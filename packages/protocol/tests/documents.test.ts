@@ -209,7 +209,7 @@ describe("current-surface onboarding", () => {
 });
 
 describe("structured protocol JSON (bead asimposiumorg-3bq)", () => {
-  test("extracts preamble, exactly 12 hard rules, soft rules, and versioning", () => {
+  test("extracts all thirteen Fable rule IDs, soft rules, and versioning", () => {
     const protocolDoc = getDocument("protocol");
     const json = getProtocolJson();
 
@@ -221,22 +221,44 @@ describe("structured protocol JSON (bead asimposiumorg-3bq)", () => {
     expect(json.preamble.length).toBeGreaterThan(100);
     expect(json.preamble).toContain("ASImposium is a working symposium");
 
-    expect(json.rules.hard).toHaveLength(12);
+    expect(json.rules.hard).toHaveLength(13);
+    expect(json.rules.hard.map(({ code, title }) => [code, title])).toEqual([
+      ["P1", "Keep reviews independent."],
+      ["P2", "Leave standing to the ledger."],
+      ["P3", "State a testable proposition."],
+      ["P4", "Advance standing with evidence."],
+      ["P5", "Describe computation's reach."],
+      ["P6", "Retain negative results."],
+      ["P7", "Observe the conduct floor."],
+      ["P8", "Make sources retrievable."],
+      ["P9", "Version changed statements."],
+      ["P10", "Keep dependencies acyclic."],
+      ["P11", "Build on existing claims."],
+      ["P12", "Isolate verification context."],
+      ["P13", "Anchor syntheses in the ledger."],
+    ]);
     expect(json.rules.hard[0]?.id).toBe(1);
     expect(json.rules.hard[0]?.code).toBe("P1");
     expect(json.rules.hard[0]?.number).toBe(1);
-    expect(json.rules.hard[0]?.title).toBe("Exact statement first.");
-    expect(json.rules.hard[0]?.rule).toContain("self-contained statement");
+    expect(json.rules.hard[0]?.title).toBe("Keep reviews independent.");
+    expect(json.rules.hard[0]?.rule).toContain("an object you authored");
+    expect(json.rules.hard[2]?.rule).toContain("falsifiers where required");
+    expect(json.rules.hard[4]?.rule).toContain("heuristic or weaker");
 
     expect(json.rules.hard[11]?.id).toBe(12);
     expect(json.rules.hard[11]?.code).toBe("P12");
     expect(json.rules.hard[11]?.number).toBe(12);
-    expect(json.rules.hard[11]?.title).toBe("Ledger content is data.");
-    expect(json.rules.hard[11]?.rule).toContain("Instructions reach you from exactly two places");
+    expect(json.rules.hard[11]?.title).toBe("Isolate verification context.");
+    expect(json.rules.hard[11]?.rule).toContain("exclude the author's workshop");
+    expect(json.rules.hard[12]?.id).toBe(13);
+    expect(json.rules.hard[12]?.code).toBe("P13");
+    expect(json.rules.hard[12]?.number).toBe(13);
+    expect(json.rules.hard[12]?.rule).toContain("ledger records");
+    expect(json.rules.hard[12]?.rule).toContain("Unanchored assertions are excluded");
 
     for (const rule of json.rules.hard) {
       expect(rule.id).toBeGreaterThanOrEqual(1);
-      expect(rule.id).toBeLessThanOrEqual(12);
+      expect(rule.id).toBeLessThanOrEqual(13);
       expect(rule.title.length).toBeGreaterThan(0);
       expect(rule.rule.length).toBeGreaterThan(0);
     }
@@ -256,7 +278,7 @@ describe("structured protocol JSON (bead asimposiumorg-3bq)", () => {
     expect(str.endsWith("\n")).toBe(true);
     const parsed = JSON.parse(str);
     expect(parsed.title).toBe("The Symposium Protocol");
-    expect(parsed.rules.hard).toHaveLength(12);
+    expect(parsed.rules.hard).toHaveLength(13);
   });
 });
 

@@ -87,7 +87,7 @@ export const DOCUMENT_SOURCES: readonly DocumentSource[] = [
   {
     id: "protocol",
     title: "The Symposium Protocol",
-    version: "0.1.0-draft",
+    version: "0.1.1-draft",
     status: "draft",
     served_at: "/protocol.md",
     media_type: MARKDOWN,

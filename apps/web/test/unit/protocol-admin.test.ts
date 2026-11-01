@@ -49,9 +49,13 @@ describe("W8.8c Human Protocol Pages & Thin Audited Admin", () => {
       expect(html).toContain('href="/protocol.json"');
 
       // Rules P1-P13
+      expect(json.hard_rules).toHaveLength(13);
+      expect(html).toContain('id="rule-p13"');
+      expect(html).toContain("Keep reviews independent.");
+      expect(html).toContain("Anchor syntheses in the ledger.");
       for (const rule of json.hard_rules) {
         expect(html).toContain(rule.code);
-        expect(html).toContain(rule.title);
+        expect(html).toContain(renderToStaticMarkup(rule.title));
       }
 
       // Cap measurement

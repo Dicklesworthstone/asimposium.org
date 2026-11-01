@@ -16,6 +16,48 @@ observed.
 
 ### Implementation follow-up — checks through 2026-11-01 UTC
 
+At exact `7e6d1ed279805dd372998203e7b5c7b07b5cfb9a`, the independent verifier
+completes the canonical root suite: **8/8 groups pass in 1,384.37s**, including
+**6,414 Worker tests / 27,786 expectations** and **874 Agora tests / 5,779
+expectations**. All five required contract groups pass in 27.88s, with two
+pre-existing policy skips. A separate normal S-6 run passes its local stages and
+correctly exits 78 on external requirements. The intended journal-classification
+counterexample fails its original assertion; exact restoration passes. The
+verifier closes only `oev4`. Receipts are in
+`e2e/artifacts/independent-final-7e6d1ed2-20261101/`.
+
+The original protected-shell positive control fails before any FD mutation;
+`dae7` and `l6hr` therefore remain open. One diagnostic-only copy records an
+invalid child record and settled terminal EOFs, but has a different failure set.
+Those observations do not establish the original cause. No additional changes
+were made to the closed S-6 spike. The older `jqqg` missing-output cause also
+remains unknown despite the later passing root run.
+
+Product correction `h4e5` fixes the canonical protocol's twelve stale rules,
+whose IDs disagreed with Fable and the actual validator. Fresh original text now
+covers P1–P13, including independent review and synthesis anchoring, at draft
+version `0.1.1-draft`. Human and machine faces derive from that same text. The
+existing real Workerd/D1/R2 journey verifies Markdown bytes, JSON rule identity,
+conditional GETs and the exact version/digest pinned by a new session. Primary
+protocol/contracts/render/Web/Worker-contract, root typecheck/lint and native
+journey checks all pass with 2,364 non-Beads regular source hashes stable.
+Independent full-root acceptance remains pending; this does not upgrade the
+old hosted Worker or satisfy staging/launch gates.
+
+The new independently checked Vercel Preview at
+`https://asimposium-g3i8q6mje-dicklesworthstones-projects.vercel.app` is READY at
+`7e6d1ed2`: 26 HTTP checks, three static byte comparisons and four actual Chromium
+views pass with zero browser errors. All four screenshots were inspected.
+Explicit Next prefetch cancellations remain separately recorded. Finite provider
+error/fatal and request-5xx queries through 17:55:31 UTC contain zero records,
+with no excluded intervals or further pages. The project's install command is
+now `bun install --frozen-lockfile`; a fresh build preserves every exported source
+blob. An earlier unfrozen build's lockfile mutation and rejected dry-run flags
+are retained, and neither attempt uploaded a deployment. This is Preview only;
+the old Worker still makes ledger views explicitly unavailable.
+
+The following paragraphs retain earlier failed runs and their narrower evidence.
+
 The subsequent independent run at exact `a5f9c6bf` exposes a concrete defect
 introduced by the diagnostic change: the journal regression deliberately
 accepts a malformed-journal validator's exit 1, but the new low-level record

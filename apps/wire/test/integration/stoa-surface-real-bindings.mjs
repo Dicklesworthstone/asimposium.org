@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import {
   InboxAckResponseSchema,
   InboxResponseSchema,
@@ -12,6 +13,7 @@ import {
 } from "@asimposium/contracts";
 import { EventTailResponseSchema } from "../../../../packages/contracts/src/event-tail.ts";
 import { ProblemDocumentSchema } from "../../../../packages/contracts/src/problem.ts";
+import { SessionStatusResponseSchema } from "../../../../packages/contracts/src/sessions.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // W6 Stoa surface on real Workerd HTTP, D1 and R2 (bead asimposiumorg-lu59):
@@ -21,6 +23,41 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // sponsor approval come from the shared harness; no deployment claim.
 await runLocalWorkerJourney(
   async ({ call, enroll, sponsorCall, fixtures, env, worker, origin, userAgent }) => {
+    const protocolSource = await readFile(
+      new URL("../../../../packages/protocol/assets/protocol.md", import.meta.url),
+      "utf8",
+    );
+    const protocolMd = await worker.fetch(`${origin}/protocol.md`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(protocolMd.status, 200);
+    assert.equal(await protocolMd.text(), protocolSource, "native protocol Markdown is canonical");
+    const protocolJson = await worker.fetch(`${origin}/protocol.json`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(protocolJson.status, 200);
+    const protocol = await protocolJson.json();
+    const protocolDigest = createHash("sha256").update(protocolSource).digest("hex");
+    assert.equal(protocol.version, "0.1.1-draft");
+    assert.equal(protocol.digest, protocolDigest);
+    assert.deepEqual(
+      protocol.hard_rules.map((rule) => rule.code),
+      Array.from({ length: 13 }, (_, index) => `P${index + 1}`),
+    );
+    assert.equal(protocol.hard_rules[0].title, "Keep reviews independent.");
+    assert.equal(protocol.hard_rules[12].title, "Anchor syntheses in the ledger.");
+    for (const [path, response] of [
+      ["/protocol.md", protocolMd],
+      ["/protocol.json", protocolJson],
+    ]) {
+      const etag = response.headers.get("etag");
+      assert.ok(etag, `${path} has an ETag`);
+      const cached = await worker.fetch(`${origin}${path}`, {
+        headers: { "User-Agent": userAgent, "If-None-Match": etag },
+      });
+      assert.equal(cached.status, 304, `${path} conditional GET`);
+      assert.equal(await cached.text(), "");
+    }
     const author = await enroll("stoa-surface-author", "usr_stoa_author");
     const reviewer = await enroll("stoa-surface-reviewer", "usr_stoa_reviewer");
     const second = await enroll("stoa-surface-second", "usr_stoa_second");
@@ -60,6 +97,17 @@ await runLocalWorkerJourney(
       reviewer,
     );
     const authorSession = await open(author, "prove");
+    const terms = SessionStatusResponseSchema.parse(
+      await call(`/v1/sessions/${authorSession}`, undefined, author),
+    );
+    assert.deepEqual(
+      terms.provenance?.documents.protocol,
+      {
+        version: "0.1.1-draft",
+        digest: protocolDigest,
+      },
+      "a new native session pins the exact protocol served to agents",
+    );
     const secondSession = await open(second, "prove");
     const promote = async (token, sessionId, statement) => {
       const draft = await call(

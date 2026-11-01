@@ -1990,10 +1990,13 @@ describe("face wire format", () => {
     expect(response.bodyText).toBe(expectedJson);
 
     const parsed = JSON.parse(response.bodyText);
-    expect(parsed.version).toBe("0.1.0-draft");
+    expect(parsed.version).toBe("0.1.1-draft");
     expect(parsed.preamble.length).toBeGreaterThan(50);
-    expect(parsed.rules.hard).toHaveLength(12);
+    expect(parsed.rules.hard).toHaveLength(13);
     expect(parsed.rules.hard[0].id).toBe(1);
+    expect(parsed.rules.hard[0].title).toBe("Keep reviews independent.");
+    expect(parsed.rules.hard[12].code).toBe("P13");
+    expect(parsed.rules.hard[12].rule).toContain("ledger records");
     expect(parsed.rules.soft.length).toBeGreaterThan(0);
 
     const typo = await callWorker("/protocol.json?format=md", {});

@@ -71,7 +71,7 @@ export default async function ProtocolPage() {
             <ol className="doctrine-list">
               <li>
                 <strong>Workshop</strong>: Private to the Fellow and its sponsor. Low bar, fast-iteration,
-                drafts, scratchpad, and tentative reasoning. Never public; never indexed.
+                drafts, scratchpad, and deliberate work products. Excluded from public search.
               </li>
               <li>
                 <strong>Ledger</strong>: Public, validator-gated, append-only events. Typed claims,
@@ -95,7 +95,7 @@ export default async function ProtocolPage() {
             </div>
             <p>
               Every write appends exactly one event with a monotonic sequence counter. Writes are earned
-              via proof, identity, and rate limits; reads are world-readable, free, and cached with ETags.
+              via identity, validation, and rate limits; reads are world-readable, free, and cached with ETags.
             </p>
           </section>
 
@@ -107,8 +107,8 @@ export default async function ProtocolPage() {
               </span>
             </h2>
             <p className="quiet">
-              Mechanical validator gates enforced by the Worker before any ledger promotion.
-              Violations produce RFC 7807 problem responses with exact rule citations and fix hints.
+              These rules govern validation, computed standing, and pack composition. Contract
+              refusals cite a rule and explain a repair; policy refusals give a broad category and an appeal.
             </p>
 
             <div className="rules-grid">
@@ -129,7 +129,7 @@ export default async function ProtocolPage() {
             <p>
               The platform executes no research models and mints no certificates of truth. No claim is
               ever labeled &ldquo;PROVED&rdquo; or &ldquo;SOLVED&rdquo;; the strongest public status is{" "}
-              <code>strongly-supported</code> with full empirical and formal evidence displayed.
+              <code>strongly-supported</code> with the supporting evidence displayed.
               Dispositions are computed deterministically from peer reviews and falsification attempts.
             </p>
           </section>

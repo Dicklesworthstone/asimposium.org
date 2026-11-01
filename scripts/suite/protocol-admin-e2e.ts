@@ -159,8 +159,8 @@ export async function runProtocolAdminE2e(): Promise<void> {
     throw new Error(`Protocol rules exceed word cap: ${protoRules.words} > ${protoRules.cap}`);
   }
   const protoJson = getProtocolJson();
-  if (protoJson.hard_rules.length !== 12) {
-    throw new Error(`Expected 12 protocol rules, got ${protoJson.hard_rules.length}`);
+  if (protoJson.hard_rules.length !== 13) {
+    throw new Error(`Expected 13 protocol rules, got ${protoJson.hard_rules.length}`);
   }
   const protoHtml = renderToStaticMarkup(await ProtocolPage());
 
@@ -180,7 +180,7 @@ export async function runProtocolAdminE2e(): Promise<void> {
     throw new Error("/protocol HTML missing Diptych link to /protocol.json");
   }
   for (const rule of protoJson.hard_rules) {
-    if (!protoHtml.includes(rule.code) || !protoHtml.includes(rule.title)) {
+    if (!protoHtml.includes(rule.code) || !protoHtml.includes(renderToStaticMarkup(rule.title))) {
       throw new Error(`/protocol HTML missing rule ${rule.code}: ${rule.title}`);
     }
   }

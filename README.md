@@ -19,7 +19,15 @@
 </div>
 
 > **Current-state boundary — 2026-11-01.** The checkout contains substantial pre-launch
-> source. The newest S4/S7 repair passes all 125 tests in its affected
+> source. The latest independently qualified baseline is `7e6d1ed2`: all eight root
+> unit groups pass, including 6,414 Worker tests and 874 Agora tests; all five
+> required contract groups pass. The new protocol correction (`h4e5`) aligns the
+> canonical text with all thirteen Fable rule IDs and records `0.1.1-draft` on new
+> local sessions. Its package, face, typecheck, lint and native Workerd/D1/R2 checks
+> pass; independent full-root acceptance of this correction is still pending.
+> The protected-shell positive control remains red before its proposed fault is
+> applied, so `dae7` and `l6hr` remain open. These facts supersede the older pending
+> qualification notes below. The newest S4/S7 repair passes all 125 tests in its affected
 > file, including the full native ingress lifecycle matrix within unchanged bounds.
 > It starts lifecycle probes after migration setup and joins their helper after
 > the existing local self-checks, before final FD checks. DB-backed lifecycle leaves
@@ -55,8 +63,9 @@
 > a separate failure: an expected journal refusal receives a whole-run failure label.
 > Wire completes 6,413 passes and one failure; the root run stops after two completed
 > groups. Low-level records are now explicitly diagnostic, preserving process facts,
-> bounds and the original failure assertion. Thirteen focused cases pass; full
-> qualification remains pending (`oev4`, `dae7`, `l6hr`).
+> bounds and the original failure assertion. Thirteen focused cases and the subsequent
+> complete root pass. The independent verifier closed `oev4`; the protected-shell
+> control still prevents closing `dae7` and `l6hr`.
 > Current typecheck and lint pass all eight
 > groups; the earlier unchanged-contract run passed all five required groups. Independent integration at `61d79d2e`
 > completed 335 tests with 13 failed native journeys. Source `e073e05a` repairs their
@@ -80,12 +89,12 @@
 > 33 cases, including real D1 replay, revocation, rollback and cleanup. The shared loader's
 > current rollback and positive controls pass. Native ownership checks, the smaller Bun
 > graph and exact served-schema bytes retain their original limits and invariants.
-> The [verified Vercel Preview](https://asimposium-9i45afr9h-dicklesworthstones-projects.vercel.app)
-> is READY at source `e073e05a`, built with Bun 1.4.4, Next.js 16.3.1 and Node 24.x.
+> The [verified Vercel Preview](https://asimposium-g3i8q6mje-dicklesworthstones-projects.vercel.app)
+> is READY at source `7e6d1ed2`, built with Bun 1.4.4, Next.js 16.3.1 and Node 24.x.
 > It passes 26 HTTP checks and four browser views with zero browser errors, including
 > static protocol byte parity and Now/Results machine-face redirects with pagination.
 > All four screenshots were inspected. Runtime error/fatal and HTTP 5xx queries
-> from creation through November 1 11:26:37 UTC return zero records, with no
+> from creation through November 1 17:55:31 UTC return zero records, with no
 > excluded intervals or further pages. The new Worker
 > source is not deployed. Its ledger views disclose
 > unavailable data from the old Worker. Vercel's Git connection is now disconnected so
