@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   classifyRefusal,
@@ -1836,22 +1836,39 @@ describe("restart persistence retains envelope state in one stopped checker", ()
       expect(shellSource).toContain("readonly SCRIPT_CLEANUP_RESERVE_SECONDS=30");
       expect(210_000).toBeLessThan(SHELL_SELF_TEST_INNER_BUDGET_MS);
       const selfTest = startShellSelfTest();
+      let captured: Awaited<ReturnType<ShellSelfTest["result"]>> | undefined;
       try {
-        const { exitCode, stdout, stderr } = await selfTest.result();
+        captured = await selfTest.result();
+        const { exitCode, stdout, stderr } = captured;
         expect(exitCode).toBe(0);
         // A fail record is invalid on either stream. The self-test normally
         // emits records on stdout, but error paths may emit diagnostics on stderr.
-        expect(stdout).not.toMatch(FAIL_STATUS_RECORD);
-        expect(stderr).not.toMatch(FAIL_STATUS_RECORD);
+        expect(FAIL_STATUS_RECORD.test(stdout), "stdout has no failure record").toBe(false);
+        expect(FAIL_STATUS_RECORD.test(stderr), "stderr has no failure record").toBe(false);
         const records = stdout
           .split("\n")
           .filter((line) => line.length > 0)
-          .map((line) => JSON.parse(line) as Record<string, unknown>);
+          .map((line, index) => {
+            let record: unknown;
+            try {
+              record = JSON.parse(line);
+            } catch {
+              throw new Error(`S-6 automatic gate: non-JSON record at nonempty line ${index + 1}`);
+            }
+            if (record === null || typeof record !== "object" || Array.isArray(record)) {
+              throw new Error(
+                `S-6 automatic gate: non-object record at nonempty line ${index + 1}`,
+              );
+            }
+            return record as Record<string, unknown>;
+          });
         for (const assertion of [
           "wedged_restart_checker_is_bounded",
           "nested_lifecycle_matrix_complete",
         ]) {
-          expect(records.filter((record) => record.assertion === assertion)).toHaveLength(1);
+          expect(records.filter((record) => record.assertion === assertion).length, assertion).toBe(
+            1,
+          );
         }
         expect(
           records.some(
@@ -1905,6 +1922,27 @@ describe("restart persistence retains envelope state in one stopped checker", ()
               record.exit_code === 0,
           ),
         ).toBe(true);
+      } catch (error) {
+        // Keep the original failure, including the first parent record before
+        // cleanup. Printing only expect(exitCode) loses the complete native
+        // cause. Raw streams stay private; diagnostics expose only their path.
+        if (captured !== undefined) {
+          try {
+            const artifacts = resolve(root, "e2e/artifacts");
+            mkdirSync(artifacts, { recursive: true });
+            const directory = mkdtempSync(resolve(artifacts, "s6-auth-failure-"));
+            for (const stream of ["stdout", "stderr"] as const) {
+              writeFileSync(resolve(directory, `${stream}.log`), captured[stream], {
+                flag: "wx",
+                mode: 0o600,
+              });
+            }
+            console.error(`S-6 automatic gate retained private failure streams: ${directory}`);
+          } catch {
+            console.error("S-6 automatic gate could not retain private failure streams");
+          }
+        }
+        throw error;
       } finally {
         await selfTest.cleanup();
       }

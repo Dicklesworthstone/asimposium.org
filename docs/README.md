@@ -16,6 +16,61 @@ observed.
 
 ### Implementation follow-up — checks through 2026-11-01 UTC
 
+The latest primary S4/S7 repair passes the complete affected auth file:
+**125 pass / 0 fail / 591 expectations** in 193.680s. Its original automatic
+native gate passes in 192.272s. One scheduling change starts the lifecycle matrix
+after all migrations and the migrated parent's listener are ready. Fresh ports,
+keys, state, all six mandatory outcomes and the same inherited absolute work
+deadline remain; no deadline, quota, assertion, query or parser was relaxed.
+All 2,402 working source hashes remain unchanged during the run. This is primary
+proof; final independent full integration/root/HUP/fault qualification is pending.
+
+That repair follows a fresh independent failure at `a3ea2958`: automatic auth
+exits 1 after 159.872s. The original wrapper discarded its captured streams,
+so the first parent cause and a secondary nested KILL-versus-reap subcondition
+remain unknown. The known-red integration was deliberately stopped through its
+owned exec-session cancellation to prioritize diagnosis. Tool exit 130 is not
+a complete 335-test census or downstream S-2 blocked 78. Fourteen emitted native
+PASS records remain partial observations. All 17 recorded process identities
+retired; the owned group and temporary-root FD census are empty. The wider
+host census is partial (369 unreadable cwd and five stat entries). Both isolated
+copies retain 2,402 exact hashes, six dependency directories, eight local aliases
+and 15 physical identities. Receipts: `e2e/artifacts/independent-l6hr-a3ea2958-20261101/`.
+
+The automatic test now saves completed failed runs' full streams under private
+0700 directories with 0600 files and reports only their paths. Boolean/count
+matchers and index-only parse errors avoid exposing raw received data. Errors
+before capture or during transport cleanup remain outside that retention path.
+The changed-reporting diagnostic reproduces a real parent readiness failure in
+188.368s, with all 2,402 hashes unchanged. Its retained first record is
+`local_worker_ready` after cross-clock retention passes, just as the original
+180s work window ends. It runs one selected test; 124 are filtered, not passed.
+The existing strict count and file validation remain unchanged. An attempted
+read-only native adapter prototype returned the same count as the CLI but showed
+no speed advantage (3.648s versus 3.500s), so the proposed helper rewrite was
+rejected before implementation. The scheduling change above is the sole later
+runtime lever. Receipts: `e2e/artifacts/dae7-native-20261101-0528/`.
+
+The repaired working source passes typecheck **8/8 groups** in 299.979s and
+lint **8/8 groups** in 109.074s, with inherited warnings. All 2,402 tracked
+working hashes remain unchanged across both checks. The five required contract
+groups' earlier source-identical contract run remains a separate receipt;
+no contract, schema or renderer changed in this continuation.
+
+The initial local Vercel build's rejected 11-character origin was the literal
+`[SENSITIVE]` marker written by `vercel pull`, rather than evidence that the
+stored project value was invalid. Official metadata confirms a write-only
+sensitive Preview variable. The verified local builds use the explicit public
+staging origin; the stored origin was not readable, replaced or declassified.
+This distinction matters when reproducing a local prebuilt deployment.
+
+The current default UBS diff scan exits 1 with two critical, six warning and
+219 informational findings across the two changed code files, with no failed
+module. All eight critical/warning locations were inspected: synthetic secret
+canaries, loopback `Bun.serve` handlers, observed child-exit promises and fail-fast
+fixture JSON parsing. No new production finding was established and no scan
+limit or suppression changed. Staged qualification remains a separate check.
+
 Source `e073e05acb9c238f0f3d4847027be87fc4711830` repairs the thirteen native
 journeys exposed by the complete independent integration run at `61d79d2e`.
 That original run completed **322 pass / 13 fail**, 335 tests and 1,743

@@ -2193,17 +2193,6 @@ if ! start_worker; then
   fail_record "pre_migration_worker_ready" "the un-migrated local Worker never answered on its owned port"
   exit 1
 fi
-# Allocate the parent's real listener first. The independent lifecycle matrix
-# then uses fresh state/ports/keys while the full parent auth proof runs. Only
-# one exact helper is owned here, and it owns one sequential leaf at a time.
-if [[ "${SELF_TEST}" == "1" ]]; then
-  if ! run_nested_harness "lifecycle-matrix" \
-    "S6_TEST_LIFECYCLE_MATRIX=1" \
-    "S6_TEST_PARENT_WORK_DEADLINE=$(($(date +%s) + SCRIPT_WORK_DEADLINE - SECONDS))"; then
-    fail_record "nested_lifecycle_matrix_started" "the exact lifecycle helper could not be launched"
-    exit 1
-  fi
-fi
 if ! start_restart_checker "pre-migration" "unavailable"; then
   show_redacted "checker stderr" "${CHECK_LOG}"
   fail_record "pre_migration_replay_store" \
@@ -2223,6 +2212,17 @@ if ! start_worker; then
   show_redacted "curl" "${CURL_LOG}"
   fail_record "pre_migration_replay_store" "the migrated local Worker did not restart against the same persisted D1"
   exit 1
+fi
+# Finish migration setup before overlapping independent lifecycle cold starts.
+# Its real listener is live before the helper allocates fresh ports; the helper
+# still receives only the remainder of the original absolute deadline.
+if [[ "${SELF_TEST}" == "1" ]]; then
+  if ! run_nested_harness "lifecycle-matrix" \
+    "S6_TEST_LIFECYCLE_MATRIX=1" \
+    "S6_TEST_PARENT_WORK_DEADLINE=$(($(date +%s) + SCRIPT_WORK_DEADLINE - SECONDS))"; then
+    fail_record "nested_lifecycle_matrix_started" "the exact lifecycle helper could not be launched"
+    exit 1
+  fi
 fi
 resume_restart_checker
 PRE_MIGRATION_EXIT=$?

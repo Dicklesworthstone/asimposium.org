@@ -19,13 +19,15 @@
 </div>
 
 > **Current-state boundary — 2026-11-01.** The checkout contains substantial pre-launch
-> source. The current candidate's local S4/S7 auth directory passes all 256 tests,
-> including the full native ingress lifecycle matrix within its original deadlines.
+> source. The newest S4/S7 scheduling repair passes all 125 tests in its affected
+> file, including the full native ingress lifecycle matrix within unchanged bounds.
+> It starts lifecycle probes after migration setup. An intervening independent
+> run failed auth and was deliberately stopped; final aggregate verification is pending.
 > Bun is now pinned to 1.4.4 after a native 1.3.8 socket crash reproduced on unchanged
 > source. The first complete root run on the new runtime failed two groups; the
 > manifest binding and four affected unit cases are repaired, with all 222 affected
-> units and the complete toolchain passing. Final typecheck and lint pass all eight
-> groups; contracts pass all five required groups. Independent integration at `61d79d2e`
+> units and the complete toolchain passing. Current typecheck and lint pass all eight
+> groups; the earlier unchanged-contract run passed all five required groups. Independent integration at `61d79d2e`
 > completed 335 tests with 13 failed native journeys. Source `e073e05a` repairs their
 > stale fixture/contract assumptions; all thirteen complete native journeys now have
 > primary passes, and Agora passes 874 unit tests. These runs span repair revisions;
