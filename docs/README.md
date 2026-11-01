@@ -14,16 +14,35 @@ observed.
 
 ## Current reality check — 2026-10-30
 
-### Implementation follow-up — checks through 2026-10-31 UTC
+### Implementation follow-up — checks through 2026-11-01 UTC
 
-The next source increment removes expired private artifact staging on eight
+The qualified source is `19019858a9a5dfd3c90d6daa5ba252f8c8e2d6d1`.
+Independent canonical typecheck passes all eight groups in 252.93 seconds,
+lint all eight in 106.58 seconds, and contracts all five required groups in
+82.22 seconds, with two existing policy skips. The complete unfiltered
+`bun run test` passes **8/8 groups**, exit 0, in 3,156.16 seconds. Wire passes
+6,413 tests and 27,754 expectations across 274 files in 2,725.49 seconds, under
+its unchanged one-hour limit. All other required root groups complete; existing
+case skips remain reported. The separate S6 integration gate is still red.
+
+Main and both independent copies retain all 2,402 source hashes, six dependency
+directories and eight workspace aliases. All twelve recorded PID/start
+identities exited; no readable owned working-directory process remains.
+356 unreadable `/proc` entries make that a partial host census. Receipts are in
+`e2e/artifacts/independent-artifact-19019858-20261031/`.
+
+The artifact repair removes expired private staging on eight
 request/replay paths. Real local Workerd/D1/R2 checks cover late arrivals,
 exactly one expiry transition, unchanged reservations and four protected CAS
 classes. Cleanup uses the existing 15-second aggregate storage budget; sealed
 declaration/renewal replays cannot restart that budget through admission recovery.
-Expanded artifact/erasure units pass 68 cases, followed by three focused
-single-attempt checks. Exact final-source independent and aggregate checks are
-pending. Provider presigned PUT, public Range, automatic abandoned-upload bucket
+Independent artifact/erasure units pass all 70 cases; the full native journey
+and registered wrapper pass. A native omission fault retains staging bytes;
+two unit faults expose repeated cleanup and late part deletion. These controls
+ran at `522fcd31`; only test import ordering changed afterward. That ordering
+mistake caused one lint error at `522fcd31`, was corrected without changing a
+rule or test body, and the final canonical gates above passed at `19019858`.
+Provider presigned PUT, public Range, automatic abandoned-upload bucket
 lifecycle and inventory acceptance remain on the original open `y2t7` task.
 
 The local S6 ingress runner reuses the existing real-D1 migration adapter,
@@ -31,10 +50,14 @@ reducing observed setup from 109 to 18 seconds. Its pinned supervisor now waits
 for the controller's existing release after Wrangler exits, protecting cleanup
 when esbuild remains. The corrected control passes busy-port and physical
 group/port/FD cleanup, but the full self-test still fails at a nested lifecycle
-deadline (190.66 seconds total). `l6hr` remains open; no timeout or assertion was
-relaxed. One earlier leaked esbuild was retired manually through its verified
-pidfd; that is not runner cleanup proof. The deployed cross-plane script is
-untouched. Receipts are under `e2e/artifacts/artifact-y2t7-20261031-2208/` and
+deadline (190.66 seconds total). The original registered automatic test also
+fails at `19019858`: exit 1 versus expected 0 at `e2e-blocked.test.ts:1778`,
+after 191.23 seconds. Its wrapper does not expose the inner cause, so that run
+adds no new diagnosis. `l6hr` remains open; no timeout or assertion was relaxed.
+One earlier leaked esbuild was retired manually through its verified
+pidfd; that is not runner cleanup proof.
+`scripts/e2e-s6-cross-plane-auth.sh` is unchanged. Receipts are under
+`e2e/artifacts/artifact-y2t7-20261031-2208/` and
 `e2e/artifacts/l6hr-20261031-2225/`.
 
 The previously qualified baseline is `e5db4e2219e3004600e7992b56ea7f323f30afec`.
@@ -50,7 +73,7 @@ S1 retains its separate trusted resolver, Node 25.9/Bun 1.4.4.
 The independent verifier closed `gy1t` and `2or3` against their original
 criteria (comments 2623/2624); all five `gy1t` acceptance items are checked.
 Changes through `7b4f7de4` were report/tracker metadata only; these gate results
-qualify that earlier runtime revision, not the new increment awaiting checks.
+qualify that earlier revision; the new canonical results above supersede them.
 
 Both independent copies retain all 2,402 exact source hashes, six dependency
 directories and eight local workspace aliases. All seven known owned PID/start
@@ -65,14 +88,19 @@ earns no causal proof. All seven registered local discovery scenarios pass
 in 348.08 seconds. Fixture screening is still distinct from live-model evidence.
 
 The current [Vercel Preview is READY](https://asimposium-35mekgt27-dicklesworthstones-projects.vercel.app)
-from that exact runtime source. Twenty-five HTTP checks and four desktop/mobile
+from `e5db4e22`. Its web inputs are unchanged by the new Worker/test repairs.
+Twenty-five HTTP checks and four desktop/mobile
 browser views pass with zero browser errors; thirteen explicitly identified
 router-prefetch aborts are retained separately. The four existing Now/Results
 Markdown/JSON faces now redirect to the validated staging origin, preserving
 pagination queries; their human pages remain HTML. Independent external checks
-confirm those eight redirects and three human pages. The final runtime query,
-covering 20:37–21:52 UTC, returns zero error/fatal records, no omitted intervals
-and no further page. All 2,363 exported Git blobs match; the native expanded
+confirm those eight redirects and three human pages. Runtime queries cover
+October 31 20:37 through November 1 00:23 UTC with zero error/fatal records;
+recorded HTTP 5xx queries cover 21:52 through 00:23 UTC with zero records.
+Neither query class has omitted intervals or a further page. Four final GETs
+pass at 00:23 UTC: two HTML 200s and two exact canonical 308s with queries.
+The new Worker source is not deployed by these Preview checks.
+All 2,363 exported Git blobs match; the native expanded
 upload manifest's 2,358 files also match their bytes and paths. This is not an
 inspection of a physical remote archive. Evidence is retained under
 `e2e/artifacts/vercel-source-e5db4e22-20261031/verification/` and
@@ -87,12 +115,15 @@ Agora reconciliation remain operator work (`rs5n`). The staging Worker is still
 old, so ledger views disclose unavailable data. No production, hosted screening,
 OAuth, G0 or launch result is certified by these source and Preview checks.
 
-The final changed-code UBS diff and staged scans both complete three files
-under default limits: 18 critical findings, 37 warnings, 677 information items,
-exit 1, no failed modules. All critical and warning locations were reviewed and
-match between scans: the critical matches are nonsecret test-driver comparisons;
-warnings cover fixture parsing and quoted listener assertions. No suppression,
-baseline or limit was changed, and this is not a clean security audit.
+The implementation's default UBS diff and staged scans complete six files:
+15 critical findings, 23 warnings, 660 information items, exit 1, no failed
+modules. The import-only correction's scans complete one file with 6 critical,
+12 warnings and 425 information items. All critical/warning locations were
+reviewed: nonsecret route/state/operation comparisons, intentional fixture
+values, fail-fast parsing, returning switch cases and validated headers.
+Diff/staged finding multisets match exactly. The earlier `e5db4e22` three-file
+scan's 18 critical/37 warnings remain a separate scope. No suppression,
+baseline or limit changed; this is not a clean security audit.
 Fresh `verify:cost` remains **blocked, exit 78**,
 `S2_COST_MEASUREMENT_UNAVAILABLE`; no retained S2 cost receipt exists.
 
@@ -102,14 +133,16 @@ existing staging database lineage and binding roles, and deploy that verified
 source before Agora production. The Git deployment bypass is resolved, not the
 rest of that task. Hosted provider/context delivery, screening accuracy, real
 Google approval, the third harness, retained cost measurement and launch gates
-remain open. Local ready work also remains, including artifact lifecycle and
-inventory proof (`y2t7`) and the historical unclassified integration failures;
+remain open. The local preflight matrix (`l6hr`) remains red. Artifact provider,
+lifecycle and inventory proof (`y2t7`) and historical unclassified integration
+failures also remain open;
 the old CAS helper list was already retired in `7738fa9b`, so do not recreate it.
-The deployed S6 cross-plane script remains untouched. Original policy decisions and broad
-acceptance conditions remain in their original Beads.
+`scripts/e2e-s6-cross-plane-auth.sh` remains unchanged. Original policy decisions
+and broad acceptance conditions remain in their original Beads.
 
 The record below preserves earlier failures and intermediate proof scopes;
-its pending states are superseded by the exact final qualification above.
+its pending source states are superseded by the exact qualification above.
+That qualification does not certify the separate S6, provider or launch gates.
 
 At `14415c72`, the earlier completed independent aggregate finishes all eight
 root unit groups in 3,286.29 seconds: six pass and two fail. Wire completes

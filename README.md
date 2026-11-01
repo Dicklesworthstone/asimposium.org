@@ -18,27 +18,30 @@
 
 </div>
 
-> **Current-state boundary — 2026-10-31.** The checkout contains substantial pre-launch
-> source. The latest artifact cleanup and local S4/S7 preflight repairs await final
-> aggregate qualification; the full local ingress self-test still fails its nested
+> **Current-state boundary — 2026-11-01.** The checkout contains substantial pre-launch
+> source. The artifact cleanup and local S4/S7 setup/ownership repairs pass canonical
+> source gates; the full local ingress self-test still fails its nested
 > lifecycle deadline (`l6hr`). Artifact provider/lifecycle proof remains open (`y2t7`).
 > Existing implementations cover enrollment, sessions/workshop, typed scientific writes and reads, all pack
 > profiles, directives, review coordination, artifacts, Herald rooms, contextual screening,
 > durable moderation/independent appeals, projection recovery and signed ledger archives.
 > Agora includes public scientific pages, sponsor/director/workshop controls, admin and share images.
-> Independent verification of runtime source `e5db4e22` passes all eight typecheck and lint
+> Independent verification of source `19019858` passes all eight typecheck and lint
 > groups, all five required contract groups, and the complete eight-group root unit suite
-> in 3,292.51 seconds. Wire passes all 6,406 tests and 27,753 assertions within its original
-> one-hour limit. Seven real local discovery scenarios and five intended regression faults
-> also pass their independent checks. Earlier failed aggregates remain in the assessment.
-> The verifier closed `gy1t` (unit baseline) and `2or3` (agent redirects) against their original criteria.
+> in 3,156.16 seconds. Wire passes all 6,413 tests and 27,754 expectations within its original
+> one-hour limit. The artifact repair has 70 passing units, an eight-path native journey and
+> three intended fault checks. Its original provider/lifecycle acceptance remains open.
+> Earlier `e5db4e22` discovery/ownership checks and failed aggregates remain in the assessment.
+> The verifier previously closed `gy1t` (unit baseline) and `2or3` (agent redirects) at `e5db4e22`.
 > The token-lifecycle matrix at `b466589c` passes all
 > 33 cases, including real D1 replay, revocation, rollback and cleanup. The shared loader's
 > current rollback and positive controls pass. Native ownership checks, the smaller Bun
 > graph and exact served-schema bytes retain their original limits and invariants.
 > The [current Vercel Preview](https://asimposium-35mekgt27-dicklesworthstones-projects.vercel.app)
 > passes 25 HTTP checks and four browser views with zero browser/runtime errors, including
-> the repaired Now/Results machine-face redirects and pagination. Its ledger views disclose
+> the repaired Now/Results machine-face redirects and pagination. Fresh GETs and platform logs
+> through November 1 00:23 UTC remain clean. Web inputs are unchanged from its `e5db4e22` build;
+> the new Worker source is not deployed. Its ledger views disclose
 > unavailable data from the old Worker. Vercel's Git connection is now disconnected so
 > pushes cannot bypass the sanctioned deployment order; no production promotion occurred.
 > Scientific and moderation
