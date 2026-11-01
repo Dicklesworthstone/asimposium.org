@@ -19,12 +19,14 @@
 </div>
 
 > **Current-state boundary — 2026-11-01.** The checkout contains substantial pre-launch
-> source. The latest independently qualified baseline is `7e6d1ed2`: all eight root
+> source. The latest independently qualified baseline is `aa3da072`: all eight root
 > unit groups pass, including 6,414 Worker tests and 874 Agora tests; all five
 > required contract groups pass. The new protocol correction (`h4e5`) aligns the
 > canonical text with all thirteen Fable rule IDs and records `0.1.1-draft` on new
-> local sessions. Its package, face, typecheck, lint and native Workerd/D1/R2 checks
-> pass; independent full-root acceptance of this correction is still pending.
+> local sessions. Independent full-root, typecheck, lint, contract and native
+> Workerd/D1/R2 checks pass, including a deliberately wrong P1/P3 counterexample;
+> the verifier closed `h4e5`. Integration of 22 remote product commits is now
+> in progress (`ghr3`) and requires fresh combined-source acceptance.
 > Its first independent run found a stale discovery golden's word count and
 > protocol digest; both intentional metadata changes are now patched explicitly.
 > The protected-shell positive control remains red before its proposed fault is

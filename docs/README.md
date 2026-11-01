@@ -16,6 +16,30 @@ observed.
 
 ### Implementation follow-up — checks through 2026-11-01 UTC
 
+The corrected protocol revision `aa3da072d1e2a358db927c6a4acd7d08e17cd610`
+is independently accepted. All eight root groups pass in 1,388.90s, including
+6,414 Worker tests / 27,787 expectations and 874 Agora tests. Independent
+typecheck/lint each pass all eight groups; all five required contract groups
+pass with two existing policy skips. The complete registered native Stoa journey
+passes on genuine Node 24.1.0 and real Workerd/D1/R2 in 12.250s. A P1/P3
+title-and-body swap preserves all thirteen IDs, version and digest consistency
+but fails the intended native P1 assertion; exact restoration passes the source
+and dependency audit. The verifier closes only `h4e5` (comment 2686).
+Receipts and per-acceptance file references are in
+`e2e/artifacts/independent-h4e5-aa3da072-20261101/acceptance.json` and its
+`h4e5-acceptance-comment.md`. All twelve recorded births and three known groups
+retire; host/FD visibility remains partial. The earlier failed run stays retained.
+
+The next task, `ghr3`, reconciles local main with 22 additional remote product
+commits at `260d23f9`. These include scientific Markdown, sponsor instructions,
+public needs, warning notices, artifact recovery and six migrations through
+0129. Read-only merge review finds 21 conflicts and no file deletions. Both
+histories and their safety checks must survive; the combined runtime needs fresh
+acceptance and a new Preview. No prior root or 335-case proof transfers wholesale.
+Fresh 19:48 UTC public reads still show unchanged old production/staging
+capabilities and production `/protocol.json` returning 404; the Cloudflare rollout
+remains operator-blocked. The existing Vercel Preview remains reachable.
+
 At exact `7e6d1ed279805dd372998203e7b5c7b07b5cfb9a`, the independent verifier
 completes the canonical root suite: **8/8 groups pass in 1,384.37s**, including
 **6,414 Worker tests / 27,786 expectations** and **874 Agora tests / 5,779
