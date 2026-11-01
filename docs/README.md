@@ -16,6 +16,30 @@ observed.
 
 ### Implementation follow-up — checks through 2026-11-01 UTC
 
+The subsequent independent run at exact `a5f9c6bf` exposes a concrete defect
+introduced by the diagnostic change: the journal regression deliberately
+accepts a malformed-journal validator's exit 1, but the new low-level record
+labels that expected outcome `status:"fail"`. The unchanged combined-stream
+failure assertion correctly rejects it. The subject itself exits 0 and emits
+all three required pass records. Wire finishes **6,413 pass / one fail /
+27,786 expectations / 6,414 tests / 274 files** in 1,195.25s. The outer root
+is stopped through its pinned process identity at 1,330.81s, exit -SIGINT,
+after only two completed groups; the other five groups never execute. Sources
+and dependencies remain exact, all seven recorded identities retire, and
+owned groups/cwd are empty. The FD census remains partial because of ambient
+mount warnings. No contract/fault gates or closures follow this failed run.
+Receipts are in `e2e/artifacts/independent-final-a5f9c6bf-20261101/`.
+
+The correction marks only those low-level observations as
+`record_type:"diagnostic"`. Numeric exit/signal/deadline/cleanup facts,
+stderr retention, return values and the original blanket failure assertion
+remain intact; there is no journal-specific exception. Thirteen focused cases,
+including that original journal assertion, pass **73 expectations in 25.105s**.
+Current typecheck and lint each pass all eight groups in 64.444s and 34.500s,
+with all 2,364 checked non-Beads regular source hashes stable. Independent
+full-root and causal reversion checks remain required. This concrete new
+classification defect does not explain the older `9c6bb6e6` failure below.
+
 The newest independent canonical root run at exact `9c6bb6e6` completes all
 eight groups in 2,491.17s: **seven pass, one fails**, exit 1. Agora passes
 **874 tests / 5,779 expectations** independently. Wire reports **6,412 pass /

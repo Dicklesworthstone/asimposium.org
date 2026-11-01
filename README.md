@@ -51,9 +51,12 @@
 > verification at `9c6bb6e6` completes all eight groups: seven pass, while Wire reports
 > 6,412 pass and one failure. Agora independently passes all 874 tests. The S-2 file-URL
 > refusal returns exit 1 with empty output instead of the required rule record; its
-> inner cause is unknown (`jqqg`). A narrow diagnostic change now retains child exit,
-> signal and deadline metadata without changing bounds or refusal assertions; twelve
-> focused cases pass, but full qualification remains pending (`oev4`, `dae7`, `l6hr`).
+> inner cause is unknown (`jqqg`). The first diagnostic change at `a5f9c6bf` introduces
+> a separate failure: an expected journal refusal receives a whole-run failure label.
+> Wire completes 6,413 passes and one failure; the root run stops after two completed
+> groups. Low-level records are now explicitly diagnostic, preserving process facts,
+> bounds and the original failure assertion. Thirteen focused cases pass; full
+> qualification remains pending (`oev4`, `dae7`, `l6hr`).
 > Current typecheck and lint pass all eight
 > groups; the earlier unchanged-contract run passed all five required groups. Independent integration at `61d79d2e`
 > completed 335 tests with 13 failed native journeys. Source `e073e05a` repairs their

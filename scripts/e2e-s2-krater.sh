@@ -923,10 +923,10 @@ readonly S2_OWNED_COMMAND_PROGRAM='
     if ($waited == $child) {
       my $status = $?;
       if ($status & 127) {
-        printf STDERR qq({"suite":"s2-owned-command","status":"fail","outcome":"child-signal","signal":%d}\n), $status & 127;
+        printf STDERR qq({"suite":"s2-owned-command","record_type":"diagnostic","outcome":"child-signal","signal":%d}\n), $status & 127;
         exit(128 + ($status & 127));
       }
-      printf STDERR qq({"suite":"s2-owned-command","status":"fail","outcome":"child-exit","exit_code":%d}\n), $status >> 8 if $status >> 8;
+      printf STDERR qq({"suite":"s2-owned-command","record_type":"diagnostic","outcome":"child-exit","exit_code":%d}\n), $status >> 8 if $status >> 8;
       exit($status >> 8);
     }
     if (!$have_group) {
@@ -942,7 +942,7 @@ readonly S2_OWNED_COMMAND_PROGRAM='
         $settle_seconds,
         $reap_proof_failure,
       );
-      printf STDERR qq({"suite":"s2-owned-command","status":"fail","outcome":"deadline","cleanup_proven":%s}\n), $no_survivors ? "true" : "false";
+      printf STDERR qq({"suite":"s2-owned-command","record_type":"diagnostic","outcome":"deadline","cleanup_proven":%s}\n), $no_survivors ? "true" : "false";
       exit($no_survivors ? 124 : 123);
     }
     select undef, undef, undef, 0.02;
@@ -975,9 +975,10 @@ s2_bounded_capture() {
   output="$(perl -MPOSIX=setsid,WNOHANG -MFcntl=F_GETFL,F_SETFL,O_NONBLOCK \
     -e "${S2_OWNED_COMMAND_PROGRAM}" "${timeout}" "$@")" || {
     capture_status=$?
-    # Keep failure metadata even when callers discard the partial capture.
+    # Keep observations even when callers discard the partial capture. Only
+    # callers know whether a nonzero child status was an expected refusal.
     # Command arguments and captured bytes may contain private data.
-    printf '{"suite":"s2-bounded-capture","status":"fail","owned_program_status":%d,"chosen_timeout_seconds":%d}\n' \
+    printf '{"suite":"s2-bounded-capture","record_type":"diagnostic","owned_program_status":%d,"chosen_timeout_seconds":%d}\n' \
       "${capture_status}" "$((10#${timeout}))" >&2
     return 1
   }

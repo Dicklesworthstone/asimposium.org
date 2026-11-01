@@ -4107,13 +4107,13 @@ s2_bounded_capture perl -e "$1"`;
         expect(diagnostics).toEqual([
           {
             suite: "s2-owned-command",
-            status: "fail",
+            record_type: "diagnostic",
             outcome,
             ...(outcome === "child-exit" ? { exit_code: 124 } : { signal: 15 }),
           },
           {
             suite: "s2-bounded-capture",
-            status: "fail",
+            record_type: "diagnostic",
             owned_program_status: expectedStatus,
             chosen_timeout_seconds: 9,
           },
@@ -4146,7 +4146,7 @@ s2_bounded_capture perl -e "$1"`;
       );
       expect(ndjsonRecords({ ...run, stdout: run.stderr })).toContainEqual({
         suite: "s2-owned-command",
-        status: "fail",
+        record_type: "diagnostic",
         outcome: "deadline",
         cleanup_proven: true,
       });
@@ -4179,7 +4179,7 @@ s2_bounded_capture perl -e "$1"`;
       );
       expect(ndjsonRecords({ ...run, stdout: run.stderr })).toContainEqual({
         suite: "s2-owned-command",
-        status: "fail",
+        record_type: "diagnostic",
         outcome: "deadline",
         cleanup_proven: false,
       });
@@ -4209,13 +4209,13 @@ s2_bounded_capture perl -e "$1"`;
       const diagnostics = ndjsonRecords({ ...run, stdout: run.stderr });
       expect(diagnostics).toContainEqual({
         suite: "s2-owned-command",
-        status: "fail",
+        record_type: "diagnostic",
         outcome: "deadline",
         cleanup_proven: true,
       });
       expect(diagnostics).toContainEqual({
         suite: "s2-bounded-capture",
-        status: "fail",
+        record_type: "diagnostic",
         owned_program_status: 124,
         chosen_timeout_seconds: 1,
       });
