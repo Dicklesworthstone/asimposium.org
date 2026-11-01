@@ -9,7 +9,9 @@
  * contracts; a spike that quietly minted `/v1/...` would pre-empt them. The two
  * routes below are named `__s6` precisely so nothing here can be mistaken for a
  * product surface, and the ingress route performs **no business effect**: it
- * authenticates, records one nonce, and answers. Nothing else is written.
+ * authenticates, records one nonce, and answers. Lifecycle leaves may explicitly
+ * supply the checked-in nonce DDL for setup on this same native D1 binding;
+ * the full parent never supplies it and proves the complete migration chain.
  *
  * ## What this proves, and what it cannot
  *
@@ -70,6 +72,38 @@ interface LocalAuthEnv {
   /** Per-run, non-secret ownership marker so a runner can tell our Worker from
    * a stranger already listening on the same port. Never a credential. */
   readonly S6_RUN_ID?: string;
+  /** Local setup: checked-in 0003 split by pinned Wrangler, never request data. */
+  readonly S6_NONCE_FIXTURE_STATEMENTS?: string;
+}
+
+const nonceFixtureSetup = new WeakMap<D1Database, Promise<void>>();
+
+async function prepareNonceFixture(env: LocalAuthEnv): Promise<void> {
+  const encoded = env.S6_NONCE_FIXTURE_STATEMENTS;
+  if (encoded === undefined) return;
+  let setup = nonceFixtureSetup.get(env.DB);
+  if (setup === undefined) {
+    setup = (async () => {
+      const statements: unknown = JSON.parse(encoded);
+      if (
+        !Array.isArray(statements) ||
+        statements.length === 0 ||
+        !statements.every((statement): statement is string => typeof statement === "string")
+      ) {
+        throw new Error("S6_NONCE_FIXTURE_INVALID");
+      }
+      // A restarted leaf retains its actual nonce rows. Never recreate or
+      // replace an existing table, and never provide an in-memory nonce store.
+      const existing = await env.DB.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'auth_envelope_nonces'",
+      ).first();
+      if (existing === null) {
+        await env.DB.batch(statements.map((statement) => env.DB.prepare(statement)));
+      }
+    })();
+    nonceFixtureSetup.set(env.DB, setup);
+  }
+  await setup;
 }
 
 function json(body: unknown, status = 200): Response {
@@ -210,6 +244,7 @@ function keyringFrom(env: LocalAuthEnv): VerificationKeyring {
  * because it re-randomises a key. Same shape, opposite meaning.)
  */
 async function ingress(request: Request, env: LocalAuthEnv): Promise<Response> {
+  await prepareNonceFixture(env);
   const startedAt = Date.now();
   let cookieReads = 0;
   const guarded = cookieTrappedRequest(request, () => {

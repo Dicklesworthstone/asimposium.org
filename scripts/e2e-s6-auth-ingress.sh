@@ -141,6 +141,7 @@ fi
 # Nested children test one lifecycle ownership window, not another complete
 # auth/retention run. A missing or contradictory target must never skip proof.
 NESTED_LIFECYCLE_TARGET=""
+NESTED_NONCE_FIXTURE_STATEMENTS=""
 if [[ "${SELF_TEST_NESTED}" == "1" ]]; then
   case "${S6_TEST_SIGNAL_WINDOW:-}:${S6_TEST_WEDGE_AFTER_RESTART:-0}:${S6_TEST_LIFECYCLE_MATRIX:-0}" in
     provisional-supervisor:0:0|ordinary-checker:0:0|restart-checker:0:0|worker:0:0|busy-contender:0:0)
@@ -1428,7 +1429,11 @@ export S6_PUBLIC_KEY_HEX S6_PRIVATE_KEY_JWK S6_KID S6_NOW
 
 start_worker() {
   local launch_status=0
+  local nonce_fixture_vars=()
   assert_work_budget || return 1
+  if [[ -n "${NESTED_NONCE_FIXTURE_STATEMENTS:-}" ]]; then
+    nonce_fixture_vars=(--var "S6_NONCE_FIXTURE_STATEMENTS:${NESTED_NONCE_FIXTURE_STATEMENTS}")
+  fi
   launch_pinned_supervisor "${SERVER_LOG}" "${WRANGLER}" dev \
     --config "${CONFIG}" \
     --local \
@@ -1441,7 +1446,7 @@ start_worker() {
     --var "S6_KID:${S6_KID}" \
     --var "S6_NOW:${WORKER_NOW}" \
     --var "S6_PSEUDONYM_SALT:s6-local-salt" \
-    --var "S6_RUN_ID:${S6_RUN_ID}" || launch_status=$?
+    --var "S6_RUN_ID:${S6_RUN_ID}" "${nonce_fixture_vars[@]}" || launch_status=$?
 
   if (( launch_status != 0 )); then
     return "${launch_status}"
@@ -2106,16 +2111,20 @@ run_nested_lifecycle_matrix() {
 
 # The full parent below proves every migration and auth/retention scenario.
 # Lifecycle children need only their actual process/DB prerequisites. The
-# nonce fixture uses the checked-in SQL through native Wrangler/D1; it is not
-# a second schema, a mock binding, or evidence for the full migration chain.
+# nonce fixture uses the checked-in SQL through the leaf Worker's native D1
+# binding; it is not a second schema or proof of the full migration chain.
 prepare_nested_nonce_fixture() {
   assert_work_budget || return 1
-  if ! "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local \
-    --persist-to "${STATE_DIR}" --env-file /dev/null \
-    --file "${ROOT}/db/migrations/0003_auth_nonce_replay.sql" \
-    >"${STATE_DIR}/nonce-fixture.log" 2>&1; then
-    show_redacted "native nonce fixture" "${STATE_DIR}/nonce-fixture.log"
-    fail_record "nested_nonce_fixture_applied" "the checked-in nonce migration could not initialize real local D1"
+  if ! NESTED_NONCE_FIXTURE_STATEMENTS="$(node --input-type=module --eval '
+    import { readFileSync } from "node:fs";
+    import { createRequire } from "node:module";
+    const fromWire = createRequire(process.cwd() + "/apps/wire/package.json");
+    const { unstable_splitSqlQuery } = fromWire("wrangler-s1-local");
+    const sql = readFileSync(process.argv[1], "utf8");
+    process.stdout.write(JSON.stringify(unstable_splitSqlQuery(sql)));
+  ' "${ROOT}/db/migrations/0003_auth_nonce_replay.sql")" \
+    || [[ -z "${NESTED_NONCE_FIXTURE_STATEMENTS}" ]]; then
+    fail_record "nested_nonce_fixture_applied" "the checked-in nonce migration could not be parsed"
     return 1
   fi
 }
