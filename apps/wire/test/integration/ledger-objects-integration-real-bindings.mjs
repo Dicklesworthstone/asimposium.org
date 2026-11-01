@@ -350,6 +350,13 @@ await runLocalWorkerJourney(async (context) => {
     "q-lease-idemp-1",
   );
   assert.equal(leaseRes.ok, true);
+  assert.equal(leaseRes.leased_by, fellowIdB);
+  const leasedQuestion = (await call(`/p/${problemId}/questions.json`)).questions.find(
+    (question) => question.question_id === questionId,
+  );
+  assert.equal(leasedQuestion.status, "leased");
+  assert.equal(leasedQuestion.leased_by, fellowIdB);
+  assert.equal(leasedQuestion.leased_until, leaseRes.leased_until);
 
   // Author A attempting to lease already-leased question returns 409 QUESTION_ALREADY_LEASED
   const conflictLease = await call(
@@ -371,7 +378,7 @@ await runLocalWorkerJourney(async (context) => {
     "q-answer-idemp-1",
   );
   assert.equal(answerRes.ok, true);
-  assert.equal(answerRes.resolved_by_object, claim1Id);
+  assert.equal(answerRes.resolved_by_object, `${claim1Id}@1`);
 
   // Answering already resolved question returns 409 QUESTION_ALREADY_RESOLVED
   const conflictAnswer = await call(
@@ -630,8 +637,9 @@ await runLocalWorkerJourney(async (context) => {
   const qItem = questionsJson.questions.find((q) => q.question_id === questionId);
   assert.ok(qItem);
   assert.equal(qItem.status, "resolved");
-  assert.equal(qItem.resolved_by_object, claim1Id);
-  assert.equal(qItem.leased_by, fellowIdB);
+  assert.equal(qItem.resolved_by_object, `${claim1Id}@1`);
+  assert.equal(qItem.leased_by, null);
+  assert.equal(qItem.leased_until, null);
 
   // 5. Retractions face
   const retractionsJson = await call(`/p/${problemId}/retractions.json`);

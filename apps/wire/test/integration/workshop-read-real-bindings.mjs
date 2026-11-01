@@ -810,11 +810,21 @@ if (!cliMode) {
         );
         assert.deepEqual(history.object.revision, stale);
 
+        const publishedDraft = await call(
+          `${path}/workshop/${draft.workshop_id}`,
+          undefined,
+          token,
+        );
+        assert.equal(publishedDraft.object.current_version, 3);
+        assert.equal(publishedDraft.object.version, 3);
+        assert.equal(publishedDraft.object.state, "archived");
+        assert.deepEqual(publishedDraft.object.revision, current);
+
         await call(
           `${path}/workshop`,
           {
             workshop_id: draft.workshop_id,
-            base_version: 2,
+            base_version: publishedDraft.object.current_version,
             revision: {
               ...current,
               statement: `The ${mode} next private draft remains unpublished.`,

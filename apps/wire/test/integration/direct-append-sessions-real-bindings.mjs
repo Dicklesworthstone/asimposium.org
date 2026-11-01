@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { IMPLICIT_SESSION_RELEASE_SQL } from "../../src/sessions/implicit-session.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+import { directAppendProbe } from "./raced-ledger-write.mjs";
 
 // Direct appends and their implicit sessions on real local Workerd/D1:
 // - 6svb: parallel direct appends share one implicit session, counted in
@@ -14,7 +15,8 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // - A session past its idle deadline is retired before a direct append looks
 //   for one to join, so it is neither revived nor counted against the cap.
 
-await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env }) => {
+await runLocalWorkerJourney(async (context) => {
+  const { call, enroll, sponsorCall, fixtures, env } = context;
   const OWNER = "usr_direct_sessions_owner";
   const author = await enroll("direct-sessions-author", OWNER);
   const reviewer = await enroll("direct-sessions-reviewer", "usr_direct_sessions_reviewer");
@@ -139,17 +141,45 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
   assert.equal(failed.handback, "Direct append failed", "closed as a session that wrote nothing");
   assert.equal(failed.events, 0);
 
-  // Parallel direct appends: every one succeeds, and once all have answered
-  // no implicit session of this Fellow is left open.
-  const parallel = await Promise.all(
-    Array.from({ length: 6 }, (_, index) =>
-      call(`/v1/p/${problem}/dead-ends`, deadEnd(`parallel-${index}`), author, null),
-    ),
-  );
+  // All six first attempts remain concurrent; context-stale candidates then
+  // follow one real refresh/same-key recovery. All six must actually publish.
+  // Use the already-published third problem so these recovery attempts do
+  // not consume the independent later closure-race subjects' allowance.
+  // The Fellow, sponsor, native20-attempt limit and all six launches stay.
+  const parallelProblem = problems[2];
+  const probe = directAppendProbe(context, parallelProblem);
+  const requests = Array.from({ length: 6 }, (_, index) => {
+    const body = Object.freeze(deadEnd(`parallel-${index}`));
+    return Object.freeze({
+      path: `/v1/p/${parallelProblem}/dead-ends`,
+      body,
+      raw: JSON.stringify(body),
+      token: author,
+      key: `direct-sessions-parallel-${index}`,
+    });
+  });
+  const eventsBeforeParallel = (
+    await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id = ?")
+      .bind(parallelProblem)
+      .first()
+  ).n;
+  const first = await Promise.all(requests.map(probe.send));
+  const parallel = [];
+  for (let index = 0; index < requests.length; index++)
+    parallel.push((await probe.finish(requests[index], first[index])).data);
   assert.deepEqual(
     parallel.map((response) => response.code ?? "ok"),
     Array(6).fill("ok"),
-    "all parallel appends succeeded",
+    "all six concurrently launched candidates published",
+  );
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id = ?")
+        .bind(parallelProblem)
+        .first()
+    ).n,
+    eventsBeforeParallel + 6,
+    "all six candidates have their own event",
   );
   const lingering = await env.DB.prepare(
     "SELECT COUNT(*) AS n FROM sessions WHERE fellow_id = ? AND closed_at IS NULL AND implicit_inflight IS NOT NULL",

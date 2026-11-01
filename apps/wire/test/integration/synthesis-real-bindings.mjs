@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  ClaimReanchorResponseSchema,
+  PackResponseSchema,
   ScreeningPublicationProvenanceSchema,
   SingleSynthesisResponseSchema,
   SynthesesListResponseSchema,
@@ -649,18 +651,44 @@ await runLocalWorkerJourney(
     assert.equal(notFoundJson.code, "PROBLEM_NOT_FOUND");
 
     // 11. Pack staleness standing context
-    const orientPack = await call(
-      `/v1/sessions/${sessionId}/pack?profile=orient`,
-      undefined,
-      author,
-      200,
+    const orientPack = PackResponseSchema.parse(
+      await call(`/v1/sessions/${sessionId}/pack?profile=orient`, undefined, author, 200),
     );
-    const stalenessItem = orientPack.items.find((item) => item.id === "SYS-synthesis-staleness");
-    assert.ok(stalenessItem, "orient pack must surface SYS-synthesis-staleness");
+    assert.equal(orientPack.budget_tokens, 1500);
+    assert.ok(orientPack.tokens_estimate <= 1500);
+    const defaultStaleness = orientPack.items.find((item) => item.id === "SYS-synthesis-staleness");
+    if (!defaultStaleness)
+      assert.ok(orientPack.omitted.some((item) => item.reason === "budget_exceeded"));
+    // The documented larger budget must actually recover this standing
+    // context at the same cursor; omission alone earns no coverage credit.
+    const fullOrient = PackResponseSchema.parse(
+      await call(
+        `/v1/sessions/${sessionId}/pack?profile=orient&max_tokens=8000`,
+        undefined,
+        author,
+        200,
+      ),
+    );
+    assert.equal(fullOrient.budget_tokens, 8000);
+    assert.ok(fullOrient.tokens_estimate <= 8000);
+    assert.equal(fullOrient.cursor, orientPack.cursor);
+    const stalenessItem = fullOrient.items.find((item) => item.id === "SYS-synthesis-staleness");
+    assert.ok(stalenessItem, "a sufficient orient budget must surface SYS-synthesis-staleness");
     assert.equal(stalenessItem.kind, "standing-context");
     assert.match(
       stalenessItem.body,
       /synthesis covers through #\d+ — stale by \d+ material events/,
+    );
+    if (defaultStaleness) assert.deepEqual(defaultStaleness, stalenessItem);
+    const latest = listData.syntheses.reduce((head, item) =>
+      item.covers_through > head.covers_through ? item : head,
+    );
+    const exactLatest = SingleSynthesisResponseSchema.parse(
+      await call(`/p/${problemId}/syntheses/${latest.synthesis_id}.json`),
+    );
+    assert.equal(
+      stalenessItem.body,
+      `synthesis covers through #${latest.covers_through} — stale by ${exactLatest.staleness.material_events_since} material events`,
     );
 
     // 12. Minority finding coverage: hypotheses and dead ends
@@ -725,11 +753,50 @@ await runLocalWorkerJourney(
 
     // A synthesis can now retain the actual review and negative result, rather
     // than merely describing them in prose without ledger references.
+    // Earlier statement-revision subjects intentionally made claims drift.
+    // The author must inspect the formulation and explicitly re-anchor before
+    // the reviewer can assess the same immutable claim version.
+    const authorContext = PackResponseSchema.parse(
+      await call(
+        `/v1/sessions/${sessionId}/pack?profile=orient&max_tokens=8000`,
+        undefined,
+        author,
+      ),
+    );
+    assert.equal(authorContext.problem, problemId);
+    assert.equal(authorContext.session, sessionId);
+    const reanchored = ClaimReanchorResponseSchema.parse(
+      await call(
+        `/v1/sessions/${sessionId}/reanchor`,
+        { claim_id: claim1Id, base_version: 2 },
+        author,
+        200,
+      ),
+    );
+    assert.equal(reanchored.claim_id, claim1Id);
+    const claimContext = await env.DB.prepare(
+      "SELECT c.statement_version, c.statement_drift, p.current_statement_version FROM claims c JOIN problems p ON p.id = c.problem_id WHERE c.problem_id = ? AND c.id = ?",
+    )
+      .bind(problemId, claim1Id)
+      .first();
+    assert.equal(claimContext.statement_drift, 0);
+    assert.equal(claimContext.statement_version, claimContext.current_statement_version);
+    assert.equal(reanchored.statement_version, claimContext.current_statement_version);
+    const reviewContext = PackResponseSchema.parse(
+      await call(
+        `/v1/sessions/${reviewSession.session_id}/pack?profile=orient&max_tokens=8000`,
+        undefined,
+        reviewer,
+      ),
+    );
+    assert.equal(reviewContext.problem, problemId);
+    assert.equal(reviewContext.session, reviewSession.session_id);
     const reviewed = await call(
       `/v1/sessions/${reviewSession.session_id}/review`,
       {
         target_claim_id: claim1Id,
         target_version: 2,
+        client_context_cursor: reviewContext.cursor,
         verdict: "inform",
         basis: "Examined the finite divisor interval in the revised statement.",
         capable_of_failure: "A prime divisor greater than the integer would fail the argument.",
@@ -794,15 +861,50 @@ await runLocalWorkerJourney(
       .bind(problemId, reviewed.review_id)
       .first();
     assert.ok(reviewSource);
+    // Earlier independent subjects consume the author's real attempt budget.
+    // Prove that refusal rather than resetting it, then isolate the source
+    // race under a fresh real Fellow with the same sponsor and unchanged caps.
+    const beforeQuota = await footprint();
+    const screensBeforeQuota = await fixtures.screeningCalls();
+    const exhausted = await call(
+      `/v1/sessions/${sessionId}/synthesize`,
+      retainedBody,
+      author,
+      429,
+      "synthesis-original-author-quota",
+    );
+    assert.equal(exhausted.code, "PROMOTION_RATE_LIMITED");
+    assert.equal(exhausted.limit, 20);
+    assert.equal(exhausted.remaining, 0);
+    assert.equal(await fixtures.screeningCalls(), screensBeforeQuota);
+    assert.deepEqual(await footprint(), beforeQuota);
+    const raceWriter = await enroll("synthesis-source-race-writer", sponsorA);
+    const raceSession = await call(
+      "/v1/sessions",
+      {
+        problem_id: problemId,
+        intent: "explore",
+      },
+      raceWriter,
+      201,
+    );
     const beforeRace = await footprint();
     const screensBeforeRace = await fixtures.screeningCalls();
     await fixtures.redactOnNextScreen(reviewSource.id);
     const refused = await call(
-      `/v1/sessions/${sessionId}/synthesize`,
+      `/v1/sessions/${raceSession.session_id}/synthesize`,
       retainedBody,
-      author,
+      raceWriter,
       null,
       "synthesis-redaction-race",
+    );
+    console.log(
+      JSON.stringify({
+        stage: "synthesis-redaction-refusal-diagnostic",
+        code: refused.code,
+        declared_status: refused.status,
+        screening_call_delta: (await fixtures.screeningCalls()) - screensBeforeRace,
+      }),
     );
     assert.ok(
       ["SYNTHESIS_UNANCHORED", "SCREENING_CONTEXT_STALE"].includes(refused.code),

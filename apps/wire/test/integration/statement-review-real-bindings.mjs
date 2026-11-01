@@ -5,6 +5,14 @@ import {
   ProblemStatementReviewEventSchema,
   ScreeningPromotionDeniedResponseSchema,
 } from "@asimposium/contracts";
+import {
+  ProjectionRepairRefusedError,
+  projectionDoctorReport,
+  readProblemLog,
+  readProjectionSnapshot,
+  repairProjections,
+  replayProjections,
+} from "../../src/krater/projection-replay.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
@@ -591,6 +599,11 @@ await runLocalWorkerJourney(
       "OBJECT_VERSION_CONFLICT",
     );
     assert.deepEqual(await state(), terminal);
+    // W2.6 (79n, pjkj): compare all verdicts, versions and reviewers while
+    // their event payloads still exist, before projection-only legacy rows.
+    const rebuilt = await assertProjectionsRebuild(env.DB, id);
+    console.log(JSON.stringify({ stage: "projection-rebuild", ...rebuilt }));
+    assert.ok(rebuilt.counts.problem_statement_reviews > 1, "several statement reviews replayed");
     // Lawful withdrawal is one-way. The retained envelope still identifies the
     // historical event; the public face must stop serving its old basis immediately.
     const beforeWithdrawal = (await publicGet()).headers.get("etag");
@@ -607,12 +620,27 @@ await runLocalWorkerJourney(
       withdrawnFace.omitted.some((item) => item.reason === "statement_review_content_unavailable"),
     );
     assert.ok(!(await (await publicGet("md")).text()).includes(`"event": "${event.id}"`));
-    // W2.6 (79n, pjkj): the statement reviews this journey recorded (several
-    // reviewers, both verdicts, more than one version) rebuild from the log,
-    // before the event-less legacy rows below are inserted.
-    const rebuilt = await assertProjectionsRebuild(env.DB, id);
-    console.log(JSON.stringify({ stage: "projection-rebuild", ...rebuilt }));
-    assert.ok(rebuilt.counts.problem_statement_reviews > 1, "several statement reviews replayed");
+    // The withdrawn activation payload contained a historical status change.
+    // Never claim it can be reconstructed or replace the surviving snapshot
+    // with a partial replay. The doctor must name that limitation and refuse.
+    const withdrawnState = await state();
+    const withdrawnSnapshot = await readProjectionSnapshot(env.DB, id);
+    const replay = await replayProjections(id, await readProblemLog(env.DB, id));
+    assert.deepEqual(replay.unreplayable, [event.id]);
+    const doctor = await projectionDoctorReport(env.DB, id);
+    assert.equal(doctor.integrity.sound, true);
+    assert.equal(doctor.status, "unreplayable");
+    assert.equal(doctor.unreplayable_events, 1);
+    assert.equal(doctor.repairable, false);
+    await assert.rejects(
+      () => repairProjections(env.DB, id),
+      (error) =>
+        error instanceof ProjectionRepairRefusedError &&
+        error.code === "PROJECTION_REBUILD_UNREPLAYABLE" &&
+        error.inserted === 0,
+    );
+    assert.deepEqual(await readProjectionSnapshot(env.DB, id), withdrawnSnapshot);
+    assert.deepEqual(await state(), withdrawnState);
     // Historical projection-only imports stay unattributed: no current identity join.
     await env.DB.prepare(
       "INSERT INTO problem_statement_reviews VALUES (?, 1, 'legacy-reviewer', 'statement-clear', 'LEGACY_REVIEW_BASIS_CANARY', ?)",
@@ -696,11 +724,14 @@ await runLocalWorkerJourney(
     return {
       // The lane proved this problem rebuilds (assertProjectionsRebuild above)
       // and then inserted event-less legacy review rows on purpose, beside a
-      // redacted review: replay cannot reproduce exactly those rows.
+      // redacted activation: replay cannot reproduce exactly those rows or
+      // the historical materiality transition whose payload was withdrawn.
       projectionParityExpect: {
         [id]: {
           status: "unreplayable",
           drift: [
+            `problems:column:${id}:last_material_at`,
+            `problems:column:${id}:last_material_event_id`,
             `problem_statement_reviews:orphan_row:1@${event.actor_fellow_id}`,
             "problem_statement_reviews:orphan_row:1@legacy-reviewer",
             ...Array.from(

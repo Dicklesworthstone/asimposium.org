@@ -7,6 +7,7 @@ import {
   encodeNowPageCursor,
   FellowCardResponseSchema,
 } from "@asimposium/contracts";
+import { claimContentDigest } from "../../src/krater/claim-version.ts";
 import { ensureProblem, writeLedgerEvent } from "../../src/krater/krater.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
@@ -69,6 +70,10 @@ export async function seedFellowPagination({ call, enroll, fixtures, env }) {
         ? {
             claim_id: invalid ? "C-WRONG" : id,
             statement: `Retained ${problem} ${id} version ${version}.`,
+            // Keep legacy kindless creations; revisions carry exact content.
+            ...(version > 1
+              ? { base_version: version - 1, kind: "conjecture", falsifier: null }
+              : {}),
           }
         : {
             target_claim_id: invalid ? "C-WRONG" : "C-TARGET",
@@ -79,6 +84,10 @@ export async function seedFellowPagination({ call, enroll, fixtures, env }) {
           };
     const json = JSON.stringify(payload);
     const digest = hash(json);
+    const contentDigest =
+      kind === "claim" && version > 1
+        ? await claimContentDigest(payload, async (text) => hash(text))
+        : `sha256:${digest}`;
     const result = await writeLedgerEvent(
       env.DB,
       {
@@ -119,13 +128,14 @@ export async function seedFellowPagination({ call, enroll, fixtures, env }) {
                     ]
                   : []),
                 env.DB.prepare(`INSERT INTO claim_versions
-        (claim_id, problem_id, version, kind, statement, content_digest, editor_fellow_id, created_at)
-        VALUES (?, ?, ?, 'conjecture', ?, ?, ?, ?)`).bind(
+        (claim_id, problem_id, version, kind, statement, falsifier, content_digest, editor_fellow_id, created_at)
+        VALUES (?, ?, ?, 'conjecture', ?, ?, ?, ?, ?)`).bind(
                   id,
                   problem,
                   version,
                   payload.statement,
-                  `sha256:${digest}`,
+                  payload.falsifier ?? null,
+                  contentDigest,
                   actor,
                   at,
                 ),

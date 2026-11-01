@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
+  ContractProblemSchema,
   getMoveTemplate,
   PackResponseSchema,
+  ReviewResponseSchema,
   ScreeningPromotionDeniedResponseSchema,
 } from "@asimposium/contracts";
 import Ajv from "ajv/dist/2020.js";
@@ -737,15 +739,50 @@ await runLocalWorkerJourney(async (context) => {
     );
     oversizedIds.push(recorded.dead_end_id);
   }
+  const navigationBudgets = [800, 1500, 2500, 4000, 8000];
   for (const budget of [800, 1500, 8000]) {
-    const pack = await readPack("graveyard", budget);
-    assert.ok(pack.tokens_estimate <= budget);
-    assert.ok(!pack.items.some((item) => oversizedIds.includes(item.id)));
-    assert.equal(pack.omitted.filter((item) => item.reason === "item_too_large").length, 1);
-    assert.ok(!pack.items.some((item) => item.id === "SYS-public-dead-ends-empty"));
-    assert.ok(
-      pack.next_actions.some((item) => item.url.endsWith(`/p/${problemId}/dead-ends.json`)),
-    );
+    let pack = await readPack("graveyard", budget);
+    const cursor = pack.cursor;
+    let currentBudget = budget;
+    let reached = false;
+    for (let hop = 0; hop < navigationBudgets.length; hop++) {
+      assert.equal(pack.budget_tokens, currentBudget);
+      assert.ok(pack.tokens_estimate <= currentBudget);
+      assert.equal(pack.cursor, cursor);
+      assert.ok(!pack.items.some((item) => oversizedIds.includes(item.id)));
+      assert.equal(pack.omitted.filter((item) => item.reason === "item_too_large").length, 1);
+      assert.ok(!pack.items.some((item) => item.id === "SYS-public-dead-ends-empty"));
+      const publicRead = pack.next_actions.find(
+        (item) => item.method === "GET" && item.url.endsWith(`/p/${problemId}/dead-ends.json`),
+      );
+      if (publicRead) {
+        const target = new URL(publicRead.url, origin);
+        assert.equal(target.origin, origin);
+        const published = await call(`${target.pathname}${target.search}`);
+        for (const id of oversizedIds)
+          assert.ok(published.dead_ends.some((item) => item.dead_end_id === id));
+        reached = true;
+        break;
+      }
+      assert.ok(pack.omitted.some((item) => item.reason === "next_actions_budget"));
+      const larger = pack.next_actions.filter(
+        (item) =>
+          item.method === "GET" &&
+          new URL(item.url, origin).pathname === `/v1/sessions/${sessionB.session_id}/pack`,
+      );
+      assert.equal(larger.length, 1);
+      const nextUrl = new URL(larger[0].url, origin);
+      assert.equal(nextUrl.origin, origin);
+      assert.equal(nextUrl.searchParams.get("profile"), "graveyard");
+      assert.deepEqual([...nextUrl.searchParams.keys()].sort(), ["max_tokens", "profile"]);
+      const nextBudget = Number(nextUrl.searchParams.get("max_tokens"));
+      assert.ok(navigationBudgets.includes(nextBudget) && nextBudget > currentBudget);
+      currentBudget = nextBudget;
+      pack = PackResponseSchema.parse(
+        await call(`${nextUrl.pathname}${nextUrl.search}`, undefined, reviewerB),
+      );
+    }
+    assert.equal(reached, true, `budget ${budget} reaches the actual public oversized records`);
   }
   const publicOversized = await call(`/p/${problemId}/dead-ends.json`);
   for (const id of oversizedIds)
@@ -1052,26 +1089,107 @@ await runLocalWorkerJourney(async (context) => {
     claim_id: distantClaim.claim_id,
     reaches: "disputed",
   });
-  const distantReviews = await Promise.all(
-    ["first", "second"].map((label) =>
-      call(
-        reviewPath,
-        {
-          ...reviewBody,
-          target_claim_id: distantClaim.claim_id,
-          basis: `The ${label} refutation checks the alleged factorial divisor against the recorded domain.`,
-        },
-        reviewerB,
-        201,
-        `retry-concurrent-review-${label}`,
-      ),
-    ),
-  );
+  const reviewRequests = ["first", "second"].map((label) => {
+    const body = Object.freeze({
+      ...reviewBody,
+      target_claim_id: distantClaim.claim_id,
+      basis: `The ${label} refutation checks the alleged factorial divisor against the recorded domain.`,
+    });
+    return Object.freeze({
+      body,
+      raw: JSON.stringify(body),
+      key: `retry-concurrent-review-${label}`,
+    });
+  });
+  const submitReview = async (request) => {
+    assert.equal(JSON.stringify(request.body), request.raw);
+    const response = await worker.fetch(`${origin}${reviewPath}`, {
+      method: "POST",
+      headers: {
+        "User-Agent": userAgent,
+        authorization: `Bearer ${reviewerB}`,
+        "content-type": "application/json",
+        "Idempotency-Key": request.key,
+      },
+      body: request.raw,
+    });
+    return { status: response.status, headers: response.headers, data: await response.json() };
+  };
+  // Both original reviews enter concurrently. A context-stale answer then
+  // follows the current protocol once; it cannot count as a published review.
+  const firstReviews = await Promise.all(reviewRequests.map(submitReview));
+  const distantReviews = [];
+  for (let index = 0; index < reviewRequests.length; index++) {
+    const request = reviewRequests[index];
+    let result = firstReviews[index];
+    if (result.status === 409) {
+      ContractProblemSchema.parse(result.data);
+      assert.equal(result.data.status, 409);
+      assert.equal(result.data.code, "SCREENING_CONTEXT_STALE");
+      assert.equal(result.data.rule, "A5");
+      assert.ok(result.data.fix_hint);
+      assert.equal(result.headers.get("cache-control"), "private, no-store");
+      assert.equal(
+        (
+          await env.DB.prepare(
+            "SELECT COUNT(*) AS n FROM reviews WHERE problem_id = ? AND target_claim_id = ? AND basis = ?",
+          )
+            .bind(problemId, distantClaim.claim_id, request.body.basis)
+            .first()
+        ).n,
+        0,
+      );
+      assert.equal(
+        (
+          await env.DB.prepare(
+            "SELECT COUNT(*) AS n FROM session_write_replays WHERE idempotency_key = ?",
+          )
+            .bind(request.key)
+            .first()
+        ).n,
+        0,
+      );
+      const target = `${distantClaim.claim_id}@1`;
+      const fresh = PackResponseSchema.parse(
+        await call(
+          `/v1/sessions/${sessionB.session_id}/pack?profile=review&target=${encodeURIComponent(target)}&max_tokens=8000`,
+          undefined,
+          reviewerB,
+        ),
+      );
+      assert.ok(fresh.items.some((item) => item.kind === "claim-detail" && item.id === target));
+      assert.ok(!fresh.items.some((item) => item.scope === "workshop"));
+      result = await submitReview(request);
+    }
+    assert.equal(result.status, 201);
+    const review = ReviewResponseSchema.parse(result.data);
+    assert.equal(
+      (
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM events WHERE problem_id = ? AND type = 'review.created' AND object_id = ?",
+        )
+          .bind(problemId, review.review_id)
+          .first()
+      ).n,
+      1,
+    );
+    assert.equal(
+      (
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM session_write_replays WHERE idempotency_key = ?",
+        )
+          .bind(request.key)
+          .first()
+      ).n,
+      1,
+    );
+    distantReviews.push(review);
+  }
   const earliestReview = distantReviews.toSorted((left, right) => left.seq - right.seq)[0];
   assert.equal(
     (await triggerFor(distantRetry.dead_end_id)).object_id,
     earliestReview.review_id,
-    "Concurrent writes fire once on the first transition, even beyond fifty earlier claims",
+    "Concurrent attempts fire once on the first committed transition, even beyond fifty earlier claims",
   );
   settledRetryIds.push(distantRetry.dead_end_id);
 
@@ -1187,14 +1305,29 @@ await runLocalWorkerJourney(async (context) => {
     triggerAuthor,
     200,
   );
-  const retryCandidate = postRevPack.items.find(
-    (c) => c.id === `SYS-retry-dead-end-${stmtRevDeadEnd.dead_end_id}`,
+  const moveRecords = postRevPack.items.filter((item) => item.kind === "move");
+  assert.equal(moveRecords.length, 1, "the working pack has one canonical ranked move record");
+  assert.equal(moveRecords[0].scope, "system");
+  assert.equal(moveRecords[0].untrusted, false);
+  const ranked = JSON.parse(moveRecords[0].body);
+  const next = await call(`/v1/p/${problemId}/next`, undefined, triggerAuthor);
+  assert.deepEqual(ranked.primary_move, next.primary_move);
+  assert.deepEqual(ranked.alternatives, next.alternatives);
+  // Orient retains recorded-firing context while working ranks all current
+  // needs. Here the larger independent-review backlog correctly comes first.
+  const orientPack = await call(
+    `/v1/sessions/${triggerSessionId}/pack?profile=orient&max_tokens=8000`,
+    undefined,
+    triggerAuthor,
+    200,
   );
-  assert.ok(retryCandidate, "Fired retry trigger must surface retry-dead-end move in working pack");
+  const retryCandidate = orientPack.items.find(
+    (item) => item.id === `SYS-retry-dead-end-${stmtRevDeadEnd.dead_end_id}`,
+  );
+  assert.ok(retryCandidate, "Orient must serve the committed retry context");
   assert.equal(retryCandidate.kind, "move");
   assert.equal(retryCandidate.scope, "system");
   assert.equal(retryCandidate.untrusted, false);
-
   const movePayload = JSON.parse(retryCandidate.body);
   assert.equal(movePayload.move, "retry-dead-end");
   assert.deepEqual(movePayload.refs, [stmtRevDeadEnd.dead_end_id]);
@@ -1203,9 +1336,18 @@ await runLocalWorkerJourney(async (context) => {
     "Author prose must not become a trusted system instruction",
   );
   assert.equal(movePayload.contract.prefilled_hints.type, "scratch");
-  assert.ok(
-    postRevPack.items.some((item) => item.untrusted && item.body.includes("AUTHOR-RETRY-CANARY")),
+  const sourceResponse = await worker.fetch(
+    `${origin}/p/${problemId}/dead-ends.md?include_superseded=true`,
+    {
+      headers: { "User-Agent": userAgent },
+    },
   );
+  assert.equal(sourceResponse.status, 200);
+  assert.ok((await sourceResponse.text()).includes("AUTHOR-RETRY-CANARY"));
+  if (
+    !postRevPack.items.some((item) => item.untrusted && item.body.includes("AUTHOR-RETRY-CANARY"))
+  )
+    assert.ok(postRevPack.omitted.some((item) => item.reason === "budget_exceeded"));
   assert.ok(
     !JSON.parse(await fixtures.retryTriggersAt(problemId, preRevPack.cursor)).some(
       (item) => item.dead_end_id === stmtRevDeadEnd.dead_end_id,
@@ -1217,13 +1359,7 @@ await runLocalWorkerJourney(async (context) => {
     ),
   );
 
-  // Also verify in orient pack
-  const orientPack = await call(
-    `/v1/sessions/${triggerSessionId}/pack?profile=orient&max_tokens=8000`,
-    undefined,
-    triggerAuthor,
-    200,
-  );
+  // The recorded context and its source are independent of the ranked choice.
   assert.ok(
     orientPack.items.some((c) => c.id === `SYS-retry-dead-end-${stmtRevDeadEnd.dead_end_id}`),
     "Fired retry trigger must also surface in orient pack",
@@ -1293,7 +1429,7 @@ await runLocalWorkerJourney(async (context) => {
 
   // Once superseded, the retry move candidate must no longer surface
   const postRetryPack = await call(
-    `/v1/sessions/${triggerSessionId}/pack?profile=working&max_tokens=8000`,
+    `/v1/sessions/${triggerSessionId}/pack?profile=orient&max_tokens=8000`,
     undefined,
     triggerAuthor,
     200,
@@ -1301,6 +1437,144 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(
     !postRetryPack.items.some((c) => c.id === `SYS-retry-dead-end-${stmtRevDeadEnd.dead_end_id}`),
     "Superseded dead end must no longer surface retry move",
+  );
+
+  // A separate real problem isolates canonical retry selection from the
+  // fifty-claim review backlog above. Exercise the served executable move,
+  // then its removal after actual new work; keep the original Fellow/quotas.
+  const choiceProposal = {
+    title: "Retry selection for finite simple paths",
+    statement: "A finite simple path with n edges has exactly n + 1 distinct vertices for n >= 1.",
+    falsifier: "A finite simple path with a different number of distinct vertices.",
+    motivation: "Test a changed domain without unrelated unreviewed claims.",
+    areas: ["combinatorics"],
+  };
+  const choiceProblemId = (await call("/v1/problems", choiceProposal, triggerAuthor, 201)).problem
+    .id;
+  const choiceLifecycle = `/v1/sponsors/problems/${choiceProblemId}/lifecycle`;
+  await sponsorCall(sponsorA, "POST", choiceLifecycle, "problem-lifecycle", { action: "publish" });
+  const choiceReviewSession = await call(
+    "/v1/sessions",
+    {
+      problem_id: choiceProblemId,
+      intent: "review",
+    },
+    authorD,
+    201,
+  );
+  await call(
+    `/v1/problems/${choiceProblemId}/statement-review`,
+    {
+      session_id: choiceReviewSession.session_id,
+      statement_version: 1,
+      verdict: "statement-clear",
+      basis: "The finite domain and counterexample are explicit.",
+    },
+    authorD,
+  );
+  await call(
+    `/v1/sessions/${choiceReviewSession.session_id}/close`,
+    {
+      handback: "Reviewed the path formulation.",
+    },
+    authorD,
+    201,
+  );
+  const choiceSession = await call(
+    "/v1/sessions",
+    {
+      problem_id: choiceProblemId,
+      intent: "explore",
+    },
+    triggerAuthor,
+    201,
+  );
+  const choicePath = `/v1/sessions/${choiceSession.session_id}`;
+  const choiceDeadEnd = await call(
+    `${choicePath}/dead-ends`,
+    {
+      approach: "CANONICAL-RETRY-SOURCE Transfer the path bound to walks with repeated vertices.",
+      why_it_fails: "Repeated vertices invalidate the distinct-vertex count.",
+      retry_predicate: "Revisit when the problem statement changes its domain.",
+      retry_when: { kind: "statement-revised" },
+    },
+    triggerAuthor,
+    201,
+  );
+  await sponsorCall(sponsorA, "POST", choiceLifecycle, "problem-lifecycle", {
+    action: "revise-statement",
+    statement: "A finite simple path with n edges has exactly n + 1 distinct vertices for n >= 2.",
+    falsifier: choiceProposal.falsifier,
+    motivation: choiceProposal.motivation,
+  });
+  const choicePack = PackResponseSchema.parse(
+    await call(`${choicePath}/pack?profile=working&max_tokens=8000`, undefined, triggerAuthor),
+  );
+  const choiceRecords = choicePack.items.filter((item) => item.kind === "move");
+  assert.equal(choiceRecords.length, 1);
+  assert.equal(choiceRecords[0].scope, "system");
+  assert.equal(choiceRecords[0].untrusted, false);
+  const choiceRanked = JSON.parse(choiceRecords[0].body);
+  const choiceNext = await call(`/v1/p/${choiceProblemId}/next`, undefined, triggerAuthor);
+  assert.deepEqual(choiceRanked.primary_move, choiceNext.primary_move);
+  assert.deepEqual(choiceRanked.alternatives, choiceNext.alternatives);
+  const choiceMove = [choiceRanked.primary_move, ...choiceRanked.alternatives].find(
+    (move) => move?.move === "retry-dead-end" && move.refs.includes(choiceDeadEnd.dead_end_id),
+  );
+  assert.ok(choiceMove, "the canonical engine actually serves the eligible retry");
+  assert.ok(!JSON.stringify(choiceMove).includes("CANONICAL-RETRY-SOURCE"));
+  assert.equal(choiceMove.contract.move, getMoveTemplate("retry-dead-end").move);
+  assert.equal(choiceMove.contract.availability, "available");
+  assert.equal(
+    choiceMove.contract.target_contract,
+    "/schemas/sessions.v1/workshop_push_request.json",
+  );
+  const choiceSchema = await worker.fetch(`${origin}${choiceMove.contract.target_contract}`, {
+    headers: { "User-Agent": userAgent },
+  });
+  assert.equal(choiceSchema.status, 200, "the served investigation contract is actually mounted");
+  assert.equal(typeof (await choiceSchema.json()).$schema, "string");
+  assert.deepEqual(choiceMove.contract.prefilled_hints, { type: "scratch" });
+  assert.equal(choiceMove.contract.preparation.dead_end_pin.dead_end_id, choiceDeadEnd.dead_end_id);
+  const choiceBeforeWork = await call("/cursor");
+  await call(
+    choiceMove.contract.request.path.replace("{id}", choiceSession.session_id),
+    {
+      ...choiceMove.contract.prefilled_hints,
+      title: "Re-examine the revised path domain",
+      body_md: "Check the repeated-vertex failure against the narrowed simple-path domain.",
+    },
+    triggerAuthor,
+    201,
+  );
+  assert.equal(await call("/cursor"), choiceBeforeWork, "the served move writes only private work");
+  await call(
+    `${choicePath}/dead-ends`,
+    {
+      approach: "Reassess the repeated-vertex transfer under the narrowed domain.",
+      why_it_fails: "The domain remains simple paths, so repeated walks still do not apply.",
+      retry_predicate: "Revisit only if repeated walks enter the stated domain.",
+      supersedes_dead_end_id: choiceDeadEnd.dead_end_id,
+    },
+    triggerAuthor,
+    201,
+  );
+  const choiceAfter = await call(`/v1/p/${choiceProblemId}/next`, undefined, triggerAuthor);
+  assert.ok(
+    ![choiceAfter.primary_move, ...choiceAfter.alternatives].some(
+      (move) => move?.move === "retry-dead-end" && move.refs.includes(choiceDeadEnd.dead_end_id),
+    ),
+  );
+  assert.equal(
+    (
+      await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM dead_end_fired_triggers WHERE problem_id = ? AND dead_end_id = ?",
+      )
+        .bind(choiceProblemId, choiceDeadEnd.dead_end_id)
+        .first()
+    ).n,
+    1,
+    "completion preserves the append-only firing record",
   );
 
   // W2.6: every projection row this journey built is reproducible from the log.

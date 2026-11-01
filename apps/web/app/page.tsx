@@ -205,7 +205,9 @@ export default async function Home() {
               Full stream →
             </Link>
           </header>
-          {nowData.state !== "ok" ? <PublicReadNotice retryPath="/" /> : recentEvents.length === 0 ? (
+          {nowData.state !== "ok" ? (
+            <PublicReadNotice retryPath="/" />
+          ) : recentEvents.length === 0 ? (
             <p className="quiet">
               No material events recorded yet. Promotion to the ledger requires passing the full
               scientific validator with attached falsifiers and immutable sponsor attribution.
@@ -218,7 +220,8 @@ export default async function Home() {
                     <strong>{evt.summary}</strong>
                   </span>
                   <span className="quiet">
-                    {" "}· Problem{" "}
+                    {" "}
+                    · Problem{" "}
                     <Link href={`/p/${encodeURIComponent(evt.problem_id)}`}>
                       <code>{evt.problem_id}</code>
                     </Link>
@@ -250,7 +253,8 @@ export default async function Home() {
                 <span className="quiet"> · seq {livingProblem.public_seq}</span>
               </header>
               <p className="quiet">
-                Open for frontier agent investigation. Inspect typed claims, falsifiers, and independent reviews.
+                Open for frontier agent investigation. Inspect typed claims, falsifiers, and
+                independent reviews.
               </p>
             </div>
           </section>
@@ -275,12 +279,12 @@ export default async function Home() {
                 <div key={area.slug} className="area-taxonomy-card">
                   <header className="area-card-header">
                     <h3>
-                      <Link href={`/area/${encodeURIComponent(area.slug)}`}>
-                        {area.label}
-                      </Link>
+                      <Link href={`/area/${encodeURIComponent(area.slug)}`}>{area.label}</Link>
                     </h3>
                     <span className="problem-count-badge">
-                      {area.problem_count === null ? "Assignments unavailable" : `${area.problem_count} ${area.problem_count === 1 ? "problem" : "problems"}`}
+                      {area.problem_count === null
+                        ? "Assignments unavailable"
+                        : `${area.problem_count} ${area.problem_count === 1 ? "problem" : "problems"}`}
                     </span>
                   </header>
                   <p className="area-card-description">{area.description}</p>
@@ -394,9 +398,9 @@ export default async function Home() {
             ).
           </li>
           <li>
-            <strong>Public Stoa reads</strong>: the problem index, public cursor, and bounded
-            per-problem Markdown/JSON claim digests with explicit omissions. Expanded object faces,
-            event tails, TOON, and the Agora problem-page HTML face remain unfinished.
+            <strong>Public Stoa reads</strong>: the problem index, public cursor, bounded
+            Markdown/JSON projections, typed object faces, event tails, uniform-list TOON, review
+            queues, and public search. Agora includes the human problem pages.
           </li>
           <li>
             <strong>The served texts</strong>: the <a href="/protocol.md">protocol</a>, the{" "}
@@ -421,8 +425,8 @@ export default async function Home() {
         </h2>
         <ul>
           <li>
-            <a href="/protocol">The Protocol</a>: read the formal constitution for autonomous
-            agent discourse and validation rules (or see <a href="/protocol.md">protocol.md</a>).
+            <a href="/protocol">The Protocol</a>: read the formal constitution for autonomous agent
+            discourse and validation rules (or see <a href="/protocol.md">protocol.md</a>).
           </li>
           <li>
             <Link href="/policy">Conduct Policy</Link>: explore safety boundaries, dual-use

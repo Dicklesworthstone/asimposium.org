@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+import { directAppendProbe } from "./raced-ledger-write.mjs";
 
 // 9zr2 / 4uvb on real local Workerd/D1: a direct append (POST /v1/p/:id/...,
 // which opens and closes its own implicit session) raced by a genuine
@@ -9,7 +10,8 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 //
 // Not covered: staging, concurrency beyond one interleaved competing write.
 
-await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env }) => {
+await runLocalWorkerJourney(async (context) => {
+  const { call, enroll, sponsorCall, fixtures, env } = context;
   const OWNER = "usr_direct_race_owner";
   const author = await enroll("direct-race-author", OWNER);
   const reviewer = await enroll("direct-race-reviewer", "usr_direct_race_reviewer");
@@ -161,57 +163,91 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
     reviewer,
   );
 
-  // 6svb: parallel direct appends by one Fellow share its one open session;
-  // neither may close it under the other.
+  // 6svb: keep both launches concurrent. Context changes require a fresh read
+  // and the same candidate/key; consumed attempts still count toward the real
+  // allowance. A teaching quota refusal is never credited as a publication.
+  const probe = directAppendProbe(context, problem);
+  let completePairs = 0;
+  let recoveredPublications = 0;
   for (let round = 0; round < 8; round += 1) {
-    const [claimed, recorded] = await Promise.all([
-      call(
-        `/v1/p/${problem}/claims`,
-        {
+    const before = await eventCount();
+    const requests = [
+      {
+        path: `/v1/p/${problem}/claims`,
+        body: {
           kind: "conjecture",
           statement: `Round ${round}: the square of integer ${round} has the parity of ${round}.`,
           falsifier: `Round ${round}: an integer whose square has the opposite parity.`,
         },
-        author,
-        null,
-      ),
-      call(
-        `/v1/p/${problem}/dead-ends`,
-        {
+        token: author,
+        key: `parallel-claim-${round}`,
+      },
+      {
+        path: `/v1/p/${problem}/dead-ends`,
+        body: {
           approach: `Round ${round}: a parity argument through modular squares of ${round}.`,
           why_it_fails: `Round ${round}: it covers even inputs only and skips the odd case.`,
           retry_predicate: `Round ${round}: retry once odd inputs are handled.`,
         },
-        author,
-        null,
-      ),
-    ]);
-    assert.equal(claimed.code, undefined, `round ${round}: parallel claim (${claimed.code ?? ""})`);
+        token: author,
+        key: `parallel-dead-end-${round}`,
+      },
+    ].map((request) =>
+      Object.freeze({
+        ...request,
+        body: Object.freeze(request.body),
+        raw: JSON.stringify(request.body),
+      }),
+    );
+    const first = await Promise.all(requests.map(probe.send));
+    const settled = [];
+    for (let index = 0; index < requests.length; index++)
+      settled.push(await probe.finish(requests[index], first[index], true));
+    const published = settled.filter((result) => result.data.code === undefined);
+    if (published.length === 2) completePairs++;
+    recoveredPublications += published.filter((result) => result.recovered).length;
     assert.equal(
-      recorded.code,
-      undefined,
-      `round ${round}: parallel dead end (${recorded.code ?? ""})`,
+      await eventCount(),
+      before + published.length,
+      `round ${round}: exact event count`,
+    );
+    const open = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM sessions WHERE problem_id = ? AND closed_at IS NULL AND implicit_inflight IS NOT NULL",
+    )
+      .bind(problem)
+      .first();
+    assert.equal(
+      open.n,
+      0,
+      `round ${round}: neither success nor teaching refusal leaves an implicit session open`,
     );
   }
+  assert.ok(completePairs > 0, "a complete concurrently launched claim/dead-end pair published");
+  assert.ok(recoveredPublications > 0, "a refused candidate published after real context recovery");
 
   // 4ce1: a burst of 40 parallel direct appends by one fresh Fellow. Every
   // answer is a success or the teaching quota refusal, never a 5xx: the
   // joins do not starve each other and lost chain races back off.
   const burster = await enroll("direct-race-burst", OWNER);
-  const burst = await Promise.all(
-    Array.from({ length: 40 }, (_, index) =>
-      call(
-        `/v1/p/${problem}/dead-ends`,
-        {
-          approach: `Burst ${index}: a parity argument through modular squares of ${index}.`,
-          why_it_fails: `Burst ${index}: it covers even inputs only and skips the odd case.`,
-          retry_predicate: `Burst ${index}: retry once odd inputs are handled.`,
-        },
-        burster,
-        null,
-      ),
-    ),
-  );
+  const burstRequests = Array.from({ length: 40 }, (_, index) => {
+    const body = Object.freeze({
+      approach: `Burst ${index}: a parity argument through modular squares of ${index}.`,
+      why_it_fails: `Burst ${index}: it covers even inputs only and skips the odd case.`,
+      retry_predicate: `Burst ${index}: retry once odd inputs are handled.`,
+    });
+    return Object.freeze({
+      path: `/v1/p/${problem}/dead-ends`,
+      body,
+      raw: JSON.stringify(body),
+      token: burster,
+      key: `parallel-burst-${index}`,
+    });
+  });
+  const beforeBurst = await eventCount();
+  const initialBurst = await Promise.all(burstRequests.map(probe.send));
+  const burst = [];
+  for (let index = 0; index < burstRequests.length; index++)
+    burst.push((await probe.finish(burstRequests[index], initialBurst[index], true)).data);
   const tally = {};
   for (const response of burst) {
     const outcome = response.code ?? "ok";
@@ -225,6 +261,11 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
     `burst outcomes ${JSON.stringify(tally)}`,
   );
   assert.ok((tally.ok ?? 0) >= 1, "the burst wrote");
+  assert.equal(
+    await eventCount(),
+    beforeBurst + tally.ok,
+    "the burst's exact published event count",
+  );
   const burstOpen = await env.DB.prepare(
     "SELECT COUNT(*) AS n FROM sessions WHERE problem_id = ? AND closed_at IS NULL AND implicit_inflight IS NOT NULL",
   )
@@ -236,6 +277,8 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
     JSON.stringify({
       kind: "direct-append-race-real-bindings",
       status: "pass",
+      complete_parallel_pairs: completePairs,
+      recovered_publications: recoveredPublications,
       boundary: "local Workerd/D1; one genuine competing ledger write per append; no staging",
     }),
   );

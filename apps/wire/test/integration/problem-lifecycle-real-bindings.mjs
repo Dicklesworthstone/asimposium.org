@@ -361,7 +361,7 @@ export async function runLocalWorkerJourney(journey, options = {}) {
         (Array.isArray(expected) ? expected : [expected]).includes(response.status),
         `${path}: signed sponsor call status=${response.status} expected=${expected} code=${code.success ? code.data : "unrecognized"} detail=${data?.detail}`,
       );
-      if (expected >= 200 && expected < 300) {
+      if (response.status >= 200 && response.status < 300) {
         assert.equal(response.headers.get("cache-control"), "private, no-store");
       }
       return data;

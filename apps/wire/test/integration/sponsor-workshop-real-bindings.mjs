@@ -936,6 +936,7 @@ await runLocalWorkerJourney(async (journey) => {
   console.log(
     JSON.stringify({
       stage: "sponsor-workshop-verified",
+      status: "pass",
       signed_actions: true,
       unbound_workshop_discovery: true,
       paginated_actual_problem_pairs: true,

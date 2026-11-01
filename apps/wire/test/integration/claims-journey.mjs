@@ -367,10 +367,22 @@ export async function claimsJourney({
           operation,
           status,
           http_status: result._status,
+          code: result.code ?? null,
         }),
       );
-      assert.equal(result._status, 422, `${status} during screening must refuse ${operation}`);
-      assert.equal(result.code, "CLAIMS_BOARD_LOCKED");
+      // Withdrawing public formulation bytes invalidates screening context
+      // before the board-state check; the exact teaching refusal is distinct.
+      const withdrawnContext = operation === "promote" && status === "private-draft";
+      assert.equal(
+        result._status,
+        withdrawnContext ? 409 : 422,
+        `${status} during screening must refuse ${operation}`,
+      );
+      assert.equal(
+        result.code,
+        withdrawnContext ? "SCREENING_CONTEXT_STALE" : "CLAIMS_BOARD_LOCKED",
+      );
+      assert.equal(result.rule, withdrawnContext ? "A5" : "P3");
       assert.ok(result.fix_hint);
       assert.deepEqual(
         await dormantState(),
@@ -1160,6 +1172,14 @@ export async function claimsJourney({
       .run(),
     /WORKSHOP_REVISION_IMMUTABLE/,
   );
+  const untypedDraft = await env.DB.prepare(
+    "SELECT state, type, revision_json FROM workshop_objects WHERE workshop_id = ?",
+  )
+    .bind(workshopAuthor.draft.workshop_id)
+    .first();
+  assert.equal(untypedDraft.state, "open");
+  assert.equal(untypedDraft.type, "claim-draft");
+  assert.equal(untypedDraft.revision_json, null);
 
   for (const [path, body, token, status, code] of [
     [
@@ -1180,8 +1200,8 @@ export async function claimsJourney({
       workshopAuthor.path,
       { workshop_id: workshopAuthor.draft.workshop_id },
       workshopAuthor.token,
-      404,
-      "WORKSHOP_OBJECT_NOT_FOUND",
+      422,
+      "PROMOTE_BODY_INVALID",
     ],
   ]) {
     const refused = await call(`${path}/revise`, body, token, status);
@@ -1357,8 +1377,8 @@ export async function claimsJourney({
   assert.equal(foreignSession.code, "WORKSHOP_OBJECT_NOT_FOUND");
   assert.deepEqual(await publicState(), afterClose);
 
-  // Corrupt stored content is an internal failure, with no draft bytes in the
-  // response and no fallback to generic Markdown or paid screening.
+  // Malformed stored content gets the current typed-selection refusal, with
+  // no draft bytes in the response or generic-Markdown/paid-screen fallback.
   const corruptDraft = await call(
     `/v1/sessions/${nextSession.session_id}/workshop`,
     {
@@ -1369,9 +1389,50 @@ export async function claimsJourney({
     workshopAuthor.token,
     201,
   );
-  await env.DB.prepare("UPDATE workshop_objects SET revision_json = ? WHERE workshop_id = ?")
-    .bind(JSON.stringify({ unexpected: privateNotes }), corruptDraft.workshop_id)
-    .run();
+  const corruptRevision = JSON.stringify({ unexpected: privateNotes });
+  await assert.rejects(
+    env.DB.prepare("UPDATE workshop_objects SET revision_json = ? WHERE workshop_id = ?")
+      .bind(corruptRevision, corruptDraft.workshop_id)
+      .run(),
+    /WORKSHOP_REVISION_IMMUTABLE/,
+  );
+  // Explicit storage-corruption fixture: append a malformed semantic payload
+  // as a new private version, retaining the API-created immutable old version.
+  // SQL permits JSON objects; the real publication reader must fail closed.
+  const corruptAt = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO workshop_revisions
+      (workshop_id, version, problem_id, fellow_id, session_id, type, title, body_md,
+       cas_hash, relates_to_json, ledger_intent_json, revision_json, revise_action,
+       created_at, publication_json)
+      SELECT workshop_id, current_version + 1, problem_id, fellow_id, session_id,
+       type, title, body_md, cas_hash, relates_to_json, ledger_intent_json, ?, 'edit', ?, publication_json
+      FROM workshop_objects WHERE workshop_id = ?`).bind(
+      corruptRevision,
+      corruptAt,
+      corruptDraft.workshop_id,
+    ),
+    env.DB.prepare(`UPDATE workshop_objects
+      SET revision_json = ?, current_version = current_version + 1,
+          workshop_seq = workshop_seq + 1, updated_at = ? WHERE workshop_id = ?`).bind(
+      corruptRevision,
+      corruptAt,
+      corruptDraft.workshop_id,
+    ),
+  ]);
+  const corruptHistory = (
+    await env.DB.prepare(
+      "SELECT version, revision_json FROM workshop_revisions WHERE workshop_id = ? ORDER BY version",
+    )
+      .bind(corruptDraft.workshop_id)
+      .all()
+  ).results;
+  assert.deepEqual(
+    corruptHistory.map((row) => row.version),
+    [1, 2],
+  );
+  assert.equal(corruptHistory[0].revision_json, null);
+  assert.equal(corruptHistory[1].revision_json, corruptRevision);
   const beforeCorruptRead = await publicState();
   const screenBeforeCorruptRead = await fixtures.screeningCalls();
   const corruptRefusal = await call(
@@ -1380,9 +1441,15 @@ export async function claimsJourney({
       workshop_id: corruptDraft.workshop_id,
     },
     workshopAuthor.token,
-    500,
+    422,
   );
-  assert.equal(corruptRefusal.code, "INTERNAL_ERROR");
+  assert.equal(corruptRefusal.code, "PROMOTE_BODY_INVALID");
+  assert.ok(
+    corruptRefusal.rule &&
+      corruptRefusal.fix_hint &&
+      corruptRefusal.schema &&
+      corruptRefusal.example,
+  );
   assert.ok(!JSON.stringify(corruptRefusal).includes(privateCanary));
   assert.deepEqual(await publicState(), beforeCorruptRead);
   assert.equal(await fixtures.screeningCalls(), screenBeforeCorruptRead);

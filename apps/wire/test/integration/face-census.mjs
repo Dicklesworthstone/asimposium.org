@@ -43,17 +43,22 @@ function expectedToon(kind, json) {
   if (kind === "events-tail") {
     const rows = json.events.map((envelope) =>
       envelope.event === null
-        ? `none|${envelope.seq}|undisclosed|none|none`
+        ? `none|${envelope.seq}|undisclosed|none|none|null|unavailable`
         : [
             envelope.event.id,
             envelope.seq,
             envelope.event.type,
             envelope.event.object_id,
             envelope.event.created_at,
+            JSON.stringify(envelope.event.caused_by),
+            envelope.event.causality_omitted ?? "none",
           ].join("|"),
     );
     const footer = `[control:page_end|next_cursor:${json.page_end.next_cursor}|has_more:${json.page_end.has_more}]`;
-    return ["id|seq|type|object_id|created_at", ...rows, footer].join("\n") + "\n";
+    return (
+      ["id|seq|type|object_id|created_at|caused_by|causality_omitted", ...rows, footer].join("\n") +
+      "\n"
+    );
   }
   return null;
 }

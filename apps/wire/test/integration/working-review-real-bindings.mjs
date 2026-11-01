@@ -144,12 +144,52 @@ await runLocalWorkerJourney(
     );
     assert.ok(!isolated.items.some((item) => item.scope === "workshop" || item.kind === "move"));
     assert.ok(!JSON.stringify(isolated).includes(privateCanary));
-    for (const budget of [800, 1500, 2500, 4000, 8000]) {
-      const pack = await getWorking(budget);
-      assert.ok(pack.tokens_estimate <= budget);
-      assert.ok(pack.next_actions.some((item) => item.url === action.url));
-      if (!pack.items.some((item) => item.kind === "move"))
-        assert.ok(pack.omitted.some((item) => item.reason === "budget_exceeded"));
+    const budgets = [800, 1500, 2500, 4000, 8000];
+    for (const budget of budgets) {
+      let pack = await getWorking(budget);
+      let currentBudget = budget;
+      let reached = false;
+      for (let hop = 0; hop < budgets.length; hop++) {
+        assert.equal(pack.budget_tokens, currentBudget);
+        assert.ok(pack.tokens_estimate <= currentBudget);
+        assert.equal(pack.cursor, first.cursor);
+        assert.ok(!JSON.stringify(pack).includes(privateCanary));
+        if (!pack.items.some((item) => item.kind === "move"))
+          assert.ok(pack.omitted.some((item) => item.reason === "budget_exceeded"));
+        const review = pack.next_actions.find(
+          (item) => item.method === "GET" && item.url === action.url,
+        );
+        if (review) {
+          const target = PackResponseSchema.parse(await call(review.url, undefined, reviewer));
+          assert.equal(target.cursor, first.cursor);
+          assert.ok(
+            target.items.some((item) => item.kind === "claim-detail" && item.id === firstTarget),
+          );
+          assert.ok(
+            !target.items.some((item) => item.scope === "workshop" || item.kind === "move"),
+          );
+          assert.ok(!JSON.stringify(target).includes(privateCanary));
+          reached = true;
+          break;
+        }
+        // Compact packs must teach a bounded real GET, never lose the review.
+        assert.ok(pack.omitted.some((item) => item.reason === "next_actions_budget"));
+        const larger = pack.next_actions.filter(
+          (item) => item.method === "GET" && new URL(item.url, origin).pathname === `${rp}/pack`,
+        );
+        assert.equal(larger.length, 1);
+        const nextUrl = new URL(larger[0].url, origin);
+        assert.equal(nextUrl.origin, origin);
+        assert.equal(nextUrl.searchParams.get("profile"), "working");
+        assert.deepEqual([...nextUrl.searchParams.keys()].sort(), ["max_tokens", "profile"]);
+        const nextBudget = Number(nextUrl.searchParams.get("max_tokens"));
+        assert.ok(budgets.includes(nextBudget) && nextBudget > currentBudget);
+        currentBudget = nextBudget;
+        pack = PackResponseSchema.parse(
+          await call(`${nextUrl.pathname}${nextUrl.search}`, undefined, reviewer),
+        );
+      }
+      assert.equal(reached, true, `budget ${budget} reaches the same pinned isolated review`);
     }
     const own = PackResponseSchema.parse(
       await call(`${ap}/pack?profile=working&max_tokens=8000`, undefined, author),

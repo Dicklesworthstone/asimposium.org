@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { ProblemDocumentSchema, ProblemGovernanceEventSchema } from "@asimposium/contracts";
+import {
+  ProblemDocumentSchema,
+  ProblemGovernanceEventSchema,
+  ProblemPublicationPreviewSchema,
+} from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 await runLocalWorkerJourney(
@@ -208,10 +212,30 @@ await runLocalWorkerJourney(
       "A stale snapshot cannot append an event or retain its key",
     );
 
-    const sameKey = await Promise.all(
-      Array.from({ length: 4 }, () => govern(revision, "concurrent-key")),
+    const firstSameKey = await Promise.all(
+      Array.from({ length: 4 }, () => govern(revision, "concurrent-key", [200, 429])),
     );
+    assert.ok(
+      firstSameKey.some((outcome) => outcome.problem),
+      "the concurrent writer committed",
+    );
+    const afterSameKey = await state();
+    const sameKey = [];
+    for (const outcome of firstSameKey) {
+      if (outcome.problem) sameKey.push(outcome);
+      else {
+        ProblemDocumentSchema.parse(outcome);
+        assert.equal(outcome.status, 429);
+        assert.equal(outcome.code, "WRITE_REFUSED");
+        assert.equal(outcome.detail, "An identical publication attempt is still in progress.");
+        assert.ok(outcome.fix_hint.includes("same key"));
+        // The first wave has settled, including the winner. This is an exact
+        // replay of that request, not a new paid attempt or a blind retry.
+        sameKey.push(await govern(revision, "concurrent-key"));
+      }
+    }
     for (const outcome of sameKey) assert.deepEqual(outcome, sameKey[0]);
+    assert.deepEqual(await state(), afterSameKey, "pending callers only replay the winner");
     assert.equal((await state()).events.length, 3);
     assert.equal(await call("/cursor"), globalBefore + 3);
     const beforeRace = await state();
@@ -628,6 +652,23 @@ await runLocalWorkerJourney(
     assert.equal(await call("/cursor"), privateCursor);
     await call(`/p/${privateId}.json`, undefined, undefined, 404);
     assert.ok(!(await call("/now.json")).events.some((item) => item.problem_id === privateId));
+    // Review while the source Fellow is live. Hold its valid contract unchanged
+    // across revocation to exercise publishable-snapshot invalidation.
+    const preview = ProblemPublicationPreviewSchema.parse(
+      await sponsorCall(
+        sponsor,
+        "GET",
+        `/v1/sponsors/problems/${privateId}/publication-preview`,
+        "problem-publication-preview",
+      ),
+    );
+    assert.equal(preview.problem.id, privateId);
+    assert.equal(preview.acting_sponsor_id, sponsor);
+    const reviewedPublication = {
+      action: "publish",
+      reviewed_statement_version: preview.problem.current_statement_version,
+      reviewed_digest: preview.review_digest,
+    };
     await sponsorCall(sponsor, "POST", "/v1/fellows/lifecycle", "fellow.lifecycle.change", {
       fellow_id: sourceFellow,
       status: "revoked",
@@ -636,8 +677,27 @@ await runLocalWorkerJourney(
     });
     const beforeRevoked = await state(privateId);
     assert.equal(
-      (await govern({ action: "publish" }, "revoked-publication", 403, privateId)).code,
-      "WRITE_REFUSED",
+      (
+        await env.DB.prepare("SELECT status FROM enrollment_fellows WHERE fellow_id = ?")
+          .bind(sourceFellow)
+          .first()
+      ).status,
+      "revoked",
+    );
+    const unavailablePreview = await sponsorCall(
+      sponsor,
+      "GET",
+      `/v1/sponsors/problems/${privateId}/publication-preview`,
+      "problem-publication-preview",
+      undefined,
+      404,
+    );
+    assert.equal(unavailablePreview.code, "PROBLEM_NOT_FOUND");
+    // Revocation removes the publishable snapshot. Even a previously valid
+    // reviewed body must now get the exact unavailable-preview conflict.
+    assert.equal(
+      (await govern(reviewedPublication, "revoked-publication", 409, privateId)).code,
+      "OBJECT_VERSION_CONFLICT",
     );
     assert.deepEqual(await state(privateId), beforeRevoked);
 
