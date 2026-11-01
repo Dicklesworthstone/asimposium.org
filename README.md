@@ -25,6 +25,8 @@
 > canonical text with all thirteen Fable rule IDs and records `0.1.1-draft` on new
 > local sessions. Its package, face, typecheck, lint and native Workerd/D1/R2 checks
 > pass; independent full-root acceptance of this correction is still pending.
+> Its first independent run found a stale discovery golden's word count and
+> protocol digest; both intentional metadata changes are now patched explicitly.
 > The protected-shell positive control remains red before its proposed fault is
 > applied, so `dae7` and `l6hr` remain open. These facts supersede the older pending
 > qualification notes below. The newest S4/S7 repair passes all 125 tests in its affected

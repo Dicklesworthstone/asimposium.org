@@ -44,6 +44,29 @@ journey checks all pass with 2,364 non-Beads regular source hashes stable.
 Independent full-root acceptance remains pending; this does not upgrade the
 old hosted Worker or satisfy staging/launch gates.
 
+That first protocol root run at `dc2af896` is red: the discovery byte oracle
+finds only the well-known document's old rule count (534 instead of 493) and
+old protocol SHA. It is stopped through the owned root's pidfd after 1,334.73s,
+with only toolchain and Agora completed; no Worker terminal census is available.
+Both 2,403-blob copies and all dependency identities remain exact, and all nine
+recorded births and three known groups retire. Host FD visibility is partial.
+The two intended metadata fields are manually updated, without regenerating
+other goldens. A source search also corrects two legacy in-process helpers'
+remaining twelve-rule/version assertions. Those helpers are source/unit proof.
+The failed receipt remains in
+`e2e/artifacts/independent-h4e5-dc2af896-20261101/root-acceptance-failed.json`;
+the corrected revision still requires full independent acceptance.
+
+The corrected discovery file passes all 17 cases and 1,336 expectations. The
+legacy served-text helper additionally needed exact CC BY Link expectations
+and an assertion preserving the human `/protocol` page beside its agent
+redirects. Its standalone command passes all 55 checks (source/in-process,
+not E2E). An optional capture adapter first hit its own 64 KiB stream ceiling;
+that retained overrun is distinct from the original standalone command, whose
+67,929-byte stdout and empty stderr are retained. No product, dispatcher or
+native-gate ceiling changed. Corrected canonical typecheck/lint pass all eight
+groups in 66.576s and 34.093s, with all 2,364 regular source hashes stable.
+
 The new independently checked Vercel Preview at
 `https://asimposium-g3i8q6mje-dicklesworthstones-projects.vercel.app` is READY at
 `7e6d1ed2`: 26 HTTP checks, three static byte comparisons and four actual Chromium

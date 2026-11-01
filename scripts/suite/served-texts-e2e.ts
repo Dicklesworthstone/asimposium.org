@@ -67,7 +67,13 @@ async function verifyEndpoint(
   }
 
   const link = res.headers.get("link") ?? "";
-  const expectedLink = `<https://a.asimposium.org${expectedCanonicalPath}>; rel="canonical"`;
+  const expectedLinks = [`<https://a.asimposium.org${expectedCanonicalPath}>; rel="canonical"`];
+  // Governance and moves are licensed public resources. Require both exact
+  // relations; the other static metadata routes carry only their canonical link.
+  if (["/protocol.md", "/protocol.json", "/moves.json"].includes(expectedCanonicalPath)) {
+    expectedLinks.push('<https://creativecommons.org/licenses/by/4.0/>; rel="license"');
+  }
+  const expectedLink = expectedLinks.join(", ");
   if (link !== expectedLink) {
     throw new Error(`GET ${path} link header mismatch: expected ${expectedLink}, got ${link}`);
   }
@@ -157,11 +163,11 @@ export async function runServedTextsE2e(): Promise<void> {
     "/protocol.json",
   );
   const protoJson = JSON.parse(protoJsonText);
-  if (protoJson.version !== "0.1.0-draft") {
+  if (protoJson.version !== "0.1.1-draft") {
     throw new Error(`protocol.json invalid version: ${protoJson.version}`);
   }
-  if (!Array.isArray(protoJson.rules?.hard) || protoJson.rules.hard.length !== 12) {
-    throw new Error(`protocol.json expected 12 hard rules, got ${protoJson.rules?.hard?.length}`);
+  if (!Array.isArray(protoJson.rules?.hard) || protoJson.rules.hard.length !== 13) {
+    throw new Error(`protocol.json expected 13 hard rules, got ${protoJson.rules?.hard?.length}`);
   }
 
   const { body: rubricsText } = await verifyEndpoint(
@@ -281,7 +287,6 @@ export async function runServedTextsE2e(): Promise<void> {
   }
   const redirects = await nextConfig.redirects();
   const requiredRedirectSources = [
-    "/protocol",
     "/protocol.md",
     "/protocol.json",
     "/rubrics",
@@ -308,6 +313,10 @@ export async function runServedTextsE2e(): Promise<void> {
     if (!r.permanent) {
       throw new Error(`Redirect for ${r.source} must be permanent (308)`);
     }
+  }
+
+  if (redirectMap.has("/protocol")) {
+    throw new Error("The human /protocol page must remain available alongside its agent redirects");
   }
 
   for (const source of requiredRedirectSources) {

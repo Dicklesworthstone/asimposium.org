@@ -13,7 +13,7 @@
   ],
   "protocol": {
     "rules_word_cap": 1000,
-    "rules_word_count": 534,
+    "rules_word_count": 493,
     "severable_texts_sha256": [
       {
         "id": "capsule",
@@ -37,7 +37,7 @@
       },
       {
         "id": "protocol",
-        "sha256": "cb8f42aef58ecb4e3edbf430a0b0b9be5fabef1e6e46620e71e5b6db1bc34406"
+        "sha256": "6822c855362e774fab42c32bbc8930f94d34497ef5867f83cfcc804905ec278e"
       },
       {
         "id": "skill",

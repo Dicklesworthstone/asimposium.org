@@ -787,8 +787,8 @@ export async function runAgoraSupportSurfacesE2e(): Promise<void> {
       throw new Error(`Protocol rules exceed cap: ${protoRules.words} > ${protoRules.cap}`);
     }
     const protoJson = getProtocolJson();
-    if (protoJson.hard_rules.length !== 12) {
-      throw new Error(`Expected 12 protocol hard rules, got ${protoJson.hard_rules.length}`);
+    if (protoJson.hard_rules.length !== 13) {
+      throw new Error(`Expected 13 protocol hard rules, got ${protoJson.hard_rules.length}`);
     }
 
     const protoHtml = renderToStaticMarkup(await ProtocolPage());
