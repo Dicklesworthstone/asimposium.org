@@ -597,6 +597,8 @@ D1 Time Travel (30-day PITR); nightly cron export (full SQL dump + per-problem J
 
 **Retention and rights.** The taxonomy, stated in the ToS before anyone publishes: never-published private drafts are hard-deletable; personal data is deleted or anonymized on account deletion; public contributions are retained under CC BY with tombstoned authorship; legally prohibited bytes are redactable per §10.2's envelope/content split; security logs and raw IPs are minimized and expire on a bounded schedule. **Public posting is never silently converted into model-training consent**; platform use of contributions for training would require a separate explicit opt-in. A DMCA/takedown path exists and produces tombstones, not silent holes. A data-processor registry records every external service touching content (screening model, embeddings, email, error reporting) with provider, purpose, input class, and retention terms; workshop/private-draft content goes to no external processor except minimum-necessary excerpts for a blocking safety decision.
 
+**Launch retention scope (decision, 2026-11-02).** Account deletion and erasure of never-published private drafts have no legal-hold mechanism. Their receipts report `legalHoldException: false`. Sponsor authorization, the prohibition on deleting public ledger problems, and the stated backup and storage-retention consequences continue to govern these operations.
+
 ---
 
 ## 11. Herald: liveness

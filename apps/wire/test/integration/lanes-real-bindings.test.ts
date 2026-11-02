@@ -34,6 +34,7 @@ const LANES = [
   "fellow-rebind",
   "hypotheses-evidence",
   "hypothesis-lifecycle",
+  "journey-cleanup",
   "ledger-objects-integration",
   "moderation",
   "problem-dormancy",

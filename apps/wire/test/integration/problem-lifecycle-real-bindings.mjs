@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { channel } from "node:diagnostics_channel";
+import { createRequire } from "node:module";
 import { basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ProblemCodeSchema, ProblemPublicationPreviewSchema } from "@asimposium/contracts";
@@ -20,6 +22,53 @@ const LANE_EVENT_TYPES = new Set(["lane.competing-write"]);
 const root = fileURLToPath(new URL("../../../../", import.meta.url));
 const origin = "http://127.0.0.1:8787";
 const userAgent = "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
+// Wrangler closes Workerd and bundling contexts, but its shared esbuild service
+// is unref'ed and can otherwise outlive Node on an assertion/process.exit.
+// Use the exact dependency instance Wrangler uses, then await real close events.
+const esbuild = createRequire(import.meta.resolve("wrangler"))("esbuild");
+const childProcesses = channel("child_process");
+const builderClosures = new Map();
+let activeJourneys = 0;
+let observingBuilders = false;
+const observeBuilder = ({ process: child }) => {
+  child.once("spawn", () => {
+    if (activeJourneys === 0) return;
+    if (!/^esbuild(?:\.exe)?$/.test(basename(child.spawnfile ?? ""))) return;
+    if (!child.spawnargs.includes(`--service=${esbuild.version}`)) return;
+    const closed = new Promise((resolveClose) => {
+      child.once("close", () => {
+        builderClosures.delete(child);
+        resolveClose();
+      });
+    });
+    builderClosures.set(child, closed);
+  });
+};
+function retainWranglerBuilder() {
+  if (!observingBuilders) {
+    childProcesses.subscribe(observeBuilder);
+    observingBuilders = true;
+  }
+  activeJourneys++;
+}
+async function releaseWranglerBuilder() {
+  if (--activeJourneys !== 0) return;
+  const closing = [...builderClosures.entries()];
+  // esbuild deliberately unrefs its child. A pending Promise alone does not
+  // keep Node alive long enough to deliver the child's exit/close events.
+  for (const [child] of closing) child.ref();
+  try {
+    // stop() initiates shutdown synchronously, before yielding to any new
+    // journey. Await only this generation's children, not a later service.
+    await esbuild.stop();
+    await Promise.all(closing.map(([, closed]) => closed));
+  } finally {
+    if (activeJourneys === 0 && builderClosures.size === 0) {
+      childProcesses.unsubscribe(observeBuilder);
+      observingBuilders = false;
+    }
+  }
+}
 // Fresh local signing key exercises the actual sponsor ingress; no OAuth claim.
 const signingKeys = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
 const keyId = "problem-lifecycle-local-sponsor";
@@ -143,6 +192,7 @@ export const LOCAL_OPERATOR_ID = "usr_local_operator";
 // Importing it never starts a journey or certifies another product surface.
 export async function runLocalWorkerJourney(journey, options = {}) {
   const server = createLocalWorkerHarness(options);
+  retainWranglerBuilder();
   try {
     await server.listen();
     console.log(JSON.stringify({ stage: "workerd-started" }));
@@ -546,7 +596,11 @@ export async function runLocalWorkerJourney(journey, options = {}) {
     );
     return result;
   } finally {
-    await server.close();
+    try {
+      await server.close();
+    } finally {
+      await releaseWranglerBuilder();
+    }
   }
 }
 

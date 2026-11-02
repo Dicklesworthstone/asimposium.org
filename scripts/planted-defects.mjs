@@ -2041,6 +2041,22 @@ export const PLANTS = [
     replace: '    if (row === null) {\n      throw new EnrollmentError("REBIND_NOT_FOUND");',
     command: LANE("fellow-rebind"),
   },
+  {
+    id: "journey-leaves-builder-service-running",
+    bead: "9tb8",
+    file: "apps/wire/test/integration/problem-lifecycle-real-bindings.mjs",
+    find: "      await releaseWranglerBuilder();",
+    replace: "      // Planted: Workerd closed, shared builder service left running.",
+    command: LANE("journey-cleanup"),
+  },
+  {
+    id: "journey-stops-active-sibling-builder",
+    bead: "9tb8",
+    file: "apps/wire/test/integration/problem-lifecycle-real-bindings.mjs",
+    find: "  if (--activeJourneys !== 0) return;",
+    replace: "  activeJourneys--;",
+    command: LANE("journey-cleanup"),
+  },
 ];
 
 function occurrences(text, snippet) {

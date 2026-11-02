@@ -500,6 +500,7 @@ export async function problemLifecycleJourney({
   const erased = await sponsorCall(sponsorA, "DELETE", erasePath, "delete-problem-draft");
   assert.equal(erased.deleted, true);
   assert.equal(erased.problem_id, erasedId);
+  assert.equal(erased.receipt.legalHoldException, false, "no legal-hold feature is implemented");
   const erasure = await env.DB.prepare(
     `SELECT e.problem_id, e.erased_at, j.action, j.target_id, j.created_at
        FROM private_draft_erasures e JOIN deletion_journal j USING (control_id)
@@ -566,6 +567,24 @@ export async function problemLifecycleJourney({
     `publish response breaks its contract: ${JSON.stringify(publishContract.error?.issues)}`,
   );
   assert.equal(publishRes.problem.status, "sharpening");
+
+  const beforePublicErasure = await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
+    .bind(problemId)
+    .first();
+  const refusedPublicErasure = await sponsorCall(
+    sponsorA,
+    "DELETE",
+    `/v1/sponsors/problems/${problemId}`,
+    "delete-problem-draft",
+    undefined,
+    422,
+  );
+  assert.equal(refusedPublicErasure.code, "WRITE_REFUSED");
+  assert.deepEqual(
+    await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?").bind(problemId).first(),
+    beforePublicErasure,
+    "private-draft erasure never removes or advances the published ledger",
+  );
 
   // Now visible on public problems index!
   const publicIndexAfterPublish = await call("/problems.json", undefined, undefined, 200);

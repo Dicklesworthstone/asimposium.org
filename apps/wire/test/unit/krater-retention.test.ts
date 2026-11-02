@@ -457,18 +457,12 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
       }
     });
 
-    test("refuses deletion when subject to legal hold", async () => {
-      const { sqlite, db } = freshDb();
-      const problemId = "P-PRIVATE-DRAFT-LEGAL";
-      sqlite.run(
-        `INSERT INTO problems (id, public_seq, status, unlisted, sponsor_id, created_by_fellow_id, title, current_statement_version, chain_version, chain_digest, created_at, updated_at)
-         VALUES (?, 0, 'private-draft', 1, 'usr_sponsor_1', 'fel_1', 'Draft', 1, 2, 'genesis-chain', ?, ?)`,
-        [problemId, NOW, NOW],
-      );
-
+    test("refuses deletion of a missing problem without writing an erasure journal", async () => {
+      const { db } = freshDb();
       await expect(
-        hardDeletePrivateDraft(db, problemId, "usr_sponsor_1", { now: NOW, legalHold: true }),
-      ).rejects.toThrow("LEGAL_HOLD_EXCLUSION");
+        hardDeletePrivateDraft(db, "P-ABSENT-DRAFT", "usr_sponsor_1", { now: NOW }),
+      ).rejects.toThrow("PROBLEM_NOT_FOUND");
+      expect(await readDeletionJournalRecords(db)).toEqual([]);
     });
   });
 

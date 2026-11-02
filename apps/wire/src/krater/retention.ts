@@ -611,24 +611,16 @@ export async function fetchLatestDeletionJournal(bucket: R2Bucket): Promise<stri
  * 2. Problem must have status 'private-draft'.
  * 3. Problem must have public_seq === 0 and 0 ledger events (strictly never published).
  * 4. Requester must be the problem's sponsor.
- * 5. Not subject to legal hold.
- * 6. Erases private draft content and authority. Immutable audit/quota records
+ * 5. Erases private draft content and authority. Immutable audit/quota records
  *    may retain a permanently inaccessible, empty problem identity.
- * 7. The receipt distinguishes database-content erasure from storage retention.
+ * 6. The receipt distinguishes database-content erasure from storage retention.
  */
 export async function hardDeletePrivateDraft(
   db: D1Database,
   problemId: string,
   sponsorId: string,
-  options?: { readonly now?: string; readonly legalHold?: boolean },
+  options?: { readonly now?: string },
 ): Promise<HardDeleteDraftResult> {
-  if (options?.legalHold === true) {
-    throw new RetentionError(
-      "LEGAL_HOLD_EXCLUSION",
-      "Problem is subject to an active legal hold and cannot be deleted.",
-    );
-  }
-
   const problem = await db.prepare("SELECT * FROM problems WHERE id = ?").bind(problemId).first<{
     id: string;
     status: string;

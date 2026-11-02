@@ -370,6 +370,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, fixtures })
     ),
   );
   assert.ok(preview.active_fellows_count >= 1);
+  assert.equal(preview.legal_hold_exceptions, false, "account deletion has no legal-hold feature");
   await enroll("lifecycle-after-deletion-preview", A);
   const changed = await sponsorCall(
     A,
@@ -416,6 +417,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, fixtures })
     ),
   );
   assert.equal(deleted.acknowledged, true);
+  assert.equal(deleted.deletion_receipt.legalHoldException, false);
   assert.deepEqual(deleted.review, preview.review);
   assert.equal(deleted.revoked_fellows_count, preview.fellows_to_revoke_count);
   assert.equal(deleted.revoked_credentials_count, preview.credentials_to_revoke_count);

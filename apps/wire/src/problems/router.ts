@@ -1435,15 +1435,6 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
               "Public problems and problems with committed events are immutable per Rule A6.",
           });
         }
-        if (err.code === "LEGAL_HOLD_EXCLUSION") {
-          return validatedProblem({
-            status: 403,
-            code: "WRITE_REFUSED",
-            title: "Problem subject to legal hold",
-            detail: err.message,
-            fixHint: "Contact an operator regarding legal hold status.",
-          });
-        }
       }
       throw err;
     }
