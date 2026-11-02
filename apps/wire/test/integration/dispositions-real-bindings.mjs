@@ -1251,6 +1251,7 @@ await runLocalWorkerJourney(async (context) => {
       .bind(problemId)
       .first();
   const { synthesis_id: _publicationId, ...unpublished } = command.closing_synthesis;
+  const screensBeforeAdmissionRefusals = await fixtures.screeningCalls();
   const refusedCommands = [
     ["missing-publication", { ...command, closing_synthesis: unpublished }],
     [
@@ -1274,6 +1275,13 @@ await runLocalWorkerJourney(async (context) => {
       },
     ],
     ["changed-direction", { ...command, direction: "refuted-as-stated" }],
+    [
+      "unsupported-external-review",
+      {
+        ...command,
+        external_expert_review_proof: "A caller assertion cannot supply external review authority.",
+      },
+    ],
   ];
   for (const [label, request] of refusedCommands) {
     const before = await resolutionState();
@@ -1312,8 +1320,54 @@ await runLocalWorkerJourney(async (context) => {
   await env.DB.prepare("UPDATE problems SET famous_guardrail = NULL WHERE id = ?")
     .bind(problemId)
     .run();
+  assert.equal(
+    await fixtures.screeningCalls(),
+    screensBeforeAdmissionRefusals,
+    "scientific admission and unsupported expert-proof assertions refuse before paid screening",
+  );
+
+  // ux6q: exercise an otherwise eligible closing command. No sponsor text
+  // reaches the public scientific record when the screen refuses or is down.
+  const fellowRefusals = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM screening_refusals",
+  ).first();
+  for (const [mode, status, code] of [
+    ["reject", 403, "POLICY_DENIED"],
+    ["quarantine", 202, "SCREENING_HOLD"],
+    ["unavailable", 202, "SCREENING_HOLD"],
+    ["allow-with-warning", 202, "SCREENING_HOLD"],
+  ]) {
+    const before = await resolutionState();
+    const calls = await fixtures.screeningCalls();
+    await fixtures.setScreenMode(mode);
+    const refused = await govern(command, `ordinary-resolution-screen-${mode}`, status);
+    await fixtures.setScreenMode("pass");
+    assert.equal(refused.code, code);
+    assert.equal(
+      await fixtures.screeningCalls(),
+      calls + 1,
+      "eligible resolution reaches screening",
+    );
+    assert.equal(
+      (await fixtures.lastScreening()).statement,
+      JSON.stringify(command),
+      "the exact closing summary and every no-claim boundary field are screened",
+    );
+    assert.ok(!JSON.stringify(refused).includes(summary), "the policy response never echoes prose");
+    assert.deepEqual(
+      await resolutionState(),
+      before,
+      `${mode}: no scientific publication or receipt`,
+    );
+  }
+  assert.deepEqual(
+    await env.DB.prepare("SELECT COUNT(*) AS n FROM screening_refusals").first(),
+    fellowRefusals,
+    "sponsor resolution refusals never count against the Fellow author",
+  );
 
   const beforeResolution = await resolutionState();
+  const screensBeforeResolution = await fixtures.screeningCalls();
   const resolved = ProblemResolutionResponseSchema.parse(
     await govern(command, "ordinary-resolution-success"),
   );
@@ -1331,6 +1385,8 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(afterResolution.events, beforeResolution.events + 1);
   assert.equal(afterResolution.content, beforeResolution.content + 1);
   assert.equal(afterResolution.receipts, beforeResolution.receipts + 1);
+  assert.equal(afterResolution.screening_publications, beforeResolution.screening_publications + 1);
+  assert.equal(await fixtures.screeningCalls(), screensBeforeResolution + 1);
   const recorded = await env.DB.prepare(`SELECT e.actor_fellow_id,e.actor_sponsor_id,c.payload_json
     FROM events e JOIN event_content c ON c.event_id=e.id
     WHERE e.problem_id=? AND e.type='problem.resolved'`)
@@ -1356,6 +1412,11 @@ await runLocalWorkerJourney(async (context) => {
     await resolutionState(),
     afterResolution,
     "A lost successful reply replays without a second event",
+  );
+  assert.equal(
+    await fixtures.screeningCalls(),
+    screensBeforeResolution + 1,
+    "exact resolution replay never buys a second screen",
   );
   const conflictingRetry = await govern(refusedCommands[1][1], "ordinary-resolution-success", 409);
   assert.equal(conflictingRetry.code, "IDEMPOTENCY_CONFLICT");

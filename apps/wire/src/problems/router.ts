@@ -1277,15 +1277,42 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       }
     }
 
-    // P7 (Fable §9 L1, "ledger writes and problem proposals"): Fellow-proposed
-    // problem text becomes public at publish, and a revision replaces public
-    // text. Both cross the same screening boundary as ledger writes before
-    // any public commit. Hold and deny return the coarse policy response.
+    // P7 applies to all public lifecycle prose, including sponsor governance.
+    // The ledger writer performs replay, authority and scientific admission
+    // checks before invoking this paid boundary or committing public state.
     const screening =
-      action.action === "publish" || action.action === "revise-statement"
+      action.action === "publish" ||
+      action.action === "revise-statement" ||
+      action.action === "resolve" ||
+      action.action === "retire" ||
+      action.action === "merge"
         ? {
             sponsorLimit: parseSponsorLimit(c.env.SPONSOR_PROMOTION_RATE_LIMIT),
             screen: async () => {
+              if (
+                action.action === "resolve" ||
+                action.action === "retire" ||
+                action.action === "merge"
+              ) {
+                return screenPublicCandidate(
+                  screenPromotion,
+                  c.env,
+                  {
+                    problemId,
+                    fellowId: problem.created_by_fellow_id ?? sponsor.sponsorId,
+                    kind: "problem-lifecycle",
+                    // Include every nested field and mapping key; screen exactly
+                    // the immutable parsed action the governance writer will use.
+                    statement: JSON.stringify(action),
+                    falsifier: null,
+                  },
+                  {
+                    sponsorId: sponsor.sponsorId,
+                    route: `problem-${action.action}`,
+                    authorKind: "sponsor",
+                  },
+                );
+              }
               let candidate: {
                 statement: string;
                 falsifier: string | null;
@@ -1333,11 +1360,17 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
                     .join("\n\n"),
                   falsifier: candidate.falsifier,
                 },
-                // A held proposal opens a review case attributed to its proposing
-                // Fellow; a sponsor-authored proposal has no Fellow to attribute it to.
-                problem.created_by_fellow_id === null || problem.created_by_fellow_id === undefined
-                  ? undefined
-                  : { sponsorId: sponsor.sponsorId, route: `problem-${action.action}` },
+                // A proposal belongs to its Fellow. A sponsor's replacement
+                // statement must not count refusals against that Fellow.
+                action.action === "publish"
+                  ? problem.created_by_fellow_id == null
+                    ? undefined
+                    : { sponsorId: sponsor.sponsorId, route: `problem-${action.action}` }
+                  : {
+                      sponsorId: sponsor.sponsorId,
+                      route: `problem-${action.action}`,
+                      authorKind: "sponsor",
+                    },
               );
               return screened;
             },

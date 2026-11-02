@@ -101,10 +101,6 @@ const CLAIM_REFS = {
   "relates_to[]": "never persisted: the claim writer takes no relates_to",
   "depends_on[]": "must name existing claims on the problem (DEPENDENCY_NOT_FOUND)",
 };
-const PENDING_UX6Q =
-  "sponsor-authored governance text; screening decision open (asimposiumorg-ux6q)";
-const PENDING_UX6Q_ID =
-  "sponsor-authored id, not checked to exist, copied into the public event (asimposiumorg-ux6q)";
 
 /** Routes dispatched by path matchers or registered through a path constant. */
 const PATH_MATCHED_WRITES = [
@@ -252,8 +248,8 @@ const CENSUS: Readonly<Record<string, Class>> = {
     "all",
     ["problem_statement_reviews"],
   ),
-  // Publish screens the stored proposal (ProposeProblemRequestSchema) and
-  // revise-statement screens its replacement text.
+  // Publish screens the stored proposal. Public revisions and terminal
+  // sponsor lifecycle actions screen all prose before their ledger commit.
   "POST /v1/sponsors/problems/:id/lifecycle": screened(
     "test/integration/problem-screening-real-bindings.mjs",
     [ProblemLifecycleActionRequestSchema, ProposeProblemRequestSchema],
@@ -267,26 +263,27 @@ const CENSUS: Readonly<Record<string, Class>> = {
       "famous_guardrail.authoritative_references[]",
       "famous_guardrail.standing_banner",
       "areas[]",
+      "closing_synthesis.summary",
+      "closing_synthesis.no_claim_boundary.verified[]",
+      "closing_synthesis.no_claim_boundary.mechanisms[]",
+      "closing_synthesis.no_claim_boundary.independence_tiers[]",
+      "closing_synthesis.no_claim_boundary.remaining_external_validation[]",
+      "reason",
+      "claim_mapping{}",
     ],
     ["problems", "problem_statement_versions", "problem_merges"],
     {
       brief_id: "a private brief id; never public",
       distinct_because: "read by the duplicate check only; never persisted",
-      target_fellow_id: PENDING_UX6Q_ID,
-      target_sponsor_id: PENDING_UX6Q_ID,
+      target_fellow_id: "must name an enrolled Fellow, including when removing membership",
+      target_sponsor_id: "must name a known sponsor, including when removing stewardship",
       canonical_problem_id: "must name an existing, non-retired problem (merge refuses otherwise)",
       reviewed_digest:
         "SHA-256 concurrency pin compared with the exact reviewed publication preview; not public prose",
       "closing_synthesis.synthesis_id":
         "selects an existing immutable Fellow synthesis; its original public prose was screened on publication",
-      "closing_synthesis.summary": PENDING_UX6Q,
-      "closing_synthesis.no_claim_boundary.verified[]": PENDING_UX6Q,
-      "closing_synthesis.no_claim_boundary.mechanisms[]": PENDING_UX6Q,
-      "closing_synthesis.no_claim_boundary.independence_tiers[]": PENDING_UX6Q,
-      "closing_synthesis.no_claim_boundary.remaining_external_validation[]": PENDING_UX6Q,
-      external_expert_review_proof: PENDING_UX6Q,
-      reason: PENDING_UX6Q,
-      "claim_mapping{}": PENDING_UX6Q,
+      external_expert_review_proof:
+        "an explicit caller proof assertion is refused by resolution admission before any public write",
     },
   ),
   "POST /v1/sponsors/leases/release": screened(

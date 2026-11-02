@@ -298,9 +298,8 @@ export const PLANTS = [
     id: "publish-not-screened",
     bead: "kqz5",
     file: "apps/wire/src/problems/router.ts",
-    find: '      action.action === "publish" || action.action === "revise-statement"\n        ? {',
-    replace:
-      '      (false as boolean) && (action.action === "publish" || action.action === "revise-statement")\n        ? {',
+    find: '      action.action === "publish" ||\n',
+    replace: "      (false as boolean) ||\n",
     command: LANE("problem-screening"),
   },
   {

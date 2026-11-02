@@ -1047,22 +1047,26 @@ console.log(JSON.stringify({ exit, lines, bound: typeof port === "number", paire
   });
 
   for (const fault of [
-    { code: "EIO", expected: "EIO", afterExit: false, gcGuard: false },
+    { code: "EIO", expected: "EIO", afterExit: false, gcGuard: false, replayOutput: false },
     {
       code: "UNTRUSTED_PROCESS_ERROR_CODE",
       expected: "UNCLASSIFIED",
       afterExit: false,
       gcGuard: false,
+      replayOutput: false,
     },
-    { code: "EIO", expected: "EIO", afterExit: true, gcGuard: false },
-    { code: "EIO", expected: "EIO", afterExit: true, gcGuard: true },
+    { code: "EIO", expected: "EIO", afterExit: true, gcGuard: false, replayOutput: false },
+    { code: "EIO", expected: "EIO", afterExit: true, gcGuard: true, replayOutput: false },
+    { code: "EIO", expected: "EIO", afterExit: false, gcGuard: false, replayOutput: true },
   ]) {
     containmentTest(
       fault.gcGuard
         ? "subprocess finalization cannot close an unrelated parent descriptor"
-        : fault.afterExit
-          ? "an error after real exit never signals a stale group"
-          : `a real started child error (${fault.expected}) cannot bypass cleanup`,
+        : fault.replayOutput
+          ? "diagnostic replay does not distort the owned socket census"
+          : fault.afterExit
+            ? "an error after real exit never signals a stale group"
+            : `a real started child error (${fault.expected}) cannot bypass cleanup`,
       () => {
         const root = fixtureRoot();
         const sentinel = join(root, "error-grandchild-survived");
@@ -1072,11 +1076,12 @@ console.log(JSON.stringify({ exit, lines, bound: typeof port === "number", paire
         const spike = executable(
           root,
           "s1",
-          fault.afterExit
-            ? `if IFS= read -r unexpected; then exit 17; fi\nprintf started > ${shellQuote(started)}\nexit 0`
-            : `(trap '' TERM; sleep 0.4; printf leaked > ${shellQuote(sentinel)}) &\n` +
+          (fault.replayOutput ? "printf 'G0_CENSUS_DIAGNOSTIC\\n'\n" : "") +
+            (fault.afterExit
+              ? `if IFS= read -r unexpected; then exit 17; fi\nprintf started > ${shellQuote(started)}\nexit 0`
+              : `(trap '' TERM; sleep 0.4; printf leaked > ${shellQuote(sentinel)}) &\n` +
                 `printf started > ${shellQuote(started)}\n` +
-                "while :; do sleep 0.01; done",
+                "while :; do sleep 0.01; done"),
         );
         const runner = join(root, "post-start-error.ts");
         writeFileSync(
@@ -1145,7 +1150,13 @@ const unrelatedExit = new Promise((resolve, reject) => {
   unrelated.once("error", reject);
   unrelated.once("exit", resolve);
 });
-const socketsBefore = descriptorTargets().filter((target) => target.startsWith("socket:[")).length;
+// Bun lazily duplicates a piped stderr descriptor on its first write. Prime
+// that known runtime owner before measuring the control operation's resources.
+// This is outside the subject's unchanged timeout and observation budgets.
+process.stderr.write("G0_SOCKET_CENSUS_READY\\n");
+await Bun.sleep(0);
+const socketTargetsBefore = descriptorTargets().filter((target) => target.startsWith("socket:["));
+const socketsBefore = socketTargetsBefore.length;
 const summary = await runG0Spikes({
   root: ${JSON.stringify(root)}, spikes: [${JSON.stringify(spike)}],
   timeoutMs: 150, terminationGraceMs: 100,
@@ -1173,6 +1184,8 @@ console.log(JSON.stringify({
   guard_states: guardStates,
   sockets_before: socketsBefore,
   sockets_after: remainingDescriptors.filter((target) => target.startsWith("socket:[")).length,
+  socket_targets_before: socketTargetsBefore,
+  socket_targets_after: remainingDescriptors.filter((target) => target.startsWith("socket:[")),
   script_descriptors_after: remainingDescriptors.filter((target) => target === realpathSync(${JSON.stringify(join(root, spike.script))})).length,
 }));
 // This fixture is PID 1 in an OUTER namespace. Ending it contains the old
@@ -1195,6 +1208,16 @@ process.exit(0);
         expect(combinedOutput).not.toContain("UNTRUSTED_PROCESS_ERROR_MESSAGE");
         expect(combinedOutput).not.toContain("UNTRUSTED_PROCESS_ERROR_CODE");
         const observation = JSON.parse(child.stdout);
+        if (observation.sockets_after !== observation.sockets_before) {
+          console.error(
+            JSON.stringify({
+              stage: "g0-socket-census-mismatch",
+              before: observation.socket_targets_before,
+              after: observation.socket_targets_after,
+              diagnostic_bytes: Buffer.byteLength(child.stderr),
+            }),
+          );
+        }
         expect(observation.injected).toBe(!fault.gcGuard);
         expect(observation.started).toBe(true);
         expect(observation.delayed_side_effect).toBe(false);
@@ -1202,6 +1225,13 @@ process.exit(0);
         expect(observation.unrelated_exit).toBe(0);
         expect(observation.signals_after_exit).toEqual([]);
         expect(observation.sockets_after).toBe(observation.sockets_before);
+        expect([...observation.socket_targets_after].sort()).toEqual(
+          [...observation.socket_targets_before].sort(),
+        );
+        if (fault.replayOutput) {
+          expect(child.stderr.length).toBeGreaterThan(0);
+          expect(child.stderr).toContain("G0_CENSUS_DIAGNOSTIC");
+        }
         expect(observation.script_descriptors_after).toBe(0);
         if (fault.gcGuard) {
           expect(observation.guard_states).toHaveLength(16);

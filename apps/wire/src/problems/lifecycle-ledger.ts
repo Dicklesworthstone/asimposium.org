@@ -221,10 +221,7 @@ export async function governanceTargetRefusal(
       "Name a different sponsor as the transfer target.",
     );
   }
-  if (
-    action.action === "manage-steward" &&
-    (action.operation === "add" || action.operation === "transfer")
-  ) {
+  if (action.action === "manage-steward") {
     const target = await db
       .prepare("SELECT 1 FROM sponsors WHERE sponsor_id = ?")
       .bind(action.target_sponsor_id)
@@ -238,7 +235,7 @@ export async function governanceTargetRefusal(
       );
     }
   }
-  if (action.action === "manage-member" && action.operation === "set-role") {
+  if (action.action === "manage-member") {
     const target = await db
       .prepare("SELECT 1 FROM enrollment_fellows WHERE fellow_id = ?")
       .bind(action.target_fellow_id)

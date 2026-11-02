@@ -100,6 +100,7 @@ type ScreenMode =
   | "pass"
   | "reject"
   | "quarantine"
+  | "allow-with-warning"
   | "unavailable"
   | "wrong-digest"
   | "wrong-context"
@@ -184,10 +185,14 @@ const app = createApp({
         { run: async () => ({ response: 'verdict: PASS (probably) {"decision": ' }) },
         input,
       );
-    if (screenMode === "reject" || screenMode === "quarantine")
+    if (
+      screenMode === "reject" ||
+      screenMode === "quarantine" ||
+      screenMode === "allow-with-warning"
+    )
       return syntheticScreeningObservation(input, {
         decision: screenMode,
-        coarse_category: "injection",
+        coarse_category: screenMode === "allow-with-warning" ? "dual-use-boundary" : "injection",
         provider_status: "ok",
       });
     const observation = await syntheticScreeningObservation(input, {

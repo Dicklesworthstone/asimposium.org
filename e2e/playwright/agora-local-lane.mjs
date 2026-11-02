@@ -59,9 +59,12 @@ const require = createRequire(`${root}e2e/package.json`);
 const { chromium } = require("@playwright/test");
 const developmentMode = process.argv.includes("--dev");
 const serverMode = developmentMode ? "development" : "production";
-const browserOptions = process.env.ASIMPOSIUM_CHROMIUM_EXECUTABLE
-  ? { executablePath: process.env.ASIMPOSIUM_CHROMIUM_EXECUTABLE }
-  : {};
+const browserOptions = {
+  args: [`--user-agent=${USER_AGENT}`],
+  ...(process.env.ASIMPOSIUM_CHROMIUM_EXECUTABLE
+    ? { executablePath: process.env.ASIMPOSIUM_CHROMIUM_EXECUTABLE }
+    : {}),
+};
 // axe-core is installed in the workspace store; resolve it from there.
 const AXE = (() => {
   for (const base of [
@@ -927,6 +930,15 @@ async function main() {
             .filter({ has: page.locator("math mfrac") })
             .first()
             .locator(".asimp-source");
+          const clickStarted = performance.now();
+          const navigations = [];
+          const onNavigation = (frame) => {
+            if (frame === page.mainFrame() && navigations.length < 8) {
+              navigations.push({ elapsed_ms: performance.now() - clickStarted,
+                path: new URL(frame.url()).pathname });
+            }
+          };
+          page.on("framenavigated", onNavigation);
           try {
             await source.locator("summary").click();
           } catch (error) {
@@ -938,6 +950,14 @@ async function main() {
                 ready: document.readyState,
                 fonts: document.fonts.status,
                 visibility: document.visibilityState,
+                time_origin: performance.timeOrigin,
+                now_ms: performance.now(),
+                scroll_y: window.scrollY,
+                viewport_height: window.innerHeight,
+                navigation: performance.getEntriesByType("navigation").map((entry) => ({
+                  type: entry.type, response_end_ms: entry.responseEnd,
+                  load_end_ms: entry.loadEventEnd, duration_ms: entry.duration,
+                })),
                 animation_count: document.getAnimations().length,
                 sources: [...document.querySelectorAll(".scientific-markdown .asimp-source summary")].map((element) => {
                   const box = element.getBoundingClientRect();
@@ -947,8 +967,11 @@ async function main() {
             } catch {
               // A detached/closed page must not replace the original click error.
             }
-            console.error(JSON.stringify({ stage: "math-source-click-failed", mode, path, state }));
+            console.error(JSON.stringify({ stage: "math-source-click-failed", mode, path,
+              elapsed_ms: performance.now() - clickStarted, navigations, state }));
             throw error;
+          } finally {
+            page.off("framenavigated", onNavigation);
           }
           record(
             `${mode} ${path} offers copyable LaTeX without requiring page scripts`,

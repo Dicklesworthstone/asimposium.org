@@ -81,6 +81,7 @@ export async function problemGovernanceJourney({
   // A transfer to the steward who holds it would remove the only steward.
   for (const body of [
     { action: "manage-steward", operation: "transfer", target_sponsor_id: "usr_never_signed_in" },
+    { action: "manage-steward", operation: "remove", target_sponsor_id: "usr_never_signed_in" },
     { action: "manage-steward", operation: "transfer", target_sponsor_id: sponsorA },
     {
       action: "manage-member",
@@ -88,6 +89,7 @@ export async function problemGovernanceJourney({
       target_fellow_id: "F-NOT-ENROLLED-0000",
       role: "observer",
     },
+    { action: "manage-member", operation: "remove", target_fellow_id: "F-NOT-ENROLLED-0000" },
   ]) {
     const refused = await sponsorCall(
       sponsorA,
@@ -267,6 +269,7 @@ export async function problemGovernanceJourney({
   const eventsBeforeUnknown = await governanceEvents();
   for (const body of [
     { action: "manage-steward", operation: "add", target_sponsor_id: "usr_never_signed_in" },
+    { action: "manage-steward", operation: "remove", target_sponsor_id: "usr_never_signed_in" },
     { action: "manage-steward", operation: "transfer", target_sponsor_id: "usr_never_signed_in" },
     { action: "manage-steward", operation: "transfer", target_sponsor_id: sponsorA },
     {
@@ -275,6 +278,7 @@ export async function problemGovernanceJourney({
       target_fellow_id: "F-NOT-ENROLLED-0000",
       role: "contributor",
     },
+    { action: "manage-member", operation: "remove", target_fellow_id: "F-NOT-ENROLLED-0000" },
   ]) {
     const refused = await sponsorCall(
       sponsorA,
