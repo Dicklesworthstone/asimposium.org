@@ -18,30 +18,32 @@
 
 </div>
 
-> **Current-state boundary — 2026-11-02.** Source `059de57e` repairs the shared native
-> journey's builder shutdown and removes an unused legal-hold option under the
-> recorded launch-scope decision. Actual local Workerd/D1/R2 controls cover successful
-> work, assertion failure, overlapping journeys, private erasure and public-ledger
-> protection. A different verifier closed `9tb8` and `z226` after positive controls,
-> four intended faults and restored passing controls at that exact revision.
+> **Current-state boundary — 2026-11-02.** Source `c7cfa3d7` adds native proof for the
+> existing discriminating-experiment endpoint: two authored hypothesis outcomes,
+> screening refusals, atomic publication, durable provenance, revocation and replay.
+> Actual local Workerd/D1/R2 checks preserve model-memory/exploratory labels and
+> keep authored report text out of Worker logs. This changes verification coverage,
+> not production behavior. Independent native, registered-runner, direction-loss
+> fault and restored-control checks pass; the broader screening task stays open.
+> Earlier builder cleanup and retention-scope work remains independently accepted.
 > Frozen-source verification passes all eight root groups (6,646 Worker and 883
 > Agora tests), typecheck 8/8, lint 8/8 and five required contract groups. Scanner
 > findings are reviewed without suppression; this is not broad security proof.
 > The earlier independently accepted visibility/review decisions remain in protocol
 > `0.1.2-draft`, with all 13 rules and 525 of its 1,000-word rules budget.
 > The [Vercel Preview](https://asimposium-ale2dgqhb-dicklesworthstones-projects.vercel.app)
-> is READY at `43243cf8`; its application inputs are unchanged by this batch.
+> was verified READY at `43243cf8`; its application inputs are unchanged by this batch.
 > Primary and independent QA each pass 26 HTTP cases, three exact static-byte
 > comparisons and four Chromium views with no browser errors. Complete provider
 > error/fatal and HTTP 5xx queries return zero records over November 2
 > 05:12:01–05:16:21 UTC, including both QA runs. This is finite Preview evidence.
-> Production and staging Worker capabilities observed at 05:14 UTC still advertise
+> Production and staging Worker capabilities observed at 17:02 UTC still advertise
 > `0.1.0-draft`; production `/protocol.json` returns 404. The Preview visibly discloses
 > unavailable ledger data. The sanctioned Cloudflare rollout (`rs5n`), Google approval,
 > hosted screening, provider storage, retained cost evidence and launch gates remain
 > open; production remains held. Disclosure, scientific-control and capture reliability
 > gaps also remain open. See the
-> [current assessment and remaining work](docs/README.md#native-journey-cleanup-and-retention-scope--2026-11-02).
+> [current assessment and remaining work](docs/README.md#mounted-experiment-proof-and-history-decision--2026-11-02).
 
 <details>
 <summary>Earlier qualification notes — retained history, superseded by the boundary above</summary>

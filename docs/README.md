@@ -14,6 +14,95 @@ observed.
 
 ## Current reality check — 2026-10-30
 
+### Mounted experiment proof and history decision — 2026-11-02
+
+Source `c7cfa3d795bba709c81ee4c83775b5f070a3a180` adds real native coverage for the
+already-mounted `POST /v1/p/:id/discrimination` adapter. Previously its census
+entry delegated to the batch writer and explicitly lacked a native route proof.
+The existing direct-append journey now calls it, and the census names its canonical
+request schema, all authored fields, evidence sink and actual proof. Production
+routing, contracts and scientific algorithms are unchanged; this is a local proof
+improvement, not a new scientific capability or deployment.
+
+The journey publishes one authored experiment concerning two hypotheses. It checks
+contrasting predictions and evidence directions, the exact shared report, public
+evidence reads, and model-memory evidence remaining `assertion`/`exploratory`.
+Reject, quarantine and provider-unavailable outcomes leave the checked public
+ledger, evidence, provenance, outbox count and public R2 keys unchanged. An actual
+credential revocation during the fixture screening call rolls back both members;
+the revoked retry returns 401 without another screening call. A pass creates
+exactly two events, evidence records and immutable screening-provenance rows,
+bound through returned sequences and canonical event object IDs. Every work field
+is present in the current screening candidate, separately from prior context.
+Exact replay returns the original receipt without new events or screen calls;
+changed input with the same key conflicts. The final log scan covers the new prose.
+Synthetic sponsor setup and classifier decisions remain explicitly local fixtures.
+
+The final primary native journey passes at committed source in **11.620s**.
+All **2,427 source blobs/modes** stay fixed through typecheck **8/8**, lint **8/8**,
+five required contract groups and original root **8/8 in 1,519.310s**, including
+**6,646 Worker and 883 Agora tests**. Default diff/staged UBS complete all three
+changed code files in 2.632s/2.582s, each exit 1 with identical one-critical,
+three-warning and 147-information findings. The critical match is the existing
+deliberate bearer-logging mutation string; warnings flag intentional fail-fast
+parsing of test evidence, provenance and screening input. All critical/warning
+contexts are read, with no suppression. This is not broader `g4b4` qualification.
+All 226 mutation anchors match; that does not mean 226 mutants were executed.
+StormyGorge independently records the bounded result in original `b9y9` comment
+2729 at `c7cfa3d7`. Complete native control exits 0 in 11.576s; exact current census
+passes ten cases/53 expectations, and the registered runner passes one case with
+32 explicitly filtered. The canonical-producer direction-loss plant reaches the
+intended second-row assertion (`supports` versus `refutes`), exiting 1 normally in
+9.208s. Exact restoration is followed by a complete native pass in 11.225s.
+Both isolated copies restore 2,466 tracked hashes/modes, six dependency directories,
+eight local aliases and fifteen physical identities exactly, sharing no regular
+source inodes with main. All nine observed process births retire; 363 unreadable cwd
+observations and retained mount warnings limit host visibility. Root read the actual
+six terminal receipts, fault assertion and restoration audits. These local results
+do not certify the full integration aggregate or provider behavior. Original `b9y9`
+remains in progress, including its full field/race criteria and same-revision
+staging Workers AI evidence.
+
+Errors remain on record. An ad hoc Bun filter discovered archived verification
+copies and intentional mutants: 682 passes, 13 failures and five errors across
+695 cases. Its raw tool output was not fully retained; it is not a current-source
+gate. The corrected exact-file command retains both streams and passes ten current
+census cases. A new assertion wrongly expected an evidence ID inside event content;
+that failed native run is retained. The corrected check uses the schema's exact
+`events.object_id`/`object_kind` binding and canonical provenance. Review also
+strengthened candidate-only field checks, accepted-record deltas and the final
+prose-log scan. Early ad hoc metadata-label errors are superseded by the final
+genuine Node 24.1/Bun 1.4.4 source/runtime freeze; no production defect is inferred.
+
+The highest ready local reliability item, `123b`, received two bounded controls:
+complete science alone exits 0 in 22.559s; science alongside the canonical contract
+suite completes with both statuses 0 in 45.524s. This is a current-version concurrency
+analogue, not a reconstruction of the historical load or a cause for its lost
+route/status assertion. The original failure remains unclassified and the task
+stays open. No extra observer framework or repeated probes were added.
+
+`n21x` is independently closed in comment 2726 under its original recommended
+leave-history option, selected using delegated operator judgment. Immutable Git
+inspection confirms the old commit has 522 checkout-path fields, the corrective
+commit has none, and current/staged exports have none. No history rewrite,
+force-push, deletion or claim that old objects were scrubbed follows from this
+decision. It resolves an operational question, with no product-capability credit.
+
+Fresh public reads at **17:02:37–17:02:39 UTC** still find production/staging
+capabilities `0.1.0-draft` with the earlier body hashes, and production
+`/protocol.json` returns 404 `ROUTE_NOT_FOUND`. Equal bodies do not identify provider
+revision, migration lineage or deployment history. All five local authority inputs
+remain absent; `rs5n` stays open for sanctioned Workers Builds authority and staging
+reconciliation. The existing qualified Preview has unchanged application inputs;
+no fresh backend or launch claim is made. `0oi3` retains its historical-snapshot
+uncertainty; `3soe`, `g4b4`, `sbuk`, `2tnr` and the original hosted/provider/launch
+criteria remain open. Current raw evidence is under
+`e2e/artifacts/123b-science-20261102/` and
+`e2e/artifacts/b9y9-discrimination-20261102/`; independent raw results are under
+`e2e/artifacts/independent-b9y9-c7cfa3d7-20261102/`. The current ready queue has seven
+items and no active dependency cycles. The sanctioned rollout remains the highest
+priority; the history decision does not resolve any hosted or scientific gate.
+
 ### Native journey cleanup and retention scope — 2026-11-02
 
 Source `059de57e7f6d966f3fb2754913e8e504c086beda` repairs a demonstrated
