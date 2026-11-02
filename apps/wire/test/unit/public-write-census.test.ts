@@ -37,6 +37,7 @@ import {
 } from "@asimposium/contracts";
 import { type ZodType, z } from "zod";
 import { ArtifactPublicationRequestSchema } from "../../../../packages/contracts/src/artifact-publications.ts";
+import { DiscriminationRequestSchema } from "../../../../packages/contracts/src/discrimination.ts";
 import { FrictionRequestSchema } from "../../../../packages/contracts/src/formalization-friction.ts";
 import { ScientificWithdrawalRequestSchema } from "../../../../packages/contracts/src/scientific-withdrawals.ts";
 
@@ -313,11 +314,9 @@ const CENSUS: Readonly<Record<string, Class>> = {
   // Each member is re-parsed with its own action schema and screened by the
   // same executor as its single-write route.
   "POST /v1/p/:id/events:batch": screened(DIRECT, EventBatchRequestSchema, "all", []),
-  "POST /v1/p/:id/discrimination": {
-    kind: "screened-adapter",
-    delegate: "POST /v1/p/:id/events:batch",
-    why: "expands one bounded experiment into evidence batch members; the existing batch executor owns every write and screen; this classification does not claim an independent real-bindings proof for the adapter",
-  },
+  "POST /v1/p/:id/discrimination": screened(DIRECT, DiscriminationRequestSchema, "all", [
+    "evidence",
+  ]),
   // No request prose: the bound bytes are screened before any public put.
   "POST /v1/artifacts/:id/publish": screened(
     "test/integration/artifact-real-bindings.mjs",
@@ -573,7 +572,8 @@ describe("P7 public-write census (kqz5)", () => {
     }
   });
 
-  test("write adapters delegate to a classified screened executor", () => {
+  test("the experiment adapter has its own proof; other adapters name a screened executor", () => {
+    expect(CENSUS["POST /v1/p/:id/discrimination"]?.kind).toBe("screened");
     for (const decision of Object.values(CENSUS)) {
       if (decision.kind === "screened-adapter") {
         expect(mounted).toContain(decision.delegate);

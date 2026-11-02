@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { ScreeningPublicationProvenanceSchema } from "../../../../packages/contracts/src/screening.ts";
 import { opsRecords, runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // P7 on the direct-append routes (beads asimposiumorg-kqz5 / b9y9) on real
@@ -233,13 +234,209 @@ await runLocalWorkerJourney(
         assert.ok(!logText.includes(text), "no write body reaches the Worker log");
     }
 
+    // The mounted convenience route must preserve the real atomic writer's
+    // screening, attribution, evidence semantics and replay behavior.
+    const firstHypothesis = await env.DB.prepare(
+      "SELECT hypothesis_id FROM hypotheses WHERE problem_id = ? ORDER BY hypothesis_id LIMIT 1",
+    )
+      .bind(problem)
+      .first();
+    assert.ok(firstHypothesis);
+    const secondHypothesis = await call(
+      `/v1/p/${problem}/hypotheses`,
+      {
+        ...hypothesisBody,
+        route: "Squaring changes zero to an odd residue.",
+        mechanism: "The proposed parity flip also applies at zero.",
+        falsifier: "Zero squared having an even residue.",
+        body_md: "This deliberately competing route predicts an odd residue at zero.",
+      },
+      author,
+      201,
+    );
+    const experiment = {
+      kind: "argument",
+      source: { kind: "model_memory" },
+      mode: "exploratory",
+      work: {
+        question: "Two-route parity experiment at zero",
+        protocol: "Apply the definition of squaring and evaluate the residue of zero modulo two.",
+        observation: "Zero multiplied by zero is zero, which has residue zero modulo two.",
+        limitations: "Only the zero boundary is considered; this is no proof over all integers.",
+        prediction_timing_self_declared: "after-observation",
+        cases: [
+          {
+            hypothesis_id: firstHypothesis.hypothesis_id,
+            prediction: "The residue at zero is even.",
+            would_count_against: "An odd residue at zero.",
+            direction: "supports",
+            interpretation: "The observed boundary is consistent with parity preservation.",
+          },
+          {
+            hypothesis_id: secondHypothesis.hypothesis_id,
+            prediction: "The residue at zero is odd.",
+            would_count_against: "An even residue at zero.",
+            direction: "refutes",
+            interpretation: "The observed boundary contradicts the proposed parity flip.",
+          },
+        ],
+      },
+    };
+    const experimentPath = `/v1/p/${problem}/discrimination`;
+    const publicationState = async () => ({
+      ledger: await env.DB.prepare(`SELECT public_seq,
+        (SELECT COUNT(*) FROM events WHERE problem_id = ?1) AS events,
+        (SELECT COUNT(*) FROM evidence WHERE problem_id = ?1) AS evidence,
+        (SELECT COUNT(*) FROM outbox) AS outbox,
+        (SELECT COUNT(*) FROM screening_publications s JOIN events e ON e.id = s.event_id
+          WHERE e.problem_id = ?1) AS screens
+        FROM problems WHERE id = ?1`)
+        .bind(problem)
+        .first(),
+      publicObjects: (await env.PUBLIC_ARTIFACTS.list()).objects.map((row) => row.key).sort(),
+    });
+    const beforeExperiment = await publicationState();
+    for (const [mode, status, code] of [
+      ["reject", 403, "POLICY_DENIED"],
+      ["quarantine", 202, "SCREENING_HOLD"],
+      ["unavailable", 202, "SCREENING_HOLD"],
+    ]) {
+      await clearScreeningPosture(OWNER);
+      await fixtures.setScreenMode(mode);
+      const callsBefore = await fixtures.screeningCalls();
+      const refused = await call(experimentPath, experiment, author, status);
+      assert.equal(refused.code, code, `${mode}: ordinary batch screening response`);
+      assert.equal(await fixtures.screeningCalls(), callsBefore + 1, `${mode}: reached provider`);
+      assert.deepEqual(await publicationState(), beforeExperiment, `${mode}: no public mutation`);
+      assert.ok(!JSON.stringify(refused).includes(experiment.work.observation));
+    }
+    await clearScreeningPosture(OWNER);
+    await fixtures.setScreenMode("pass");
+    const revokedAuthor = await enroll("discrimination-revoked", "usr_discrimination_revoked");
+    const beforeRevocation = await publicationState();
+    const callsBeforeRevocation = await fixtures.screeningCalls();
+    await fixtures.revokeOnNextScreen();
+    const revoked = await call(experimentPath, experiment, revokedAuthor, 403, "experiment-revoke");
+    assert.equal(revoked.code, "WRITE_REFUSED", "a completed screen cannot override revocation");
+    assert.ok((await fixtures.screeningCalls()) > callsBeforeRevocation, "screening actually ran");
+    assert.deepEqual(
+      await publicationState(),
+      beforeRevocation,
+      "revocation rolls back both members",
+    );
+    const callsAfterRevocation = await fixtures.screeningCalls();
+    const revokedRetry = await call(
+      experimentPath,
+      experiment,
+      revokedAuthor,
+      401,
+      "experiment-revoke",
+    );
+    assert.equal(revokedRetry.code, "FELLOW_TOKEN_INVALID");
+    assert.equal(
+      await fixtures.screeningCalls(),
+      callsAfterRevocation,
+      "revoked retry does not screen",
+    );
+    assert.deepEqual(await publicationState(), beforeRevocation);
+    const callsBeforeExperiment = await fixtures.screeningCalls();
+    const experimentKey = "direct-discrimination-experiment";
+    const acceptedExperiment = await call(experimentPath, experiment, author, 201, experimentKey);
+    assert.equal(acceptedExperiment.ok, true);
+    assert.equal(acceptedExperiment.results.length, 2);
+    assert.equal(new Set(acceptedExperiment.results.map((row) => row.id)).size, 2);
+    assert.equal(await publicSeq(), beforeExperiment.ledger.public_seq + 2);
+    assert.equal(await fixtures.screeningCalls(), callsBeforeExperiment + 2);
+    const expectedReport = {
+      format: "asimposium.discrimination.v1",
+      problem_id: problem,
+      ...experiment,
+    };
+    for (const [index, result] of acceptedExperiment.results.entries()) {
+      const row = await env.DB.prepare(
+        "SELECT bears_on_id, direction, computed_class, mode, body_md FROM evidence WHERE problem_id = ? AND evidence_id = ?",
+      )
+        .bind(problem, result.id)
+        .first();
+      assert.ok(row, "each returned evidence id names a committed projection");
+      assert.equal(result.action, "evidence");
+      assert.equal(row.bears_on_id, experiment.work.cases[index].hypothesis_id);
+      assert.equal(row.direction, experiment.work.cases[index].direction);
+      assert.equal(row.computed_class, "assertion", "model memory does not mint verification");
+      assert.equal(row.mode, "exploratory");
+      assert.deepEqual(JSON.parse(row.body_md), expectedReport, "one exact authored report");
+      const publication = await env.DB.prepare(`SELECT e.object_id, e.object_kind, s.provenance_json
+        FROM events e JOIN event_content c ON c.event_id = e.id
+        JOIN screening_publications s ON s.event_id = e.id
+        WHERE e.problem_id = ? AND e.seq = ?`)
+        .bind(problem, result.seq)
+        .first();
+      assert.ok(publication, "each returned sequence has immutable screening provenance");
+      assert.equal(publication.object_id, result.id, "the event names this evidence");
+      assert.equal(publication.object_kind, "evidence");
+      ScreeningPublicationProvenanceSchema.parse(JSON.parse(publication.provenance_json));
+      const face = await call(`/p/${problem}/evidence/${result.id}.json`);
+      assert.ok(JSON.stringify(face).includes(experiment.work.question), "public evidence face");
+    }
+    const screenedExperiment = await fixtures.lastScreening();
+    const screenedCandidate = JSON.stringify(
+      JSON.parse(screenedExperiment.publication_body).current_candidate,
+    );
+    const experimentTexts = [
+      experiment.work.question,
+      experiment.work.protocol,
+      experiment.work.observation,
+      experiment.work.limitations,
+      ...experiment.work.cases.flatMap((item) => [
+        item.prediction,
+        item.would_count_against,
+        item.interpretation,
+      ]),
+    ];
+    for (const text of experimentTexts) {
+      assert.ok(
+        screenedCandidate.includes(text),
+        "the current screening candidate includes every work field",
+      );
+    }
+    const afterExperiment = await publicationState();
+    for (const field of ["events", "evidence", "screens"]) {
+      assert.equal(
+        afterExperiment.ledger[field],
+        beforeExperiment.ledger[field] + 2,
+        `exactly two accepted ${field}`,
+      );
+    }
+    const replayedExperiment = await call(experimentPath, experiment, author, 200, experimentKey);
+    assert.deepEqual(replayedExperiment, acceptedExperiment, "recover the original batch receipt");
+    const changedExperiment = await call(
+      experimentPath,
+      { ...experiment, work: { ...experiment.work, limitations: "A deliberately changed scope." } },
+      author,
+      409,
+      experimentKey,
+    );
+    assert.equal(changedExperiment.code, "IDEMPOTENCY_CONFLICT");
+    assert.equal(
+      await fixtures.screeningCalls(),
+      callsBeforeExperiment + 2,
+      "replay does not rescreen",
+    );
+    assert.deepEqual(await publicationState(), afterExperiment, "replay/conflict append nothing");
+    const experimentLogs = workerLogs()
+      .map((log) => log.message)
+      .join("\n");
+    for (const text of experimentTexts) {
+      assert.ok(!experimentLogs.includes(text), "experiment prose never reaches Worker logs");
+    }
+
     console.log(
       JSON.stringify({
         stage: "direct-append-screening-journey-passed",
         kind: "direct-append-screening-real-bindings",
         status: "pass",
         boundary:
-          "local Workerd/D1; fixture screening; claims, dead-ends, hypotheses, evidence, review, reviews, events:batch and friction routes",
+          "local Workerd/D1/R2; fixture screening; direct writes, discrimination, atomic evidence and replay",
       }),
     );
   },

@@ -2057,6 +2057,14 @@ export const PLANTS = [
     replace: "  activeJourneys--;",
     command: LANE("journey-cleanup"),
   },
+  {
+    id: "discrimination-turns-refutation-into-support",
+    bead: "b9y9",
+    file: "packages/contracts/src/discrimination-model.ts",
+    find: "      direction: item.direction,",
+    replace: '      direction: "supports",',
+    command: LANE("direct-append-screening"),
+  },
 ];
 
 function occurrences(text, snippet) {
