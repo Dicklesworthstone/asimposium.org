@@ -14,6 +14,97 @@ observed.
 
 ## Current reality check — 2026-10-30
 
+### Combined source and Preview — 2026-11-02
+
+The accepted Preview source is `28ffa1a5316d4469e794cf0d63b1e2bfbd2ebe63`.
+StormyGorge independently closes only `ghr3` at 00:28 UTC, citing all original
+acceptance items in Beads comment 2694. The candidate is committed on local main;
+no remote Git push or production promotion was performed.
+An ordinary merge preserves both main histories and integrates 22 remote product
+commits through migration 0129. This connects scientific Markdown/KaTeX, current
+sponsor directives and discovery, public scientific needs, warning/off-scope notices,
+premise health, cursor caching, artifact retention/review and evidence-pinned
+concessions with the previously qualified local safety repairs. No alternate stack,
+new provider or changed ADR was introduced.
+
+The integration fixes expiry-clock propagation, immediate cleanup ownership after
+timeouts, JSON-schema bindings, active-directive API discovery, and an actual D1
+expression-depth failure. A separate cursor repair rejects ineligible request shapes
+before reading bindings. Existing native session-close proof now includes mixed
+creation and saved public revision, exact replay, retained prior versions/premises,
+private R2 archives, stale-member atomic refusal and private handback recovery.
+The retention lane now probes its required immutable delete guard. Six other new
+review/release and concession guards are explicitly unprobed; their original
+`rhg` and `3b9` feature acceptance remains open.
+
+Independent exact-revision results, retaining original assertions and bounds:
+
+- Complete root dispatcher: **8/8 groups PASS, 1,545.21s**. Worker: **6,646 pass,
+  0 fail, 30,411 expectations across 284 files**; Agora: **883 pass, 0 fail**.
+  The toolchain retains its 54 existing test skips.
+- Typecheck **8/8**, lint **8/8**, required contract groups **5/5**, plus two
+  existing policy skips.
+- Five genuine local Node 24.1.0/Workerd/D1/R2 journeys pass: Stoa, content-hide,
+  extended session-close publications, moderation, and artifact staging retention.
+- Original production Agora browser: **209/209 checks**, 233.718s; all four axe
+  reports have zero violations. Synthetic sponsor sessions and fixture screening
+  are explicitly local substitutes, not Google or hosted screening evidence.
+- Both original privacy mutations and disabled retention guard fail their intended
+  assertions. A reconstructed direct real-D1 comparison completes all four original
+  table renames under grouped SQL; original flat SQL fails the first rename at depth
+  100 in `artifact_publication_review_authorized`. This is direct SQL proof, not a
+  second complete browser pass. All 1,551 ordered non-parenthesis SQL tokens match.
+
+The new [Vercel Preview](https://asimposium-c1qnpcfv9-dicklesworthstones-projects.vercel.app)
+is `dpl_8VJMFoLwoL9Vm9ftPJ3sJWGJ3SKj`, READY on Node 24.x. Official provider
+readback binds both revision fields to the accepted source. The frozen prebuild
+passes in 60.995s; all 2,426 exported Git blobs remain exact. Native dry inspection
+records the virtual archive plan and ignored private environment/project files;
+it does not claim physical inspection of a remote archive. Primary and independent
+live QA each pass the original 26 HTTP/three static-byte/four Chromium checks,
+including protocol P1–P13, version `0.1.1-draft` and digest `6822c855362e774f…`.
+Both reviewers inspect all four screenshots. Browser errors are empty; 17 primary
+and 18 independent explicit Next prefetch cancellations are separately retained.
+Provider error/fatal and HTTP 5xx queries return zero records over the complete
+finite window **2026-11-02 00:15:04–00:20:23 UTC**, after independent QA,
+with no excluded intervals or further pages. This is not an all-time guarantee.
+
+Retained failures limit these results. Two earlier combined-source root runs were
+red; their observed failures and incomplete censuses remain recorded. A borrowed
+dependency browser setup failed before any checks because Turbopack fenced its
+external realpaths. A fresh own-root frozen install preserves all source/lock bytes
+and matches 502 package manifests; its full browser control passes. The whole-browser
+flat-SQL counter then stops at 90 checks on the recurring no-JavaScript source-click
+timeout, before reaching SQL. Ready/loaded/visible/no-animation diagnostics do not
+establish its cause. **`3soe` remains open and unexplained**. **`g4b4` remains open**:
+complete narrow diff/staged scans do not supply missing broad JavaScript/ShellCheck
+coverage, and their reviewed test findings do not constitute clean security proof.
+
+All three verification subjects restore 2,465 source blobs and their dependency
+identities exactly. All 53 recorded process births and 11 known groups retire;
+382 unreadable host process entries prevent a whole-host claim. Raw source checks
+and the bounded verdict are retained in
+`e2e/artifacts/independent-ghr3-28ffa1a5-20261101/`; deployment/build/live/provider
+receipts are in `e2e/artifacts/vercel-ghr3-28ffa1a5-20261101/`, with independent
+live QA in `e2e/artifacts/independent-ghr3-preview-28ffa1a5-20261102/`.
+
+The largest remaining gap is deployment of the current Worker. Honest public reads
+at **2026-11-02 00:25 UTC** still return production/staging capabilities
+`0.1.0-draft` with the previously recorded body hashes; production `/protocol.json`
+is still 404. Identical bodies do not prove migration lineage or the absence of
+intervening deployments. The Preview correctly discloses unavailable ledger data.
+`rs5n` requires authority for the existing sanctioned Workers Builds pipeline and
+operator reconciliation of existing D1 lineage/binding roles, followed by staging
+before production. Do not substitute a manual Worker rollout or duplicate resources.
+Live Google approval, hosted screening/census, the protected hard-reject corpus,
+provider R2/lifecycle proof, the third fresh harness, retained S-2 cost measurement
+and G0–G3 remain incomplete. The optional Rust CLI and complete historical 335-case
+suite are not certified by these selected current-source checks. Earlier shell and
+missing-output investigations (`dae7`, `l6hr`, `jqqg`) retain their original limits.
+Primary storage headroom has returned but is declining and its cause/durability
+remains unverified (`0oi3`). No agent cleanup was performed to recover this capacity;
+the earlier storage-daemon deletion incident remains recorded below.
+
 ### Implementation follow-up — checks through 2026-11-01 UTC
 
 The corrected protocol revision `aa3da072d1e2a358db927c6a4acd7d08e17cd610`
