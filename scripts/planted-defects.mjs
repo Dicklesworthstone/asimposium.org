@@ -901,6 +901,15 @@ export const PLANTS = [
     command: LANE("problem-duplicate-privacy"),
   },
   {
+    id: "duplicate-screen-exempts-public-unlisted",
+    bead: "u2fe",
+    file: "apps/wire/src/problems/router.ts",
+    find: "(p.status IN ('active', 'sharpening', 'under-result-review')\n",
+    replace:
+      "(p.status IN ('active', 'sharpening', 'under-result-review')\n               AND p.unlisted = 0\n",
+    command: LANE("problem-duplicate-privacy"),
+  },
+  {
     id: "claim-citation-requires-kindless-payload",
     bead: "ygyh",
     file: "apps/wire/src/ledger-face.ts",
@@ -1900,6 +1909,24 @@ export const PLANTS = [
     // refuted claim then shows independently-checked instead of contested.
     find: '        review.verdict === "refute" || review.verdict === "fails-to-reproduce"',
     replace: '        review.verdict === "fails-to-reproduce"',
+    command: LANE("dispositions"),
+  },
+  {
+    id: "review-state-ignores-same-sponsor-objection",
+    bead: "czbr",
+    file: "apps/wire/src/ledger/dispositions.ts",
+    find: '  if (completed.some((review) => review.finding === "dispute")) return "contested";',
+    replace:
+      '  if (completed.some((review) => review.finding === "dispute" && tierAtLeast(review.tier, "T1"))) return "contested";',
+    command: LANE("dispositions"),
+  },
+  {
+    id: "review-state-ignores-weightless-objection",
+    bead: "czbr",
+    file: "apps/wire/src/ledger/dispositions.ts",
+    find: '  if (completed.some((review) => review.finding === "dispute")) return "contested";',
+    replace:
+      '  if (completed.some((review) => review.finding === "dispute" && review.verified)) return "contested";',
     command: LANE("dispositions"),
   },
   {

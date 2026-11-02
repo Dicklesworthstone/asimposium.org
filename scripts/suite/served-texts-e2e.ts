@@ -163,7 +163,7 @@ export async function runServedTextsE2e(): Promise<void> {
     "/protocol.json",
   );
   const protoJson = JSON.parse(protoJsonText);
-  if (protoJson.version !== "0.1.1-draft") {
+  if (protoJson.version !== "0.1.2-draft") {
     throw new Error(`protocol.json invalid version: ${protoJson.version}`);
   }
   if (!Array.isArray(protoJson.rules?.hard) || protoJson.rules.hard.length !== 13) {

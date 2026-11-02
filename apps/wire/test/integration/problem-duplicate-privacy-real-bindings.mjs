@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
+import { ProblemFaceResponseSchema, SearchResponseSchema } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // P11 duplicate-problem screening must not confirm private text (real local
 // Workerd/D1). A sponsor revises a private draft before publishing it; the
 // earlier wording stays in problem_statement_versions but was never public.
 // Another sponsor proposing that earlier wording must not be told it
-// matches, while the published wording still refuses as POSSIBLE_DUPLICATE.
+// matches, while published unlisted wording still refuses as POSSIBLE_DUPLICATE.
+// Unlisted hides a public problem from discovery, not from a known-URL read or
+// a duplicate refusal. Never-published foreign wording remains private.
 
 const problemBody = (title, statement) => ({
   title,
@@ -15,17 +18,27 @@ const problemBody = (title, statement) => ({
   areas: ["number-theory"],
 });
 
-await runLocalWorkerJourney(async ({ call, enroll, sponsorCall }) => {
+await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, userAgent }) => {
   const SPONSOR_A = "usr_dup_privacy_a";
   const SPONSOR_B = "usr_dup_privacy_b";
   const fellowA = await enroll("dup-privacy-a", SPONSOR_A);
   const fellowB = await enroll("dup-privacy-b", SPONSOR_B);
   const DRAFT_WORDING = "Every prime above three is one more or one less than a multiple of six.";
   const PUBLISHED_WORDING = "Each prime greater than three is congruent to 1 or 5 modulo 6.";
+  const publicRead = (path) =>
+    worker.fetch(`${origin}${path}`, { headers: { "User-Agent": userAgent } });
 
   const problem = (
-    await call("/v1/problems", problemBody("Primes mod six", DRAFT_WORDING), fellowA, 201)
+    await call(
+      "/v1/problems",
+      { ...problemBody("Primes mod six", DRAFT_WORDING), unlisted: true },
+      fellowA,
+      201,
+    )
   ).problem.id;
+  const privateFace = await publicRead(`/p/${problem}.json`);
+  assert.equal(privateFace.status, 404);
+  assert.ok(!(await privateFace.text()).includes(DRAFT_WORDING));
   await sponsorCall(
     SPONSOR_A,
     "POST",
@@ -48,6 +61,21 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall }) => {
     },
   );
 
+  const publicFace = await publicRead(`/p/${problem}.json`);
+  assert.equal(publicFace.status, 200, "a published unlisted problem is public by known URL");
+  assert.equal(publicFace.headers.get("x-robots-tag"), "noindex, nofollow");
+  const projection = ProblemFaceResponseSchema.parse(await publicFace.json());
+  assert.ok(JSON.stringify(projection).includes(PUBLISHED_WORDING));
+  assert.ok(!JSON.stringify(projection).includes(DRAFT_WORDING));
+  for (const path of ["/problems.json", `/search.json?q=${problem}`]) {
+    const response = await publicRead(path);
+    assert.equal(response.status, 200, path);
+    const data = await response.json();
+    // Search echoes its caller's query; only result items represent discovery.
+    const listed = path.startsWith("/search") ? SearchResponseSchema.parse(data).items : data;
+    assert.ok(!JSON.stringify(listed).includes(problem), "unlisted is absent from discovery");
+  }
+
   // The never-published draft wording is not a public statement: no match.
   const fresh = await call(
     "/v1/problems",
@@ -57,7 +85,8 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall }) => {
   );
   assert.notEqual(fresh.problem.id, problem);
 
-  // The published wording is: the duplicate refusal names the public problem.
+  // The published wording is: the duplicate refusal intentionally names the
+  // public unlisted problem even though ordinary discovery excludes it.
   const refusal = await call(
     "/v1/problems",
     problemBody("Primes mod six again", PUBLISHED_WORDING),
@@ -65,7 +94,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall }) => {
     409,
   );
   assert.equal(refusal.code, "POSSIBLE_DUPLICATE");
-  assert.equal(refusal.existing_problem_id, problem);
+  assert.equal(refusal.existing_problem_id, problem, "published unlisted matches retain their ID");
 
   // A sponsor's own private draft still counts for that sponsor.
   const own = await call(

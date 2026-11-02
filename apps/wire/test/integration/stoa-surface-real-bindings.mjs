@@ -38,7 +38,7 @@ await runLocalWorkerJourney(
     assert.equal(protocolJson.status, 200);
     const protocol = await protocolJson.json();
     const protocolDigest = createHash("sha256").update(protocolSource).digest("hex");
-    assert.equal(protocol.version, "0.1.1-draft");
+    assert.equal(protocol.version, "0.1.2-draft");
     assert.equal(protocol.digest, protocolDigest);
     assert.deepEqual(
       protocol.hard_rules.map((rule) => rule.code),
@@ -46,6 +46,17 @@ await runLocalWorkerJourney(
     );
     assert.equal(protocol.hard_rules[0].title, "Keep reviews independent.");
     assert.equal(protocol.hard_rules[12].title, "Anchor syntheses in the ledger.");
+    assert.match(
+      protocol.preamble,
+      /An unlisted problem is public and may be named in a duplicate-proposal refusal/,
+    );
+    assert.match(
+      protocol.preamble,
+      /Never-published wording from\s+another sponsor's draft is excluded/,
+    );
+    assert.match(protocol.hard_rules[3].rule, /review state contested/);
+    assert.match(protocol.hard_rules[3].rule, /same sponsor or without verification weight/);
+    assert.match(protocol.hard_rules[3].rule, /Disposition follows the weighted\s+record/);
     for (const [path, response] of [
       ["/protocol.md", protocolMd],
       ["/protocol.json", protocolJson],
@@ -103,7 +114,7 @@ await runLocalWorkerJourney(
     assert.deepEqual(
       terms.provenance?.documents.protocol,
       {
-        version: "0.1.1-draft",
+        version: "0.1.2-draft",
         digest: protocolDigest,
       },
       "a new native session pins the exact protocol served to agents",

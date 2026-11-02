@@ -4,6 +4,7 @@ import {
   PackResponseSchema,
   ProblemGovernanceEventSchema,
   ProblemResolutionResponseSchema,
+  ReviewResponseSchema,
 } from "@asimposium/contracts";
 import { opsRecords, runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
@@ -1102,14 +1103,15 @@ await runLocalWorkerJourney(async (context) => {
         201,
       )
     ).claim_id;
-    const reviewState = async () =>
+    const claimState = async (target = tierClaim) =>
       (
         await (
-          await worker.fetch(`${origin}/p/${tierProblem}/claims/${tierClaim}.json`, {
+          await worker.fetch(`${origin}/p/${tierProblem}/claims/${target}.json`, {
             headers: { "user-agent": userAgent },
           })
         ).json()
-      ).claim_state.review_state;
+      ).claim_state;
+    const reviewState = async () => (await claimState()).review_state;
     assert.equal(await reviewState(), "unreviewed");
     await call(
       `/v1/sessions/${siblingSession.session_id}/review`,
@@ -1157,6 +1159,137 @@ await runLocalWorkerJourney(async (context) => {
       "independently-checked",
       "a weight-carrying cross-sponsor confirm is the check",
     );
+
+    // czbr: objections request scrutiny even when their author shares the
+    // sponsor or their review carries no verification weight. Each case gets
+    // its own claim so an earlier contest cannot conceal an ignored objection.
+    const objections = [
+      {
+        reviewer: sameSponsor,
+        session: siblingSession,
+        tier: "T0",
+        weighted: true,
+        verdict: "refute",
+      },
+      {
+        reviewer: sameSponsor,
+        session: siblingSession,
+        tier: "T0",
+        weighted: true,
+        verdict: "fails-to-reproduce",
+      },
+      {
+        reviewer: crossSponsor,
+        session: crossSession,
+        tier: "T1",
+        weighted: false,
+        verdict: "refute",
+      },
+      {
+        reviewer: crossSponsor,
+        session: crossSession,
+        tier: "T1",
+        weighted: false,
+        verdict: "fails-to-reproduce",
+      },
+    ];
+    for (const [index, objection] of objections.entries()) {
+      let target = tierClaim;
+      if (index > 0) {
+        const statement = `For every natural number n, n + ${index} = ${index} + n.`;
+        const falsifier = `A natural number n where n + ${index} differs from ${index} + n.`;
+        const scratch = await call(
+          `/v1/sessions/${authorSession.session_id}/workshop`,
+          {
+            type: "claim-draft",
+            title: `Objection case ${index}`,
+            body_md: statement,
+            relates_to: [],
+          },
+          tierAuthor,
+          201,
+        );
+        target = (
+          await call(
+            `/v1/sessions/${authorSession.session_id}/promote`,
+            { workshop_id: scratch.workshop_id, kind: "conjecture", statement, falsifier },
+            tierAuthor,
+            201,
+          )
+        ).claim_id;
+      }
+      if (!objection.weighted) {
+        const support = ReviewResponseSchema.parse(
+          await call(
+            `/v1/sessions/${crossSession.session_id}/review`,
+            {
+              target_claim_id: target,
+              target_version: 1,
+              verdict: "confirm",
+              basis: "Checked the stated addition identity on its finite initial cases.",
+              capable_of_failure: "A checked natural number where the two sums differ.",
+              body_md: "A weighted cross-sponsor check, with no refutation attempt yet.",
+            },
+            crossSponsor,
+            201,
+          ),
+        );
+        assert.equal(support.tier, "T1");
+        assert.equal(support.carries_weight, true);
+      }
+      const before = await claimState(target);
+      assert.equal(
+        before.review_state,
+        index === 0 || !objection.weighted ? "independently-checked" : "unreviewed",
+        "each objection starts without a previous contest",
+      );
+      assert.equal(before.disposition, "open", "support still requires an actual refutation check");
+      const review = ReviewResponseSchema.parse(
+        await call(
+          `/v1/sessions/${objection.session.session_id}/review`,
+          {
+            target_claim_id: target,
+            target_version: 1,
+            verdict: objection.verdict,
+            basis: "Considered the stated equality on the declared natural-number domain.",
+            ...(objection.weighted
+              ? { capable_of_failure: "A finite check that agrees with the stated equality." }
+              : {}),
+            body_md:
+              "Synthetic objection for the review-state boundary; no independent result is asserted.",
+          },
+          objection.reviewer,
+          201,
+        ),
+      );
+      assert.equal(review.tier, objection.tier, "independence comes from the stored principals");
+      assert.equal(
+        review.carries_weight,
+        objection.weighted,
+        "missing capable-of-failure stays weightless",
+      );
+      const state = await claimState(target);
+      console.log(
+        JSON.stringify({
+          stage: "review-state-objection",
+          tier: review.tier,
+          verdict: objection.verdict,
+          carries_weight: review.carries_weight,
+          review_state: state.review_state,
+          disposition: state.disposition,
+        }),
+      );
+      assert.equal(
+        state.review_state,
+        "contested",
+        `${objection.tier} ${objection.verdict} is recorded`,
+      );
+      assert.equal(
+        state.disposition,
+        objection.weighted ? "disputed" : before.disposition,
+        "weighted objections dispute; weightless objections cannot alter scientific standing",
+      );
+    }
     console.log(JSON.stringify({ stage: "review-state-tier-floor", status: "pass" }));
   }
 

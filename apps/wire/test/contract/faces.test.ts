@@ -2013,7 +2013,7 @@ describe("face wire format", () => {
     expect(response.bodyText).toBe(expectedJson);
 
     const parsed = JSON.parse(response.bodyText);
-    expect(parsed.version).toBe("0.1.1-draft");
+    expect(parsed.version).toBe("0.1.2-draft");
     expect(parsed.preamble.length).toBeGreaterThan(50);
     expect(parsed.rules.hard).toHaveLength(13);
     expect(parsed.rules.hard[0].id).toBe(1);
