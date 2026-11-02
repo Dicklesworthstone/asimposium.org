@@ -14,6 +14,98 @@ observed.
 
 ## Current reality check — 2026-10-30
 
+### Unlisted visibility, review objections and Preview — 2026-11-02
+
+Accepted source is `43243cf857ada400af94be5a57732f3ee02ad446`. It retains the
+previous lifecycle-screening implementation below and clarifies two existing
+behaviors under the operator's delegated product judgment. Published unlisted
+problems remain public: known-URL reads work and duplicate refusals may name their
+ID, while ordinary discovery excludes them. Never-published foreign draft wording
+remains private. Completed `refute` and `fails-to-reproduce` reviews contest their
+exact claim version even at T0 or without verification weight. Weightless objections
+do not change scientific disposition or unlock positive standing; weighted T1+
+confirmation remains necessary for `independently-checked`. These are explicit
+policy decisions, not newly implemented duplicate or review algorithms.
+
+Fable sections 6.2 and 6.6 and the original served protocol record the choices.
+Protocol `0.1.2-draft` keeps all thirteen rule IDs, measures 525/1,000 rules words,
+and hashes to `8d21cc0abf30f2ade7a37e618cdf850ac115af11041ba101900399deae209d49`.
+The apex static copy matches exactly. The discovery golden changes only that
+intentional word count and digest; actual version consumers change explicitly.
+Real Stoa HTTP checks verify canonical Markdown, structured semantics, ETags and
+the exact protocol version/digest pinned on a newly opened session.
+
+StormyGorge independently closed only `u2fe` and `czbr` at that exact source,
+with acceptance-item citations in Beads comments 2711 and 2712. Complete native
+privacy, dispositions and Stoa controls pass in 10.751s, 16.034s and 12.000s.
+The privacy lane retains private-history/own-draft checks and adds known-URL,
+noindex, listing, exact-ID search and public-unlisted duplicate assertions.
+Four separate objection cases retain positive tier controls and check actual stored
+tier/weight, initial standing and both resulting facets. The unlisted-exclusion fault
+wrongly returns 201 instead of 409. The same-sponsor and weightless-objection faults
+each fail the intended assertion: `independently-checked` instead of `contested`.
+Restored complete controls pass in 9.413s, 16.133s and 16.222s; all 223 registry
+anchors pass. Both own Git subjects restore 2,465 tracked files and their dependency
+identities exactly. Genuine Node 24.1 is bound by executable, inode and digest.
+
+The review-fault children both exit 1, but their outer supervisor reports
+`descendant-leaked`, not normal exited negatives. The original assertions and both
+classifications are retained. Subsequent bounded retirement/readable-proc checks
+find no remaining owned processes and all 17 observed birth identities are absent;
+369 unreadable cwd observations and mount warnings limit host visibility. New open
+P2 `9tb8` owns this assertion-failure disposal observation; no residual identity or
+cause is established. Restored passes do not explain it. The author's first new
+assertion also incorrectly required every contest to make disposition disputed.
+That failed run remains: reading the existing scientific fold justified correcting
+only the new expectation and strengthening the prior-support/weightless cases.
+No original assertion, deadline or acceptance criterion was relaxed. A separate
+nonexistent-runner invocation was a retained setup failure that executed zero tests.
+
+Primary canonical verification passes **8/8 root groups in 1,448.329s**, including
+**6,646 Worker and 883 Agora tests**; typecheck 8/8, lint 8/8 and five required
+contract groups also pass. All 2,426 source blobs/modes remain fixed through these
+runs. Default UBS diff/staged scans complete seven JavaScript/TypeScript files,
+each exiting 1 with one critical match, 13 warnings and 798 informational findings.
+The critical match is the existing deliberate bearer-logging mutation; warnings
+are test parsing and a hostile alert fixture. All critical/warning locations were
+read, with no suppression. This scoped result does not close broader `g4b4`.
+Synthetic screening and sponsor setup are explicitly local, not hosted AI or Google.
+
+The [new Vercel Preview](https://asimposium-ale2dgqhb-dicklesworthstones-projects.vercel.app)
+is `dpl_J6gZqUn424cPAYARrYjNRXg6mpAt`, READY with Preview target, Node 24.x and
+both provider revision fields equal to `43243cf8`. Project settings retain frozen
+Bun installation, disconnected Git deployment and disabled Preview feedback.
+Frozen prebuild passes in 55.709s and upload in 15.761s, preserving all 2,426
+source blobs/modes. Native dry inspection reports one 22,255,674-byte virtual archive
+part and excludes private environment/project files; it is not physical inspection
+of a remote archive. The private environment file was tightened to mode 600 and its
+directory to 700 without displaying its contents.
+Primary and independent live QA each pass 26 HTTP cases, three exact static-byte
+comparisons and four Chromium views in 19.487s and 17.115s, with no browser errors.
+Both reviewers viewed all four screenshots. Explicit Next prefetch cancellations
+remain narrowly classified and separately counted: 17 primary, 15 independent.
+Independent QA ends at 05:15:01.025 UTC; screenshot inspection finishes by 05:15:18.
+Provider error/fatal and HTTP 5xx queries each return zero records over the complete
+**05:12:01–05:16:21 UTC** window, with no excluded intervals or further pages.
+This is finite Preview evidence, not a backend or launch guarantee.
+
+Fresh public reads at **05:14:24 UTC** retain production/staging capabilities
+`0.1.0-draft` and the previously recorded hashes; production `/protocol.json`
+returns 404. Body equality does not identify provider revision or migration lineage.
+The Preview honestly shows unavailable ledger data. `rs5n` remains the top blocker:
+sanctioned Workers Builds authority, existing D1 lineage/binding reconciliation and
+staging evidence are still required. Google, hosted screening, provider storage,
+cost and G0–G3 launch evidence remain open. The ready queue has ten items and no
+active dependency cycles; `9tb8`, `123b`, `3soe`, `g4b4` and `sbuk` preserve their
+distinct unresolved observations. Primary capacity went from 4 KiB free to about
+47 GiB without agent cleanup; cause and durability are unknown, so `0oi3` remains
+open. No manual deletion, history rewrite, remote push or production promotion ran.
+
+Current evidence: `e2e/artifacts/u2fe-czbr-policy-20261102/`,
+`independent-u2fe-czbr-43243cf8-20261102/` and
+`independent-preview-43243cf8-20261102/`. Earlier accepted work below remains
+historical evidence at its named revision and proof scope.
+
 ### Lifecycle screening and Preview — 2026-11-02
 
 Source `b626630f6b99dcd9704b164e3d895fe7c1d23d31` closes a demonstrated P7 bypass:

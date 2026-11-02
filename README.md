@@ -18,35 +18,33 @@
 
 </div>
 
-> **Current-state boundary — 2026-11-02.** Source `b626630f` screens public sponsor
-> resolution, retirement and merge text through the existing P7 boundary, preserving
-> scientific admission, sponsor attribution and exact replay. Governance removals verify
-> their target principals. It includes the earlier integration through migration 0129.
-> A different verifier closed `ux6q` and the strict G0 socket-census repair `78dv` after
-> real local Workerd/D1/R2 journeys and deliberate screening/socket faults.
+> **Current-state boundary — 2026-11-02.** Source `43243cf8` retains the qualified
+> lifecycle-screening work and records two policy decisions in protocol `0.1.2-draft`:
+> published unlisted problems remain public and may be named in duplicate refusals;
+> T0 or weightless objections contest a review facet, while scientific disposition
+> follows the weighted record. The duplicate and review algorithms are unchanged.
+> A different verifier closed `u2fe` and `czbr` after complete real local Workerd/D1/R2
+> controls, three intended semantic faults and restored passing controls. The protocol
+> retains all 13 rules and uses 525 of its 1,000-word rules budget.
 > Primary verification passes all eight root groups (6,646 Worker and 883 Agora tests),
-> typecheck 8/8, lint 8/8 and five required contract groups. Independent G0/toolchain,
-> field-census and both complete lifecycle journeys pass. Synthetic local screening and
-> sponsor identity are not hosted Workers AI, Google OAuth, staging or launch proof.
-> The [new Vercel Preview](https://asimposium-3lnak184p-dicklesworthstones-projects.vercel.app)
-> is READY from that exact revision on Node 24.x, Bun 1.4.4 and Next.js 16.3.1.
-> Primary and independent checks each pass 26 HTTP cases, three exact static-byte
-> comparisons and four Chromium views with no browser errors; both reviewers inspected
-> all four screenshots. The
-> protocol contains all 13 rules at `0.1.1-draft`, using 493 of its 1,000-word budget.
-> Provider error/fatal and HTTP 5xx queries return zero records over the complete
-> November 2 03:26:37–03:36:58 UTC window, after independent QA, with no excluded
-> intervals or further pages.
-> Production and staging Worker capabilities observed November 2 03:33 UTC still
-> advertise `0.1.0-draft`; production `/protocol.json` returns 404. The Preview visibly
-> discloses unavailable ledger data. The operator's sanctioned Cloudflare staging rollout
-> (`rs5n`), Google approval, hosted screening, provider storage and measured cost evidence
-> still gate launch. Production remains held. The disclosure-click timeout (`3soe`)
-> remains unexplained; broad scanner coverage (`g4b4`) and the original review/concession
-> proof gaps remain open. Current diff/staged scans complete with reviewed findings;
-> they are not clean security proof. Unexplained capture interruptions are tracked
-> separately as `sbuk`. See the
-> [current assessment and remaining work](docs/README.md#lifecycle-screening-and-preview--2026-11-02).
+> typecheck 8/8, lint 8/8 and five required contract groups.
+> The [new Vercel Preview](https://asimposium-ale2dgqhb-dicklesworthstones-projects.vercel.app)
+> is READY with both provider revision fields bound to that exact source.
+> Primary and independent QA each pass 26 HTTP cases, three exact static-byte
+> comparisons and four Chromium views with no browser errors; both reviewers viewed
+> all four screenshots. Provider error/fatal and HTTP 5xx queries return zero records
+> over November 2 05:12:01–05:16:21 UTC, including both QA runs, with no excluded
+> intervals or further pages. This is finite Preview delivery evidence.
+> Two deliberate review-fault runs also required the owner's residual-descendant
+> cleanup path; `9tb8` preserves that unresolved fixture issue. Current diff/staged
+> scans complete with reviewed findings, not clean or broader security proof.
+> Production and staging Worker capabilities observed at 05:14 UTC still advertise
+> `0.1.0-draft`; production `/protocol.json` returns 404. The Preview visibly discloses
+> unavailable ledger data. The sanctioned Cloudflare rollout (`rs5n`), Google approval,
+> hosted screening, provider storage, retained cost evidence and launch gates remain
+> open; production remains held. Disclosure, scientific-control and capture reliability
+> gaps also remain open. See the
+> [current assessment and remaining work](docs/README.md#unlisted-visibility-review-objections-and-preview--2026-11-02).
 
 <details>
 <summary>Earlier qualification notes — retained history, superseded by the boundary above</summary>
