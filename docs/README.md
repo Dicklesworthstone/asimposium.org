@@ -14,6 +14,95 @@ observed.
 
 ## Current reality check — 2026-10-30
 
+### Lifecycle screening and Preview — 2026-11-02
+
+Source `b626630f6b99dcd9704b164e3d895fe7c1d23d31` closes a demonstrated P7 bypass:
+an eligible retirement under a reject decision previously returned 200, bought no
+screening call and changed public scientific state. Public sponsor resolution,
+retirement and merge now screen the complete parsed action, including every nested
+no-claim boundary and mapping key/value. Existing scientific admission precedes paid
+screening; sponsor authorship, atomic provenance and exact replay remain intact.
+Stored governance targets are checked on removal as well as addition. Sponsor refusals
+leave Fellow moderation posture unchanged; existing quota accounting may still charge
+the source Fellow, so this does not establish budget isolation.
+
+StormyGorge independently closes only `78dv` then `ux6q` at that exact revision,
+citing original acceptance and `file:line` in Beads comments 2702 and 2703. The complete
+native screening journey includes an earned scientific resolution as well as retirement
+and merge, all policy holds and successful one-event/provenance/replay paths. It passes
+in 27.875s; complete governance passes in 12.267s; the census passes 10 tests/53
+expectations. The actual registered publish-only fault fails at its original reject
+assertion, not setup. These are genuine local Workerd/D1/R2 bindings with explicitly
+synthetic screening and sponsor identity, not hosted AI or Google.
+
+The G0 repair initializes Bun's lazy stderr descriptor before the ownership baseline;
+the original strict socket count remains and complete socket identities are also
+compared. All original deadlines and cleanup assertions remain. Independent cold-stderr
+and real post-baseline TCP-listener faults fail the intended count assertion; the latter
+adds a new socket inode. Full G0/registry passes 71 tests with one existing skip;
+canonical toolchain passes its 46 seed cases plus 402 cases with 54 existing skips.
+Both isolated subjects restore all 2,465 source blobs and dependency identities.
+Readable final process/FD checks are empty, with explicit host-visibility limits.
+The original unrecorded third descriptor and interrupted-capture causes remain unknown.
+
+Primary full root verification passes **8/8 groups in 1,510.94s**, including
+**6,646 Worker tests and 883 Agora tests**. Fresh typecheck and lint each pass 8/8;
+five required contract groups pass with two existing policy skips. All 2,426 source
+hashes remain fixed through those runs. The first full root remains retained as 7/8 red:
+the expanded screening predicate broke an old mutation anchor, and the old socket
+census failed without recording descriptor identities. The anchor is repaired and
+the new diagnostic case specifically requires its own output marker. Default UBS diff
+and staged scans each complete all 10 selected JavaScript files, exiting 1 with
+5 critical findings, 136 warnings and 1,187 informational findings. Every critical and
+warning location was reviewed; critical matches are an intentional bearer-logging
+mutation, public-ID comparisons and browser pathname/status assertions. No rule was
+suppressed. This does not replace the missing broader `g4b4` coverage.
+
+The new [Vercel Preview](https://asimposium-3lnak184p-dicklesworthstones-projects.vercel.app)
+is `dpl_SXgomHdpd96xgP9pTvEJ68swuzZf`, READY with Preview target, Node 24.x and
+both provider revision fields bound to `b626630f`. Its frozen prebuild passes in
+107.140s; all 2,426 Git blobs/modes remain exact. Native dry inspection reports one
+22,262,308-byte virtual archive part and excludes private environment/project files;
+this is not physical inspection of a remote archive. Upload passes in 23.196s.
+Primary and independent live QA each pass the original 26 HTTP, three exact static-byte
+and four Chromium checks in 23.128s and 16.709s, with no browser errors. Both reviewers
+viewed all four screenshots; 16 primary and 18 independent explicit Next prefetch
+cancellations retain their narrow original classification. Independent QA ended at
+03:34:32.889 UTC; screenshot inspection finished by 03:34:54. Provider error/fatal and
+HTTP 5xx queries return zero records over the complete common window
+**03:26:37–03:36:58 UTC**, with no excluded intervals or further pages. Request logs
+round the end to whole seconds; the retained review uses that common window. This is
+finite delivery evidence, not an all-time or backend-readiness guarantee.
+An earlier build capture ended 143 before a receipt and lost its legacy adapter's
+buffered streams; no upload occurred and its unchanged export is retained. A fresh
+export with direct raw files and signal tracing supplies the successful result.
+Neither later success nor empty accepted signal traces diagnose the earlier captures.
+`sbuk` retains all four unclassified capture interruptions, including a build interrupted
+despite a short session-poll interval; no polling-gap cause or universal workaround is
+claimed. Complete accepted raw streams and terminal receipts remain distinct from the
+interrupted attempts.
+
+Fresh public reads at **03:33:29 UTC** still show production/staging capabilities
+`0.1.0-draft` with the previously recorded body hashes, and production `/protocol.json`
+returns 404. Body equality does not identify deployment revision or migration lineage.
+The Preview correctly shows unavailable ledger data; it does not deploy the Worker.
+`rs5n` still requires the existing sanctioned Workers Builds staging rollout and
+operator reconciliation of D1/binding roles before production. Parent `b9y9` retains
+its original full field/race and same-revision hosted-screening acceptance. The
+disclosure-click cause (`3soe`), broader scanner gap (`g4b4`), provider/Google/corpus,
+third-harness, retained cost measurement and launch gates remain open. Two complete
+209-check browser controls in this continuation do not diagnose the disclosure flake.
+At 03:42 UTC primary headroom is down to 4.7 GiB, below the existing 5 GiB target;
+`0oi3` remains open. Retained evidence and both original peer WAL directories are
+preserved; no manual cleanup was performed. The refreshed ready queue has 11 items
+and no active dependency cycles, led by operator deployment and capacity work.
+
+Evidence is retained under `e2e/artifacts/ux6q-lifecycle-screening-20261102/`,
+`independent-ux6q-78dv-b626630f-20261102/` and
+`vercel-ux6q-b626630f-20261102-traced/`, with independent live QA in
+`independent-preview-b626630f-20261102/`. The earlier accepted integration and Preview
+below remain historical evidence with their own exact revisions and scope.
+
 ### Combined source and Preview — 2026-11-02
 
 The accepted Preview source is `28ffa1a5316d4469e794cf0d63b1e2bfbd2ebe63`.

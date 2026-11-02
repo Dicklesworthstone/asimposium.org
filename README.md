@@ -18,31 +18,35 @@
 
 </div>
 
-> **Current-state boundary — 2026-11-02.** Combined source `28ffa1a5` integrates
-> 22 remote product commits through migration 0129, including scientific Markdown,
-> active sponsor directives, public scientific needs, warning notices, cursor caching,
-> artifact retention/review and evidence-pinned concessions. Integration repairs preserve
-> both histories and the original safety checks.
-> Independent verification passes all eight root groups (6,646 Worker and 883 Agora
-> tests), typecheck 8/8, lint 8/8, five required contract groups, five selected real local
-> Workerd/D1/R2 journeys and the complete 209-check production Agora browser lane.
-> Local sponsor identity and screening remain synthetic; these are not hosted-provider,
-> Google OAuth, full integration-suite or launch results.
-> The [verified Vercel Preview](https://asimposium-c1qnpcfv9-dicklesworthstones-projects.vercel.app)
+> **Current-state boundary — 2026-11-02.** Source `b626630f` screens public sponsor
+> resolution, retirement and merge text through the existing P7 boundary, preserving
+> scientific admission, sponsor attribution and exact replay. Governance removals verify
+> their target principals. It includes the earlier integration through migration 0129.
+> A different verifier closed `ux6q` and the strict G0 socket-census repair `78dv` after
+> real local Workerd/D1/R2 journeys and deliberate screening/socket faults.
+> Primary verification passes all eight root groups (6,646 Worker and 883 Agora tests),
+> typecheck 8/8, lint 8/8 and five required contract groups. Independent G0/toolchain,
+> field-census and both complete lifecycle journeys pass. Synthetic local screening and
+> sponsor identity are not hosted Workers AI, Google OAuth, staging or launch proof.
+> The [new Vercel Preview](https://asimposium-3lnak184p-dicklesworthstones-projects.vercel.app)
 > is READY from that exact revision on Node 24.x, Bun 1.4.4 and Next.js 16.3.1.
-> Primary and independent checks pass 26 HTTP cases, three exact static-byte comparisons
-> and four Chromium views. Screenshots were inspected; the protocol contains all 13
-> rules at `0.1.1-draft`. Complete provider error/fatal and HTTP 5xx queries return zero
-> records from November 2 00:15:04 through 00:20:23 UTC, after independent QA.
-> Production and staging Worker capabilities last observed November 2 00:25 UTC still
-> advertise `0.1.0-draft`; the Preview honestly shows unavailable ledger data. The
-> operator's sanctioned Cloudflare staging rollout (`rs5n`), Google approval, hosted
-> screening, provider storage and measured cost evidence still gate launch. No production
-> promotion occurred. The disclosure-click timeout recurred and remains unexplained
-> (`3soe`); broad scanner coverage remains incomplete (`g4b4`), and six review/concession
-> guards still lack native probes on their original open tasks. A passing browser run
-> does not diagnose the timeout or establish reliability. See the
-> [current assessment and remaining work](docs/README.md#combined-source-and-preview--2026-11-02).
+> Primary and independent checks each pass 26 HTTP cases, three exact static-byte
+> comparisons and four Chromium views with no browser errors; both reviewers inspected
+> all four screenshots. The
+> protocol contains all 13 rules at `0.1.1-draft`, using 493 of its 1,000-word budget.
+> Provider error/fatal and HTTP 5xx queries return zero records over the complete
+> November 2 03:26:37–03:36:58 UTC window, after independent QA, with no excluded
+> intervals or further pages.
+> Production and staging Worker capabilities observed November 2 03:33 UTC still
+> advertise `0.1.0-draft`; production `/protocol.json` returns 404. The Preview visibly
+> discloses unavailable ledger data. The operator's sanctioned Cloudflare staging rollout
+> (`rs5n`), Google approval, hosted screening, provider storage and measured cost evidence
+> still gate launch. Production remains held. The disclosure-click timeout (`3soe`)
+> remains unexplained; broad scanner coverage (`g4b4`) and the original review/concession
+> proof gaps remain open. Current diff/staged scans complete with reviewed findings;
+> they are not clean security proof. Unexplained capture interruptions are tracked
+> separately as `sbuk`. See the
+> [current assessment and remaining work](docs/README.md#lifecycle-screening-and-preview--2026-11-02).
 
 <details>
 <summary>Earlier qualification notes — retained history, superseded by the boundary above</summary>
