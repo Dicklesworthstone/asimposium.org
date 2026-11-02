@@ -14,6 +14,92 @@ observed.
 
 ## Current reality check — 2026-10-30
 
+### Native journey cleanup and retention scope — 2026-11-02
+
+Source `059de57e7f6d966f3fb2754913e8e504c086beda` repairs a demonstrated
+resource-lifetime defect in the shared local Worker journey. Wrangler's esbuild
+service could remain alive after Node exited, even after Workerd closed. The
+journey now uses Wrangler's exact builder dependency, observes its actual child
+process, and waits for its close event after the last active journey releases it.
+It preserves callback errors and leaves the strict outer supervisor and deadlines
+unchanged. The new real-bindings regression checks successful work, an exact
+deliberate assertion failure and overlapping journeys: an active sibling keeps
+its builder, and the last owner retires it. This improves local proof reliability;
+it adds no scientific or deployed capability.
+
+The same revision resolves `z226` through its permitted no-feature option. Fable
+section 10.5 records that launch account/private-draft erasure has no legal-hold
+mechanism. The unused helper input and unreachable route mapping are removed;
+receipts already report false. The obsolete unit case is deliberately replaced
+with a missing-problem/no-journal case. Existing private erasure, foreign-sponsor
+refusal, immutable public-ledger and audit/storage protections remain. Native
+journeys add account and draft receipt checks and a published-problem DELETE 422
+with unchanged public cursor. No schema, table, URL or legal-hold feature is added.
+
+Primary qualification holds all 2,427 source blobs/modes fixed: typecheck **8/8**,
+lint **8/8**, five required contract groups and original root **8/8 in 1,448.577s**,
+including **6,646 Worker and 883 Agora tests**. Complete native problem and account
+journeys pass in 12.981s and 9.964s; the final three-mode cleanup regression passes
+in 27.054s. The registered inventory/cleanup selection passes two cases with 46
+explicitly filtered, not a full integration aggregate. All 225 mutation anchors
+are valid; that is not execution of 225 mutants. Default diff/staged UBS each
+complete nine JavaScript/TypeScript files, exit 1 with three critical matches,
+ten warnings and 686 informational findings. Reviewed critical contexts are two
+sponsor/Fellow ID comparisons and the existing deliberate bearer-logging mutation
+string. Existing stored-JSON/test parsing and initialized Uint8Array warnings are
+also reviewed; nothing is suppressed. This is scoped review, not broad security
+qualification or closure of `g4b4`.
+
+Retained failures matter: before repair the new regression sees an unclosed real
+builder and the owner reports a descendant leak. The first repair omits the child
+reference needed to keep Node alive for its close event and exits 13 with an
+unsettled await; the corrected implementation passes. A process-only trace of the
+original T0 fault shows its builder outliving Node by 62.7 ms, while the instrumented
+owner exits normally 1. This does not identify the two historical unrecorded
+residuals, reproduce their outer classification, or diagnose `sbuk`/`2tnr`.
+StormyGorge independently accepts the original criteria at `059de57e`, covering
+the reproduced builder-lifetime gap and repaired retirement of the named domain
+faults, and closes only `9tb8` and `z226` in comments 2720 and 2721.
+Cleanup, complete problem/account and full dispositions controls exit 0
+normally in 27.420s, 13.321s, 10.122s and 16.242s. The 21 retention unit cases pass
+165 expectations; registered inventory/cleanup passes two with 46 filtered.
+All four one-site faults reach the intended assertions and exit 1 normally:
+T0 and weightless review facets (12.828s/12.973s), omitted builder release (8.852s)
+and premature sibling shutdown (27.007s). Restored complete controls exit 0 in
+15.991s, 15.836s, 27.050s and 27.654s. Assertions and owner bounds remain unchanged.
+Both isolated own-Git subjects restore all 2,466 tracked hashes/modes, six dependency
+directories, eight workspace aliases and fifteen physical identities exactly;
+neither shares source inodes with main. All 29 recorded process births retire and
+the final readable-own-cwd census is empty. The 366 unreadable cwd observations
+and retained mount warnings limit host-wide visibility. These are actual local
+runtime results, not independent reruns of the primary aggregate gates or hosted
+proof. The two old unrecorded residual identities remain unknown.
+
+The Vercel Preview below retains identical application inputs and its existing
+qualified revision. No new backend deployment follows from these local tests.
+`rs5n` remains the highest-priority external gap. Primary capacity remains about
+45 GiB through retained work and normal Beads publication now succeeds without
+a TMPDIR override. Independent assessment nevertheless finds the older full Beads
+snapshot `/tmp/asimposium-beads-full-disk-20261101-1050` absent at its recorded path;
+the `1025` snapshot path is also absent, and no byte-verified equivalent is known.
+`0oi3` remains open on that retention uncertainty. This is not proof of lost current
+Beads records or of a deletion cause. Recovery cause is unknown and no manual
+cleanup/deletion ran. Current raw evidence remains under
+`e2e/artifacts/9tb8-native-cleanup-20261102/` and
+`e2e/artifacts/z226-retention-20261102/`; independent acceptance and raw results are
+under `e2e/artifacts/independent-z226-9tb8-059de57e-20261102/`.
+
+The current ready queue has eight items and no active dependency cycles. The next
+priority is `rs5n`: configure sanctioned Workers Builds authority, reconcile the
+existing staging revision/D1 lineage/binding roles, then retain a staging deploy
+receipt before production. `0oi3` retains the snapshot uncertainty above. Local
+`123b`, `3soe` and `g4b4` retain their distinct original scientific-control,
+production-browser and complete-scanner-coverage criteria; later passes do not
+explain their original failures. `sbuk` and `2tnr` retain separate unknown capture
+and lifecycle failures. `n21x` requires an operator decision about already-public
+history; no history rewrite is authorized here. Google approval, hosted screening,
+provider storage, retained cost evidence and G0–G3 launch gates remain open.
+
 ### Unlisted visibility, review objections and Preview — 2026-11-02
 
 Accepted source is `43243cf857ada400af94be5a57732f3ee02ad446`. It retains the
