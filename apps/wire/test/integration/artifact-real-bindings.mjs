@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
-import { ProblemPublicationPreviewSchema } from "@asimposium/contracts";
+import {
+  AdminQuarantineCaseDetailSchema,
+  AdminQuarantineDecisionResponseSchema,
+  AdminQuarantineQueueResponseSchema,
+  ProblemPublicationPreviewSchema,
+} from "@asimposium/contracts";
 import {
   ArtifactPublicationReceiptSchema,
   ArtifactPublicationRetryReceiptSchema,
@@ -25,6 +30,7 @@ const root = fileURLToPath(new URL("../../../../", import.meta.url));
 const origin = "https://a-staging.asimposium.org";
 const agoraOrigin = "https://staging.asimposium.org";
 const userAgent = "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
+const operatorId = "usr_artifact_operator";
 
 const signingKeys = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
 const keyId = "artifact-local-sponsor";
@@ -76,6 +82,7 @@ function createLocalArtifactWorkerHarness() {
             STOA_ORIGIN: origin,
             AGORA_ORIGIN: agoraOrigin,
             SPONSOR_PROMOTION_RATE_LIMIT: "100",
+            OPERATOR_PRINCIPAL_IDS: operatorId,
             ENROLLMENT_REPLAY_KEY: Buffer.from(Array.from({ length: 32 }, (_, i) => i)).toString(
               "base64url",
             ),
@@ -165,6 +172,7 @@ try {
     expected = 200,
     route = path,
     idempotencyKey,
+    principalType = "sponsor",
   ) {
     const raw = body === undefined ? "" : JSON.stringify(body);
     const envelope = await mintServiceEnvelope({
@@ -174,6 +182,7 @@ try {
       method,
       route,
       action,
+      principalType,
       principalId: sponsorId,
       body: raw,
     });
@@ -202,6 +211,9 @@ try {
     }
     return { status: response.status, data, headers: response.headers, raw: resultRaw };
   }
+
+  const operatorCall = (method, path, action, body, expected = 200, route = path) =>
+    sponsorCall(operatorId, method, path, action, body, expected, route, undefined, "operator");
 
   const discovery = (await call("/openapi.json")).data;
   function discoveredRequest(property) {
@@ -1329,6 +1341,8 @@ try {
       legacyAudit: await publicationRows("artifact_publication_audit", publication),
       retries: await publicationRows("artifact_publication_retries", publication),
       retryAudit: await publicationRows("artifact_publication_retry_audit", publication),
+      reviews: await publicationRows("artifact_publication_reviews", publication),
+      reviewReleases: await publicationRows("artifact_publication_review_releases", publication),
     };
   };
   const assertOriginalPublication = (before, after) => {
@@ -1520,6 +1534,244 @@ try {
   );
   assert.equal(await fixtures.readPublicCas(rejectedArtifact.digest), null);
 
+  // A reviewed policy hold is not a new upload or another model attempt.
+  // The operator decides the exact private bytes; the current owner must
+  // separately consent before the existing delivery job can publish them.
+  const reviewedArtifact = await observerArtifact(
+    "theorem reviewed_artifact_release : True := by trivial\n",
+    "operator-reviewed-artifact",
+  );
+  const reviewedPublication = ArtifactPublicationReceiptSchema.parse(
+    (
+      await call(
+        `/v1/artifacts/${reviewedArtifact.declaration.upload_id}/publish`,
+        observerPayload,
+        reviewerTokenB,
+        202,
+        "operator-reviewed-publication",
+      )
+    ).data,
+  );
+  assert.equal(
+    await fixtures.deliverPublication(reviewedPublication.publication_id, "reject"),
+    "held",
+  );
+  const heldReview = await recoveryStatus(reviewedPublication);
+  assert.equal(heldReview.delivery, "held");
+  assert.equal(heldReview.review?.state, "pending");
+  assert.equal(heldReview.recovery, null);
+  assert.equal(heldReview.download_url, null);
+  assert.equal(await fixtures.readPublicCas(reviewedArtifact.digest), null);
+  await call(reviewedPublication.manifest_path, undefined, undefined, 404);
+  const heldSnapshot = await recoverySnapshot(reviewedPublication);
+  assert.equal(
+    heldSnapshot.reviews.length,
+    1,
+    "the actual hold has one immutable review observation",
+  );
+  assert.equal(heldSnapshot.reviewReleases.length, 0);
+  await withoutRecoveryEffect(reviewedPublication, () =>
+    recover(reviewedPublication, recoveryBody(0), "review-not-approved", 409),
+  );
+
+  const caseId = heldReview.review.case_id;
+  const casePath = `/v1/operators/quarantine/${caseId}`;
+  const sponsorReviewRefusal = await sponsorCall(
+    sponsorB,
+    "GET",
+    casePath,
+    "operator.quarantine.read",
+    undefined,
+    401,
+    "/v1/operators/quarantine/:caseId",
+  );
+  assert.equal(sponsorReviewRefusal.data.code, "UNAUTHORIZED");
+  const fellowReviewRefusal = await call(casePath, undefined, reviewerTokenB, 403);
+  assert.equal(fellowReviewRefusal.data.code, "WRONG_PRINCIPAL");
+  const unlistedOperator = await sponsorCall(
+    sponsorB,
+    "GET",
+    casePath,
+    "operator.quarantine.read",
+    undefined,
+    401,
+    "/v1/operators/quarantine/:caseId",
+    undefined,
+    "operator",
+  );
+  assert.equal(unlistedOperator.data.code, "UNAUTHORIZED");
+  const queueResponse = await operatorCall(
+    "GET",
+    "/v1/operators/quarantine",
+    "operator.quarantine.list",
+  );
+  assert.equal(queueResponse.headers.get("cache-control"), "private, no-store");
+  const queue = AdminQuarantineQueueResponseSchema.parse(queueResponse.data);
+  assert.ok(queue.items.some((item) => item.id === caseId));
+  assert.ok(
+    !queueResponse.raw.includes("reviewed_artifact_release"),
+    "the queue never copies bytes",
+  );
+  const detailResponse = await operatorCall(
+    "GET",
+    casePath,
+    "operator.quarantine.read",
+    undefined,
+    200,
+    "/v1/operators/quarantine/:caseId",
+  );
+  assert.equal(detailResponse.headers.get("cache-control"), "private, no-store");
+  const reviewDetail = AdminQuarantineCaseDetailSchema.parse(detailResponse.data);
+  assert.equal(reviewDetail.state, "pending");
+  assert.equal(reviewDetail.candidate.kind, "artifact-publication");
+  assert.equal(
+    createHash("sha256").update(reviewDetail.candidate.statement).digest("hex"),
+    heldSnapshot.original.screening_sha256,
+    "the operator reads the complete, digest-bound screening envelope",
+  );
+  assert.equal(
+    JSON.parse(reviewDetail.candidate.statement).items[0].text,
+    new TextDecoder().decode(reviewedArtifact.bytes),
+  );
+  const reviewReason =
+    "Reviewed the exact complete artifact; this is legitimate reproducible mathematics.";
+  const decision = AdminQuarantineDecisionResponseSchema.parse(
+    (
+      await operatorCall(
+        "POST",
+        "/v1/operators/quarantine/decision",
+        "operator.quarantine.decide",
+        {
+          case_id: caseId,
+          decision: "release",
+          reason: reviewReason,
+        },
+      )
+    ).data,
+  );
+  assert.equal(decision.decision, "release");
+  const approved = await recoveryStatus(reviewedPublication);
+  assert.equal(
+    approved.delivery,
+    "held",
+    "operator approval alone is not owner publication consent",
+  );
+  assert.equal(approved.release_authorized, false);
+  assert.equal(approved.review?.state, "approved");
+  assert.ok(approved.recovery);
+  assert.equal(await fixtures.readPublicCas(reviewedArtifact.digest), null);
+  await call(reviewedPublication.manifest_path, undefined, undefined, 404);
+  assertOriginalPublication(heldSnapshot, await recoverySnapshot(reviewedPublication));
+  await withoutRecoveryEffect(reviewedPublication, async () => {
+    assert.equal(
+      await fixtures.deliverPublication(reviewedPublication.publication_id),
+      "idle",
+      "the drainer cannot publish an operator-approved artifact without fresh owner consent",
+    );
+  });
+  assert.equal(await fixtures.readPublicCas(reviewedArtifact.digest), null);
+  await withoutRecoveryEffect(reviewedPublication, () =>
+    recover(reviewedPublication, recoveryBody(0), "review-foreign-consent", 404, authorTokenA),
+  );
+
+  const reviewedConsentBody = recoveryBody(0);
+  const reviewedConsentKey = "reviewed-owner-consent";
+  const reviewedConsentResponse = await recover(
+    reviewedPublication,
+    reviewedConsentBody,
+    reviewedConsentKey,
+  );
+  const reviewedConsent = ArtifactPublicationRetryReceiptSchema.parse(reviewedConsentResponse.data);
+  assert.equal(reviewedConsent.publication_id, reviewedPublication.publication_id);
+  assert.equal(reviewedConsent.problem_id, problemId);
+  assert.equal(reviewedConsent.status_path, reviewedPublication.status_path);
+  assert.equal(reviewedConsent.initial_delivery, "release-authorized");
+  assert.equal(reviewedConsent.retry_generation, 0);
+  assert.equal(reviewedConsent.review_case_id, caseId);
+  const assertReviewedPublication = (after) => {
+    for (const name of ["original", "requests", "events", "eventContent", "quota", "upload"])
+      assert.deepEqual(after[name], heldSnapshot[name], `reviewed recovery preserves ${name}`);
+    assert.deepEqual(after.reviews, heldSnapshot.reviews);
+    assert.deepEqual(
+      after.legacyAudit.slice(0, heldSnapshot.legacyAudit.length),
+      heldSnapshot.legacyAudit,
+      "reviewed recovery appends to the audit without rewriting the hold",
+    );
+  };
+  const authorized = await recoverySnapshot(reviewedPublication);
+  assertReviewedPublication(authorized);
+  assert.deepEqual(
+    authorized.legacyAudit.map((row) => row.state),
+    ["queued", "held", "release-authorized"],
+  );
+  assert.equal(authorized.reviewReleases.length, 1);
+  assert.equal(authorized.reviewReleases[0].publication_id, reviewedPublication.publication_id);
+  assert.equal(authorized.reviewReleases[0].case_id, caseId);
+  assert.equal(authorized.reviewReleases[0].retry_id, reviewedConsent.retry_id);
+  assert.equal(authorized.reviewReleases[0].created_at, reviewedConsent.authorized_at);
+  assert.equal(authorized.reviewReleases[0].fellow_id, fellowIdB);
+  assert.equal(authorized.reviewReleases[0].sponsor_id, sponsorB);
+  assert.equal(authorized.reviewReleases[0].audit_event_id, decision.audit_event_id);
+  assert.equal(authorized.reviewReleases[0].session_id, sessionB.data.session_id);
+  assert.deepEqual(authorized.reviews, heldSnapshot.reviews);
+  assert.equal(authorized.jobs[0].state, "release-authorized");
+  assert.equal(authorized.jobs[0].screen_attempts, 1);
+  assert.equal(authorized.jobs[0].last_screen_json, heldSnapshot.jobs[0].last_screen_json);
+  assert.equal(await fixtures.readPublicCas(reviewedArtifact.digest), null);
+  await withoutRecoveryEffect(reviewedPublication, async () => {
+    const replay = await recover(reviewedPublication, reviewedConsentBody, reviewedConsentKey);
+    assert.equal(replay.raw, reviewedConsentResponse.raw);
+  });
+  assert.equal(await fixtures.deliverPublication(reviewedPublication.publication_id), "published");
+  const reviewedDelivery = await recoverySnapshot(reviewedPublication);
+  assertReviewedPublication(reviewedDelivery);
+  assert.deepEqual(
+    reviewedDelivery.legacyAudit.map((row) => row.state),
+    ["queued", "held", "release-authorized", "published"],
+  );
+  assert.equal(
+    reviewedDelivery.jobs[0].screen_attempts,
+    1,
+    "operator release does not screen again",
+  );
+  assert.equal(reviewedDelivery.jobs[0].retry_generation, 0);
+  const publishedReviewStatus = await recoveryStatus(reviewedPublication);
+  assert.equal(publishedReviewStatus.delivery, "published");
+  assert.equal(publishedReviewStatus.release_authorized, true);
+  assert.equal(publishedReviewStatus.recovery, null);
+  const reviewedManifest = PublicArtifactManifestSchema.parse(
+    (await call(reviewedPublication.manifest_path)).data,
+  );
+  assert.equal(reviewedManifest.artifact.sha256, reviewedArtifact.digest);
+  assert.equal(reviewedManifest.artifact.size_bytes, reviewedArtifact.bytes.length);
+  assert.equal(reviewedManifest.evidence.evidence_id, observerEvidence.evidence_id);
+  assert.equal(reviewedManifest.author.fellow_id, fellowIdB);
+  assert.equal(reviewedManifest.author.sponsor_id, sponsorB);
+  assert.deepEqual(
+    Buffer.from(await fixtures.readPublicCas(reviewedArtifact.digest)),
+    Buffer.from(reviewedArtifact.bytes),
+  );
+  assert.equal((await recoverySnapshot(reviewedPublication)).reviewReleases.length, 1);
+  assert.ok(
+    !server
+      .getLogs()
+      .some(
+        (log) =>
+          log.message.includes("reviewed_artifact_release") || log.message.includes(reviewReason),
+      ),
+    "operator recovery diagnostics never copy uploaded text or the private review reason",
+  );
+  console.log(
+    JSON.stringify({
+      stage: "artifact-operator-review-release",
+      pass: true,
+      separate_operator_and_owner_consent: true,
+      exact_reviewed_bytes: true,
+      screen_attempts: 1,
+      immutable_release_receipts: 1,
+    }),
+  );
+
   // The original recovery session may close without changing an accepted receipt.
   await call(
     `/v1/sessions/${sessionB.data.session_id}/close`,
@@ -1530,7 +1782,17 @@ try {
     reviewerTokenB,
     201,
   );
-  for (const accepted of [firstRecovery, secondRecovery, paidRecovery]) {
+  for (const accepted of [
+    firstRecovery,
+    secondRecovery,
+    paidRecovery,
+    {
+      publication: reviewedPublication,
+      body: reviewedConsentBody,
+      key: reviewedConsentKey,
+      response: reviewedConsentResponse,
+    },
+  ]) {
     await withoutRecoveryEffect(accepted.publication, async () => {
       const replay = await recover(accepted.publication, accepted.body, accepted.key);
       assert.equal(

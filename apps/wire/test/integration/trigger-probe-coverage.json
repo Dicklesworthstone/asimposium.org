@@ -66,6 +66,10 @@
       "artifact_publication_audit_no_delete",
       "artifact_publication_audit_no_update",
       "artifact_publication_job_no_delete",
+      "artifact_publication_review_no_delete",
+      "artifact_publication_review_no_update",
+      "artifact_publication_review_release_no_delete",
+      "artifact_publication_review_release_no_update",
       "artifact_publication_retry_audit_no_delete",
       "artifact_publication_retry_audit_no_update",
       "artifact_publication_retry_no_delete",
@@ -205,10 +209,6 @@
     "stoa-surface": ["sponsor_directives_no_delete", "sponsor_directives_no_update"]
   },
   "unprobed": {
-    "artifact_publication_review_no_delete": "registered native journeys do not yet create operator review observations; held-publication recovery and immutable observation probes remain required by open rhg",
-    "artifact_publication_review_no_update": "registered native journeys do not yet create operator review observations; held-publication recovery and immutable observation probes remain required by open rhg",
-    "artifact_publication_review_release_no_delete": "registered native journeys do not yet create owner-consented review release receipts; complete recovery and immutable release probes remain required by open rhg",
-    "artifact_publication_review_release_no_update": "registered native journeys do not yet create owner-consented review release receipts; complete recovery and immutable release probes remain required by open rhg",
     "device_codes_immutable": "no real-bindings lane run through runLocalWorkerJourney leaves a row of device_codes that this trigger guards",
     "enrollment_credentials_legacy_frozen_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of enrollment_credentials that this trigger guards",
     "enrollment_credentials_legacy_frozen_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of enrollment_credentials that this trigger guards",
