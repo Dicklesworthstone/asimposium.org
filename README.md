@@ -23,18 +23,15 @@
 > New terminal review notices have no expiry; existing rows keep their recorded deadlines.
 > Independent local native, fault and restoration checks qualify that bounded fix.
 > Artifact review notices now link the owning Fellow to the exact publication's
-> current private status in JSON and Markdown. Native checks preserve fresh owner
-> consent and reject mismatched case, owner and problem bindings; independent runtime
-> verification is pending. Typecheck, lint, relevant inbox units, contracts and render
-> pass. The pre-change isolated root baseline passes all eight groups and 6,656 Worker
-> tests. The next root run is **red: six groups pass, two fail** on output-overrun
-> cleanup. A direct diagnostic reproduces `final-census` failure and observes an
-> orphan zombie under the namespace's non-reaping PID 1. The same control passes
-> with installed `docker-init`; full-suite verification there is pending.
-> The preceding shared-host root remains **red: seven
-> groups pass, one fails**, with one S-2 retained-state scan timeout. Isolation also
-> changes temporary storage; these results do not explain or repair the historical
-> failures tracked by `x77k`. Its earlier S-3 repair remains unqualified after an
+> current private status in JSON and Markdown. Independent native, deliberate-fault
+> and restoration checks qualify that bounded fix, preserving fresh owner consent
+> and rejecting mismatched case, owner and problem bindings. Typecheck, lint,
+> relevant inbox units, contracts and render pass. The latest complete root run is
+> **red: seven groups pass, one fails**. Worker passes all 6,656 tests; two toolchain
+> cleanup cases fail. A proper namespace init fixes the reproduced orphan-zombie
+> control, but does not restore the whole gate. The shared-host S-2 timeout and
+> other historical failures remain unclassified under `x77k`. Isolation also changes
+> temporary storage; its passes are not shared-host repair. The earlier S-3 repair remains unqualified after an
 > independent control fails at `final-census`. Protocol
 > `0.1.2-draft` retains all 13 rules and 525 of its 1,000-word rules budget.
 > The [Vercel Preview](https://asimposium-ale2dgqhb-dicklesworthstones-projects.vercel.app)
@@ -43,8 +40,11 @@
 > comparisons and four Chromium views with no browser errors. Complete provider
 > error/fatal and HTTP 5xx queries return zero records over November 2
 > 05:12:01–05:16:21 UTC, including both QA runs. This is finite Preview evidence.
-> Production and staging Worker capabilities observed on November 3 at 16:01 UTC
-> still advertise `0.1.0-draft`; a fresh production `/protocol.json` probe returns 404.
+> A November 3 21:25 UTC refresh returns 200 for the home page and `/AGENTS.md`,
+> with exact static-byte parity; it adds no browser or provider-log coverage.
+> Production and staging Worker capabilities observed at 21:29 UTC still advertise
+> `0.1.0-draft`, byte-identical to September receipts. The production `/protocol.json`
+> probe at 16:01 UTC returns 404.
 > The Preview visibly discloses
 > unavailable ledger data. The sanctioned Cloudflare rollout (`rs5n`), Google approval,
 > hosted screening, provider storage, retained cost evidence and launch gates remain

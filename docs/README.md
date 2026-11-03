@@ -39,8 +39,15 @@ The classifier and sponsor identities remain fixtures; storage bindings are real
 Five existing inbox unit files pass 111 tests and 692 expectations. Root typecheck
 and lint pass all eight groups in 72.914 and 35.463 seconds; existing lint warnings
 remain. The prescribed contracts package command passes 944 tests and 6,448
-expectations; render passes 584 tests and 5,873 expectations. Independent runtime
-control, deliberate link-omission fault and restoration are pending. Original
+expectations; render passes 584 tests and 5,873 expectations. At committed
+`cba01193`, independent full native controls pass in 21.218 and 44.567 seconds.
+Three separate link-omission, Fellow-predicate and problem-predicate faults fail
+at the intended native assertions, with exact restoration between each. All
+2,466 source hashes and executable modes, dependency identities and aliases are
+preserved in both verifier copies. Nineteen recorded process identities retire;
+369 unreadable cwd observations limit host scope. The independent 111 inbox
+units also pass. The primary committed-HEAD native reexecution passes in 20.847
+seconds, with complete old/new assertions and all 93 guards. Original
 `1e7` remains in progress; `rhg` remains open after its normal claim is refused
 by the open `kl8` prerequisite. No acceptance or dependency is waived.
 
@@ -61,9 +68,17 @@ real `pgrep` results and `/proc` state: the killed Perl target remains a zombie,
 reparented to the namespace's non-reaping PID 1. This is a defect in this isolated
 test setup, not evidence that the application caused the failures. With installed
 `docker-init` (Tini 0.19.0) as PID 1, the original direct control passes unchanged,
-including its no-survivor assertion. Full-suite execution in that corrected
-environment is pending. No test bound, census requirement or application source
-is changed for this diagnosis. `x77k` retains all historical failures and
+including its no-survivor assertion. Full-suite execution with that proper init
+finishes at 21:31:07 UTC in 1,567.839 seconds: **seven groups pass and one fails**.
+Worker passes all 6,656 cases and 30,546 expectations across 284 files in 1,369.15
+seconds. Toolchain has 400 passes, 54 existing skips and two failures: the throwing
+ready-hook cleanup and ordinary unit/integration output-overrun diagnostics. The
+latter still reports `final-census` ownership unproven. Agora passes 883 tests;
+all other root groups pass. `/proc/1/comm` confirms `docker-init`, UID/GID 1000 and
+temporary storage `/tmp`. Proper init resolves the observed direct control, but
+does not restore the full root gate or diagnose these remaining failures. No test
+bound, census requirement or application source changes for this diagnosis.
+`x77k` retains all historical failures and
 its original full acceptance. Raw evidence is under
 `e2e/artifacts/lifecycle-recovery-20261103/` and
 `e2e/artifacts/artifact-notice-20261103/`.
@@ -71,10 +86,18 @@ its original full acceptance. Raw evidence is under
 Independent capacity checks verify current normal backup/export and the retained
 named archives, but cannot locate the historical November 1 full snapshot;
 `0oi3` stays open. This work performs no manual file deletion and does not claim
-to have caused the recovered headroom. The earlier verified Vercel Preview is
-unchanged. This Worker fix has
-not been deployed; sanctioned Cloudflare authority, hosted proof and launch
-acceptance remain outstanding.
+to have caused the recovered headroom. The earlier verified Vercel Preview's
+application inputs are unchanged. A fresh November 3 21:25 UTC read returns 200
+for its rendered home page and `/AGENTS.md`; the latter exactly matches the
+checked-in 3,772-byte static file. The home page has its expected title/main and
+no application-error banner marker. This is two HTTP reads and one byte comparison,
+not new browser or provider-log coverage. At 21:29 UTC, production and staging
+`/capabilities` both return 200 with `0.1.0-draft`, exactly matching their September
+SHA-256 bodies (`1844555d…bbc0`, `8e79852b…aa70`). This does not identify provider
+revision or prove that no intervening redeploy happened. The new Worker fix has
+not been deployed by this work; the five required authority/staging/smoke inputs
+remain absent. Sanctioned Cloudflare authority, hosted proof and launch acceptance
+remain outstanding.
 
 ### S-3 holder lifetime and retained failure diagnostics — 2026-11-03
 
