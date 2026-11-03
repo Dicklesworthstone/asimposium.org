@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
-import { ProblemCodeSchema } from "@asimposium/contracts";
+import { ProblemCodeSchema, ProblemDocumentSchema } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // asimp search (bead asimposiumorg-l3b.1) against a real local Worker: real
@@ -108,8 +108,10 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
   }
 
   // The lexical index is filled from the outbox after the promotion commits,
-  // so wait until the claim is findable before comparing faces; until then the
-  // face declares index_pending rather than a false "no matches".
+  // so wait until the claim is findable before comparing faces. An update
+  // during a read can return SEARCH_RESULTS_CHANGED; both it and index_pending
+  // consume the same bounded warmup budget. The CLI cases below never retry.
+  let indexConflicts = 0;
   for (let attempt = 0; ; attempt++) {
     const probe = await curlFace("/search.json", [["q", "congruent modulo eight"]]);
     let face;
@@ -119,17 +121,25 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
       assert.fail(`search index probe: HTTP ${probe.status} non-JSON response`);
     }
     const code = ProblemCodeSchema.safeParse(face?.code);
-    assert.equal(
-      probe.status,
-      200,
-      `search index probe: HTTP ${probe.status} code=${code.success ? code.data : "unrecognized"}`,
-    );
-    assert.ok(Array.isArray(face?.items), "search index probe: HTTP 200 has no result items");
-    if (face.items.some((item) => item.id === claim.claim_id)) break;
-    assert.ok(
-      face.omitted.some((entry) => entry.reason === "index_pending"),
-      "a face missing the fresh claim must declare index_pending",
-    );
+    if (probe.status === 409 && code.success && code.data === "SEARCH_RESULTS_CHANGED") {
+      assert.ok(
+        ProblemDocumentSchema.safeParse(face).success,
+        "search index probe: HTTP 409 has an invalid problem document",
+      );
+      indexConflicts++;
+    } else {
+      assert.equal(
+        probe.status,
+        200,
+        `search index probe: HTTP ${probe.status} code=${code.success ? code.data : "unrecognized"}`,
+      );
+      assert.ok(Array.isArray(face?.items), "search index probe: HTTP 200 has no result items");
+      if (face.items.some((item) => item.id === claim.claim_id)) break;
+      assert.ok(
+        face.omitted.some((entry) => entry.reason === "index_pending"),
+        "a face missing the fresh claim must declare index_pending",
+      );
+    }
     assert.ok(attempt < 50, "the promoted claim was never indexed");
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
@@ -233,6 +243,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
       kind: "cli-search-real-bindings",
       status: "pass",
       cases: cases.length,
+      index_conflicts: indexConflicts,
       boundary:
         "local Workerd/D1 through a loopback bridge; Rust command path; no TLS, deploy or auth claim",
     }),
