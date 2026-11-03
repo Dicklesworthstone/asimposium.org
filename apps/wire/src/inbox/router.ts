@@ -8,6 +8,7 @@ import {
   InboxResponseSchema,
   type ProblemFollowResponse,
   ProblemFollowResponseSchema,
+  ProblemIdSchema,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { type Context, Hono } from "hono";
@@ -41,7 +42,6 @@ function bearerToken(request: Request): string | undefined {
   return match?.[1];
 }
 
-const PROBLEM_ID_REGEX = /^P-[A-Za-z0-9]{3,32}$/;
 const MAX_INBOX_ACK_BODY_BYTES = 16 * 1024;
 
 export function createInboxRouter(options: InboxRouterOptions): Hono<{ Bindings: Env }> {
@@ -302,7 +302,7 @@ export function createInboxRouter(options: InboxRouterOptions): Hono<{ Bindings:
       rawProblemId = rawProblemId.replace(/\.(json|md)$/, "");
     }
 
-    if (!PROBLEM_ID_REGEX.test(rawProblemId)) {
+    if (!ProblemIdSchema.safeParse(rawProblemId).success) {
       return problem({
         status: 404,
         code: "PROBLEM_NOT_FOUND",

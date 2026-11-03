@@ -72,6 +72,85 @@ await runLocalWorkerJourney(
     const author = await enroll("stoa-surface-author", "usr_stoa_author");
     const reviewer = await enroll("stoa-surface-reviewer", "usr_stoa_reviewer");
     const second = await enroll("stoa-surface-second", "usr_stoa_second");
+    // Follow routes consume the same problem grammar as sessions and public
+    // faces, including short IDs, internal hyphens and the maximum length.
+    for (const problemId of ["P-AB", "P-FOLLOW-1", `P-${"A".repeat(31)}`]) {
+      await fixtures.seedProblem(problemId);
+      for (const prefix of ["/v1/p", "/v1/problems"]) {
+        const path = `${prefix}/${problemId}/follow`;
+        const read = async (token = second) =>
+          ProblemFollowResponseSchema.parse(await call(path, undefined, token));
+        assert.equal((await read()).following, false);
+        const followed = ProblemFollowResponseSchema.parse(await call(path, {}, second));
+        assert.equal(followed.problem_id, problemId);
+        assert.equal(followed.following, true);
+        assert.ok(followed.followed_at > 0);
+        assert.deepEqual(await read(), followed);
+        assert.deepEqual(
+          ProblemFollowResponseSchema.parse(await call(path, {}, second)),
+          followed,
+          "repeated follows retain their original preference timestamp",
+        );
+        assert.equal((await read(author)).following, false, "preferences remain private");
+        assert.equal(
+          (
+            await env.DB.prepare(
+              "SELECT COUNT(*) AS n FROM problem_memberships WHERE problem_id = ?",
+            )
+              .bind(problemId)
+              .first()
+          ).n,
+          0,
+          "an active follow grants no problem membership",
+        );
+        const removed = await worker.fetch(`${origin}${path}`, {
+          method: "DELETE",
+          headers: { "User-Agent": userAgent, authorization: `Bearer ${second}` },
+        });
+        assert.equal(removed.status, 200, `${path}: unfollow`);
+        assert.equal(removed.headers.get("cache-control"), "private, no-store");
+        const unfollowed = ProblemFollowResponseSchema.parse(await removed.json());
+        assert.equal(unfollowed.problem_id, problemId);
+        assert.equal(unfollowed.following, false);
+        assert.equal(unfollowed.followed_at, null);
+        assert.deepEqual(await read(), unfollowed);
+      }
+      const membership = await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM problem_memberships WHERE problem_id = ?",
+      )
+        .bind(problemId)
+        .first();
+      assert.equal(membership.n, 0, "following grants no problem membership");
+    }
+    await fixtures.seedProblem("P-FOLLOW-PRIVATE");
+    await env.DB.prepare("UPDATE problems SET status = 'private-draft' WHERE id = ?")
+      .bind("P-FOLLOW-PRIVATE")
+      .run();
+    for (const problemId of [
+      "P-FOLLOW-PRIVATE",
+      "P-FOLLOW-MISSING",
+      "P-A",
+      "P-abcd",
+      "P-BAD--ID",
+      `P-${"A".repeat(32)}`,
+    ]) {
+      for (const prefix of ["/v1/p", "/v1/problems"]) {
+        for (const method of ["GET", "POST", "DELETE"]) {
+          const response = await worker.fetch(`${origin}${prefix}/${problemId}/follow`, {
+            method,
+            headers: { "User-Agent": userAgent, authorization: `Bearer ${second}` },
+          });
+          assert.equal(response.status, 404, `${method} ${prefix}/${problemId}/follow`);
+          assert.equal((await response.json()).code, "PROBLEM_NOT_FOUND");
+        }
+      }
+    }
+    assert.equal(
+      (await env.DB.prepare("SELECT COUNT(*) AS n FROM problem_follows").first()).n,
+      0,
+      "invalid, missing and private targets create no follow preferences",
+    );
+    console.log(JSON.stringify({ stage: "canonical-problem-follow-ids", problems: 3, aliases: 2 }));
     const created = await call(
       "/v1/problems",
       {

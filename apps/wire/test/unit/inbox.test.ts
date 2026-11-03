@@ -576,10 +576,35 @@ describe("W6.3 Inbox, follows, notices, and impact echoes", () => {
     expect(textAccept).toBe(textMd);
   });
 
-  test("problem follow/unfollow lifecycle and privacy guarantees", async () => {
+  const followIds = ["P-4DSP", "P-AB", "P-FOLLOW-1", `P-${"A".repeat(31)}`];
+  test.each(["P-A", "P-abcd", "P-BAD--ID", `P-${"A".repeat(32)}`])(
+    "noncanonical stored IDs cannot be followed: %s",
+    async (problemId) => {
+      const { app, env, enrollFellow, seedProblem } = await createTestHarness();
+      const fellow = await enrollFellow();
+      await seedProblem(problemId, "Noncanonical legacy problem");
+      for (const prefix of ["/v1/p", "/v1/problems"]) {
+        for (const method of ["GET", "POST", "DELETE"]) {
+          const response = await app.fetch(
+            new Request(`https://a.asimposium.org${prefix}/${problemId}/follow`, {
+              method,
+              headers: { authorization: `Bearer ${fellow.token}` },
+            }),
+            env,
+          );
+          expect(response.status).toBe(404);
+          expect(((await response.json()) as { code: string }).code).toBe("PROBLEM_NOT_FOUND");
+        }
+      }
+      expect(
+        await env.DB.prepare("SELECT COUNT(*) AS n FROM problem_follows").first<{ n: number }>(),
+      ).toEqual({ n: 0 });
+    },
+  );
+
+  test.each(followIds)("follow/unfollow lifecycle and privacy: %s", async (problemId) => {
     const { app, env, enrollFellow, seedProblem } = await createTestHarness();
     const fellow = await enrollFellow();
-    const problemId = "P-4DSP";
     await seedProblem(problemId, "Distribution Sorting Problem");
 
     // Initial follow status: not following
