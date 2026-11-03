@@ -53,24 +53,41 @@ passes in 116.404 seconds: seed 46 pass, suite 405 pass / 54 existing skips /
 3,995 expectations, and the environment-interface self-test passes. No second
 Worker aggregate is claimed for this test-only correction.
 
-Before that correction, typecheck and lint pass all eight groups in 67.646 and 34.801 seconds;
-existing lint warnings and its diagnostic limit remain. The default source scan
+Before that correction, typecheck and lint pass all eight groups in 67.646 and
+34.801 seconds; existing lint warnings and its diagnostic limit remain. The
+default source scan
 completes both changed code files with four critical matches, 13 warnings and 485
 informational findings. All four critical matches are unchanged synthetic token
 fixtures or a test label; warnings are existing strict test-output parsing and
 awaited helper races. Their source contexts are reviewed without suppression;
 the scanner's exit 1 is retained and is not called a clean security result.
-Independent source review finds no blocker; execution and deliberate faults at
-the committed revision are pending. Raw evidence is under
-`e2e/artifacts/group-reap-x77k-20261103/`.
+Independent execution at `0534ecac` passes the full affected toolchain in 118.247
+seconds and, after restoration, 125.338 seconds. Both retain seed 46 pass, suite
+405 pass / 54 existing skips / 3,995 expectations and the environment-interface
+pass. Focused controls before and after faults each pass five cases and 28
+expectations. Four separate one-site runtime faults are retained: stopping after
+one nonempty census, accepting nonempty as empty, and omitting the budget
+decrement fail their result/observation assertions. The last of those reaches a
+typed-result failure before the count assertion, so it earns no counter-oracle
+credit. A separate half-decrement fault reaches the actual count assertion:
+12 inspections exceed six. No assertion or deadline is changed for these faults.
+
+Both isolated copies finish with all 2,466 tracked hashes and Git modes restored,
+six dependency directories, eight local aliases and 15 physical identities each
+unchanged. Ten observed process births have retired; 419 unreadable process
+working directories limit that census. The primary agent reads the actual
+terminals, fault diffs and source/dependency/mode/process audits, then reruns the
+five cases from committed main: normal exit 0, 1.890 seconds, 28 expectations.
+Raw primary evidence is under `e2e/artifacts/group-reap-x77k-20261103/`;
+independent evidence is under
+`e2e/artifacts/independent-group-reap-0534ecac-20261103/`.
 
 After the counter correction, typecheck and lint again pass eight groups in
 70.289 and 34.995 seconds, retaining existing warnings. Its default diff scan
 completes the one changed test file with the same four critical fixture matches
 and 13 warnings, plus 234 informational findings; exit 1 is retained.
-A read-only refresh at
-22:34 UTC gets HTTP 200 for the existing Preview home and its exact source copy
-of `AGENTS.md`; the home has its expected title/main and no application-error
+A read-only refresh at 22:34 UTC gets HTTP 200 for the existing Preview home and
+its exact source copy of `AGENTS.md`; the home has its expected title/main and no application-error
 marker. This is two HTTP reads, not new browser or provider-log coverage.
 Production and staging capabilities also return 200 and the same retained
 September body hashes, both `0.1.0-draft`. The five required Cloudflare/staging/

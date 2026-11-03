@@ -30,9 +30,11 @@
 > **passes all eight groups**, including 6,656 Worker tests and 883 Agora tests.
 > The cleanup repair rechecks a stale process-group census within the original
 > six-inspection ceiling and deadline, preserving refusal on persistent members or
-> observer errors. Typecheck and lint also pass eight groups each; committed-source
-> independent execution of this repair is pending. The shared-host S-2 timeout and
-> other historical causes remain open under `x77k`. This qualification uses a private
+> observer errors. Typecheck and lint also pass eight groups each. The final test
+> counter correction passes the affected suite; independent committed-source
+> controls, deliberate faults and restoration checks qualify the repair. The
+> shared-host S-2 timeout and other historical causes remain open under `x77k`.
+> This qualification uses a private
 > process namespace, proper init and `/tmp`; deployed and shared-host proof remain
 > separate. Protocol
 > `0.1.2-draft` retains all 13 rules and 525 of its 1,000-word rules budget.
