@@ -28,7 +28,9 @@
 > a holder fixture's premature self-expiry with a parent lease and preserves authentic
 > negative outcomes previously masked by missing-file errors. The original holder
 > case, typecheck and lint pass; token-lifecycle and S-3 pass in the new aggregate.
-> Those passes do not explain the historical failures. Protocol
+> A later independent S-3 control at `f8cc3559` fails with unproven ownership at
+> `final-census`, so the repair remains unqualified. Those passes do not explain
+> the historical failures. Protocol
 > `0.1.2-draft` retains all 13 rules and 525 of its 1,000-word rules budget.
 > The [Vercel Preview](https://asimposium-ale2dgqhb-dicklesworthstones-projects.vercel.app)
 > was verified READY at `43243cf8`; its application inputs are unchanged by this batch.

@@ -46,7 +46,20 @@ an unchanged isolated S-2 startup case passes in 8.850 seconds. Typecheck and li
 pass eight groups each. The source scanner completes both code files with zero
 critical findings and 14 existing warnings, reviewed without suppression; this is
 not broad security qualification. Full raw evidence is retained under
-`e2e/artifacts/lifecycle-x77k-20261103/`. Read-only process observations catch native
+`e2e/artifacts/lifecycle-x77k-20261103/`.
+
+A later independent run at `f8cc3559` fails its first unchanged selected holder
+control in 53.523 seconds: `ownership-unproven`, phase `final-census`, cleanup
+unproven. The validated negative result survives without an absent-file error,
+but the repair remains **unqualified**. The verifier stops there: the planned
+delayed-holder, lease-loss, restoration and controlled-inspector checks are not
+run. Its source/dependency audit stays exact; all nine observed process births
+retire, with 360 unreadable cwd observations limiting host visibility. The inner
+negative stream is not retained beyond authenticated outcome and byte counts;
+the complete outer streams and audits are under
+`e2e/artifacts/independent-x77k-f8cc3559-20261103/`. No acceptance or Bead is closed.
+
+Read-only process observations catch native
 `lsof` kernel waits, but do not establish the exact blocking path or explain every
 historical failure. An experimental mount exemption crashes installed lsof 4.99.4;
 a private official 4.99.7 comparison avoids that particular crash. Both versions
