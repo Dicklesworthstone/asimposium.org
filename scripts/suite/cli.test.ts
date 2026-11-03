@@ -620,14 +620,18 @@ const POST_KILL_CENSUS_OBSERVER = String.raw`
 use strict;
 use warnings;
 my ($pid_path, $state_path, $mode) = @ARGV;
-my $total = 0;
+my ($previous_member, $previous_observations, $total) = ("", 0, 0);
 if (open(my $previous, "<", $state_path)) {
-  <$previous>;
-  <$previous>;
+  $previous_member = <$previous> // "";
+  $previous_observations = <$previous> // 0;
   $total = <$previous> // 0;
   close($previous);
 }
 ++ $total;
+chomp($previous_member, $previous_observations);
+open(my $count, ">", $state_path) or exit 126;
+print {$count} "$previous_member\n$previous_observations\n$total\n";
+close($count) or exit 126;
 open(my $pid_file, "<", $pid_path) or exit 126;
 my $leader = <$pid_file>;
 close($pid_file);

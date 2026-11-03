@@ -16,7 +16,7 @@ observed.
 
 ### Bounded group retirement and the root gate — 2026-11-03
 
-The current source completes the original `bun run test`: **eight groups pass**
+The original `bun run test` at `7601f542` completes: **eight groups pass**
 in 1,364.307 seconds, ending at 22:22:31 UTC. Worker passes 6,656 tests and 30,547
 expectations across 284 files; Agora passes 883 tests and 5,831 expectations.
 Toolchain passes 405 tests with 54 existing skips, 3,995 expectations and 459
@@ -44,7 +44,16 @@ the natural race. The old runtime fails the intended positive/error assertions;
 the repair passes all three cases and both original failures. No old assertion,
 timeout, output ceiling or public contract changes.
 
-Final typecheck and lint pass all eight groups in 67.646 and 34.801 seconds;
+The full root run precedes a test-only counter correction. Review found that the
+observer could omit a count when a real census contained a descendant but no
+leader. It now persists the count before every branch, preserving the prior
+member and observation state. The runtime is byte-identical to the full-root
+snapshot. The corrected three cases pass, and the complete affected toolchain
+passes in 116.404 seconds: seed 46 pass, suite 405 pass / 54 existing skips /
+3,995 expectations, and the environment-interface self-test passes. No second
+Worker aggregate is claimed for this test-only correction.
+
+Before that correction, typecheck and lint pass all eight groups in 67.646 and 34.801 seconds;
 existing lint warnings and its diagnostic limit remain. The default source scan
 completes both changed code files with four critical matches, 13 warnings and 485
 informational findings. All four critical matches are unchanged synthetic token
@@ -54,6 +63,18 @@ the scanner's exit 1 is retained and is not called a clean security result.
 Independent source review finds no blocker; execution and deliberate faults at
 the committed revision are pending. Raw evidence is under
 `e2e/artifacts/group-reap-x77k-20261103/`.
+
+After the counter correction, typecheck and lint again pass eight groups in
+70.289 and 34.995 seconds, retaining existing warnings. Its default diff scan
+completes the one changed test file with the same four critical fixture matches
+and 13 warnings, plus 234 informational findings; exit 1 is retained.
+A read-only refresh at
+22:34 UTC gets HTTP 200 for the existing Preview home and its exact source copy
+of `AGENTS.md`; the home has its expected title/main and no application-error
+marker. This is two HTTP reads, not new browser or provider-log coverage.
+Production and staging capabilities also return 200 and the same retained
+September body hashes, both `0.1.0-draft`. The five required Cloudflare/staging/
+smoke inputs remain absent; no new deployment is performed.
 
 The full run uses the same private Linux process/proc namespace, installed
 `docker-init`, UID/GID 1000 and `/tmp` as the failed control. This establishes the
