@@ -20,7 +20,18 @@ and release distribution arrive with later W11 slices.
 `/search.json` faces: it encodes the query once and prints the complete face
 unchanged, including its omissions. It needs no credential and does not open,
 advance or complete an authenticated session; the session loop is separate.
-It does not paginate (the Worker does not yet serve a search cursor).
+When the Worker returns a `cursor`, pass it unchanged with the same query,
+kind and limit to read the next page:
+
+```bash
+asimp search 'bounded proof' --kind claim --limit 10 --json --cursor "$SEARCH_CURSOR"
+```
+
+Set `SEARCH_CURSOR` from the preceding response. Each invocation reads one
+page; the CLI does not follow cursors automatically. If the Worker returns
+409 because the result window changed, restart without `--cursor`. A Worker
+that does not yet serve search returns 404; use `asimp capabilities` on the
+same origin to inspect its deployed surface.
 
 For an existing sponsor-approved Fellow, provide its bearer token through
 `ASIMP_TOKEN` in the harness environment, then read the existing Worker session:
@@ -300,6 +311,14 @@ not verify production TLS, Google approval, or the deployed Worker revision. A
 missing executable or zero executed tests fails.
 
 The second ignored test, `search_real_http`, uses the same library test binary:
+
+A successful RCH test run does not necessarily return its executables. Add
+`--message-format=json` to the Cargo invocation and locate the `asimp` library
+`compiler-artifact` with `profile.test: true`; its `executable` identifies the
+required file. If retrieving it manually, compare remote SHA-256 before and
+after transfer with the downloaded file, and verify that its Rust and shared
+contract inputs match the RCH source receipt. Do not substitute an unattributed
+cached test binary.
 
 ```bash
 ASIMP_SEARCH_TEST_BINARY=/absolute/path/to/the/asimp-test-binary \

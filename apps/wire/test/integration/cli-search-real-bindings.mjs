@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
+import { ProblemCodeSchema } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // asimp search (bead asimposiumorg-l3b.1) against a real local Worker: real
@@ -11,12 +12,12 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // expected bytes are what curl fetched from the same Worker. Not a deployed,
 // TLS or authenticated-session-loop proof.
 //
-// Build the Rust library test binary first. On a host whose cargo runs through
-// RCH, sync it back as a job artifact, e.g.
-//   rch exec --job --result-dir e2e/artifacts/<dir> -- bash -c '... cargo test
-//     --manifest-path cli/Cargo.toml --locked --no-run --message-format=json ...
-//     && cp <lib test executable> e2e/artifacts/<dir>/asimp-lib-tests'
-// then run with ASIMP_SEARCH_TEST_BINARY=<that file>.
+// Build the matching Rust library test executable first (cli/README.md).
+// RCH test success does not imply executable retrieval. Use the asimp library
+// compiler-artifact with profile.test=true from Cargo's JSON output, retrieve
+// that exact executable, and verify its hash before/after transfer. Bind its
+// Rust/shared-contract inputs to the source receipt, then set
+// ASIMP_SEARCH_TEST_BINARY to the verified file, not an unbound cached binary.
 
 const execute = promisify(execFile);
 const binary = process.env.ASIMP_SEARCH_TEST_BINARY;
@@ -111,7 +112,19 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
   // face declares index_pending rather than a false "no matches".
   for (let attempt = 0; ; attempt++) {
     const probe = await curlFace("/search.json", [["q", "congruent modulo eight"]]);
-    const face = JSON.parse(probe.body);
+    let face;
+    try {
+      face = JSON.parse(probe.body);
+    } catch {
+      assert.fail(`search index probe: HTTP ${probe.status} non-JSON response`);
+    }
+    const code = ProblemCodeSchema.safeParse(face?.code);
+    assert.equal(
+      probe.status,
+      200,
+      `search index probe: HTTP ${probe.status} code=${code.success ? code.data : "unrecognized"}`,
+    );
+    assert.ok(Array.isArray(face?.items), "search index probe: HTTP 200 has no result items");
     if (face.items.some((item) => item.id === claim.claim_id)) break;
     assert.ok(
       face.omitted.some((entry) => entry.reason === "index_pending"),
@@ -197,23 +210,24 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
         "exactly one GET for curl's face with the WHATWG-encoded query, with the required user agent",
       );
     }
+    // This independent pagination check still needs the real HTTP bridge.
+    const secondFellowPage = JSON.parse(
+      (
+        await curlFace("/search.json", [
+          ["q", "cli-search"],
+          ["kind", "fellow"],
+          ["limit", "1"],
+          ["cursor", firstFellowPage.cursor],
+        ])
+      ).body,
+    );
+    assert.equal(secondFellowPage.items.length, 1);
+    assert.notEqual(secondFellowPage.items[0].id, firstFellowPage.items[0].id, "page two moves on");
+    assert.equal(secondFellowPage.cursor, undefined, "the last page issues no cursor");
   } finally {
     await new Promise((resolve) => bridge.close(resolve));
   }
   assert.ok(found >= 2, `the promoted claim is findable (found in ${found} faces)`);
-  const secondFellowPage = JSON.parse(
-    (
-      await curlFace("/search.json", [
-        ["q", "cli-search"],
-        ["kind", "fellow"],
-        ["limit", "1"],
-        ["cursor", firstFellowPage.cursor],
-      ])
-    ).body,
-  );
-  assert.equal(secondFellowPage.items.length, 1);
-  assert.notEqual(secondFellowPage.items[0].id, firstFellowPage.items[0].id, "page two moves on");
-  assert.equal(secondFellowPage.cursor, undefined, "the last page issues no cursor");
   console.log(
     JSON.stringify({
       kind: "cli-search-real-bindings",
