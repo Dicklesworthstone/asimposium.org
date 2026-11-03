@@ -4,6 +4,8 @@ import {
   PackResponseSchema,
   ProblemGovernanceEventSchema,
   ProblemResolutionResponseSchema,
+  RetractionsListResponseSchema,
+  RetractResponseSchema,
   ReviewResponseSchema,
 } from "@asimposium/contracts";
 import { opsRecords, runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
@@ -1004,10 +1006,222 @@ await runLocalWorkerJourney(async (context) => {
     );
   }
 
+  // An author concession acknowledges exact counterevidence, rather than
+  // withdrawing a claim or asserting its disposition. Exercise the mounted
+  // writer, immutable receipt and current/historical readers on real D1.
+  const concessionDraft = await call(
+    `${authorSessionPath}/workshop`,
+    {
+      type: "claim-draft",
+      title: "Parity counterexample for an author concession",
+      body_md: "Every integer square is odd.",
+    },
+    authorA,
+    201,
+  );
+  const concessionClaim = await call(
+    `${authorSessionPath}/promote`,
+    {
+      workshop_id: concessionDraft.workshop_id,
+      kind: "conjecture",
+      statement: "The square of every integer is odd.",
+      falsifier: "An integer whose square is even.",
+    },
+    authorA,
+    201,
+  );
+  const concessionClaimId = concessionClaim.claim_id;
+  const counterexample = await call(
+    `${reviewerSessionPathB}/evidence`,
+    {
+      bears_on_kind: "claim",
+      bears_on_id: concessionClaimId,
+      bears_on_version: 1,
+      direction: "refutes",
+      kind: "argument",
+      mode: "confirmatory",
+      source: {
+        kind: "locator",
+        locator: "https://example.invalid/counterexamples/square-of-two",
+        excerpt: "2 squared equals 4, which is even.",
+      },
+      body_md: "The integer 2 has the even square 4, contradicting the universal statement.",
+    },
+    reviewerB,
+    201,
+  );
+  await assertStanding(concessionClaimId, "disputed", "unreviewed");
+  const claimSource = await env.DB.prepare(`SELECT e.id, e.payload_sha256,
+    e.actor_fellow_id, e.actor_sponsor_id, v.content_digest
+    FROM events e JOIN claim_versions v ON v.problem_id=e.problem_id
+      AND v.claim_id=e.object_id AND v.version=e.object_version
+    WHERE e.problem_id=? AND e.object_id=? AND e.type='claim.created'`)
+    .bind(problemId, concessionClaimId)
+    .first();
+  const counterSource = await env.DB.prepare(`SELECT id, seq, payload_sha256,
+    actor_fellow_id, actor_sponsor_id FROM events
+    WHERE problem_id=? AND object_id=? AND type='evidence.created'`)
+    .bind(problemId, counterexample.evidence_id)
+    .first();
+  assert.ok(claimSource && counterSource);
+  assert.notEqual(claimSource.actor_fellow_id, counterSource.actor_fellow_id);
+  assert.notEqual(claimSource.actor_sponsor_id, counterSource.actor_sponsor_id);
+  const concessionBody = {
+    target_object: concessionClaimId,
+    reason: "The square of 2 is even; I concede this exact statement against that counterexample.",
+    concession: {
+      target_version: 1,
+      target_digest: claimSource.content_digest,
+      evidence: {
+        evidence_id: counterexample.evidence_id,
+        digest: `sha256:${counterSource.payload_sha256}`,
+      },
+    },
+  };
+  const concessionState = () =>
+    env.DB.prepare(`SELECT public_seq,
+      (SELECT COUNT(*) FROM events WHERE problem_id=?) AS events,
+      (SELECT COUNT(*) FROM claim_concessions WHERE problem_id=?) AS concessions
+      FROM problems WHERE id=?`)
+      .bind(problemId, problemId, problemId)
+      .first();
+  const beforeConcession = await concessionState();
+  const screensBeforeConcession = await fixtures.screeningCalls();
+  for (const badPin of [
+    { ...concessionBody.concession, target_version: 2 },
+    { ...concessionBody.concession, target_digest: `sha256:${"a".repeat(64)}` },
+    {
+      ...concessionBody.concession,
+      evidence: { ...concessionBody.concession.evidence, digest: `sha256:${"b".repeat(64)}` },
+    },
+  ]) {
+    const refused = await call(
+      `${authorSessionPath}/retract`,
+      { ...concessionBody, concession: badPin },
+      authorA,
+      422,
+    );
+    assert.equal(refused.code, "RETRACTION_TARGET_INVALID");
+  }
+  await call(`${reviewerSessionPathB}/retract`, concessionBody, reviewerB, 403);
+  assert.deepEqual(await concessionState(), beforeConcession, "bad concessions publish nothing");
+  assert.equal(await fixtures.screeningCalls(), screensBeforeConcession);
+
+  const concessionKey = "exact-counterevidence-concession";
+  const concession = RetractResponseSchema.parse(
+    await call(`${authorSessionPath}/retract`, concessionBody, authorA, 201, concessionKey),
+  );
+  assert.equal(concession.target_object, `${concessionClaimId}@1`);
+  assert.deepEqual(concession.concession, {
+    ...concessionBody.concession,
+    claim_source: {
+      event_id: claimSource.id,
+      digest: `sha256:${claimSource.payload_sha256}`,
+      fellow_id: claimSource.actor_fellow_id,
+      sponsor_id: claimSource.actor_sponsor_id,
+    },
+    evidence_source: {
+      event_id: counterSource.id,
+      digest: `sha256:${counterSource.payload_sha256}`,
+      fellow_id: counterSource.actor_fellow_id,
+      sponsor_id: counterSource.actor_sponsor_id,
+    },
+  });
+  const afterConcession = await concessionState();
+  assert.equal(afterConcession.events, beforeConcession.events + 1);
+  assert.equal(afterConcession.public_seq, beforeConcession.public_seq + 1);
+  assert.equal(afterConcession.concessions, 1, "a real immutable concession row was committed");
+  await assertStanding(concessionClaimId, "refuted", "unreviewed");
+  const historicalConcessionFace = ClaimFaceResponseSchema.parse(
+    await call(`/p/${problemId}/claims/${concessionClaimId}@1.json?through=${counterSource.seq}`),
+  );
+  assert.equal(historicalConcessionFace.claim_state.disposition, "disputed");
+
+  const retractions = RetractionsListResponseSchema.parse(
+    await call(`/p/${problemId}/retractions.json`),
+  );
+  assert.deepEqual(
+    retractions.retractions.find((item) => item.retraction_id === concession.retraction_id)
+      ?.concession,
+    concession.concession,
+  );
+  for (const format of ["md", "html"]) {
+    const response = await worker.fetch(`${origin}/p/${problemId}/retractions.${format}`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.ok(text.includes("author concession"));
+    assert.ok(text.includes(counterexample.evidence_id));
+    assert.ok(text.includes(counterSource.payload_sha256));
+  }
+  const concessionPack = PackResponseSchema.parse(
+    await call(
+      `${authorSessionPath}/pack?profile=full&max_tokens=8000&after=${counterSource.seq}&through=${concession.seq}`,
+      undefined,
+      authorA,
+    ),
+  );
+  const packedConcession = concessionPack.items
+    .filter((item) => item.kind === "full-event")
+    .map((item) => safeJsonParse(item.body))
+    .find((item) => item.publication?.object_id === concession.retraction_id);
+  assert.deepEqual(packedConcession?.content?.concession, concession.concession);
+
+  const revisedConcessionClaim = await call(
+    `${authorSessionPath}/revise`,
+    {
+      claim_id: concessionClaimId,
+      base_version: 1,
+      kind: "conjecture",
+      statement: "The square of every odd integer is odd.",
+      falsifier: "An odd integer whose square is even.",
+    },
+    authorA,
+    201,
+  );
+  assert.equal(revisedConcessionClaim.version, 2);
+  await assertStanding(concessionClaimId, "open", "unreviewed");
+  const concededVersion = ClaimFaceResponseSchema.parse(
+    await call(`/p/${problemId}/claims/${concessionClaimId}@1.json`),
+  );
+  assert.equal(concededVersion.claim_state.disposition, "refuted");
+  const beforeConcessionReplay = await concessionState();
+  const screensBeforeReplay = await fixtures.screeningCalls();
+  assert.deepEqual(
+    await call(`${authorSessionPath}/retract`, concessionBody, authorA, 200, concessionKey),
+    concession,
+    "the original concession replays even after a new claim version",
+  );
+  const conflict = await call(
+    `${authorSessionPath}/retract`,
+    { ...concessionBody, reason: "A changed concession using the already committed request key." },
+    authorA,
+    409,
+    concessionKey,
+  );
+  assert.equal(conflict.code, "IDEMPOTENCY_CONFLICT");
+  assert.deepEqual(await concessionState(), beforeConcessionReplay);
+  assert.equal(await fixtures.screeningCalls(), screensBeforeReplay);
+  const concessionWrite = opsRecords(context.workerLogs(), "fellow-write").find(
+    (record) => record.status === 201 && record.seq === concession.seq,
+  );
+  assert.ok(concessionWrite, "the committed concession leaves an OPS.2a write record");
+  assert.equal(concessionWrite.scope_id, authorSession.session_id);
+  assert.equal(concessionWrite.outcome, "committed-or-replayed");
+  assert.ok(
+    !context.workerLogs().some((log) => log.message.includes(concessionBody.reason)),
+    "Worker diagnostics never copy the authored concession reason",
+  );
+  console.log(
+    JSON.stringify({ stage: "author-concession", version: 1, current_version: 2, replay: "once" }),
+  );
+
   // W2.6 (79n, z3or): claims, their versions and dependencies (C-4 depends
   // on C-1), reviews, evidence and retractions rebuild from the log.
   const rebuilt = await assertProjectionsRebuild(context.env.DB, problemId);
   assert.ok(rebuilt.counts.claim_deps > 0, "the journey recorded a claim dependency");
+  assert.equal(rebuilt.counts.claim_concessions, 1, "the exact concession rebuilds from the log");
   console.log(JSON.stringify({ stage: "projection-rebuild", ...rebuilt }));
 
   // Fable §6.6 tier floor, on its own problem: a same-sponsor (T0) confirm,

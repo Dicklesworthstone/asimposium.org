@@ -1801,6 +1801,16 @@ export const PLANTS = [
     command: LANE("content-hide-sweep"),
   },
   {
+    id: "author-concession-is-only-withdrawal",
+    bead: "3b9",
+    file: "apps/wire/src/ledger/disposition-read.ts",
+    // Exact counterevidence is conceded, but the public reader treats it as
+    // ordinary withdrawal instead of preserving the refutation.
+    find: '      apply({ kind: "author-concession" });',
+    replace: '      apply({ kind: "author-withdrawal" });',
+    command: LANE("dispositions"),
+  },
+  {
     id: "review-state-counts-same-sponsor-checks",
     bead: "3b9",
     file: "apps/wire/src/ledger/dispositions.ts",

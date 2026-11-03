@@ -139,7 +139,13 @@
       "enrollment_sponsor_security_no_delete"
     ],
     "direct-append-race": ["hypotheses_immutable_delete"],
-    "dispositions": ["claim_deps_immutable_delete"],
+    "dispositions": [
+      "claim_concessions_no_delete",
+      "claim_concessions_no_update",
+      "claim_deps_immutable_delete",
+      "scientific_withdrawals_no_delete",
+      "scientific_withdrawals_no_update"
+    ],
     "fellow-rebind": [
       "fellow_rebinds_claim_immutable:claimed_at",
       "fellow_rebinds_claim_immutable:claimed_harness",
@@ -203,13 +209,9 @@
     "artifact_publication_review_no_update": "registered native journeys do not yet create operator review observations; held-publication recovery and immutable observation probes remain required by open rhg",
     "artifact_publication_review_release_no_delete": "registered native journeys do not yet create owner-consented review release receipts; complete recovery and immutable release probes remain required by open rhg",
     "artifact_publication_review_release_no_update": "registered native journeys do not yet create owner-consented review release receipts; complete recovery and immutable release probes remain required by open rhg",
-    "claim_concessions_no_delete": "registered native journeys do not yet publish exact-evidence author concessions; the concession transition and immutable receipt probes remain required by open 3b9",
-    "claim_concessions_no_update": "registered native journeys do not yet publish exact-evidence author concessions; the concession transition and immutable receipt probes remain required by open 3b9",
     "device_codes_immutable": "no real-bindings lane run through runLocalWorkerJourney leaves a row of device_codes that this trigger guards",
     "enrollment_credentials_legacy_frozen_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of enrollment_credentials that this trigger guards",
     "enrollment_credentials_legacy_frozen_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of enrollment_credentials that this trigger guards",
-    "scientific_withdrawals_no_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of scientific_withdrawals that this trigger guards",
-    "scientific_withdrawals_no_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of scientific_withdrawals that this trigger guards",
     "sponsor_device_enrollment_attempts_immutable_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_device_enrollment_attempts that this trigger guards",
     "sponsor_device_enrollment_attempts_immutable_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_device_enrollment_attempts that this trigger guards",
     "sponsor_fellow_cap_audit_events_immutable_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_fellow_cap_audit_events that this trigger guards",
