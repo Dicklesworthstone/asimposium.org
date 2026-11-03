@@ -26,13 +26,15 @@
 > current private status in JSON and Markdown. Independent native, deliberate-fault
 > and restoration checks qualify that bounded fix, preserving fresh owner consent
 > and rejecting mismatched case, owner and problem bindings. Typecheck, lint,
-> relevant inbox units, contracts and render pass. The latest complete root run is
-> **red: seven groups pass, one fails**. Worker passes all 6,656 tests; two toolchain
-> cleanup cases fail. A proper namespace init fixes the reproduced orphan-zombie
-> control, but does not restore the whole gate. The shared-host S-2 timeout and
-> other historical failures remain unclassified under `x77k`. Isolation also changes
-> temporary storage; its passes are not shared-host repair. The earlier S-3 repair remains unqualified after an
-> independent control fails at `final-census`. Protocol
+> relevant inbox units, contracts and render pass. The latest complete root run
+> **passes all eight groups**, including 6,656 Worker tests and 883 Agora tests.
+> The cleanup repair rechecks a stale process-group census within the original
+> six-inspection ceiling and deadline, preserving refusal on persistent members or
+> observer errors. Typecheck and lint also pass eight groups each; committed-source
+> independent execution of this repair is pending. The shared-host S-2 timeout and
+> other historical causes remain open under `x77k`. This qualification uses a private
+> process namespace, proper init and `/tmp`; deployed and shared-host proof remain
+> separate. Protocol
 > `0.1.2-draft` retains all 13 rules and 525 of its 1,000-word rules budget.
 > The [Vercel Preview](https://asimposium-ale2dgqhb-dicklesworthstones-projects.vercel.app)
 > was verified READY at `43243cf8`; its application inputs are unchanged by this batch.
@@ -50,7 +52,7 @@
 > hosted screening, provider storage, retained cost evidence and launch gates remain
 > open; production remains held. Disclosure, scientific-control and capture reliability
 > gaps also remain open. See the
-> [current assessment and remaining work](docs/README.md#artifact-review-notice-status-links--2026-11-03).
+> [current assessment and remaining work](docs/README.md#bounded-group-retirement-and-the-root-gate--2026-11-03).
 
 <details>
 <summary>Earlier qualification notes — retained history, superseded by the boundary above</summary>

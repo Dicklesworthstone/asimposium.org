@@ -14,6 +14,55 @@ observed.
 
 ## Current reality check — 2026-10-30
 
+### Bounded group retirement and the root gate — 2026-11-03
+
+The current source completes the original `bun run test`: **eight groups pass**
+in 1,364.307 seconds, ending at 22:22:31 UTC. Worker passes 6,656 tests and 30,547
+expectations across 284 files; Agora passes 883 tests and 5,831 expectations.
+Toolchain passes 405 tests with 54 existing skips, 3,995 expectations and 459
+cases across 13 files. All other root groups pass. The unchanged Worker dispatcher
+includes both `test/unit` and `test/split`, including the S-2, token-lifecycle and
+S-3 files. This is local source/unit qualification, with the existing native
+process and binding cases; it does not certify hosted or launch gates.
+
+The previous root's two cleanup failures are reproduced with the original
+assertions. A temporary observation runs only after the real final census
+refuses: in both failing cases, the returned member has already disappeared by
+the immediate `/proc` read. The launcher had reaped its direct child, then treated
+one stale snapshot as the final decision. That temporary diagnostic is removed
+before the repair. The launcher now uses the unused portion of its original six
+inspections to establish an empty group, within the unchanged absolute cleanup
+deadline. Each cleanup gets its own counter; no signal is sent after leader
+reaping. Persistent members and failed inspections still produce typed refusals.
+
+Three new unit cases use real process groups and `pgrep`, then deliberately replay
+an earlier member only after the group is actually empty. One stale response must
+recover; persistent stale responses and a subsequent observer error must refuse.
+The tests also require no more than six total inspections. These planted observer
+responses test control handling; the separate original-failure snapshots establish
+the natural race. The old runtime fails the intended positive/error assertions;
+the repair passes all three cases and both original failures. No old assertion,
+timeout, output ceiling or public contract changes.
+
+Final typecheck and lint pass all eight groups in 67.646 and 34.801 seconds;
+existing lint warnings and its diagnostic limit remain. The default source scan
+completes both changed code files with four critical matches, 13 warnings and 485
+informational findings. All four critical matches are unchanged synthetic token
+fixtures or a test label; warnings are existing strict test-output parsing and
+awaited helper races. Their source contexts are reviewed without suppression;
+the scanner's exit 1 is retained and is not called a clean security result.
+Independent source review finds no blocker; execution and deliberate faults at
+the committed revision are pending. Raw evidence is under
+`e2e/artifacts/group-reap-x77k-20261103/`.
+
+The full run uses the same private Linux process/proc namespace, installed
+`docker-init`, UID/GID 1000 and `/tmp` as the failed control. This establishes the
+current source gate there. Original `x77k` stays in progress with its historical
+diagnosis acceptance intact; older shared-host S-2 scanner/startup and token/S-3
+failures remain unclassified where no cause is demonstrated. The existing Vercel
+Preview and deployed Worker inputs are unchanged; sanctioned Cloudflare authority,
+hosted proof and launch acceptance remain outstanding.
+
 ### Artifact review notice status links — 2026-11-03
 
 An actual artifact review decision reached its owner with a QC case target but no

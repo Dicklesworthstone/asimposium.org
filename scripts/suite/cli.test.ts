@@ -614,6 +614,59 @@ while (1) { sleep 1; }
 `;
 }
 
+// Planted observer delay, not an OS/process simulation: the real group must
+// already be empty before this fixture replays one of its earlier member IDs.
+const POST_KILL_CENSUS_OBSERVER = String.raw`
+use strict;
+use warnings;
+my ($pid_path, $state_path, $mode) = @ARGV;
+my $total = 0;
+if (open(my $previous, "<", $state_path)) {
+  <$previous>;
+  <$previous>;
+  $total = <$previous> // 0;
+  close($previous);
+}
+++ $total;
+open(my $pid_file, "<", $pid_path) or exit 126;
+my $leader = <$pid_file>;
+close($pid_file);
+chomp $leader;
+exit 126 if $leader !~ /^[1-9][0-9]*$/;
+open(my $read, "-|", "/usr/bin/pgrep", "-g", $leader, ".*") or exit 126;
+my $output = do { local $/; <$read> } // "";
+close($read);
+my $status = $? >> 8;
+if ($status == 0) {
+  my @members = split(/\n/, $output);
+  if (grep { $_ == $leader } @members) {
+    my ($member) = grep { $_ != $leader } @members;
+    open(my $state, ">", $state_path) or exit 126;
+    print {$state} ($member // $leader), "\n0\n$total\n";
+    close($state) or exit 126;
+  }
+  print STDOUT $output;
+  exit 0;
+}
+exit $status if $status != 1 || $output ne "";
+open(my $state_read, "<", $state_path) or exit 126;
+my $member = <$state_read>;
+my $observations = <$state_read>;
+close($state_read);
+chomp $member;
+++ $observations;
+open(my $state_write, ">", $state_path) or exit 126;
+print {$state_write} "$member\n$observations\n$total\n";
+close($state_write) or exit 126;
+if ($observations > 1 && $mode eq "once") { exit 1; }
+if ($observations > 1 && $mode eq "error") {
+  print STDERR "planted post-KILL inspection failure\n";
+  exit 2;
+}
+print STDOUT "$member\n";
+exit 0;
+`;
+
 const FRAGMENTED_CONTROL_SUPERVISOR = String.raw`
 use strict;
 use warnings;
@@ -1593,6 +1646,47 @@ describe("owned session launcher", () => {
     expect(result.outcome).toBe("inspection-unproven");
     expect(result.ownershipFailurePhase).toBe("initial-census");
   });
+
+  test.each([
+    ["once", "output-overrun", true],
+    ["persistent", "ownership-unproven", false],
+    ["error", "inspection-unproven", false],
+  ] as const)(
+    "PLANTED: %s post-KILL census retains strict cleanup proof",
+    async (mode, outcome, cleanup) => {
+      const nonce = crypto.randomUUID();
+      const pidPath = capturePath(`post-kill-${nonce}.pid`);
+      const statePath = capturePath(`post-kill-${nonce}.state`);
+      const result = await runOwnedCommand({
+        command: [
+          "perl",
+          "-e",
+          '$SIG{TERM} = sub {}; $SIG{HUP} = sub {}; syswrite(STDOUT, "x" x 129); while (1) { sleep 1; }',
+        ],
+        cwd: process.cwd(),
+        env: childEnvironment(),
+        timeoutMs: 2_000,
+        termGraceMs: 40,
+        killReapMs: 300,
+        pipeDrainMs: 200,
+        retainedStreamBytes: 128,
+        retainedOutputBytes: 128,
+        supervisorScript: stubbornReleaseSupervisor(pidPath),
+        inspectionCommand: ["perl", "-e", POST_KILL_CENSUS_OBSERVER, pidPath, statePath, mode],
+      });
+
+      expect(result.outcome).toBe(outcome);
+      expect(result.cleanupProven).toBe(cleanup);
+      expect(result.retainedStdoutBytes).toBe(128);
+      expect(ownedGroupPids(Number(readFileSync(pidPath, "utf8").trim()))).toEqual([]);
+      const [, observed, total] = readFileSync(statePath, "utf8").trim().split("\n");
+      const observations = Number(observed);
+      expect(observations).toBeGreaterThan(0);
+      expect(Number(total)).toBeLessThanOrEqual(6);
+      if (mode === "once" || mode === "error") expect(observations).toBe(2);
+      if (mode !== "once") expect(result.ownershipFailurePhase).toBe("final-census");
+    },
+  );
 
   test("a stalled inspector retires a live target through the parent lease", async () => {
     const marker = `suite-stalled-inspector-${crypto.randomUUID()}`;

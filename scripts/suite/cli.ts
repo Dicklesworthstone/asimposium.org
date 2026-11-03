@@ -646,6 +646,7 @@ interface OwnedSessionInspectorOptions {
   timeoutMs: number;
   streamLimitBytes: number;
   outputLimitBytes: number;
+  remainingInspections?: number;
 }
 
 type OwnedGroupCensus =
@@ -683,6 +684,10 @@ async function inspectOwnedProcessGroup(
   options: OwnedSessionInspectorOptions,
   deadlineAt: number,
 ): Promise<OwnedGroupCensus> {
+  if (options.remainingInspections !== undefined) {
+    if (options.remainingInspections <= 0) return { state: "inspection-unproven" };
+    options.remainingInspections -= 1;
+  }
   const timeoutMs = Math.min(options.timeoutMs, millisecondsBefore(deadlineAt));
   if (timeoutMs <= 0) return { state: "inspection-unproven" };
 
@@ -1391,14 +1396,16 @@ async function releaseOrKillOwnedSession(
   retireThroughParentLease?: () => void,
   recordOwnershipFailure?: (phase: OwnedSessionFailurePhase) => void,
 ): Promise<OwnedCommandOutcome | undefined> {
-  const inspection =
-    inspector ??
-    inspectionOptions({
-      command: [],
-      cwd: "",
-      env: {},
-      timeoutMs: 0,
-    });
+  const inspection = {
+    ...(inspector ??
+      inspectionOptions({
+        command: [],
+        cwd: "",
+        env: {},
+        timeoutMs: 0,
+      })),
+    remainingInspections: OWNED_PROCESS_MAX_INSPECTIONS_PER_CLEANUP,
+  };
   const cleanupDeadlineAt =
     performance.now() +
     termGraceMs +
@@ -1432,14 +1439,22 @@ async function releaseOrKillOwnedSession(
     }
     if (signal !== "signalled") return ownershipUnproven("kill-signal");
     if (!(await reapBefore(child, cleanupDeadlineAt))) return ownershipUnproven("kill-reap");
-    const finalCensus = await inspectOwnedProcessGroup(leaderPid, inspection, cleanupDeadlineAt);
-    if (finalCensus.state === "inspection-unproven") {
-      recordOwnershipFailure?.("final-census");
-      return "inspection-unproven";
+    while (true) {
+      const finalCensus = await inspectOwnedProcessGroup(leaderPid, inspection, cleanupDeadlineAt);
+      if (finalCensus.state === "inspection-unproven") {
+        recordOwnershipFailure?.("final-census");
+        return "inspection-unproven";
+      }
+      if (finalCensus.members.length === 0) return undefined;
+      // Reaping the direct child does not order after an orphan's retirement.
+      // A pgrep member can disappear before we even read its /proc entry. Use
+      // the remaining original inspection/deadline budget to prove emptiness;
+      // never signal again after the identity-pinning leader has been reaped.
+      if (inspection.remainingInspections === 0 || !(await sleepBefore(10, cleanupDeadlineAt))) {
+        recordOwnershipFailure?.("final-census");
+        return "ownership-unproven";
+      }
     }
-    if (finalCensus.members.length === 0) return undefined;
-    recordOwnershipFailure?.("final-census");
-    return "ownership-unproven";
   };
 
   // The supervisor intentionally emits `-1`: post-target census authority lives
