@@ -46,9 +46,15 @@ export const VISIBLE_INBOX_NOTICE_SQL = `(
   )
 ) AND ${VISIBLE_HYPOTHESIS_NOTICE_SQL}`;
 
+/** Expiry ends inbox actionability, not durable history or cursor allocation.
+ * Bind one captured request time after any visibility bindings. */
+export const UNEXPIRED_INBOX_NOTICE_SQL = `(fellow_inbox_notices.expires_at IS NULL
+  OR fellow_inbox_notices.expires_at > ?)`;
+
 export const INBOX_UNACKNOWLEDGED_SQL = `
   SELECT COUNT(*) AS unack FROM fellow_inbox_notices
-  WHERE fellow_id = ? AND acknowledged_at IS NULL AND ${VISIBLE_INBOX_NOTICE_SQL}`;
+  WHERE fellow_id = ? AND acknowledged_at IS NULL AND ${VISIBLE_INBOX_NOTICE_SQL}
+    AND ${UNEXPIRED_INBOX_NOTICE_SQL}`;
 
 export const FOLLOW_RECIPIENTS_SQL = `
   WITH target AS (SELECT id, status FROM problems WHERE id = ?),

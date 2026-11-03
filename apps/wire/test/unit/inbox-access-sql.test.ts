@@ -28,7 +28,8 @@ function fixture(run: (db: Database) => void) {
       CREATE TABLE problem_follows (principal_id TEXT, problem_id TEXT, created_at INTEGER, PRIMARY KEY(principal_id, problem_id));
       CREATE TABLE fellow_inbox_notices (
         id TEXT PRIMARY KEY, fellow_id TEXT, problem_id TEXT, seq INTEGER, acknowledged_at INTEGER,
-        notice_type TEXT DEFAULT 'statement_revision', target_id TEXT, caused_by_event_id TEXT
+        notice_type TEXT DEFAULT 'statement_revision', target_id TEXT, caused_by_event_id TEXT,
+        expires_at INTEGER
       );
       INSERT INTO problems(id,status,unlisted) VALUES ('P-PUBLIC', 'active', 0), ('P-UNLISTED', 'active', 1), ('P-PRIVATE', 'private-draft', 1);
       INSERT INTO enrollment_fellows VALUES ('fellow-a'), ('fellow-b');
@@ -65,7 +66,7 @@ function visible(db: Database, fellow: string, since = 0, limit = 50) {
 }
 
 function unacknowledged(db: Database, fellow: string) {
-  return (db.query(INBOX_UNACKNOWLEDGED_SQL).get(fellow) as { unack: number }).unack;
+  return (db.query(INBOX_UNACKNOWLEDGED_SQL).get(fellow, 100) as { unack: number }).unack;
 }
 
 describe("follow and inbox visibility is current authority, not a subscription", () => {

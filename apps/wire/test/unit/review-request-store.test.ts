@@ -265,6 +265,44 @@ test("concurrent unchanged retries return exactly one invitation and one notice"
     f.sql.close();
   }
 });
+test.each(["decline", "cancel"] as const)(
+  "%s after invitation expiry preserves a non-expiring terminal notice",
+  async (action) => {
+    const f = await fixture();
+    try {
+      await commitRequest(f.db, f.crypto, f.offer);
+      const base = action === "decline" ? f.response("decline") : f.offer;
+      const command: RequestCommand = {
+        ...base,
+        action,
+        scope: "coordinate",
+        eventId: `RRE-late-${action}`,
+        idempotencyKey: `late-${action}`,
+        requestDigest: `late-${action}`,
+        receipt: {
+          ...base.receipt,
+          version: 2,
+          status: action === "decline" ? "declined" : "cancelled",
+          updated_at: f.offer.receipt.expires_at + 1,
+        },
+      };
+      const receipt = await commitRequest(f.db, f.crypto, command);
+      assert.equal(receipt.status, command.receipt.status);
+      assert.equal(receipt.expires_at, f.offer.receipt.expires_at);
+      assert.deepEqual(
+        f.sql
+          .query("SELECT created_at, expires_at FROM fellow_inbox_notices WHERE id = ?")
+          .get(`IN-${command.eventId}`),
+        { created_at: command.receipt.updated_at, expires_at: null },
+      );
+      assert.deepEqual(await commitRequest(f.db, f.crypto, command), receipt);
+      assert.equal(f.count("fellow_inbox_notices"), 2);
+    } finally {
+      f.sql.close();
+    }
+  },
+);
+
 test("racing accept and decline cannot both settle the same invitation version", async () => {
   const f = await fixture();
   try {
@@ -546,6 +584,12 @@ test("accepted work completes through a verified review and notifies its author 
     assert.equal(completed.status, "completed");
     assert.equal(completed.review_event_id, "EV-complete");
     assert.deepEqual(await commitRequest(f.db, f.crypto, command), completed);
+    assert.deepEqual(
+      f.sql
+        .query("SELECT expires_at FROM fellow_inbox_notices WHERE id = ?")
+        .get(`IN-${command.eventId}`),
+      { expires_at: null },
+    );
     assert.equal(f.count("review_request_events"), 3);
     assert.equal(f.count("fellow_inbox_notices"), 3);
     assert.equal(f.count("events"), 2);

@@ -175,6 +175,11 @@ await runLocalWorkerJourney(
         JSON.stringify(delivered[0]).includes(requested.request_id),
         "the notice links the exact request",
       );
+      assert.equal(
+        delivered[0].expires_at,
+        requested.expires_at,
+        "an offer expires with its invitation",
+      );
       assert.equal((await inboxOf(sameFamily)).length, 0);
       assert.equal((await inboxOf(sameSponsor)).length, 0);
 
@@ -192,6 +197,11 @@ await runLocalWorkerJourney(
         );
       const declines = await declinesOf(author);
       assert.equal(declines.length, 1, "the author is told once that the reviewer declined");
+      assert.equal(
+        declines[0].expires_at,
+        null,
+        "a terminal update outlives the old offer deadline",
+      );
       assert.ok(JSON.stringify(declines[0]).includes(requested.request_id));
       assert.ok(declines[0].next_actions?.[0]?.url.includes(requested.request_id));
       for (const other of [eligible, sameFamily, sameSponsor]) {

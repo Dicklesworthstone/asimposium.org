@@ -14,6 +14,27 @@ observed.
 
 ## Current reality check — 2026-10-30
 
+### Inbox expiry and current root-gate failure — 2026-11-03
+
+Inbox reads, unread counts and both acknowledgment modes now honor stored expiry
+using one captured request time. Expiry filters before pagination and preserves
+rows, retry receipts and cursor allocation. New terminal review outcomes have no
+expiry; existing notices retain their recorded deadlines. No contract, endpoint
+or migration is added. The unchanged native journey first returns an expired
+notice instead of its live successor; the corrected Stoa and matchmaking journeys
+pass, as do 168 targeted unit tests, typecheck 8/8 and lint 8/8.
+
+The complete root unit run is **RED: seven groups pass, one fails**. Worker runs
+6,656 cases: 6,646 pass and ten fail in unchanged S2, token-lifecycle and S3
+process-supervision tests. Failures include watchdog timeout, unproven leader
+reaping, a holder inspection mismatch and missing retained child receipts. A
+bounded rerun of the S3 holder case also fails. Their causes remain unclassified;
+neither an inbox regression nor a host-only explanation has been established.
+`asimposiumorg-x77k` owns restoration of the root gate, and `1e7` retains its full
+unfinished acceptance. Complete raw evidence is under
+`e2e/artifacts/inbox-expiry-20261103/`. The Cloudflare rollout still needs `rs5n`;
+these local results do not establish deployed or launch readiness.
+
 ### Mounted experiment proof and history decision — 2026-11-02
 
 Source `c7cfa3d795bba709c81ee4c83775b5f070a3a180` adds real native coverage for the

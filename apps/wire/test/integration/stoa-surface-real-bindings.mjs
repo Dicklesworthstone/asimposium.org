@@ -14,6 +14,7 @@ import {
 import { EventTailResponseSchema } from "../../../../packages/contracts/src/event-tail.ts";
 import { ProblemDocumentSchema } from "../../../../packages/contracts/src/problem.ts";
 import { SessionStatusResponseSchema } from "../../../../packages/contracts/src/sessions.ts";
+import { createInboxNotice } from "../../src/inbox/store.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // W6 Stoa surface on real Workerd HTTP, D1 and R2 (bead asimposiumorg-lu59):
@@ -72,6 +73,95 @@ await runLocalWorkerJourney(
     const author = await enroll("stoa-surface-author", "usr_stoa_author");
     const reviewer = await enroll("stoa-surface-reviewer", "usr_stoa_reviewer");
     const second = await enroll("stoa-surface-second", "usr_stoa_second");
+    const expiryReader = await enroll("stoa-expiry-reader", "usr_stoa_expiry");
+    const expiryFellow = (await call("/v1/hello", undefined, expiryReader)).fellow.fellow_id;
+    const noticeTime = Date.now();
+    const expiredInput = {
+      id: "NOT-stoa-expired",
+      fellowId: expiryFellow,
+      noticeType: "protocol_notice",
+      title: "Expired inbox action canary",
+      createdAt: noticeTime - 2000,
+      expiresAt: noticeTime - 1000,
+    };
+    const expiredNotice = await createInboxNotice(env.DB, expiredInput);
+    const liveNotice = await createInboxNotice(env.DB, {
+      ...expiredInput,
+      id: "NOT-stoa-live",
+      title: "Current inbox action canary",
+      expiresAt: noticeTime + 3600000,
+    });
+    const permanentNotice = await createInboxNotice(env.DB, {
+      ...expiredInput,
+      id: "NOT-stoa-permanent",
+      title: "Persistent inbox update canary",
+      expiresAt: null,
+    });
+    const expiryPage = InboxResponseSchema.parse(
+      await call("/v1/inbox?limit=1", undefined, expiryReader),
+    );
+    assert.deepEqual(
+      expiryPage.items.map((item) => item.id),
+      [liveNotice.id],
+    );
+    assert.equal(expiryPage.unacknowledged_count, 2);
+    assert.equal(expiryPage.next_cursor, liveNotice.seq);
+    assert.equal(expiryPage.has_more, true, "expiry is filtered before pagination");
+    const expiryNext = await call(`/v1/inbox?since=${liveNotice.seq}`, undefined, expiryReader);
+    assert.deepEqual(
+      expiryNext.items.map((item) => item.id),
+      [permanentNotice.id],
+    );
+    const expiredAck = await call(
+      "/v1/inbox/ack",
+      { notice_ids: [expiredNotice.id] },
+      expiryReader,
+    );
+    assert.deepEqual(expiredAck, { acknowledged_count: 0, unacknowledged_count: 2 });
+    const expiryBulkAck = await call(
+      "/v1/inbox/ack",
+      { until_seq: permanentNotice.seq },
+      expiryReader,
+    );
+    assert.deepEqual(expiryBulkAck, { acknowledged_count: 2, unacknowledged_count: 0 });
+    assert.deepEqual(
+      await env.DB.prepare("SELECT acknowledged_at FROM fellow_inbox_notices WHERE id = ?")
+        .bind(expiredNotice.id)
+        .first(),
+      { acknowledged_at: null },
+    );
+    assert.deepEqual(
+      await createInboxNotice(env.DB, {
+        ...expiredInput,
+        createdAt: noticeTime + 1,
+        expiresAt: noticeTime + 3600000,
+      }),
+      expiredNotice,
+      "an original expired receipt is not renewed by a delivery retry",
+    );
+    const expiryMarkdown = await worker.fetch(`${origin}/v1/inbox.md`, {
+      headers: { "User-Agent": userAgent, authorization: `Bearer ${expiryReader}` },
+    });
+    assert.equal(expiryMarkdown.status, 200);
+    assert.equal(expiryMarkdown.headers.get("cache-control"), "private, no-store");
+    assert.ok(!(await expiryMarkdown.text()).includes(expiredInput.title));
+    const laterNotice = await createInboxNotice(env.DB, {
+      ...expiredInput,
+      id: "NOT-stoa-later",
+      title: "Later inbox update canary",
+      expiresAt: null,
+    });
+    assert.equal(laterNotice.seq, permanentNotice.seq + 1, "expired history retains its cursor");
+    assert.equal(
+      (
+        await env.DB.prepare("SELECT COUNT(*) AS n FROM fellow_inbox_notices WHERE fellow_id = ?")
+          .bind(expiryFellow)
+          .first()
+      ).n,
+      4,
+      "expiry does not delete notice history",
+    );
+    console.log(JSON.stringify({ stage: "inbox-expiry", retained: 4, expired: 1 }));
     // Follow routes consume the same problem grammar as sessions and public
     // faces, including short IDs, internal hyphens and the maximum length.
     for (const problemId of ["P-AB", "P-FOLLOW-1", `P-${"A".repeat(31)}`]) {

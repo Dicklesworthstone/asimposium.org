@@ -101,6 +101,55 @@ const count = (sql: Database) =>
   (sql.query("SELECT COUNT(*) AS n FROM fellow_inbox_notices").get() as { n: number }).n;
 
 describe("causal inbox delivery survives retries", () => {
+  test("expiry alone removes actions and unread debt without erasing delivery history", async () => {
+    await fixture(async ({ db, sql }) => {
+      const expired = await createInboxNotice(db, input);
+      const live = await createInboxNotice(db, {
+        ...input,
+        causedByEventId: "E-live",
+        expiresAt: 2000,
+      });
+      const permanent = await createInboxNotice(db, {
+        ...input,
+        causedByEventId: "E-permanent",
+        expiresAt: null,
+      });
+      const before = await getInboxNotices(db, "fellow-a", { limit: 1 }, 999);
+      expect(before.items.map((item) => item.id)).toEqual([expired.id]);
+      expect(before.unacknowledged_count).toBe(3);
+      const atExpiry = await getInboxNotices(db, "fellow-a", { limit: 1 }, 1000);
+      expect(atExpiry.items.map((item) => item.id)).toEqual([live.id]);
+      expect(atExpiry.next_cursor).toBe(live.seq);
+      expect(atExpiry.has_more).toBe(true);
+      expect(atExpiry.unacknowledged_count).toBe(2);
+      const next = await getInboxNotices(db, "fellow-a", { limit: 1, since: live.seq }, 1000);
+      expect(next.items.map((item) => item.id)).toEqual([permanent.id]);
+      expect(next.has_more).toBe(false);
+      expect(await ackInboxNotices(db, "fellow-a", { notice_ids: [expired.id] }, 1000)).toEqual({
+        acknowledged_count: 0,
+        unacknowledged_count: 2,
+      });
+      expect(await ackInboxNotices(db, "fellow-a", { until_seq: permanent.seq }, 1000)).toEqual({
+        acknowledged_count: 2,
+        unacknowledged_count: 0,
+      });
+      expect(
+        sql.query("SELECT acknowledged_at FROM fellow_inbox_notices WHERE id = ?").get(expired.id),
+      ).toEqual({ acknowledged_at: null });
+      expect(count(sql)).toBe(3);
+      expect(await createInboxNotice(db, { ...input, createdAt: 3000, expiresAt: 9000 })).toEqual(
+        expired,
+      );
+      expect((await getInboxNotices(db, "fellow-a", { limit: 50 }, 1000)).items).toHaveLength(2);
+      const later = await createInboxNotice(db, {
+        ...input,
+        causedByEventId: "E-later",
+        expiresAt: null,
+      });
+      expect(later.seq).toBe(4);
+    });
+  });
+
   test("replaying a causal notice returns the original content and cursor", async () => {
     await fixture(async ({ db, sql }) => {
       const first = await createInboxNotice(db, input);

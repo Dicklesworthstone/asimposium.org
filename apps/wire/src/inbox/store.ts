@@ -16,6 +16,7 @@ import {
   FOLLOW_RECIPIENTS_SQL,
   FOLLOW_STATUS_SQL,
   INBOX_UNACKNOWLEDGED_SQL,
+  UNEXPIRED_INBOX_NOTICE_SQL,
   VISIBLE_INBOX_NOTICE_SQL,
 } from "./follow-access.ts";
 import { ledgerNoticeActions } from "./ledger-notice-actions.ts";
@@ -213,6 +214,7 @@ export async function getInboxNotices(
   db: D1Database,
   fellowId: string,
   query: InboxQuery,
+  now: number = Date.now(),
 ): Promise<InboxResponse> {
   const limit = query.limit ?? 50;
   const since = query.since;
@@ -227,9 +229,9 @@ export async function getInboxNotices(
              AND e.type = 'evidence.created' AND e.object_kind = 'evidence'
              AND e.object_version = 1) AS source_evidence_id
     FROM fellow_inbox_notices
-    WHERE fellow_id = ? AND ${VISIBLE_INBOX_NOTICE_SQL}
+    WHERE fellow_id = ? AND ${VISIBLE_INBOX_NOTICE_SQL} AND ${UNEXPIRED_INBOX_NOTICE_SQL}
   `;
-  const binds: (string | number)[] = [fellowId];
+  const binds: (string | number)[] = [fellowId, now];
 
   if (since !== undefined) {
     sql += " AND seq > ?";
@@ -256,7 +258,7 @@ export async function getInboxNotices(
   // Total unacknowledged count for this fellow
   const unackRow = await db
     .prepare(INBOX_UNACKNOWLEDGED_SQL)
-    .bind(fellowId)
+    .bind(fellowId, now)
     .first<{ unack: number }>();
   const unacknowledgedCount = unackRow?.unack ?? 0;
 
@@ -292,10 +294,11 @@ export async function ackInboxNotices(
         AND id IN (${placeholders})
         AND acknowledged_at IS NULL
         AND ${VISIBLE_INBOX_NOTICE_SQL}
+        AND ${UNEXPIRED_INBOX_NOTICE_SQL}
     `;
     const result = await db
       .prepare(updateSql)
-      .bind(now, fellowId, ...request.notice_ids)
+      .bind(now, fellowId, ...request.notice_ids, now)
       .run();
     acknowledgedCount = result.meta?.changes ?? 0;
   } else if (request.until_seq !== undefined) {
@@ -306,15 +309,16 @@ export async function ackInboxNotices(
         AND seq <= ?
         AND acknowledged_at IS NULL
         AND ${VISIBLE_INBOX_NOTICE_SQL}
+        AND ${UNEXPIRED_INBOX_NOTICE_SQL}
     `;
-    const result = await db.prepare(updateSql).bind(now, fellowId, request.until_seq).run();
+    const result = await db.prepare(updateSql).bind(now, fellowId, request.until_seq, now).run();
     acknowledgedCount = result.meta?.changes ?? 0;
   }
 
   // Check remaining unacknowledged count
   const unackRow = await db
     .prepare(INBOX_UNACKNOWLEDGED_SQL)
-    .bind(fellowId)
+    .bind(fellowId, now)
     .first<{ unack: number }>();
   const unacknowledgedCount = unackRow?.unack ?? 0;
 

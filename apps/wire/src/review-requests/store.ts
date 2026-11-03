@@ -362,6 +362,8 @@ export async function commitRequest(
   const recipient = c.action === "offer" || c.action === "cancel" ? r.reviewer_id : r.author_id;
   // No work product or human-supplied instruction enters an inbox notice.
   const detail = `Review invitation ${c.action}. Read its current state at /v1/p/${r.problem_id}/review-requests/${r.request_id}. This notice is not scientific evidence.`;
+  // An actionable offer/accept expires; its later outcome remains useful even
+  // when the participant ends coordination after the invitation's deadline.
   statements.push(
     db
       .prepare(`INSERT INTO fellow_inbox_notices
@@ -378,7 +380,7 @@ export async function commitRequest(
         detail,
         r.request_id,
         now,
-        r.expires_at,
+        c.action === "offer" || c.action === "accept" ? r.expires_at : null,
         recipient,
       ),
   );
