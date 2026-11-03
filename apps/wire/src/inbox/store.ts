@@ -1,14 +1,17 @@
-import type {
-  EnrollmentNextAction,
-  ImpactEchoKind,
-  InboxAckRequest,
-  InboxAckResponse,
-  InboxItem,
-  InboxNoticeType,
-  InboxQuery,
-  InboxResponse,
-  ProblemFollowResponse,
+import {
+  type EnrollmentNextAction,
+  type ImpactEchoKind,
+  type InboxAckRequest,
+  type InboxAckResponse,
+  type InboxItem,
+  type InboxNoticeType,
+  type InboxQuery,
+  type InboxResponse,
+  type ProblemFollowResponse,
+  ProblemIdSchema,
+  ScreeningPromotionHoldResponseSchema,
 } from "@asimposium/contracts";
+import { ArtifactPublicationReceiptSchema } from "@asimposium/contracts/artifact-publications";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
   FOLLOW_DELETE_SQL,
@@ -58,11 +61,64 @@ interface NoticeRow {
   source_evidence_id?: string | null;
 }
 
+const reviewCaseIdSchema = ScreeningPromotionHoldResponseSchema.options[0].shape.case_id.unwrap();
+
+/** Enrich only this returned page, without reading artifact bytes or granting
+ * publication consent. A notice's exact case, problem and recipient must all
+ * agree with the existing immutable publication binding. */
+async function artifactPublicationNoticePaths(
+  db: D1Database,
+  fellowId: string,
+  rows: readonly NoticeRow[],
+): Promise<Map<string, string>> {
+  const candidates = rows
+    .filter(
+      (row) =>
+        row.notice_type === "moderation_outcome" &&
+        reviewCaseIdSchema.safeParse(row.target_id).success &&
+        ProblemIdSchema.safeParse(row.problem_id).success,
+    )
+    .map((row) => ({ id: row.id, case_id: row.target_id, problem_id: row.problem_id }));
+  const paths = new Map<string, string>();
+  if (candidates.length === 0) return paths;
+
+  // One bounded JSON parameter avoids both an N+1 lookup and D1's bind limit.
+  const result = await db
+    .prepare(`SELECT json_extract(n.value, '$.id') AS notice_id, b.publication_id
+      FROM json_each(?) n
+      JOIN artifact_publication_reviews r ON r.case_id = json_extract(n.value, '$.case_id')
+      JOIN artifact_publications b ON b.publication_id = r.publication_id
+      WHERE b.fellow_id = ? AND b.problem_id = json_extract(n.value, '$.problem_id')`)
+    .bind(JSON.stringify(candidates), fellowId)
+    .all<{ notice_id: string; publication_id: string }>();
+  if (!result.success) throw new Error("Artifact notice status lookup is unavailable.");
+  for (const row of result.results ?? []) {
+    const path = ArtifactPublicationReceiptSchema.shape.status_path.safeParse(
+      `/v1/artifact-publications/${row.publication_id}`,
+    );
+    if (!path.success) continue;
+    if (paths.has(row.notice_id)) throw new Error("Artifact notice status binding is ambiguous.");
+    paths.set(row.notice_id, path.data);
+  }
+  return paths;
+}
+
 function buildNoticeNextActions(
   noticeType: string,
   problemId?: string | null,
   targetId?: string | null,
+  artifactStatusPath?: string,
 ): EnrollmentNextAction[] {
+  if (noticeType === "moderation_outcome" && artifactStatusPath !== undefined) {
+    return [
+      {
+        action: "orient",
+        url: artifactStatusPath,
+        reason:
+          "Inspect this artifact publication's current delivery and recovery state before deciding whether to retry.",
+      },
+    ];
+  }
   const invitation = reviewInvitationLink(problemId, targetId);
   if (noticeType === "review_decline" && invitation !== null) {
     return [
@@ -122,9 +178,9 @@ function buildNoticeNextActions(
   }
 }
 
-function rowToItem(row: NoticeRow): InboxItem {
+function rowToItem(row: NoticeRow, artifactStatusPath?: string): InboxItem {
   const nextActions = [
-    ...buildNoticeNextActions(row.notice_type, row.problem_id, row.target_id),
+    ...buildNoticeNextActions(row.notice_type, row.problem_id, row.target_id, artifactStatusPath),
     ...ledgerNoticeActions(
       row.notice_type,
       row.problem_id,
@@ -251,7 +307,8 @@ export async function getInboxNotices(
 
   const hasMore = rows.length > limit;
   const slicedRows = hasMore ? rows.slice(0, limit) : rows;
-  const items = slicedRows.map(rowToItem);
+  const artifactPaths = await artifactPublicationNoticePaths(db, fellowId, slicedRows);
+  const items = slicedRows.map((row) => rowToItem(row, artifactPaths.get(row.id)));
 
   const nextCursor = items.length > 0 ? (items[items.length - 1]?.seq ?? null) : null;
 

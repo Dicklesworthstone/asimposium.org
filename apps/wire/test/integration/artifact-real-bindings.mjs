@@ -6,6 +6,7 @@ import {
   AdminQuarantineCaseDetailSchema,
   AdminQuarantineDecisionResponseSchema,
   AdminQuarantineQueueResponseSchema,
+  InboxResponseSchema,
   ProblemPublicationPreviewSchema,
 } from "@asimposium/contracts";
 import {
@@ -1650,7 +1651,26 @@ try {
     ).data,
   );
   assert.equal(decision.decision, "release");
-  const approved = await recoveryStatus(reviewedPublication);
+  const beforeNoticeReads = await recoverySnapshot(reviewedPublication);
+  const decisionInboxResponse = await call("/v1/inbox", undefined, reviewerTokenB);
+  assert.equal(decisionInboxResponse.headers.get("cache-control"), "private, no-store");
+  const decisionInbox = InboxResponseSchema.parse(decisionInboxResponse.data);
+  const approvalNotice = decisionInbox.items.find(
+    (item) => item.type === "moderation_outcome" && item.target_id === caseId,
+  );
+  assert.ok(approvalNotice, "the actual review decision reaches its owner");
+  assert.deepEqual(
+    approvalNotice.next_actions?.map(({ action, url }) => ({ action, url })),
+    [{ action: "orient", url: reviewedPublication.status_path }],
+    "an artifact decision notice must point to its owner's current publication status",
+  );
+  const approvedResponse = await call(
+    approvalNotice.next_actions[0].url,
+    undefined,
+    reviewerTokenB,
+  );
+  assert.equal(approvedResponse.headers.get("cache-control"), "private, no-store");
+  const approved = ArtifactPublicationStatusSchema.parse(approvedResponse.data);
   assert.equal(
     approved.delivery,
     "held",
@@ -1659,6 +1679,88 @@ try {
   assert.equal(approved.release_authorized, false);
   assert.equal(approved.review?.state, "approved");
   assert.ok(approved.recovery);
+  const decisionMarkdown = await call("/v1/inbox.md", undefined, reviewerTokenB);
+  assert.equal(decisionMarkdown.headers.get("cache-control"), "private, no-store");
+  assert.ok(
+    decisionMarkdown.raw.includes(
+      `[${reviewedPublication.status_path}](${reviewedPublication.status_path})`,
+    ),
+    "the Markdown face carries the same server-selected status read",
+  );
+
+  // Deliberately malformed/misrouted stored notices exercise the read boundary;
+  // they do not claim the production decision producer misdelivered anything.
+  const otherNoticeProblem = "P-ARTIFACT-NOTICE-OTHER";
+  await fixtures.seedProblem(otherNoticeProblem, sponsorB);
+  const otherReview = await recoveryStatus(rejectedPublication);
+  assert.ok(otherReview.review?.case_id && otherReview.review.case_id !== caseId);
+  const noticeProbes = [
+    ["foreign", fellowIdA, problemId, "moderation_outcome", caseId],
+    ["problem", fellowIdB, otherNoticeProblem, "moderation_outcome", caseId],
+    ["unknown", fellowIdB, problemId, "moderation_outcome", `QC-${"0".repeat(26)}`],
+    ["malformed", fellowIdB, problemId, "moderation_outcome", "QC-not-a-case"],
+    ["type", fellowIdB, problemId, "protocol_notice", caseId],
+    ["other-case", fellowIdB, problemId, "moderation_outcome", otherReview.review.case_id],
+  ];
+  for (const [label, fellow, noticeProblem, type, target] of noticeProbes) {
+    assert.equal(
+      await fixtures.execRaw(
+        `INSERT INTO fellow_inbox_notices
+          (id,fellow_id,problem_id,notice_type,seq,title,detail,impact_kind,
+           caused_by_event_id,target_id,acknowledged_at,expires_at,created_at)
+         SELECT ?,?,?,?,
+           (SELECT COALESCE(MAX(seq),0)+1 FROM fellow_inbox_notices WHERE fellow_id=?),
+           'Synthetic artifact notice source probe',NULL,NULL,
+           caused_by_event_id,?,NULL,NULL,created_at
+         FROM fellow_inbox_notices WHERE id=?`,
+        [
+          `N-artifact-source-${label}`,
+          fellow,
+          noticeProblem,
+          type,
+          fellow,
+          target,
+          approvalNotice.id,
+        ],
+      ),
+      1,
+    );
+  }
+  const ownerNoticePage = InboxResponseSchema.parse(
+    (await call("/v1/inbox?limit=100", undefined, reviewerTokenB)).data,
+  );
+  for (const label of ["problem", "unknown", "malformed", "type"]) {
+    const item = ownerNoticePage.items.find((notice) => notice.id === `N-artifact-source-${label}`);
+    assert.ok(item, `source probe ${label} is actually visible to its recipient`);
+    assert.equal(
+      item.next_actions,
+      undefined,
+      `source probe ${label} cannot mint an artifact link`,
+    );
+  }
+  const otherCaseNotice = ownerNoticePage.items.find(
+    (notice) => notice.id === "N-artifact-source-other-case",
+  );
+  assert.deepEqual(
+    otherCaseNotice?.next_actions?.map(({ action, url }) => ({ action, url })),
+    [{ action: "orient", url: rejectedPublication.status_path }],
+    "two owned publications on the same problem remain bound to their exact cases",
+  );
+  const foreignNoticePage = InboxResponseSchema.parse(
+    (await call("/v1/inbox?limit=100", undefined, authorTokenA)).data,
+  );
+  assert.ok(!foreignNoticePage.items.some((item) => item.id === approvalNotice.id));
+  const foreignSourceProbe = foreignNoticePage.items.find(
+    (notice) => notice.id === "N-artifact-source-foreign",
+  );
+  assert.ok(foreignSourceProbe, "the foreign source probe is actually read");
+  assert.equal(foreignSourceProbe.next_actions, undefined);
+  await call(reviewedPublication.status_path, undefined, authorTokenA, 404);
+  assert.deepEqual(
+    await recoverySnapshot(reviewedPublication),
+    beforeNoticeReads,
+    "notice reads and source probes cannot enqueue, authorize, screen or publish an artifact",
+  );
   assert.equal(await fixtures.readPublicCas(reviewedArtifact.digest), null);
   await call(reviewedPublication.manifest_path, undefined, undefined, 404);
   assertOriginalPublication(heldSnapshot, await recoverySnapshot(reviewedPublication));

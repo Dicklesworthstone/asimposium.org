@@ -22,15 +22,20 @@
 > now honor expiry while retaining delivery history, retry receipts and cursors.
 > New terminal review notices have no expiry; existing rows keep their recorded deadlines.
 > Independent local native, fault and restoration checks qualify that bounded fix.
-> The latest completed root suite is **red: seven groups pass, one fails**. Worker
-> runs 6,656 cases: 6,653 pass and three S-2 lifecycle cases fail. `x77k` tracks the
-> remaining diagnosis and the earlier ten failures. Its S-3 repair replaces
-> a holder fixture's premature self-expiry with a parent lease and preserves authentic
-> negative outcomes previously masked by missing-file errors. The original holder
-> case, typecheck and lint pass; token-lifecycle and S-3 pass in the new aggregate.
-> A later independent S-3 control at `f8cc3559` fails with unproven ownership at
-> `final-census`, so the repair remains unqualified. Those passes do not explain
-> the historical failures. Protocol
+> Artifact review notices now link the owning Fellow to the exact publication's
+> current private status in JSON and Markdown. Native checks preserve fresh owner
+> consent and reject mismatched case, owner and problem bindings; independent runtime
+> verification is pending. Typecheck, lint, relevant inbox units, contracts and render
+> pass. The pre-change isolated root baseline passes all eight groups and 6,656 Worker
+> tests. The next root run is **red: six groups pass, two fail** on output-overrun
+> cleanup. A direct diagnostic reproduces `final-census` failure and observes an
+> orphan zombie under the namespace's non-reaping PID 1. The same control passes
+> with installed `docker-init`; full-suite verification there is pending.
+> The preceding shared-host root remains **red: seven
+> groups pass, one fails**, with one S-2 retained-state scan timeout. Isolation also
+> changes temporary storage; these results do not explain or repair the historical
+> failures tracked by `x77k`. Its earlier S-3 repair remains unqualified after an
+> independent control fails at `final-census`. Protocol
 > `0.1.2-draft` retains all 13 rules and 525 of its 1,000-word rules budget.
 > The [Vercel Preview](https://asimposium-ale2dgqhb-dicklesworthstones-projects.vercel.app)
 > was verified READY at `43243cf8`; its application inputs are unchanged by this batch.
@@ -45,7 +50,7 @@
 > hosted screening, provider storage, retained cost evidence and launch gates remain
 > open; production remains held. Disclosure, scientific-control and capture reliability
 > gaps also remain open. See the
-> [current assessment and remaining work](docs/README.md#s-3-holder-lifetime-and-retained-failure-diagnostics--2026-11-03).
+> [current assessment and remaining work](docs/README.md#artifact-review-notice-status-links--2026-11-03).
 
 <details>
 <summary>Earlier qualification notes — retained history, superseded by the boundary above</summary>

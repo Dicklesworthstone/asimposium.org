@@ -14,6 +14,68 @@ observed.
 
 ## Current reality check — 2026-10-30
 
+### Artifact review notice status links — 2026-11-03
+
+An actual artifact review decision reached its owner with a QC case target but no
+machine-followable next action. The existing private publication-status route
+already exposed delivery, review and recovery state. Inbox reads now resolve the
+exact immutable case-to-publication binding, constrained by the notice's problem
+and authenticated Fellow, and return an `orient` read in JSON and Markdown. One
+bounded query enriches only the returned page. Existing contracts validate IDs
+and paths; no table, endpoint or write authority is added. The link reads current
+state; an old notice is not evidence of a current approval.
+
+The unchanged runtime fails the new native missing-link assertion in 15.700
+seconds. The final complete real Workerd/D1/R2 artifact journey passes in 20.374
+seconds. It follows the actual decision-produced owner notice, checks both faces
+and private/no-store headers, and preserves every earlier consent, recovery,
+public-CAS and 93 immutable-guard assertion. A snapshot captured before the first
+inbox read proves that these reads do not enqueue, screen, authorize or publish.
+Six explicitly synthetic stored-notice probes test five mismatched/malformed
+sources and exact selection between two existing cases on the same problem.
+These probes are not proof of producer misdelivery or audit-event causality.
+The classifier and sponsor identities remain fixtures; storage bindings are real.
+
+Five existing inbox unit files pass 111 tests and 692 expectations. Root typecheck
+and lint pass all eight groups in 72.914 and 35.463 seconds; existing lint warnings
+remain. The prescribed contracts package command passes 944 tests and 6,448
+expectations; render passes 584 tests and 5,873 expectations. Independent runtime
+control, deliberate link-omission fault and restoration are pending. Original
+`1e7` remains in progress; `rhg` remains open after its normal claim is refused
+by the open `kl8` prerequisite. No acceptance or dependency is waived.
+
+After external capacity recovery, a complete unchanged shared-host root run takes
+2,264.177 seconds: seven groups pass and Worker fails one of 6,656 cases, the S-2
+concurrent-capture retained-state `lsof` scan (status 124). Both subsequent selected
+comparisons pass, with and without a private PID namespace: this is a null causal
+result. A complete pre-change root baseline then passes all eight groups in
+1,427.696 seconds, including all 6,656 Worker cases, under a private Linux PID/mount
+namespace and private `/proc`. The platform ignores `sudo -E`, so this run also
+uses default `/tmp` instead of `/data/tmp`; it is not a one-variable comparison or
+a shared-host repair. The next same-environment root run finishes in 1,393.004
+seconds: six groups pass and two fail. Toolchain's throwing pipe-cancel observer
+and S-3's inner output-overrun case receive `ownership-unproven` instead of
+`output-overrun`; Worker passes 6,655 of 6,656 cases. A direct same-options diagnostic
+reproduces failure at `final-census`. A second, instrumented observation retains
+real `pgrep` results and `/proc` state: the killed Perl target remains a zombie,
+reparented to the namespace's non-reaping PID 1. This is a defect in this isolated
+test setup, not evidence that the application caused the failures. With installed
+`docker-init` (Tini 0.19.0) as PID 1, the original direct control passes unchanged,
+including its no-survivor assertion. Full-suite execution in that corrected
+environment is pending. No test bound, census requirement or application source
+is changed for this diagnosis. `x77k` retains all historical failures and
+its original full acceptance. Raw evidence is under
+`e2e/artifacts/lifecycle-recovery-20261103/` and
+`e2e/artifacts/artifact-notice-20261103/`.
+
+Independent capacity checks verify current normal backup/export and the retained
+named archives, but cannot locate the historical November 1 full snapshot;
+`0oi3` stays open. This work performs no manual file deletion and does not claim
+to have caused the recovered headroom. The earlier verified Vercel Preview is
+unchanged. This Worker fix has
+not been deployed; sanctioned Cloudflare authority, hosted proof and launch
+acceptance remain outstanding.
+
 ### S-3 holder lifetime and retained failure diagnostics — 2026-11-03
 
 The S-3 holder fixture could exit after ten seconds while its parent was still
