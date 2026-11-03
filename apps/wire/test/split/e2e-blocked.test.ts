@@ -1930,9 +1930,11 @@ async function readFreshOwnedS3Result(
   if (!canonical.equals(content)) {
     throw new Error(`${label}_FRESH_RUNTIME_RESULT_NONCANONICAL`);
   }
-  // The retained name is only reread evidence after the unlinked authority
-  // inode has passed every UTF-8, nonce, schema, and canonicality check.
-  rereadRetainedFreshRuntimeResult(invocation, content, label);
+  // The dispatcher republishes the retained name only after cleanup is proven.
+  // An authentic negative still travels through the pinned unlinked inode;
+  // requiring its absent retained copy would replace that outcome with ENOENT.
+  // The bounded caller must still reject every unproven cleanup outcome.
+  if (record.cleanupProven) rereadRetainedFreshRuntimeResult(invocation, content, label);
   return { result: record.result, cleanupProven: record.cleanupProven };
 }
 
@@ -2019,7 +2021,7 @@ async function runBoundedS3Child(
   const { result, cleanupProven } = await runFreshOwnedS3Command(command, label, options);
   if (result.outcome !== "exited") {
     throw new Error(
-      `${label}_OUTCOME:${result.outcome}:CLEANUP:${result.cleanupProven === true}:STDOUT_BYTES:${result.retainedStdoutBytes}:STDERR_BYTES:${result.retainedStderrBytes}`,
+      `${label}_OUTCOME:${result.outcome}:PHASE:${result.ownershipFailurePhase ?? "none"}:CLEANUP:${result.cleanupProven === true}:STDOUT_BYTES:${result.retainedStdoutBytes}:STDERR_BYTES:${result.retainedStderrBytes}`,
     );
   }
   if (cleanupProven !== true) throw new Error(`${label}_CLEANUP_UNPROVEN`);

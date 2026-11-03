@@ -2302,10 +2302,12 @@ run_post_kill_reap_uncertainty_self_test() {
 
 run_state_holder_recheck_self_test() {
   local holders status holder_pid ready_line holder_status
-  local held_file ready_file release_file released_file prefix
+  local held_file ready_file release_file released_file prefix holder_lease_fd
 
   start_state_holder_recheck_child() {
     prefix="$1"
+    holder_pid=""
+    holder_lease_fd=""
     held_file="${STATE_DIR}/state-holder-recheck-${prefix}.held"
     ready_file="${STATE_DIR}/state-holder-recheck-${prefix}.ready"
     release_file="${STATE_DIR}/state-holder-recheck-${prefix}.release"
@@ -2314,15 +2316,20 @@ run_state_holder_recheck_self_test() {
       ! -e "${ready_file}" && ! -L "${ready_file}" && \
       ! -e "${release_file}" && ! -L "${release_file}" && \
       ! -e "${released_file}" && ! -L "${released_file}" ]] || return 1
-    bash -c '
+    # The holder must outlive both observations, however long traversal takes
+    # within the caller's unchanged deadline. A ten-second self-expiry could
+    # close FD 9 between the two scans and counterfeit a disappearing holder.
+    # Bash coprocess descriptors are closed on exec: lsof and other observers
+    # cannot inherit the parent-only writer and keep this lease alive.
+    coproc S3_HOLDER_LEASE { exec bash -c '
     held_file="$1"
     ready_file="$2"
     release_file="$3"
     released_file="$4"
     exec 9>"${held_file}" || exit 125
     printf "ready %s\n" "$$" >"${ready_file}" || exit 125
-    deadline=$((SECONDS + 10))
-    while (( SECONDS < deadline )); do
+    lease_open=1
+    while :; do
       if [[ -f "${release_file}" && ! -L "${release_file}" ]] && \
         IFS= read -r release_line <"${release_file}" && \
         [[ "${release_line}" == "release $$" ]]; then
@@ -2330,12 +2337,22 @@ run_state_holder_recheck_self_test() {
         printf "released %s\n" "$$" >"${released_file}" || exit 125
         exit 0
       fi
-      sleep 0.05
+      # Recheck the release marker after EOF, since normal release publishes
+      # it before closing the lease. EOF without that marker is parent loss,
+      # never a successful release acknowledgment.
+      (( lease_open == 1 )) || { exec 9>&-; exit 125; }
+      if IFS= read -r -t 0.05 unexpected; then
+        exec 9>&-
+        exit 125
+      else
+        lease_status=$?
+        (( lease_status > 128 )) || lease_open=0
+      fi
     done
-    exit 124
     ' s3-state-holder-recheck "${held_file}" "${ready_file}" "${release_file}" \
-      "${released_file}" &
-    holder_pid=$!
+      "${released_file}"; }
+    holder_pid=${S3_HOLDER_LEASE_PID}
+    holder_lease_fd=${S3_HOLDER_LEASE[1]}
     ready_line=""
     for _ in $(seq 1 100); do
       if [[ -f "${ready_file}" && ! -L "${ready_file}" ]]; then
@@ -2355,6 +2372,14 @@ run_state_holder_recheck_self_test() {
       (umask 077; set -o noclobber; printf 'release %s\n' "${holder_pid}" \
         >"${release_file}") 2>/dev/null || :
     fi
+    # A released child may already have caused Bash to retire its coprocess
+    # descriptors. Never close a remembered number after that ownership ends.
+    if [[ -n "${holder_lease_fd}" && \
+      "${S3_HOLDER_LEASE_PID:-}" == "${holder_pid}" && \
+      "${S3_HOLDER_LEASE[1]:-}" == "${holder_lease_fd}" ]]; then
+      exec {holder_lease_fd}>&- || :
+    fi
+    holder_lease_fd=""
     if wait "${holder_pid}" 2>/dev/null; then holder_status=0; else holder_status=$?; fi
     (( holder_status == 0 ))
   }

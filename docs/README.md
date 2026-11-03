@@ -14,6 +14,53 @@ observed.
 
 ## Current reality check — 2026-10-30
 
+### S-3 holder lifetime and retained failure diagnostics — 2026-11-03
+
+The S-3 holder fixture could exit after ten seconds while its parent was still
+checking it. An unchanged full-file failure retained a persistent holder's ready
+and release records 21 seconds apart, with no release acknowledgment. A parent-only
+pipe lease now keeps it alive until explicit release or parent loss, within the
+existing 60-second case deadline. Release closes the held file before acknowledgment;
+lease loss closes it without a success acknowledgment. Saved PID/FD fields reset
+per start, and cleanup closes only the matching live coprocess writer.
+
+The fresh helper intentionally retains a named result only after proven cleanup.
+Its reader now preserves authentic negative results from the validated unlinked
+inode instead of replacing them with an absent-file error. Gate consumers still
+refuse unproven cleanup; diagnostics include the validated ownership-failure phase.
+No product API, contract, migration or deployed behavior changes in this increment.
+
+The full original root command remains **RED: seven groups pass, one fails** in
+2,777.456 seconds. Worker executes 6,656 cases across 284 files: **6,653 pass and
+three fail**, with 30,528 expectations. The failures are S-2's concurrent capture
+retained-state scan (status 124), startup-watchdog diagnostics, and legacy leader
+loss. The latter two retain `spawnSync perl ETIMEDOUT` and captured status 143;
+legacy leader loss also reports `S2_LEGACY_SUPERVISOR_INSPECTION_UNCERTAIN`.
+Token-lifecycle and S-3 have no failures in this aggregate. Their earlier failures
+remain retained; this changed census does not establish all their causes or that
+all seven disappeared because of the repair. `asimposiumorg-x77k` stays in progress
+with its original full acceptance intact.
+
+The final selected holder case passes all six assertions in 2.224 seconds, while
+an unchanged isolated S-2 startup case passes in 8.850 seconds. Typecheck and lint
+pass eight groups each. The source scanner completes both code files with zero
+critical findings and 14 existing warnings, reviewed without suppression; this is
+not broad security qualification. Full raw evidence is retained under
+`e2e/artifacts/lifecycle-x77k-20261103/`. Read-only process observations catch native
+`lsof` kernel waits, but do not establish the exact blocking path or explain every
+historical failure. An experimental mount exemption crashes installed lsof 4.99.4;
+a private official 4.99.7 comparison avoids that particular crash. Both versions
+later complete an ordinary scan, so no scanner upgrade or host repair is claimed.
+The system binary, test PATH, mount configuration and test deadlines are unchanged.
+
+Primary headroom falls from about 20 GiB to 2.5 GiB during this block. A private
+recovery copy in `/tmp/asimposium-x77k-recovery-20261103/` preserves the pending patch,
+a consistent 564-issue Beads backup and current evidence; its first aggregate copy
+is explicitly a partial checkpoint. `0oi3` remains open and no files are deleted.
+Fresh November 3 public probes retain `0.1.0-draft` on production/staging and 404
+on production `/protocol.json`. The sanctioned Workers Builds authority and `rs5n`
+remain outstanding; local qualification does not establish deployed or launch readiness.
+
 ### Inbox expiry and current root-gate failure — 2026-11-03
 
 Inbox reads, unread counts and both acknowledgment modes now honor stored expiry
@@ -24,7 +71,7 @@ or migration is added. The unchanged native journey first returns an expired
 notice instead of its live successor; the corrected Stoa and matchmaking journeys
 pass, as do 168 targeted unit tests, typecheck 8/8 and lint 8/8.
 
-The complete root unit run is **RED: seven groups pass, one fails**. Worker runs
+The earlier inbox increment's complete root unit run is **RED: seven groups pass, one fails**. Worker runs
 6,656 cases: 6,646 pass and ten fail in unchanged S2, token-lifecycle and S3
 process-supervision tests. Failures include watchdog timeout, unproven leader
 reaping, a holder inspection mismatch and missing retained child receipts. A
