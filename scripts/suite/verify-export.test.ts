@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test";
-import { serializeProblemExport } from "../../apps/wire/src/krater/export.ts";
+import {
+  EXPORT_FORMAT,
+  PUBLIC_EXPORT_FORMAT,
+  parseProblemExport,
+  publicationContextDigest,
+  serializeProblemExport,
+  serializePublicProblemExport,
+} from "../../apps/wire/src/krater/export.ts";
 import {
   checkpointDigest,
   eventChainDigest,
@@ -78,7 +85,9 @@ const exportOf = (events: unknown[], checkpoints: unknown[]) =>
     generatedAt: "2026-09-25T00:00:00.000Z",
   } as never);
 
-test("the verifier anchors on trusted signatures, not on the export header", async () => {
+async function verifySignedExportFormat(
+  format: typeof EXPORT_FORMAT | typeof PUBLIC_EXPORT_FORMAT,
+) {
   const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
     "sign",
     "verify",
@@ -91,6 +100,35 @@ test("the verifier anchors on trusted signatures, not on the export header", asy
     '{"statement":"One squared is odd."}',
     '{"statement":"Two squared is even."}',
   ]);
+  const exportFor = async (
+    events: typeof genuine.events,
+    checkpoints: typeof genuine.checkpoints,
+  ): Promise<string> => {
+    if (format === EXPORT_FORMAT) return exportOf(events, checkpoints);
+    const first = events[0];
+    return serializePublicProblemExport({
+      problemId: P,
+      problemTitle: "t",
+      events,
+      checkpoints,
+      generatedAt: "2026-09-25T00:00:00.000Z",
+      publicationNotices:
+        first === undefined
+          ? []
+          : [
+              {
+                event_id: first.eventId,
+                seq: first.seq,
+                payload_sha256: first.payloadSha256,
+                screening_notice: {
+                  category: "dual-use-boundary",
+                  action: "published-with-warning",
+                  notice: "screening-warning",
+                },
+              },
+            ],
+    } as never);
+  };
   const signatures = [];
   for (const c of genuine.checkpoints) {
     const root = bare(c.rootChainDigest);
@@ -129,9 +167,62 @@ test("the verifier anchors on trusted signatures, not on the export header", asy
   const trustedKeys = [{ key_id: "k1", public_key: publicKey }];
   const verify = (ndjson: string) => verifyExportOffline({ ndjson, signatures: face, trustedKeys });
 
-  const good = await verify(exportOf(genuine.events, genuine.checkpoints));
+  const genuineExport = await exportFor(genuine.events, genuine.checkpoints);
+  const good = await verify(genuineExport);
   expect(good.failures).toEqual([]);
   expect(good.ok).toBe(true);
+  expect(good.format).toBe(format);
+  if (format === PUBLIC_EXPORT_FORMAT) {
+    expect(good.publicationContextAssurance).toBe("export-self-consistency-only");
+    expect(good.publicationNoticeCount).toBe(1);
+    const original = genuineExport
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(good.publicationContextSha256).toBe(original[0].publication_context_sha256);
+    expect(parseProblemExport(genuineExport).ok).toBe(false);
+
+    // A valid signed event history does not excuse missing or altered context.
+    const mutations = [
+      (records: typeof original) => {
+        records.splice(1, 1);
+      },
+      (records: typeof original) => {
+        records[1].notices = [];
+      },
+      (records: typeof original) => {
+        records[0].publication_context_sha256 = records[1].context_sha256 = "0".repeat(64);
+      },
+      (records: typeof original) => {
+        records[1].problem = "P-OTHER";
+      },
+      (records: typeof original) => {
+        records[0].format = "asimposium.problem-export.v99";
+      },
+    ];
+    for (const mutate of mutations) {
+      const altered = structuredClone(original);
+      mutate(altered);
+      expect(
+        (await verify(`${altered.map((record) => JSON.stringify(record)).join("\n")}\n`)).ok,
+      ).toBe(false);
+    }
+
+    // Checkpoint signatures bind events, not this independently mutable
+    // companion. Recomputed context must never gain an authenticity label.
+    const recontextualized = structuredClone(original);
+    recontextualized[1].notices = [];
+    recontextualized[1].context_sha256 = await publicationContextDigest(recontextualized[1]);
+    recontextualized[0].publication_context_sha256 = recontextualized[1].context_sha256;
+    const unpinned = await verify(
+      `${recontextualized.map((record) => JSON.stringify(record)).join("\n")}\n`,
+    );
+    expect(unpinned.ok).toBe(true);
+    expect(unpinned.publicationNoticeCount).toBe(0);
+    expect(unpinned.publicationContextAssurance).toBe("export-self-consistency-only");
+  } else {
+    expect(good.publicationContextAssurance).toBeUndefined();
+  }
 
   // A: last event rewritten, unkeyed digests recomputed, its checkpoint dropped.
   const forged = await buildHistory([
@@ -139,14 +230,16 @@ test("the verifier anchors on trusted signatures, not on the export header", asy
     '{"statement":"One squared is odd."}',
     '{"statement":"Two squared is ODD (forged)."}',
   ]);
-  expect((await verify(exportOf(forged.events, forged.checkpoints.slice(0, 2)))).ok).toBe(false);
+  expect((await verify(await exportFor(forged.events, forged.checkpoints.slice(0, 2)))).ok).toBe(
+    false,
+  );
   // B: truncation.
   expect(
-    (await verify(exportOf(genuine.events.slice(0, 2), genuine.checkpoints.slice(0, 2)))).ok,
+    (await verify(await exportFor(genuine.events.slice(0, 2), genuine.checkpoints.slice(0, 2)))).ok,
   ).toBe(false);
   // C: every event forged, no header checkpoints.
   const everything = await buildHistory(['{"statement":"X"}', '{"statement":"Y"}']);
-  expect((await verify(exportOf(everything.events, []))).ok).toBe(false);
+  expect((await verify(await exportFor(everything.events, []))).ok).toBe(false);
   // E: genuine signed history plus an appended, unsigned forged event.
   const extended = await buildHistory([
     '{"statement":"Zero squared is even."}',
@@ -154,15 +247,20 @@ test("the verifier anchors on trusted signatures, not on the export header", asy
     '{"statement":"Two squared is even."}',
     '{"statement":"Three squared is even (forged, unsigned)."}',
   ]);
-  expect((await verify(exportOf(extended.events, extended.checkpoints))).ok).toBe(false);
+  expect((await verify(await exportFor(extended.events, extended.checkpoints))).ok).toBe(false);
   // D: served keys alone are never trusted.
   expect(
     (
       await verifyExportOffline({
-        ndjson: exportOf(genuine.events, genuine.checkpoints),
+        ndjson: await exportFor(genuine.events, genuine.checkpoints),
         signatures: face,
         trustedKeys: [],
       })
     ).ok,
   ).toBe(false);
-});
+}
+
+test.each([EXPORT_FORMAT, PUBLIC_EXPORT_FORMAT])(
+  "the verifier anchors %s on trusted signatures, not on the export header",
+  verifySignedExportFormat,
+);

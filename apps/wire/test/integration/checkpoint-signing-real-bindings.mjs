@@ -178,10 +178,7 @@ await runLocalWorkerJourney(
     assert.equal(good.format, header.format);
     assert.equal(good.publicationContextAssurance, "export-self-consistency-only");
     assert.equal(good.publicationContextSha256, header.publication_context_sha256);
-    assert.equal(
-      good.publicationNoticeCount,
-      JSON.parse(ndjson.split("\n")[1]).notices.length,
-    );
+    assert.equal(good.publicationNoticeCount, JSON.parse(ndjson.split("\n")[1]).notices.length);
     assert.equal(good.signed, header.checkpoints.length);
     const lines = ndjson.split("\n");
     const target = lines.findIndex((line, i) => i > 0 && line.includes("squared"));
