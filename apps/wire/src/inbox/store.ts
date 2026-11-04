@@ -10,6 +10,7 @@ import {
   type ProblemFollowResponse,
   ProblemIdSchema,
   ScreeningPromotionHoldResponseSchema,
+  SessionIdSchema,
 } from "@asimposium/contracts";
 import { ArtifactPublicationReceiptSchema } from "@asimposium/contracts/artifact-publications";
 import type { D1Database } from "@cloudflare/workers-types";
@@ -104,12 +105,59 @@ async function artifactPublicationNoticePaths(
   return paths;
 }
 
+/** A protocol notice may target a closed session. Resolve only the returned
+ * page against its recipient and problem; prose and an id-shaped target do
+ * not establish a recovery context. The read grants no write permission. */
+async function closedSessionNoticePaths(
+  db: D1Database,
+  fellowId: string,
+  rows: readonly NoticeRow[],
+): Promise<Map<string, string>> {
+  const candidates = rows
+    .filter(
+      (row) =>
+        row.notice_type === "protocol_notice" &&
+        SessionIdSchema.safeParse(row.target_id).success &&
+        row.target_id === row.target_id?.trim() &&
+        ProblemIdSchema.safeParse(row.problem_id).success,
+    )
+    .map((row) => ({ id: row.id, session_id: row.target_id, problem_id: row.problem_id }));
+  const paths = new Map<string, string>();
+  if (candidates.length === 0) return paths;
+
+  const result = await db
+    .prepare(`SELECT json_extract(n.value, '$.id') AS notice_id, s.session_id
+      FROM json_each(?) n JOIN sessions s
+        ON s.session_id = json_extract(n.value, '$.session_id')
+        AND s.problem_id = json_extract(n.value, '$.problem_id')
+      WHERE s.fellow_id = ? AND s.closed_at IS NOT NULL`)
+    .bind(JSON.stringify(candidates), fellowId)
+    .all<{ notice_id: string; session_id: string }>();
+  if (!result.success) throw new Error("Session notice recovery lookup is unavailable.");
+  for (const row of result.results ?? []) {
+    if (paths.has(row.notice_id)) throw new Error("Session notice recovery binding is ambiguous.");
+    paths.set(row.notice_id, `/v1/sessions/${row.session_id}`);
+  }
+  return paths;
+}
+
 function buildNoticeNextActions(
   noticeType: string,
   problemId?: string | null,
   targetId?: string | null,
   artifactStatusPath?: string,
+  closedSessionPath?: string,
 ): EnrollmentNextAction[] {
+  if (noticeType === "protocol_notice" && closedSessionPath !== undefined) {
+    return [
+      {
+        action: "orient",
+        url: closedSessionPath,
+        reason:
+          "Inspect this closed session before opening another session to continue your private workshop.",
+      },
+    ];
+  }
   if (noticeType === "moderation_outcome" && artifactStatusPath !== undefined) {
     return [
       {
@@ -179,9 +227,19 @@ function buildNoticeNextActions(
   }
 }
 
-function rowToItem(row: NoticeRow, artifactStatusPath?: string): InboxItem {
+function rowToItem(
+  row: NoticeRow,
+  artifactStatusPath?: string,
+  closedSessionPath?: string,
+): InboxItem {
   const nextActions = [
-    ...buildNoticeNextActions(row.notice_type, row.problem_id, row.target_id, artifactStatusPath),
+    ...buildNoticeNextActions(
+      row.notice_type,
+      row.problem_id,
+      row.target_id,
+      artifactStatusPath,
+      closedSessionPath,
+    ),
     ...ledgerNoticeActions(
       row.notice_type,
       row.problem_id,
@@ -330,7 +388,10 @@ export async function getInboxNotices(
   const hasMore = rows.length > limit;
   const slicedRows = hasMore ? rows.slice(0, limit) : rows;
   const artifactPaths = await artifactPublicationNoticePaths(db, fellowId, slicedRows);
-  const items = slicedRows.map((row) => rowToItem(row, artifactPaths.get(row.id)));
+  const sessionPaths = await closedSessionNoticePaths(db, fellowId, slicedRows);
+  const items = slicedRows.map((row) =>
+    rowToItem(row, artifactPaths.get(row.id), sessionPaths.get(row.id)),
+  );
 
   const nextCursor = items.length > 0 ? (items[items.length - 1]?.seq ?? null) : null;
 

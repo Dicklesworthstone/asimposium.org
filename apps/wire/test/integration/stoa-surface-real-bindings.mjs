@@ -1147,6 +1147,16 @@ await runLocalWorkerJourney(
     const idleSession = (
       await call("/v1/sessions", { problem_id: problem, intent: "explore" }, idler, 201)
     ).session_id;
+    const idleDraftBody = "IDLE-RECOVERY-PRIVATE-DRAFT: unfinished parity notes.";
+    const idleDraft = await call(
+      `/v1/sessions/${idleSession}/workshop`,
+      { type: "scratch", title: "Retained working notes", body_md: idleDraftBody },
+      idler,
+      201,
+    );
+    const publicCursorBeforeIdle = await (
+      await worker.fetch(`${origin}/cursor`, { headers: { "User-Agent": userAgent } })
+    ).text();
     const later = Date.now() + 13 * 3600 * 1000;
     assert.equal(
       (await fixtures.expireIdleTick(later, idlerId)).closed,
@@ -1154,11 +1164,151 @@ await runLocalWorkerJourney(
       "the idle session closes",
     );
     assert.equal((await fixtures.expireIdleTick(later, idlerId)).closed, 0, "closing is once");
-    const idleNotices = (await inbox(idler)).items.filter(
+    const idleInboxResponse = await worker.fetch(`${origin}/v1/inbox`, {
+      headers: { "User-Agent": userAgent, authorization: `Bearer ${idler}` },
+    });
+    assert.equal(idleInboxResponse.status, 200);
+    assert.equal(idleInboxResponse.headers.get("cache-control"), "private, no-store");
+    const idleNotices = InboxResponseSchema.parse(await idleInboxResponse.json()).items.filter(
       (item) => item.type === "protocol_notice" && item.target_id === idleSession,
     );
     assert.equal(idleNotices.length, 1, "one idle-close notice");
     assert.equal(idleNotices[0].title, "Idle session closed");
+    const idleStatusPath = `/v1/sessions/${idleSession}`;
+    assert.deepEqual(
+      idleNotices[0].next_actions?.map((action) => action.url),
+      [idleStatusPath],
+      "an actual idle notice points to its owned closed-session recovery read",
+    );
+    const idleStatusResponse = await worker.fetch(`${origin}${idleStatusPath}`, {
+      headers: { "User-Agent": userAgent, authorization: `Bearer ${idler}` },
+    });
+    assert.equal(idleStatusResponse.status, 200);
+    assert.equal(idleStatusResponse.headers.get("cache-control"), "private, no-store");
+    const idleStatus = SessionStatusResponseSchema.parse(await idleStatusResponse.json());
+    assert.equal(idleStatus.session_id, idleSession);
+    assert.notEqual(idleStatus.closed_at, null);
+    assert.ok(idleStatus.workshop_cursor >= idleDraft.workshop_seq);
+    assert.ok(!JSON.stringify(idleStatus).includes(idleDraftBody), "status omits private bodies");
+    const idleMarkdown = await worker.fetch(`${origin}/v1/inbox.md`, {
+      headers: { "User-Agent": userAgent, authorization: `Bearer ${idler}` },
+    });
+    assert.equal(idleMarkdown.status, 200);
+    assert.equal(idleMarkdown.headers.get("cache-control"), "private, no-store");
+    const idleMarkdownBody = await idleMarkdown.text();
+    assert.ok(idleMarkdownBody.includes(idleStatusPath), "Markdown exposes the same recovery read");
+    assert.ok(!idleMarkdownBody.includes(idleDraftBody), "notices omit private draft bodies");
+    const orientAction = idleStatus.next_actions.find(
+      (action) => action.method === "GET" && action.url === "/v1/hello",
+    );
+    assert.ok(orientAction, "closed status teaches the next orientation read");
+    const resumedHello = await call(orientAction.url, undefined, idler);
+    const openAction = resumedHello.next_actions.find((action) => action.action === "session.open");
+    assert.ok(openAction, "orientation offers an authorized new session");
+    const openUrl = new URL(openAction.url);
+    assert.equal(openUrl.origin, origin);
+    const resumedSession = (
+      await call(openUrl.pathname, { problem_id: problem, intent: "explore" }, idler, 201)
+    ).session_id;
+    assert.notEqual(resumedSession, idleSession);
+    const workingAction = SessionStatusResponseSchema.parse(
+      await call(`/v1/sessions/${resumedSession}`, undefined, idler),
+    ).next_actions.find(
+      (action) => action.method === "GET" && action.url.endsWith("?profile=working"),
+    );
+    assert.ok(workingAction, "the new session offers its working pack");
+    const recoveryPack = await call(workingAction.url, undefined, idler);
+    const preservedHead = recoveryPack.items.find((item) => item.kind === "workshop-head");
+    assert.ok(preservedHead, "the working pack discovers the retained draft");
+    assert.equal(preservedHead.scope, "workshop");
+    assert.equal(preservedHead.id, idleDraft.workshop_id);
+    const recoveryPath = preservedHead.body.match(
+      /Private work product: (\/v1\/sessions\/S-[A-Za-z0-9]{26}\/workshop\/W-[A-Za-z0-9]{26})/,
+    )?.[1];
+    assert.equal(recoveryPath, `/v1/sessions/${resumedSession}/workshop/${preservedHead.id}`);
+    const recovered = await call(recoveryPath, undefined, idler);
+    assert.equal(recovered.object.body_md, idleDraftBody);
+    assert.equal(recovered.object.version, 1);
+    await call(
+      `/v1/sessions/${resumedSession}/workshop`,
+      {
+        workshop_id: idleDraft.workshop_id,
+        base_version: 1,
+        body_md: `${idleDraftBody} Continued.`,
+      },
+      idler,
+      201,
+    );
+    const continued = await call(recoveryPath, undefined, idler);
+    assert.equal(continued.object.body_md, `${idleDraftBody} Continued.`);
+    assert.equal(continued.object.version, 2, "the same preserved draft can be revised");
+    for (const path of [idleStatusPath, recoveryPath]) {
+      const denied = await worker.fetch(`${origin}${path}`, {
+        headers: { "User-Agent": userAgent, authorization: `Bearer ${author}` },
+      });
+      assert.equal(denied.status, 404, "a foreign Fellow cannot use a recovery URL");
+      assert.equal(denied.headers.get("cache-control"), "private, no-store");
+      assert.ok(!(await denied.text()).includes(idleDraftBody));
+    }
+    assert.equal(
+      await (
+        await worker.fetch(`${origin}/cursor`, { headers: { "User-Agent": userAgent } })
+      ).text(),
+      publicCursorBeforeIdle,
+      "idle closure, recovery reads and draft continuation never move the public cursor",
+    );
+    const publicProblem = await worker.fetch(`${origin}/p/${problem}.json`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(publicProblem.status, 200);
+    const publicProblemBody = await publicProblem.text();
+    assert.ok(
+      !publicProblemBody.includes(idleDraftBody),
+      "private recovery bytes stay off the public face",
+    );
+    assert.ok(
+      !publicProblemBody.includes(idleDraft.workshop_id),
+      "the public face omits private draft IDs",
+    );
+    // Explicitly PLANTED notice-context probes, distinct from the genuine
+    // idle producer above. Text and a session-shaped target grant no recovery
+    // affordance without matching recipient, problem and closed session state.
+    const authorId = (await call("/v1/hello", undefined, author)).fellow.fellow_id;
+    const recoveryProbes = [
+      { name: "foreign-recipient", fellowId: authorId, problemId: problem, targetId: idleSession },
+      { name: "wrong-problem", fellowId: idlerId, problemId: otherProblem, targetId: idleSession },
+      { name: "open-session", fellowId: idlerId, problemId: problem, targetId: resumedSession },
+      {
+        name: "missing-session",
+        fellowId: idlerId,
+        problemId: problem,
+        targetId: `S-${"Z".repeat(26)}`,
+      },
+      {
+        name: "noncanonical-session",
+        fellowId: idlerId,
+        problemId: problem,
+        targetId: `${idleSession}\n`,
+      },
+    ];
+    for (const probe of recoveryProbes) {
+      await createInboxNotice(env.DB, {
+        id: `NOT-idle-recovery-${probe.name}`,
+        fellowId: probe.fellowId,
+        problemId: probe.problemId,
+        targetId: probe.targetId,
+        noticeType: "protocol_notice",
+        title: "Idle session closed",
+      });
+    }
+    const recoveryPages = [await inbox(author), await inbox(idler)];
+    for (const probe of recoveryProbes) {
+      const item = recoveryPages
+        .flatMap((page) => page.items)
+        .find((item) => item.id === `NOT-idle-recovery-${probe.name}`);
+      assert.ok(item, `${probe.name} probe reaches its recipient's private inbox`);
+      assert.deepEqual(item.next_actions ?? [], [], `${probe.name} cannot mint a recovery action`);
+    }
     assert.ok(
       !(await call("/v1/hello", undefined, idler)).open_sessions.some(
         (open) => open.session_id === idleSession,
@@ -1174,6 +1324,10 @@ await runLocalWorkerJourney(
         inbox_notice: fresh[0].type,
         tail_events: seen.length,
         move_contracts_followed: followedContracts,
+        idle_recovery: {
+          resumed_original_draft: true,
+          planted_binding_probes: recoveryProbes.length,
+        },
         boundary: "local Workerd/D1/R2; inbox delivery by one cron-tick call; fixture screening",
       }),
     );

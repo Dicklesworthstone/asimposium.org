@@ -59,6 +59,7 @@ function fixture() {
   function prepare(text: string) {
     let values: (string | number | null)[] = [];
     const execute = () => ({
+      success: true,
       results: sql.query(text).all(...values),
       meta: { changes: (sql.query("SELECT changes() AS n").get() as { n: number }).n },
     });
@@ -329,6 +330,55 @@ function hide(f: ReturnType<typeof fixture>, target: string, visibility = "hidde
     FROM content_controls WHERE problem_id='P-DEMO' AND target_ref=?`)
     .run(target, visibility, target);
 }
+
+describe("closed-session protocol notice recovery (SQLite adapter unit coverage)", () => {
+  test("requires the exact recipient, problem, closed state and canonical session target", async () => {
+    await withFixture(async (f) => {
+      f.sql.exec(`CREATE TABLE sessions(session_id TEXT PRIMARY KEY, fellow_id TEXT,
+        problem_id TEXT, closed_at TEXT);`);
+      const own = `S-${"A".repeat(26)}`;
+      const foreign = `S-${"B".repeat(26)}`;
+      const otherProblem = `S-${"C".repeat(26)}`;
+      const open = `S-${"D".repeat(26)}`;
+      const insertSession = f.sql.query("INSERT INTO sessions VALUES (?, ?, ?, ?)");
+      insertSession.run(own, "fellow-a", "P-DEMO", iso());
+      insertSession.run(foreign, "fellow-b", "P-DEMO", iso());
+      insertSession.run(otherProblem, "fellow-a", "P-OTHER", iso());
+      insertSession.run(open, "fellow-a", "P-DEMO", null);
+      insertSession.run(`${own}\n`, "fellow-a", "P-DEMO", iso());
+      const cases = [
+        { name: "owned", target: own, type: "protocol_notice", url: `/v1/sessions/${own}` },
+        { name: "foreign", target: foreign, type: "protocol_notice" },
+        { name: "wrong-problem", target: otherProblem, type: "protocol_notice" },
+        { name: "open", target: open, type: "protocol_notice" },
+        { name: "missing", target: `S-${"Z".repeat(26)}`, type: "protocol_notice" },
+        { name: "noncanonical", target: `${own}\n`, type: "protocol_notice" },
+        { name: "other-type", target: own, type: "object_critique" },
+        { name: "generic", target: null, type: "protocol_notice" },
+      ];
+      const insertNotice = f.sql.query(`INSERT INTO fellow_inbox_notices
+        (id, fellow_id, problem_id, notice_type, seq, title, target_id, created_at)
+        VALUES (?, 'fellow-a', 'P-DEMO', ?, ?, 'Idle session closed', ?, ?)`);
+      for (const [index, item] of cases.entries()) {
+        insertNotice.run(item.name, item.type, index + 1, item.target, NOW);
+      }
+      const page = await getInboxNotices(f.db, "fellow-a", { limit: 50 }, NOW);
+      expect(page.items).toHaveLength(cases.length);
+      for (const item of cases) {
+        const notice = page.items.find((notice) => notice.id === item.name);
+        expect(notice, item.name).toBeDefined();
+        expect(notice?.next_actions?.map((action) => action.url) ?? [], item.name).toEqual(
+          item.url === undefined ? [] : [item.url],
+        );
+      }
+      expect((await getInboxNotices(f.db, "fellow-b", { limit: 50 }, NOW)).items).toEqual([]);
+      f.sql.query("UPDATE sessions SET closed_at = NULL WHERE session_id = ?").run(own);
+      expect(
+        (await getInboxNotices(f.db, "fellow-a", { limit: 1 }, NOW)).items[0]?.next_actions,
+      ).toBeUndefined();
+    });
+  });
+});
 
 describe("hypothesis evidence reaches the immutable route author", () => {
   test.each(["supports", "refutes", "informs"])(
