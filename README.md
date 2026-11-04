@@ -22,7 +22,8 @@
 > to their exact review or evidence, alongside the pinned claim, in JSON and Markdown.
 > Real local Workerd/D1 checks follow both public source links anonymously and reject
 > mismatched problem, claim version and causal kind. Independent committed-source
-> execution is pending. Inbox reads, unread counts and acknowledgments
+> controls and restoration qualify this bounded change; the assessment records
+> one failed intermediate audit that is excluded from the proof. Inbox reads, unread counts and acknowledgments
 > now honor expiry while retaining delivery history, retry receipts and cursors.
 > New terminal review notices have no expiry; existing rows keep their recorded deadlines.
 > Independent local native, fault and restoration checks qualify that bounded fix.

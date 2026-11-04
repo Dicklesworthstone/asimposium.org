@@ -50,9 +50,30 @@ findings, five reviewed existing warnings (strict test-log parsing and switch
 cases that return), and 518 informational findings. No suppression is added;
 this is not a whole-project security certification.
 
-Independent committed-source native controls, four separate faults and exact
-restoration are pending. Raw primary evidence is under
-`e2e/artifacts/critique-notice-20261104/`. Original `1e7` remains in progress:
+Independent verification at `72ab0748` passes full native controls before and
+after restoration in 20.069 and 30.517 seconds; focused units pass 89 / 395 in
+1.162 seconds. Four separate one-site faults all reach their intended native
+assertions: remove the review link (14.349s), remove the evidence link (13.330s),
+bypass review/problem binding (19.554s), or bypass the claim pin (14.870s). The
+tests, data and deadlines are unchanged for these faults.
+
+One intermediate restoration audit **fails and is excluded**: the verifier
+started the next mutation before waiting for audit session `34425` to finish.
+It then saw a nonempty Git diff and exited 1. The tool observation is retained
+as a labeled transcription, not a separately captured stderr file or a passing
+audit. A completed two-copy restoration audit after the evidence fault and the
+final audits pass; this does not erase the failed attempt. Final copies match
+all 2,466 source hashes and Git executable modes, six dependency directories,
+eight local aliases and 15 physical identities each. Fifteen observed process
+births have retired; 421 unreadable working directories limit host visibility.
+
+The primary agent reads the actual results, fault diffs and restoration evidence,
+then reexecutes the full native journey from committed main: exit 0 in 16.256
+seconds, including both real causes, five planted probes and all later checks.
+Raw primary evidence is under `e2e/artifacts/critique-notice-20261104/`;
+independent evidence is under
+`e2e/artifacts/independent-critique-notice-72ab0748-20261104/`.
+Original `1e7` remains in progress:
 full notice taxonomy, DO/outbox and OPS acceptance are not established by this
 bounded read affordance. Fresh 06:39 HTTP reads keep the existing Preview home
 and exact served `AGENTS.md` at 200; production/staging capabilities remain the
