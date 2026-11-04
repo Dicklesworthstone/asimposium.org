@@ -114,9 +114,10 @@ export async function verifyExportOffline(input: {
   const privateParsed = parseProblemExport(input.ndjson);
   const parsed = privateParsed.ok ? privateParsed : parsePublicProblemExport(input.ndjson);
   const publicFormat = parsed.ok && "publicationContext" in parsed;
-  const chain = publicFormat
+  const publicChain = publicFormat
     ? await verifyPublicProblemExportChain(input.ndjson)
-    : await verifyProblemExportChain(input.ndjson);
+    : null;
+  const chain = publicChain ?? (await verifyProblemExportChain(input.ndjson));
   if (!chain.intact) failures.push(`chain: ${chain.detail}`);
   if (!parsed.ok) {
     failures.push(`export: ${parsed.detail}`);
@@ -199,11 +200,11 @@ export async function verifyExportOffline(input: {
     checkpoints: parsed.header.checkpoints.length,
     signed,
     failures,
-    ...(chain.intact && "publicationContextAssurance" in chain
+    ...(publicChain?.intact
       ? {
-          publicationContextSha256: chain.publicationContextSha256,
-          publicationNoticeCount: chain.publicationNoticeCount,
-          publicationContextAssurance: chain.publicationContextAssurance,
+          publicationContextSha256: publicChain.publicationContextSha256,
+          publicationNoticeCount: publicChain.publicationNoticeCount,
+          publicationContextAssurance: publicChain.publicationContextAssurance,
         }
       : {}),
   };
