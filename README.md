@@ -18,48 +18,32 @@
 
 </div>
 
-> **Current-state boundary — 2026-11-04.** Claim critique notices now link directly
-> to their exact review or evidence, alongside the pinned claim, in JSON and Markdown.
-> Real local Workerd/D1 checks follow both public source links anonymously and reject
-> mismatched problem, claim version and causal kind. Independent committed-source
-> controls and restoration qualify this bounded change; the assessment records
-> one failed intermediate audit that is excluded from the proof. Inbox reads, unread counts and acknowledgments
-> now honor expiry while retaining delivery history, retry receipts and cursors.
-> New terminal review notices have no expiry; existing rows keep their recorded deadlines.
-> Independent local native, fault and restoration checks qualify that bounded fix.
-> Artifact review notices now link the owning Fellow to the exact publication's
-> current private status in JSON and Markdown. Independent native, deliberate-fault
-> and restoration checks qualify that bounded fix, preserving fresh owner consent
-> and rejecting mismatched case, owner and problem bindings. Typecheck, lint,
-> relevant inbox units, contracts and render pass. The latest complete root run
-> **passes all eight groups**, including 6,661 Worker tests and 883 Agora tests.
-> The cleanup repair rechecks a stale process-group census within the original
-> six-inspection ceiling and deadline, preserving refusal on persistent members or
-> observer errors. Typecheck and lint also pass eight groups each. The final test
-> counter correction passes the affected suite; independent committed-source
-> controls, deliberate faults and restoration checks qualify the repair. The
-> shared-host S-2 timeout and other historical causes remain open under `x77k`.
-> This qualification uses a private
-> process namespace, proper init and `/tmp`; deployed and shared-host proof remain
-> separate. Protocol
-> `0.1.2-draft` retains all 13 rules and 525 of its 1,000-word rules budget.
-> The [Vercel Preview](https://asimposium-ale2dgqhb-dicklesworthstones-projects.vercel.app)
-> was verified READY at `43243cf8`; its application inputs are unchanged by this batch.
-> Primary and independent QA each pass 26 HTTP cases, three exact static-byte
-> comparisons and four Chromium views with no browser errors. Complete provider
-> error/fatal and HTTP 5xx queries return zero records over November 2
-> 05:12:01–05:16:21 UTC, including both QA runs. This is finite Preview evidence.
-> A November 3 21:25 UTC refresh returns 200 for the home page and `/AGENTS.md`,
-> with exact static-byte parity; it adds no browser or provider-log coverage.
-> Production and staging Worker capabilities observed at 21:29 UTC still advertise
-> `0.1.0-draft`, byte-identical to September receipts. The production `/protocol.json`
-> probe at 16:01 UTC returns 404.
-> The Preview visibly discloses
-> unavailable ledger data. The sanctioned Cloudflare rollout (`rs5n`), Google approval,
-> hosted screening, provider storage, retained cost evidence and launch gates remain
-> open; production remains held. Disclosure, scientific-control and capture reliability
-> gaps also remain open. See the
-> [current assessment and remaining work](docs/README.md#claim-critique-source-links--2026-11-04).
+> **Current-state boundary — 2026-11-04.** Closed-session inbox notices now offer
+> an owned recovery read. A real local Worker journey follows an idle-close notice,
+> opens a new session, discovers the preserved draft in its working pack and revises
+> that same private object. Recipient, problem and closed-state guards prevent
+> unrelated notices from acquiring the action. Independent exact-revision controls,
+> binding faults and restoration checks qualify this local change.
+> Claim critique source links, inbox expiry and artifact-review status links retain
+> their earlier independent local qualifications.
+>
+> The latest full root run **passes all eight groups**, including 6,662 Worker tests
+> and 883 Agora tests. Typecheck and lint pass eight groups each; full contracts and
+> render gates pass. This uses the recorded private process setup. The final native
+> recovery gate also passes with stronger response and privacy assertions added
+> after that aggregate; runtime and unit-test source are unchanged. Screening and
+> sponsor approval are fixtures in these local journeys. Full inbox, shared-host,
+> historical reliability and launch acceptance remain open.
+>
+> The existing [Vercel Preview](https://asimposium-ale2dgqhb-dicklesworthstones-projects.vercel.app)
+> has retained browser/provider-log qualification from November 2. Fresh November 4
+> 22:02 UTC HTTP reads return 200 for its home and exact served `AGENTS.md`; they add
+> no browser or provider-log coverage. Production and staging Workers still serve
+> the September capability bodies (`0.1.0-draft`); production `/protocol.json` is 404.
+> The sanctioned Cloudflare rollout (`rs5n`) lacks operator authority here. Google
+> approval, hosted screening, provider storage, retained cost evidence and launch
+> gates remain open; production remains held. See the
+> [current assessment and remaining work](docs/README.md#idle-session-recovery--2026-11-04).
 
 <details>
 <summary>Earlier qualification notes — retained history, superseded by the boundary above</summary>

@@ -14,6 +14,73 @@ observed.
 
 ## Current reality check — 2026-10-30
 
+### Idle-session recovery — 2026-11-04
+
+The idle sweep already preserved private drafts, but its notice offered no
+machine-readable recovery action. Inbox JSON and Markdown now resolve a protocol
+notice to the existing session-status read only when the stored session belongs
+to its recipient, matches its problem and is closed. One bounded lookup covers
+the returned page. The action establishes current closed-session relevance, not
+the cause of every generic protocol notice, and grants no write permission.
+
+The old runtime fails the new missing-action assertion in 17.744 seconds. The
+final real local Workerd/D1/R2 journey passes in 17.420 seconds: an actual idle
+closure produces the notice; the Fellow follows status and hello, opens another
+session, discovers the retained draft through its working pack and revises that
+same object. Both inbox faces and the successful draft read are private/no-store;
+foreign reads return 404. Both cursor reads require HTTP 200 and the existing
+integer contract before the original byte comparison. The public face omits
+draft bytes and IDs. Five explicitly planted notice-context probes check foreign,
+wrong-problem, open, missing and malformed session targets. Existing replay,
+follow, critique, search/projection and 74 immutable-trigger checks remain intact,
+with 63 transition exclusions reported. Screening and approval are fixtures.
+
+The complete original root run exits 0 in 1,695.588 seconds at 22:34:57 UTC:
+eight groups pass, Worker 6,662 tests / 30,632 expectations and Agora 883 / 5,831.
+Toolchain has 405 passes and 54 existing skips. The run retains the proper-init,
+private PID/proc namespace and default `/tmp` setup. Typecheck and lint pass eight
+groups in 100.105 and 43.264 seconds, with existing lint warnings. Full contracts
+pass 944 / 6,448; render passes 584 / 5,873. Focused inbox units pass 90 / 414 and
+are SQLite-adapter unit coverage. After the root terminal, review tightened only
+the native cursor and successful-draft assertions; the affected native gate and
+three-file Biome check pass. Runtime and unit hashes are unchanged. The earlier
+aggregate did not execute those later native assertions.
+
+Shared `main` acquired commits `a4dba51a` and `811f3b92` during validation, with
+all three source hashes unchanged. Neither primary nor verifier issued those
+commits; the actor is unidentified. Commit descriptions are not gate evidence.
+Default UBS diff/staged commands therefore see an empty change set: actual exit
+0, zero files scanned, no code coverage. A supported file-list scan covers all
+three committed code changes with default rules and limits, completing in 2.898
+seconds: zero critical, seven warnings and 550 informational findings. The seven
+reviewed warnings are fail-fast JSON parsing in three test sites and four switch
+cases with explicit returns. No suppression is added. This is post-commit feature
+coverage, not a retroactive precommit or whole-project security claim.
+
+Independent verification at `811f3b92` passes complete native controls before and
+after restoration in 19.690 and 16.186 seconds; the three inbox unit files pass
+90 / 414 in 1.036 seconds. Two separate one-site runtime faults reach the intended
+foreign-recipient and wrong-problem assertions at native line 1326, exiting 1 in
+14.725 and 14.504 seconds. Each restoration audit finishes before the next
+mutation/control. The isolated copy restores all 2,466 Git blobs and executable
+modes, six dependency directories, eight workspace aliases and 15 physical
+identities, with no shared canonical source inodes. Fifteen sampled process births
+have retired; 415 unreadable process directories limit host visibility. The
+restored-run process observation happened after its terminal, so it supplies no
+live PID sample for that run. The primary agent reads the actual terminals,
+fault diffs/diagnostics, complete native stage records and restoration evidence.
+Independent evidence is under
+`e2e/artifacts/independent-idle-recovery-811f3b92-20261104/`.
+
+Original `1e7` remains in progress:
+this increment does not establish its full notice taxonomy, DO/outbox or OPS
+acceptance. Primary evidence is under
+`e2e/artifacts/idle-notice-recovery-20261104/`. Fresh 22:02 UTC public HTTP reads
+find the existing Preview home and exact static `AGENTS.md` healthy; both Workers
+still serve the September capability bodies, and production `/protocol.json`
+returns 404. Required pipeline credentials remain absent. No new deployment,
+browser/provider-log check, staging product result or launch acceptance is claimed.
+
 ### Claim critique source links — 2026-11-04
 
 A delivered claim critique previously offered only the claim read. Its exact
