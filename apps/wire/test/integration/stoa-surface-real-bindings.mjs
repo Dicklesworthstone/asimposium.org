@@ -14,7 +14,11 @@ import {
 } from "@asimposium/contracts";
 import { EventTailResponseSchema } from "../../../../packages/contracts/src/event-tail.ts";
 import { ProblemDocumentSchema } from "../../../../packages/contracts/src/problem.ts";
-import { SessionStatusResponseSchema } from "../../../../packages/contracts/src/sessions.ts";
+import {
+  CursorResponseSchema,
+  SessionStatusResponseSchema,
+  WorkshopObjectResponseSchema,
+} from "../../../../packages/contracts/src/sessions.ts";
 import { createInboxNotice } from "../../src/inbox/store.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
@@ -1154,9 +1158,12 @@ await runLocalWorkerJourney(
       idler,
       201,
     );
-    const publicCursorBeforeIdle = await (
-      await worker.fetch(`${origin}/cursor`, { headers: { "User-Agent": userAgent } })
-    ).text();
+    const publicCursorBeforeResponse = await worker.fetch(`${origin}/cursor`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(publicCursorBeforeResponse.status, 200);
+    const publicCursorBeforeIdle = await publicCursorBeforeResponse.text();
+    CursorResponseSchema.parse(JSON.parse(publicCursorBeforeIdle));
     const later = Date.now() + 13 * 3600 * 1000;
     assert.equal(
       (await fixtures.expireIdleTick(later, idlerId)).closed,
@@ -1226,7 +1233,12 @@ await runLocalWorkerJourney(
       /Private work product: (\/v1\/sessions\/S-[A-Za-z0-9]{26}\/workshop\/W-[A-Za-z0-9]{26})/,
     )?.[1];
     assert.equal(recoveryPath, `/v1/sessions/${resumedSession}/workshop/${preservedHead.id}`);
-    const recovered = await call(recoveryPath, undefined, idler);
+    const recoveredResponse = await worker.fetch(`${origin}${recoveryPath}`, {
+      headers: { "User-Agent": userAgent, authorization: `Bearer ${idler}` },
+    });
+    assert.equal(recoveredResponse.status, 200);
+    assert.equal(recoveredResponse.headers.get("cache-control"), "private, no-store");
+    const recovered = WorkshopObjectResponseSchema.parse(await recoveredResponse.json());
     assert.equal(recovered.object.body_md, idleDraftBody);
     assert.equal(recovered.object.version, 1);
     await call(
@@ -1250,10 +1262,14 @@ await runLocalWorkerJourney(
       assert.equal(denied.headers.get("cache-control"), "private, no-store");
       assert.ok(!(await denied.text()).includes(idleDraftBody));
     }
+    const publicCursorAfterResponse = await worker.fetch(`${origin}/cursor`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(publicCursorAfterResponse.status, 200);
+    const publicCursorAfterIdle = await publicCursorAfterResponse.text();
+    CursorResponseSchema.parse(JSON.parse(publicCursorAfterIdle));
     assert.equal(
-      await (
-        await worker.fetch(`${origin}/cursor`, { headers: { "User-Agent": userAgent } })
-      ).text(),
+      publicCursorAfterIdle,
       publicCursorBeforeIdle,
       "idle closure, recovery reads and draft continuation never move the public cursor",
     );
