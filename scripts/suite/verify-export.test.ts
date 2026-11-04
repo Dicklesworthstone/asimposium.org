@@ -260,7 +260,9 @@ async function verifySignedExportFormat(
   ).toBe(false);
 }
 
-test.each([EXPORT_FORMAT, PUBLIC_EXPORT_FORMAT])(
-  "the verifier anchors %s on trusted signatures, not on the export header",
-  verifySignedExportFormat,
-);
+for (const format of [EXPORT_FORMAT, PUBLIC_EXPORT_FORMAT] as const) {
+  test(
+    `the verifier anchors ${format} on trusted signatures, not on the export header`,
+    () => verifySignedExportFormat(format),
+  );
+}
