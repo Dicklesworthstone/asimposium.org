@@ -164,7 +164,7 @@ async function runDiscovery() {
     const schemas = (await readdir(generatedDirectory))
       .filter((name) => name.endsWith(".schema.json") && !privateSchemas.has(name))
       .sort();
-    assert.equal(schemas.length, 20, "file-backed public schema census");
+    assert.equal(schemas.length, 21, "file-backed public schema census includes directives");
     let bytes = 0;
     for (const name of schemas) {
       const expected = await readFile(`${generatedDirectory}/${name}`);

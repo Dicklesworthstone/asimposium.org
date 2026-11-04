@@ -21,6 +21,9 @@
  * truncated checkpoints.json passes as a shorter, still-authentic history.
  * Freshness needs an independent source of the latest signed seq (another
  * mirror, or a checkpoint retained from an earlier fetch).
+ * Public v4 companions are checked for exact framing, source binding and digest
+ * consistency. The result labels that context as self-consistency-only: event
+ * checkpoint signatures do not authenticate the companion's provenance.
  *
  * Exit 0 verified; 1 verification failed; 2 usage or unreadable input.
  */
@@ -32,7 +35,15 @@ import {
   CheckpointSignaturesResponseSchema,
   checkpointSignatureMessage,
 } from "@asimposium/contracts";
-import { parseProblemExport, verifyProblemExportChain } from "../apps/wire/src/krater/export.ts";
+import {
+  EXPORT_FORMAT,
+  PUBLIC_EXPORT_FORMAT,
+  type PublicProblemExportVerification,
+  parseProblemExport,
+  parsePublicProblemExport,
+  verifyProblemExportChain,
+  verifyPublicProblemExportChain,
+} from "../apps/wire/src/krater/export.ts";
 import { parseAndVerifyDeletionJournal } from "../apps/wire/src/krater/retention.ts";
 
 export interface TrustedKey {
@@ -40,8 +51,16 @@ export interface TrustedKey {
   readonly public_key: string;
 }
 
-export interface ExportVerification {
+type PublicContextIntegrity = Partial<
+  Pick<
+    Extract<PublicProblemExportVerification, { intact: true }>,
+    "publicationContextSha256" | "publicationNoticeCount" | "publicationContextAssurance"
+  >
+>;
+
+export interface ExportVerification extends PublicContextIntegrity {
   readonly ok: boolean;
+  readonly format?: typeof EXPORT_FORMAT | typeof PUBLIC_EXPORT_FORMAT;
   readonly problem: string | null;
   readonly checkpoints: number;
   readonly signed: number;
@@ -90,9 +109,15 @@ export async function verifyExportOffline(input: {
   readonly trustedKeys: readonly TrustedKey[];
 }): Promise<ExportVerification> {
   const failures: string[] = [];
-  const chain = await verifyProblemExportChain(input.ndjson);
+  // Keep both exact grammars. Public context is never stripped or passed to
+  // the private restore parser as an implicitly trusted v3 archive.
+  const privateParsed = parseProblemExport(input.ndjson);
+  const parsed = privateParsed.ok ? privateParsed : parsePublicProblemExport(input.ndjson);
+  const publicFormat = parsed.ok && "publicationContext" in parsed;
+  const chain = publicFormat
+    ? await verifyPublicProblemExportChain(input.ndjson)
+    : await verifyProblemExportChain(input.ndjson);
   if (!chain.intact) failures.push(`chain: ${chain.detail}`);
-  const parsed = parseProblemExport(input.ndjson);
   if (!parsed.ok) {
     failures.push(`export: ${parsed.detail}`);
     return { ok: false, problem: null, checkpoints: 0, signed: 0, failures };
@@ -169,10 +194,18 @@ export async function verifyExportOffline(input: {
   }
   return {
     ok: failures.length === 0,
+    format: publicFormat ? PUBLIC_EXPORT_FORMAT : EXPORT_FORMAT,
     problem,
     checkpoints: parsed.header.checkpoints.length,
     signed,
     failures,
+    ...(chain.intact && "publicationContextAssurance" in chain
+      ? {
+          publicationContextSha256: chain.publicationContextSha256,
+          publicationNoticeCount: chain.publicationNoticeCount,
+          publicationContextAssurance: chain.publicationContextAssurance,
+        }
+      : {}),
   };
 }
 
