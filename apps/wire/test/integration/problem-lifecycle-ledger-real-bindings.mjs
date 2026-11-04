@@ -212,30 +212,34 @@ await runLocalWorkerJourney(
       "A stale snapshot cannot append an event or retain its key",
     );
 
-    const firstSameKey = await Promise.all(
-      Array.from({ length: 4 }, () => govern(revision, "concurrent-key", [200, 429])),
-    );
-    assert.ok(
-      firstSameKey.some((outcome) => outcome.problem),
-      "the concurrent writer committed",
-    );
-    const afterSameKey = await state();
-    const sameKey = [];
-    for (const outcome of firstSameKey) {
-      if (outcome.problem) sameKey.push(outcome);
-      else {
-        ProblemDocumentSchema.parse(outcome);
-        assert.equal(outcome.status, 429);
-        assert.equal(outcome.code, "WRITE_REFUSED");
-        assert.equal(outcome.detail, "An identical publication attempt is still in progress.");
-        assert.ok(outcome.fix_hint.includes("same key"));
-        // The first wave has settled, including the winner. This is an exact
-        // replay of that request, not a new paid attempt or a blind retry.
-        sameKey.push(await govern(revision, "concurrent-key"));
+    async function concurrentReplays(action, key, count) {
+      const firstWave = await Promise.all(
+        Array.from({ length: count }, () => govern(action, key, [200, 429])),
+      );
+      assert.ok(
+        firstWave.some((outcome) => outcome.problem),
+        "the concurrent writer committed",
+      );
+      const committed = await state();
+      const replays = [];
+      for (const outcome of firstWave) {
+        if (outcome.problem) replays.push(outcome);
+        else {
+          ProblemDocumentSchema.parse(outcome);
+          assert.equal(outcome.status, 429);
+          assert.equal(outcome.code, "WRITE_REFUSED");
+          assert.equal(outcome.detail, "An identical publication attempt is still in progress.");
+          assert.ok(outcome.fix_hint.includes("same key"));
+          // The whole first wave, including its winner, has settled. Only
+          // exact body/key replays qualify; other throttles cannot recover here.
+          replays.push(await govern(action, key));
+        }
       }
+      for (const outcome of replays) assert.deepEqual(outcome, replays[0]);
+      assert.deepEqual(await state(), committed, "pending callers only replay the winner");
+      return replays;
     }
-    for (const outcome of sameKey) assert.deepEqual(outcome, sameKey[0]);
-    assert.deepEqual(await state(), afterSameKey, "pending callers only replay the winner");
+    await concurrentReplays(revision, "concurrent-key", 4);
     assert.equal((await state()).events.length, 3);
     assert.equal(await call("/cursor"), globalBefore + 3);
     const beforeRace = await state();
@@ -456,7 +460,7 @@ await runLocalWorkerJourney(
       });
       const etag = face.headers.get("etag");
       await face.arrayBuffer();
-      const outcomes = await Promise.all(Array.from({ length: 3 }, () => govern(action, key)));
+      const outcomes = await concurrentReplays(action, key, 3);
       const response = outcomes[0];
       for (const outcome of outcomes) assert.deepEqual(outcome, response);
       const after = await state();
