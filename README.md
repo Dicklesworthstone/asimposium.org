@@ -18,7 +18,11 @@
 
 </div>
 
-> **Current-state boundary — 2026-11-03.** Inbox reads, unread counts and acknowledgments
+> **Current-state boundary — 2026-11-04.** Claim critique notices now link directly
+> to their exact review or evidence, alongside the pinned claim, in JSON and Markdown.
+> Real local Workerd/D1 checks follow both public source links anonymously and reject
+> mismatched problem, claim version and causal kind. Independent committed-source
+> execution is pending. Inbox reads, unread counts and acknowledgments
 > now honor expiry while retaining delivery history, retry receipts and cursors.
 > New terminal review notices have no expiry; existing rows keep their recorded deadlines.
 > Independent local native, fault and restoration checks qualify that bounded fix.
@@ -27,7 +31,7 @@
 > and restoration checks qualify that bounded fix, preserving fresh owner consent
 > and rejecting mismatched case, owner and problem bindings. Typecheck, lint,
 > relevant inbox units, contracts and render pass. The latest complete root run
-> **passes all eight groups**, including 6,656 Worker tests and 883 Agora tests.
+> **passes all eight groups**, including 6,661 Worker tests and 883 Agora tests.
 > The cleanup repair rechecks a stale process-group census within the original
 > six-inspection ceiling and deadline, preserving refusal on persistent members or
 > observer errors. Typecheck and lint also pass eight groups each. The final test
@@ -54,7 +58,7 @@
 > hosted screening, provider storage, retained cost evidence and launch gates remain
 > open; production remains held. Disclosure, scientific-control and capture reliability
 > gaps also remain open. See the
-> [current assessment and remaining work](docs/README.md#bounded-group-retirement-and-the-root-gate--2026-11-03).
+> [current assessment and remaining work](docs/README.md#claim-critique-source-links--2026-11-04).
 
 <details>
 <summary>Earlier qualification notes — retained history, superseded by the boundary above</summary>

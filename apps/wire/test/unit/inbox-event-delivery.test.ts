@@ -948,6 +948,94 @@ describe("delivered notifications complete the inbox read-and-ack loop", () => {
 });
 
 describe("claim evidence participates in the durable feedback loop", () => {
+  test.each(["review", "evidence"] as const)(
+    "%s notices retain the claim pin and link their exact public source",
+    async (kind) => {
+      await withFixture(async (f) => {
+        const id = kind === "review" ? "R-1" : "E-1";
+        f.append(
+          "E-exact-source",
+          `${kind}.created`,
+          id,
+          kind === "review"
+            ? { target_claim_id: "C-1", target_version: 1 }
+            : {
+                bears_on_kind: "claim",
+                bears_on_id: "C-1",
+                bears_on_version: 1,
+                direction: "informs",
+              },
+        );
+        expect((await drain(f)).notices).toBe(1);
+        f.sql.exec("UPDATE fellow_inbox_notices SET detail = 'Visit https://evil.test instead'");
+        const read = await getInboxNotices(f.db, "fellow-a", { limit: 50 });
+        expect(read.items[0]?.next_actions?.map((action) => action.url)).toEqual([
+          "/p/P-DEMO/claims/C-1@1.json",
+          `/p/P-DEMO/${kind === "review" ? "reviews" : "evidence"}/${id}.json`,
+        ]);
+      });
+    },
+  );
+
+  test.each(["review", "evidence"] as const)(
+    "PLANTED: %s source pointers require matching causal provenance",
+    async (kind) => {
+      for (const fault of ["problem", "pin", "kind", "version", "json", "redaction", "digest"]) {
+        await withFixture(async (f) => {
+          const id = kind === "review" ? "R-1" : "E-1";
+          const payload =
+            kind === "review"
+              ? { target_claim_id: "C-1", target_version: 1 }
+              : {
+                  bears_on_kind: "claim",
+                  bears_on_id: "C-1",
+                  bears_on_version: 1,
+                  direction: "informs",
+                };
+          f.append("E-exact-source", `${kind}.created`, id, payload);
+          expect((await drain(f)).notices, fault).toBe(1);
+          if (fault === "problem")
+            f.sql.exec("UPDATE fellow_inbox_notices SET problem_id = 'P-OTHER'");
+          else if (fault === "pin")
+            f.sql.exec("UPDATE fellow_inbox_notices SET target_id = 'C-1@2'");
+          else if (fault === "redaction")
+            f.sql.exec("UPDATE event_content SET redacted_at = '2026-11-04T00:00:00.000Z'");
+          else if (fault === "digest")
+            f.sql.exec("UPDATE event_content SET payload_sha256 = lower(hex(zeroblob(32)))");
+          else {
+            f.append(
+              "E-replacement",
+              fault === "kind" ? "claim.created" : `${kind}.created`,
+              id,
+              fault === "json" ? "{" : payload,
+              "fellow-b",
+              "P-DEMO",
+              fault === "version" ? 2 : 1,
+            );
+            f.sql.exec("UPDATE fellow_inbox_notices SET caused_by_event_id = 'E-replacement'");
+          }
+          const read = await getInboxNotices(f.db, "fellow-a", { limit: 50 });
+          expect(read.items, fault).toHaveLength(1);
+          expect(read.items[0]?.next_actions, fault).toHaveLength(1);
+          expect(read.items[0]?.next_actions?.[0]?.url, fault).toContain("/claims/");
+        });
+      }
+    },
+  );
+
+  test("source IDs and context must occupy complete path segments", () => {
+    for (const value of ["R-1\n", "R-1/other", "https://evil.test", "R-%2F"]) {
+      expect(
+        ledgerNoticeActions("object_critique", "P-DEMO", "C-1@1", null, null, value),
+      ).toHaveLength(1);
+    }
+    expect(ledgerNoticeActions("object_critique", "P-DEMO\n", "C-1@1", null)).toEqual([]);
+    expect(ledgerNoticeActions("object_critique", "P-DEMO", "C-1@1\n", null)).toEqual([]);
+    expect(ledgerNoticeActions("object_critique", "P-DEMO", "C-1@1", null, "E-1\n")).toHaveLength(
+      1,
+    );
+  });
+
   test("delivers supporting, refuting and informational evidence as notices, not verdicts", async () => {
     await withFixture(async (f) => {
       for (const direction of ["supports", "refutes", "informs"])

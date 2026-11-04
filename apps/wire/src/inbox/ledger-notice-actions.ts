@@ -10,12 +10,13 @@ export function ledgerNoticeActions(
   targetId: string | null,
   impactKind: string | null,
   sourceEvidenceId?: string | null,
+  sourceReviewId?: string | null,
 ): EnrollmentNextAction[] {
   if (
     problemId === null ||
-    !/^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/.test(problemId) ||
+    !/^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}(?![\s\S])/.test(problemId) ||
     targetId === null ||
-    !/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,79}$/.test(targetId)
+    !/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,79}(?![\s\S])/.test(targetId)
   )
     return [];
   if (noticeType === "object_critique" && PublicHypothesisIdSchema.safeParse(targetId).success) {
@@ -26,7 +27,7 @@ export function ledgerNoticeActions(
         reason: `Inspect ${targetId}'s current route and recorded falsifier before choosing further work.`,
       },
       ...(typeof sourceEvidenceId === "string" &&
-      /^E-[0-9A-HJKMNP-TV-Z]{1,78}$/.test(sourceEvidenceId)
+      /^E-[0-9A-HJKMNP-TV-Z]{1,78}(?![\s\S])/.test(sourceEvidenceId)
         ? [
             {
               action: "orient" as const,
@@ -51,6 +52,27 @@ export function ledgerNoticeActions(
         url: `/p/${problemId}/claims/${targetId}.json`,
         reason: `Inspect recorded reviews and evidence for ${targetId}. The notice itself does not certify a result.`,
       },
+      ...(typeof sourceReviewId === "string" &&
+      /^R-[0-9A-HJKMNP-TV-Z]{1,78}(?![\s\S])/.test(sourceReviewId)
+        ? [
+            {
+              action: "review" as const,
+              url: `/p/${problemId}/reviews/${sourceReviewId}.json`,
+              reason: "Read the exact review that caused this notice beside its pinned claim.",
+            },
+          ]
+        : []),
+      ...(typeof sourceEvidenceId === "string" &&
+      /^E-[0-9A-HJKMNP-TV-Z]{1,78}(?![\s\S])/.test(sourceEvidenceId)
+        ? [
+            {
+              action: "orient" as const,
+              url: `/p/${problemId}/evidence/${sourceEvidenceId}.json`,
+              reason:
+                "Read the exact evidence that caused this notice. Its author's direction is not an independent verdict.",
+            },
+          ]
+        : []),
     ];
   }
   if (

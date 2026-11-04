@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import {
+  ClaimFaceResponseSchema,
   InboxAckResponseSchema,
   InboxResponseSchema,
   ProblemCodeSchema,
@@ -358,7 +359,7 @@ await runLocalWorkerJourney(
     const inbox = async (token, query = "") =>
       InboxResponseSchema.parse(await call(`/v1/inbox${query}`, undefined, token));
     const before = await inbox(author);
-    await call(
+    const recordedReview = await call(
       `/v1/sessions/${reviewSession}/review`,
       {
         target_claim_id: claim.claim_id,
@@ -385,6 +386,15 @@ await runLocalWorkerJourney(
     assert.equal(fresh[0].problem_id, problem);
     assert.equal(fresh[0].target_id, `${claim.claim_id}@1`, "notices pin the exact claim version");
     assert.ok(fresh[0].caused_by_event_id, "the notice names the event that caused it");
+    const reviewPath = `/p/${problem}/reviews/${recordedReview.review_id}.json`;
+    assert.ok(
+      fresh[0].next_actions?.some((action) => action.url === reviewPath),
+      "a claim critique links to the exact review that caused it",
+    );
+    const reviewFace = ClaimFaceResponseSchema.parse(await call(reviewPath));
+    assert.equal(reviewFace.claim_state.claim_id, claim.claim_id);
+    assert.equal(reviewFace.claim_state.version, 1);
+    assert.ok(reviewFace.items.some((item) => item.id === recordedReview.review_id));
     const reviewerInbox = await inbox(reviewer);
     assert.ok(
       !reviewerInbox.items.some((item) => item.caused_by_event_id === fresh[0].caused_by_event_id),
@@ -437,6 +447,72 @@ await runLocalWorkerJourney(
       (item) => !after.items.some((old) => old.id === item.id),
     );
     assert.equal(evidenceNotices.length, 1, "racing ticks deliver one notice for one evidence");
+    const evidencePath = `/p/${problem}/evidence/${evidence.evidence_id}.json`;
+    assert.ok(
+      evidenceNotices[0].next_actions?.some((action) => action.url === evidencePath),
+      "a claim critique links to the exact evidence that caused it",
+    );
+    const evidenceFace = ClaimFaceResponseSchema.parse(await call(evidencePath));
+    assert.equal(evidenceFace.claim_state.claim_id, claim.claim_id);
+    assert.equal(evidenceFace.claim_state.version, 1);
+    assert.ok(evidenceFace.items.some((item) => item.id === evidence.evidence_id));
+    const inboxMarkdown = await worker.fetch(`${origin}/v1/inbox`, {
+      headers: {
+        "User-Agent": userAgent,
+        authorization: `Bearer ${author}`,
+        accept: "text/markdown",
+      },
+    });
+    assert.equal(inboxMarkdown.status, 200);
+    assert.equal(inboxMarkdown.headers.get("cache-control"), "private, no-store");
+    const inboxText = await inboxMarkdown.text();
+    assert.ok(inboxText.includes(`](${reviewPath})`));
+    assert.ok(inboxText.includes(`](${evidencePath})`));
+
+    // PLANTED stored-notice probes, not additional production causes: the
+    // actual review/evidence writes above establish the positive path.
+    const claimEvent = await env.DB.prepare(
+      "SELECT id FROM events WHERE problem_id = ? AND object_id = ? AND type = 'claim.created'",
+    )
+      .bind(problem, claim.claim_id)
+      .first();
+    assert.ok(claimEvent?.id);
+    const sourceProbes = [
+      ["review-pin", problem, `${claim.claim_id}@2`, fresh[0].caused_by_event_id],
+      ["review-problem", "P-AB", `${claim.claim_id}@1`, fresh[0].caused_by_event_id],
+      ["evidence-pin", problem, `${claim.claim_id}@2`, evidenceNotices[0].caused_by_event_id],
+      ["evidence-problem", "P-AB", `${claim.claim_id}@1`, evidenceNotices[0].caused_by_event_id],
+      ["wrong-cause-kind", problem, `${claim.claim_id}@1`, claimEvent.id],
+    ];
+    const sourceProbeIds = [];
+    for (const [name, problemId, targetId, cause] of sourceProbes) {
+      const probe = await createInboxNotice(env.DB, {
+        id: `NOT-source-${name}`,
+        fellowId: before.fellow_id,
+        problemId,
+        noticeType: "object_critique",
+        targetId,
+        causedByEventId: cause,
+        title: "PLANTED mismatched source binding",
+      });
+      sourceProbeIds.push(probe.id);
+      const item = (await inbox(author)).items.find((notice) => notice.id === probe.id);
+      assert.ok(item);
+      assert.deepEqual(
+        item.next_actions?.map((action) => action.url),
+        [`/p/${problemId}/claims/${targetId}.json`],
+        `${name}: a mismatched cause cannot author an exact source link`,
+      );
+    }
+    for (const token of [reviewer, second]) {
+      assert.ok(
+        (await inbox(token)).items.every((notice) => !sourceProbeIds.includes(notice.id)),
+        "source probes stay private to their recipient",
+      );
+    }
+    console.log(
+      JSON.stringify({ stage: "claim-critique-source-links", causes: 2, planted_probes: 5 }),
+    );
 
     // Reordered delivery: two queued jobs processed in reverse order still
     // yield exactly one notice per causal event.

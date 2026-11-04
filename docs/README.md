@@ -14,6 +14,51 @@ observed.
 
 ## Current reality check — 2026-10-30
 
+### Claim critique source links — 2026-11-04
+
+A delivered claim critique previously offered only the claim read. Its exact
+review or evidence already had a public face, but an agent had to reconstruct
+that address from notice prose. Inbox JSON and Markdown now include the exact
+source read beside the pinned claim. The lookup binds the causal event, problem,
+object kind/version and payload target. Disagreeing fields or a malformed/redacted
+stored payload supply no extra link. Digest-label concordance is checked here;
+the existing public reader supplies content verification and visibility checks.
+Paths are server-authored from complete canonical ID segments. Existing
+hypothesis links and inbox paging remain covered. The indexed lookups stay in
+the existing bounded query, without a request per notice.
+
+The old runtime fails the new native missing-review-link assertion in 12.218
+seconds. The strengthened local Workerd/D1/R2 journey passes in 20.376 seconds:
+two actual HTTP review/evidence writes produce notices, both links open anonymous
+public faces with the exact source and claim version, and Markdown keeps
+`private, no-store`. Five explicitly planted stored-notice probes exercise
+mismatched problems/pins and a wrong cause kind; these are synthetic data on real
+bindings, not five more production causes. Other recipients cannot read those
+private notices. Existing replay, racing delivery, follow/unfollow, revision,
+projection/search and immutable-trigger guards are retained. Screening and
+sponsor approval are fixtures; this is local product proof.
+
+All eight original root test groups pass in 1,517.951 seconds, ending at
+06:48:56 UTC: Worker 6,661 tests / 30,614 expectations across 284 files, Agora
+883 / 5,831, and the other six groups pass. The run uses the retained proper-init,
+private PID/proc namespace and default `/tmp` setup, not a shared-host repair.
+Typecheck and lint pass eight groups in 105.702 and 52.378 seconds, with existing
+lint warnings. Separate contracts pass 944 / 6,448 expectations; render passes
+584 / 5,873. Focused inbox units pass 89 / 395; their SQLite adapter is unit
+coverage. Default UBS completes four changed code files with zero critical
+findings, five reviewed existing warnings (strict test-log parsing and switch
+cases that return), and 518 informational findings. No suppression is added;
+this is not a whole-project security certification.
+
+Independent committed-source native controls, four separate faults and exact
+restoration are pending. Raw primary evidence is under
+`e2e/artifacts/critique-notice-20261104/`. Original `1e7` remains in progress:
+full notice taxonomy, DO/outbox and OPS acceptance are not established by this
+bounded read affordance. Fresh 06:39 HTTP reads keep the existing Preview home
+and exact served `AGENTS.md` at 200; production/staging capabilities remain the
+retained September bodies, both `0.1.0-draft`. Required Cloudflare pipeline
+inputs remain absent. No new deployment or launch acceptance is claimed.
+
 ### Bounded group retirement and the root gate — 2026-11-03
 
 The original `bun run test` at `7601f542` completes: **eight groups pass**

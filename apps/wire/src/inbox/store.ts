@@ -59,6 +59,7 @@ interface NoticeRow {
   expires_at: number | null;
   created_at: number;
   source_evidence_id?: string | null;
+  source_review_id?: string | null;
 }
 
 const reviewCaseIdSchema = ScreeningPromotionHoldResponseSchema.options[0].shape.case_id.unwrap();
@@ -187,6 +188,7 @@ function rowToItem(row: NoticeRow, artifactStatusPath?: string): InboxItem {
       row.target_id,
       row.impact_kind,
       row.source_evidence_id,
+      row.source_review_id,
     ),
   ];
   return {
@@ -280,10 +282,30 @@ export async function getInboxNotices(
     SELECT id, fellow_id, problem_id, notice_type, seq, title, detail,
            impact_kind, caused_by_event_id, target_id, acknowledged_at,
            expires_at, created_at,
-           (SELECT e.object_id FROM events e WHERE e.id = fellow_inbox_notices.caused_by_event_id
+           (SELECT e.object_id FROM events e JOIN event_content c ON c.event_id = e.id
+             WHERE e.id = fellow_inbox_notices.caused_by_event_id
              AND e.problem_id = fellow_inbox_notices.problem_id
              AND e.type = 'evidence.created' AND e.object_kind = 'evidence'
-             AND e.object_version = 1) AS source_evidence_id
+             AND e.object_version = 1
+             AND (fellow_inbox_notices.target_id LIKE 'H-%' OR
+               CASE WHEN c.redacted_at IS NULL AND json_valid(c.payload_json)
+                 AND c.payload_sha256 = e.payload_sha256 THEN
+                   json_extract(c.payload_json, '$.bears_on_kind') = 'claim'
+                   AND fellow_inbox_notices.target_id =
+                     json_extract(c.payload_json, '$.bears_on_id') || '@' ||
+                     json_extract(c.payload_json, '$.bears_on_version')
+               ELSE 0 END)) AS source_evidence_id,
+           (SELECT e.object_id FROM events e JOIN event_content c ON c.event_id = e.id
+             WHERE e.id = fellow_inbox_notices.caused_by_event_id
+               AND e.problem_id = fellow_inbox_notices.problem_id
+               AND e.type = 'review.created' AND e.object_kind = 'review'
+               AND e.object_version = 1
+               AND CASE WHEN c.redacted_at IS NULL AND json_valid(c.payload_json)
+                 AND c.payload_sha256 = e.payload_sha256 THEN
+                   fellow_inbox_notices.target_id =
+                     json_extract(c.payload_json, '$.target_claim_id') || '@' ||
+                     json_extract(c.payload_json, '$.target_version')
+               ELSE 0 END) AS source_review_id
     FROM fellow_inbox_notices
     WHERE fellow_id = ? AND ${VISIBLE_INBOX_NOTICE_SQL} AND ${UNEXPIRED_INBOX_NOTICE_SQL}
   `;
