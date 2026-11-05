@@ -2284,9 +2284,10 @@ redacted_wrangler_cause() {
   local log_path="${1:-${S2_SERVER_LOG}}"
   # shellcheck disable=SC2016
   S2_LOG_PATH="${log_path}" s2_run_owned_deadline bun --eval '
+    import { redactCredentials } from "@asimposium/contracts/diagnostic-safety";
     const file = Bun.file(process.env.S2_LOG_PATH ?? "");
     const text = await file.text().catch(() => "wrangler log unavailable");
-    const redacted = text
+    const redacted = redactCredentials(text)
       .replace(/(?:[A-Za-z]+:)?\/(?:Users|var|tmp)\/[^\s"'\''`]+/g, "<path>")
       .replace(
         /(["\x27]?(?:authorization|proxy-authorization)["\x27]?\s*:\s*["\x27]?)(?:bearer|basic|token)\s+[^"\x27,;}\s]+/gi,
@@ -6087,10 +6088,9 @@ start_worker() {
   deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
   while (( SECONDS < deadline )); do
     server_is_owned || break
-    if ready_response="$(curl --fail --silent --show-error --connect-timeout 1 --max-time 1 \
-      --user-agent "${ASIMPOSIUM_E2E_HTTP_USER_AGENT}" \
+    if ready_response="$(e2e_curl --fail --silent --show-error --connect-timeout 1 --max-time 1 \
       -H "x-s2-harness-token: ${S2_ACTIVE_HARNESS_TOKEN}" \
-      "${S2_ACTIVE_ORIGIN}/__s2/ready" 2>/dev/null)" && \
+      "${S2_ACTIVE_ORIGIN}/__s2/ready" 2>>"${log}")" && \
       [[ "${ready_response}" == "{\"status\":\"ready\",\"run_id\":\"${S2_ACTIVE_HARNESS_RUN_ID}\"}" ]] && \
       server_is_owned; then
       return 0
@@ -8929,14 +8929,15 @@ run_s2_shell_regression_test() {
       printf '%s\n' \
         'Authorization: Bearer S2BearerSecretValue0123456789' \
         '{"token":"S2JsonTokenValue0123456789","signature":"S2SignatureValue0123456789","fragment":"#v1.S2FragmentSecretValue0123456789"}' \
-        'token=S2PartialTokenValue0123456789 signature S2PartialSignature0123456789'
-      # Put this bearer value across the final 2K clipping boundary. If clipping happened first,
-      # the surviving token suffix would no longer be preceded by `Bearer` and would leak.
-      printf '%*s' 1000 '' | tr ' ' x
-      printf ' '
-      printf '%s' 'Bearer S2BoundaryBearerSecret0123456789'
-      printf '%*s\n' 1965 '' | tr ' ' x
+        'token=S2PartialTokenValue0123456789 signature S2PartialSignature0123456789' \
+        'asimp_ag_S2FellowTokenValue0123456789' \
+        'v1.S2JoinSecretValue01234567890123456789012345' \
+        'flow_v1.S2EnrollmentHandle012345678901234567890123' \
+        'flow_handle=S2FlowBodyValue device_code=S2DeviceCodeValue' \
+        'S2_LOCAL_READINESS_CONNECTION_REFUSED'
     } >"${redaction_log}"
+    # Check the full short fixture first. Padding it before this check would
+    # clip the initial secrets away even if the redactor left them untouched.
     redaction_cause="$(redacted_wrangler_cause "${redaction_log}")"
     for source_path in \
       S2BearerSecretValue0123456789 \
@@ -8945,9 +8946,22 @@ run_s2_shell_regression_test() {
       S2FragmentSecretValue0123456789 \
       S2PartialTokenValue0123456789 \
       S2PartialSignature0123456789 \
-      S2BoundaryBearerSecret0123456789; do
+      S2FellowTokenValue0123456789 \
+      S2JoinSecretValue01234567890123456789012345 \
+      S2EnrollmentHandle012345678901234567890123 \
+      S2FlowBodyValue S2DeviceCodeValue; do
       [[ "${redaction_cause}" != *"${source_path}"* ]] || return 1
     done
+    [[ "${redaction_cause}" == *S2_LOCAL_READINESS_CONNECTION_REFUSED* ]] || return 1
+    # Retain the separate clipping-boundary check after the unpadded samples.
+    {
+      printf '%*s' 1000 '' | tr ' ' x
+      printf ' '
+      printf '%s ' 'Bearer S2BoundaryBearerSecret0123456789'
+      printf '%*s\n' 1965 '' | tr ' ' x
+    } >>"${redaction_log}"
+    redaction_cause="$(redacted_wrangler_cause "${redaction_log}")"
+    [[ "${redaction_cause}" != *S2BoundaryBearerSecret0123456789* ]] || return 1
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"planted-bearer-json-fragment-and-partial-log-secrets-redacted-before-clipping","reproduce":"S2_SHELL_REGRESSION_TEST=redaction scripts/e2e-s2-krater.sh"}'
     return 0
   fi
