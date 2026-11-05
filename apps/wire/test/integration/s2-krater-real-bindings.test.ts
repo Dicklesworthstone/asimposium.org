@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { redactCredentials } from "@asimposium/contracts/diagnostic-safety";
 
 const REPOSITORY_ROOT = resolve(import.meta.dir, "../../../..");
 const SCRIPT = "scripts/e2e-s2-krater.sh";
@@ -129,10 +130,16 @@ describeRealBindingLane("S2 real local Wrangler lifecycle proof", () => {
   test("runs only with explicit integration authority and a real Wrangler binary", async () => {
     for (const mode of ["parallel", "sigterm"] as const) {
       const run = await runHarness({ S2_LIFECYCLE_TEST: mode }, 660_000);
-      expect(run.exitCode).toBe(0);
-      expect(run.stdout).toContain('"suite":"s2-krater-lifecycle","status":"pass"');
-      expect(run.stdout).toContain('"suite":"s2-krater-evidence","status":"pass"');
-      expect(`${run.stdout}\n${run.stderr}`).not.toContain('"status":"fail"');
+      try {
+        expect(run.exitCode).toBe(0);
+        expect(run.stdout).toContain('"suite":"s2-krater-lifecycle","status":"pass"');
+        expect(run.stdout).toContain('"suite":"s2-krater-evidence","status":"pass"');
+        expect(`${run.stdout}\n${run.stderr}`).not.toContain('"status":"fail"');
+      } catch (error) {
+        process.stdout.write(redactCredentials(run.stdout));
+        process.stderr.write(redactCredentials(run.stderr));
+        throw error;
+      }
     }
   }, 1_340_000);
 });

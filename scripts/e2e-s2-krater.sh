@@ -90,58 +90,86 @@ readonly S2_OWNED_COMMAND_DEADLINE_SECONDS=120
 # Each file and its journal insert remain one batch, as in Wrangler migrations.
 readonly S2_MIGRATIONS_PROGRAM='
   const assert = require("node:assert/strict");
-  const { readdirSync, readFileSync, realpathSync } = require("node:fs");
+  const { lstatSync, readdirSync, readFileSync, realpathSync } = require("node:fs");
   const { createRequire } = require("node:module");
+  const { dirname, isAbsolute, relative, resolve, sep } = require("node:path");
   const { unstable_readConfig, unstable_splitSqlQuery } = require("./apps/wire/node_modules/wrangler/wrangler-dist/cli.js");
 
   async function migrate() {
-  assert.equal(process.versions.bun, undefined);
-  assert.ok(process.versions.node.startsWith("24."));
-  const names = readdirSync("db/migrations").filter((name) => name.endsWith(".sql")).sort();
-  assert.ok(names.length > 0);
-  assert.ok(names.every((name) => /^[0-9]{4}_[a-z0-9_]+\.sql$/.test(name)));
-  const config = unstable_readConfig({ config: "apps/wire/src/krater/wrangler.s2.toml" });
-  const binding = config.d1_databases.find((database) => database.binding === "DB");
-  assert.ok(binding);
-  const wranglerRequire = createRequire(realpathSync("apps/wire/node_modules/wrangler/package.json"));
-  const { Miniflare, convertV4MiniflareOptions } = wranglerRequire("miniflare");
-  // Match pinned Wranglers executeLocally binding and persistence options.
-  // Only its per-file runtime recreation is removed; DOs still run in the
-  // original Worker after migration, under the unchanged lifecycle supervisor.
-  const platform = new Miniflare(convertV4MiniflareOptions({
-    modules: true,
-    script: "",
-    resourcePersistencePath: `${process.argv[1]}/v3`,
-    d1Databases: { DATABASE: binding.preview_database_id ?? binding.database_id ?? binding.binding },
-  }));
-  let migration;
-  try {
-    console.log(JSON.stringify({ suite: "s2-native-migrations", phase: "binding-start" }));
-    const database = await platform.getD1Database("DATABASE");
-    console.log(JSON.stringify({ suite: "s2-native-migrations", phase: "binding-ready" }));
-    await database.prepare("CREATE TABLE IF NOT EXISTS \"d1_migrations\"(\n\t\tid         INTEGER PRIMARY KEY AUTOINCREMENT,\n\t\tname       TEXT UNIQUE,\n\t\tapplied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL\n);").run();
-    console.log(JSON.stringify({ suite: "s2-native-migrations", phase: "journal-ready" }));
-    const before = await database.prepare(`SELECT name FROM "d1_migrations" ORDER BY id`).all();
-    assert.deepEqual(before.results.map((row) => row.name), names.slice(0, before.results.length));
-    for (migration of names.slice(before.results.length)) {
-      const sql = readFileSync(`db/migrations/${migration}`, "utf8");
-      const query = `${sql}\nINSERT INTO "d1_migrations" (name) values (\u0027${migration}\u0027);`;
-      const results = await database.batch(unstable_splitSqlQuery(query).map((part) => database.prepare(part)));
-      assert.ok(results.every((result) => result.success));
-      console.log(JSON.stringify({ suite: "s2-native-migrations", migration, status: "pass" }));
+    let platform, phase = "configuration", migration, summary, failed = false;
+    function report(error) {
+      // Retain the failing stage without printing SQL, paths or credentials.
+      console.error(JSON.stringify({ suite: "s2-native-migrations", status: "fail",
+        phase, migration, error_name: error?.name, error_code: error?.cause?.code ?? error?.code }));
+      failed = true;
+      process.exitCode = 1;
     }
-    const after = await database.prepare(`SELECT name FROM "d1_migrations" ORDER BY id`).all();
-    assert.deepEqual(after.results.map((row) => row.name), names);
-    console.log(JSON.stringify({ suite: "s2-native-migrations", status: "pass",
-      applied: names.length - before.results.length, total: names.length }));
-  } catch (error) {
-    // Canonical SQL is public, but retained diagnostics still never print queries.
-    console.error(JSON.stringify({ suite: "s2-native-migrations", status: "fail",
-      migration, error_name: error?.name, error_code: error?.cause?.code ?? error?.code }));
-    process.exitCode = 1;
-  } finally {
-    await platform.dispose();
-  }
+    try {
+      assert.equal(process.versions.bun, undefined);
+      assert.ok(process.versions.node.startsWith("24."));
+      assert.equal(process.argv.length, 2);
+      const repository = realpathSync(".");
+      const artifacts = realpathSync("e2e/artifacts");
+      const persist = realpathSync(process.argv[1]);
+      const suffix = relative(artifacts, persist);
+      assert.ok(artifacts.startsWith(`${repository}${sep}`));
+      assert.ok(suffix && !isAbsolute(suffix) && suffix !== ".." && !suffix.startsWith(`..${sep}`));
+      assert.ok(lstatSync(persist).isDirectory());
+
+      const config = unstable_readConfig({ config: "apps/wire/src/krater/wrangler.s2.toml" });
+      const binding = config.d1_databases.find((database) => database.binding === "DB");
+      assert.ok(binding);
+      const directory = realpathSync("db/migrations");
+      assert.equal(realpathSync(resolve(dirname(config.configPath), binding.migrations_dir ?? "migrations")), directory);
+      assert.equal(binding.migrations_table ?? "d1_migrations", "d1_migrations");
+      assert.equal(binding.migrations_pattern, undefined);
+      const names = readdirSync(directory).filter((name) => name.endsWith(".sql")).sort();
+      assert.ok(names.length > 0);
+      assert.ok(names.every((name) => /^[0-9]{4}_[a-z0-9_]+\.sql$/.test(name)));
+      const wranglerRequire = createRequire(realpathSync("apps/wire/node_modules/wrangler/package.json"));
+      const { Miniflare, convertV4MiniflareOptions } = wranglerRequire("miniflare");
+      // Match the pinned CLI D1 binding; the application DO starts later in
+      // the original Worker under its unchanged lifecycle supervisor.
+      platform = new Miniflare(convertV4MiniflareOptions({
+        modules: true,
+        script: "",
+        resourcePersistencePath: `${persist}/v3`,
+        d1Databases: { DATABASE: binding.preview_database_id ?? binding.database_id ?? binding.binding },
+      }));
+      phase = "binding";
+      const database = await platform.getD1Database("DATABASE");
+      phase = "journal";
+      const created = await database.prepare("CREATE TABLE IF NOT EXISTS \"d1_migrations\"(\n\t\tid         INTEGER PRIMARY KEY AUTOINCREMENT,\n\t\tname       TEXT UNIQUE,\n\t\tapplied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL\n);").run();
+      assert.equal(created.success, true);
+      const before = await database.prepare(`SELECT name FROM "d1_migrations" ORDER BY id`).all();
+      assert.equal(before.success, true);
+      assert.deepEqual(before.results.map((row) => row.name), names.slice(0, before.results.length));
+      phase = "apply";
+      for (migration of names.slice(before.results.length)) {
+        const sql = readFileSync(`${directory}/${migration}`, "utf8");
+        const query = `${sql}\nINSERT INTO "d1_migrations" (name) values (\u0027${migration}\u0027);`;
+        const parts = unstable_splitSqlQuery(query);
+        assert.ok(parts.length > 0);
+        const results = await database.batch(parts.map((part) => database.prepare(part)));
+        assert.equal(results.length, parts.length);
+        assert.ok(results.every((result) => result.success === true));
+        console.log(JSON.stringify({ suite: "s2-native-migrations", migration, status: "pass" }));
+      }
+      migration = undefined;
+      phase = "verify";
+      const after = await database.prepare(`SELECT name FROM "d1_migrations" ORDER BY id`).all();
+      assert.equal(after.success, true);
+      assert.deepEqual(after.results.map((row) => row.name), names);
+      summary = { applied: names.length - before.results.length, total: names.length };
+    } catch (error) {
+      report(error);
+    } finally {
+      if (platform !== undefined) {
+        phase = "cleanup";
+        try { await platform.dispose(); } catch (error) { report(error); }
+      }
+    }
+    if (!failed) console.log(JSON.stringify({ suite: "s2-native-migrations", status: "pass", ...summary }));
   }
   migrate().catch((error) => {
     console.error(JSON.stringify({ suite: "s2-native-migrations", status: "fail",
@@ -9234,7 +9262,7 @@ run_lifecycle_self_test() {
       "${second_watchdog_health}" "${state_dir}" "${second_port}"; then second_status=0; else second_status=$?; fi
     if [[ ${first_status} -ne 78 || ${second_status} -ne 78 ]] || \
       port_is_busy "${first_port}" || port_is_busy "${second_port}"; then
-      emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-lifecycle","status":"fail","code":"S2_PARALLEL_ISOLATION_FAILED","reproduce":"S2_LIFECYCLE_TEST=parallel scripts/e2e-s2-krater.sh"}'
+      emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-lifecycle\",\"status\":\"fail\",\"code\":\"S2_PARALLEL_ISOLATION_FAILED\",\"first_status\":${first_status},\"second_status\":${second_status},\"reproduce\":\"S2_LIFECYCLE_TEST=parallel scripts/e2e-s2-krater.sh\"}"
       return 1
     fi
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-lifecycle","status":"pass","scenario":"two-concurrent-local-workerd-runs-use-isolated-main-and-inspector-ports","reproduce":"S2_LIFECYCLE_TEST=parallel scripts/e2e-s2-krater.sh"}'

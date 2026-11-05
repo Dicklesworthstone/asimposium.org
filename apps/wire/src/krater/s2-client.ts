@@ -1781,6 +1781,7 @@ async function expectAcceptedTransportAbort(
   const currentRequestId = requestId();
   const started = performance.now();
   let transport: Bun.Subprocess<"pipe", "pipe", "pipe"> | undefined;
+  let exited: Promise<void> | undefined;
   let deadline: ReturnType<typeof setTimeout> | undefined;
   let observedResponse: RequestResult | undefined;
   const deadlineAt = performance.now() + 15_000;
@@ -1860,23 +1861,26 @@ lines.on("line", (line) => {
       stderr: "pipe",
     });
     const child = transport;
-    const output = new Response(child.stdout).text();
-    const stderr = new Response(child.stderr).text();
-    child.stdin.write(
-      `${JSON.stringify({
-        url: new URL(pathname, origin).href,
-        token: requireHarnessToken(),
-        request_id: observationId,
-        body: payload.toString("utf8"),
-        remaining_ms: Math.max(1, Math.ceil(deadlineAt - performance.now())),
-      })}\n`,
-    );
-    child.stdin.end();
-    const exited = (async () => {
+    const output = Promise.allSettled([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    const timeout = new Promise<never>((_, reject) => {
+      deadline = setTimeout(
+        () => reject(new Error("S2_ABORT_ACCEPTANCE_TIMEOUT")),
+        Math.max(0, deadlineAt - performance.now()),
+      );
+    });
+    // Observe exit and both streams before writing: an early stdin failure
+    // must still retain the child's diagnostics and enter owned cleanup.
+    exited = (async () => {
       const code = await child.exited;
-      const text = await output;
-      process.stdout.write(text);
-      process.stderr.write(await stderr);
+      const [stdout, stderr] = await output;
+      if (stdout.status === "fulfilled") process.stdout.write(stdout.value);
+      if (stderr.status === "fulfilled") process.stderr.write(stderr.value);
+      if (stdout.status === "rejected") throw stdout.reason;
+      if (stderr.status === "rejected") throw stderr.reason;
+      const text = stdout.value;
       const result = asRecord(JSON.parse(text.trim()));
       if (result.state === "early-response") {
         observedResponse = {
@@ -1898,16 +1902,19 @@ lines.on("line", (line) => {
       }
       parseS2AbortAcceptance(JSON.stringify(result.acceptance), observationId);
     })();
-    const closed = Promise.race([
-      exited,
-      new Promise<never>((_, reject) => {
-        deadline = setTimeout(
-          () => reject(new Error("S2_ABORT_ACCEPTANCE_TIMEOUT")),
-          Math.max(0, deadlineAt - performance.now()),
-        );
-      }),
-    ]);
-    await closed;
+    const sent = (async () => {
+      await child.stdin.write(
+        `${JSON.stringify({
+          url: new URL(pathname, origin).href,
+          token: requireHarnessToken(),
+          request_id: observationId,
+          body: payload.toString("utf8"),
+          remaining_ms: Math.max(1, Math.ceil(deadlineAt - performance.now())),
+        })}\n`,
+      );
+      await child.stdin.end();
+    })();
+    await Promise.race([Promise.all([exited, sent]), timeout]);
     requestDiagnostics(
       currentRequestId,
       scenario,
@@ -1934,6 +1941,7 @@ lines.on("line", (line) => {
       transport.kill("SIGTERM");
       await transport.exited;
     }
+    if (exited !== undefined) await Promise.allSettled([exited]);
   }
 }
 
