@@ -14,6 +14,54 @@ observed.
 
 ## Current reality check — 2026-11-05
 
+### S2 local lifecycle and retained cost input — 2026-11-05
+
+Source `056d1de7a718d00a6e38e18cf5a256e07ba9b32b` repairs the local S2 fixture
+and runner. The original opt-in gate first fails in a verified process context
+after 214.653 seconds: mounted promotion returns 503 because the active fixture
+problem has no statement-version row. The production context reader correctly
+refuses it. The existing local seed now supplies an explicit legacy formulation
+with the canonical normalized hash. It creates no event or outbox row; the
+unchanged mounted promotion must still be event sequence 1 and deliver once.
+
+That repair lets both parallel children complete every native phase, but the
+next whole run still fails after 504.412 seconds: retained files exceed the
+unchanged 64 MiB cap. Wrangler 4.123's optional local explorer trace store is
+now disabled for new S2 runs. Required client, D1, DO and stderr records remain;
+no failed evidence is deleted or truncated. Fresh children retain 49,786,639
+and 49,807,204 bytes, each plus the unchanged 2,359,296-byte publication reserve
+within the 67,108,864-byte limit. HTTP requests also identify the project.
+
+The complete original opt-in command then passes in **518.763 seconds**:
+**one test, eight assertions, both parallel and SIGTERM modes**, with all
+original limits and later assertions. Its full children honestly retain exit
+78 for absent deployed DO and edge-cache evidence, while evidence retention
+and immutable cost publication pass. The existing cost verifier consumes one
+actual four-file receipt chain and reports **S2 `accepted-local`**, covering
+232 selected settled-write receipts. Its overall result remains exit 78,
+`COST_MODEL_EXTERNAL_MEASUREMENTS_UNAVAILABLE`; incomplete row totals, deployed
+traffic, CPU, cache, R2 and pricing evidence prevent a complete cost verdict.
+
+Typecheck and lint pass all eight groups, full contracts pass 944 tests and
+render passes 584 (128.713 seconds combined). The original full root unit run
+passes eight groups in 1,384.795 seconds, including 6,662 Worker and 883 Agora
+tests; toolchain has 406 passes and 54 existing skips. Three source hashes stay
+fixed through these checks. Default UBS diff/staged scans each cover all three
+changed code files and exit 1 with one critical match, five warnings and 513
+informational findings. All critical/warning locations were read: the critical
+is a public header name; warnings include the existing local-only unbounded
+JSON reader and lexical Bash matches. No suppression or security-clean claim.
+
+Independent source review found no blocker; exact-revision native control,
+missing-formulation counterfactual and restoration are in progress. Initial
+launcher errors (wrong home, then Tini not PID 1) remain retained without
+qualification credit. Corrected runs use UID 1000, its own home, PID-1
+`docker-init`, genuine Node 24, Bun 1.4.4 and default `/tmp` in private process
+and mount namespaces. Receipts are in `e2e/artifacts/dae7-repair-20261104/` and
+the named local S2 artifact roots. Original `asimposiumorg-doa` stays blocked
+with its full deployed/cache/DO/cost acceptance. The verified Preview's web
+inputs are unchanged; no new deployment or production promotion is claimed.
+
 ### Original integration acceptance and Preview — 2026-11-05
 
 The independent, unfiltered Worker integration command at exact revision
@@ -113,8 +161,9 @@ checks, not deployed Worker or launch proof.
 Fresh November 5 reads at **01:08:52 UTC** retain the production and staging
 capability bodies (`0.1.0-draft`) and production `/protocol.json` 404. Equality
 does not establish provider revision or migration lineage. The separate local
-S2 lane opts into two 660-second lifecycle runs and was not executed here; its
-resource flag is distinct from Cloudflare deployment permission. It cannot
+S2 lane opts into two 660-second lifecycle runs and was not executed during
+that earlier Preview verification; the subsequent local proof is recorded above.
+Its resource flag is distinct from Cloudflare deployment permission. It cannot
 replace deployed cron, cache, cost or staging evidence. The sanctioned Workers
 Builds pipeline still lacks operator credentials, staging D1 identity/signing
 inputs and smoke authority in this session. Reconcile existing resources and

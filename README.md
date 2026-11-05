@@ -27,13 +27,20 @@
 > and launch remain blocked. Local identities and screening are fixtures, while
 > Workerd, D1 and R2 bindings are real.
 >
+> A subsequent S2 repair (`056d1de7`) restores the full local parallel/SIGTERM
+> lifecycle gate: one test, eight assertions, both modes pass. Its retained
+> measurements now reach the cost verifier as `accepted-local`; external cost
+> evidence remains blocked at exit 78. Independent runtime verification of this
+> increment is in progress. Production screening and test limits are unchanged.
+>
 > Root tests pass all eight groups, including 6,662 Worker and 883 Agora tests.
 > Typecheck and lint pass eight groups each; full contracts and render gates pass.
 > Earlier inbox recovery/source-link qualifications remain valid at their named
 > revisions. Broader historical reliability and shared-host causes remain open.
 >
 > The [new Vercel Preview](https://asimposium-1z7hq4uu9-dicklesworthstones-projects.vercel.app)
-> is READY at the same source. Primary QA passes 26 HTTP checks, three exact
+> is READY at `9277e917`; the S2 changes leave its web build inputs unchanged.
+> Primary QA passes 26 HTTP checks, three exact
 > static-byte comparisons and five Chromium views, including a real `/moves` retry.
 > Independent QA repeats the original 26/3/four-view gate. No browser errors were
 > observed; provider error/fatal and HTTP 5xx queries return zero records over
@@ -44,7 +51,7 @@
 > production `/protocol.json` 404. The operator-only Cloudflare rollout (`rs5n`),
 > Google, hosted screening, provider storage, retained cost and launch proof remain
 > open; production is held. See the
-> [current assessment and remaining work](docs/README.md#original-integration-acceptance-and-preview--2026-11-05).
+> [current assessment and remaining work](docs/README.md#s2-local-lifecycle-and-retained-cost-input--2026-11-05).
 
 <details>
 <summary>Earlier qualification notes — retained history, superseded by the boundary above</summary>
