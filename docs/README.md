@@ -32,7 +32,8 @@ no failed evidence is deleted or truncated. Fresh children retain 49,786,639
 and 49,807,204 bytes, each plus the unchanged 2,359,296-byte publication reserve
 within the 67,108,864-byte limit. HTTP requests also identify the project.
 
-The complete original opt-in command then passes in **518.763 seconds**:
+The complete original `bun run --filter @asimposium/wire test:integration:s2-real`
+command then passes in **518.763 seconds**:
 **one test, eight assertions, both parallel and SIGTERM modes**, with all
 original limits and later assertions. Its full children honestly retain exit
 78 for absent deployed DO and edge-cache evidence, while evidence retention
@@ -52,8 +53,32 @@ informational findings. All critical/warning locations were read: the critical
 is a public header name; warnings include the existing local-only unbounded
 JSON reader and lexical Bash matches. No suppression or security-clean claim.
 
-Independent source review found no blocker; exact-revision native control,
-missing-formulation counterfactual and restoration are in progress. Initial
+Independent verification at exact `056d1de7` passes the complete original gate
+in **515.762 seconds**, then passes again after exact restoration in **556.749
+seconds** (one test/eight assertions each). The one-site formulation-INSERT
+removal fails normally in 144.593 seconds: its second parallel child reaches
+the intended 503 / `S2_MOUNTED_PROMOTE_NOT_COMMITTED`. Its first child instead
+fails an earlier disconnect-acceptance assertion. Client timeout followed by
+observation 404 is retained under **`asimposiumorg-tum1`**, which now blocks
+the original S2 Bead. This is a mixed negative result; restored green does not
+classify that additional failure, and no unchanged retry was used to do so.
+
+All four successful independent parallel children pass the six required local
+phases and retention-plus-reserve limit (largest sum 55,029,955 bytes). Required
+logs remain and optional trace-store paths are absent. The independent cost
+CLI consumes a clean restored receipt and reports `accepted-local` with 232
+selected settled-write receipts, then exits 78 for external measurements.
+Observed local p95 write-phase / preflight / whole-write times are 1,602 / 265 /
+1,850 ms; these establish no deployed latency or 900 ms budget verdict.
+All 2,466 Git blobs/executable modes and checked dependency identities are
+restored; 40 sampled births retire and 12 known groups are empty. Visibility
+of 409 host cwd entries is unavailable, so this is not a whole-host census.
+Evidence is in `e2e/artifacts/independent-doa-056d1de7-20261105/`.
+
+A canonical-HEAD check fails after an unknown actor commits only the two
+documentation files as `0e3a74df`; neither primary nor verifier issued that
+commit. The failed check is retained. A separate Git-tree comparison confirms
+no runtime delta, and the tested subject remains `056d1de7`. Initial
 launcher errors (wrong home, then Tini not PID 1) remain retained without
 qualification credit. Corrected runs use UID 1000, its own home, PID-1
 `docker-init`, genuine Node 24, Bun 1.4.4 and default `/tmp` in private process
@@ -61,6 +86,9 @@ and mount namespaces. Receipts are in `e2e/artifacts/dae7-repair-20261104/` and
 the named local S2 artifact roots. Original `asimposiumorg-doa` stays blocked
 with its full deployed/cache/DO/cost acceptance. The verified Preview's web
 inputs are unchanged; no new deployment or production promotion is claimed.
+Fresh 03:42:43 UTC reads retain the production/staging capability bodies
+(`0.1.0-draft`, the same recorded hashes) and production `/protocol.json` 404.
+Body equality does not identify provider revision or migration lineage.
 
 ### Original integration acceptance and Preview — 2026-11-05
 
