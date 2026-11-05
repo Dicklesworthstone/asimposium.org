@@ -6076,7 +6076,7 @@ start_worker() {
 
   start_pinned_supervisor "${persist}/server-${run_id}.status" "worker-${port}" \
     "${persist}" "${port}" server \
-    env "${S2_WRANGLER}" dev apps/wire/src/krater/worker.ts \
+    env "WRANGLER_LOG_PATH=${log}" "${S2_WRANGLER}" dev apps/wire/src/krater/worker.ts \
       --config "${config}" \
       --local \
       --test-scheduled \

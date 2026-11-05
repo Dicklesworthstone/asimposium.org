@@ -14,9 +14,38 @@ observed.
 
 ## Current reality check — 2026-11-05
 
-### Fresh-eyes S2 corrections — 2026-11-05, 23:04 UTC
+### Fresh-eyes S2 corrections — 2026-11-05, 23:18 UTC
 
-The latest Bash-only increment fixes a separate Wrangler-summary redaction gap.
+The final one-line correction routes Wrangler's existing debug logger into the
+existing per-Worker log using `WRANGLER_LOG_PATH`. Previously those startup details
+were outside run retention in the global directory. Three exact original logs
+are now also retained privately under the existing artifact prefix. The pinned
+logger treats an explicit `.log` path as a file and skips global age cleanup;
+no past deletion is inferred. Real pinned CLI directory/file controls pass in
+2.027 seconds with identical version output; only file mode leaves the ambient
+directory empty. No new logger framework, product surface or bound is introduced.
+
+At script SHA-256
+`19ca21a858f1160c195388cec50a24335c0cf7fd17aaed70c038c6fb535ad798`,
+the original parallel/SIGTERM gate passes once in 274.507 seconds,
+23:11:59–23:16:33 UTC: one test, zero failures, all eight original assertions.
+Both parallel children complete the current legacy-journal upgrades and evidence
+publication at expected exit 78; their retention receipts pass at 24,060,655 and
+26,755,148 bytes, below the unchanged limit. Three inspected Worker logs per child
+contain the built-in debug output. The full test also passes SIGTERM cleanup.
+This primary local run extends the earlier focused migration checks; it does not
+diagnose historical startup/listener loss, exercise the outstanding actual-partial
+experiment, supply independent exact-revision execution, or close `9gyi`/`tum1`/`doa`.
+Its receipt is `fresh-review-retained-debug-native-20261105T2313.result.json`
+under `e2e/artifacts/dae7-repair-20261104/`; parallel parent is
+`e2e/artifacts/s2-krater/20261105T231159Z-9402e3af6e849744/`.
+Eight selected existing units also pass in 13.428 seconds (92 filtered, 199
+expectations). Root lint passes all eight groups in 65.138 seconds with existing
+warnings. Default `ubs --diff` completes in 91.337 seconds: one Bash file, zero
+critical, the same four reviewed warnings and 24 informational findings. No
+TypeScript changed; earlier full-root/typecheck results keep their original scope.
+
+The earlier Bash-only increment fixes a separate Wrangler-summary redaction gap.
 Its legacy regexes missed bare Fellow, join and flow credentials. The existing
 fixture padded its input before checking, clipping away most samples. The summary
 now applies the already-shared canonical credential redactor first, followed by
@@ -76,9 +105,10 @@ The changed source's whole original control fails in 206.490 seconds,
 assertion, SIGTERM mode unreached. One child completes its exercise then cannot
 restart its Worker; the other cannot initially start its Worker. Retained cause
 text contains curl connection refusals followed by one-second zero-byte timeouts.
-The whole control does not reach the changed journal-upgrade path. No further
-heavy retry follows this result; startup/restart causes and original `9gyi`,
-`tum1` and `doa` acceptance remain open and unchanged.
+The whole control on that source does not reach the changed journal-upgrade path.
+That review ended after this result; the subsequent logging-only correction and
+control are recorded above. Startup/restart causes and original `9gyi`, `tum1`
+and `doa` acceptance remain open and unchanged.
 
 Eight selected existing Bun cases pass in 7.310 seconds (92 filtered out; 199
 expectations), covering four shell modes, journal/source closure and integration

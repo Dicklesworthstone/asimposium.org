@@ -57,9 +57,12 @@
 > upgrade cases now reuse the native migration driver with strict database and
 > legacy-journal checks. CLI bootstrap/readback and Worker assertions remain.
 > Sixteen focused native checks and eight selected unit checks pass; root lint
-> passes all eight groups. The full S2 control still fails at Worker readiness,
-> before reaching the changed upgrade path. Earlier `SQLITE_FULL` and deadline
-> failures remain recorded. Historical runtime failures remain unclassified.
+> passes all eight groups. A final one-line fix retains Wrangler's built-in
+> debug output in the existing Worker log. Source `19ca21a8` (script SHA-256)
+> passes the original parallel/SIGTERM control once, including both legacy
+> upgrades and evidence publication. Earlier readiness, `SQLITE_FULL` and
+> deadline failures remain recorded and unclassified where no cause is known.
+> This is local qualification, with no independent execution or S2 closure.
 >
 > Source baseline `4f4a75dd` passes all eight root groups, including 6,672 Worker
 > and 883 Agora tests, and all typecheck/lint groups. Full contracts and render
