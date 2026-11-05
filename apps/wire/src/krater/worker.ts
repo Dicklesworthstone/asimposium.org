@@ -137,17 +137,19 @@ interface AbortBeforeCommitObservation {
 // cannot read an observation and therefore cannot pass the pre-commit abort negative.
 const abortBeforeCommitObservations = new Map<string, AbortBeforeCommitObservation>();
 
-function recordAbortBeforeCommitObservation(requestId: string): void {
-  abortBeforeCommitObservations.set(requestId, {
+function recordAbortBeforeCommitObservation(requestId: string): AbortBeforeCommitObservation {
+  const observation: AbortBeforeCommitObservation = {
     requestId,
     acceptedBeforeCommit: true,
     transactionEntered: false,
-  });
+  };
+  abortBeforeCommitObservations.set(requestId, observation);
   while (abortBeforeCommitObservations.size > MAX_ABORT_OBSERVATIONS) {
     const oldest = abortBeforeCommitObservations.keys().next().value;
-    if (oldest === undefined) return;
+    if (oldest === undefined) break;
     abortBeforeCommitObservations.delete(oldest);
   }
+  return observation;
 }
 
 /**
@@ -951,9 +953,37 @@ async function handleHarnessRequest(
         "s2_plant_late_outbox_cleanup_failure",
       );
       const competingInput = competingWriteInput(body);
-      if (abortBeforeCommit) recordAbortBeforeCommitObservation(harnessRequestId(body));
+      if (abortBeforeCommit) {
+        const observation = recordAbortBeforeCommitObservation(harnessRequestId(body));
+        let cancelled = false;
+        const stream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                `${JSON.stringify({
+                  request_id: observation.requestId,
+                  accepted_before_commit: observation.acceptedBeforeCommit,
+                  transaction_entered: observation.transactionEntered,
+                })}\n`,
+              ),
+            );
+            // This preserves the original controlled pretransaction refusal.
+            // The finite native wait keeps Workerd's response alive while the
+            // client deliberately disconnects; normal EOF is not an abort.
+            await waitForHarnessDelay(preCommitDelayMs);
+            if (!cancelled) controller.close();
+          },
+          cancel() {
+            cancelled = true;
+          },
+        });
+        return new Response(stream, {
+          status: 202,
+          headers: { "content-type": "application/x-ndjson", "cache-control": "no-store" },
+        });
+      }
       if (preCommitDelayMs > 0) await waitForHarnessDelay(preCommitDelayMs);
-      if (abortBeforeCommit || request.signal.aborted) {
+      if (request.signal.aborted) {
         return localHarnessProblem(
           499,
           "KRATER_REQUEST_ABORTED",

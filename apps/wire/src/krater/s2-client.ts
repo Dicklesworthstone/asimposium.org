@@ -1746,6 +1746,196 @@ async function waitForOutbox(
   return s2WaitForOutbox(scenario, predicate);
 }
 
+export function parseS2AbortAcceptance(
+  text: string,
+  expectedRequestId: string,
+): Record<string, unknown> {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return fail("S2_ABORT_ACCEPTANCE_INVALID");
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return fail("S2_ABORT_ACCEPTANCE_INVALID");
+  }
+  const record = body as Record<string, unknown>;
+  if (
+    record.request_id !== expectedRequestId ||
+    record.accepted_before_commit !== true ||
+    record.transaction_entered !== false
+  ) {
+    return fail("S2_ABORT_ACCEPTANCE_INVALID");
+  }
+  return record;
+}
+
+async function expectAcceptedTransportAbort(
+  body: Record<string, unknown>,
+  scenario: string,
+): Promise<string> {
+  if (origin === undefined) return fail("S2_ORIGIN_MISSING");
+  const pathname = "/__s2/write";
+  const observationId = body.s2_harness_request_id;
+  if (typeof observationId !== "string") return fail("S2_ABORT_OBSERVATION_ID_MISSING");
+  const currentRequestId = requestId();
+  const started = performance.now();
+  let transport: Bun.Subprocess<"pipe", "pipe", "pipe"> | undefined;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  let observedResponse: RequestResult | undefined;
+  const deadlineAt = performance.now() + 15_000;
+  try {
+    const payload = Buffer.from(JSON.stringify(body));
+    // Use a genuine Node HTTP socket for the deliberately damaged connection,
+    // separate from Bun's fetch pool used by subsequent transactional checks.
+    // Credentials and body travel only over stdin, never argv or retained output.
+    transport = Bun.spawn({
+      cmd: [
+        "node",
+        "--input-type=commonjs",
+        "-e",
+        String.raw`
+const { request } = require("node:http");
+const lines = require("node:readline").createInterface({ input: process.stdin });
+let req, timer, abortTimer, acceptance, ownedError = false, aborted = false, finished = false;
+const reason = new Error("S2_ACCEPTED_TRANSPORT_ABORT");
+function finish(state, code, fields = {}) {
+  if (finished) return;
+  finished = true;
+  clearTimeout(timer);
+  clearTimeout(abortTimer);
+  process.stdout.write(JSON.stringify({ tool: "node", tool_version: process.versions.node,
+    suite: "s2-krater-accepted-disconnect", state, acceptance, ...fields }) + "\n", () => process.exit(code));
+}
+lines.on("line", (line) => {
+  if (req) return finish("invalid-command", 1);
+  if (process.versions.bun || !process.versions.node.startsWith("24.")) return finish("wrong-runtime", 1);
+  let input;
+  try { input = JSON.parse(line); } catch { return finish("invalid-input", 1); }
+  const payload = Buffer.from(input.body);
+  req = request(input.url, { method: "POST", agent: false, headers: {
+    "content-type": "application/json", "content-length": String(payload.byteLength),
+    "x-s2-harness-token": input.token,
+    "user-agent": "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)"
+  } }, (response) => {
+    if (response.statusCode !== 202 || response.headers["content-type"] !== "application/x-ndjson") {
+      response.resume();
+      return finish("early-response", 1, { http_status: response.statusCode,
+        content_type: response.headers["content-type"] || "" });
+    }
+    let bytes = Buffer.alloc(0);
+    response.on("data", (chunk) => {
+      if (acceptance) return;
+      bytes = Buffer.concat([bytes, chunk]);
+      if (bytes.byteLength > 4096) return finish("invalid-acceptance", 1);
+      const boundary = bytes.indexOf(10);
+      if (boundary === -1) return;
+      let ack;
+      try { ack = JSON.parse(bytes.subarray(0, boundary).toString("utf8")); }
+      catch { return finish("invalid-acceptance", 1); }
+      if (!ack || ack.request_id !== input.request_id || ack.accepted_before_commit !== true ||
+          ack.transaction_entered !== false) return finish("invalid-acceptance", 1);
+      acceptance = { request_id: ack.request_id, accepted_before_commit: true, transaction_entered: false };
+      abortTimer = setTimeout(() => { aborted = true; req.destroy(reason); }, 20);
+    });
+    response.on("end", () => { if (!aborted) finish("response-ended-before-abort", 1); });
+    response.on("error", (error) => {
+      if (!aborted) finish("response-error", 1, { error_code: error.code || error.name });
+    });
+  });
+  req.on("error", (error) => {
+    if (acceptance && aborted && error === reason) ownedError = true;
+    else finish("transport-error", 1, { error_code: error.code || error.name });
+  });
+  req.on("close", () => finish("closed", acceptance && aborted && ownedError ? 0 : 1,
+    { owned_error: ownedError, aborted }));
+  timer = setTimeout(() => { req.destroy(); finish("deadline", 1); }, input.remaining_ms);
+  req.end(payload);
+});
+`,
+      ],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const child = transport;
+    const output = new Response(child.stdout).text();
+    const stderr = new Response(child.stderr).text();
+    child.stdin.write(
+      `${JSON.stringify({
+        url: new URL(pathname, origin).href,
+        token: requireHarnessToken(),
+        request_id: observationId,
+        body: payload.toString("utf8"),
+        remaining_ms: Math.max(1, Math.ceil(deadlineAt - performance.now())),
+      })}\n`,
+    );
+    child.stdin.end();
+    const exited = (async () => {
+      const code = await child.exited;
+      const text = await output;
+      process.stdout.write(text);
+      process.stderr.write(await stderr);
+      const result = asRecord(JSON.parse(text.trim()));
+      if (result.state === "early-response") {
+        observedResponse = {
+          status: numberAt(result, "http_status"),
+          body: {},
+          elapsedMs: Math.round((performance.now() - started) * 1_000) / 1_000,
+          contentType: stringAt(result, "content_type"),
+          requestId: currentRequestId,
+        };
+        fail("S2_ABORT_ACCEPTANCE_INVALID");
+      }
+      if (
+        code !== 0 ||
+        result.state !== "closed" ||
+        result.owned_error !== true ||
+        result.aborted !== true
+      ) {
+        fail("S2_ABORT_SOCKET_CLOSED_WITHOUT_OWNED_ABORT");
+      }
+      parseS2AbortAcceptance(JSON.stringify(result.acceptance), observationId);
+    })();
+    const closed = Promise.race([
+      exited,
+      new Promise<never>((_, reject) => {
+        deadline = setTimeout(
+          () => reject(new Error("S2_ABORT_ACCEPTANCE_TIMEOUT")),
+          Math.max(0, deadlineAt - performance.now()),
+        );
+      }),
+    ]);
+    await closed;
+    requestDiagnostics(
+      currentRequestId,
+      scenario,
+      pathname,
+      requestEventId(body),
+      null,
+      "Error: S2_ACCEPTED_TRANSPORT_ABORT",
+    );
+    return observationId;
+  } catch (error) {
+    const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    requestDiagnostics(
+      currentRequestId,
+      scenario,
+      pathname,
+      requestEventId(body),
+      observedResponse ?? null,
+      detail,
+    );
+    throw error;
+  } finally {
+    clearTimeout(deadline);
+    if (transport !== undefined && transport.exitCode === null) {
+      transport.kill("SIGTERM");
+      await transport.exited;
+    }
+  }
+}
+
 async function expectTransportAbort(
   body: Record<string, unknown>,
   scenario: string,
@@ -1754,6 +1944,7 @@ async function expectTransportAbort(
   if (body.s2_abort_before_commit === true && typeof observationId !== "string") {
     fail("S2_ABORT_OBSERVATION_ID_MISSING");
   }
+  if (body.s2_abort_before_commit === true) return expectAcceptedTransportAbort(body, scenario);
   try {
     await request("POST", "/__s2/write", scenario, body, 20);
   } catch (error) {
@@ -2870,6 +3061,12 @@ async function exercise(): Promise<void> {
     s2_harness_request_id: "AB-s2-before-commit-001",
     s2_pre_commit_delay_ms: 125,
   };
+  const missingObservation = await request(
+    "GET",
+    `/__s2/abort-observation?request_id=${beforeDisconnect.s2_harness_request_id}`,
+    "disconnect-observation-absent-before-upload",
+  );
+  assertEqual(missingObservation.status, 404, "S2_ABORT_OBSERVATION_PREEXISTS");
   const beforeDisconnectObservationId = await expectTransportAbort(
     beforeDisconnect,
     "disconnect-before-commit",

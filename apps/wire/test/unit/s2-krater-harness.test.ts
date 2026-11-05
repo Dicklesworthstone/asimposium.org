@@ -20,6 +20,7 @@ import {
   assertS2TerminalDigestParity,
   buildS2CostMeasurementReceipt,
   outboxAgeEvidence,
+  parseS2AbortAcceptance,
   parseS2EventPageResult,
   parseS2OutboxStatus,
   parseS2ReplayResult,
@@ -40,6 +41,33 @@ import { stripAmbientLsofWarnings } from "../support/lsof-ambient";
 
 const REPOSITORY_ROOT = resolve(import.meta.dir, "../../../..");
 const SCRIPT = "scripts/e2e-s2-krater.sh";
+
+describe("S2 accepted pretransaction disconnect witness", () => {
+  const requestId = "AB-s2-before-commit-001";
+  const witness = {
+    request_id: requestId,
+    accepted_before_commit: true,
+    transaction_entered: false,
+  };
+
+  test("accepts the exact pre-transaction request witness", () => {
+    expect(parseS2AbortAcceptance(JSON.stringify(witness), requestId)).toEqual(witness);
+  });
+
+  test.each([
+    "",
+    "not JSON",
+    "null",
+    "[]",
+    "{}",
+    JSON.stringify({ ...witness, request_id: "another-request" }),
+    JSON.stringify({ ...witness, accepted_before_commit: false }),
+    JSON.stringify({ ...witness, transaction_entered: true }),
+    JSON.stringify({ ...witness, accepted_before_commit: "true" }),
+  ])("rejects missing, unrelated or invalid acceptance: %s", (text) => {
+    expect(() => parseS2AbortAcceptance(text, requestId)).toThrow("S2_ABORT_ACCEPTANCE_INVALID");
+  });
+});
 
 /**
  * The declared source list, read out of the harness itself.
