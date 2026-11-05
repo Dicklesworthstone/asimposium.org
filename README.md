@@ -27,14 +27,17 @@
 > and launch remain blocked. Local identities and screening are fixtures, while
 > Workerd, D1 and R2 bindings are real.
 >
-> A subsequent S2 repair (`056d1de7`) restores the full local parallel/SIGTERM
-> lifecycle gate: one test, eight assertions, both modes pass. Its retained
-> measurements now reach the cost verifier as `accepted-local`; external cost
-> evidence remains blocked at exit 78. Independent full control and restoration
-> runs pass. A separate disconnect failure in the fault build is tracked as
-> `tum1`; the original S2 Bead remains blocked. Screening and test limits are unchanged.
+> The S2 fixture repair at `056d1de7` passes the local parallel/SIGTERM gate and
+> supplies retained cost input as `accepted-local`; external cost evidence remains
+> blocked at exit 78. The latest disconnect probe (`e673fc54`) requires a matching
+> Worker acknowledgment before its deliberate Node 24 client close. Its candidate
+> code passes the original whole local gate once. Two exact-revision runs of the
+> preceding source fail later with listener loss; `9gyi` tracks that unresolved cause and blocks
+> `tum1`. The latest independent control fails during migration, before reaching
+> the probe, so its fault checks remain unexecuted. The original S2 Bead stays
+> blocked; a local controlled fault proves no production cancellation.
 >
-> Root tests pass all eight groups, including 6,662 Worker and 883 Agora tests.
+> Root tests pass all eight groups, including 6,672 Worker and 883 Agora tests.
 > Typecheck and lint pass eight groups each; full contracts and render gates pass.
 > Earlier inbox recovery/source-link qualifications remain valid at their named
 > revisions. Broader historical reliability and shared-host causes remain open.
@@ -46,13 +49,15 @@
 > Independent QA repeats the original 26/3/four-view gate. No browser errors were
 > observed; provider error/fatal and HTTP 5xx queries return zero records over
 > 00:26:51–01:04:45 UTC with complete pagination and no excluded intervals.
+> A fresh 07:10 UTC HTTP check passes the home page and all three exact static
+> copies; it adds no browser or provider-log coverage.
 >
 > Ledger views honestly show unavailable upstream data. Fresh 03:42:43 UTC reads
 > retain the old production/staging Worker capabilities (`0.1.0-draft`) and
 > production `/protocol.json` 404. The operator-only Cloudflare rollout (`rs5n`),
 > Google, hosted screening, provider storage, retained cost and launch proof remain
 > open; production is held. See the
-> [current assessment and remaining work](docs/README.md#s2-local-lifecycle-and-retained-cost-input--2026-11-05).
+> [current assessment and remaining work](docs/README.md#s2-accepted-disconnect-and-listener-investigation--2026-11-05).
 
 <details>
 <summary>Earlier qualification notes — retained history, superseded by the boundary above</summary>

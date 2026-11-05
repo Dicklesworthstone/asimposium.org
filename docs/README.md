@@ -14,6 +14,91 @@ observed.
 
 ## Current reality check — 2026-11-05
 
+### S2 accepted disconnect and listener investigation — 2026-11-05
+
+The local probe at `fc56a331` replaces a race between dispatch and a 20 ms timeout
+with a matching Worker acknowledgment followed by an owned Node 24 request close.
+The Worker reads the complete JSON body, records the existing three-field local
+observation and sends one bounded NDJSON acknowledgment. Its original synthetic
+fault still refuses the transaction; the finite 125 ms response window and normal
+EOF remain. The client starts its 20 ms close timer **after** validating that
+acknowledgment, within one 15-second helper bound. This intentionally changes the
+phase measured by the timer; it is not an unchanged 20 ms end-to-end deadline.
+The original 400 ms observation, no-transaction, cursor, idempotent retry and outer
+lifecycle assertions remain.
+
+This proves only a controlled pretransaction refusal plus an observed accepted
+client disconnect. It does not prove Worker-reactive cancellation, upload
+interruption, rollback, canonical scientific validation or production behavior.
+Normal EOF, an HTTP refusal or an absent/mismatched acknowledgment cannot count as
+the client's owned abort. The independent missing-acknowledgment fault is still
+required; a preliminary observation GET returning 404 is not that proof.
+
+Eight earlier response-cancellation and partial-upload experiments fail and earn
+no qualification credit. Actual partial-byte/body-read-error assertions eventually
+pass, but later native requests reset. Genuine Node 24 and removal of an invalid
+missing-route probe do not establish the cause. The stronger experimental protocol
+was withdrawn explicitly, restoring the original controlled-fault scope; its exact
+failed three-file source is retained in
+`e2e/artifacts/dae7-repair-20261104/tum1-unqualified-upload-experiment.patch`
+(17,002 bytes, SHA256 `0d7baac1e86bcc6337637ef9d5ce108fceb58f7a9600a5a509fe6a68ae4d24aa`).
+
+The minimum complete-body variant first passes the whole local gate in 548.997
+seconds. However, the primary exact-`fc56a331` run then fails in 317.549 seconds
+and the independent exact-revision clean control fails in 347.411 seconds. Both
+pass the acknowledgment/owned-close/no-write/retry checks before later listener
+loss. One primary Wrangler log contains an esbuild Go deadlock trace; the independent
+failure reports HTTP 500, `Error: Network connection lost`. Neither proves a
+specific pre-cleanup exit cause. Independent verification stops at the red control;
+no mutant, restored positive or closure is credited to that run. Its source,
+dependency and bounded cleanup audits pass: 2,466 Git blobs/executable modes are
+exact, 30 sampled births retire and seven known groups are empty; 395 unreadable
+host cwd entries limit the census.
+
+Source `e673fc54` adds only an explicit `Connection: keep-alive` header to the
+genuine Node request; `agent: false`, original assertions and bounds stay. Its
+complete original local gate passes in **549.644 seconds**, one test/eight
+assertions across parallel and SIGTERM modes. This is a candidate transport setting,
+not a diagnosis of earlier listener loss. Typecheck/lint pass all eight groups,
+full contracts pass 944 tests and render 584. The complete root command passes
+eight groups in **1,441.883 seconds**, including 6,672 Worker and 883 Agora tests;
+toolchain has 406 passes and 54 existing skips. All three source hashes remain
+fixed. Literal default UBS diff/staged scans cover the one changed JS file with
+zero critical/warning matches and 419 informational findings; earlier three-file
+scan findings remain retained, with no project-wide clean-security claim.
+These primary checks run on the candidate before its commit; their source hashes
+match `e673fc54`. They are not primary native execution at that exact Git revision.
+
+Independent exact-`e673fc54` qualification **fails its first clean control**, normal
+exit 1 in **187.478 seconds**, 07:04:32.503–07:07:39.981 UTC, zero passes/one failure/
+one assertion. The first child stops during migration, before any workload or
+acknowledgment. Its retained migration log reports
+`0071_scientific_withdrawals.sql`, `ECONNREFUSED 127.0.0.1:41727` and an owned-command
+`deadline` with `cleanup_proven: true`. The existing command bound is 120 seconds
+(`scripts/e2e-s2-krater.sh:85`); the outer command terminates normally with exit 1,
+not an outer timeout. Why migration missed that bound remains unknown. Do not
+classify the refused connection as spontaneous listener death or a keepalive
+effect from this evidence.
+
+Verification stops at that red control. SIGTERM, the Connection-close comparison,
+missing-acknowledgment fault, partial-upload matrix, restored positive and new cost
+consumer are **not run**. Source/dependency audits remain exact; 14 sampled births
+retire and four known groups are empty, with 381 unreadable host cwd entries. Raw
+evidence is in `e2e/artifacts/independent-tum1-e673fc54-20261105/`; the actual child
+migration log is retained under its named `s2l-190968b5...` root. A future meaningful
+fault and restored whole positive remain required; no unchanged retry or widened
+deadline substitutes for them.
+
+`asimposiumorg-9gyi` retains its original specific-cause, native chronology and
+real partial-upload acceptance; ordinary complete-body success cannot close it.
+`tum1` is blocked on `9gyi`, and original `doa` stays blocked with its complete
+deployed/cache/DO/cost acceptance. No acceptance criterion was removed and no issue
+was self-closed. The verified existing Preview's web inputs remain unchanged.
+Fresh 07:10 UTC reads return HTTP 200 for its home and all three static protocol
+copies, whose bytes match source. This is four HTTP checks, not fresh browser or
+provider-log coverage. There is no new Vercel build, Cloudflare deployment,
+production promotion or launch verdict here.
+
 ### S2 local lifecycle and retained cost input — 2026-11-05
 
 Source `056d1de7a718d00a6e38e18cf5a256e07ba9b32b` repairs the local S2 fixture
