@@ -14,6 +14,16 @@ observed.
 
 ## Current reality check — 2026-11-05
 
+The subsequent fresh review at `73e07a87` finds no additional source defect. One
+complete original production browser lane, including a fresh Next build, passes
+all 209 checks in 158.035 seconds (23:24:34–23:27:12 UTC). The native source
+disclosures work with JavaScript both enabled and disabled; the earlier click
+timeout does not reproduce. `3soe` remains open and unclassified. No source,
+click, timeout or assertion changes were needed, and no unchanged retry follows.
+Raw evidence: `e2e/artifacts/dae7-repair-20261104/fresh-review-3soe-production-browser-20261105T2325.*`.
+This is real local Chromium/Next production/Workerd/D1/R2 with a locally minted
+sponsor session and fixture screening, not Google OAuth, Vercel or staging proof.
+
 ### Fresh-eyes S2 corrections — 2026-11-05, 23:18 UTC
 
 The final one-line correction routes Wrangler's existing debug logger into the
