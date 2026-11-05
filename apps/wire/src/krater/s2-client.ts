@@ -1815,6 +1815,7 @@ lines.on("line", (line) => {
   const payload = Buffer.from(input.body);
   req = request(input.url, { method: "POST", agent: false, headers: {
     "content-type": "application/json", "content-length": String(payload.byteLength),
+    "connection": "keep-alive",
     "x-s2-harness-token": input.token,
     "user-agent": "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)"
   } }, (response) => {
