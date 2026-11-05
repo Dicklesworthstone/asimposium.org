@@ -14,6 +14,58 @@ observed.
 
 ## Current reality check — 2026-11-05
 
+### S2 migration setup increment — capacity hold, 2026-11-05
+
+The current setup patch (`scripts/e2e-s2-krater.sh`, SHA256
+`0694a6026b2b01dfa5b71a42099f5873af9972b14c92faa4b19bfc7ac4206ccf`)
+keeps one native D1 runtime for the initial fresh-database migration sequence.
+It uses the pinned Wrangler CLI's Miniflare constructor, database identity and
+persistence layout, its SQL splitter, and a separate batch plus journal insert
+for each canonical file. The 120-second command bound is unchanged. Both legacy
+journal upgrade lanes still execute the original Wrangler CLI; no snapshot or
+SQLite adapter replaces native D1.
+
+Real Node 24 / Workerd applies all 129 files in 4,983 ms; the same-state rerun
+applies zero in 1,116 ms. A final journal-format control passes in 6.824 seconds
+including both launches. Read-only artifact inspection finds all 129 journal
+IDs/names identical to a completed CLI run, with 833 schema objects: 832 have
+byte-identical SQL and one trigger differs only in indentation after the workload
+recreates it (`worker.ts:625,669`). Integrity is clean and foreign-key violations
+are zero. A changed executable input adds duplicate-key inserts after migration
+0002's real SQL: native D1 fails at that file, rolls back its table and journal
+entry, and preserves migration 0001. The failing child exits 1 in 1,322 ms; this
+is an intended negative, not a passing whole product gate.
+
+The original whole parallel/SIGTERM command **fails** in 423.928 seconds
+(07:54:48.449–08:01:52.378 UTC), zero passes/one failure/one assertion. The second
+parallel child completes every local phase and publishes retained evidence
+(41,978,388 bytes plus the unchanged reserve, external exit 78). The first ends
+after 545 records during upgrade, with status 143 and no final evidence receipt.
+Its status time is 299.376 seconds after the second child's ready file, matching
+the parent lifecycle's 300-second window; the retained observations do not prove
+the signal sender. SIGTERM mode is unreached. No unchanged retry or widened bound
+is used to turn this failure green.
+
+Current typecheck/lint pass eight groups each, contracts 944 tests/6,448
+expectations and render 584/5,916, combined 140.844 seconds. Default UBS diff scans
+the one changed Bash file in 46.635 seconds: zero critical, four reviewed existing
+warnings, 24 informational findings, with no suppressions. Full-root and independent
+runtime qualification are **not run** after the primary filesystem falls below
+219 MiB and then to tens of MiB. `0oi3` is P0; `9gyi` is blocked on it. All original
+`9gyi`, `tum1` and `doa` criteria remain intact and unfinished. No current-source
+full-root, independent, deployed, cost or launch pass is claimed.
+
+Failed startup prototypes remain retained: the general platform proxy and forced
+ESM launches time out; an initial dependency-resolution error is corrected by
+resolving Wrangler's physical package path. Installed Miniflare uses an inherited
+CommonJS worker and a synchronous wait; the corrected launcher uses CommonJS.
+An optional inline worker diagnostic is blocked before execution by DCG and earns
+no proof credit. Evidence remains in `e2e/artifacts/dae7-repair-20261104/`, under
+the `s2-native-d1-*` and `s2-runtime-reuse-*` names. A private `/tmp` patch and
+consistent 566-issue database checkpoint preserve current work against ENOSPC.
+These are recovery copies, not restored primary capacity or the missing historical
+snapshot. No deletion, global cleanup, new deployment or production promotion.
+
 ### S2 accepted disconnect and listener investigation — 2026-11-05
 
 The local probe at `fc56a331` replaces a race between dispatch and a 20 ms timeout

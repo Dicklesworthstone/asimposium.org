@@ -83,6 +83,72 @@ readonly S2_MAX_RETAINED_BYTES=67108864
 readonly S2_MAX_RETAINED_FILES=1024
 readonly S2_PROVENANCE_COMMAND_DEADLINE_SECONDS=10
 readonly S2_OWNED_COMMAND_DEADLINE_SECONDS=120
+# Keep one native D1 runtime for the fresh database's migration sequence.
+# Wrangler's CLI starts and disposes a Miniflare runtime per file; at 129
+# migrations that repeated startup can exhaust this command's unchanged bound.
+# SQL splitting and D1 execution still come from the pinned Wrangler package.
+# Each file and its journal insert remain one batch, as in Wrangler migrations.
+readonly S2_MIGRATIONS_PROGRAM='
+  const assert = require("node:assert/strict");
+  const { readdirSync, readFileSync, realpathSync } = require("node:fs");
+  const { createRequire } = require("node:module");
+  const { unstable_readConfig, unstable_splitSqlQuery } = require("./apps/wire/node_modules/wrangler/wrangler-dist/cli.js");
+
+  async function migrate() {
+  assert.equal(process.versions.bun, undefined);
+  assert.ok(process.versions.node.startsWith("24."));
+  const names = readdirSync("db/migrations").filter((name) => name.endsWith(".sql")).sort();
+  assert.ok(names.length > 0);
+  assert.ok(names.every((name) => /^[0-9]{4}_[a-z0-9_]+\.sql$/.test(name)));
+  const config = unstable_readConfig({ config: "apps/wire/src/krater/wrangler.s2.toml" });
+  const binding = config.d1_databases.find((database) => database.binding === "DB");
+  assert.ok(binding);
+  const wranglerRequire = createRequire(realpathSync("apps/wire/node_modules/wrangler/package.json"));
+  const { Miniflare, convertV4MiniflareOptions } = wranglerRequire("miniflare");
+  // Match pinned Wranglers executeLocally binding and persistence options.
+  // Only its per-file runtime recreation is removed; DOs still run in the
+  // original Worker after migration, under the unchanged lifecycle supervisor.
+  const platform = new Miniflare(convertV4MiniflareOptions({
+    modules: true,
+    script: "",
+    resourcePersistencePath: `${process.argv[1]}/v3`,
+    d1Databases: { DATABASE: binding.preview_database_id ?? binding.database_id ?? binding.binding },
+  }));
+  let migration;
+  try {
+    console.log(JSON.stringify({ suite: "s2-native-migrations", phase: "binding-start" }));
+    const database = await platform.getD1Database("DATABASE");
+    console.log(JSON.stringify({ suite: "s2-native-migrations", phase: "binding-ready" }));
+    await database.prepare("CREATE TABLE IF NOT EXISTS \"d1_migrations\"(\n\t\tid         INTEGER PRIMARY KEY AUTOINCREMENT,\n\t\tname       TEXT UNIQUE,\n\t\tapplied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL\n);").run();
+    console.log(JSON.stringify({ suite: "s2-native-migrations", phase: "journal-ready" }));
+    const before = await database.prepare(`SELECT name FROM "d1_migrations" ORDER BY id`).all();
+    assert.deepEqual(before.results.map((row) => row.name), names.slice(0, before.results.length));
+    for (migration of names.slice(before.results.length)) {
+      const sql = readFileSync(`db/migrations/${migration}`, "utf8");
+      const query = `${sql}\nINSERT INTO "d1_migrations" (name) values (\u0027${migration}\u0027);`;
+      const results = await database.batch(unstable_splitSqlQuery(query).map((part) => database.prepare(part)));
+      assert.ok(results.every((result) => result.success));
+      console.log(JSON.stringify({ suite: "s2-native-migrations", migration, status: "pass" }));
+    }
+    const after = await database.prepare(`SELECT name FROM "d1_migrations" ORDER BY id`).all();
+    assert.deepEqual(after.results.map((row) => row.name), names);
+    console.log(JSON.stringify({ suite: "s2-native-migrations", status: "pass",
+      applied: names.length - before.results.length, total: names.length }));
+  } catch (error) {
+    // Canonical SQL is public, but retained diagnostics still never print queries.
+    console.error(JSON.stringify({ suite: "s2-native-migrations", status: "fail",
+      migration, error_name: error?.name, error_code: error?.cause?.code ?? error?.code }));
+    process.exitCode = 1;
+  } finally {
+    await platform.dispose();
+  }
+  }
+  migrate().catch((error) => {
+    console.error(JSON.stringify({ suite: "s2-native-migrations", status: "fail",
+      phase: "startup", error_name: error?.name, error_code: error?.code }));
+    process.exitCode = 1;
+  });
+'
 readonly S2_EVIDENCE_ROOT="e2e/artifacts/s2-krater"
 readonly S2_COST_RECEIPT_RELATIVE_PATH="s2-cost-input.json"
 readonly S2_COST_MANIFEST_RELATIVE_PATH="manifest.json"
@@ -9256,7 +9322,9 @@ if ! assert_legacy_fixture_bytes; then
   exit 1
 fi
 
-if ! s2_run_owned_deadline "${S2_WRANGLER}" d1 migrations apply DB --config "${S2_WRANGLER_CONFIG}" --local --persist-to "${S2_STATE_DIR}" >"${S2_STATE_DIR}/migration.log" 2>&1; then
+# Miniflare evaluates a CommonJS helper in a worker thread. Do not force ESM
+# through inherited execArgv: its synchronous bridge cannot observe that failure.
+if ! s2_run_owned_deadline node --input-type=commonjs -e "${S2_MIGRATIONS_PROGRAM}" "${S2_STATE_DIR}" >"${S2_STATE_DIR}/migration.log" 2>&1; then
   emit_wrangler_failure "LOCAL_D1_MIGRATION_FAILED"
   exit 1
 fi

@@ -37,8 +37,17 @@
 > the probe, so its fault checks remain unexecuted. The original S2 Bead stays
 > blocked; a local controlled fault proves no production cancellation.
 >
-> Root tests pass all eight groups, including 6,672 Worker and 883 Agora tests.
-> Typecheck and lint pass eight groups each; full contracts and render gates pass.
+> The current migration setup patch reuses one real native D1 runtime: 129 files
+> apply in 4.98 seconds and a no-op rerun takes 1.12 seconds. A planted duplicate
+> key confirms per-file rollback. The full S2 command still fails: one parallel
+> child finishes, while the other records 143 during a later upgrade phase.
+> This remains under qualification. Critical primary disk exhaustion (`0oi3`,
+> now P0) blocks the full-root rerun and independent execution. Existing files
+> and a private recovery checkpoint are preserved; no task is closed from this.
+>
+> The last complete root run passed eight groups, including 6,672 Worker and
+> 883 Agora tests, before this setup patch. Current typecheck and lint pass eight
+> groups each; full contracts and render gates pass.
 > Earlier inbox recovery/source-link qualifications remain valid at their named
 > revisions. Broader historical reliability and shared-host causes remain open.
 >
