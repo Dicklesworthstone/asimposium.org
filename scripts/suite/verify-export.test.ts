@@ -261,8 +261,6 @@ async function verifySignedExportFormat(
 }
 
 for (const format of [EXPORT_FORMAT, PUBLIC_EXPORT_FORMAT] as const) {
-  test(
-    `the verifier anchors ${format} on trusted signatures, not on the export header`,
-    () => verifySignedExportFormat(format),
-  );
+  test(`the verifier anchors ${format} on trusted signatures, not on the export header`, () =>
+    verifySignedExportFormat(format));
 }

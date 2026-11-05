@@ -202,11 +202,13 @@ export function renderPublicMovesMarkdown(value: PublicMovesResponse): string {
       : []),
     "## Move template catalog",
     "",
+    `Catalog version: ${safeInlineProse(response.version)}.`,
+    "",
     "Templates describe possible actions; they are not additional live recommendations. Full templates remain in the JSON face.",
     "",
     ...Object.values(response.moves).map(
       (template) =>
-        `- **${template.move}**: ${safeInlineProse(template.description)} (${template.availability}).`,
+        `- **${template.move}** — ${safeInlineProse(template.title)}: ${safeInlineProse(template.description)} (${template.availability}).`,
     ),
     "",
   ].join("\n");
@@ -231,11 +233,11 @@ export function renderPublicMovesHtml(
     (discovery.next_after
       ? `<p><a href="${escapeHtml(publicMovesPagePath(discovery.next_after, ""))}">Continue to more problems</a></p>`
       : "") +
-    `<details><summary>Move template catalog</summary><p>Templates describe possible actions; they are not additional live recommendations.</p><ul>` +
+    `<details><summary>Move template catalog</summary><p>Catalog version: ${escapeHtml(response.version)}.</p><p>Templates describe possible actions; they are not additional live recommendations.</p><ul>` +
     Object.values(response.moves)
       .map(
         (template) =>
-          `<li><strong>${escapeHtml(template.move)}</strong>: ${escapeHtml(template.description)} (${template.availability})</li>`,
+          `<li><strong>${escapeHtml(template.move)}</strong> — ${escapeHtml(template.title)}: ${escapeHtml(template.description)} (${template.availability})</li>`,
       )
       .join("") +
     "</ul></details></article>"

@@ -94,6 +94,7 @@ import { screenPromotionWithWorkersAI } from "../../src/screening/workers-ai.ts"
 let artifactClock: number | null = null;
 let screenCalls = 0;
 let screeningDelayMs = 0;
+let heldScreeningCall: number | null = null;
 let revokeDuringNextScreen = false;
 let redactDuringNextScreen: string | null = null;
 type ScreenMode =
@@ -120,6 +121,15 @@ let lastScreen:
 const app = createApp({
   screenPromotion: async (input, env) => {
     screenCalls += 1;
+    const call = screenCalls;
+    // A controller can hold one exact invocation while governance proceeds.
+    // Each timer belongs to the held request's Workerd I/O context; no promise
+    // is shared between RPC requests. A missing release fails closed.
+    const releaseDeadline = Date.now() + 15_000;
+    while (heldScreeningCall === call) {
+      if (Date.now() >= releaseDeadline) throw new Error("Screening barrier was not released");
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
     if (redactDuringNextScreen !== null) {
       const eventId = redactDuringNextScreen;
       redactDuringNextScreen = null;
@@ -757,6 +767,17 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
 
   resumeScreening(): void {
     screeningDelayMs = 0;
+  }
+
+  holdScreeningCall(call: number): void {
+    if (!Number.isSafeInteger(call) || call <= screenCalls || heldScreeningCall !== null) {
+      throw new Error("Screening barrier requires one future invocation");
+    }
+    heldScreeningCall = call;
+  }
+
+  releaseScreeningCall(): void {
+    heldScreeningCall = null;
   }
 
   // Synthetic prior attempts through the real accounting function and D1,

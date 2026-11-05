@@ -27,9 +27,17 @@
 > Claim critique source links, inbox expiry and artifact-review status links retain
 > their earlier independent local qualifications.
 >
-> The latest full root run **passes all eight groups**, including 6,662 Worker tests
+> The subsequent original native integration run at `abfa90cd` failed:
+> **331 pass / 6 fail / 337 tests**. It did not reach the expected S2 authority
+> block. The five repaired native lanes and complete S6 auth file (131 tests)
+> now pass. The S6 repair preserves fragmented control and child-result records
+> across timed reads, with strict bounds and causal regression checks. Current
+> typecheck, lint, contracts and render gates pass. The new full root run
+> **passes all eight groups**, including 6,662 Worker tests
 > and 883 Agora tests. Typecheck and lint pass eight groups each; full contracts and
-> render gates pass. This uses the recorded private process setup. The final native
+> render gates pass. Independent unfiltered integration acceptance remains pending;
+> the original integration Bead stays open. This uses the recorded private process
+> setup. The earlier native
 > recovery gate also passes with stronger response and privacy assertions added
 > after that aggregate; runtime and unit-test source are unchanged. Screening and
 > sponsor approval are fixtures in these local journeys. Full inbox, shared-host,
@@ -43,7 +51,7 @@
 > The sanctioned Cloudflare rollout (`rs5n`) lacks operator authority here. Google
 > approval, hosted screening, provider storage, retained cost evidence and launch
 > gates remain open; production remains held. See the
-> [current assessment and remaining work](docs/README.md#idle-session-recovery--2026-11-04).
+> [current assessment and remaining work](docs/README.md#original-integration-acceptance--2026-11-04).
 
 <details>
 <summary>Earlier qualification notes — retained history, superseded by the boundary above</summary>

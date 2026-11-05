@@ -14,6 +14,69 @@ observed.
 
 ## Current reality check — 2026-10-30
 
+### Original integration acceptance — 2026-11-04
+
+The independent, unfiltered Worker integration command at exact revision
+`abfa90cd9ec7fecd875d3f217a837652889537d7` finished with **331 passing and six
+failing tests out of 337**, 1,685 expectations, exit 1 `SUITE_PREFLIGHT_FAILED`,
+in 2,330.701 seconds. The downstream S2 authority probe was not reached.
+Eleven of the thirteen earlier repaired journeys passed; governance and face
+census did not. Full accounting and raw-stream hashes are retained in
+`e2e/artifacts/independent-dae7-abfa90cd-20261104/integration-terminal-summary.json`.
+The verifier checked all 2,466 source blobs and Git executable modes, dependency
+identities and the isolation boundary. This is local evidence only.
+
+The failures exposed a stale public-schema census (21 actual versus 20 expected),
+an offline verifier still restricted to v3 although the public export is v4,
+concurrent governance callers receiving the declared in-flight 429, an atomic
+authority test whose delay also held governance screening, and a moves Markdown
+face omitting the catalog version and template titles. Repairs retain strict
+source binding, event signatures, exact-key replay, authority refusals and face
+parity. The v4 companion's reported assurance is self-consistency only; event
+checkpoint signatures do not authenticate that companion's provenance.
+
+The sixth failure is the S6 supervisor self-test. Diagnostics observed a timed
+read consume one byte of a control frame before timing out. The inner supervisor
+discarded partial control and child-result records. Two separate causal cases
+split a valid record across the existing 50 ms poll; the old reader's complete
+self-test fails precisely those two cases (64.671 seconds). Separate buffers
+retain at most 511 bytes until a newline, preserving the existing nonce, status,
+order, EOF and deadline checks. The same complete wrapped self-test then passes
+in 64.613 seconds. Explicit zero-survivor and empty-owner checks isolate the
+cases; the final complete auth file passes **131 tests and 1,069 assertions**
+in 68.507 seconds. This establishes the current framing defect, not the sole
+cause of every historical S6 failure. Diagnostics retain safe statuses without
+recording envelopes, keys or signatures. The script change addresses an actual
+S4/S7 blocker; the closed S6 spike is not reopened as a polishing project.
+
+The five selected registered native tests pass in 134.973 seconds (76 tests
+filtered out), and focused renderer/verifier units pass six tests with 114
+assertions. Typecheck and lint pass all eight groups; contracts pass 944 tests
+and renderers pass 584. The new full root run exits zero in **1,418.831 seconds**:
+all eight groups pass, including 6,662 Worker tests and 883 Agora tests. Toolchain
+has 406 passes and 54 existing skips. The same ten code hashes remain fixed
+through the required gates. This uses the recorded proper-init/private-process
+setup. Independent unfiltered integration acceptance is still pending;
+`asimposiumorg-dae7` and the broader reliability work remain open. The independent
+checks below predate these repairs and do not qualify the new working source.
+
+Default UBS diff exits zero over seven files with zero critical findings and
+58 warnings. A separate scan includes all ten changed code files, including
+already committed peer work: it exits one with 15 critical matches, 96 warnings
+and 1,298 informational findings. All critical and warning locations were read.
+The critical matches compare test modes, face suffixes and public IDs; they do
+not compare secrets. Warnings concern strict test parsing, schema-refined or
+fixture accesses, named verifier helpers, hostile-input fixtures and an already
+exported locale. No rule or finding was suppressed. All 1,409 source occurrences
+were retained; this is scoped coverage, not a project-wide clean security scan.
+
+Fresh November 5 reads at 00:01:58–59 UTC return the retained production and
+staging capability bodies (`0.1.0-draft`) and production `/protocol.json` 404.
+Body equality does not establish a deployment revision or migration lineage.
+The Vercel project remains configured for Next.js under `apps/web`, Node 24 and
+frozen Bun installation, with Git deployment disconnected. A Preview refresh
+is being prepared; no new deployment is claimed yet.
+
 ### Idle-session recovery — 2026-11-04
 
 The idle sweep already preserved private drafts, but its notice offered no

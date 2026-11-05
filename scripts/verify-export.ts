@@ -114,9 +114,7 @@ export async function verifyExportOffline(input: {
   const privateParsed = parseProblemExport(input.ndjson);
   const parsed = privateParsed.ok ? privateParsed : parsePublicProblemExport(input.ndjson);
   const publicFormat = parsed.ok && "publicationContext" in parsed;
-  const publicChain = publicFormat
-    ? await verifyPublicProblemExportChain(input.ndjson)
-    : null;
+  const publicChain = publicFormat ? await verifyPublicProblemExportChain(input.ndjson) : null;
   const chain = publicChain ?? (await verifyProblemExportChain(input.ndjson));
   if (!chain.intact) failures.push(`chain: ${chain.detail}`);
   if (!parsed.ok) {

@@ -417,6 +417,7 @@ SELF_TEST_NESTED="${S6_SELF_TEST_NESTED:-0}"
 SIGNAL_KILL_FAILURE_PLANT=0
 SIGNAL_TERM_FAILURE_PLANT=0
 SIGNAL_KILL_NO_SETTLE_PLANT=0
+SIGNAL_SPLIT_FRAME_PLANT=0
 OWNER_TOKEN_COUNTER=0
 OWNER_TOKEN=""
 GROUP_CONTROL_PID=""
@@ -589,7 +590,7 @@ read_group_outcome() {
 }
 
 request_group_signal() {
-  local pid="$1" signal="$2" index token status expected allow_child=0
+  local pid="$1" signal="$2" index token status=0 expected allow_child=0
   child_record_index "$pid" || return 1
   index="$CHILD_RECORD_INDEX"
   token="${CHILD_OWNER_TOKENS[$index]:-}"
@@ -612,8 +613,17 @@ request_group_signal() {
   # Ignore PIPE only around the builtin write. A dead same-group supervisor
   # makes this fail; no parent-side numeric signal or fallback exists.
   trap '' PIPE
-  printf 'SIGNAL\t%s\t%s\n' "$token" "$signal" >&6 2>/dev/null
-  status=$?
+  if (( SIGNAL_SPLIT_FRAME_PLANT == 1 )); then
+    # Deliberately cross the listener's polling timeout without ending the
+    # record. Only the complete, nonce-bound frame may authorize a signal.
+    printf 'S' >&6 2>/dev/null || status=$?
+    sleep 0.15
+    if (( status == 0 )); then
+      printf 'IGNAL\t%s\t%s\n' "$token" "$signal" >&6 2>/dev/null || status=$?
+    fi
+  else
+    printf 'SIGNAL\t%s\t%s\n' "$token" "$signal" >&6 2>/dev/null || status=$?
+  fi
   trap - PIPE
   (( status == 0 )) || return 1
   if [[ "$GROUP_PROTOCOL_STATE" == "running" ]] &&
@@ -1129,6 +1139,7 @@ SUPERVISOR_CHILD_BEFORE_ACK_PLANT=0
 SUPERVISOR_CHILD_STATUS_PLANT=""
 SUPERVISOR_INPUT_ACK_PLANT=""
 SUPERVISOR_EXTRA_RECORD_PLANT=0
+SUPERVISOR_CHILD_SPLIT_PLANT=0
 DEAD_LISTENER_WRITE_REFUSAL_OBSERVED=0
 RUN_BOUNDED_OUTCOME="idle"
 RUN_BOUNDED_CHILD_STATUS=""
@@ -1194,8 +1205,8 @@ run_bounded() {
       exec @ARGV or die $!;
     ' \
       bash -c '
-        stdout_file="$1" unavailable="$2" ready_plant="$3" early_ack_plant="$4" child_before_ack_plant="$5" child_status_plant="$6" input_ack_plant="$7" extra_record_plant="$8"
-        shift 8
+        stdout_file="$1" unavailable="$2" ready_plant="$3" early_ack_plant="$4" child_before_ack_plant="$5" child_status_plant="$6" input_ack_plant="$7" extra_record_plant="$8" child_split_plant="$9"
+        shift 9
         supervisor_bootstrap_fail() {
           printf "s6-supervisor-bootstrap:%s\n" "$1" >&2
           exit "$unavailable"
@@ -1315,14 +1326,29 @@ run_bounded() {
             '"'"' -- "$@" >"$stdout_file"
           ) || command_status=$?
           if [[ -n "$child_status_plant" ]]; then command_status="$child_status_plant"; fi
-          printf "child:%s:%s\n" "$token" "$command_status" >&9 || kill -KILL 0
+          if [[ "$child_split_plant" == "1" ]]; then
+            printf "child:%s:%s" "$token" "$command_status" >&9 || kill -KILL 0
+            sleep 0.15
+            printf "\n" >&9 || kill -KILL 0
+          else
+            printf "child:%s:%s\n" "$token" "$command_status" >&9 || kill -KILL 0
+          fi
           exec 9>&-
         ) &
         exec 9>&-
         child_sent=0
+        # Timed reads can consume a prefix without its LF. Keep each stream
+        # separate and bounded until a complete record can be validated.
+        child_buffer="" request_buffer=""
         while :; do
           if (( child_sent == 0 )); then
-            if IFS= read -r -t 0.05 child_record <&8; then
+            child_fragment="" child_read_status=0
+            IFS= read -r -t 0.05 child_fragment <&8 || child_read_status=$?
+            child_buffer+="$child_fragment"
+            (( ${#child_buffer} <= 511 )) || kill -KILL 0
+            if (( child_read_status == 0 )); then
+              child_record="$child_buffer"
+              child_buffer=""
               child_prefix="child:${token}:"
               [[ "$child_record" == "$child_prefix"* ]] || kill -KILL 0
               child_status="${child_record#"$child_prefix"}"
@@ -1333,11 +1359,18 @@ run_bounded() {
                 printf "child:%s:%s\n" "$token" "$child_status" >&5 || kill -KILL 0
               fi
               child_sent=1
+            elif (( child_read_status <= 128 )); then
+              # EOF or a read error cannot complete a child terminal.
+              kill -KILL 0
             fi
           fi
-          request_status=0
-          IFS="$tab" read -r -t 0.05 request_kind request_token request_signal request_extra <&7 || request_status=$?
+          request_fragment="" request_status=0
+          IFS= read -r -t 0.05 request_fragment <&7 || request_status=$?
+          request_buffer+="$request_fragment"
+          (( ${#request_buffer} <= 511 )) || kill -KILL 0
           if (( request_status == 0 )); then
+            IFS="$tab" read -r request_kind request_token request_signal request_extra <<<"$request_buffer"
+            request_buffer=""
             [[ "$request_kind" == "SIGNAL" && "$request_token" == "$token" && -z "$request_extra" ]] || kill -KILL 0
             case "$request_signal" in
             TERM)
@@ -1372,7 +1405,7 @@ run_bounded() {
               ;;
             *) kill -KILL 0 ;;
             esac
-          elif (( request_status == 1 )); then
+          elif (( request_status <= 128 )); then
             kill -KILL 0
           fi
         done
@@ -1380,7 +1413,7 @@ run_bounded() {
       "$EX_WATCHDOG_UNAVAILABLE" "$SUPERVISOR_READY_WRITE_PLANT" \
       "$SUPERVISOR_EARLY_ACK_PLANT" "$SUPERVISOR_CHILD_BEFORE_ACK_PLANT" \
       "$SUPERVISOR_CHILD_STATUS_PLANT" "$SUPERVISOR_INPUT_ACK_PLANT" \
-      "$SUPERVISOR_EXTRA_RECORD_PLANT" "$@"
+      "$SUPERVISOR_EXTRA_RECORD_PLANT" "$SUPERVISOR_CHILD_SPLIT_PLANT" "$@"
   }
   pid=$!
   if [[ -n "$SPAWN_REGISTRATION_READY_MARKER" ]]; then
@@ -1560,19 +1593,34 @@ run_bounded() {
   # including an unavailable main outcome. Permit exactly one token-bound CHILD;
   # terminalSeen/pending state still rejects duplicates.
   GROUP_ALLOW_CHILD_BEFORE_ACK=1
-  if ! request_group_signal "$pid" TERM; then cleanup_unproven=1; fi
-  if (( timed_out == 1 )); then
-    consume_group_terminal_during_grace 3 || cleanup_unproven=1
-  else
-    consume_group_terminal_during_grace 1 || cleanup_unproven=1
+  if ! request_group_signal "$pid" TERM; then
+    printf '%s\n' 's6-supervisor-cleanup: term-ack-refused' >&2
+    cleanup_unproven=1
   fi
-  if ! request_group_signal "$pid" KILL; then cleanup_unproven=1; fi
+  if (( timed_out == 1 )); then
+    if ! consume_group_terminal_during_grace 3; then
+      printf '%s\n' 's6-supervisor-cleanup: timeout-grace-refused' >&2
+      cleanup_unproven=1
+    fi
+  else
+    if ! consume_group_terminal_during_grace 1; then
+      printf '%s\n' 's6-supervisor-cleanup: child-grace-refused' >&2
+      cleanup_unproven=1
+    fi
+  fi
+  if ! request_group_signal "$pid" KILL; then
+    printf '%s\n' 's6-supervisor-cleanup: kill-ack-refused' >&2
+    cleanup_unproven=1
+  fi
   GROUP_ALLOW_CHILD_BEFORE_ACK=0
 
   # A write or typed-ack refusal never falls into a wait. The unreaped leader
   # and its open control channel remain registered for the outer cleanup owner.
   (( cleanup_unproven == 0 )) || return "$EX_CLEANUP_UNPROVEN"
-  group_settled_before_wait "$pid" || return "$EX_CLEANUP_UNPROVEN"
+  if ! group_settled_before_wait "$pid"; then
+    printf '%s\n' 's6-supervisor-cleanup: owned-group-not-settled' >&2
+    return "$EX_CLEANUP_UNPROVEN"
+  fi
   if ! verify_group_result_eof; then
     wait "$pid" 2>/dev/null || true
     unregister_child "$pid"
@@ -1936,18 +1984,25 @@ mint_envelope_config() {
   # Drop the guard writer now the child is done, so EOF is reachable.
   exec 9>&-
   if (( status != 0 )); then
+    printf 's6-envelope-minter: supervisor status=%s stage=%s outcome=%s child-status=%s\n' \
+      "$status" "$RUN_BOUNDED_STAGE" "$RUN_BOUNDED_OUTCOME" "$RUN_BOUNDED_CHILD_STATUS" >&2
     exec 8<&-
     return 1
   fi
   # EXACTLY one newline-terminated bounded record, then end of stream.
-  local extra="" extra_status=0
-  IFS= read -r -t 10 MINTED_CONFIG <&8 || MINTED_CONFIG=""
+  local extra="" extra_status=0 record_status=0
+  IFS= read -r -t 10 MINTED_CONFIG <&8 || record_status=$?
+  if (( record_status != 0 )); then
+    printf 's6-envelope-minter: incomplete-record status=%s\n' "$record_status" >&2
+    MINTED_CONFIG=""
+  fi
   IFS= read -r -t 5 extra <&8 || extra_status=$?
   # EXACT end-of-stream is required. `read` returns 1 at EOF and >128 on
   # timeout; the previous form treated both as "no extra bytes", so a writer
   # that stayed open — the very deadlock this transport had — was accepted as a
   # clean single record.
   if (( extra_status == 0 )) || (( extra_status > 128 )) || [[ -n "$extra" ]]; then
+    printf 's6-envelope-minter: invalid-end-of-stream status=%s\n' "$extra_status" >&2
     MINTED_CONFIG=""
   fi
   exec 8<&-
@@ -1958,6 +2013,7 @@ mint_envelope_config() {
   if [[ ! "$MINTED_PRINCIPAL_PSEUDONYM" =~ ^[0-9a-f]{64}$ ||
         ! "$MINTED_PAYLOAD_SHA256" =~ ^[0-9a-f]{64}$ ||
         "$MINTED_CONFIG" != 'header = "asimp-service-envelope: {'* ]]; then
+    printf '%s\n' 's6-envelope-minter: invalid-record-metadata' >&2
     MINTED_CONFIG=""
     MINTED_PRINCIPAL_PSEUDONYM=""
     MINTED_PAYLOAD_SHA256=""
@@ -2751,6 +2807,27 @@ self_test() {
   run_bounded 30 "$bounded_out" - true || fast_status=$?
   fast_elapsed=$((SECONDS - fast_start))
   check "run-bounded-fast-exit-status" "$fast_status" "0"
+  clear_child_records
+  local split_frame_status=0
+  SIGNAL_SPLIT_FRAME_PLANT=1
+  run_bounded 2 "$bounded_out" - true || split_frame_status=$?
+  SIGNAL_SPLIT_FRAME_PLANT=0
+  check "fragmented-control-frame-preserves-child-status" "$split_frame_status" "0"
+  reap_children
+  local split_control_cleanup="${REAP_SURVIVORS}:${#CHILD_PIDS[@]}:${GROUP_CONTROL_PID}"
+  check "fragmented-control-frame-cleanup" "$split_control_cleanup" "0:0:"
+  local split_child_status="$EX_CLEANUP_UNPROVEN"
+  if [[ "$split_control_cleanup" == "0:0:" ]]; then
+    clear_child_records
+    split_child_status=0
+    SUPERVISOR_CHILD_SPLIT_PLANT=1
+    run_bounded 2 "$bounded_out" - true || split_child_status=$?
+    SUPERVISOR_CHILD_SPLIT_PLANT=0
+  fi
+  check "fragmented-child-record-preserves-child-status" "$split_child_status" "0"
+  reap_children
+  check "fragmented-child-record-cleanup" \
+    "${REAP_SURVIVORS}:${#CHILD_PIDS[@]}:${GROUP_CONTROL_PID}" "0:0:"
   if (( fast_elapsed <= 5 )); then
     emit "{\"suite\":\"${SUITE}\",\"assertion\":\"run-bounded-fast-exit-is-prompt\",\"status\":\"pass\",\"detail\":\"a child that exits at once returned in ${fast_elapsed}s under a 30s bound\"}"
   else

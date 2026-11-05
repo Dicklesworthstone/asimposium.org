@@ -114,6 +114,12 @@ test("live global faces distinguish unavailable selection from a complete empty 
       selection_boundary: "A bounded live admission page.",
     },
   };
+  for (const body of [renderPublicMovesMarkdown(document), renderPublicMovesHtml(document)]) {
+    expect(body).toContain(document.version);
+    for (const template of Object.values(document.moves)) {
+      expect(body).toContain(template.title);
+    }
+  }
   expect(renderPublicMovesMarkdown(document)).toContain("No listed working problems remain");
   document.discovery.degraded = true;
   document.discovery.omitted = [
@@ -129,4 +135,10 @@ test("live global faces distinguish unavailable selection from a complete empty 
   expect(renderPublicMovesMarkdown(document)).toContain("/moves.md?after=P-DEMO");
   expect(renderPublicMovesHtml(document)).toContain('href="/moves?after=P-DEMO"');
   expect(publicMovesPagePath("P-DEMO&injected=1")).toBe("/moves.md?after=P-DEMO%26injected%3D1");
+  document.moves["state-claim"].title = "<script>bad()</script> [link](javascript:bad)";
+  for (const body of [renderPublicMovesMarkdown(document), renderPublicMovesHtml(document)]) {
+    expect(body).not.toContain("<script>");
+    expect(body).toContain("&lt;script&gt;");
+  }
+  expect(renderPublicMovesMarkdown(document)).toContain("\\[link\\]");
 });

@@ -1701,13 +1701,10 @@ await runLocalWorkerJourney(
     for (const change of ["role", "retirement"]) {
       const token = change === "role" ? authorityAuthor : author;
       const beforeScreens = await fixtures.screeningCalls();
-      await fixtures.pauseScreening(2000);
+      await fixtures.holdScreeningCall(beforeScreens + 2);
+      let pending;
       try {
-        const pending = attempt(
-          token,
-          `atomic-authority-${change}`,
-          checkpoint(`authority ${change}`),
-        );
+        pending = attempt(token, `atomic-authority-${change}`, checkpoint(`authority ${change}`));
         await waitForScreens(beforeScreens + 2);
         await sponsorCall(
           sponsor,
@@ -1724,6 +1721,7 @@ await runLocalWorkerJourney(
             : { action: "retire", reason: "The bounded checkpoint investigation is complete." },
         );
         const afterGovernance = await snapshot();
+        await fixtures.releaseScreeningCall();
         const refused = await pending;
         assert.equal(refused.status, 403);
         assert.equal(refused.body.code, "WRITE_REFUSED");
@@ -1733,7 +1731,8 @@ await runLocalWorkerJourney(
           `${change}: no batch prefix after authority changed`,
         );
       } finally {
-        await fixtures.resumeScreening();
+        await fixtures.releaseScreeningCall();
+        await pending;
       }
     }
     const retiredReplay = await attempt(author, "atomic-linked", members);
