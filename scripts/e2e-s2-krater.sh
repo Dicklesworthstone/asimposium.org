@@ -7,6 +7,11 @@
 
 set -euo pipefail
 
+# Wrangler's optional explorer trace store adds ~13 MiB to a full local run,
+# overflowing the evidence cap. Keep required client/DO logs and stderr; avoid
+# generating this unused duplicate telemetry rather than widening retention.
+export X_LOCAL_OBSERVABILITY=false
+
 S2_SCRIPT_SOURCE="${BASH_SOURCE[0]}"
 if [[ "${S2_SCRIPT_SOURCE}" =~ ^/proc/self/fd/[0-9]+$ ]]; then
   # G0/S7 executes the validated descriptor. Resolve only its origin metadata;

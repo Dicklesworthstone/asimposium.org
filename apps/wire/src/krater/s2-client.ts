@@ -794,6 +794,7 @@ async function request(
         ...extraHeaders,
         ...(body === undefined ? {} : { "content-type": "application/json" }),
         "x-s2-harness-token": token,
+        "user-agent": "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
       },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
@@ -832,7 +833,10 @@ async function triggerScheduledOutboxReconcile(scenario: string): Promise<void> 
   try {
     const fetchResponse = await fetch(`${origin}${pathname}`, {
       method: "GET",
-      headers: { "x-s2-harness-token": requireHarnessToken() },
+      headers: {
+        "x-s2-harness-token": requireHarnessToken(),
+        "user-agent": "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
+      },
       signal: AbortSignal.timeout(5_000),
     });
     const elapsedMs = Math.round((performance.now() - started) * 1_000) / 1_000;

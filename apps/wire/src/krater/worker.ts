@@ -14,6 +14,7 @@ import {
 import type { Env } from "../env.ts";
 import { POLICY_CATEGORIES, type ScreeningObservation } from "../screening/types";
 import { promotionScreeningBinding } from "../screening/workers-ai";
+import { normHash } from "../split/policy";
 import type { ClaimProjection, KraterWriteInput } from "./krater";
 import {
   attemptEnvelopeTamper,
@@ -898,6 +899,28 @@ async function handleHarnessRequest(
       // Problem integrity prerequisites for a real promote (chain head + backfill
       // complete) come from the same helper every harness write already uses.
       await ensureProblem(env.DB, problemId, createdAt);
+      // A legacy baseline formulation is also required by contextual screening.
+      // Seed it only for this local fixture, without a public event: the mounted
+      // promotion must still be the first event and exercise its real screen.
+      const statement = "A committed promotion is delivered exactly once by the outbox.";
+      await env.DB.batch([
+        env.DB.prepare("UPDATE problems SET title = ? WHERE id = ? AND title = ''").bind(
+          "S2 mounted outbox fixture",
+          problemId,
+        ),
+        env.DB.prepare(
+          `INSERT INTO problem_statement_versions
+            (problem_id, version, statement, norm_hash, falsifier, motivation, created_at)
+           VALUES (?, 1, ?, ?, ?, ?, ?) ON CONFLICT(problem_id, version) DO NOTHING`,
+        ).bind(
+          problemId,
+          statement,
+          `sha256:${await normHash(statement)}`,
+          "A committed promotion has a missing or duplicated delivery effect.",
+          "Exercise the mounted production promotion and its real local outbox delivery.",
+          createdAt,
+        ),
+      ]);
       // Return only the bearer plus the seeded problem: the shell drives mounted
       // production POST /v1/sessions -> workshop -> promote with the bearer, so no
       // session/workshop invariant is duplicated here. The bearer is a transient
