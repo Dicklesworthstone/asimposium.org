@@ -12,9 +12,9 @@ provisioned provider resource, a completed recovery exercise, or a green launch
 gate. Each report and runbook must state which of those proof levels it actually
 observed.
 
-## Current reality check — 2026-10-30
+## Current reality check — 2026-11-05
 
-### Original integration acceptance — 2026-11-04
+### Original integration acceptance and Preview — 2026-11-05
 
 The independent, unfiltered Worker integration command at exact revision
 `abfa90cd9ec7fecd875d3f217a837652889537d7` finished with **331 passing and six
@@ -56,9 +56,22 @@ and renderers pass 584. The new full root run exits zero in **1,418.831 seconds*
 all eight groups pass, including 6,662 Worker tests and 883 Agora tests. Toolchain
 has 406 passes and 54 existing skips. The same ten code hashes remain fixed
 through the required gates. This uses the recorded proper-init/private-process
-setup. Independent unfiltered integration acceptance is still pending;
-`asimposiumorg-dae7` and the broader reliability work remain open. The independent
-checks below predate these repairs and do not qualify the new working source.
+setup.
+
+Independent verification at exact `9277e917920e3c3eb24643c1685065304f274f20`
+then runs the original unfiltered package: **337 pass, zero fail, 1,757 Bun
+expectations**, all thirteen original repaired journeys complete, in 1,491.236
+seconds. It reaches the actual `S2_REAL_BINDING_PROOF_BLOCKED` and
+`SUITE_NOT_IMPLEMENTED` records with exit 78. This is local repair acceptance,
+not a whole-integration pass. StormyGorge closes only `asimposiumorg-dae7` in
+comment 2787, citing each original acceptance item without changing its scope or
+dependencies. All 2,466 source blobs/Git executable modes, ten repair pins and
+checked dependency identities remain exact; the isolated source shares no regular
+source inode with canonical main. Seventeen sampled births retire and four known
+groups are empty; 391 unreadable host cwd entries limit process visibility.
+Receipts and the thirteen citations are in
+`e2e/artifacts/independent-dae7-9277e917-20261105/`. The earlier abfa failure is
+retained. `l6hr`, historical causes and broader reliability acceptance stay open.
 
 Default UBS diff exits zero over seven files with zero critical findings and
 58 warnings. A separate scan includes all ten changed code files, including
@@ -70,12 +83,51 @@ fixture accesses, named verifier helpers, hostile-input fixtures and an already
 exported locale. No rule or finding was suppressed. All 1,409 source occurrences
 were retained; this is scoped coverage, not a project-wide clean security scan.
 
-Fresh November 5 reads at 00:01:58–59 UTC return the retained production and
-staging capability bodies (`0.1.0-draft`) and production `/protocol.json` 404.
-Body equality does not establish a deployment revision or migration lineage.
-The Vercel project remains configured for Next.js under `apps/web`, Node 24 and
-frozen Bun installation, with Git deployment disconnected. A Preview refresh
-is being prepared; no new deployment is claimed yet.
+The [new Vercel Preview](https://asimposium-1z7hq4uu9-dicklesworthstones-projects.vercel.app),
+`dpl_23Rjg8H4GVjs7kLbvJQNVT2Qhsxg`, is READY on Node 24 with Preview target.
+Automatic `githubCommitSha` matches `9277e917`; the optional legacy
+`gitCommitSha` field is absent. An initial readback check incorrectly required
+both fields; that failed check is retained rather than inventing metadata or
+redeploying to satisfy it. All tracked source blobs and Git executable modes
+match before and after upload. The qualified dry selection reports one
+8,759,237-byte virtual archive and excludes private environment, Beads, dependency
+and artifact paths. This does not physically inspect the remote archive. The
+three-file static capsule is explicitly only three immutable public files.
+The existing project retains Next.js under `apps/web`, frozen Bun installation
+and disconnected Git deployment. The provider's production target is a different
+deployment; this operation does not promote production.
+
+Primary live QA passes **26 HTTP / three byte comparisons / four Chromium views**
+in 21.406 seconds. A fifth mobile `/moves` view follows the real retry form and
+receives 200 on both navigations, preserving the honest unavailable state, in
+6.387 seconds. All five screenshots are viewed; browser errors are zero.
+Seventeen narrowly identified Next prefetch cancellations are counted separately.
+Independent QA repeats the original 26/3/four-view gate in 17.869 seconds with
+zero errors and 15 such cancellations. Its four screenshots are viewed by
+01:02:46.365 UTC. Provider error/fatal and HTTP 5xx queries each return zero
+records over the common complete **00:26:51–01:04:45 UTC** interval, with no more
+pages or excluded intervals. The request source quantizes the end to a whole
+second; the report uses the actual common interval. These are finite Preview
+checks, not deployed Worker or launch proof.
+
+Fresh November 5 reads at **01:08:52 UTC** retain the production and staging
+capability bodies (`0.1.0-draft`) and production `/protocol.json` 404. Equality
+does not establish provider revision or migration lineage. The separate local
+S2 lane opts into two 660-second lifecycle runs and was not executed here; its
+resource flag is distinct from Cloudflare deployment permission. It cannot
+replace deployed cron, cache, cost or staging evidence. The sanctioned Workers
+Builds pipeline still lacks operator credentials, staging D1 identity/signing
+inputs and smoke authority in this session. Reconcile existing resources and
+retain a revision/migration/binding receipt; do not provision duplicates or
+promote production ahead of staging and S7. Google, hosted screening, provider
+storage, cost, the real-harness gauntlet and launch gates remain open.
+
+The filesystem has about 37 GiB free (96% used) at 01:08 UTC, after earlier
+29–31 GiB readings. Cause and durability are unknown; no agent cleanup or deletion
+is claimed, and the missing historical snapshot is not recovered. Operator
+headroom work remains open. Current source/deployment receipts are in
+`e2e/artifacts/dae7-repair-20261104/`; independent integration, closure and live QA
+receipts share `independent-dae7-9277e917-20261105/`.
 
 ### Idle-session recovery — 2026-11-04
 

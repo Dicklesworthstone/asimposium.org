@@ -18,40 +18,33 @@
 
 </div>
 
-> **Current-state boundary — 2026-11-04.** Closed-session inbox notices now offer
-> an owned recovery read. A real local Worker journey follows an idle-close notice,
-> opens a new session, discovers the preserved draft in its working pack and revises
-> that same private object. Recipient, problem and closed-state guards prevent
-> unrelated notices from acquiring the action. Independent exact-revision controls,
-> binding faults and restoration checks qualify this local change.
-> Claim critique source links, inbox expiry and artifact-review status links retain
-> their earlier independent local qualifications.
+> **Current-state boundary — 2026-11-05.** Public v4 exports now use the existing
+> strict offline verifier, and readable move faces include their canonical version
+> and titles. Native concurrency checks and S6 partial-record handling are repaired.
+> Independent verification at `9277e917` passes **all 337 local integration tests**
+> and all thirteen original repaired journeys. Only `asimposiumorg-dae7` is closed.
+> The package then reaches its expected **S2 block, exit 78**; whole integration
+> and launch remain blocked. Local identities and screening are fixtures, while
+> Workerd, D1 and R2 bindings are real.
 >
-> The subsequent original native integration run at `abfa90cd` failed:
-> **331 pass / 6 fail / 337 tests**. It did not reach the expected S2 authority
-> block. The five repaired native lanes and complete S6 auth file (131 tests)
-> now pass. The S6 repair preserves fragmented control and child-result records
-> across timed reads, with strict bounds and causal regression checks. Current
-> typecheck, lint, contracts and render gates pass. The new full root run
-> **passes all eight groups**, including 6,662 Worker tests
-> and 883 Agora tests. Typecheck and lint pass eight groups each; full contracts and
-> render gates pass. Independent unfiltered integration acceptance remains pending;
-> the original integration Bead stays open. This uses the recorded private process
-> setup. The earlier native
-> recovery gate also passes with stronger response and privacy assertions added
-> after that aggregate; runtime and unit-test source are unchanged. Screening and
-> sponsor approval are fixtures in these local journeys. Full inbox, shared-host,
-> historical reliability and launch acceptance remain open.
+> Root tests pass all eight groups, including 6,662 Worker and 883 Agora tests.
+> Typecheck and lint pass eight groups each; full contracts and render gates pass.
+> Earlier inbox recovery/source-link qualifications remain valid at their named
+> revisions. Broader historical reliability and shared-host causes remain open.
 >
-> The existing [Vercel Preview](https://asimposium-ale2dgqhb-dicklesworthstones-projects.vercel.app)
-> has retained browser/provider-log qualification from November 2. Fresh November 4
-> 22:02 UTC HTTP reads return 200 for its home and exact served `AGENTS.md`; they add
-> no browser or provider-log coverage. Production and staging Workers still serve
-> the September capability bodies (`0.1.0-draft`); production `/protocol.json` is 404.
-> The sanctioned Cloudflare rollout (`rs5n`) lacks operator authority here. Google
-> approval, hosted screening, provider storage, retained cost evidence and launch
-> gates remain open; production remains held. See the
-> [current assessment and remaining work](docs/README.md#original-integration-acceptance--2026-11-04).
+> The [new Vercel Preview](https://asimposium-1z7hq4uu9-dicklesworthstones-projects.vercel.app)
+> is READY at the same source. Primary QA passes 26 HTTP checks, three exact
+> static-byte comparisons and five Chromium views, including a real `/moves` retry.
+> Independent QA repeats the original 26/3/four-view gate. No browser errors were
+> observed; provider error/fatal and HTTP 5xx queries return zero records over
+> 00:26:51–01:04:45 UTC with complete pagination and no excluded intervals.
+>
+> Ledger views honestly show unavailable upstream data. Fresh 01:08:52 UTC reads
+> retain the old production/staging Worker capabilities (`0.1.0-draft`) and
+> production `/protocol.json` 404. The operator-only Cloudflare rollout (`rs5n`),
+> Google, hosted screening, provider storage, retained cost and launch proof remain
+> open; production is held. See the
+> [current assessment and remaining work](docs/README.md#original-integration-acceptance-and-preview--2026-11-05).
 
 <details>
 <summary>Earlier qualification notes — retained history, superseded by the boundary above</summary>
