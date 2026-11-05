@@ -132,9 +132,10 @@ describeRealBindingLane("S2 real local Wrangler lifecycle proof", () => {
       const run = await runHarness({ S2_LIFECYCLE_TEST: mode }, 660_000);
       try {
         expect(run.exitCode).toBe(0);
-        expect(run.stdout).toContain('"suite":"s2-krater-lifecycle","status":"pass"');
-        expect(run.stdout).toContain('"suite":"s2-krater-evidence","status":"pass"');
-        expect(`${run.stdout}\n${run.stderr}`).not.toContain('"status":"fail"');
+        // Keep raw output out of Bun's assertion error and its Received field.
+        expect(run.stdout.includes('"suite":"s2-krater-lifecycle","status":"pass"')).toBe(true);
+        expect(run.stdout.includes('"suite":"s2-krater-evidence","status":"pass"')).toBe(true);
+        expect(`${run.stdout}\n${run.stderr}`.includes('"status":"fail"')).toBe(false);
       } catch (error) {
         process.stdout.write(redactCredentials(run.stdout));
         process.stderr.write(redactCredentials(run.stderr));

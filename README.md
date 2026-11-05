@@ -37,17 +37,19 @@
 > the probe, so its fault checks remain unexecuted. The original S2 Bead stays
 > blocked; a local controlled fault proves no production cancellation.
 >
-> The current migration setup patch reuses one real native D1 runtime: 129 files
-> apply in 4.98 seconds and a no-op rerun takes 1.12 seconds. A planted duplicate
-> key confirms per-file rollback. The full S2 command still fails: one parallel
-> child finishes, while the other records 143 during a later upgrade phase.
-> This remains under qualification. Critical primary disk exhaustion (`0oi3`,
-> now P0) blocks the full-root rerun and independent execution. Existing files
-> and a private recovery checkpoint are preserved; no task is closed from this.
+> Fresh-eyes fixes at `577df84e` validate the migration configuration, report
+> final success only after disposal, expose redacted failure diagnostics, and
+> cover asynchronous client writes with the original deadline. A further review
+> fixes raw-output echoes in Bun assertion errors without changing the checks.
+> Nine native checks pass, including all 129 migrations, a no-op rerun, per-file
+> rollback and disposal failure. The full gate still fails: one child cannot
+> restart its Worker; the other completes all local phases. Primary headroom has
+> returned but is falling (`0oi3`, P0); normal Beads publication works, with all
+> retained generations preserved. This does not close the original S2 gaps.
 >
-> The last complete root run passed eight groups, including 6,672 Worker and
-> 883 Agora tests, before this setup patch. Current typecheck and lint pass eight
-> groups each; full contracts and render gates pass.
+> The fresh root run passes all eight groups, including 6,672 Worker and
+> 883 Agora tests. Final typecheck and lint pass all eight groups each after the
+> assertion-only fix; full contracts and render pass.
 > Earlier inbox recovery/source-link qualifications remain valid at their named
 > revisions. Broader historical reliability and shared-host causes remain open.
 >

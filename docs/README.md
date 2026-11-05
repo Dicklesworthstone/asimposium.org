@@ -14,7 +14,87 @@ observed.
 
 ## Current reality check — 2026-11-05
 
-### S2 migration setup increment — capacity hold, 2026-11-05
+### Fresh-eyes S2 corrections — 2026-11-05, 21:06 UTC
+
+Source `577df84e788a9207b6405106ce52bc15188911af` fixes four concrete review
+findings. The reused native D1 setup now verifies the canonical migration
+directory and journal configuration, checks every batch result, and emits its
+final success only after disposal succeeds. Cleanup errors identify their phase.
+The integration consumer prints credential-redacted captured output when an
+original assertion fails; the parallel failure record includes both child exit
+statuses. The disconnect client awaits both asynchronous stdin operations inside
+its original absolute 15-second deadline and drains child diagnostics on an early
+send failure. Original product assertions, legacy Wrangler lanes and all bounds
+remain unchanged. These are setup and diagnostic fixes, not a diagnosis of the
+historical listener loss.
+
+Nine focused checks against genuine Node 24 and native D1 pass in 15.122 seconds:
+fresh 129-file setup, same-state no-op, a duplicate-key failure after real 0002
+SQL, three unsupported configuration refusals, missing/outside persistence paths,
+and an injected failure after real disposal. Read-only inspection of the closed
+D1 artifact confirms that 0001 remains, 0002's table and journal entry roll back,
+and integrity is clean. The cleanup negative has no final success summary.
+An initial inspection assumed one SQLite file and failed because Miniflare also
+creates metadata databases; it is retained, and the corrected inspection selects
+the actual D1 database. These focused checks are not the whole product gate.
+The original two-mode gate fails in 300.987 seconds (20:30:47–20:35:48 UTC),
+zero passes/one failure/one assertion; SIGTERM mode is unreached. The new captured
+diagnostic reports `first_status:125`, `second_status:78`. The first child passes
+the exercise client, then cannot restart its Worker within the original readiness
+window; its Wrangler log is empty and evidence finalization fails. The second
+completes all local phases and evidence publication. Parent retention passes.
+This identifies the boundary, not its cause; no unchanged retry or independent
+fault/closure is credited. The existing verifier reviewed the fixes read-only.
+That review finds a further output bypass: Bun's string assertion errors can echo
+the raw received stream after the catch block prints a redacted copy. The three
+string checks now assert equivalent boolean predicates, retaining all four
+original assertions. A comparison executes the actual old and corrected blocks
+in real Bun with stdin-only synthetic credentials: six cases/twelve executions
+pass in 0.479 seconds. Both versions accept the positive and reject every
+negative; four old error paths expose the dummy credential, while none of the
+corrected paths does. This is a unit check of assertion serialization, not D1 or
+whole integration proof. The root run began before this final test-only change;
+final typecheck/lint qualification follows it and passes.
+The local readiness curl also gains the shared project's honest User-Agent after
+the original native run. Final typecheck/lint passes; independent runtime
+qualification remains pending. Raw results are retained under
+`e2e/artifacts/dae7-repair-20261104/fresh-eyes-*` and parent
+`e2e/artifacts/s2-krater/20261105T203047Z-ff363975d76d4a38/`.
+
+The full root unit dispatcher passes all eight groups in 1,537.186 seconds,
+20:40:43–21:06:20 UTC: no failed, blocked, missing or skipped groups. Worker has
+6,672 passes and 30,643 expectations; Agora has 883 passes and 5,831 expectations.
+Toolchain retains its 54 existing skipped tests.
+The run began before the final integration-test-only assertion change; Worker
+and client runtime sources remained fixed. The separate six-case assertion
+comparison exercises that corrected branch. Final typecheck/lint passes eight
+groups each in 137.997 seconds, 21:06:43–21:09:01 UTC. Unchanged full contracts
+(944) and render (584) passed earlier.
+Final default UBS diff scans both changed source files in 60.803 seconds:
+zero critical, four reviewed warnings and 31 informational findings.
+An explicit scan of all four reviewed TypeScript files exits 1 with one
+critical/eight warnings: the critical is a header name, and the reviewed warnings
+concern existing test/harness code. The local body reader remains intentionally
+test-only and token-gated; this is not a production security certification.
+The default staged scan crashes at UBS line 9377 (`FREE_SLOTS: bad array subscript`)
+before completing coverage, exit 1 in 0.510 seconds. The unchanged stock tool is
+already using one slot, so `--jobs=1` would not change that path. Supported staged
+JavaScript and Bash scans then complete separately in 1.117 and 42.732 seconds.
+Their union covers both current supported staged files: zero critical findings,
+four reviewed Bash warnings and 31 informational findings. Analyzer rules and
+default limits are unchanged. This establishes current delta module coverage;
+the failed default aggregate and historical broad-input gap remain on `g4b4`.
+No scanner suppressions, global tool patch or security/launch pass is claimed.
+
+Primary headroom initially returns to 5.5 GiB, then falls to 2.3 GiB. `0oi3`
+remains open. A fresh private online database/generation snapshot preserves 566
+issues and 2,808 comments. Operational sync is healthy and normal sanitized
+publication succeeds; `br doctor` still exits 1 for retained artifact/ignore/stale
+dependency warnings. No rebuild, deletion or promotion of an older generation
+was needed. Concurrent commits `02db049c` and `577df84e` were preserved; this
+reviewing agent issued neither commit. No Bead is closed from these subset checks.
+
+### Earlier S2 migration setup increment — capacity hold, 2026-11-05
 
 The current setup patch (`scripts/e2e-s2-krater.sh`, SHA256
 `0694a6026b2b01dfa5b71a42099f5873af9972b14c92faa4b19bfc7ac4206ccf`)

@@ -6088,6 +6088,7 @@ start_worker() {
   while (( SECONDS < deadline )); do
     server_is_owned || break
     if ready_response="$(curl --fail --silent --show-error --connect-timeout 1 --max-time 1 \
+      --user-agent "${ASIMPOSIUM_E2E_HTTP_USER_AGENT}" \
       -H "x-s2-harness-token: ${S2_ACTIVE_HARNESS_TOKEN}" \
       "${S2_ACTIVE_ORIGIN}/__s2/ready" 2>/dev/null)" && \
       [[ "${ready_response}" == "{\"status\":\"ready\",\"run_id\":\"${S2_ACTIVE_HARNESS_RUN_ID}\"}" ]] && \
