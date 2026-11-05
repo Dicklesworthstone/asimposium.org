@@ -47,9 +47,23 @@
 > returned but is falling (`0oi3`, P0); normal Beads publication works, with all
 > retained generations preserved. This does not close the original S2 gaps.
 >
-> The fresh root run passes all eight groups, including 6,672 Worker and
-> 883 Agora tests. Final typecheck and lint pass all eight groups each after the
-> assertion-only fix; full contracts and render pass.
+> A later Bash-only review connects Wrangler error summaries to the canonical
+> credential redactor and readiness probes to the existing safe HTTP helper.
+> The old summary exposed five synthetic credential values; the fixed path
+> removes all eleven tested values while preserving an ordinary error message.
+> The readiness helper also prevents an ambient verbose curl configuration from
+> echoing authentication headers. Its four-request HTTP comparison passes.
+> Native controls then expose a journal-application deadline, so both legacy
+> upgrade cases now reuse the native migration driver with strict database and
+> legacy-journal checks. CLI bootstrap/readback and Worker assertions remain.
+> Sixteen focused native checks and eight selected unit checks pass; root lint
+> passes all eight groups. The full S2 control still fails at Worker readiness,
+> before reaching the changed upgrade path. Earlier `SQLITE_FULL` and deadline
+> failures remain recorded. Historical runtime failures remain unclassified.
+>
+> Source baseline `4f4a75dd` passes all eight root groups, including 6,672 Worker
+> and 883 Agora tests, and all typecheck/lint groups. Full contracts and render
+> pass there. The later Bash-only checks are recorded separately.
 > Earlier inbox recovery/source-link qualifications remain valid at their named
 > revisions. Broader historical reliability and shared-host causes remain open.
 >

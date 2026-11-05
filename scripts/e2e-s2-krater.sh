@@ -83,7 +83,7 @@ readonly S2_MAX_RETAINED_BYTES=67108864
 readonly S2_MAX_RETAINED_FILES=1024
 readonly S2_PROVENANCE_COMMAND_DEADLINE_SECONDS=10
 readonly S2_OWNED_COMMAND_DEADLINE_SECONDS=120
-# Keep one native D1 runtime for the fresh database's migration sequence.
+# Keep one native D1 runtime for each database's current migration sequence.
 # Wrangler's CLI starts and disposes a Miniflare runtime per file; at 129
 # migrations that repeated startup can exhaust this command's unchanged bound.
 # SQL splitting and D1 execution still come from the pinned Wrangler package.
@@ -108,6 +108,8 @@ readonly S2_MIGRATIONS_PROGRAM='
       assert.equal(process.versions.bun, undefined);
       assert.ok(process.versions.node.startsWith("24."));
       assert.equal(process.argv.length, 2);
+      const requireLegacy = process.env.S2_MIGRATIONS_REQUIRE_LEGACY;
+      assert.ok(requireLegacy === undefined || requireLegacy === "1");
       const repository = realpathSync(".");
       const artifacts = realpathSync("e2e/artifacts");
       const persist = realpathSync(process.argv[1]);
@@ -120,9 +122,20 @@ readonly S2_MIGRATIONS_PROGRAM='
       const binding = config.d1_databases.find((database) => database.binding === "DB");
       assert.ok(binding);
       const directory = realpathSync("db/migrations");
-      assert.equal(realpathSync(resolve(dirname(config.configPath), binding.migrations_dir ?? "migrations")), directory);
-      assert.equal(binding.migrations_table ?? "d1_migrations", "d1_migrations");
-      assert.equal(binding.migrations_pattern, undefined);
+      const identity = binding.preview_database_id ?? binding.database_id ?? binding.binding;
+      const upgrade = unstable_readConfig({ config: "apps/wire/src/krater/wrangler.s2-upgrade.toml" });
+      for (const current of [config, upgrade]) {
+        const currentBinding = current.d1_databases.find((database) => database.binding === "DB");
+        assert.ok(currentBinding);
+        assert.equal(currentBinding.preview_database_id ?? currentBinding.database_id ?? currentBinding.binding, identity);
+        assert.equal(realpathSync(resolve(dirname(current.configPath), currentBinding.migrations_dir ?? "migrations")), directory);
+        assert.equal(currentBinding.migrations_table ?? "d1_migrations", "d1_migrations");
+        assert.equal(currentBinding.migrations_pattern, undefined);
+      }
+      const legacy = unstable_readConfig({ config: "apps/wire/src/krater/wrangler.s2-legacy.toml" });
+      const legacyBinding = legacy.d1_databases.find((database) => database.binding === "DB");
+      assert.ok(legacyBinding);
+      assert.equal(legacyBinding.preview_database_id ?? legacyBinding.database_id ?? legacyBinding.binding, identity);
       const names = readdirSync(directory).filter((name) => name.endsWith(".sql")).sort();
       assert.ok(names.length > 0);
       assert.ok(names.every((name) => /^[0-9]{4}_[a-z0-9_]+\.sql$/.test(name)));
@@ -134,15 +147,22 @@ readonly S2_MIGRATIONS_PROGRAM='
         modules: true,
         script: "",
         resourcePersistencePath: `${persist}/v3`,
-        d1Databases: { DATABASE: binding.preview_database_id ?? binding.database_id ?? binding.binding },
+        d1Databases: { DATABASE: identity },
       }));
       phase = "binding";
       const database = await platform.getD1Database("DATABASE");
       phase = "journal";
-      const created = await database.prepare("CREATE TABLE IF NOT EXISTS \"d1_migrations\"(\n\t\tid         INTEGER PRIMARY KEY AUTOINCREMENT,\n\t\tname       TEXT UNIQUE,\n\t\tapplied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL\n);").run();
-      assert.equal(created.success, true);
-      const before = await database.prepare(`SELECT name FROM "d1_migrations" ORDER BY id`).all();
+      if (requireLegacy !== "1") {
+        const created = await database.prepare("CREATE TABLE IF NOT EXISTS \"d1_migrations\"(\n\t\tid         INTEGER PRIMARY KEY AUTOINCREMENT,\n\t\tname       TEXT UNIQUE,\n\t\tapplied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL\n);").run();
+        assert.equal(created.success, true);
+      }
+      const before = await database.prepare(`SELECT id, name FROM "d1_migrations" ORDER BY id`).all();
       assert.equal(before.success, true);
+      // An upgrade must observe the CLI-created legacy journal before this
+      // helper creates or applies anything. An empty new database is not one.
+      if (requireLegacy === "1") {
+        assert.deepEqual(before.results, [{ id: 1, name: "0001_krater_v0.sql" }]);
+      }
       assert.deepEqual(before.results.map((row) => row.name), names.slice(0, before.results.length));
       phase = "apply";
       for (migration of names.slice(before.results.length)) {
@@ -6505,10 +6525,11 @@ validate_current_migration_journal() {
   '
 }
 
-# Create the exact 0001 database with the legacy config, then switch to a configuration with
-# the same local D1 identity and the real repository migration directory. Unlike the raw lane,
-# this invokes Wrangler's migration journal end to end and verifies every current migration name
-# before the Worker is allowed to serve the test phase.
+# Bootstrap the exact 0001 database through the legacy Wrangler CLI. Apply all
+# current files with the shared native D1 driver on that same database, retaining
+# per-file atomic SQL+journal batches. Read the exact journal back through the
+# CLI before starting the current Worker. This tests legacy-to-current database
+# and journal interoperability, not the CLI's per-file runtime orchestration.
 run_migration_journal_upgrade() {
   local phase="$1" fixture="$2" dir port log status
   dir="$(create_evidence_subdir journal)"
@@ -6528,8 +6549,8 @@ run_migration_journal_upgrade() {
     emit_legacy_failure "${phase}" "S2_JOURNAL_FIXTURE_LOAD_FAILED" "${dir}/legacy-fixture.log"
     return 1
   fi
-  if ! s2_run_owned_deadline "${S2_WRANGLER}" d1 migrations apply DB --config "${S2_UPGRADE_CONFIG}" --local \
-    --persist-to "${dir}" >"${dir}/current-migrations.log" 2>&1; then
+  if ! S2_MIGRATIONS_REQUIRE_LEGACY=1 s2_run_owned_deadline node --input-type=commonjs \
+    -e "${S2_MIGRATIONS_PROGRAM}" "${dir}" >"${dir}/current-migrations.log" 2>&1; then
     emit_legacy_failure "${phase}" "S2_JOURNAL_CURRENT_APPLY_FAILED" "${dir}/current-migrations.log"
     return 1
   fi

@@ -14,7 +14,86 @@ observed.
 
 ## Current reality check — 2026-11-05
 
-### Fresh-eyes S2 corrections — 2026-11-05, 21:06 UTC
+### Fresh-eyes S2 corrections — 2026-11-05, 23:04 UTC
+
+The latest Bash-only increment fixes a separate Wrangler-summary redaction gap.
+Its legacy regexes missed bare Fellow, join and flow credentials. The existing
+fixture padded its input before checking, clipping away most samples. The summary
+now applies the already-shared canonical credential redactor first, followed by
+the existing extra labels/path handling and final clipping. The existing case
+checks eleven unpadded values and a retained ordinary error, then checks the
+clipping boundary separately. The registered case passes in 0.920 seconds; an
+actual-source four-case comparison takes 0.257 seconds, reproduces five old
+credential echoes versus zero fixed echoes, and catches clipping before redaction.
+These are synthetic unit fixtures, not real credential exposure or D1 proof.
+
+Readiness transport errors now append to the existing worker log. A real local
+HTTP comparison also finds that ambient verbose curl configuration can echo the
+header, so the final call uses the already-sourced `e2e_curl` helper. Empty and
+verbose configuration controls make four requests with identical path, project
+User-Agent, header and ready response; only the old direct verbose call echoes
+the synthetic header. The final-source comparison passes in 0.158 seconds.
+All original readiness/ownership assertions and deadlines remain unchanged.
+
+The first changed-diagnostic native gate fails in 377.432 seconds,
+22:16:15–22:22:33 UTC: first status 124, second 125, zero passes/one failure/one
+assertion, with SIGTERM mode unreached. The second journal application explicitly
+reports `SQLITE_FULL`; the first status is a parent deadline. Physical headroom
+falls from 1.5 GiB to 23 MiB. This classifies this occurrence, not historical
+listener loss. Both main logs retain 77 curl error lines and zero verbose header
+lines. A private `/tmp` patch/database/generation checkpoint preserves current
+work. Headroom later returns to about 10 GiB through an unidentified external
+change; `0oi3` remains open. That source's native control then fails in 441.647
+seconds, 22:27:47–22:35:09 UTC: first status 124, second 78, zero passes/one
+failure/one assertion; SIGTERM mode is unreached. The first child ends during
+journal work at the original 300-second parent bound. The other completes all
+local phases and evidence publication. This identifies a preparation bottleneck,
+not a cause of historical listener loss. External commit `b9bd3171` contains the
+redaction/readiness changes; this reviewing agent did not issue that commit.
+
+The next source change reuses the existing native migration driver for both
+empty and seeded legacy-journal upgrades. It verifies the effective database
+identity across all three configurations and canonical current migration settings.
+Upgrade mode requires the exact CLI-created 0001 journal row before applying
+anything and cannot create a missing journal. Original CLI legacy bootstrap and
+final journal readback, per-file SQL/journal transactions, fixtures, Worker
+backfill/write/replay assertions and all bounds remain. This exercises genuine
+old-to-current D1 interoperability, not the CLI's per-file runtime orchestration.
+The existing verifier reviewed both this mechanism against original acceptance
+and the implemented guards read-only; no independent runtime pass is implied.
+
+At final script SHA-256
+`7013221b9a5c123ae09e1fd2c727e2e74597c7e60efe2d5e4c08f830a79362a7`,
+nine original native driver cases pass in 12.669 seconds. Seven additional native
+legacy cases pass in 26.562 seconds: missing journal, mismatched effective
+identity, unsupported upgrade configuration, invalid mode, empty and seeded
+CLI-created upgrades with all 129 journal rows/timestamps, and rollback after
+real 0002 SQL. The seeded event and original journal survive that rollback;
+integrity and foreign-key checks pass. These are focused real-binding checks.
+
+The changed source's whole original control fails in 206.490 seconds,
+22:46:57–22:50:24 UTC: `S2_PARALLEL_SECOND_NOT_READY`, zero passes/one failure/one
+assertion, SIGTERM mode unreached. One child completes its exercise then cannot
+restart its Worker; the other cannot initially start its Worker. Retained cause
+text contains curl connection refusals followed by one-second zero-byte timeouts.
+The whole control does not reach the changed journal-upgrade path. No further
+heavy retry follows this result; startup/restart causes and original `9gyi`,
+`tum1` and `doa` acceptance remain open and unchanged.
+
+Eight selected existing Bun cases pass in 7.310 seconds (92 filtered out; 199
+expectations), covering four shell modes, journal/source closure and integration
+authority boundaries. Root lint passes all eight groups in 56.223 seconds with
+existing warnings. Literal default `ubs --diff` completes the changed Bash file
+in 79.930 seconds: zero critical, four reviewed existing warnings and 24
+informational findings. The warnings concern a `set -e` protected `cd`, embedded
+JavaScript `readSync`, and two literal signal-phase strings. No suppression or
+scanner change is made. No TypeScript file changes in this increment; the earlier
+full-root/typecheck/contracts/render results retain only their named scope.
+Raw receipts are under `e2e/artifacts/dae7-repair-20261104/fresh-eyes-*`;
+the last parent is `e2e/artifacts/s2-krater/20261105T224657Z-1bdb00fffdd0d906/`.
+Nothing here is an original S2 gate pass, deployed qualification or launch claim.
+
+The earlier qualifications and failures below retain their named source scope.
 
 Source `577df84e788a9207b6405106ce52bc15188911af` fixes four concrete review
 findings. The reused native D1 setup now verifies the canonical migration
