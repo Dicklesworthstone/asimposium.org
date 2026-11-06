@@ -5,7 +5,8 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // Novelty review (Fable §6.6(c), ADR-21; bead asimposiumorg-ncnw) on real
 // Workerd HTTP, D1 and R2 with signed sponsor publication. The shared harness
 // supplies a synthetic screening decision; no live model or deployment claim.
-await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, userAgent }) => {
+await runLocalWorkerJourney(async (context) => {
+  const { call, enroll, sponsorCall, worker, origin, userAgent, env } = context;
   const author = await enroll("novelty-author", "usr_novelty_author");
   const first = await enroll("novelty-reviewer-one", "usr_novelty_reviewer_one");
   const second = await enroll("novelty-reviewer-two", "usr_novelty_reviewer_two");
@@ -82,7 +83,10 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
       },
     ],
     nearest_prior_art: [
-      { locator: "https://arxiv.org/abs/0000.00000", relation: "a weaker bound on a larger class" },
+      {
+        locator: "https://arxiv.org/abs/0000.00000",
+        relation: "a weaker bound on a larger class",
+      },
     ],
     semantic_difference:
       "The claimed bound is sharper on this class and is not implied by the nearest result.",
@@ -168,6 +172,46 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
   const reviewItem = (await face()).items.find((item) => item.kind === "claim-review");
   assert.equal(JSON.parse(reviewItem.body).novelty.verdict, "new", "the search record is public");
 
+  const withdraw = async (record, sessionId, token) => {
+    const source = await env.DB.prepare(
+      "SELECT e.id, e.payload_sha256 FROM events e WHERE e.problem_id = ? AND e.object_id = ? AND e.type = 'review.created'",
+    )
+      .bind(problem, record.review_id)
+      .first();
+    assert.ok(source, "the review has an immutable publication");
+    return call(
+      `/v1/sessions/${sessionId}/reviews/${record.review_id}/retract`,
+      {
+        source_event_id: source.id,
+        source_digest: `sha256:${source.payload_sha256}`,
+        reason: "The recorded search no longer supports my original assessment.",
+      },
+      token,
+      200,
+    );
+  };
+  // A scientific withdrawal leaves the original review readable as history,
+  // but it must remove that review's positive novelty authority.
+  const beforeWithdrawal = (await face()).cursor;
+  await withdraw(accepted, firstSession, first);
+  assert.equal((await standing()).novelty, "unreviewed", "withdrawn support cannot establish new");
+  const historical = await call(
+    `/p/${problem}/claims/${novelty.claim_id}.json?through=${beforeWithdrawal}`,
+  );
+  assert.equal(historical.claim_state.novelty, "new", "an earlier cursor excludes the withdrawal");
+  const withdrawnFace = await face();
+  assert.ok(
+    withdrawnFace.items.some((item) => item.id === accepted.review_id),
+    "the withdrawn review remains readable history",
+  );
+  await call(
+    reviewPath(firstSession),
+    review(novelty.claim_id, { novelty: searchBlock("new") }),
+    first,
+    201,
+  );
+  assert.equal((await standing()).novelty, "new");
+
   // Assertion-only (no capable_of_failure) rediscovery carries no weight.
   const thirdSession = await session(third, "review");
   const assertionOnly = review(novelty.claim_id, { novelty: searchBlock("rediscovery") });
@@ -175,15 +219,43 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
   await call(reviewPath(thirdSession), assertionOnly, third, 201);
   assert.equal((await standing()).novelty, "new", "an assertion-only review cannot move novelty");
 
-  // A weighted rediscovery verdict contests it.
+  // Fill the visible review page with weightless reports. Scientific standing
+  // must still include the next independent review beyond this display bound.
+  for (let index = 0; index < 16; index++) {
+    await call(
+      reviewPath(thirdSession),
+      {
+        ...assertionOnly,
+        body_md: `Additional search record ${index + 1}; no capable-of-failure check.`,
+      },
+      third,
+      201,
+    );
+  }
+  assert.equal((await standing()).novelty, "new");
+
+  // The weighted twenty-first review contests it even though it is omitted
+  // from the bounded page of readable reviews.
   const secondSession = await session(second, "review");
-  await call(
+  const adverse = await call(
     reviewPath(secondSession),
     review(novelty.claim_id, { novelty: searchBlock("rediscovery") }),
     second,
     201,
   );
   assert.equal((await standing()).novelty, "contested");
+  const boundedFace = await face();
+  assert.equal(
+    boundedFace.items.some((item) => item.id === adverse.review_id),
+    false,
+  );
+  assert.ok(boundedFace.omitted.some((item) => item.reason === "candidate_limit"));
+  await withdraw(adverse, secondSession, second);
+  assert.equal(
+    (await standing()).novelty,
+    "contested",
+    "withdrawal cannot erase an adverse finding",
+  );
   // Diptych: the Markdown face carries the same computed standing.
   const markdown = await (
     await worker.fetch(`${origin}/p/${problem}/claims/${novelty.claim_id}.md`, {
@@ -212,7 +284,13 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
         "NOVELTY_REVIEW_NOT_APPLICABLE",
         "REVIEW_BODY_INVALID",
       ],
-      standing_path: ["unreviewed", "new", "new", "contested"],
+      standing_path: ["unreviewed", "new", "unreviewed", "new", "contested", "contested"],
+      authority_checks: [
+        "withdrawn-positive",
+        "historical-cursor",
+        "twenty-first-review",
+        "withdrawn-adverse",
+      ],
       boundary: "local Workerd/D1/R2; fixture screening; no live-model or deployment claim",
     }),
   );

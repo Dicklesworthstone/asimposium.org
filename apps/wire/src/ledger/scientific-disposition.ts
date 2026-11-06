@@ -4,6 +4,8 @@ import {
   GroundedFalsificationCheckSchema,
   type PublicClaimState,
   PublicClaimTargetSchema,
+  type ReviewRequest,
+  ReviewRequestSchema,
   ScientificVerificationSchema,
 } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
@@ -75,7 +77,18 @@ export type ScientificDisposition = CurrentClaimDispositionFold & {
   /** Every recorded review in this fold, for the computed review-state facet. */
   reviewFacets: readonly RecordedReviewFacet[];
   directiveDisclosure: PublicClaimState["directive_disclosure"];
+  /** Exact-version novelty from the complete verified timeline, never a page
+   * of display candidates. Correctness reviews cannot establish this facet. */
+  novelty?: PublicClaimState["novelty"];
 };
+
+type NoveltyVerdict = NonNullable<ReviewRequest["novelty"]>["verdict"];
+const noveltyReviewSchema = ReviewRequestSchema.shape.novelty.unwrap();
+const NOT_NEW: ReadonlySet<NoveltyVerdict> = new Set([
+  "reformulation",
+  "special-case",
+  "rediscovery",
+]);
 
 /** The latest publication of each claim at a captured ledger cursor. A later
  * revision moves the mutable claims row, but cannot remove or replace a claim
@@ -245,9 +258,10 @@ export async function foldScientificRows(
   const evidence = new Map<string, ScientificEvidence & { sequence: number }>();
   let stale = false;
   let legacyReviews = 0;
-  const head = rows
+  const headPublication = rows
     .filter((row) => row.type === "claim.created" || row.type === "claim.revised")
-    .at(-1)?.object_version;
+    .at(-1);
+  const head = headPublication?.object_version;
   const markStale = (row: ScientificRow): void => {
     if (row.target_version === head) stale = true;
   };
@@ -306,6 +320,13 @@ export async function foldScientificRows(
     }
   }
   const withdrawn = scientificInputEffects(rows, contents);
+  const noveltyClaim =
+    headPublication !== undefined &&
+    contents.get(headPublication.event_id)?.kind === "novelty-claim"
+      ? claims.get(headPublication.object_version)
+      : undefined;
+  const noveltyVerdicts = new Set<NoveltyVerdict>();
+  let noveltyUnavailable = false;
   for (const id of withdrawn.invalidatedEvidence) evidence.delete(id);
   const resolve = (reference: { evidence_id: string; digest: string }, row: ScientificRow) => {
     const item = evidence.get(reference.evidence_id);
@@ -471,6 +492,30 @@ export async function foldScientificRows(
   };
   for (const row of rows) {
     const payload = contents.get(row.event_id);
+    let noveltyVerdict: NoveltyVerdict | undefined;
+    if (
+      noveltyClaim &&
+      row.type === "review.created" &&
+      row.target_version === head &&
+      row.fellow_id !== noveltyClaim.fellowId &&
+      row.sponsor_id !== noveltyClaim.sponsorId
+    ) {
+      const novelty = noveltyReviewSchema.safeParse(payload?.novelty);
+      if (
+        !novelty.success ||
+        payload?.verdict !== "inform" ||
+        payload.target_claim_id !== row.claim_id ||
+        payload.target_version !== row.target_version
+      ) {
+        // A hidden, corrupt or mismatched review may contain an objection.
+        // Omitting its body from a display page cannot establish novelty.
+        noveltyUnavailable = true;
+        markStale(row);
+      } else {
+        noveltyVerdict = novelty.data.verdict;
+      }
+    }
+    const adverseNovelty = noveltyVerdict !== undefined && NOT_NEW.has(noveltyVerdict);
     if (row.withdrawn_event_id) {
       markStale(row);
       // This is a withdrawal of an input, never of its author's target claim.
@@ -487,6 +532,7 @@ export async function foldScientificRows(
       const adverseReview =
         row.type === "review.created" &&
         (isNegativeReview(payload) ||
+          adverseNovelty ||
           (!payload && (row.weighted_refutation === 1 || row.weighted_statement_defect === 1)));
       if (!adverseEvidence && !adverseReview) continue;
     }
@@ -704,16 +750,18 @@ export async function foldScientificRows(
           settledRefutation = confirmedRefutation(row, material);
       } catch (error) {
         if (!(error instanceof ScientificInputError)) throw error;
-        if (!isNegativeReview(payload)) carriesWeight = false;
+        if (!isNegativeReview(payload) && !adverseNovelty) carriesWeight = false;
         markStale(row);
       }
     }
     const provenance = readScientificProvenance(payload.scientific_provenance);
     if (provenance?.method?.evidence.some((reference) => !resolve(reference, row))) {
-      if (!isNegativeReview(payload)) carriesWeight = false;
+      if (!isNegativeReview(payload) && !adverseNovelty) carriesWeight = false;
       settledRefutation = undefined;
       markStale(row);
     }
+    if (noveltyVerdict !== undefined && carriesWeight && tier !== "T0")
+      noveltyVerdicts.add(noveltyVerdict);
     const rubric = Array.isArray(payload.rubric)
       ? (payload.rubric.filter((r) => typeof r === "string") as string[])
       : undefined;
@@ -759,6 +807,20 @@ export async function foldScientificRows(
   // Evidence can establish corroboration independently of sponsor disclosure.
   // The strongest public standing additionally requires complete, current
   // coverage of the exact result lineage. Missing metadata never qualifies.
+  const newFinding = noveltyVerdicts.has("new");
+  const notNewFinding = [...noveltyVerdicts].some((verdict) => NOT_NEW.has(verdict));
+  const novelty: PublicClaimState["novelty"] =
+    newFinding && notNewFinding
+      ? "contested"
+      : notNewFinding
+        ? "not-new"
+        : noveltyUnavailable
+          ? "unresolved"
+          : newFinding
+            ? "new"
+            : noveltyVerdicts.size > 0
+              ? "unresolved"
+              : "unreviewed";
   return {
     ...folded,
     disposition:
@@ -769,5 +831,6 @@ export async function foldScientificRows(
     legacyReviews,
     reviewFacets,
     directiveDisclosure,
+    ...(noveltyClaim ? { novelty } : {}),
   };
 }
