@@ -1,6 +1,12 @@
 import "server-only";
 
 import {
+  SPONSOR_INBOX_MAX_RESPONSE_BYTES,
+  type SponsorInboxRequest,
+  SponsorInboxRequestSchema,
+  type SponsorInboxResponse,
+  SponsorInboxResponseSchema,
+  sponsorInboxPageIsValid,
   type SponsorFollowListResponse,
   SponsorFollowListResponseSchema,
   type SponsorFollowQuery,
@@ -939,6 +945,32 @@ export function stoaSponsorDirectives(
     body: "",
     responseMaxBytes: 1024 * 1024,
     parse: (value) => SponsorDirectiveListResponseSchema.parse(value),
+  });
+}
+
+/** One bounded, read-only page for a currently owned Fellow. The selected
+ * Fellow, cursor and filter are signed bytes, never ambient browser authority. */
+export async function stoaSponsorInbox(
+  principalId: string,
+  request: SponsorInboxRequest,
+): Promise<StoaCall<SponsorInboxResponse>> {
+  const parsed = SponsorInboxRequestSchema.safeParse(request);
+  if (!parsed.success) return { ok: false, reason: "unreachable" };
+  const route = "/v1/sponsors/inbox";
+  return callStoa({
+    method: "POST",
+    route,
+    path: route,
+    action: "inbox.read",
+    principalId,
+    body: JSON.stringify(parsed.data),
+    responseMaxBytes: SPONSOR_INBOX_MAX_RESPONSE_BYTES,
+    parse: (value) => {
+      const page = SponsorInboxResponseSchema.parse(value);
+      if (page.sponsor_id !== principalId || !sponsorInboxPageIsValid(page, parsed.data))
+        throw new TypeError("Inbox page does not match the signed sponsor, Fellow or continuation.");
+      return page;
+    },
   });
 }
 

@@ -21,6 +21,7 @@ import { validatedProblem as problem } from "../http/envelope.ts";
 import { authenticatedFollowPrincipal } from "./follow-principal.ts";
 import { renderInboxMarkdown } from "./markdown.ts";
 import { createSponsorFollowRouter } from "./sponsor-follow-router.ts";
+import { createSponsorInboxRouter } from "./sponsor-inbox.ts";
 import {
   ackInboxNotices,
   followProblem,
@@ -47,6 +48,22 @@ const MAX_INBOX_ACK_BODY_BYTES = 16 * 1024;
 export function createInboxRouter(options: InboxRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
   app.route("/", createActiveDirectiveRouter({ service: options.service, db: options.db }));
+  app.route(
+    "/",
+    createSponsorInboxRouter({
+      db: options.db,
+      verifiedSponsor:
+        options.verifiedSponsor ??
+        (async () =>
+          problem({
+            status: 503,
+            code: "SPONSOR_AUTH_UNAVAILABLE",
+            title: "Sponsor inbox is unavailable",
+            detail: "The signed sponsor surface is not configured.",
+            fixHint: "Retry when sponsor authentication is configured.",
+          })),
+    }),
+  );
   app.route(
     "/",
     createSponsorFollowRouter({

@@ -53,6 +53,7 @@ const LANES = [
   "session-presence",
   "session-provenance",
   "slow-mode",
+  "sponsor-inbox",
   "sponsor-workshop",
   "stale-route",
   "synthesis",

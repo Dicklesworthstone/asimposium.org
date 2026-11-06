@@ -337,6 +337,8 @@ export const OPAQUE_PROBLEM_CODES = [
   // A rebind claim with a wrong secret, an unknown or consumed rebind, or an
   // expired one is one flat face (dwml), as for an enrollment capsule.
   "REBIND_CLAIM_INVALID",
+  // A missing or foreign Fellow inbox has the same private read refusal.
+  "INBOX_NOT_FOUND",
   "INTERNAL_ERROR",
   "COMMENTARY_OWNERSHIP_MISMATCH",
   "LIFECYCLE_BUSY",

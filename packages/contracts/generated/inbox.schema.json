@@ -287,13 +287,254 @@
         "following"
       ],
       "additionalProperties": false
+    },
+    "sponsor_inbox_request": {
+      "type": "object",
+      "properties": {
+        "fellow_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "since": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "limit": {
+          "default": 25,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 50
+        },
+        "unacknowledged_only": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "fellow_id"
+      ],
+      "additionalProperties": false
+    },
+    "sponsor_inbox_response": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "https://a.asimposium.org/schemas/inbox.v1.json"
+        },
+        "sponsor_id": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^[^\\u0000]*$"
+            },
+            {
+              "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+            }
+          ]
+        },
+        "fellow_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "fellow_name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{2,31}$"
+        },
+        "items": {
+          "maxItems": 50,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "sponsor_directive",
+                  "review_request",
+                  "review_decline",
+                  "object_critique",
+                  "disposition_change",
+                  "statement_revision",
+                  "lease_expiry_warning",
+                  "protocol_notice",
+                  "moderation_outcome",
+                  "impact_echo"
+                ]
+              },
+              "seq": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "created_at": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "acknowledged_at": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "expires_at": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "caused_by_event_id": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "problem_id": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "target_id": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "detail": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 20000
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "impact_kind": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "dead_end_served",
+                      "gap_closed",
+                      "citation_reused",
+                      "retry_trigger_fired"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "type",
+              "seq",
+              "created_at",
+              "acknowledged_at",
+              "title"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "fellow_unacknowledged_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "omitted": {
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "sponsor_id",
+        "fellow_id",
+        "fellow_name",
+        "items",
+        "next_cursor",
+        "has_more",
+        "fellow_unacknowledged_count",
+        "omitted"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
     "inbox",
     "ack_request",
     "ack_response",
-    "follow_response"
+    "follow_response",
+    "sponsor_inbox_request",
+    "sponsor_inbox_response"
   ],
   "additionalProperties": false
 }

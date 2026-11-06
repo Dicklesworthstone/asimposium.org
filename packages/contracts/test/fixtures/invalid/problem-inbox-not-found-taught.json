@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/INBOX_NOT_FOUND",
+  "title": "Fellow inbox unavailable",
+  "status": 404,
+  "code": "INBOX_NOT_FOUND",
+  "detail": "No inbox visible to this sponsor matches the request.",
+  "fix_hint": "Choose a current Fellow from the sponsor console.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/inbox.v1.json",
+  "example": { "fellow_id": "fellow-01JXYZ" }
+}

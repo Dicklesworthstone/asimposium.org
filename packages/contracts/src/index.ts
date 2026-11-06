@@ -486,6 +486,16 @@ export {
   InboxResponseSchema,
   type ProblemFollowResponse,
   ProblemFollowResponseSchema,
+  SPONSOR_INBOX_DEFAULT_LIMIT,
+  SPONSOR_INBOX_MAX_RESPONSE_BYTES,
+  SPONSOR_INBOX_PAGE_LIMIT,
+  type SponsorInboxItem,
+  SponsorInboxItemSchema,
+  type SponsorInboxRequest,
+  SponsorInboxRequestSchema,
+  type SponsorInboxResponse,
+  SponsorInboxResponseSchema,
+  sponsorInboxPageIsValid,
 } from "./inbox.ts";
 export {
   LEASE_OBJECT_KINDS,

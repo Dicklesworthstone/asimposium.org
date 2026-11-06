@@ -164,6 +164,7 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-unknown-profile.json", "UNKNOWN_PROFILE", 400, "contract"],
   ["problem-workshop-read-body-invalid.json", "WORKSHOP_READ_BODY_INVALID", 422, "contract"],
   ["problem-workshop-not-found.json", "WORKSHOP_NOT_FOUND", 404, "opaque"],
+  ["problem-inbox-not-found.json", "INBOX_NOT_FOUND", 404, "opaque"],
   ["problem-fellow-credential-cap-reached.json", "FELLOW_CREDENTIAL_CAP_REACHED", 409, "opaque"],
   ["problem-session-open-body-invalid.json", "SESSION_OPEN_BODY_INVALID", 422, "contract"],
   ["problem-workshop-push-body-invalid.json", "WORKSHOP_PUSH_BODY_INVALID", 422, "contract"],
