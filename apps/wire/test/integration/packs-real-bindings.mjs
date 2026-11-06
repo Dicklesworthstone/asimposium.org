@@ -7,9 +7,9 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // asimposiumorg-codz) on real local Workerd HTTP and D1. The review-queue pack
 // must agree with /v1/p/:id/next for an independent reviewer (same first
 // target), and must never present a same-sponsor candidate as more than T0.
-// The formal profile carries open proof gaps and verification records.
-//
-// Not covered: formal-artifact evidence uploads, TOON faces.
+// Working context retains open workshop objects without reviving archived or
+// discarded work. The formal, graveyard and literature profiles carry their
+// published records without also claiming those producers are absent.
 
 function json(text) {
   return JSON.parse(text);
@@ -117,6 +117,93 @@ await runLocalWorkerJourney(
       (await call(`/v1/problems/${problem}`)).problem.statement,
       formulation.statement,
       "committed formulation bytes return unchanged after visibility restoration",
+    );
+    const workingPack = async () =>
+      PackResponseSchema.parse(
+        await call(
+          `/v1/sessions/${authorSession}/pack?profile=working&max_tokens=8000`,
+          undefined,
+          author,
+        ),
+      );
+    const openDrafts = [];
+    for (let n = 1; n <= 6; n++) {
+      openDrafts.push(
+        await call(
+          `/v1/sessions/${authorSession}/workshop`,
+          { type: "claim-draft", title: `Open draft ${n}`, body_md: `Private draft ${n}.` },
+          author,
+          201,
+        ),
+      );
+    }
+    for (const action of ["archive", "discard"]) {
+      const history = await call(
+        `/v1/sessions/${authorSession}/workshop`,
+        {
+          type: "dead-end-draft",
+          title: `Historical ${action} route`,
+          body_md: `The ${action} route loops on a finite witness.`,
+        },
+        author,
+        201,
+      );
+      await call(
+        `/v1/sessions/${authorSession}/workshop`,
+        { workshop_id: history.workshop_id, base_version: 1, action },
+        author,
+        201,
+      );
+    }
+    const sixOpen = await workingPack();
+    const headIds = (pack) =>
+      pack.items.filter((item) => item.kind === "workshop-head").map((item) => item.id);
+    assert.deepEqual(
+      headIds(sixOpen),
+      openDrafts
+        .slice(1)
+        .reverse()
+        .map((draft) => draft.workshop_id),
+      "newer archive/discard history cannot displace open work",
+    );
+    assert.ok(
+      sixOpen.omitted.some(
+        (item) => item.reason === "candidate_limit" && item.detail === "workshop-heads",
+      ),
+    );
+    await call(
+      `/v1/sessions/${authorSession}/workshop`,
+      { workshop_id: openDrafts[5].workshop_id, base_version: 1, action: "archive" },
+      author,
+      201,
+    );
+    const fiveOpen = await workingPack();
+    assert.deepEqual(
+      headIds(fiveOpen),
+      openDrafts
+        .slice(0, 5)
+        .reverse()
+        .map((draft) => draft.workshop_id),
+    );
+    assert.ok(
+      !fiveOpen.omitted.some(
+        (item) => item.reason === "candidate_limit" && item.detail === "workshop-heads",
+      ),
+      "only open objects count toward the truncation disclosure",
+    );
+    for (const draft of openDrafts.slice(0, 5)) {
+      await call(
+        `/v1/sessions/${authorSession}/workshop`,
+        { workshop_id: draft.workshop_id, base_version: 1, action: "discard" },
+        author,
+        201,
+      );
+    }
+    const emptyWorking = await workingPack();
+    assert.deepEqual(headIds(emptyWorking), []);
+    assert.equal(
+      emptyWorking.items.find((item) => item.id === "SYS-workshop-empty")?.body,
+      "You have no open workshop objects on this problem.",
     );
     const draft = await call(
       `/v1/sessions/${authorSession}/workshop`,
@@ -332,6 +419,57 @@ await runLocalWorkerJourney(
       author,
       null,
     );
+    const artifact = await call(
+      `/v1/sessions/${authorSession}/evidence`,
+      {
+        bears_on_kind: "claim",
+        bears_on_id: claim,
+        bears_on_version: 1,
+        direction: "supports",
+        kind: "certificate",
+        mode: "confirmatory",
+        source: { kind: "locator", locator: "local/identity.lean", excerpt: "Submitted source." },
+        body_md: "Submitted identity formalization; no platform execution is asserted.",
+        formal_artifact: {
+          language: "lean",
+          declaration: "pack_identity",
+          source: "theorem pack_identity (n : Nat) : n + 0 = n := rfl",
+          toolchain: "Lean fixture",
+          axiom_report: "pack_identity: no additional axioms reported.",
+        },
+      },
+      author,
+      201,
+    );
+    const friction = await call(
+      `/v1/sessions/${authorSession}/evidence`,
+      {
+        bears_on_kind: "claim",
+        bears_on_id: claim,
+        bears_on_version: 1,
+        direction: "informs",
+        kind: "formalization-friction",
+        mode: "exploratory",
+        source: { kind: "model_memory" },
+        body_md:
+          "An alternative encoding has an unresolved coercion; this is not a counterexample.",
+      },
+      author,
+      201,
+    );
+    const citation = await call(
+      `/v1/sessions/${authorSession}/citations`,
+      {
+        title: "Identity definitions",
+        authors: ["Fixture author"],
+        locator_kind: "url",
+        locator: "https://example.invalid/identity",
+        excerpt: "A cited definition of addition.",
+        retrieved_at: new Date().toISOString(),
+      },
+      author,
+      201,
+    );
     const formal = await pack(authorSession, author, "formal");
     const kinds = new Set(formal.items.map((item) => item.kind));
     assert.ok(kinds.has("proof-gap"), `formal pack carries the open proof gap: ${[...kinds]}`);
@@ -343,6 +481,39 @@ await runLocalWorkerJourney(
     const verification = formal.items.find((item) => item.kind === "verification-report");
     assert.equal(verification.untrusted, true);
     assert.ok(!verification.body.includes("Private."), "no workshop bytes in formal records");
+    assert.ok(
+      formal.items.some(
+        (item) => item.kind === "formal-artifact" && item.id === artifact.evidence_id,
+      ),
+    );
+    assert.ok(
+      formal.items.some(
+        (item) => item.kind === "formalization-friction" && item.id === friction.evidence_id,
+      ),
+    );
+    const graveyard = await pack(authorSession, author, "graveyard");
+    assert.ok(
+      graveyard.items.some(
+        (item) => item.kind === "formalization-friction" && item.id === friction.evidence_id,
+      ),
+    );
+    assert.equal(
+      graveyard.items.filter((item) => item.kind === "dead-end").length,
+      2,
+      "closed private negative results remain in the graveyard",
+    );
+    const literature = await pack(authorSession, author, "literature");
+    assert.ok(
+      literature.items.some(
+        (item) => item.kind === "citation" && item.id === `${citation.citation_id}@1`,
+      ),
+    );
+    for (const profile of [formal, graveyard, literature]) {
+      assert.ok(
+        !profile.omitted.some((item) => item.reason === "profile_section_not_composed"),
+        `${profile.profile} must not describe its implemented producers as absent`,
+      );
+    }
 
     // The public formal-records face (Rule A1): the same record, anonymously, in
     // every format, with paging/exact-target contracts that teach on refusal.

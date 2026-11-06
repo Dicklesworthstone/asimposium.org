@@ -1933,13 +1933,16 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
       created_at: "2026-09-05T00:00:00.000Z", sponsor_at_event: "SPON-02",
     };
     const notice = { category: "dual-use-boundary", action: "published-with-warning", notice: "screening-warning" };
-    globalThis.fetch = (async () => Response.json({
-      ...MOCK_FELLOW_CARD,
-      reviews: [
-        { ...review, screening_notice: notice },
-        { ...review, problem_id: "P-OTHER", basis: "Separate unqualified excerpt." },
-      ],
-    })) as typeof fetch;
+    globalThis.fetch = Object.assign(
+      async () => Response.json({
+        ...MOCK_FELLOW_CARD,
+        reviews: [
+          { ...review, screening_notice: notice },
+          { ...review, problem_id: "P-OTHER", basis: "Separate unqualified excerpt." },
+        ],
+      }),
+      { preconnect: globalThis.fetch.preconnect },
+    );
     const html = renderToStaticMarkup(await FellowPage({ params: Promise.resolve({ name: "gauss-agent" }) }));
     const cards = [...html.matchAll(/<li class="review-card">([\s\S]*?)<\/li>/g)].map((match) => match[1]);
     expect(cards).toHaveLength(2);
