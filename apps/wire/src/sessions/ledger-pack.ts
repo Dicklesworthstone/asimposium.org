@@ -36,6 +36,7 @@ import {
 } from "../ledger/scientific-checks";
 import { withPremiseStaleness } from "../ledger/scientific-dependencies.ts";
 import {
+  CLAIM_HEADS_AT_CURSOR_SQL,
   foldScientificRows,
   prepareScientificDispositions,
   type ScientificDisposition,
@@ -54,6 +55,42 @@ export const LEDGER_PACK_CANDIDATE_LIMIT = 20;
 export interface LedgerPackSection {
   candidates: PackCandidate[];
   omitted: { reason: string; detail: string }[];
+}
+
+export interface PackClaimHead {
+  id: string;
+  source_seq: number;
+  version: number;
+  statement: string | null;
+}
+
+/** Version text and its visibility are read together. Current controls still
+ * apply to historical cuts; a retained claim version is never permission to
+ * republish hidden or redacted content. Missing content stays an omission,
+ * not a fallback to the mutable head or to an older visible version. */
+export function preparePackClaimHeads(
+  db: Env["DB"],
+  problemId: string,
+  cursor: number,
+  limit: number,
+): D1PreparedStatement {
+  return db
+    .prepare(`WITH pack_claim_heads AS (${CLAIM_HEADS_AT_CURSOR_SQL})
+    SELECT head.id, head.source_seq, e.object_version AS version,
+      CASE WHEN p.status != 'private-draft' AND e.seq <= p.public_seq
+        AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
+        AND NOT ${eventContentHiddenSql("e")}
+        THEN v.statement END AS statement
+    FROM pack_claim_heads head
+    JOIN events e ON e.problem_id = head.problem_id AND e.seq = head.source_seq
+      AND e.object_id = head.id AND e.object_kind = 'claim'
+      AND e.type IN ('claim.created', 'claim.revised')
+    JOIN problems p ON p.id = head.problem_id
+    LEFT JOIN claim_versions v ON v.problem_id = e.problem_id
+      AND v.claim_id = e.object_id AND v.version = e.object_version
+    LEFT JOIN event_content c ON c.event_id = e.id
+    ORDER BY head.source_seq ASC, head.id ASC`)
+    .bind(problemId, cursor, limit);
 }
 
 /** Arrival context and the graveyard share the public reader, never another

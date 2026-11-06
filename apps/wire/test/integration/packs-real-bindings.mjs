@@ -16,7 +16,7 @@ function json(text) {
 }
 
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, operatorCall, worker, origin, userAgent }) => {
+  async ({ call, enroll, sponsorCall, operatorCall, worker, origin, userAgent, fixtures }) => {
     const OWNER = "usr_packs_owner";
     const author = await enroll("packs-author", OWNER);
     const sibling = await enroll("packs-sibling", OWNER);
@@ -391,6 +391,56 @@ await runLocalWorkerJourney(
       (await face("/schemas/formal-records.v1.json")).status,
       200,
       "its schema is served",
+    );
+
+    // A request captures its public cursor before composing the board. A real
+    // later revision must neither erase that claim nor substitute the new text
+    // into its old scientific standing. Exercise both production readers on D1.
+    const beforeRevision = await pack(authorSession, author, "working");
+    const oldBoard = json(await fixtures.packClaimBoardAt(problem, beforeRevision.cursor));
+    assert.equal(oldBoard.heads.find((head) => head.id === claim)?.version, 1);
+    assert.equal(oldBoard.dispositions.find((fold) => fold.id === claim)?.version, 1);
+    const replacement = "For every natural n, adding zero twice leaves n unchanged.";
+    const revision = await call(
+      `/v1/sessions/${authorSession}/revise`,
+      {
+        claim_id: claim,
+        base_version: 1,
+        kind: "conjecture",
+        statement: replacement,
+        falsifier: "A natural n for which (n + 0) + 0 differs from n.",
+      },
+      author,
+      201,
+    );
+    assert.ok(revision.seq > beforeRevision.cursor);
+    assert.deepEqual(
+      json(await fixtures.packClaimBoardAt(problem, beforeRevision.cursor)),
+      oldBoard,
+      "a later revision leaves captured claim bodies and scientific versions unchanged",
+    );
+    const currentBoard = json(await fixtures.packClaimBoardAt(problem, revision.seq));
+    assert.equal(currentBoard.heads.find((head) => head.id === claim)?.statement, replacement);
+    assert.equal(currentBoard.dispositions.find((fold) => fold.id === claim)?.version, 2);
+    const revisedPack = await pack(authorSession, author, "working");
+    assert.equal(revisedPack.cursor, revision.seq);
+    assert.ok(
+      revisedPack.items
+        .find((item) => item.kind === "claim" && item.id === claim)
+        ?.body.includes(replacement),
+    );
+    await controlFormulation("hide");
+    try {
+      const hiddenBoard = json(await fixtures.packClaimBoardAt(problem, beforeRevision.cursor));
+      assert.ok(hiddenBoard.heads.every((head) => head.statement === null));
+      assert.ok(!JSON.stringify(hiddenBoard).includes(oldBoard.heads[0].statement));
+    } finally {
+      await controlFormulation("restore");
+    }
+    assert.deepEqual(
+      json(await fixtures.packClaimBoardAt(problem, beforeRevision.cursor)),
+      oldBoard,
+      "restoring visibility retains the same immutable captured publication",
     );
 
     console.log(

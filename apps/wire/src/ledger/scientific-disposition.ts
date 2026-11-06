@@ -75,6 +75,19 @@ export type ScientificDisposition = CurrentClaimDispositionFold & {
   directiveDisclosure: PublicClaimState["directive_disclosure"];
 };
 
+/** The latest publication of each claim at a captured ledger cursor. A later
+ * revision moves the mutable claims row, but cannot remove or replace a claim
+ * in an already captured read. Pack bodies and their scientific folds must use
+ * this same ordering and limit. Bind problem, cursor and candidate limit. */
+export const CLAIM_HEADS_AT_CURSOR_SQL = `SELECT publication.problem_id,
+    publication.object_id AS id, MAX(publication.seq) AS source_seq
+  FROM events publication
+  WHERE publication.problem_id = ? AND publication.seq <= ?
+    AND publication.object_kind = 'claim'
+    AND publication.type IN ('claim.created', 'claim.revised')
+  GROUP BY publication.object_id
+  ORDER BY source_seq ASC, id ASC LIMIT ?`;
+
 /** A bounded claim selection with canonical premise health at the same cursor.
  * Referenced evidence and immutable dependency pins use public ledger reads;
  * no author workshop read or mutable dependency-head substitution is needed. */
@@ -122,11 +135,11 @@ export function prepareScientificDispositions(
   claimLimit: number,
   target?: { claimId: string; version: number },
 ): D1PreparedStatement {
-  // A targeted read selects by immutable events so a later mutable head cannot
-  // erase the requested version. List callers retain their bounded selection.
+  // Both targeted and list reads select immutable events so a later mutable
+  // head cannot erase a claim from the requested cursor.
   const selection =
     target === undefined
-      ? "SELECT id FROM claims WHERE problem_id = ? AND source_seq <= ? ORDER BY source_seq ASC LIMIT ?"
+      ? CLAIM_HEADS_AT_CURSOR_SQL
       : "SELECT object_id AS id FROM events WHERE problem_id = ? AND seq <= ? AND object_id = ? AND type = 'claim.created' AND object_kind = 'claim' LIMIT 1";
   return db
     .prepare(`

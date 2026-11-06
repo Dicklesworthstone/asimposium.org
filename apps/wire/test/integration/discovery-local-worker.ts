@@ -63,6 +63,7 @@ import {
   readDeletionJournalRecords,
 } from "../../src/krater/retention.ts";
 import { loadFiredDeadEndTriggers } from "../../src/ledger/dead-ends.ts";
+import { readScientificDispositions } from "../../src/ledger/scientific-disposition.ts";
 import { markDormantProblems } from "../../src/problems/dormancy.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
 import { POLICY_CATEGORIES } from "../../src/screening/types.ts";
@@ -74,7 +75,12 @@ import {
 } from "../../src/screening/workers-ai.ts";
 import { expireIdleSessions } from "../../src/sessions/idle";
 import { warnExpiringLeases } from "../../src/sessions/lease-warnings";
-import { readDeadEndPack, readReviewQueuePack } from "../../src/sessions/ledger-pack.ts";
+import {
+  type PackClaimHead,
+  preparePackClaimHeads,
+  readDeadEndPack,
+  readReviewQueuePack,
+} from "../../src/sessions/ledger-pack.ts";
 import { checkAndReserveQuota, parseSponsorLimit } from "../../src/sessions/quota.ts";
 import { createSessionRouter } from "../../src/sessions/router.ts";
 import { normHash } from "../../src/split/policy.ts";
@@ -591,6 +597,24 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     return JSON.stringify(
       await readReviewQueuePack(this.env.DB, problemId, cursor, { fellowId, sponsorId }),
     );
+  }
+
+  async packClaimBoardAt(problemId: string, cursor: number) {
+    const heads = await preparePackClaimHeads(
+      this.env.DB,
+      problemId,
+      cursor,
+      128,
+    ).all<PackClaimHead>();
+    const dispositions = await readScientificDispositions(this.env.DB, problemId, cursor, 128);
+    return JSON.stringify({
+      heads: heads.results,
+      dispositions: [...dispositions].map(([id, fold]) => ({
+        id,
+        version: fold.currentVersion,
+        disposition: fold.disposition,
+      })),
+    });
   }
 
   override async fetch(request: WorkerRequest): Promise<WorkerResponse> {

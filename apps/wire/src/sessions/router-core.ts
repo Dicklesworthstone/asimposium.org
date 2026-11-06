@@ -259,6 +259,8 @@ import {
 import { expireIdleSessions } from "./idle";
 import { releaseDirectAppendSessions, trackDirectAppendSession } from "./implicit-session";
 import {
+  type PackClaimHead,
+  preparePackClaimHeads,
   readDeadEndPack,
   readLedgerPackSection,
   readReviewQueuePack,
@@ -3990,16 +3992,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
 
     if (profile !== "hello" && profile !== "review-queue" && targetParam === null) {
-      const claims = await db
-        .prepare(
-          `SELECT id,
-             CASE WHEN ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} THEN statement END AS statement,
-             source_seq FROM claims
-           WHERE problem_id = ? AND source_seq <= ? ORDER BY source_seq ASC
-           LIMIT ?`,
-        )
-        .bind(session.problem_id, cursor, PACK_CLAIM_CANDIDATE_LIMIT + 1)
-        .all<{ id: string; statement: string | null; source_seq: number }>();
+      const claims = await preparePackClaimHeads(
+        db,
+        session.problem_id,
+        cursor,
+        PACK_CLAIM_CANDIDATE_LIMIT + 1,
+      ).all<PackClaimHead>();
       const claimRows = claims.results ?? [];
       claimsTruncated = claimRows.length > PACK_CLAIM_CANDIDATE_LIMIT;
       if (claimRows.length === 0) {

@@ -101,6 +101,7 @@ import {
   type WorkersAIPromotionInput,
 } from "../../src/screening/workers-ai.ts";
 import {
+  preparePackClaimHeads,
   readLedgerPackSection,
   readReviewQueuePack,
   readTargetClaimPack,
@@ -137,6 +138,17 @@ async function seedClaimPublication(db: Env["DB"], claimId: string) {
     .prepare(`INSERT INTO event_content (event_id, payload_sha256, payload_json)
     SELECT id, payload_sha256, '{}' FROM events WHERE id = ?`)
     .bind(`E-fixture-${claimId}`)
+    .run();
+  await db
+    .prepare(`INSERT INTO claim_versions
+      (claim_id, problem_id, version, kind, statement, falsifier, content_digest,
+       editor_fellow_id, created_at)
+      SELECT id, problem_id, 1, 'conjecture', statement, 'Synthetic counterexample.',
+        'sha256:' || payload_sha256, 'F-fixture', created_at FROM claims
+      WHERE problem_id = 'P-4DSP' AND id = ?
+        AND NOT EXISTS (SELECT 1 FROM claim_versions v
+          WHERE v.problem_id = claims.problem_id AND v.claim_id = claims.id AND v.version = 1)`)
+    .bind(claimId)
     .run();
 }
 
@@ -11147,12 +11159,86 @@ describe("session protocol routes", () => {
     ]);
   });
 
+  test.each(["cursor", "scientific-timeline"] as const)(
+    "a working pack retains its exact claim version when a revision follows the %s read",
+    async (phase) => {
+      let revise: (() => Promise<void>) | undefined;
+      const applyRevision = async () => {
+        const pending = revise;
+        revise = undefined;
+        await pending?.();
+      };
+      const f = await ledgerPackFixture({
+        afterFirstRead: async (sql) => {
+          if (phase === "cursor" && sql.trim() === "SELECT public_seq FROM problems WHERE id = ?")
+            await applyRevision();
+        },
+        beforeRead: async (read) => {
+          if (
+            phase === "scientific-timeline" &&
+            read.kind === "all" &&
+            /\bselected_claims AS\b/u.test(read.sql)
+          )
+            await applyRevision();
+        },
+      });
+      const before = await f.db
+        .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+        .first<{ public_seq: number }>();
+      assert.ok(before);
+      let revisedSeq = 0;
+      revise = async () => {
+        const result = await f.post(`${f.path}/revise`, {
+          claim_id: "C-1",
+          base_version: 1,
+          kind: "conjecture",
+          statement: "REVISION-AFTER-PACK-CURSOR: four is even.",
+          falsifier: "A nonzero remainder after dividing four by two.",
+        });
+        revisedSeq = Number(result.seq);
+      };
+      const response = await f.call(`${f.path}/pack?profile=working&max_tokens=8000`);
+      expect(response.status, await response.clone().text()).toBe(200);
+      const pack = PackResponseSchema.parse(await response.json());
+      expect(revisedSeq).toBeGreaterThan(before.public_seq);
+      expect(pack.cursor).toBe(before.public_seq);
+      const claim = pack.items.find((item) => item.kind === "claim" && item.id === "C-1");
+      expect(claim).toBeDefined();
+      expect(claim?.body).toContain("Two is even.");
+      expect(claim?.body).not.toContain("REVISION-AFTER-PACK-CURSOR");
+      expect(pack.items.some((item) => item.id === "SYS-claims-empty")).toBe(false);
+      const capturedHeads = await preparePackClaimHeads(
+        f.db,
+        "P-4DSP",
+        before.public_seq,
+        128,
+      ).all<{ id: string; version: number; statement: string | null }>();
+      expect(capturedHeads.results).toContainEqual({
+        id: "C-1",
+        source_seq: 1,
+        version: 1,
+        statement: "Two is even.",
+      });
+
+      const next = PackResponseSchema.parse(
+        await (await f.call(`${f.path}/pack?profile=working&max_tokens=8000`)).json(),
+      );
+      expect(next.cursor).toBe(revisedSeq);
+      expect(next.items.find((item) => item.kind === "claim" && item.id === "C-1")?.body).toContain(
+        "REVISION-AFTER-PACK-CURSOR",
+      );
+    },
+  );
+
   test("PLANTED: a pack binds one captured public generation across a concurrent promotion", async () => {
     const cursorSql = "SELECT public_seq FROM problems WHERE id = ?";
     const normalizeSql = (sql: string) => sql.replace(/\s+/g, " ").trim();
-    const claimsSql = normalizeSql(`SELECT id,
-      CASE WHEN ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} THEN statement END AS statement,
-      source_seq FROM claims WHERE problem_id = ? AND source_seq <= ? ORDER BY source_seq ASC LIMIT ?`);
+    const claimsSql = "WITH pack_claim_heads AS";
+    const publicReads = () =>
+      observedReads
+        .map((read) => ({ ...read, sql: normalizeSql(read.sql) }))
+        .filter((read) => read.sql === cursorSql || read.sql.startsWith(claimsSql))
+        .map((read) => ({ ...read, sql: read.sql.startsWith(claimsSql) ? claimsSql : read.sql }));
     const observedReads: LocalRead[] = [];
     let recordReads = false;
     let barrierArmed = false;
@@ -11375,9 +11461,7 @@ describe("session protocol routes", () => {
     }
     const firstPackResponse = await firstPackRequest;
     recordReads = false;
-    const firstPackReads = observedReads
-      .map((read) => ({ ...read, sql: normalizeSql(read.sql) }))
-      .filter((read) => read.sql === cursorSql || read.sql === claimsSql);
+    const firstPackReads = publicReads();
     expect(firstPackReads).toEqual([
       { kind: "first", sql: cursorSql, bindings: ["P-4DSP"] },
       { kind: "all", sql: claimsSql, bindings: ["P-4DSP", 1, 129] },
@@ -11399,9 +11483,7 @@ describe("session protocol routes", () => {
       `/v1/sessions/${packSession.session_id}/pack?profile=working&max_tokens=8000&cursor=0`,
     );
     recordReads = false;
-    const secondPackReads = observedReads
-      .map((read) => ({ ...read, sql: normalizeSql(read.sql) }))
-      .filter((read) => read.sql === cursorSql || read.sql === claimsSql);
+    const secondPackReads = publicReads();
     expect(secondPackReads).toEqual([
       { kind: "first", sql: cursorSql, bindings: ["P-4DSP"] },
       { kind: "all", sql: claimsSql, bindings: ["P-4DSP", 2, 129] },
