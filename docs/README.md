@@ -14,6 +14,36 @@ observed.
 
 ## Current reality check — 2026-11-05
 
+### Broad scanner investigation — 2026-11-06
+
+At `770551d3`, the recovered committed merge range has 270 paths: 224 JS/TS
+sources, two shell scripts, six SQL files and 38 other files. This matches the
+old index count without certifying the exact historical uncommitted snapshot.
+All 270 current file hashes remain stable through the new runs. The captured JS
+engine input list contains those 224 sources plus two context files.
+
+Stock UBS again times out at its default 300-second module limit (302.656
+seconds overall). A separately declared, supported 900-second budget also times
+out (904.801 seconds overall). Both are partial, with no completed JS analysis;
+there is no further budget escalation. A safe diagnostic snapshot places the
+extended run in the taint analyzer's branch-state heap joins. That narrows the
+component, not the complete timeout cause. SQL completes all six files with zero
+findings; shell analysis completes both files with one reviewed Perl-block
+`eval` false positive, five reviewed warnings and 24 informational findings.
+
+An exact installed scheduler-loop test uses synthetic modules and real child
+processes: the normal control passes, an unrelated child reproduces the empty
+`FREE_SLOTS` crash, and waiting only on tracked scanner PIDs passes that case.
+The one-line candidate patch applies cleanly to the installed and maintained
+scripts, but neither is changed or fully qualified. This proves the algorithm
+defect, not the identity of the child in the historical crash. Original `g4b4`
+acceptance remains open. Raw results and the candidate patch are retained as
+`e2e/artifacts/dae7-repair-20261104/g4b4-*`. Application and harness code are unchanged.
+
+Primary headroom falls below 1 GiB. A private `/tmp` checkpoint preserves the
+pending patch, a consistent 566-issue/2,822-comment database and in-flight
+evidence; that checkpoint is not a final scan result. `0oi3` remains open.
+
 The subsequent fresh review at `73e07a87` finds no additional source defect. One
 complete original production browser lane, including a fresh Next build, passes
 all 209 checks in 158.035 seconds (23:24:34–23:27:12 UTC). The native source
