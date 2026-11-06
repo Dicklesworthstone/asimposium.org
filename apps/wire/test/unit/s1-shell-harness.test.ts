@@ -2210,7 +2210,7 @@ describe("a pinned port is validated before anything is started", () => {
     expect(ownership).not.toContain("run_named_with_deadline");
   });
 
-  test("PLANTED: S1 uses the first stable Wrangler with the repaired proxy runtime", () => {
+  test("PLANTED: S1 keeps the fixed Wrangler pin and repaired proxy runtime", () => {
     const wireManifest = JSON.parse(
       readFileSync(resolve(REPO_ROOT, "apps/wire/package.json"), "utf8"),
     ) as { devDependencies?: Record<string, unknown> };
@@ -2235,9 +2235,9 @@ describe("a pinned port is validated before anything is started", () => {
       "utf8",
     );
 
-    expect(wireManifest.devDependencies?.wrangler).toBe("4.129.1");
+    expect(wireManifest.devDependencies?.wrangler).toBe("4.158.0");
     expect(wireManifest.devDependencies?.["wrangler-s1-local"]).toBeUndefined();
-    expect(wranglerManifest.version).toBe("4.129.1");
+    expect(wranglerManifest.version).toBe("4.158.0");
     expect(proxySource).toContain(
       '(request.method === "GET" || request.method === "HEAD") && attempt < 2',
     );
