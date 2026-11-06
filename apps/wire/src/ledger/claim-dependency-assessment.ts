@@ -22,7 +22,7 @@ import {
   ScientificInputError,
 } from "./scientific-checks.ts";
 import { foldScientificRows, type ScientificRow } from "./scientific-disposition.ts";
-import { scientificWithdrawalEffects } from "./scientific-withdrawal-effects.ts";
+import { scientificInputEffects } from "./scientific-withdrawal-effects.ts";
 
 export const DEPENDENCY_SCIENCE_ROW_LIMIT = 1024;
 export const DEPENDENCY_SCIENCE_ITEM_BYTES = 65_536;
@@ -305,7 +305,7 @@ export async function composeDependencyAssessment(
       const fold = await foldScientificRows(timeline);
       if (fold.stale || fold.currentVersion !== node.row.version)
         throw new ScientificInputError("Scientific standing is incomplete or stale.");
-      const withdrawn = scientificWithdrawalEffects(timeline, contents);
+      const withdrawn = scientificInputEffects(timeline, contents);
       const evidence = rows.filter(
         (row) =>
           row.type === "evidence.created" &&

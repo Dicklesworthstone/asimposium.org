@@ -252,7 +252,7 @@ export function withdrawalFixture({
             direction: "supports",
             kind: "computation",
             mode: "confirmatory",
-            computed_class: "numerical",
+            computed_class: "computation",
             body_md: "Deliberate public work product.",
             ...extra,
           };

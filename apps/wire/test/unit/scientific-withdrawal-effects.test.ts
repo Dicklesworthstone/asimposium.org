@@ -5,7 +5,7 @@ import {
   prepareScientificDispositions,
   type ScientificRow,
 } from "../../src/ledger/scientific-disposition.ts";
-import { scientificWithdrawalEffects } from "../../src/ledger/scientific-withdrawal-effects.ts";
+import { scientificInputEffects } from "../../src/ledger/scientific-withdrawal-effects.ts";
 import { withdrawScientificInput } from "../../src/ledger/scientific-withdrawals.ts";
 import { SESSION, sha, withdrawalFixture } from "./scientific-withdrawal-fixture.ts";
 
@@ -173,7 +173,7 @@ test("a forged marker cannot withdraw a source written by a different Fellow", (
         .filter((r) => r.payload_json !== null)
         .map((r) => [r.event_id, JSON.parse(r.payload_json!)]),
     );
-    assert.equal(scientificWithdrawalEffects(all, contents).withdrawnEvents.size, 0);
+    assert.equal(scientificInputEffects(all, contents).withdrawnEvents.size, 0);
   }));
 test("free-form references cannot make unrelated evidence dependent on a withdrawal", () =>
   using(async (f) => {
@@ -183,7 +183,7 @@ test("free-form references cannot make unrelated evidence dependent on a withdra
       });
     await withdraw(f, s.base);
     const all = (await rows(f)).results;
-    const effects = scientificWithdrawalEffects(
+    const effects = scientificInputEffects(
       all,
       new Map(all.map((r) => [r.event_id, JSON.parse(r.payload_json!)])),
     );
@@ -207,12 +207,40 @@ test("transitive structured grounding dependencies are invalidated to arbitrary 
       });
     await withdraw(f, base);
     const all = (await rows(f)).results;
-    const effects = scientificWithdrawalEffects(
+    const effects = scientificInputEffects(
       all,
       new Map(all.map((r) => [r.event_id, JSON.parse(r.payload_json!)])),
     );
     assert.equal(effects.invalidatedEvidence.size, 101);
     assert.equal(effects.invalidatedEvidence.has(previous.id), true);
+  }));
+test("missing exact ancestors invalidate every transitive dependent without a withdrawal event", () =>
+  using(async (f) => {
+    const base = f.source("evidence", "E-base");
+    let previous = base;
+    for (let index = 0; index < 12; index++)
+      previous = f.source("evidence", `E-nested${index}`, {
+        scientific_provenance: {
+          model_family_self_declared: null,
+          method: {
+            category: "computation",
+            procedure: "Use the exact previous result.",
+            evidence: [{ evidence_id: previous.id, digest: previous.request.source_digest }],
+          },
+        },
+      });
+    const unrelated = f.source("evidence", "E-unrelated", {
+      body_md: `Discuss ${base.id} without claiming its result as a premise.`,
+    });
+    const all = (await rows(f)).results;
+    const contents = new Map(all.map((r) => [r.event_id, JSON.parse(r.payload_json!)]));
+    assert.equal(scientificInputEffects(all, contents).invalidatedEvidence.size, 0);
+    contents.delete(base.event.id);
+    const effects = scientificInputEffects(all, contents);
+    assert.equal(effects.withdrawnEvents.size, 0);
+    assert.equal(effects.invalidatedEvidence.size, 13);
+    assert.equal(effects.invalidatedEvidence.has(previous.id), true);
+    assert.equal(effects.invalidatedEvidence.has(unrelated.id), false);
   }));
 test("markers with wrong source digest, kind, claim, version or chronology cannot remove support", () =>
   using(async (f) => {
@@ -229,6 +257,6 @@ test("markers with wrong source digest, kind, claim, version or chronology canno
       { seq: 1 },
     ]) {
       const changed = all.map((r, i) => (i === index ? { ...r, ...change } : r));
-      assert.equal(scientificWithdrawalEffects(changed, contents).withdrawnEvents.size, 0);
+      assert.equal(scientificInputEffects(changed, contents).withdrawnEvents.size, 0);
     }
   }));

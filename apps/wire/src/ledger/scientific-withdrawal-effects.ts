@@ -1,5 +1,13 @@
-/** Withdrawal removes positive authority, not history or negative knowledge.
- * The caller supplies one cursor-bounded, digest-checked ledger snapshot. */
+import {
+  EvidenceResponseSchema,
+  GroundedFalsificationCheckSchema,
+  type ScientificEvidenceReference,
+  ScientificProvenanceSchema,
+} from "@asimposium/contracts";
+
+/** Withdrawal or unavailable grounding removes positive authority, not history
+ * or negative knowledge. The caller supplies one cursor-bounded snapshot and
+ * only its digest-checked, currently readable payloads in `contents`. */
 export interface WithdrawalInputRow {
   readonly claim_id: string;
   readonly event_id: string;
@@ -15,7 +23,7 @@ export interface WithdrawalInputRow {
   readonly withdrawn_sha256?: string | null;
 }
 
-export function scientificWithdrawalEffects(
+export function scientificInputEffects(
   rows: readonly WithdrawalInputRow[],
   contents: ReadonlyMap<string, Record<string, unknown>>,
 ): { withdrawnEvents: ReadonlySet<string>; invalidatedEvidence: ReadonlySet<string> } {
@@ -55,21 +63,55 @@ export function scientificWithdrawalEffects(
     if (original.type === "evidence.created") invalidatedEvidence.add(original.object_id);
   }
 
-  // Explicit evidence dependencies form a graph. A surviving check derived
-  // from withdrawn evidence cannot become a fresh independent basis merely
-  // because it was recorded under another evidence id. Traverse once, not a
-  // repeated fixed-point scan, and never search free-form bodies for references.
+  // Exact evidence dependencies form a graph. A surviving check derived from
+  // withdrawn, hidden, redacted or corrupt evidence cannot become a fresh
+  // independent basis merely because it has another evidence id. Current
+  // content controls apply even to an earlier cursor's scientific standing.
+  const evidence = new Map(
+    rows.filter((row) => row.type === "evidence.created").map((row) => [row.object_id, row]),
+  );
   const dependents = new Map<string, Set<string>>();
   for (const row of rows) {
     if (row.type !== "evidence.created") continue;
     const payload = contents.get(row.event_id);
-    if (!payload) continue;
-    for (const reference of evidenceDependencies(payload)) {
-      const values = dependents.get(reference) ?? new Set<string>();
+    const references = payload ? evidenceDependencies(payload) : null;
+    if (
+      references === null ||
+      !EvidenceResponseSchema.shape.computed_class.safeParse(payload?.computed_class).success
+    ) {
+      invalidatedEvidence.add(row.object_id);
+      continue;
+    }
+    for (const reference of references) {
+      const values = dependents.get(reference.evidence_id) ?? new Set<string>();
       values.add(row.object_id);
-      dependents.set(reference, values);
+      dependents.set(reference.evidence_id, values);
+      const source = evidence.get(reference.evidence_id);
+      const body = source && contents.get(source.event_id);
+      if (
+        !source ||
+        !body ||
+        reference.digest !== `sha256:${source.payload_sha256}` ||
+        source.seq >= row.seq ||
+        source.claim_id !== row.claim_id ||
+        source.target_version !== row.target_version ||
+        body.bears_on_kind !== "claim" ||
+        body.bears_on_id !== row.claim_id ||
+        body.bears_on_version !== row.target_version ||
+        body.mode !== "confirmatory" ||
+        body.selected_hypothesis_id != null ||
+        body.computed_class === "assertion" ||
+        body.computed_class === "heuristic" ||
+        typeof body.kind !== "string" ||
+        typeof body.direction !== "string" ||
+        typeof body.body_md !== "string" ||
+        body.body_md.trim().length === 0
+      )
+        invalidatedEvidence.add(row.object_id);
     }
   }
+  // Traverse once, not a repeated fixed-point scan. Free-form references are
+  // not grounding pins and cannot invalidate unrelated scientific work.
   const pending = [...invalidatedEvidence];
   for (let index = 0; index < pending.length; index++) {
     for (const dependent of dependents.get(pending[index]!) ?? []) {
@@ -81,22 +123,28 @@ export function scientificWithdrawalEffects(
   return { withdrawnEvents, invalidatedEvidence };
 }
 
-function evidenceDependencies(payload: Record<string, unknown>): string[] {
-  const record = (value: unknown): Record<string, unknown> | undefined =>
-    value !== null && typeof value === "object" && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : undefined;
-  const check = record(payload.falsification_check);
-  const method = record(record(payload.scientific_provenance)?.method);
-  const refs = [check?.evidence, method?.evidence];
-  return refs.flatMap((values) =>
-    Array.isArray(values)
-      ? values.flatMap((value) => {
-          const reference = record(value);
-          return typeof reference?.evidence_id === "string" ? [reference.evidence_id] : [];
-        })
-      : [],
-  );
+function evidenceDependencies(
+  payload: Record<string, unknown>,
+): ScientificEvidenceReference[] | null {
+  const references: ScientificEvidenceReference[] = [];
+  if (payload.falsification_check != null) {
+    const check = GroundedFalsificationCheckSchema.safeParse(payload.falsification_check);
+    if (
+      !check.success ||
+      new Set(check.data.evidence.map((ref) => ref.evidence_id)).size !== check.data.evidence.length
+    )
+      return null;
+    references.push(...check.data.evidence);
+  }
+  if (payload.scientific_provenance != null) {
+    const provenance = ScientificProvenanceSchema.safeParse(payload.scientific_provenance);
+    if (!provenance.success) return null;
+    const methodEvidence = provenance.data.method?.evidence ?? [];
+    if (new Set(methodEvidence.map((ref) => ref.evidence_id)).size !== methodEvidence.length)
+      return null;
+    references.push(...methodEvidence);
+  }
+  return references;
 }
 
 /** A withdrawal is not a resolution of an adverse finding. Keep its original

@@ -25,7 +25,7 @@ import {
   ScientificInputError,
 } from "./scientific-checks.ts";
 import { readPremiseAwareDisposition } from "./scientific-dependencies.ts";
-import { isNegativeReview, scientificWithdrawalEffects } from "./scientific-withdrawal-effects.ts";
+import { isNegativeReview, scientificInputEffects } from "./scientific-withdrawal-effects.ts";
 
 export interface ScientificRow {
   claim_id: string;
@@ -299,7 +299,7 @@ export async function foldScientificRows(
       });
     }
   }
-  const withdrawn = scientificWithdrawalEffects(rows, contents);
+  const withdrawn = scientificInputEffects(rows, contents);
   for (const id of withdrawn.invalidatedEvidence) evidence.delete(id);
   const resolve = (reference: { evidence_id: string; digest: string }, row: ScientificRow) => {
     const item = evidence.get(reference.evidence_id);
@@ -682,15 +682,13 @@ export async function foldScientificRows(
           settledRefutation = confirmedRefutation(row, material);
       } catch (error) {
         if (!(error instanceof ScientificInputError)) throw error;
-        if (payload.verdict !== "refute" && payload.verdict !== "fails-to-reproduce")
-          carriesWeight = false;
+        if (!isNegativeReview(payload)) carriesWeight = false;
         markStale(row);
       }
     }
     const provenance = readScientificProvenance(payload.scientific_provenance);
     if (provenance?.method?.evidence.some((reference) => !resolve(reference, row))) {
-      if (payload.verdict !== "refute" && payload.verdict !== "fails-to-reproduce")
-        carriesWeight = false;
+      if (!isNegativeReview(payload)) carriesWeight = false;
       settledRefutation = undefined;
       markStale(row);
     }

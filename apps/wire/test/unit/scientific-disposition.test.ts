@@ -436,6 +436,124 @@ test("grounded current-policy reviews earn support and redacted proof revokes it
   expect(fold.context.has_certified_artifact).toBe(false);
 });
 
+test("unavailable evidence ancestors remove derived checks and positive verification weight", async () => {
+  const original = await corpus();
+  const ancestor = await row(
+    2,
+    "evidence.created",
+    {
+      bears_on_kind: "claim",
+      bears_on_id: "C-1",
+      bears_on_version: 1,
+      kind: "argument",
+      direction: "supports",
+      mode: "confirmatory",
+      computed_class: "citation",
+      body_md: "The underlying equality law is the premise of the proof.",
+    },
+    { object_id: "E-ancestor", direction: "supports" },
+  );
+  const proof = await changedPayload(
+    { ...original[1]!, seq: 3, event_id: "EVENT-3" },
+    {
+      falsification_check: {
+        target_digest: targetDigest,
+        attempted_falsifier: "The underlying equality law fails for this instance.",
+        capable_of_failure: "The values would be unequal.",
+        result: "survived",
+        evidence: [
+          { evidence_id: ancestor.object_id, digest: `sha256:${ancestor.payload_sha256}` },
+        ],
+      },
+    },
+  );
+  const reference = { evidence_id: proof.object_id, digest: `sha256:${proof.payload_sha256}` };
+  const check = await changedPayload(
+    { ...original[2]!, seq: 4, event_id: "EVENT-4" },
+    {
+      falsification_check: {
+        ...JSON.parse(original[2]!.payload_json!).falsification_check,
+        evidence: [reference],
+      },
+    },
+  );
+  const reviews = await Promise.all(
+    original.slice(3).map((review) =>
+      changedPayload(
+        { ...review, seq: review.seq + 1, event_id: `EVENT-${review.seq + 1}` },
+        {
+          verification: { ...JSON.parse(review.payload_json!).verification, evidence: reference },
+        },
+      ),
+    ),
+  );
+  const rows = [original[0]!, ancestor, proof, check, ...reviews];
+  expect((await foldScientificRows(rows)).disposition).toBe("strongly-supported");
+  for (const unavailable of [
+    [{ ...ancestor, payload_json: null }],
+    [{ ...ancestor, payload_sha256: "0".repeat(64) }],
+    [],
+  ]) {
+    const selected = [rows[0]!, ...unavailable, ...rows.slice(2)];
+    const folded = await foldScientificRows(selected);
+    expect(folded.disposition).toBe("open");
+    expect(folded.stale).toBe(true);
+    expect(folded.context.recorded_refutation_attempts).toBe(0);
+    expect(folded.context.verified_reviews).toHaveLength(0);
+    expect(folded.context.has_certified_artifact).toBe(false);
+    const defect = await changedPayload(reviews[0]!, { rubric: ["statement-defect"] });
+    expect((await foldScientificRows([...selected.slice(0, -2), defect])).disposition).toBe(
+      "malformed",
+    );
+    const objection = await changedPayload(reviews[0]!, { verdict: "refute" });
+    expect((await foldScientificRows([...selected.slice(0, -2), objection])).disposition).toBe(
+      "disputed",
+    );
+  }
+  expect((await foldScientificRows(rows)).disposition).toBe("strongly-supported");
+});
+
+test("unrelated unavailable evidence does not remove independently grounded support", async () => {
+  const rows = await corpus();
+  const unrelated = await row(
+    6,
+    "evidence.created",
+    {},
+    { object_id: "E-unrelated", direction: "informs", payload_json: null },
+  );
+  const folded = await foldScientificRows([...rows, unrelated]);
+  expect(folded.disposition).toBe("strongly-supported");
+  expect(folded.context.verified_reviews).toHaveLength(2);
+  expect(folded.context.recorded_refutation_attempts).toBe(1);
+  expect(folded.stale).toBe(true);
+});
+
+test("missing or unknown recorded evidence classes cannot supply positive authority", async () => {
+  for (const computed_class of [undefined, null, "numerical", "invented", 5]) {
+    const rows = await corpus();
+    const proof = await changedPayload(rows[1]!, { computed_class });
+    const reference = { evidence_id: proof.object_id, digest: `sha256:${proof.payload_sha256}` };
+    const selected = await Promise.all(
+      rows.map(async (source, index) => {
+        if (index === 1) return proof;
+        if (index < 2) return source;
+        const payload = JSON.parse(source.payload_json!);
+        return changedPayload(
+          source,
+          index === 2
+            ? { falsification_check: { ...payload.falsification_check, evidence: [reference] } }
+            : { verification: { ...payload.verification, evidence: reference } },
+        );
+      }),
+    );
+    const folded = await foldScientificRows(selected);
+    expect(folded.disposition).toBe("open");
+    expect(folded.context.recorded_refutation_attempts).toBe(0);
+    expect(folded.context.verified_reviews).toHaveLength(0);
+    expect(folded.stale).toBe(true);
+  }
+});
+
 test("unavailable claim content cannot regain support through retraction authorship lookup", async () => {
   for (const legacy of [false, true]) {
     const rows = await corpus(legacy);
