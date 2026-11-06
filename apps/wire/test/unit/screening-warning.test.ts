@@ -215,6 +215,7 @@ describe("published screening warnings", () => {
     withFixture(async (f) => {
       for (const [kind, patch] of [
         ["hypotheses", {}],
+        ["review", {}],
         ["unimplemented-kind", {}],
         ["conjecture", { provider_status: "timeout" }],
         ["conjecture", { coarse_category: "benign-context" }],

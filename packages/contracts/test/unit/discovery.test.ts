@@ -524,6 +524,42 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
       expect(HonorsItemSchema.safeParse(resolvedProblem).success).toBe(true);
     });
 
+    test("carrying reviewer warnings remain public-safe and independent of the settled statement", () => {
+      const notice = {
+        category: "dual-use-boundary",
+        action: "published-with-warning",
+        notice: "screening-warning",
+      } as const;
+      const warned = {
+        ...validClaimEntry,
+        carrying_reviewers: validClaimEntry.carrying_reviewers.map((review) => ({
+          ...review,
+          screening_notice: notice,
+        })),
+      };
+      const parsed = HonorsItemSchema.parse(warned);
+      expect(parsed.carrying_reviewers[0]?.screening_notice).toEqual(notice);
+      expect(parsed).not.toHaveProperty("screening_notice");
+      expect(parsed.status).toBe(validClaimEntry.status);
+      const claimOnly = HonorsItemSchema.parse({ ...validClaimEntry, screening_notice: notice });
+      expect(claimOnly.carrying_reviewers[0]).not.toHaveProperty("screening_notice");
+      for (const invalid of [
+        { ...notice, model_version: "private-provider-version" },
+        { ...notice, action: "published" },
+        { ...notice, category: "benign" },
+      ]) {
+        expect(
+          HonorsItemSchema.safeParse({
+            ...validClaimEntry,
+            carrying_reviewers: validClaimEntry.carrying_reviewers.map((review) => ({
+              ...review,
+              screening_notice: invalid,
+            })),
+          }).success,
+        ).toBe(false);
+      }
+    });
+
     test("refuses non-gated or subjective status", () => {
       for (const badStatus of ["proved", "verified", "top-result", "open", "conjecture"]) {
         expect(

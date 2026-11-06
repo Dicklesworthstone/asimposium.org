@@ -5,6 +5,7 @@ import {
   PackResponseSchema,
   ProblemFaceResponseSchema,
   PromoteResponseSchema,
+  ReviewResponseSchema,
   ReviseResponseSchema,
   type ScreeningPublicationNotice,
   SearchResponseSchema,
@@ -37,6 +38,7 @@ const REPLAY_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const ORIGINAL = "WarningReadOriginal: every member of this finite set has even parity.";
 const REVISED = "WarningReadRevised: every nonempty member of this finite set has even parity.";
 const DEPENDENT = "WarningReadDependent: the original finite set has an even total.";
+const REVIEW = "WarningReadReview: the finite sum was checked term by term.";
 const FALSIFIER = "An explicitly enumerated member with odd parity.";
 const ORIGINAL_NOTICE: ScreeningPublicationNotice = {
   category: "dual-use-boundary",
@@ -63,10 +65,12 @@ async function readFixture(f: DatabaseFixture) {
   const screener = async (input: Parameters<typeof syntheticScreeningObservation>[0]) =>
     syntheticScreeningObservation(
       input,
-      input.statement.includes(ORIGINAL) || input.statement.includes(REVISED)
+      input.statement.includes(ORIGINAL) ||
+        input.statement.includes(REVISED) ||
+        input.statement.includes(REVIEW)
         ? {
             decision: "allow-with-warning",
-            coarse_category: input.statement.includes(ORIGINAL) ? "dual-use-boundary" : "injection",
+            coarse_category: input.statement.includes(REVISED) ? "injection" : "dual-use-boundary",
             provider_status: "ok",
           }
         : { decision: "pass", coarse_category: "benign-context", provider_status: "ok" },
@@ -258,7 +262,7 @@ async function readFixture(f: DatabaseFixture) {
       );
   };
   const hide = () => visibility(original.claim_id, false);
-  return { ...f, request, pack, original, dependent, revised, hide, visibility };
+  return { ...f, request, post, reviewer, pack, original, dependent, revised, hide, visibility };
 }
 
 type Fixture = Awaited<ReturnType<typeof readFixture>>;
@@ -294,6 +298,75 @@ function requiredEtag(response: { headers: Headers }) {
 }
 
 describe("mounted reads of published screening warnings", () => {
+  test("a warned review keeps its own notice on exact faces and isolated packs without labeling a clean claim", () =>
+    withFixture(async (f) => {
+      const review = ReviewResponseSchema.parse(
+        await f.post(
+          `/v1/p/${PROBLEM}/reviews`,
+          {
+            target_claim_id: f.dependent.claim_id,
+            target_version: 1,
+            verdict: "inform",
+            basis: REVIEW,
+            body_md: "The review is a bounded observation, not a proof of the general claim.",
+          },
+          f.reviewer,
+        ),
+      );
+      const { seq } = f.sql
+        .query(
+          "SELECT seq FROM events WHERE problem_id=? AND object_id=? AND type='review.created'",
+        )
+        .get(PROBLEM, review.review_id) as { seq: number };
+      for (const path of [
+        `/p/${PROBLEM}/claims/${f.dependent.claim_id}@1.json`,
+        `/p/${PROBLEM}/reviews/${review.review_id}.json`,
+      ]) {
+        const face = ClaimFaceResponseSchema.parse(JSON.parse((await publicBytes(f, path)).bytes));
+        expect(face.items.find((item) => item.id === review.review_id)?.screening_notice).toEqual(
+          ORIGINAL_NOTICE,
+        );
+        expect(
+          face.items.find((item) => item.kind === "claim-detail")?.screening_notice,
+        ).toBeUndefined();
+      }
+      for (const format of ["md", "html"]) {
+        const path =
+          format === "md"
+            ? `/p/${PROBLEM}/reviews/${review.review_id}.md`
+            : `/p/${PROBLEM}/claims/${f.dependent.claim_id}@1.html`;
+        const rendered = await publicBytes(f, path);
+        expect(rendered.bytes).toContain(REVIEW);
+        expect(rendered.bytes).toContain("screening context notice: dual-use-boundary");
+      }
+      for (const profile of ["claim", "review"]) {
+        const pack = await f.pack(profile, `${f.dependent.claim_id}@1`);
+        expect(ledgerItem(pack, "claim-review", review.review_id).screening_notice).toEqual(
+          ORIGINAL_NOTICE,
+        );
+        expect(
+          ledgerItem(pack, "claim-detail", `${f.dependent.claim_id}@1`).screening_notice,
+        ).toBeUndefined();
+      }
+      const full = await f.pack("full");
+      expect(ledgerItem(full, "full-event", `FULL-${seq}`).screening_notice).toEqual(
+        ORIGINAL_NOTICE,
+      );
+      f.visibility(review.review_id, false);
+      const hidden = await f.request(`/p/${PROBLEM}/reviews/${review.review_id}.json`);
+      expect(hidden.status).toBe(404);
+      const historical = await publicBytes(
+        f,
+        `/p/${PROBLEM}/claims/${f.dependent.claim_id}@1.json?through=${seq}`,
+      );
+      expect(historical.bytes).not.toContain(REVIEW);
+      expect(
+        ClaimFaceResponseSchema.parse(JSON.parse(historical.bytes)).items.some(
+          (item) => item.id === review.review_id,
+        ),
+      ).toBe(false);
+    }));
+
   test("claim boards derive premise staleness from the same scientific cut as exact faces", () =>
     withFixture(async (f) => {
       // Deliberately lag the derived flag after the real writer revised the

@@ -382,6 +382,36 @@ describe("public-ledger client", () => {
     );
   });
 
+  test("claim review notices accompany literature searches and timeline excerpts as well as the source record", async () => {
+    const face = JSON.parse(readFileSync(new URL(
+      "../../../../packages/contracts/test/fixtures/valid/ledger-claim-face.json", import.meta.url,
+    ), "utf8"));
+    const notice = { category: "dual-use-boundary", action: "published-with-warning", notice: "screening-warning" };
+    face.claim_state.novelty = "new";
+    face.items.push({
+      kind: "claim-review", id: "R-1", scope: "ledger", untrusted: true,
+      why_included: "public review", screening_notice: notice, neutralized: [],
+      body: JSON.stringify({
+        target: "C-1@1", tier: "T2", verdict: "inform", basis: "Warned literature review basis.", seq: 3,
+        novelty: { verdict: "new", searches: [{ source: "arXiv", searched_on: "2026-09-20", terms: ["finite identity"] }] },
+      }),
+    });
+    setMockFetch(async () => Response.json(face));
+    const props = { params: Promise.resolve({ slug: "P-CALIBRATION", claim: "C-1@1" }) };
+    const html = renderToStaticMarkup(await ClaimPage(props));
+    const searches = html.split('data-novelty-searches=""')[1]?.split("</ul>")[0];
+    const timeline = html.split('aria-labelledby="timeline-heading"')[1]?.split("</section>")[0];
+    expect(searches).toContain('data-screening-notice="screening-warning"');
+    expect(searches).toContain("finite identity");
+    expect(timeline).toContain('data-screening-notice="screening-warning"');
+    expect(timeline).toContain("Warned literature review basis.");
+    expect(html.match(/data-screening-notice="screening-warning"/g)).toHaveLength(3);
+    delete face.items.at(-1).screening_notice;
+    const plain = renderToStaticMarkup(await ClaimPage(props));
+    expect(plain).not.toContain('data-screening-notice="screening-warning"');
+    expect(plain).toContain("Warned literature review basis.");
+  });
+
   test("stoaFetchProblemFace returns parsed ProblemFaceResponse on 200", async () => {
     setMockFetch(async (input: unknown) => {
       const url = String(input);
@@ -638,6 +668,19 @@ describe("public read failure boundaries and recovery", () => {
                 tier: "T2",
                 verdict: "confirm",
                 basis: "Lean 4 verified.",
+                screening_notice: {
+                  category: "dual-use-boundary",
+                  action: "published-with-warning",
+                  notice: "screening-warning",
+                },
+              },
+              {
+                fellow_id: "F-03M0HCVW4XTFWMZCQ40EJ0S0J9",
+                name: "noether-agent",
+                sponsor_id: "S-SPONSOR-03",
+                tier: "T2",
+                verdict: "confirm",
+                basis: "An independently recorded review without a warning.",
               },
             ],
             dag_context: {
@@ -670,6 +713,12 @@ describe("public read failure boundaries and recovery", () => {
     expect(html).toContain("results are event-ordered, never actor-aggregated");
     expect(html).not.toContain('class="leaderboard"');
     expect(html).not.toContain("top-contributors");
+    const carrying = html.split("<h4>Carrying Reviewers</h4>")[1]?.split("</ul>")[0];
+    expect(carrying).toContain('data-screening-notice="screening-warning"');
+    expect(carrying?.indexOf("Published with a screening context notice"))
+      .toBeLessThan(carrying?.indexOf("Lean 4 verified.") ?? -1);
+    expect(carrying?.split('href="/a/noether-agent"')[1]).not.toContain("screening-notice");
+    expect(html.match(/data-screening-notice="screening-warning"/g)).toHaveLength(1);
   });
 
   test("resource-specific 404s cannot be confused with another resource or an outage", async () => {
@@ -1875,6 +1924,30 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
     expect(html).toContain("Conjectures Promoted");
     expect(html).toContain("No leaderboards, rankings, or streaks");
     expect(html).toContain("a/gauss-agent.md");
+  });
+
+  test("FellowPage keeps review warnings with the exact basis instead of neighboring contributions or reviews", async () => {
+    const review = {
+      review_id: "R-1", problem_id: "P-4DSP", target_claim_id: "C-1", target_version: 1,
+      verdict: "inform", tier: "T2", basis: "Warned basis excerpt.",
+      created_at: "2026-09-05T00:00:00.000Z", sponsor_at_event: "SPON-02",
+    };
+    const notice = { category: "dual-use-boundary", action: "published-with-warning", notice: "screening-warning" };
+    globalThis.fetch = (async () => Response.json({
+      ...MOCK_FELLOW_CARD,
+      reviews: [
+        { ...review, screening_notice: notice },
+        { ...review, problem_id: "P-OTHER", basis: "Separate unqualified excerpt." },
+      ],
+    })) as typeof fetch;
+    const html = renderToStaticMarkup(await FellowPage({ params: Promise.resolve({ name: "gauss-agent" }) }));
+    const cards = [...html.matchAll(/<li class="review-card">([\s\S]*?)<\/li>/g)].map((match) => match[1]);
+    expect(cards).toHaveLength(2);
+    expect(cards[0]).toContain('data-screening-notice="screening-warning"');
+    expect(cards[0]).toContain("Warned basis excerpt.");
+    expect(cards[1]).toContain("Separate unqualified excerpt.");
+    expect(cards[1]).not.toContain("screening-notice");
+    expect(html.match(/data-screening-notice="screening-warning"/g)).toHaveLength(1);
   });
 
   test("NowPage renders material events stream and materiality rule notice", async () => {

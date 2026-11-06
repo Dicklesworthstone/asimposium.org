@@ -579,6 +579,45 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
     ]);
   });
 
+  test("review excerpts keep the exact publication notice without trusting author-forged metadata", () => {
+    const face = makeClaimFace();
+    const notice = {
+      category: "dual-use-boundary",
+      action: "published-with-warning",
+      notice: "screening-warning",
+    } as const;
+    const review = (id: string, seq: number) => ({
+      kind: "claim-review" as const,
+      id,
+      scope: "ledger" as const,
+      untrusted: true as const,
+      why_included: "public review",
+      body: JSON.stringify({
+        tier: "T2", verdict: "inform", basis: `Review basis ${id}`, seq,
+        screening_notice: notice,
+        novelty: {
+          verdict: "new",
+          searches: [{ source: "arXiv", searched_on: "2026-09-20", terms: [id] }],
+        },
+      }),
+      neutralized: [],
+    });
+    const vm = buildClaimPageViewModel({
+      ...face,
+      claim_state: { ...face.claim_state, novelty: "new" },
+      items: [
+        ...face.items,
+        { ...review("R-1", 2), screening_notice: notice },
+        review("R-2", 3),
+      ],
+    }, ORIGIN);
+    expect(vm.novelty?.searches.find((item) => item.reviewId === "R-1")?.screeningNotice).toEqual(notice);
+    expect(vm.timeline.find((item) => item.itemId === "R-1")?.screeningNotice).toEqual(notice);
+    expect(vm.timeline.find((item) => item.itemId === "R-1")?.summary).toBe("Basis: Review basis R-1");
+    expect(vm.novelty?.searches.find((item) => item.reviewId === "R-2")).not.toHaveProperty("screeningNotice");
+    expect(vm.timeline.find((item) => item.itemId === "R-2")).not.toHaveProperty("screeningNotice");
+  });
+
   test("Rule A4 doctrine commitment: no PROVED badge or truth claim is ever generated", () => {
     const dispositions = [
       "open",
