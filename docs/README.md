@@ -16,8 +16,58 @@ observed.
 
 ### Dependency and schema repairs — 2026-11-06
 
-The newest repair addresses the repeated no-JS click failure (`3soe`). Exact
-`92ce6a4d` independently passes all eight root groups (Wire 6,683), uninterrupted
+The final functional revision is `c6fb716b0836b7cc96b66cffb6c09a37b15b8310`.
+Independent verification in a standalone frozen checkout passes the original
+gates below, with source bytes, Git modes and nineteen selected dependency
+identities checked before and after execution. The source inventory contains
+2,467 tracked files and shares no source inodes with the primary checkout.
+
+| Gate | Result at `c6fb716b` |
+| --- | --- |
+| Unfiltered root dispatcher | Eight groups pass in 1,401.154 seconds; Wire 6,683/0 and Agora 883 |
+| Native discovery | Original 33 cases pass uninterrupted in 439.333 seconds |
+| Atomic-batch journey | Passes in 37.555 seconds, including the new nested-source refusal and every original atomic check |
+| Account-export journey | Passes in 10.916 seconds, including privacy and transfer checks |
+| Production-build browser | All 209 checks pass in 106.287 seconds with the original actions and bounds |
+| Separate static gates | Typecheck and lint eight groups each; contracts 947, render 584, Worker contracts 178 and security 33; schema drift passes |
+
+The toolchain root group retains 54 existing individual skips; no dispatcher group
+is blocked, missing or skipped. Native discovery excludes the separately executed
+atomic-batch and account-export journeys; these runs do not cover the whole
+integration registry. Browser coverage includes JavaScript-disabled source and
+claim links, actual PNG decoding and image invalidation after a public write.
+Workerd, D1 and R2 bindings are real, while identity and screening use local
+fixtures. This is local product proof, not Google OAuth or staging G-C evidence.
+Final process audits find all 64 recorded process births retired and all 21 known
+groups empty. Active visibility limits, one unreadable root post-run record,
+warnings and non-exhaustive signal tracing remain recorded in the raw receipts.
+
+The matching [Vercel Preview](https://asimposium-i06jlptgo-dicklesworthstones-projects.vercel.app)
+(`dpl_AnEqoRZe3JF3HYwHYmEQ5Y1CjmqA`) is READY at that exact revision.
+Build logs confirm Bun 1.4.4, frozen installation, Next 16.4.5 and Node 24.
+Primary and independent live QA each pass the unchanged 26 HTTP, three static-byte
+and four Chromium-view checks; all eight screenshots are inspected. Three actual
+share-image responses pass PNG signature and 1200-by-630 size checks. The provider
+source archive contains 2,423 regular files matching tracked bytes and modes;
+its only omissions are 39 Beads files and five `.gitignore` files. No extra or
+unsafe archive paths are present. Complete provider queries report zero runtime
+error/fatal records and zero HTTP 5xx records over 09:29:33–10:16:33 UTC, covering
+both live QA runs. Pagination is exhausted and excluded intervals are empty; a
+separate HTTP 200 record confirms log visibility. This is a bounded observation,
+not a permanent no-errors claim or a working deployed ledger.
+
+At 10:00 UTC, production and staging Worker capability bytes still match the
+retained draft receipts; `/protocol.json` returns 404 on both. The four required
+Cloudflare authority/configuration variables are absent in both Node and Bun
+presence checks. No Worker deploy, resource provisioning, production promotion
+or DNS change occurs. `rs5n` and launch remain blocked on operator authority and
+the original deployed gates.
+
+The earlier failures and controls below explain the repairs; their results retain
+their original revisions.
+
+The repeated no-JS click failure (`3soe`) was reproduced at exact `92ce6a4d`.
+That revision independently passes all eight root groups (Wire 6,683), uninterrupted
 Discovery 33, the separate atomic-batch journey (34.233 seconds) and account export
 (8.472 seconds). Its original production browser nevertheless fails normally in
 161.631 seconds after 108 passing checks. The original 30-second exact-claim click
@@ -47,11 +97,13 @@ three Playwright versions and removes their obsolete optional fsevents descripto
 Next/Auth.js versions and integrity descriptors are unchanged; Bun's peer-context
 stores change. Primary hydration preserves all eight old links and matches every
 candidate link. The new 575-name/601-version census retains the same two alerts.
-Final exact-revision independent gates and matching deployment checks are pending.
-`3soe` now blocks both `1mag` and `hdc1`; none is self-closed.
+Final exact-revision independent gates and matching deployment checks now pass
+as recorded above. StormyGorge independently assesses every original acceptance
+item and closes `3soe` first (comment 2852), then `1mag` (2853) and `hdc1` (2854),
+flushing each mutation. Criteria and dependencies are unchanged; no implementing
+agent self-closure occurs. The tracker retains the earlier failures and controls.
 
-The following earlier qualification names its own exact source and does not
-substitute for those pending gates.
+The following earlier qualification names its own exact source.
 
 The latest review finds a concrete nested-data validation discrepancy (`1mag`):
 the temporary-ID resolver can convert an own `__proto__` key into a local object's
@@ -61,8 +113,8 @@ global prototype mutation or authentication escalation. The minimal repair uses
 a null-prototype copy. The mounted unit passes eight expectations; the existing
 real-bindings atomic journey fails before repair (batch 201 versus direct 422,
 7.864 seconds) and passes afterward in 36.716 seconds. All original atomic checks
-remain. Final independent qualification and deployment must follow the corrected
-source. The preceding qualified source is
+remain. The final independent atomic-batch journey also passes at `c6fb716b`.
+The preceding qualified source is
 `44e8b99c1109371ce5aeadbcf03512111e72070f`.
 Wrangler 4.158.0 and Workers types 5.20261104.1 use the published dependency
 family: Miniflare 5.20261104.0-beta, Workerd 1.20261104.1, Sharp 0.35.5 and
@@ -89,7 +141,8 @@ full contracts 947, schema drift, render 584, Worker contracts 178 and security
 finds all twenty recorded process births retired and all eight known groups
 empty; earlier visibility limits are retained. These results qualify the 22
 peer changes in `b3fd95d0`, without attributing authorship or importing their
-earlier proof. The historical click failures remain unclassified (`3soe`).
+earlier proof. At that revision the historical click failures were still
+unclassified; the later reproduced retry defect and repair are recorded above.
 
 The fixture repair (`fec9eff6`, `hdc1`) follows an actual independent root
 failure at `ae2cb4bc`: Wire 6,681 pass and one fail. Retained Workerd-created
@@ -103,7 +156,7 @@ named positive passes 57 expectations; five mounted reads select 78 items each,
 with median 115.515 ms and maximum 165.366 ms inside the unchanged 600 ms bound.
 The full lifecycle matrix passes in both subsequent independent root runs.
 
-The final registry census covers 575 names/602 locked versions and leaves two
+The final registry census covers 575 names/601 locked versions and leaves two
 advisory-bearing families: low-severity KaTeX 0.16.47 in the Markdown extension
 and moderate Minimatch 10.2.6 in TypeScript tooling. The public renderer calls
 direct KaTeX 0.19.1 with existing bounds and `trust: false`; invocation of the old
@@ -121,7 +174,7 @@ changes, one new attempt transfers source but stops before compilation with
 the required floor and this job's reservation. No Rust tests execute, and no local
 fallback, guard reduction, cache deletion or unchanged retry follows.
 
-Vercel Preview `dpl_5E7oV9Rky4f83gBVwBtq5VvvgbYb` is READY at exact `44e8b99c`:
+The earlier Vercel Preview `dpl_5E7oV9Rky4f83gBVwBtq5VvvgbYb` is READY at exact `44e8b99c`:
 [open Preview](https://asimposium-hqse9xjno-dicklesworthstones-projects.vercel.app).
 Actual build logs show Bun 1.4.4, frozen installation, Next 16.4.5 and Node 24.
 The provider's retained source archive contains 2,423 regular files, all matching
@@ -130,8 +183,8 @@ files. No private artifacts, dependencies or environment files are uploaded.
 Primary QA passes 26 HTTP checks, three exact static copies and four Chromium
 views in 20.874 seconds; all screenshots are inspected. Three actual share-image
 responses have valid 1200-by-630 PNG bytes. Seventeen specifically identified
-canceled RSC prefetches are recorded separately. Independent live QA and the final
-provider-log window for the corrected source are still pending.
+canceled RSC prefetches are recorded separately. Final live QA and the provider-log
+window for corrected `c6fb716b` belong to the new deployment recorded above.
 
 The 22-file scan completes with a full 7,210-location export; independent review
 of all 86 critical and 347 warning locations identifies the one `1mag` defect.

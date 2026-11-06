@@ -18,33 +18,28 @@
 
 </div>
 
-> **Current-state boundary — 2026-11-06.** The repeated no-JS browser timeout
-> is reproduced in a static control and traced to Playwright's in-page retry timer.
-> The supported 1.65.0 update passes the unchanged 209-check production lane and
-> all candidate typecheck/lint groups. It is adopted; final independent qualification
-> remains pending. At `92ce6a4d`, root and native gates pass, but the old driver's
-> browser gate fails after 108 checks. The results below retain their own revisions.
-> The latest review also found a nested
-> batch-source validation discrepancy (`1mag`); its repair and final qualification
-> are in progress. The results below name the preceding exact revision.
-> Fresh review patches Next, Hono,
-> Zod and validation tooling, fixes strict JSON Schema portability, and adopts
-> supported Wrangler 4.158.0 with patched Sharp and Undici dependencies. A real-D1
-> failure also exposed missing immutable claim versions in the pack benchmark;
-> the fixture now uses canonical semantic digests without weakening its checks.
-> Independent verification of exact `44e8b99c` passes all eight root groups
-> (6,682 Wire tests and 883 Agora tests), all 33 native discovery cases, the
-> account-export journey, and all 209 production-browser checks. Separate
-> typecheck/lint, contracts, drift, render and Worker security gates also pass.
-> This includes the 22 peer changes to privacy, packs, moves and scientific support.
-> The earlier native-click failure remains unclassified despite this passing control.
-> The [current Vercel Preview](https://asimposium-hqse9xjno-dicklesworthstones-projects.vercel.app)
-> is READY at that revision; primary QA passes 26 HTTP checks, three exact static
-> comparisons, four browser views and actual 1200-by-630 PNG checks. Independent
-> live QA and the final provider-log window are still pending. Two residual
-> dependency families, raw Next advisory-range acceptance, remote Rust capacity,
-> broad scanner coverage and S2 remain open. The production and staging Worker
-> still advertise `0.1.0-draft`; Cloudflare deployment needs the operator. Launch is held.
+> **Current-state boundary — 2026-11-06.** Fresh review fixes nested batch-source
+> validation, missing immutable versions in the pack benchmark, and a reproduced
+> Playwright retry-timer defect behind no-JavaScript click timeouts. The supported
+> Playwright 1.65.0 family repairs the driver without changing application animations,
+> actions, deadlines or assertions. Earlier dependency and schema repairs include
+> Next 16.4.5 and supported Wrangler 4.158.0 with patched Sharp and Undici.
+> Independent verification of exact `c6fb716b` passes all eight root groups
+> (6,683 Wire tests and 883 Agora tests), all 33 native discovery cases, separate
+> atomic-batch and account-export journeys, and all 209 production-browser checks.
+> Separate typecheck/lint, contracts, schema drift, render and Worker security
+> gates also pass. The independent verifier closes `3soe`, `1mag` and `hdc1`
+> against their original acceptance criteria. Local Workerd, D1 and R2 bindings
+> are real. Identity and screening are fixtures; Google OAuth and staging remain unproved.
+> The matching [Vercel Preview](https://asimposium-i06jlptgo-dicklesworthstones-projects.vercel.app)
+> is READY. Primary and independent live QA each pass 26 HTTP checks, three exact
+> static comparisons and four browser views; three actual share images also pass
+> 1200-by-630 PNG checks. Provider error/fatal and HTTP 5xx queries return zero
+> records over 09:29:33–10:16:33 UTC, with complete pagination and no excluded
+> intervals. This Preview does not update the Cloudflare Worker. Production and
+> staging still advertise `0.1.0-draft`; their deployment needs the operator.
+> Two residual dependency families, raw Next advisory-range acceptance, remote
+> Rust capacity, broad scanner coverage and S2 remain open. Launch is held.
 > See the [repair evidence and remaining gaps](docs/README.md#dependency-and-schema-repairs--2026-11-06).
 >
 > Earlier qualification: public v4 exports now use the existing
