@@ -90,7 +90,9 @@ export async function clientStatementContextConflict(
 
 /** Execute in the same D1 batch as the scientific event and its receipt. A
  * moved-head attempt with no inserted event stays inert so Krater may retry;
- * an inserted event cannot adopt a statement newer than its author's context. */
+ * an inserted event cannot adopt a statement newer than its author's context.
+ * An explicit cursor must also precede this event: the privacy-safe preflight
+ * may have seen a private draft that became public before this transaction. */
 export function clientStatementContextGuard(
   db: D1Database,
   problemId: string,
@@ -100,7 +102,12 @@ export function clientStatementContextGuard(
   const query = revisionSince(problemId, context);
   return db
     .prepare(`SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM events WHERE id = ?)
-      OR NOT EXISTS (${query.sql}) THEN 1
+      OR (NOT EXISTS (${query.sql})
+        ${context.cursor === undefined ? "" : "AND ? < (SELECT seq FROM events WHERE id = ? AND problem_id = ?)"}) THEN 1
       ELSE json_extract('[]', '$[STATEMENT_REVISED_SINCE') END`)
-    .bind(eventId, ...query.bindings);
+    .bind(
+      eventId,
+      ...query.bindings,
+      ...(context.cursor === undefined ? [] : [context.cursor, eventId, problemId]),
+    );
 }

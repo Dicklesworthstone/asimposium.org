@@ -657,6 +657,178 @@ describe("statement context race", () => {
     ).toEqual([{ fellow_id: f.binding.fellowId, status: "settled_failed" }]);
   });
 
+  test("private publication during admission cannot admit a future statement cursor", async () => {
+    for (const { cursor, transport } of [
+      { cursor: 3, transport: "body" },
+      { cursor: Number.MAX_SAFE_INTEGER, transport: "header" },
+    ]) {
+      let publishAfterHeadRead: (() => Promise<void>) | undefined;
+      let claimScreenings = 0;
+      const f = await fixture({
+        afterRead: async (read) => {
+          if (
+            publishAfterHeadRead &&
+            read.kind === "first" &&
+            read.sql ===
+              "SELECT public_seq FROM problems WHERE id = ? AND status <> 'private-draft'"
+          ) {
+            const publish = publishAfterHeadRead;
+            publishAfterHeadRead = undefined;
+            await publish();
+          }
+        },
+        screenPromotion: async (input) => {
+          if (input.kind === "conjecture") claimScreenings++;
+          return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+        },
+      });
+      const reviewer = await addApprovedFellow(f, {
+        suffix: "publication-race-reviewer",
+        scopes: ["review"],
+        sponsor: { type: "sponsor", sponsorId: "usr_publication_race_reviewer" },
+      });
+      await f.db
+        .prepare(
+          "UPDATE problems SET status = 'private-draft', sponsor_id = ?, created_by_fellow_id = ? WHERE id = 'P-4DSP'",
+        )
+        .bind(f.binding.sponsorId, f.binding.fellowId)
+        .run();
+      publishAfterHeadRead = async () => {
+        const formulation = await f.db
+          .prepare(`SELECT p.title, v.statement, v.falsifier, v.motivation
+            FROM problems p JOIN problem_statement_versions v
+              ON v.problem_id = p.id AND v.version = p.current_statement_version
+            WHERE p.id = 'P-4DSP'`)
+          .first<{ title: string; statement: string; falsifier: string; motivation: string }>();
+        if (!formulation) throw new Error("Missing fixture formulation");
+        const createdAt = new Date().toISOString();
+        const payloadJson = JSON.stringify({
+          action: "publish",
+          acting_principal: { type: "sponsor", id: f.binding.sponsorId },
+          source_fellow_id: f.binding.fellowId,
+          previous_statement_version: 1,
+          previous_status: "private-draft",
+          problem: {
+            id: "P-4DSP",
+            ...formulation,
+            status: "sharpening",
+            current_statement_version: 1,
+            updated_at: createdAt,
+          },
+        });
+        await writeLedgerEvent(
+          f.db,
+          {
+            problemId: "P-4DSP",
+            eventId: "E-context-publication-race",
+            idempotencyKey: "context-publication-race",
+            requestDigest: await sha256Hex(payloadJson),
+            eventType: "problem.admitted",
+            objectKind: "problem",
+            objectId: "P-4DSP",
+            objectVersion: 1,
+            payloadJson,
+            createdAt,
+            attribution: {
+              principalType: "sponsor",
+              sponsorId: f.binding.sponsorId,
+              fellowId: null,
+              sessionId: null,
+              modelSelfDeclared: null,
+              harness: null,
+            },
+          },
+          {
+            statementsAfterEvent: () => [
+              f.db.prepare(`UPDATE problems SET status = 'sharpening', admission_mode = 'open'
+                WHERE id = 'P-4DSP' AND EXISTS (SELECT 1 FROM events WHERE id = 'E-context-publication-race')`),
+            ],
+          },
+        );
+        const opened = await reviewer.call("/v1/sessions", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": "publication-race-review-session",
+          },
+          body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+        });
+        expect(opened.status, await opened.clone().text()).toBe(201);
+        const session = SessionOpenResponseSchema.parse(await opened.json());
+        const reviewed = await reviewer.call("/v1/problems/P-4DSP/statement-review", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": "publication-race-statement-clear",
+          },
+          body: JSON.stringify({
+            session_id: session.session_id,
+            statement_version: 1,
+            verdict: "statement-clear",
+            basis: "The domain, parity claim, and falsifier are explicit.",
+            client_context_cursor: 1,
+          }),
+        });
+        expect(reviewed.status, await reviewed.clone().text()).toBe(200);
+      };
+
+      const response = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "publication-race-claim",
+          ...(transport === "header" ? { "asimp-client-context-cursor": String(cursor) } : {}),
+        },
+        body: JSON.stringify({
+          ...claim,
+          ...(transport === "body" ? { client_context_cursor: cursor } : {}),
+        }),
+      });
+      expect(publishAfterHeadRead).toBeUndefined();
+      expect(response.status, `${transport}/${cursor}: ${await response.clone().text()}`).toBe(400);
+      expect(ProblemDocumentSchema.parse(await response.json())).toMatchObject({
+        code: "SCHEMA_INVALID",
+        example: { client_context_cursor: 2 },
+      });
+      expect(claimScreenings).toBe(1);
+      expect(
+        await f.db
+          .prepare("SELECT status, public_seq FROM problems WHERE id = 'P-4DSP'")
+          .first<{ status: string; public_seq: number }>(),
+      ).toEqual({ status: "active", public_seq: 2 });
+      for (const table of ["claims", "claim_versions"])
+        expect(
+          await f.db
+            .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE problem_id = 'P-4DSP'`)
+            .first<{ n: number }>(),
+        ).toEqual({ n: 0 });
+      expect(
+        await f.db
+          .prepare(`SELECT COUNT(*) AS n FROM screening_publications s
+            JOIN events e ON e.id = s.event_id WHERE e.actor_fellow_id = ?`)
+          .bind(f.binding.fellowId)
+          .first<{ n: number }>(),
+      ).toEqual({ n: 0 });
+      expect(
+        await f.db
+          .prepare("SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'promote'")
+          .first<{ n: number }>(),
+      ).toEqual({ n: 0 });
+      expect(
+        await f.db
+          .prepare("SELECT status FROM public_write_attempt_reservations WHERE fellow_id = ?")
+          .bind(f.binding.fellowId)
+          .first<{ status: string }>(),
+      ).toEqual({ status: "settled_failed" });
+      const implicit = await f.db
+        .prepare("SELECT closed_at, implicit_inflight FROM sessions WHERE fellow_id = ?")
+        .bind(f.binding.fellowId)
+        .first<{ closed_at: string | null; implicit_inflight: number }>();
+      expect(implicit?.closed_at).toBeString();
+      expect(implicit?.implicit_inflight).toBe(0);
+    }
+  });
+
   test("a valid completed receipt replays before later cursor validation", async () => {
     const f = await statementRaceFixture();
     const draft = await f.draft();
