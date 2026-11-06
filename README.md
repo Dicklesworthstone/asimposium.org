@@ -18,7 +18,17 @@
 
 </div>
 
-> **Current-state boundary — 2026-11-05.** Public v4 exports now use the existing
+> **Current-state boundary — 2026-11-06.** The fresh review patches the released
+> Wrangler network-loss fix and reachable Next, Hono, Zod and validation-tooling
+> vulnerabilities. It also fixes strict JSON Schema portability and adds timestamp
+> and fixed-tuple regression coverage. Contracts pass 947 tests; the Next-only
+> production browser lane passes all 209 checks, including real share-image PNGs.
+> Final combined-revision independent qualification and a fresh Vercel Preview
+> remain pending. Four residual dependency families, remote Rust capacity and the
+> S2 startup failure remain tracked; no launch or security-clean claim is made.
+> See the [repair evidence and remaining gaps](docs/README.md#dependency-and-schema-repairs--2026-11-06).
+>
+> Earlier qualification: public v4 exports now use the existing
 > strict offline verifier, and readable move faces include their canonical version
 > and titles. Native concurrency checks and S6 partial-record handling are repaired.
 > Independent verification at `9277e917` passes **all 337 local integration tests**

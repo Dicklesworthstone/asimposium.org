@@ -14,6 +14,72 @@ observed.
 
 ## Current reality check — 2026-11-05
 
+### Dependency and schema repairs — 2026-11-06
+
+The released fix for Cloudflare workers-sdk #15252 is now pinned: Wrangler
+4.129.1, with Workers types 5.20260907.1. The temporary older Wrangler alias
+is removed from its actual consumers. Compatibility dates and request assertions
+are unchanged. Upstream's own fix retries eligible GET/HEAD requests internally;
+no application retry was added. The exact unpinned and parallel S1 plants pass
+three tests/67 expectations in 33.970 seconds. All three captures record free
+ports and no child survivors before success; 24 retained logs contain no raw
+500 or ProxyWorker network-loss diagnostic. Independent final-revision execution
+is still required for `e9y6.1` and its parent.
+
+The security review patches Next/eslint-config-next to 16.4.5, Hono to 4.13.16,
+Zod to 4.6.7, AJV to 8.18.0 and Playwright to 1.55.1. Compatible transitive URI,
+YAML, brace-expansion and source-map updates stay within existing parent ranges.
+Next resolves Sharp 0.35.5. A fresh frozen install matches every checked installed
+dependency link, including nested Bun store links; old dependencies and Chromium
+1187 remain preserved. Chromium 1193 (140.0.7339.186) is installed from the official
+Linux archives without cache pruning. Ubuntu 26.04 is outside Playwright 1.55's
+official platform table; actual local execution must qualify compatibility.
+
+Zod's updated exporter exposed a nonstandard `starts_with` format and previously
+underconstrained fixed tuples. Four equivalent prefix regexes remove the custom
+format. A reviewed refresh changes twelve JSON schemas, no generated TypeScript.
+Eighteen nullable unions are equivalent; 86 timestamp patterns now require
+RFC3339 seconds; seven tuples close their lengths, including exact S2 lengths
+two and six. Three new regressions compile emitted string schemas with a strict
+standard-format consumer and compare timestamp/tuple boundaries against the
+canonical Zod source. Before repair, two of these tests fail. Afterward, contracts
+pass 947 tests, drift passes, render passes 584, Worker contracts pass 178 and
+security passes 33. Original golden and drift assertions remain intact.
+
+The Next-only production browser lane passes all 209 checks, including actual
+1200-by-630 PNG responses and changed image bytes after a public write. Hono's
+425 focused query/auth/session units pass. Its native discovery file completes
+31 scenarios before the reviewer's insufficient 600-second outer capture expires
+with cleanup proved; the remaining two pass once separately. This is coverage
+across two invocations, not an uninterrupted 33-case pass. Final combined-source
+independent root/native/browser qualification and a fresh Vercel Preview are pending.
+The combined primary typecheck/lint (eight groups each), contracts/render and
+Worker contract/security gates pass in 175.626 seconds. UBS completes the current
+four manifest inputs with zero findings, and the three changed contract sources
+with zero critical/nine warnings. All nine warnings are deliberate fail-hard
+`JSON.parse` calls in contract tests; malformed generated artifacts should fail.
+
+The final npm registry census at 02:50:16 UTC covers 582 package names/636 locked
+versions and reports four advisory-bearing families: Miniflare's exact Sharp
+0.35.2 and Undici 7.29.0 pins, tooling Minimatch 10.2.6, and KaTeX 0.16.47 through
+the Markdown math extension. That older KaTeX is installed, but invocation of its
+vulnerable helper is not established; the active math renderer uses direct KaTeX
+0.19.1 with its existing trust and sanitization controls. These residuals do not
+justify unsupported dependency overrides or a security-clean claim. `l1yg` stays
+open. Rust verification stops before compilation: required RCH remote admission
+returns exit 103, `disk_headroom=8`; fleet readiness does not satisfy that job's
+capacity check. No local fallback, worker reconfiguration or cache deletion occurs.
+
+The new stable-runtime S2 control fails in 219.422 seconds with
+`S2_PARALLEL_SECOND_NOT_READY`; SIGTERM mode is unreached. The other child
+completes its workload but separately refuses provenance after a concurrent commit,
+despite an unchanged source digest. Neither observation diagnoses the second
+child's readiness failure. Original `9gyi` remains blocked; no unchanged retry is
+used to replace this failure. Cloudflare deployment authority remains unavailable
+(`rs5n`), and old immutable Vercel deployments are not patched by a new Preview.
+Raw records are retained under `e2e/artifacts/dae7-repair-20261104/` with the
+`e9y6-*`, `ii92-*` and `l1yg-*` prefixes.
+
 ### Broad scanner investigation — 2026-11-06
 
 At `770551d3`, the recovered committed merge range has 270 paths: 224 JS/TS
