@@ -16,7 +16,7 @@
     "test:security": "bun scripts/gate.ts security"
   },
   "dependencies": {
-    "next": "16.3.1",
+    "next": "16.4.5",
     "next-auth": "5.0.0-beta.32",
     "react": "19.2.8",
     "react-dom": "19.2.8",
@@ -32,7 +32,7 @@
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
     "eslint": "9.39.5",
-    "eslint-config-next": "16.3.1",
+    "eslint-config-next": "16.4.5",
     "tailwindcss": "4.3.3",
     "typescript": "5.9.3"
   },
