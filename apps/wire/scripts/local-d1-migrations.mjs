@@ -11,7 +11,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import wrangler from "wrangler-s1-local";
+import wrangler from "wrangler";
 
 assert.equal(process.versions.bun, undefined, "D1 fixture migration requires genuine Node");
 const [configPath, state, envFile, expectedRecord, rollback] = process.argv.slice(2);
@@ -32,7 +32,7 @@ const { unstable_getMiniflareWorkerOptions, unstable_splitSqlQuery } = wrangler;
 assert.equal(typeof unstable_getMiniflareWorkerOptions, "function");
 assert.equal(typeof unstable_splitSqlQuery, "function");
 // Use the exact Miniflare shipped with the already-pinned local Wrangler.
-const localRequire = createRequire(import.meta.resolve("wrangler-s1-local"));
+const localRequire = createRequire(import.meta.resolve("wrangler"));
 const { Miniflare, convertV4MiniflareOptions } = localRequire("miniflare");
 const { workerOptions } = unstable_getMiniflareWorkerOptions(configPath, undefined, {
   envFiles: [envFile],

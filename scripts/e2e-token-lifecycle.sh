@@ -32,7 +32,7 @@ readonly SUITE="token-lifecycle-local"
 readonly AGENT_USER_AGENT="asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1
 readonly ROOT
-readonly WRANGLER="${ROOT}/apps/wire/node_modules/wrangler-s1-local/bin/wrangler.js"
+readonly WRANGLER="${ROOT}/apps/wire/node_modules/wrangler/bin/wrangler.js"
 readonly CONFIG="${ROOT}/apps/wire/test/integration/wrangler.token-lifecycle.toml"
 readonly REPRODUCE="bash scripts/e2e-token-lifecycle.sh"
 readonly TOTAL_DEADLINE_SECONDS=150

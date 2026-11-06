@@ -53,7 +53,7 @@ setDefaultTimeout(60_000);
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
 const SCRIPT = "scripts/e2e-s1-cold-enrollment.sh";
-const WRANGLER = resolve(REPO_ROOT, "apps/wire/node_modules/wrangler-s1-local/bin/wrangler.js");
+const WRANGLER = resolve(REPO_ROOT, "apps/wire/node_modules/wrangler/bin/wrangler.js");
 const TRUSTED_ENV = "/usr/bin/env";
 const STARTUP_CONTROL_NAMES = [
   "BASH_ENV",
@@ -2210,22 +2210,19 @@ describe("a pinned port is validated before anything is started", () => {
     expect(ownership).not.toContain("run_named_with_deadline");
   });
 
-  test("PLANTED: S1 pins the repaired proxy runtime without changing the general Wrangler pin", () => {
+  test("PLANTED: S1 uses the first stable Wrangler with the repaired proxy runtime", () => {
     const wireManifest = JSON.parse(
       readFileSync(resolve(REPO_ROOT, "apps/wire/package.json"), "utf8"),
     ) as { devDependencies?: Record<string, unknown> };
-    const s1WranglerManifest = JSON.parse(
-      readFileSync(
-        resolve(REPO_ROOT, "apps/wire/node_modules/wrangler-s1-local/package.json"),
-        "utf8",
-      ),
+    const wranglerManifest = JSON.parse(
+      readFileSync(resolve(REPO_ROOT, "apps/wire/node_modules/wrangler/package.json"), "utf8"),
     ) as { version?: unknown };
     const proxySource = readFileSync(
-      resolve(REPO_ROOT, "apps/wire/node_modules/wrangler-s1-local/wrangler-dist/ProxyWorker.js"),
+      resolve(REPO_ROOT, "apps/wire/node_modules/wrangler/wrangler-dist/ProxyWorker.js"),
       "utf8",
     );
     const cliSource = readFileSync(
-      resolve(REPO_ROOT, "apps/wire/node_modules/wrangler-s1-local/wrangler-dist/cli.js"),
+      resolve(REPO_ROOT, "apps/wire/node_modules/wrangler/wrangler-dist/cli.js"),
       "utf8",
     );
     const source = readFileSync(resolve(REPO_ROOT, SCRIPT), "utf8");
@@ -2238,11 +2235,9 @@ describe("a pinned port is validated before anything is started", () => {
       "utf8",
     );
 
-    expect(wireManifest.devDependencies?.wrangler).toBe("4.123.0");
-    expect(wireManifest.devDependencies?.["wrangler-s1-local"]).toBe(
-      "https://pkg.pr.new/cloudflare/workers-sdk/wrangler@5fc41f0",
-    );
-    expect(s1WranglerManifest.version).toBe("4.124.0");
+    expect(wireManifest.devDependencies?.wrangler).toBe("4.129.1");
+    expect(wireManifest.devDependencies?.["wrangler-s1-local"]).toBeUndefined();
+    expect(wranglerManifest.version).toBe("4.129.1");
     expect(proxySource).toContain(
       '(request.method === "GET" || request.method === "HEAD") && attempt < 2',
     );
@@ -2250,7 +2245,7 @@ describe("a pinned port is validated before anything is started", () => {
     expect(cliSource).toContain('event.reason.startsWith("Error inside ProxyWorker")');
     expect(cliSource).toContain("the affected request failed; the dev server continues");
     expect(source).toContain(
-      'readonly LOCAL_WRANGLER="$REPO_ROOT/apps/wire/node_modules/wrangler-s1-local/bin/wrangler.js"',
+      'readonly LOCAL_WRANGLER="$REPO_ROOT/apps/wire/node_modules/wrangler/bin/wrangler.js"',
     );
     expect(source).not.toContain(
       'readonly LOCAL_WRANGLER="$REPO_ROOT/apps/wire/node_modules/.bin/wrangler"',

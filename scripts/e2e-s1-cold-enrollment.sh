@@ -77,9 +77,9 @@ REPO_ROOT="$(pwd -P)" || {
 readonly REPO_ROOT
 # Wrangler 4.114 introduced a proxy failure that can terminate `wrangler dev`
 # with `Network connection lost` while this harness is driving an otherwise
-# healthy local Worker. Keep the repository's general Wrangler pin independent,
-# but run this real local-D1 proof through Cloudflare's commit-pinned repair.
-readonly LOCAL_WRANGLER="$REPO_ROOT/apps/wire/node_modules/wrangler-s1-local/bin/wrangler.js"
+# healthy local Worker. Wrangler 4.129.1 ships the upstream repair (#15252), so
+# all local-D1 proofs now use the repository's single stable Wrangler pin.
+readonly LOCAL_WRANGLER="$REPO_ROOT/apps/wire/node_modules/wrangler/bin/wrangler.js"
 readonly LOCAL_WRANGLER_CONFIG="$REPO_ROOT/infra/wrangler.toml"
 readonly LOCAL_D1_WORKER="$REPO_ROOT/apps/wire/src/enrollment/local-d1-worker.ts"
 readonly LOCAL_D1_CLIENT="$REPO_ROOT/apps/wire/src/enrollment/local-d1-client.ts"

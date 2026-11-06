@@ -34,7 +34,7 @@ set -m
 
 readonly BLOCKED_EXIT=78
 readonly REPRODUCE="bash scripts/e2e-s6-auth-ingress.sh"
-readonly WRANGLER="apps/wire/node_modules/wrangler-s1-local/bin/wrangler.js"
+readonly WRANGLER="apps/wire/node_modules/wrangler/bin/wrangler.js"
 readonly CONFIG="apps/wire/wrangler.s6.toml"
 readonly CHECKER="apps/wire/src/auth/local-check.ts"
 readonly READY_DEADLINE_SECONDS=30
@@ -2119,7 +2119,7 @@ prepare_nested_nonce_fixture() {
     import { readFileSync } from "node:fs";
     import { createRequire } from "node:module";
     const fromWire = createRequire(process.cwd() + "/apps/wire/package.json");
-    const { unstable_splitSqlQuery } = fromWire("wrangler-s1-local");
+    const { unstable_splitSqlQuery } = fromWire("wrangler");
     const sql = readFileSync(process.argv[1], "utf8");
     process.stdout.write(JSON.stringify(unstable_splitSqlQuery(sql)));
   ' "${ROOT}/db/migrations/0003_auth_nonce_replay.sql")" \
