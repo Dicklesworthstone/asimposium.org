@@ -92,7 +92,7 @@ function fixture() {
     pins: unknown = [],
     statement = `Proposition ${claim}.`,
     version = 1,
-    kind: "lemma" | "reduction" = "lemma",
+    kind: "lemma" | "reduction" | "novelty-claim" = "lemma",
   ) => {
     seq = Math.max(
       seq,
@@ -502,17 +502,33 @@ async function scientificEvidence(
   return { event, id };
 }
 
-async function scientificReview(f: ReturnType<typeof fixture>, seq: number, claim: string) {
+async function scientificReview(
+  f: ReturnType<typeof fixture>,
+  seq: number,
+  claim: string,
+  novelty?: "new" | "rediscovery",
+) {
   const event = `EV-REVIEW-${seq}`,
     id = `R-${seq}`;
+  const verdict = novelty === undefined ? "cannot-verify" : "inform";
   const payload = JSON.stringify({
     target_claim_id: claim,
     target_version: 1,
-    verdict: "cannot-verify",
+    verdict,
     basis: "The supplied enumeration could not be independently reproduced.",
     capable_of_failure: "A reproduced enumeration with no exceptions.",
     rubric: [],
     body_md: "CONTROLLED_REVIEW_BODY_CANARY",
+    ...(novelty === undefined
+      ? {}
+      : {
+          novelty: {
+            verdict: novelty,
+            searches: [{ source: "Literature index", searched_on: "2026-10-01", terms: ["bound"] }],
+            nearest_prior_art: [{ locator: "doi:10.0000/prior", relation: "The same exact bound" }],
+            semantic_difference: "Compare the exact bound and its hypotheses.",
+          },
+        }),
   });
   const hash = await digest(payload);
   f.db
@@ -522,12 +538,42 @@ async function scientificReview(f: ReturnType<typeof fixture>, seq: number, clai
     .run(event, id, seq, hash);
   f.db.prepare("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(event, hash, payload);
   f.db
-    .prepare(`INSERT INTO reviews VALUES (?, 'P-PACK', ?, ?, ?, 1, 'T1', 'cannot-verify',
+    .prepare(`INSERT INTO reviews VALUES (?, 'P-PACK', ?, ?, ?, 1, 'T1', ?,
     'The supplied enumeration could not be independently reproduced.',
     'A reproduced enumeration with no exceptions.', '[]', 'CONTROLLED_REVIEW_BODY_CANARY', NULL)`)
-    .run(id, event, seq, claim);
+    .run(id, event, seq, claim, verdict);
   return { event, id };
 }
+
+test("public novelty faces retain the twenty-first adverse review beyond display bounds", async () => {
+  const f = fixture();
+  await f.add(1, [], "The exact bound has no earlier publication.", 1, "novelty-claim");
+  for (let sequence = 2; sequence <= 21; sequence++)
+    await scientificReview(f, sequence, "C-1", "new");
+  const adverse = await scientificReview(f, 22, "C-1", "rediscovery");
+  const app = createLedgerFaceRoutes();
+  const face = async (target = "C-1@1", through = 22) => {
+    const response = await app.request(
+      `https://a.asimposium.org/p/P-PACK/claims/${target}.json?through=${through}`,
+      {},
+      { DB: f.d1 } as Env,
+    );
+    expect(response.status).toBe(200);
+    return response.json();
+  };
+  expect((await face("C-1@1", 21)).claim_state.novelty).toBe("new");
+  const current = await face();
+  expect(current.claim_state.novelty).toBe("contested");
+  expect(current.items.some((item: { id: string }) => item.id === adverse.id)).toBe(false);
+  expect(current.omitted).toContainEqual(expect.objectContaining({ reason: "candidate_limit" }));
+  control(f, `#22`);
+  expect((await face()).claim_state).toMatchObject({ novelty: "unresolved", stale: true });
+  control(f, `#22`, "visible");
+  expect((await face()).claim_state.novelty).toBe("contested");
+  await f.add(1, [], "The revised bound has no earlier publication.", 2, "novelty-claim");
+  expect((await face("C-1@2", 23)).claim_state.novelty).toBe("unreviewed");
+  expect((await face("C-1@1", 23)).claim_state.novelty).toBe("contested");
+});
 
 for (const kind of ["claim-evidence", "claim-review"] as const) {
   for (const scope of ["object", "version", "event"] as const) {

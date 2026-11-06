@@ -101,6 +101,188 @@ async function changedPayload(source: Row, change: Record<string, unknown>): Pro
   return { ...source, payload_json: payload, payload_sha256: await sha256Hex(payload) };
 }
 
+async function noveltyClaim(version = 1, sequence = 1): Promise<Row> {
+  return row(
+    sequence,
+    version === 1 ? "claim.created" : "claim.revised",
+    { claim_id: "C-1", kind: "novelty-claim", statement, dependency_pins: [] },
+    {
+      object_id: "C-1",
+      object_version: version,
+      target_version: version,
+      content_digest: targetDigest,
+      statement,
+    },
+  );
+}
+
+async function noveltyReview(
+  sequence: number,
+  verdict: "new" | "rediscovery" | "reformulation" | "special-case" | "unresolved",
+  version = 1,
+): Promise<Row> {
+  return row(
+    sequence,
+    "review.created",
+    {
+      target_claim_id: "C-1",
+      target_version: version,
+      verdict: "inform",
+      capable_of_failure: "An earlier equivalent statement would refute novelty.",
+      tier: "T2",
+      independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
+      novelty: {
+        verdict,
+        searches: [{ source: "Literature index", searched_on: "2026-09-01", terms: ["bound"] }],
+        nearest_prior_art: [{ locator: "doi:10.0000/prior", relation: "A weaker bound" }],
+        semantic_difference: "Compare the exact bound and domain of the prior statement.",
+      },
+    },
+    {
+      object_id: `R-${sequence}`,
+      fellow_id: `F-reviewer-${sequence}`,
+      sponsor_id: `S-reviewer-${sequence}`,
+      target_version: version,
+    },
+  );
+}
+
+async function withdrawNoveltyReview(source: Row, sequence: number): Promise<Row> {
+  return row(
+    sequence,
+    "object.retracted",
+    {
+      target_object: source.object_id,
+      target_event_id: source.event_id,
+      target_kind: "review",
+      target_digest: `sha256:${source.payload_sha256}`,
+      claim_id: source.claim_id,
+      claim_version: source.target_version,
+    },
+    {
+      object_id: `RT-${sequence}`,
+      fellow_id: source.fellow_id,
+      sponsor_id: source.sponsor_id,
+      target_version: source.target_version,
+      withdrawn_event_id: source.event_id,
+      withdrawn_kind: "review",
+      withdrawn_sha256: source.payload_sha256,
+    },
+  );
+}
+
+test("novelty standing includes the adverse twenty-first review outside the display page", async () => {
+  const claim = await noveltyClaim();
+  const reviews = await Promise.all(
+    Array.from({ length: 20 }, (_, index) => noveltyReview(index + 2, "new")),
+  );
+  expect(await foldScientificRows([claim, ...reviews])).toMatchObject({ novelty: "new" });
+  const adverse = await noveltyReview(22, "rediscovery");
+  expect(await foldScientificRows([claim, ...reviews, adverse])).toMatchObject({
+    novelty: "contested",
+    disposition: "open",
+  });
+});
+
+test("novelty withdrawal removes positive authority without erasing negative knowledge", async () => {
+  const claim = await noveltyClaim();
+  const positive = await noveltyReview(2, "new");
+  const withdrawal = await withdrawNoveltyReview(positive, 3);
+  for (const payload_json of [withdrawal.payload_json, null]) {
+    expect(
+      await foldScientificRows([claim, positive, { ...withdrawal, payload_json }]),
+    ).toMatchObject({
+      novelty: "unreviewed",
+      stale: true,
+    });
+  }
+  for (const verdict of ["rediscovery", "reformulation", "special-case"] as const) {
+    const adverse = await noveltyReview(4, verdict);
+    const retracted = await withdrawNoveltyReview(adverse, 5);
+    expect(await foldScientificRows([claim, adverse, retracted])).toMatchObject({
+      novelty: "not-new",
+      stale: true,
+    });
+    expect(await foldScientificRows([claim, positive, adverse, retracted])).toMatchObject({
+      novelty: "contested",
+    });
+  }
+});
+
+test("unavailable novelty reviews cannot let a remaining positive review manufacture new", async () => {
+  const claim = await noveltyClaim();
+  const positive = await noveltyReview(2, "new");
+  const adverse = await noveltyReview(3, "rediscovery");
+  for (const payload_json of [null, `${adverse.payload_json} `]) {
+    const unavailable = { ...adverse, payload_json };
+    expect(await foldScientificRows([claim, positive, unavailable])).toMatchObject({
+      novelty: "unresolved",
+      stale: true,
+    });
+    expect(await foldScientificRows([claim, unavailable])).toMatchObject({
+      novelty: "unresolved",
+    });
+  }
+  expect(
+    await foldScientificRows([claim, { ...positive, payload_json: null }, adverse]),
+  ).toMatchObject({
+    novelty: "not-new",
+    stale: true,
+  });
+});
+
+test("novelty standing is exact-version and earlier cursor reviews never establish a revision", async () => {
+  const claim = await noveltyClaim();
+  const positive = await noveltyReview(2, "new");
+  const revised = await noveltyClaim(2, 3);
+  const oldAdverse = await noveltyReview(4, "rediscovery");
+  expect(await foldScientificRows([claim, positive])).toMatchObject({ novelty: "new" });
+  expect(await foldScientificRows([claim, positive, revised, oldAdverse])).toMatchObject({
+    currentVersion: 2,
+    novelty: "unreviewed",
+  });
+  const newReview = await noveltyReview(5, "new", 2);
+  expect(await foldScientificRows([claim, positive, revised, oldAdverse, newReview])).toMatchObject(
+    {
+      novelty: "new",
+    },
+  );
+  const lemma = await changedPayload(revised, { kind: "lemma" });
+  expect(await foldScientificRows([claim, positive, lemma, oldAdverse])).not.toHaveProperty(
+    "novelty",
+  );
+});
+
+test("novelty requires an exact valid search record and a weighted independent review", async () => {
+  const claim = await noveltyClaim();
+  const positive = await noveltyReview(2, "new");
+  for (const change of [{ tier: "T0" }, { capable_of_failure: "" }, { capable_of_failure: null }]) {
+    expect(await foldScientificRows([claim, await changedPayload(positive, change)])).toMatchObject(
+      {
+        novelty: "unreviewed",
+      },
+    );
+  }
+  for (const sameIdentity of [{ fellow_id: claim.fellow_id }, { sponsor_id: claim.sponsor_id }]) {
+    expect(await foldScientificRows([claim, { ...positive, ...sameIdentity }])).toMatchObject({
+      novelty: "unreviewed",
+    });
+  }
+  for (const change of [
+    { target_claim_id: "C-2" },
+    { target_version: 2 },
+    { verdict: "confirm" },
+    { novelty: { verdict: "new" } },
+  ]) {
+    expect(await foldScientificRows([claim, await changedPayload(positive, change)])).toMatchObject(
+      {
+        novelty: "unresolved",
+        stale: true,
+      },
+    );
+  }
+});
+
 test("reduction standing comes from the exact publication's immutable dependency pins", async () => {
   const publication = await row(
     1,

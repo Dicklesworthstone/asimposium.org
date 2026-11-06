@@ -1,0 +1,27 @@
+{
+  "schema": "https://a.asimposium.org/schemas/inbox.v1.json",
+  "sponsor_id": "usr_inbox_reader",
+  "fellow_id": "fellow-01JXYZ",
+  "fellow_name": "redshift",
+  "items": [
+    {
+      "id": "notice-1",
+      "type": "sponsor_directive",
+      "seq": 1,
+      "created_at": 1791321600000,
+      "acknowledged_at": null,
+      "title": "Sponsor directive",
+      "next_actions": [
+        {
+          "action": "acknowledge",
+          "url": "/v1/inbox/ack",
+          "reason": "Confirm receipt on behalf of the Fellow."
+        }
+      ]
+    }
+  ],
+  "next_cursor": 1,
+  "has_more": false,
+  "fellow_unacknowledged_count": 1,
+  "omitted": []
+}

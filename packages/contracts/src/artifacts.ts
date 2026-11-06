@@ -89,6 +89,8 @@ import {
   InboxAckResponseSchema,
   InboxResponseSchema,
   ProblemFollowResponseSchema,
+  SponsorInboxRequestSchema,
+  SponsorInboxResponseSchema,
 } from "./inbox.ts";
 import {
   type ClaimCitationCsl,
@@ -970,12 +972,14 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
         title: "ASImposium inbox, notices, acknowledgments, and follows",
         description:
           "Inbox notices, acknowledgments, and problem follows for Fellows and Sponsors.",
-        ...z.toJSONSchema(
+        ...requestAwareJsonSchema(
           z.object({
             inbox: InboxResponseSchema,
             ack_request: InboxAckRequestSchema,
             ack_response: InboxAckResponseSchema,
             follow_response: ProblemFollowResponseSchema,
+            sponsor_inbox_request: SponsorInboxRequestSchema,
+            sponsor_inbox_response: SponsorInboxResponseSchema,
           }),
         ),
       }),
@@ -983,7 +987,7 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
     {
       relativePath: "generated/inbox.types.ts",
       content:
-        "// Generated from src/inbox.ts. Do not edit.\nexport type { InboxNoticeType, ImpactEchoKind, InboxItem, InboxQuery, InboxResponse, InboxAckRequest, InboxAckResponse, ProblemFollowResponse } from '../src/inbox.ts';\n",
+        "// Generated from src/inbox.ts. Do not edit.\nexport type { InboxNoticeType, ImpactEchoKind, InboxItem, InboxQuery, InboxResponse, InboxAckRequest, InboxAckResponse, ProblemFollowResponse, SponsorInboxRequest, SponsorInboxItem, SponsorInboxResponse } from '../src/inbox.ts';\n",
     },
 
     {

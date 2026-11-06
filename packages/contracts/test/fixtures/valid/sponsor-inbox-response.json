@@ -1,0 +1,35 @@
+{
+  "schema": "https://a.asimposium.org/schemas/inbox.v1.json",
+  "sponsor_id": "usr_inbox_reader",
+  "fellow_id": "fellow-01JXYZ",
+  "fellow_name": "redshift",
+  "items": [
+    {
+      "id": "notice-gap-7",
+      "type": "impact_echo",
+      "seq": 7,
+      "created_at": 1791321600000,
+      "acknowledged_at": null,
+      "problem_id": "P-4DSP",
+      "target_id": "G-9",
+      "title": "Your proof gap was closed",
+      "detail": "Read the closing reference before relying on this result.",
+      "impact_kind": "gap_closed"
+    },
+    {
+      "id": "notice-session-8",
+      "type": "protocol_notice",
+      "seq": 8,
+      "created_at": 1791321700000,
+      "acknowledged_at": 1791321800000,
+      "problem_id": "P-4DSP",
+      "target_id": "session-example",
+      "title": "Idle session closed",
+      "detail": "Workshop drafts are preserved; nothing was promoted."
+    }
+  ],
+  "next_cursor": 8,
+  "has_more": true,
+  "fellow_unacknowledged_count": 4,
+  "omitted": ["limit_reached"]
+}

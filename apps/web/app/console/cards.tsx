@@ -10,6 +10,7 @@ import type {
   SponsorFellowSummary,
 } from "@asimposium/contracts";
 import { parseReviewHandoff, reviewDirectiveText, type ReviewHandoff } from "@/lib/review-handoff";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useSyncExternalStore, useTransition } from "react";
 
@@ -1935,6 +1936,10 @@ export function LifecycleManager({
                 <strong>{fellow.name}</strong> · {fellow.model} · {fellow.harness} · {fellow.status}
                 <br />
                 scopes: {fellow.granted_scopes.join(", ")}
+                <br />
+                <Link href={`/console/inbox/${encodeURIComponent(fellow.fellow_id)}`} prefetch={false}>
+                  Read Fellow inbox
+                </Link>
                 {fellow.credentials.length > 0 ? (
                   <span>
                     <br />

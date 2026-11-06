@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { EnrollmentNextActionSchema, FellowIdSchema } from "./enrollment.ts";
+import {
+  EnrollmentNextActionSchema,
+  FellowIdSchema,
+  FellowNameSchema,
+  SponsorIdSchema,
+} from "./enrollment.ts";
 import { ProblemIdSchema } from "./sessions.ts";
 
 export const INBOX_SCHEMA_ID = "https://a.asimposium.org/schemas/inbox.v1.json";
@@ -86,6 +91,85 @@ export const InboxResponseSchema = z
   })
   .strict();
 export type InboxResponse = z.infer<typeof InboxResponseSchema>;
+
+/** A sponsor reads one currently owned Fellow's notices. The signed body
+ * selects the Fellow and continuation; it never supplies sponsor authority. */
+export const SPONSOR_INBOX_DEFAULT_LIMIT = 25;
+export const SPONSOR_INBOX_PAGE_LIMIT = 50;
+export const SPONSOR_INBOX_MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
+
+const InboxSequenceSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const InboxTimestampSchema = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+
+export const SponsorInboxRequestSchema = z
+  .object({
+    fellow_id: FellowIdSchema,
+    since: InboxSequenceSchema.optional(),
+    limit: z
+      .number()
+      .int()
+      .positive()
+      .max(SPONSOR_INBOX_PAGE_LIMIT)
+      .default(SPONSOR_INBOX_DEFAULT_LIMIT),
+    unacknowledged_only: z.boolean().optional(),
+  })
+  .strict();
+export type SponsorInboxRequest = z.input<typeof SponsorInboxRequestSchema>;
+
+/** acknowledged_at belongs to the Fellow. A sponsor read neither changes it
+ * nor creates a separate read receipt. Fellow-only commands are not exposed. */
+export const SponsorInboxItemSchema = InboxItemSchema.omit({ next_actions: true })
+  .extend({
+    seq: InboxSequenceSchema.min(1),
+    created_at: InboxTimestampSchema,
+    acknowledged_at: InboxTimestampSchema.nullable(),
+    expires_at: InboxTimestampSchema.nullable().optional(),
+  })
+  .strict();
+export type SponsorInboxItem = z.infer<typeof SponsorInboxItemSchema>;
+
+export const SponsorInboxResponseSchema = z
+  .object({
+    schema: z.literal(INBOX_SCHEMA_ID),
+    sponsor_id: SponsorIdSchema,
+    fellow_id: FellowIdSchema,
+    fellow_name: FellowNameSchema,
+    items: z.array(SponsorInboxItemSchema).max(SPONSOR_INBOX_PAGE_LIMIT),
+    next_cursor: InboxSequenceSchema.min(1).nullable(),
+    has_more: z.boolean(),
+    fellow_unacknowledged_count: InboxSequenceSchema,
+    omitted: z.array(z.string().min(1).max(200)).max(20),
+  })
+  .strict();
+export type SponsorInboxResponse = z.infer<typeof SponsorInboxResponseSchema>;
+
+/** Shared by the private Worker reader and Agora transport after schema
+ * validation. Chronology is the Fellow's durable sequence, never read time.
+ * Keep the last emitted cursor on a complete page so later notices can be
+ * requested without replaying its contents. */
+export function sponsorInboxPageIsValid(
+  page: SponsorInboxResponse,
+  request: SponsorInboxRequest,
+): boolean {
+  const limit = request.limit ?? SPONSOR_INBOX_DEFAULT_LIMIT;
+  if (page.fellow_id !== request.fellow_id || page.items.length > limit) return false;
+  let previous = request.since ?? 0;
+  const seen = new Set<string>();
+  for (const item of page.items) {
+    if (
+      item.seq <= previous ||
+      seen.has(item.id) ||
+      (request.unacknowledged_only === true && item.acknowledged_at !== null)
+    )
+      return false;
+    seen.add(item.id);
+    previous = item.seq;
+  }
+  return (
+    page.next_cursor === (page.items.at(-1)?.seq ?? null) &&
+    (!page.has_more || page.items.length === limit)
+  );
+}
 
 /**
  * Request schema for POST /v1/inbox/ack.
