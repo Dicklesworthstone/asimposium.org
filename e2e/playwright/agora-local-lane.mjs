@@ -1651,6 +1651,42 @@ async function main() {
         "directive: another sponsor's Fellow never receives it",
         !JSON.stringify(await inbox(reviewerToken)).includes(DIRECTIVE_TEXT),
       );
+      const sponsorInboxPath = `/console/inbox/${encodeURIComponent(fellowId)}`;
+      record(
+        "sponsor inbox: the console links to the Fellow's private notices",
+        (await sponsorPage.locator(`a[href="${sponsorInboxPath}"]`).count()) === 1,
+      );
+      const noticeBeforeRead = await target.env.DB.prepare(
+        "SELECT acknowledged_at FROM fellow_inbox_notices WHERE id = ?",
+      )
+        .bind(delivered[0]?.id ?? "missing-directive")
+        .first();
+      const inboxResponse = await sponsorPage.goto(`${agora.origin}${sponsorInboxPath}`, {
+        waitUntil: "load",
+      });
+      await sponsorPage.waitForFunction(
+        (text) => document.querySelector("main")?.textContent?.includes(text),
+        DIRECTIVE_TEXT,
+        { timeout: 20_000 },
+      );
+      record(
+        "sponsor inbox: the actual private page reads the UI-issued directive",
+        inboxResponse?.status() === 200 &&
+          (await sponsorPage.locator("main").textContent()).includes(DIRECTIVE_TEXT),
+      );
+      record(
+        "sponsor inbox: the rendered private page is not publicly cacheable",
+        privateToCaches(inboxResponse?.headers() ?? {}),
+      );
+      const noticeAfterRead = await target.env.DB.prepare(
+        "SELECT acknowledged_at FROM fellow_inbox_notices WHERE id = ?",
+      )
+        .bind(delivered[0]?.id ?? "missing-directive")
+        .first();
+      record(
+        "sponsor inbox: reading does not acknowledge the Fellow's directive",
+        noticeBeforeRead?.acknowledged_at === null && noticeAfterRead?.acknowledged_at === null,
+      );
       const ack =
         delivered.length === 1
           ? await fellowPost(
@@ -1688,6 +1724,26 @@ async function main() {
                 .catch(() => null)) ?? ""
             ).slice(0, 300),
       );
+      await sponsorPage.goto(`${agora.origin}${sponsorInboxPath}`, { waitUntil: "load" });
+      const directiveNotice = sponsorPage
+        .locator(".workshop-card")
+        .filter({ hasText: DIRECTIVE_TEXT });
+      await directiveNotice.getByText("Acknowledged by the Fellow:", { exact: false }).waitFor();
+      record(
+        "sponsor inbox: a fresh page reflects the actual Fellow acknowledgment",
+        (await directiveNotice.count()) === 1,
+      );
+      await sponsorPage
+        .getByRole("link", { name: "Unacknowledged by Fellow", exact: true })
+        .click();
+      await sponsorPage.waitForURL((url) => url.searchParams.get("unacknowledged_only") === "true");
+      await sponsorPage
+        .getByRole("heading", { name: "agora-lane-author’s notices", exact: true })
+        .waitFor();
+      record(
+        "sponsor inbox: the live unacknowledged filter omits the acknowledged directive",
+        !(await sponsorPage.locator("main").textContent()).includes(DIRECTIVE_TEXT),
+      );
 
       // The public page, read by the signed-in sponsor, still omits workshop bytes.
       await sponsorPage.goto(`${agora.origin}/p/${problemId}`, { waitUntil: "load" });
@@ -1720,6 +1776,22 @@ async function main() {
         /sign in required/i.test(anonymousHtml) &&
           !anonymousHtml.includes(SCRATCH_CANARY) &&
           !anonymousHtml.includes(WORKSHOP_CANARY),
+      );
+      const anonymousInboxResponse = await anonymousPage.goto(
+        `${agora.origin}${sponsorInboxPath}`,
+        { waitUntil: "load" },
+      );
+      await anonymousPage
+        .getByRole("heading", { name: "Sign in to read your Fellow’s notices" })
+        .waitFor();
+      record(
+        "sponsor inbox: an anonymous visit has no private notice bytes",
+        anonymousInboxResponse?.status() === 200 &&
+          !(await anonymousPage.content()).includes(DIRECTIVE_TEXT),
+      );
+      record(
+        "sponsor inbox: the anonymous response is not publicly cacheable",
+        privateToCaches(anonymousInboxResponse?.headers() ?? {}),
       );
       await anonymousPage.goto(`${agora.origin}/console/commentary/${problemId}`, {
         waitUntil: "load",
@@ -1755,6 +1827,41 @@ async function main() {
         !(await forgedPage.content()).includes(SCRATCH_CANARY),
       );
       await forged.close();
+
+      const foreignSponsor = await browser.newContext();
+      try {
+        await foreignSponsor.addCookies([
+          {
+            name: SESSION_COOKIE,
+            value: await encode({
+              token: { sub: "usr_agora_lane_reviewer", authTime: Math.floor(Date.now() / 1000) },
+              secret: AUTH_SECRET,
+              salt: SESSION_COOKIE,
+            }),
+            url: agora.origin,
+            httpOnly: true,
+            sameSite: "Lax",
+          },
+        ]);
+        const foreignPage = await foreignSponsor.newPage();
+        const foreignResponse = await foreignPage.goto(`${agora.origin}${sponsorInboxPath}`, {
+          waitUntil: "load",
+        });
+        await foreignPage
+          .getByRole("heading", { name: "Fellow inbox unavailable", exact: true })
+          .waitFor();
+        record(
+          "sponsor inbox: an authenticated foreign sponsor receives no private notice bytes",
+          foreignResponse?.status() === 200 &&
+            !(await foreignPage.content()).includes(DIRECTIVE_TEXT),
+        );
+        record(
+          "sponsor inbox: the foreign sponsor's refusal is not publicly cacheable",
+          privateToCaches(foreignResponse?.headers() ?? {}),
+        );
+      } finally {
+        await foreignSponsor.close();
+      }
     }
 
     // Share cards: the og:image each page declares is a real 1200x630 PNG

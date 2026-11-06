@@ -375,6 +375,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0127_disposition_dependency_fanout.sql
   db/migrations/0128_artifact_publication_reviews.sql
   db/migrations/0129_author_concessions.sql
+  db/migrations/0130_session_opened_public_cursor.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -585,6 +586,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/moderation/store.ts
   apps/wire/src/sessions/router.ts
   apps/wire/src/sessions/router-core.ts
+  apps/wire/src/sessions/statement-context.ts
   apps/wire/src/sessions/refusal-schema.ts
   apps/wire/src/sessions/scientific-withdrawal-router.ts
   apps/wire/src/sessions/session-close-workshop.ts
@@ -621,6 +623,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/problems/roster.ts
   apps/wire/src/inbox/markdown.ts
   apps/wire/src/inbox/router.ts
+  apps/wire/src/inbox/sponsor-inbox.ts
   apps/wire/src/inbox/store.ts
   apps/wire/src/inbox/review-invitation-link.ts
   apps/wire/src/inbox/follow-access.ts
@@ -936,6 +939,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0127_disposition_dependency_fanout.sql
   0128_artifact_publication_reviews.sql
   0129_author_concessions.sql
+  0130_session_opened_public_cursor.sql
 )
 
 

@@ -357,6 +357,7 @@
     "screening_publications_no_update": "c30d0531d2e395bdc5dd572dd59ba3053293bf6398206222c4a36eef7421d77e",
     "screening_refusals_no_delete": "999b062aaaca70d106116626468e436f526acca3c7feec545d7ef2b71ba1f971",
     "screening_refusals_no_update": "c399403a8dc50b9ee733f957526fd528e0c7ab267ef482fb363af376d10799e3",
+    "sessions_opened_public_cursor_immutable": "773e82845efefaa076ef1965fdd9233e76cfd0c06396c176e8b2cb825010898a",
     "sessions_provenance_immutable": "65796b477e686971fa9035f68668c96f18438d662aec27b74fe2573ece182d56",
     "sponsor_device_enrollment_attempts_immutable_delete": "efbf0cea7083cb74bbda1608795ac75221942e8af6a39f7d767a41f17ddebc92",
     "sponsor_device_enrollment_attempts_immutable_update": "82717bc5fc40111a04b13a14da883319cb695487dacf3593e229258c482660f2",

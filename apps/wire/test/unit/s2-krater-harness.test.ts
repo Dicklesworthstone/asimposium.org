@@ -5021,6 +5021,8 @@ s2_bounded_capture perl -e "$1"`;
     // closure verdict. An omission here could not have been detected at all.
     ["apps/wire/src/krater/krater.ts"],
     ["apps/wire/src/krater/export-signatures.ts"],
+    ["apps/wire/src/sessions/statement-context.ts"],
+    ["apps/wire/src/inbox/sponsor-inbox.ts"],
     ["apps/wire/src/krater/cas.ts"],
     ["apps/wire/src/krater/public-content.ts"],
     ["apps/wire/src/krater/outbox-do.ts"],
