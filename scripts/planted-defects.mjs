@@ -289,9 +289,18 @@ export const PLANTS = [
   {
     id: "novelty-counts-same-sponsor",
     bead: "ncnw",
-    file: "apps/wire/src/ledger-face.ts",
-    find: '        review.tier !== "T0" &&',
-    replace: "        true &&",
+    // Novelty now comes from the complete scientific fold. Both its source
+    // selection and recorded tier reject same-sponsor authority; defeat both
+    // sites to model the original semantic fault without changing its detector.
+    file: "apps/wire/src/ledger/scientific-disposition.ts",
+    find: "      row.sponsor_id !== noveltyClaim.sponsorId",
+    replace: "      true",
+    also: [
+      {
+        find: '    if (noveltyVerdict !== undefined && carriesWeight && tier !== "T0")',
+        replace: "    if (noveltyVerdict !== undefined && carriesWeight)",
+      },
+    ],
     command: LANE("novelty"),
   },
   {
@@ -603,10 +612,13 @@ export const PLANTS = [
   {
     id: "stale-statement-write-accepted",
     bead: "lu59",
-    file: "apps/wire/src/sessions/router-core.ts",
-    find: "    const revised = await stmt.first<{ seq: number; object_version: number }>();\n    if (!revised) return null;",
+    // The same revision query now feeds preflight and the in-batch fence.
+    // Disable it at their shared producer, leaving the real stale-write
+    // assertion and both call sites intact.
+    file: "apps/wire/src/sessions/statement-context.ts",
+    find: "      WHERE problem_id = ? AND type = 'problem.statement-revised'",
     replace:
-      "    const revised = await stmt.first<{ seq: number; object_version: number }>();\n    if (revised || !revised) return null;",
+      "      WHERE problem_id = ? AND type = 'problem.statement-revised-ignored'",
     command: LANE("stoa-surface"),
   },
   {

@@ -172,6 +172,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0127_disposition_dependency_fanout.sql"
   "0128_artifact_publication_reviews.sql"
   "0129_author_concessions.sql"
+  "0130_session_opened_public_cursor.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then
