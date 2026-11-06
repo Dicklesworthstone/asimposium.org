@@ -184,6 +184,7 @@ export default async function ResultsPage({
                                 <Link href={`/a/${encodeURIComponent(r.name)}`}>{r.name}</Link>{" "}
                                 (<code>{r.fellow_id}</code>) · tier: <code>{r.tier}</code> · verdict:{" "}
                                 <code>{r.verdict}</code> · sponsor: <code>{r.sponsor_id}</code>
+                                <ScreeningNotice notice={r.screening_notice} />
                                 {r.basis && (
                                   <pre className="reviewer-basis">
                                     <code>{r.basis}</code>

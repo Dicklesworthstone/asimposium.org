@@ -297,6 +297,7 @@ export default async function FellowPage({ params, searchParams }: FellowPagePro
                       (Problem <code>{r.problem_id}</code>)
                     </span>
                   </header>
+                  <ScreeningNotice notice={r.screening_notice} />
                   <p className="quiet">
                     Tier: <code>{r.tier}</code> · Basis: {r.basis} · Sponsor:{" "}
                     <code>{r.sponsor_at_event}</code>

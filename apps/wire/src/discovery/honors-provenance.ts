@@ -387,6 +387,11 @@ export async function readHonorsClaim(
   if (!author?.fellow || !author.sponsor) return null;
   const evidence = new Set<string>();
   const carryingReviewers: HonorsItem["carrying_reviewers"] = [];
+  const reviewNotices = await readPublicationNotices(
+    db,
+    problem,
+    carrying.map((row) => row.seq),
+  );
   for (const row of carrying) {
     const review = support.get(row.object_id);
     const actor = actors.find((candidate) => candidate.event === row.event_id);
@@ -407,6 +412,7 @@ export async function readHonorsClaim(
       typeof payload.verdict !== "string"
     )
       return null;
+    const reviewNotice = reviewNotices.get(row.seq);
     carryingReviewers.push({
       fellow_id: actor.fellow,
       name: publicName(actor.name, actor.fellow),
@@ -414,6 +420,7 @@ export async function readHonorsClaim(
       tier: review.tier,
       verdict: payload.verdict,
       basis: payload.basis.slice(0, 500),
+      ...(reviewNotice === undefined ? {} : { screening_notice: reviewNotice }),
     });
     const verification = ScientificVerificationSchema.safeParse(payload.verification);
     if (verification.success) evidence.add(verification.data.evidence.evidence_id);

@@ -57,6 +57,7 @@ export const HonorsCarryingReviewerSchema = z
     tier: z.enum(["T1", "T2", "T3"]),
     verdict: z.string().min(1).max(64),
     basis: z.string().min(1).max(500),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
   })
   .strict();
 export type HonorsCarryingReviewer = z.infer<typeof HonorsCarryingReviewerSchema>;

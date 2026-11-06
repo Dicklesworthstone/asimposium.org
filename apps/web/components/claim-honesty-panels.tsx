@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { ScreeningNotice } from "@/components/screening-notice";
 import type {
   ClaimBadges,
   ClaimPageViewModel,
@@ -258,6 +259,7 @@ export function ClaimTimeline({ timeline }: { readonly timeline: readonly Timeli
                   <span className="timeline-verdict"> · {entry.verdictOrDirection}</span>
                 )}
               </h3>
+              <ScreeningNotice notice={entry.screeningNotice} />
               <p className="timeline-summary">{entry.summary}</p>
               <footer className="timeline-meta quiet">
                 {entry.actor.model && (

@@ -94,12 +94,18 @@ const HEX64 = /^[a-f0-9]{64}$/;
 
 /** Other ingress kinds retain their review hold until every reading face can
  * carry the context notice. This is a producer allowlist, never caller authority. */
-function supportsPublishedWarning(kind: string): boolean {
+function supportsPublishedWarning(
+  kind: string,
+  holdContext: ScreeningHoldContext | undefined,
+): boolean {
   return (
     ClaimKindSchema.safeParse(kind).success ||
     kind === "revise" ||
     kind === "problem-proposal" ||
-    kind === "problem-statement-revision"
+    kind === "problem-statement-revision" ||
+    // Claim and statement reviews share a classifier kind. Only the server's
+    // claim-review writer has complete public notice propagation.
+    (kind === "review" && holdContext?.route === "review")
   );
 }
 
@@ -398,7 +404,8 @@ export async function screenPublicCandidate(
   }
   if (
     screening.decision === "quarantine" ||
-    (screening.decision === "allow-with-warning" && !supportsPublishedWarning(input.kind))
+    (screening.decision === "allow-with-warning" &&
+      !supportsPublishedWarning(input.kind, holdContext))
   ) {
     if (screening.decision === "quarantine") {
       await noteRefusal(env, input, holdContext, "quarantine", screening.coarse_category);

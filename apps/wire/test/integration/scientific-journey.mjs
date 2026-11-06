@@ -632,6 +632,32 @@ export async function scientificJourney({
   );
   await standing("open · unchallenged");
 
+  // This proof has a published scientific premise. The premise is deliberately
+  // distinct from the complete write-up so its later redaction exercises
+  // transitive grounding, rather than removing the directly reviewed record.
+  const premise = await call(
+    `${author.path}/evidence`,
+    {
+      bears_on_kind: "claim",
+      bears_on_id: claim.claim_id,
+      bears_on_version: 1,
+      direction: "supports",
+      kind: "argument",
+      mode: "confirmatory",
+      source: {
+        kind: "locator",
+        locator: "https://example.invalid/science/prime-divisor-premise",
+        excerpt: "Every integer greater than one has a prime divisor.",
+      },
+      body_md: "For n≥2, n!+1 is greater than one and therefore has a prime divisor.",
+    },
+    author.token,
+    201,
+  );
+  const premisePack = await pack(reviewer, "review", `${claim.claim_id}@1`);
+  const premiseDetail = JSON.parse(
+    premisePack.items.find((item) => item.id === premise.evidence_id).body,
+  );
   const proof = await call(
     `${author.path}/evidence`,
     {
@@ -645,6 +671,13 @@ export async function scientificJourney({
         kind: "locator",
         locator: "https://example.invalid/science/euclid",
         excerpt: "The complete deliberate proof is in this evidence body.",
+      },
+      falsification_check: {
+        target_digest: detail.content_digest,
+        attempted_falsifier: "The prime divisor needed by the argument does not exist.",
+        capable_of_failure: "An integer greater than one without a prime divisor.",
+        result: "survived",
+        evidence: [{ evidence_id: premise.evidence_id, digest: premiseDetail.content_digest }],
       },
       body_md: reviewBody.body_md,
     },
@@ -817,6 +850,28 @@ export async function scientificJourney({
 
   const supportedSnapshot = await retainSnapshot();
   assert.equal(supportedSnapshot.live.claim_state.disposition, "strongly-supported");
+  // Change only the ancestor's present-day visibility while the current claim
+  // is strongly supported. Restore with a later control row, never rewriting
+  // the immutable publication. This fixture controls real D1 visibility; all
+  // scientific writes and reads above and below use the production HTTP app.
+  await fixtures.setArtifactSourceVisibility(problem, premise.evidence_id, "hidden");
+  try {
+    await standing("open · unchallenged · stale");
+    for (const target of [
+      `${claimPath}@1.json`,
+      `${claimPath}@1.json?through=${supportedSnapshot.cursor}`,
+    ]) {
+      const unavailable = ClaimFaceResponseSchema.parse(await call(target));
+      assert.equal(unavailable.claim_state.disposition, "open");
+      assert.equal(unavailable.claim_state.stale, true);
+      assert.equal(unavailable.claim_state.recorded_refutation_attempts, 0);
+      assert.ok(unavailable.items.some((item) => item.id === proof.evidence_id));
+      assert.ok(!unavailable.items.some((item) => item.id === premise.evidence_id));
+    }
+  } finally {
+    await fixtures.setArtifactSourceVisibility(problem, premise.evidence_id, "visible");
+  }
+  await standing("strongly-supported");
   await unchangedSnapshot(initialSnapshot, { directive_disclosure: "unresolved" });
 
   // A private draft and a published known-false inequality travel through the
@@ -1227,6 +1282,32 @@ export async function scientificJourney({
     eventsBeforeRedaction,
   );
   await standing("open · stale");
+  await fixtures.redactPublicContent(premiseDetail.event);
+  for (const target of [
+    `${claimPath}@1.json`,
+    `${claimPath}@1.json?through=${supportedSnapshot.cursor}`,
+  ]) {
+    const invalidated = ClaimFaceResponseSchema.parse(await call(target));
+    assert.equal(
+      invalidated.claim_state.disposition,
+      "open",
+      "A redacted ancestor cannot leave its derived proof strongly supported at any cut",
+    );
+    assert.equal(invalidated.claim_state.stale, true);
+    assert.equal(invalidated.claim_state.recorded_refutation_attempts, 0);
+    assert.ok(invalidated.items.some((item) => item.id === proof.evidence_id));
+    assert.ok(!invalidated.items.some((item) => item.id === premise.evidence_id));
+  }
+  for (const prior of supportedSnapshot.faces.values()) {
+    const invalidated = await snapshotRead(prior.path, {
+      headers: { "If-None-Match": prior.etag },
+    });
+    assert.equal(invalidated.status, 200, "Ancestor loss invalidates every cached public face");
+    assert.notEqual(invalidated.headers.get("etag"), prior.etag);
+    const body = await invalidated.text();
+    assert.ok(!body.includes(premiseDetail.locator));
+    assert.ok(body.includes(proofDetail.locator), "The reviewed proof itself remains public");
+  }
   await fixtures.redactPublicContent(proofDetail.event);
   for (const prior of supportedSnapshot.faces.values()) {
     assert.ok(prior.body.includes(proofDetail.locator));
@@ -1519,6 +1600,7 @@ export async function scientificJourney({
         "same-Fellow duplicate collapse",
         "reference admission before screening",
         "redaction transaction rollback",
+        "transitive evidence loss revokes derived standing at current and retained cursors",
         "stale read parity",
         "anonymous md/json/html scientific standing and privacy parity",
         "historical version standing, withdrawal and conditional-read invalidation",

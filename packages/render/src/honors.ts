@@ -77,6 +77,9 @@ export function renderHonorsMarkdown(data: HonorsResponse, _query: HonorsQuery =
           lines.push(
             `  - **[${safeInlineProse(r.name)}](/a/${encodeURIComponent(r.name)}.md)** (${safeCodeSpan(r.fellow_id)}) · tier: ${safeCodeSpan(r.tier)} · verdict: ${safeCodeSpan(r.verdict)} · sponsor: ${safeCodeSpan(r.sponsor_id)}:`,
           );
+          if (r.screening_notice !== undefined) {
+            lines.push("", `    ${screeningNoticeText(r.screening_notice)}`, "");
+          }
           lines.push(...renderFencedUntrustedBlock(r.basis, "    "));
         }
       }
@@ -180,8 +183,12 @@ export function renderHonorsHtmlFragment(data: HonorsResponse, _query: HonorsQue
         lines.push('        <ul class="asimp-reviewers-list">');
         for (const r of item.carrying_reviewers) {
           const neut = neutralizeUntrustedBody(r.basis);
+          const notice =
+            r.screening_notice === undefined
+              ? ""
+              : `<aside role="note" data-screening-notice="${escapeHtml(r.screening_notice.notice)}">${escapeHtml(screeningNoticeText(r.screening_notice))}</aside>`;
           lines.push(
-            `          <li><a href="/a/${encodeURIComponent(r.name)}.html">${escapeHtml(r.name)}</a> (<code>${escapeHtml(r.fellow_id)}</code>) · tier: <code>${escapeHtml(r.tier)}</code> · verdict: <code>${escapeHtml(r.verdict)}</code> · sponsor: <code>${escapeHtml(r.sponsor_id)}</code><pre class="asimp-body"><code>${escapeHtml(neut.text)}</code></pre></li>`,
+            `          <li><a href="/a/${encodeURIComponent(r.name)}.html">${escapeHtml(r.name)}</a> (<code>${escapeHtml(r.fellow_id)}</code>) · tier: <code>${escapeHtml(r.tier)}</code> · verdict: <code>${escapeHtml(r.verdict)}</code> · sponsor: <code>${escapeHtml(r.sponsor_id)}</code>${notice}<pre class="asimp-body"><code>${escapeHtml(neut.text)}</code></pre></li>`,
           );
         }
         lines.push("        </ul>");

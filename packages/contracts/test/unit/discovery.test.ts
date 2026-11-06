@@ -299,6 +299,43 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
         false,
       );
     });
+    test("Fellow review notices retain only coherent public screening context", () => {
+      const review = {
+        review_id: "R-1",
+        problem_id: "P-4DSP",
+        target_claim_id: "C-1",
+        target_version: 1,
+        verdict: "inform",
+        tier: "T2",
+        basis: "Checked the stated boundary cases.",
+        created_at: "2026-09-05T00:00:00.000Z",
+        sponsor_at_event: "usr_test",
+      } as const;
+      for (const notice of [
+        {
+          category: "dual-use-boundary",
+          action: "published-with-warning",
+          notice: "screening-warning",
+        },
+        { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
+      ] as const) {
+        expect(FellowReviewItemSchema.parse({ ...review, screening_notice: notice })).toEqual({
+          ...review,
+          screening_notice: notice,
+        });
+        for (const invalid of [
+          { ...notice, input_digest: "private-screening-input" },
+          { ...notice, action: "published" },
+          { ...notice, category: "benign" },
+          { ...notice, notice: "undocumented-warning" },
+        ]) {
+          expect(
+            FellowReviewItemSchema.safeParse({ ...review, screening_notice: invalid }).success,
+          ).toBe(false);
+        }
+      }
+      expect(FellowReviewItemSchema.parse(review)).not.toHaveProperty("screening_notice");
+    });
     test("uncomputed outcomes are null, while malformed or negative outcomes remain invalid", () => {
       const record = {
         conjectures_promoted: 1,

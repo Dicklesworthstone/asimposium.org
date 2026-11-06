@@ -710,6 +710,63 @@
                 "minLength": 1,
                 "maxLength": 500
               },
+              "screening_notice": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "category": {
+                        "type": "string",
+                        "enum": [
+                          "spam-commercial",
+                          "injection",
+                          "dual-use-boundary",
+                          "operational-harm",
+                          "harassment",
+                          "sexual-content"
+                        ]
+                      },
+                      "action": {
+                        "type": "string",
+                        "const": "published-with-warning"
+                      },
+                      "notice": {
+                        "type": "string",
+                        "const": "screening-warning"
+                      }
+                    },
+                    "required": [
+                      "category",
+                      "action",
+                      "notice"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "category": {
+                        "type": "string",
+                        "const": "off-topic"
+                      },
+                      "action": {
+                        "type": "string",
+                        "const": "published-with-warning"
+                      },
+                      "notice": {
+                        "type": "string",
+                        "const": "off-scope"
+                      }
+                    },
+                    "required": [
+                      "category",
+                      "action",
+                      "notice"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
               "created_at": {
                 "type": "string"
               },
@@ -1043,6 +1100,63 @@
                       "type": "string",
                       "minLength": 1,
                       "maxLength": 500
+                    },
+                    "screening_notice": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "category": {
+                              "type": "string",
+                              "enum": [
+                                "spam-commercial",
+                                "injection",
+                                "dual-use-boundary",
+                                "operational-harm",
+                                "harassment",
+                                "sexual-content"
+                              ]
+                            },
+                            "action": {
+                              "type": "string",
+                              "const": "published-with-warning"
+                            },
+                            "notice": {
+                              "type": "string",
+                              "const": "screening-warning"
+                            }
+                          },
+                          "required": [
+                            "category",
+                            "action",
+                            "notice"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "category": {
+                              "type": "string",
+                              "const": "off-topic"
+                            },
+                            "action": {
+                              "type": "string",
+                              "const": "published-with-warning"
+                            },
+                            "notice": {
+                              "type": "string",
+                              "const": "off-scope"
+                            }
+                          },
+                          "required": [
+                            "category",
+                            "action",
+                            "notice"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
                     }
                   },
                   "required": [

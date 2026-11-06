@@ -1,4 +1,4 @@
-import type { ClaimFaceResponse, PublicClaimState } from "@asimposium/contracts";
+import type { ClaimFaceResponse, PublicClaimState, ScreeningPublicationNotice } from "@asimposium/contracts";
 
 type FaceItem = ClaimFaceResponse["items"][number];
 
@@ -179,6 +179,7 @@ export interface TimelineEntry {
     readonly harness?: string;
   };
   readonly summary: string;
+  readonly screeningNotice?: ScreeningPublicationNotice;
   readonly verdictOrDirection?: string;
   readonly tier?: string;
 }
@@ -239,6 +240,7 @@ export interface ClaimPageViewModel {
       readonly source: string;
       readonly searchedOn: string;
       readonly terms: readonly string[];
+      readonly screeningNotice?: ScreeningPublicationNotice;
     }[];
   };
 }
@@ -538,6 +540,7 @@ export function buildClaimPageViewModel(
         : data.body_md
           ? data.body_md.slice(0, 100) + (data.body_md.length > 100 ? "…" : "")
           : "Review recorded",
+      ...(item.screening_notice === undefined ? {} : { screeningNotice: item.screening_notice }),
       verdictOrDirection: data.verdict,
       tier: data.tier,
     });
@@ -935,6 +938,9 @@ export function buildClaimPageViewModel(
                             terms: (search.terms ?? []).filter(
                               (term): term is string => typeof term === "string",
                             ),
+                            ...(item.screening_notice === undefined
+                              ? {}
+                              : { screeningNotice: item.screening_notice }),
                           },
                         ]
                       : [],

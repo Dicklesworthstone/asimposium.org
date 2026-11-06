@@ -148,6 +148,7 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
             <ul aria-label="Recorded literature searches" data-novelty-searches="">
               {viewModel.novelty.searches.map((search) => (
                 <li key={`${search.reviewId}-${search.source}-${search.searchedOn}`}>
+                  <ScreeningNotice notice={search.screeningNotice} />
                   Review {search.reviewId} ({search.verdict}) searched {search.source} on{" "}
                   {search.searchedOn} for: {search.terms.join("; ")}
                 </li>
