@@ -22,6 +22,7 @@ async function fixture() {
   const a = await checkpointSigningKey(JSON.stringify({ kid: "key-a", seedHex: "11".repeat(32) }));
   const b = await checkpointSigningKey(JSON.stringify({ kid: "key-b", seedHex: "22".repeat(32) }));
   if (!a || !b) throw new Error("test keys unavailable");
+  const defaultKey = a;
   const keys = [a, b];
   const raw = JSON.stringify(keys.map((key) => ({ kid: key.kid, publicKeyHex: key.publicKeyHex })));
   for (const problem of ["P-EXPORT", "P-OTHER"]) {
@@ -33,7 +34,7 @@ async function fixture() {
       sql.query("INSERT INTO integrity_checkpoints VALUES(?,?,1,'unsigned-v0')").run(problem, seq);
     }
   }
-  async function sign(seq: number, key = a, problem = "P-EXPORT", invalid = false) {
+  async function sign(seq: number, key = defaultKey, problem = "P-EXPORT", invalid = false) {
     const checkpoint = sql
       .query("SELECT * FROM checkpoint_chain_v2 WHERE problem_id=? AND checkpoint_seq=?")
       .get(problem, seq) as { root_chain_digest: string; checkpoint_digest: string };

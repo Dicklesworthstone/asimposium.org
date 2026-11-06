@@ -300,7 +300,8 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
       expect(response.status, await response.clone().text()).toBe(200);
       const pack = PackResponseSchema.parse(await response.json());
       expect(interleave).toBeUndefined();
-      expect(later?.sequence).toBeGreaterThan(earlier.sequence);
+      if (later === undefined) throw new Error("The interleaved synthesis was not published.");
+      expect(later.sequence).toBeGreaterThan(earlier.sequence);
       expect(pack.cursor).toBe(earlier.sequence);
       expect(pack.items.find((item) => item.id === "SYS-synthesis-staleness")?.body).toContain(
         `synthesis covers through #${earlier.covers_through} — stale by 3 material events`,
@@ -308,7 +309,7 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
       const current = PackResponseSchema.parse(
         await (await f.call(`${f.path}/pack?profile=${profile}&max_tokens=8000`)).json(),
       );
-      expect(current.cursor).toBe(later?.sequence);
+      expect(current.cursor).toBe(later.sequence);
       expect(current.items.find((item) => item.id === "SYS-synthesis-staleness")?.body).toContain(
         `synthesis covers through #${earlier.sequence} — stale by 0 material events`,
       );

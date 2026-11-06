@@ -90,8 +90,9 @@ export async function verifyExportOffline(input: {
   // Keep both exact grammars. Public context is never stripped or passed to
   // the private restore parser as an implicitly trusted v3 archive.
   const privateParsed = parseProblemExport(input.ndjson);
-  const parsed = privateParsed.ok ? privateParsed : parsePublicProblemExport(input.ndjson);
-  const publicFormat = parsed.ok && "publicationContext" in parsed;
+  const publicParsed = privateParsed.ok ? null : parsePublicProblemExport(input.ndjson);
+  const parsed = publicParsed ?? privateParsed;
+  const publicExport = publicParsed?.ok ? publicParsed : null;
   if (!Array.isArray(input.trustedKeys))
     return {
       ok: false,
@@ -100,12 +101,13 @@ export async function verifyExportOffline(input: {
       signed: 0,
       failures: ["keys: expected an independently pinned key array"],
     };
-  const publicChain = publicFormat
-    ? await verifyPublicProblemExportChain(input.ndjson, undefined, undefined, input.trustedKeys)
-    : null;
+  const publicChain =
+    publicExport !== null
+      ? await verifyPublicProblemExportChain(input.ndjson, undefined, undefined, input.trustedKeys)
+      : null;
   const chain = publicChain?.intact
     ? publicChain
-    : await verifyProblemExportChain(publicFormat ? parsed.chainNdjson : input.ndjson);
+    : await verifyProblemExportChain(publicExport?.chainNdjson ?? input.ndjson);
   // Every accepted v3/v4/v5 event must carry payload_json, and the common
   // verifier rehashes those bytes before its envelope and chain links. Public
   // content-control refusals produce no archive; digest-only/redacted records
@@ -119,7 +121,7 @@ export async function verifyExportOffline(input: {
     return { ok: false, problem: null, checkpoints: 0, signed: 0, failures };
   }
   const problem = parsed.header.problem;
-  const format = publicFormat ? parsed.format : EXPORT_FORMAT;
+  const format = publicExport?.format ?? EXPORT_FORMAT;
   const context: PublicContextIntegrity = publicChain?.intact
     ? {
         publicationContextSha256: publicChain.publicationContextSha256,
@@ -128,7 +130,7 @@ export async function verifyExportOffline(input: {
       }
     : {};
   if (input.signatures === undefined) {
-    if (!publicFormat || parsed.checkpointSignatures === null)
+    if (publicExport === null || publicExport.checkpointSignatures === null)
       failures.push("signatures: legacy exports require a separate checkpoint file");
     else if (publicChain?.intact && !publicChain.authenticated)
       failures.push(
@@ -140,9 +142,11 @@ export async function verifyExportOffline(input: {
       problem,
       checkpoints: parsed.header.checkpoints.length,
       signed:
-        publicFormat && publicChain?.intact
+        publicExport !== null && publicChain?.intact
           ? new Set(
-              parsed.checkpointSignatures?.signatures.map((signature) => signature.checkpoint_seq),
+              publicExport.checkpointSignatures?.signatures.map(
+                (signature) => signature.checkpoint_seq,
+              ),
             ).size
           : 0,
       authenticated: false,
