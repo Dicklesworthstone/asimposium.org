@@ -17,7 +17,6 @@ export const PROMOTION_MOVE_KINDS: ReadonlySet<MoveKind> = new Set<MoveKind>([
   "close-gap",
   "normalize-conflict",
   "retry-dead-end",
-  "back-to-the-object",
 ]);
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -47,9 +46,16 @@ export function filterMovesByPermissions(
 ): readonly NextMoveCandidate[] {
   return candidates.filter((candidate) => {
     if (effectivePermissions.session_open !== true) return false;
-    if (PROMOTION_MOVE_KINDS.has(candidate.move) && effectivePermissions.promote !== true)
-      return false;
-    if (candidate.move === "review" && effectivePermissions.review !== true) return false;
+    let effect = candidate.move;
+    if (effect === "back-to-the-object") {
+      const preparation = candidate.contract?.preparation;
+      if (!record(preparation)) return false;
+      const focus = preparation.focus_move;
+      if (focus !== "review" && focus !== "add-refuter" && focus !== "close-gap") return false;
+      effect = focus;
+    }
+    if (PROMOTION_MOVE_KINDS.has(effect) && effectivePermissions.promote !== true) return false;
+    if (effect === "review" && effectivePermissions.review !== true) return false;
     const request = candidate.contract?.request;
     if (
       record(request) &&

@@ -1,8 +1,13 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { getMoveTemplate, type NextMoveCandidate } from "@asimposium/contracts";
+import type { ReviewQueueItem } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
+import { selectLedgerMoves } from "../../src/mega-commands/ledger-moves.ts";
 import {
   CEREMONY_BREAKER_EVENT_THRESHOLD,
+  type CeremonyMoveContext,
+  type CeremonyNeedReaders,
   checkCeremonyBreaker,
   checkIdleSession,
   checkSynthesisTrigger,
@@ -11,20 +16,97 @@ import {
   isObjectLevelEvent,
   SYNTHESIS_EVENT_THRESHOLD,
 } from "../../src/mega-commands/materiality.ts";
+import { filterMovesByPermissions } from "../../src/mega-commands/move-permissions.ts";
 
 function createMockDb(sqlite: Database): D1Database {
   return {
     prepare(sql: string) {
       return {
-        bind: (...values: unknown[]) => ({
-          first: async <T>() => (sqlite.query(sql).get(...(values as any[])) ?? null) as T | null,
+        bind: (...values: (string | number | null)[]) => ({
+          first: async <T>() => (sqlite.query(sql).get(...values) ?? null) as T | null,
           all: async <T>() => ({
-            results: sqlite.query(sql).all(...(values as any[])) as T[],
+            results: sqlite.query(sql).all(...values) as T[],
           }),
         }),
       };
     },
   } as unknown as D1Database;
+}
+
+const context: CeremonyMoveContext = {
+  viewer: { fellowId: "F-reader", sponsorId: "usr-reader" },
+  permissions: { session_open: true, review: true, promote: true },
+  now: Date.parse("2026-10-01T00:00:00.000Z"),
+};
+function need(claim: string, day: number, patch: Partial<ReviewQueueItem> = {}): ReviewQueueItem {
+  return {
+    problem_id: "P-TEST",
+    claim_id: claim,
+    version: 2,
+    cursor: 30,
+    kind: "lemma",
+    statement: "AUTHORED-CONTENT-IS-NOT-A-MOVE-INSTRUCTION",
+    falsifier: null,
+    disposition: "open",
+    need: "independent-review",
+    best_recorded_tier: "none",
+    direct_dependents: 0,
+    dependents_capped: false,
+    author_fellow_id: "F-author",
+    author_sponsor_id: "usr-author",
+    created_at: `2026-09-${String(day).padStart(2, "0")}T00:00:00.000Z`,
+    read_url: `/p/P-TEST/claims/${claim}@2.md?through=30`,
+    ...patch,
+  };
+}
+
+// Real event-window SQL and canonical eligibility/request construction; the
+// bounded need admissions are explicit fixtures. The native moves lane proves
+// their visibility, withdrawal and current-migration reads against real D1.
+function processWindow(items: ReviewQueueItem[] = [], reviewed = new Set<string>()) {
+  const sqlite = new Database(":memory:");
+  sqlite.exec(`
+    CREATE TABLE events (id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER,
+      type TEXT, object_kind TEXT, object_id TEXT, object_version INTEGER);
+    CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_json TEXT);
+  `);
+  for (let seq = 6; seq <= 30; seq++)
+    sqlite.run("INSERT INTO events VALUES (?, 'P-TEST', ?, 'question.raised', 'question', ?, 1)", [
+      `EV-${seq}`,
+      seq,
+      `Q-${seq}`,
+    ]);
+  let gapMove: NextMoveCandidate | null = null;
+  let gapCalls = 0;
+  const readers: CeremonyNeedReaders = {
+    claims: async (_db, problemId, viewer, permissions, cursor) => {
+      expect(problemId).toBe("P-TEST");
+      expect(cursor).toBe(30);
+      return {
+        items,
+        moves: selectLedgerMoves(items, viewer, permissions, reviewed, getMoveTemplate),
+        degraded: false,
+        continuation: null,
+      };
+    },
+    gap: async (_db, problemId, cursor, now) => {
+      expect([problemId, cursor, now]).toEqual(["P-TEST", 30, context.now]);
+      gapCalls++;
+      return { move: gapMove, degraded: false };
+    },
+  };
+  const db = createMockDb(sqlite);
+  return {
+    sqlite,
+    db,
+    readers,
+    read: (viewerContext = context) =>
+      checkCeremonyBreaker(db, "P-TEST", 30, "active", viewerContext, readers),
+    gapCalls: () => gapCalls,
+    setGap: (move: NextMoveCandidate) => {
+      gapMove = move;
+    },
+  };
 }
 
 describe("Materiality and Ceremony Guard (Fable §9.6)", () => {
@@ -138,9 +220,6 @@ describe("Materiality and Ceremony Guard (Fable §9.6)", () => {
           extract TEXT
         );
         CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_json TEXT);
-        CREATE TABLE reviews (problem_id TEXT, target_claim_id TEXT, target_version INTEGER);
-        CREATE TABLE evidence (problem_id TEXT, bears_on_kind TEXT, bears_on_id TEXT, bears_on_version INTEGER, direction TEXT);
-        CREATE TABLE proof_gaps (gap_id TEXT PRIMARY KEY, problem_id TEXT, statement TEXT, status TEXT, created_at TEXT);
       `);
 
       // 10 process events
@@ -172,9 +251,6 @@ describe("Materiality and Ceremony Guard (Fable §9.6)", () => {
           extract TEXT
         );
         CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_json TEXT);
-        CREATE TABLE reviews (problem_id TEXT, target_claim_id TEXT, target_version INTEGER);
-        CREATE TABLE evidence (problem_id TEXT, bears_on_kind TEXT, bears_on_id TEXT, bears_on_version INTEGER, direction TEXT);
-        CREATE TABLE proof_gaps (gap_id TEXT PRIMARY KEY, problem_id TEXT, statement TEXT, status TEXT, created_at TEXT);
       `);
 
       // 24 process events + 1 claim.created event
@@ -195,49 +271,116 @@ describe("Materiality and Ceremony Guard (Fable §9.6)", () => {
       sqlite.close();
     });
 
-    test("triggers when 25 events have zero object increments and names oldest unreviewed claim", async () => {
-      const sqlite = new Database(":memory:");
-      sqlite.exec(`
-        CREATE TABLE events (
-          id TEXT PRIMARY KEY,
-          problem_id TEXT NOT NULL,
-          seq INTEGER NOT NULL,
-          type TEXT NOT NULL,
-          object_kind TEXT,
-          object_id TEXT,
-          object_version INTEGER,
-          extract TEXT
-        );
-        CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_json TEXT);
-        CREATE TABLE reviews (problem_id TEXT, target_claim_id TEXT, target_version INTEGER);
-        CREATE TABLE evidence (problem_id TEXT, bears_on_kind TEXT, bears_on_id TEXT, bears_on_version INTEGER, direction TEXT);
-        CREATE TABLE proof_gaps (gap_id TEXT PRIMARY KEY, problem_id TEXT, statement TEXT, status TEXT, created_at TEXT);
-      `);
-
-      // Old claim at seq 1
-      sqlite.run(
-        "INSERT INTO events VALUES ('EV-CLAIM', 'P-TEST', 1, 'claim.created', 'claim', 'C-1', 1, NULL)",
-      );
-      sqlite.run(
-        "INSERT INTO event_content VALUES ('EV-CLAIM', json_object('statement', 'A conjecture.'))",
-      );
-
-      // Followed by 25 process events (seq 2 to 26)
-      for (let i = 2; i <= 26; i++) {
-        sqlite.run(
-          "INSERT INTO events VALUES (?, 'P-TEST', ?, 'synthesis.created', 'synthesis', 'SYN-1', 1, NULL)",
-          [`EV-${i}`, i],
-        );
+    test("selects the oldest eligible current need without author or same-sponsor self-review", async () => {
+      const f = processWindow([
+        need("C-4", 4, { direct_dependents: 10 }),
+        need("C-1", 1, { author_fellow_id: context.viewer.fellowId }),
+        need("C-2", 2, { author_sponsor_id: context.viewer.sponsorId }),
+        need("C-3", 3),
+      ]);
+      try {
+        const result = await f.read();
+        expect(result.active).toBe(true);
+        expect(result.objectEventCountInWindow).toBe(0);
+        expect(result.oldestNeed?.kind).toBe("unreviewed-claim");
+        expect(result.oldestNeed?.ref).toBe("C-3@2");
+        expect(result.selectedMove?.contract.availability).toBe("available");
+        expect(result.selectedMove?.contract.prefilled_hints).toMatchObject({
+          target_claim_id: "C-3",
+          target_version: 2,
+        });
+        expect(JSON.stringify(result)).not.toContain("AUTHORED-CONTENT");
+        expect(f.gapCalls()).toBe(0);
+      } finally {
+        f.sqlite.close();
       }
+    });
 
-      const db = createMockDb(sqlite);
-      const result = await checkCeremonyBreaker(db, "P-TEST", 26, "active");
-      expect(result.active).toBe(true);
-      expect(result.objectEventCountInWindow).toBe(0);
-      expect(result.oldestNeed?.kind).toBe("unreviewed-claim");
-      expect(result.oldestNeed?.ref).toBe("C-1@1");
-      expect(result.oldestNeed?.description).toContain("Oldest unreviewed claim C-1@1");
-      sqlite.close();
+    test("does not repeat a recorded review and retains the next exact-version need", async () => {
+      const f = processWindow([need("C-1", 1), need("C-2", 2)], new Set(["P-TEST/C-1@2"]));
+      try {
+        expect((await f.read()).oldestNeed?.ref).toBe("C-2@2");
+      } finally {
+        f.sqlite.close();
+      }
+    });
+
+    test("falls through to the canonical gap and never invents a problem-level scientific result", async () => {
+      const f = processWindow([need("C-1", 1, { author_fellow_id: context.viewer.fellowId })]);
+      const gap: NextMoveCandidate = {
+        move: "close-gap",
+        why: "An accessible, unowned obligation remains on the current claim version.",
+        refs: ["P-TEST", "G-5", "C-1@2"],
+        contract: {
+          ...getMoveTemplate("close-gap"),
+          preparation: {
+            problem_id: "P-TEST",
+            captured_cursor: 30,
+            read_first: { method: "GET", path: "/p/P-TEST/gaps.md?through=30&target=G-5" },
+          },
+        },
+      };
+      try {
+        const empty = await f.read();
+        expect(empty.active).toBe(true);
+        expect(empty.oldestNeed).toBeNull();
+        expect(empty.selectedMove).toBeNull();
+        expect(empty.degraded).toBe(false);
+        f.setGap(gap);
+        const selected = await f.read();
+        expect(selected.oldestNeed?.kind).toBe("unowned-gap");
+        expect(selected.oldestNeed?.ref).toBe("G-5");
+        expect(selected.selectedMove).toBe(gap);
+        expect(f.gapCalls()).toBe(2);
+      } finally {
+        f.sqlite.close();
+      }
+    });
+
+    test("withholds targets without authenticated context or permission to act on the need", async () => {
+      const f = processWindow([need("C-1", 1)]);
+      try {
+        const unknown = await checkCeremonyBreaker(f.db, "P-TEST", 30, "active");
+        expect(unknown.active).toBe(true);
+        expect(unknown.degraded).toBe(true);
+        expect(unknown.oldestNeed).toBeNull();
+        const denied = await f.read({ ...context, permissions: { session_open: true } });
+        expect(denied.oldestNeed).toBeNull();
+        expect(f.gapCalls()).toBe(0);
+        const sharpening = await checkCeremonyBreaker(
+          f.db,
+          "P-TEST",
+          30,
+          "sharpening",
+          { ...context, permissions: { session_open: true, promote: true } },
+          f.readers,
+        );
+        expect(sharpening.oldestNeed).toBeNull();
+        expect(sharpening.degraded).toBe(false);
+        expect(f.gapCalls()).toBe(0);
+      } finally {
+        f.sqlite.close();
+      }
+    });
+
+    test("a focused review respects review permission and write quotas, independently of promotion", () => {
+      const focused = (focus?: string): NextMoveCandidate => ({
+        move: "back-to-the-object",
+        why: "Resume the current need.",
+        refs: ["P-TEST", "C-1@2"],
+        contract: { ...getMoveTemplate("review"), preparation: { focus_move: focus } },
+      });
+      const permissions = { session_open: true, review: true, promote: false };
+      expect(filterMovesByPermissions([focused("review")], permissions)).toHaveLength(1);
+      expect(filterMovesByPermissions([focused("close-gap")], permissions)).toHaveLength(0);
+      expect(filterMovesByPermissions([focused("add-refuter")], permissions)).toHaveLength(0);
+      expect(
+        filterMovesByPermissions([focused(), focused("unsupported")], permissions),
+      ).toHaveLength(0);
+      expect(
+        filterMovesByPermissions([focused("review")], { ...permissions, review: false }),
+      ).toHaveLength(0);
+      expect(filterMovesByPermissions([focused("review")], permissions, true)).toHaveLength(0);
     });
   });
 

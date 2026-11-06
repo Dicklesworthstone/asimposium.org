@@ -271,7 +271,7 @@ await runLocalWorkerJourney(async ({ call, enroll, fixtures, sponsorCall, env })
     assert.ok(moved, "the receiving sponsor still sees the transferred Fellow");
     assert.equal(moved.status, "paused");
     assert.deepEqual(moved.granted_resources, { event_budget: 1000 });
-    assert.deepEqual(moved.granted_scopes, ["promote", "review", "propose-problems"]);
+    assert.deepEqual(moved.granted_scopes, ["promote", "propose-problems", "review"]);
     return moved;
   };
   const moved = await inventory();

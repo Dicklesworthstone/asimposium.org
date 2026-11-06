@@ -11735,7 +11735,22 @@ describe("session protocol routes", () => {
       )
       .bind(statement, "d".repeat(64), "2026-08-20T00:00:00.000Z")
       .run();
-    await seedClaimPublication(db, "C-oversized");
+    // This is a storage-corruption plant, not an accepted publication. The
+    // pack now reads the immutable version, whose normal CHECK rejects this
+    // payload before the mounted refusal can be exercised. Bypass that CHECK
+    // only while planting the corrupt fixture, then restore it before the read.
+    await db.prepare("PRAGMA ignore_check_constraints = ON").run();
+    try {
+      await seedClaimPublication(db, "C-oversized");
+    } finally {
+      await db.prepare("PRAGMA ignore_check_constraints = OFF").run();
+    }
+    expect(
+      await db
+        .prepare("SELECT length(statement) AS size FROM claim_versions WHERE claim_id = ?")
+        .bind("C-oversized")
+        .first<{ size: number }>(),
+    ).toEqual({ size: 20_001 });
     await db.prepare("UPDATE problems SET public_seq = 1 WHERE id = 'P-4DSP'").run();
 
     const refusal = await callMounted(

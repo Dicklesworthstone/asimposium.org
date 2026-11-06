@@ -372,8 +372,9 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
       "Redirect focus away from process commentary and back to the oldest open object-level need.",
     availability: "unavailable",
     unavailable_reason:
-      "Selecting a concrete object requires the unfinished per-problem moves engine.",
-    next_step: "Read a working pack and choose an existing claim, review or evidence task.",
+      "The executable request depends on the current accessible scientific need; the catalog cannot select it.",
+    next_step:
+      "Read authenticated /v1/p/:id/next or a working pack for a selected, permission-checked contract.",
   },
   "idle-close": {
     move: "idle-close",

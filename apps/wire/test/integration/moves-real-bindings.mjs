@@ -407,6 +407,161 @@ await runLocalWorkerJourney(async (context) => {
   );
   await working(author, session);
 
+  // A process-only window must return to a current, accessible scientific
+  // obligation. Exercise the production materiality reader, including the
+  // current proof-gap schema, rather than seeding an obsolete `statement`
+  // column or an unavailable catalog-only move.
+  const focusProblem = (
+    await call(
+      "/v1/problems",
+      {
+        title: "Process-heavy parity investigation",
+        statement: "Every integer in 61..120 has a square of the same parity.",
+        falsifier: "An integer in 61..120 whose square has the opposite parity.",
+        motivation: "Return a process-heavy investigation to its current scientific need.",
+        areas: ["number-theory"],
+      },
+      author,
+      201,
+    )
+  ).problem.id;
+  await sponsorCall(
+    OWNER,
+    "POST",
+    `/v1/sponsors/problems/${focusProblem}/lifecycle`,
+    "problem-lifecycle",
+    { action: "publish" },
+  );
+  const focusReviewSession = (
+    await call("/v1/sessions", { problem_id: focusProblem, intent: "review" }, other, 201)
+  ).session_id;
+  await call(
+    `/v1/problems/${focusProblem}/statement-review`,
+    {
+      session_id: focusReviewSession,
+      statement_version: 1,
+      verdict: "statement-clear",
+      basis: "The integer domain and parity predicate are explicit.",
+    },
+    other,
+  );
+  const focusSession = (
+    await call("/v1/sessions", { problem_id: focusProblem, intent: "prove" }, author, 201)
+  ).session_id;
+  const focusClaim = async (statement) => {
+    const draft = await call(
+      `/v1/sessions/${focusSession}/workshop`,
+      { type: "claim-draft", title: "Parity claim draft", body_md: "Private preparation." },
+      author,
+      201,
+    );
+    return call(
+      `/v1/sessions/${focusSession}/promote`,
+      {
+        workshop_id: draft.workshop_id,
+        kind: "conjecture",
+        statement,
+        falsifier: "A declared integer whose square has the opposite parity.",
+      },
+      author,
+      201,
+    );
+  };
+  const hidden = await focusClaim(
+    "Sixty-four squared is even; this source will become unavailable.",
+  );
+  const hiddenEvent = await env.DB.prepare(
+    "SELECT id FROM events WHERE problem_id=? AND object_id=? AND type='claim.created'",
+  )
+    .bind(focusProblem, hidden.claim_id)
+    .first();
+  await fixtures.redactPublicContent(hiddenEvent.id);
+  const withdrawn = await focusClaim("Sixty-five squared is odd; this proposal will be withdrawn.");
+  await call(
+    `/v1/sessions/${focusSession}/retract`,
+    {
+      target_object: withdrawn.claim_id,
+      reason: "The author withdraws this isolated formulation before further investigation.",
+    },
+    author,
+    201,
+  );
+  const current = await focusClaim("Every integer in 61..90 has a square of the same parity.");
+  await call(
+    `/v1/sessions/${focusSession}/revise`,
+    {
+      claim_id: current.claim_id,
+      base_version: 1,
+      kind: "conjecture",
+      statement: "Every integer in 61..120 has a square of the same parity.",
+      falsifier: "An integer in 61..120 whose square has the opposite parity.",
+      depends_on: [],
+    },
+    author,
+    201,
+  );
+  const gap = await call(
+    `/v1/sessions/${focusSession}/gaps`,
+    {
+      target_claim_id: current.claim_id,
+      target_version: 2,
+      obligation: "Check the two residue classes modulo two in the expanded finite domain.",
+      closes_what: "The parity step in the current formulation.",
+    },
+    author,
+    201,
+  );
+  // Split the real writes across the two Fellows so the production per-Fellow
+  // public-write budget remains in force. Each question is a process event.
+  for (let index = 0; index < 25; index++) {
+    const byReviewer = index < 13;
+    await call(
+      `/v1/sessions/${byReviewer ? focusReviewSession : focusSession}/questions`,
+      { body_md: `Which parity check should cover integer ${index + 61} in the declared domain?` },
+      byReviewer ? other : author,
+      201,
+    );
+  }
+  const focused = async (token, sessionId, expectedFocus, refs) => {
+    const recommendation = await call(`/v1/p/${focusProblem}/next`, undefined, token);
+    const move = recommendation.primary_move;
+    assert.equal(
+      recommendation.degraded,
+      true,
+      "the intentionally unavailable claim remains an explicit incomplete-read boundary",
+    );
+    assert.equal(move.move, "back-to-the-object");
+    assert.equal(move.contract.availability, "available");
+    assert.equal(move.contract.preparation.focus_move, expectedFocus);
+    assert.equal(move.contract.preparation.recent_events_scanned, 25);
+    assert.equal(move.contract.preparation.object_increments_found, 0);
+    assert.deepEqual(move.refs, [focusProblem, ...refs]);
+    assert.equal(move.contract.unavailable_reason, undefined);
+    const pack = PackResponseSchema.parse(
+      await call(
+        `/v1/sessions/${sessionId}/pack?profile=working&max_tokens=8000`,
+        undefined,
+        token,
+      ),
+    );
+    const packMoves = JSON.parse(pack.items.find((item) => item.id === "SYS-working-moves").body);
+    assert.deepEqual(packMoves.primary_move, move, "working pack uses the same focused contract");
+    const response = await worker.fetch(`${origin}${move.contract.preparation.read_first.path}`);
+    assert.equal(response.status, 200, "the selected exact-version record is readable");
+    return move;
+  };
+  const reviewFocus = await focused(other, focusReviewSession, "review", [`${current.claim_id}@2`]);
+  assert.equal(reviewFocus.contract.prefilled_hints.target_version, 2);
+  const gapFocus = await focused(author, focusSession, "close-gap", [
+    gap.gap_id,
+    `${current.claim_id}@2`,
+  ]);
+  assert.equal(gapFocus.contract.preparation.target_pin.version, 2);
+  assert.ok(
+    !gapFocus.contract.request.path.endsWith("/review"),
+    "an author is not sent to self-review",
+  );
+
   console.log(
     JSON.stringify({
       stage: "moves-journey-passed",
@@ -420,6 +575,9 @@ await runLocalWorkerJourney(async (context) => {
       current_counterevidence_moves: true,
       redacted_counterevidence_excluded: true,
       move_contract_followed_to_elimination: true,
+      process_only_window_focus: true,
+      unavailable_withdrawn_and_superseded_claims_excluded: true,
+      author_focus_uses_current_proof_gap: true,
       boundary:
         "real local Workerd/D1; production provider; replay parity shown for reviews, claim relations and conflicts",
     }),

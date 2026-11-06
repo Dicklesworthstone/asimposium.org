@@ -1,9 +1,37 @@
-import { getMoveTemplate, type NextMoveCandidate } from "@asimposium/contracts";
+import {
+  getMoveTemplate,
+  type NextMoveCandidate,
+  NextMoveCandidateSchema,
+} from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
-import { checkCeremonyBreaker } from "./materiality.ts";
+import { loadReviewQueue } from "../discovery/review-queue-service.ts";
+import { loadProofGapMove } from "./gap-moves-service.ts";
+import { loadLedgerMoves } from "./ledger-moves.ts";
+import {
+  type CeremonyMoveContext,
+  type CeremonyNeedReaders,
+  checkCeremonyBreaker,
+} from "./materiality.ts";
+
+// Keep the event classifier usable by native ledger/replay code without
+// importing the Worker's discovery service graph. Only this live move adapter
+// composes the current canonical scientific readers.
+const ceremonyNeeds: CeremonyNeedReaders = {
+  claims: (db, problemId, viewer, permissions, cursor) =>
+    loadLedgerMoves(
+      db,
+      problemId,
+      viewer,
+      permissions,
+      { loadQueue: loadReviewQueue, templateFor: getMoveTemplate },
+      cursor,
+      { includeUnlisted: true },
+    ),
+  gap: loadProofGapMove,
+};
 
 export const BACK_TO_OBJECT_BOUNDARY =
-  "The ceremony breaker triggers when the recent window is process-dominated (25+ events with zero object-level increments). Redirects focus away from process commentary and back to the oldest open object-level need.";
+  "After 25 process events without an object-level increment, focus on the oldest eligible exact-version claim need among two canonical review pages, otherwise the canonical unowned proof-gap selection. Current content controls, withdrawals and reviewer eligibility still apply. Bounded selection is not an exhaustive search, an assignment or a scientific result.";
 
 export interface BackToObjectMoveResult {
   readonly move: NextMoveCandidate | null;
@@ -15,49 +43,58 @@ export async function selectBackToObjectMove(
   problemId: string,
   cursor: number,
   problemStatus: string = "active",
+  context?: CeremonyMoveContext,
 ): Promise<BackToObjectMoveResult> {
   try {
-    const ceremony = await checkCeremonyBreaker(db, problemId, cursor, problemStatus);
+    const ceremony = await checkCeremonyBreaker(
+      db,
+      problemId,
+      cursor,
+      problemStatus,
+      context,
+      ceremonyNeeds,
+    );
     if (!ceremony.active) {
       return { move: null, degraded: false };
     }
 
     const template = getMoveTemplate("back-to-the-object");
     const oldestNeed = ceremony.oldestNeed;
-    const ref = oldestNeed?.ref ?? problemId;
-    const desc =
-      oldestNeed?.description ??
-      "Read a working pack and choose an existing claim, review or evidence task.";
+    const selected = ceremony.selectedMove;
+    if (!oldestNeed || !selected) return { move: null, degraded: ceremony.degraded };
+    const preparation = selected.contract.preparation as Record<string, unknown> | undefined;
+    if (
+      !NextMoveCandidateSchema.safeParse(selected).success ||
+      !["review", "add-refuter", "close-gap"].includes(selected.move) ||
+      selected.contract.availability !== "available" ||
+      selected.refs[0] !== problemId ||
+      preparation?.problem_id !== problemId ||
+      preparation.captured_cursor !== cursor
+    )
+      return { move: null, degraded: true };
 
     return {
       move: {
         move: "back-to-the-object",
-        why: `Ceremony breaker active: ${ceremony.totalEventsInWindow} recent events without an object-level increment. Refocus on oldest open object need: ${desc}`,
-        refs: [problemId, ref],
+        why: `${ceremony.totalEventsInWindow} recent events contain no object-level increment. Resume the oldest eligible examined need: ${oldestNeed.description}`,
+        refs: selected.refs,
         contract: {
-          ...template,
+          ...selected.contract,
+          move: template.move,
+          title: template.title,
+          trigger: template.trigger,
+          description: template.description,
           preparation: {
-            problem_id: problemId,
-            captured_cursor: cursor,
+            ...preparation,
+            focus_move: selected.move,
             recent_events_scanned: ceremony.totalEventsInWindow,
             object_increments_found: ceremony.objectEventCountInWindow,
             target_need: oldestNeed,
-            read_first: {
-              method: "GET",
-              path: `/p/${encodeURIComponent(problemId)}.md?through=${cursor}`,
-            },
-            open_session: {
-              method: "POST",
-              path: "/v1/sessions",
-              idempotency_key_required: true,
-              body: { problem_id: problemId, intent: "explore" },
-            },
-            note: "The platform's ceremony breaker: exit process commentary and execute the oldest pending object-level need.",
           },
         },
         selection_boundary: BACK_TO_OBJECT_BOUNDARY,
       },
-      degraded: false,
+      degraded: ceremony.degraded,
     };
   } catch {
     return { move: null, degraded: true };

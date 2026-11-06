@@ -398,7 +398,10 @@ test("production triage preserves higher-priority work and same-target review co
                 move: "back-to-the-object",
                 why: "Fixture",
                 refs: [problem],
-                contract: template("back-to-the-object"),
+                contract: {
+                  ...template("back-to-the-object"),
+                  preparation: { focus_move: "review" },
+                },
               }
             : null,
       }),

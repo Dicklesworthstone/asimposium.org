@@ -284,6 +284,11 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
           problemId,
           row.cursor,
           row.status ?? "active",
+          {
+            viewer: { fellowId: fellowBinding.fellowId, sponsorId: fellowBinding.sponsorId },
+            permissions: effectivePermissions,
+            now,
+          },
         );
         if (b.move) allCandidates.push(b.move);
         degraded ||= b.degraded;

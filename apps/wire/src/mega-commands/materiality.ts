@@ -1,4 +1,7 @@
+import type { NextMoveCandidate } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import type { loadProofGapMove } from "./gap-moves-service.ts";
+import type { loadLedgerMoves, MovePermissions, MoveViewer } from "./ledger-moves.ts";
 
 /**
  * Materiality and Ceremony Guard (Fable §9.6, bead asimposiumorg-z8y).
@@ -77,16 +80,32 @@ export interface CeremonyBreakerResult {
   readonly active: boolean;
   readonly objectEventCountInWindow: number;
   readonly totalEventsInWindow: number;
+  readonly degraded: boolean;
+  /** The existing scientific request, with its exact pins and permission checks.
+   * A focus recommendation must not manufacture another write contract. */
+  readonly selectedMove: NextMoveCandidate | null;
   readonly oldestNeed: {
     readonly ref: string;
     readonly description: string;
-    readonly kind:
-      | "unreviewed-claim"
-      | "unchallenged-support"
-      | "unowned-gap"
-      | "live-route"
-      | "problem";
+    readonly kind: "unreviewed-claim" | "unchallenged-support" | "review-need" | "unowned-gap";
   } | null;
+}
+
+export interface CeremonyMoveContext {
+  readonly viewer: MoveViewer;
+  readonly permissions: MovePermissions;
+  readonly now: number;
+}
+
+export interface CeremonyNeedReaders {
+  readonly claims: (
+    db: D1Database,
+    problemId: string,
+    viewer: MoveViewer,
+    permissions: MovePermissions,
+    cursor: number,
+  ) => ReturnType<typeof loadLedgerMoves>;
+  readonly gap: typeof loadProofGapMove;
 }
 
 export interface SynthesisTriggerResult {
@@ -109,6 +128,8 @@ export async function checkCeremonyBreaker(
   problemId: string,
   cursor: number,
   problemStatus: string,
+  context?: CeremonyMoveContext,
+  readers?: CeremonyNeedReaders,
 ): Promise<CeremonyBreakerResult> {
   const eventsResult = await db
     .prepare(
@@ -143,6 +164,8 @@ export async function checkCeremonyBreaker(
         }),
       ).length,
       totalEventsInWindow: events.length,
+      degraded: false,
+      selectedMove: null,
       oldestNeed: null,
     };
   }
@@ -167,119 +190,77 @@ export async function checkCeremonyBreaker(
       active: false,
       objectEventCountInWindow: objectCount,
       totalEventsInWindow: events.length,
+      degraded: false,
+      selectedMove: null,
       oldestNeed: null,
     };
   }
 
-  // Ceremony breaker fired: 25+ events with 0 object increments!
-  // Find the oldest open object-level need on the problem.
-  // 1. Oldest unreviewed claim
-  const unreviewedClaim = await db
-    .prepare(
-      `SELECT c.id, c.object_id, c.object_version, c.statement
-       FROM (
-         SELECT e.id, e.object_id, e.object_version, e.seq,
-                (SELECT json_extract(cc.payload_json, '$.statement')
-                 FROM event_content cc WHERE cc.event_id = e.id) as statement
-         FROM events e
-         WHERE e.problem_id = ? AND e.seq <= ?
-           AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')
-           AND NOT EXISTS (
-             SELECT 1 FROM reviews r WHERE r.problem_id = e.problem_id
-               AND r.target_claim_id = e.object_id AND r.target_version = e.object_version
-           )
-         ORDER BY e.seq ASC
-         LIMIT 1
-       ) c`,
-    )
-    .bind(problemId, cursor)
-    .first<{ id: string; object_id: string; object_version: number; statement: string | null }>();
-
-  if (unreviewedClaim) {
-    return {
-      active: true,
-      objectEventCountInWindow: 0,
-      totalEventsInWindow: events.length,
-      oldestNeed: {
-        ref: `${unreviewedClaim.object_id}@${unreviewedClaim.object_version}`,
-        description: `Oldest unreviewed claim ${unreviewedClaim.object_id}@${unreviewedClaim.object_version} lacks an independent review.`,
-        kind: "unreviewed-claim",
-      },
-    };
-  }
-
-  // 2. Oldest supported claim without refutation attempts
-  const unrefutedClaim = await db
-    .prepare(
-      `SELECT e.object_id, e.object_version
-       FROM events e
-       WHERE e.problem_id = ? AND e.seq <= ?
-         AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')
-         AND EXISTS (
-           SELECT 1 FROM evidence ev WHERE ev.problem_id = e.problem_id
-             AND ev.bears_on_kind = 'claim' AND ev.bears_on_id = e.object_id
-             AND ev.bears_on_version = e.object_version AND ev.direction = 'supports'
-         )
-         AND NOT EXISTS (
-           SELECT 1 FROM evidence ev WHERE ev.problem_id = e.problem_id
-             AND ev.bears_on_kind = 'claim' AND ev.bears_on_id = e.object_id
-             AND ev.bears_on_version = e.object_version AND ev.direction = 'refutes'
-         )
-       ORDER BY e.seq ASC
-       LIMIT 1`,
-    )
-    .bind(problemId, cursor)
-    .first<{ object_id: string; object_version: number }>();
-
-  if (unrefutedClaim) {
-    return {
-      active: true,
-      objectEventCountInWindow: 0,
-      totalEventsInWindow: events.length,
-      oldestNeed: {
-        ref: `${unrefutedClaim.object_id}@${unrefutedClaim.object_version}`,
-        description: `Supported claim ${unrefutedClaim.object_id}@${unrefutedClaim.object_version} has zero recorded refutation attempts.`,
-        kind: "unchallenged-support",
-      },
-    };
-  }
-
-  // 3. Oldest open proof gap
-  const openGap = await db
-    .prepare(
-      `SELECT gap_id, statement
-       FROM proof_gaps
-       WHERE problem_id = ? AND status = 'open'
-       ORDER BY created_at ASC
-       LIMIT 1`,
-    )
-    .bind(problemId)
-    .first<{ gap_id: string; statement: string }>();
-
-  if (openGap) {
-    return {
-      active: true,
-      objectEventCountInWindow: 0,
-      totalEventsInWindow: events.length,
-      oldestNeed: {
-        ref: openGap.gap_id,
-        description: `Open proof gap ${openGap.gap_id} has no closing proof or deduction.`,
-        kind: "unowned-gap",
-      },
-    };
-  }
-
-  // Default oldest need is the problem itself
-  return {
+  const result: CeremonyBreakerResult = {
     active: true,
     objectEventCountInWindow: 0,
     totalEventsInWindow: events.length,
-    oldestNeed: {
-      ref: problemId,
-      description:
-        "No pending object-level needs found; draft a new conjecture or investigation in workshop.",
-      kind: "problem",
-    },
+    degraded: false,
+    selectedMove: null,
+    oldestNeed: null,
+  };
+  // A process-only window is not evidence that any particular scientific
+  // object is still available, current, unfinished or reviewable by this Fellow.
+  // Reuse the bounded scientific readers and their exact-version history,
+  // content controls, withdrawal rules and authenticated reviewer exclusions.
+  if (!context || !readers) return { ...result, degraded: true };
+  const queue = await readers.claims(db, problemId, context.viewer, context.permissions, cursor);
+  const compare = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
+  const oldest = [...queue.items]
+    .sort(
+      (left, right) =>
+        compare(left.created_at, right.created_at) || compare(left.claim_id, right.claim_id),
+    )
+    .find((item) =>
+      queue.moves.some(
+        (move) =>
+          move.refs[0] === problemId &&
+          move.refs[1] === `${item.claim_id}@${item.version}` &&
+          move.move === (item.need === "falsification-attempt" ? "add-refuter" : "review"),
+      ),
+    );
+  if (oldest) {
+    const target = `${oldest.claim_id}@${oldest.version}`;
+    const move = queue.moves.find(
+      (candidate) => candidate.refs[0] === problemId && candidate.refs[1] === target,
+    );
+    if (!move) throw new Error("CEREMONY_NEED_UNAVAILABLE");
+    return {
+      ...result,
+      degraded: queue.degraded,
+      selectedMove: move,
+      oldestNeed: {
+        ref: target,
+        description: move.why,
+        kind:
+          oldest.need === "independent-review"
+            ? "unreviewed-claim"
+            : oldest.need === "falsification-attempt"
+              ? "unchallenged-support"
+              : "review-need",
+      },
+    };
+  }
+  if (
+    !context.permissions.session_open ||
+    !context.permissions.promote ||
+    !["active", "dormant", "under-result-review"].includes(problemStatus)
+  )
+    return { ...result, degraded: queue.degraded };
+
+  const gap = await readers.gap(db, problemId, cursor, context.now);
+  const target = gap.move?.refs[1];
+  return {
+    ...result,
+    degraded: queue.degraded || gap.degraded,
+    selectedMove: gap.move,
+    oldestNeed:
+      gap.move && target ? { ref: target, description: gap.move.why, kind: "unowned-gap" } : null,
   };
 }
 
