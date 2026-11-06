@@ -32,8 +32,17 @@ export interface CredentialPattern {
 export const CREDENTIAL_PATTERNS: readonly CredentialPattern[] = Object.freeze([
   { kind: "fellow-token", pattern: /asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43}/ },
   { kind: "prefixed-grant", pattern: /asimp_[a-z]{2}_[0-9A-Za-z_-]{20,}/ },
-  // A join URL's fragment secret, or the bare `v1.<secret>` exchange value.
-  { kind: "enrollment-secret", pattern: /ASIMP-EN-[0-9A-Za-z-]{4,}#v1\.[A-Za-z0-9_-]{16,}/ },
+  // The bare exchange value has the full 43-character base64url secret;
+  // short version labels (v1.2, v1.0-rc1) are ordinary scientific content.
+  // One alternative also covers complete join URLs without double-reporting
+  // their embedded fragment on the shared artifact scan.
+  {
+    kind: "enrollment-secret",
+    pattern: /ASIMP-EN-[0-9A-Za-z-]{4,}#v1\.[A-Za-z0-9_-]{16,}|\bv1\.[A-Za-z0-9_-]{43,}/,
+  },
+  // Body-only enrollment polling and device-code credentials use this same
+  // frame. A public proposal ID is harmless; its flow handle is authority.
+  { kind: "prefixed-grant", pattern: /\bflow_v1\.[A-Za-z0-9_-]{43,}/ },
   { kind: "private-key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
   { kind: "api-key", pattern: /\bsk_live_[0-9A-Za-z]{16,}/ },
   { kind: "api-key", pattern: /\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{32,}/ },

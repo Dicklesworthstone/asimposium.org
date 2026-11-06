@@ -92,6 +92,7 @@ function fixture() {
     pins: unknown = [],
     statement = `Proposition ${claim}.`,
     version = 1,
+    kind: "lemma" | "reduction" = "lemma",
   ) => {
     seq = Math.max(
       seq,
@@ -102,14 +103,14 @@ function fixture() {
     const payload = JSON.stringify({
       claim_id,
       statement,
-      kind: "lemma",
+      kind,
       falsifier: "Counterexample.",
       ...(version > 1 ? { base_version: version - 1 } : {}),
       dependency_pins: pins,
     });
     const payload_digest = await digest(payload),
       content_digest = await claimContentDigest(
-        { kind: "lemma", statement, falsifier: "Counterexample." },
+        { kind, statement, falsifier: "Counterexample." },
         digest,
       );
     db.prepare(
@@ -124,8 +125,8 @@ function fixture() {
     );
     db.prepare("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(id, payload_digest, payload);
     db.prepare(
-      "INSERT INTO claim_versions VALUES ('P-PACK', ?, ?, ?, 'lemma', ?, 'Counterexample.')",
-    ).run(claim_id, version, content_digest, statement);
+      "INSERT INTO claim_versions VALUES ('P-PACK', ?, ?, ?, ?, ?, 'Counterexample.')",
+    ).run(claim_id, version, content_digest, kind, statement);
     if (version === 1) db.prepare("INSERT INTO claims VALUES (?, 'P-PACK', ?)").run(claim_id, seq);
     return { claim_id, version, event_id: id, payload_digest, content_digest };
   };
@@ -200,6 +201,59 @@ test("later revisions do not retarget either public snapshots or session packs",
   expect(bodies(pack, "claim-dependency")[1].statement).toBe("Proposition 1.");
   expect(bodies(pack, "claim-dependency")[1].version).toBe(1);
   expect(bodies(pack, "claim-detail")[0].dependency_closure.through).toBe(4);
+});
+
+test("adding a reduction premise in a later revision cannot rewrite an earlier scientific cut", async () => {
+  const f = fixture();
+  const premise = await f.add(1);
+  await f.add(2, [], "A reduction whose premise has not been published.", 1, "reduction");
+  const before = await readPublicClaimSnapshot(f.d1, "P-PACK", 2, "C-2", 1);
+  expect(before.fold).toMatchObject({ disposition: "open", currentVersion: 1, stale: false });
+  await f.add(2, [premise], "The recorded reduction now names its exact premise.", 2, "reduction");
+  f.db.exec("INSERT INTO claim_deps VALUES ('P-PACK', 'C-2', 'C-1')");
+
+  expect((await readScientificDispositions(f.d1, "P-PACK", 2, 20)).get("C-2")).toEqual(before.fold);
+  expect((await readPublicClaimSnapshot(f.d1, "P-PACK", 2, "C-2", 1)).fold).toEqual(before.fold);
+  expect((await readPublicClaimSnapshot(f.d1, "P-PACK", 3, "C-2", 1)).fold).toEqual(before.fold);
+  expect(
+    bodies(await f.pack("C-2@1", 2), "claim-detail")[0].dependency_assessment.standing,
+  ).toMatchObject({ disposition: "open", stale: false });
+  const current = await readPublicClaimSnapshot(f.d1, "P-PACK", 3, "C-2", 2);
+  expect(current.fold).toMatchObject({
+    disposition: "reduced-to",
+    currentVersion: 2,
+    stale: false,
+  });
+  expect((await readScientificDispositions(f.d1, "P-PACK", 3, 20)).get("C-2")).toEqual(
+    current.fold,
+  );
+  expect(bodies(current.section, "claim-detail")[0].dependency_assessment.standing).toMatchObject({
+    disposition: "reduced-to",
+    stale: false,
+  });
+});
+
+test("dropping reduction premises resets the new version while preserving its reduced predecessor", async () => {
+  const f = fixture();
+  const premise = await f.add(1);
+  await f.add(2, [premise], "The first version reduces to the stated premise.", 1, "reduction");
+  f.db.exec("INSERT INTO claim_deps VALUES ('P-PACK', 'C-2', 'C-1')");
+  const before = await readPublicClaimSnapshot(f.d1, "P-PACK", 2, "C-2", 1);
+  expect(before.fold).toMatchObject({ disposition: "reduced-to", currentVersion: 1, stale: false });
+  await f.add(2, [], "This new reduction attempt has no recorded premise.", 2, "reduction");
+
+  const current = await readPublicClaimSnapshot(f.d1, "P-PACK", 3, "C-2", 2);
+  expect(current.fold).toMatchObject({ disposition: "open", currentVersion: 2, stale: false });
+  expect((await readScientificDispositions(f.d1, "P-PACK", 3, 20)).get("C-2")).toEqual(
+    current.fold,
+  );
+  expect(bodies(current.section, "claim-detail")[0].dependency_assessment.standing).toMatchObject({
+    disposition: "open",
+    stale: false,
+  });
+  expect((await readPublicClaimSnapshot(f.d1, "P-PACK", 2, "C-2", 1)).fold).toEqual(before.fold);
+  expect((await readPublicClaimSnapshot(f.d1, "P-PACK", 3, "C-2", 1)).fold).toEqual(before.fold);
+  expect((await readScientificDispositions(f.d1, "P-PACK", 2, 20)).get("C-2")).toEqual(before.fold);
 });
 
 test("an unavailable intermediate premise does not leak descendants or advertise an empty graph", async () => {

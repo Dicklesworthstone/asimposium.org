@@ -49,6 +49,7 @@ export const FellowReviewItemSchema = z
     verdict: z.string().min(1).max(64),
     tier: z.enum(["T0", "T1", "T2", "T3"]),
     basis: z.string().min(1).max(500),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
     created_at: z.string(),
     sponsor_at_event: z.string().min(1).max(128),
   })

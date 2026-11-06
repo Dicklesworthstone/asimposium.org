@@ -208,7 +208,11 @@ import {
   settlementReferenceGuards,
 } from "../ledger/settlement-references.ts";
 import { findStaleRoutes, staleRouteProblem, staleRouteReferences } from "../ledger/stale-route";
-import { computeDroppedSingleAuthorCount, validateSynthesisAnchors } from "../ledger/synthesis";
+import {
+  computeDroppedSingleAuthorCount,
+  loadProblemSyntheses,
+  validateSynthesisAnchors,
+} from "../ledger/synthesis";
 import {
   isSynthesisReferenceChanged,
   synthesisAnchorGuards,
@@ -3911,6 +3915,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     }
     const graveyardOmissions: { reason: string; detail: string }[] = [];
+    const synthesisOmissions: { reason: string; detail: string }[] = [];
 
     // Stable prefix: identity + assignment first (prompt-cache money, §7.3).
     candidates.push({
@@ -4206,34 +4211,43 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // Fable §7.3: orient / working profile surfaces the synthesis-staleness line
     // ("synthesis covers through #1820 — stale by 22 material events")
     if (profile === "orient" || profile === "working") {
-      const latestSynthesis = await db
-        .prepare(
-          `SELECT synthesis_id, covers_through, created_at FROM syntheses
-           WHERE problem_id = ? ORDER BY covers_through DESC, rowid DESC LIMIT 1`,
-        )
-        .bind(session.problem_id)
-        .first<{ synthesis_id: string; covers_through: number; created_at: string }>();
-
-      if (latestSynthesis) {
-        const materialEvents = await db
-          .prepare(
-            `SELECT COUNT(*) AS count FROM events
-             WHERE problem_id = ? AND seq > ? AND seq <= ?
-               AND object_kind IN ('claim', 'hypothesis', 'review', 'evidence', 'dead_end', 'conflict', 'gap')`,
-          )
-          .bind(session.problem_id, latestSynthesis.covers_through, cursor)
-          .first<{ count: number }>();
-        const staleBy = materialEvents?.count ?? 0;
-        candidates.push({
-          kind: "standing-context",
-          id: "SYS-synthesis-staleness",
-          scope: "system",
-          tokens: 1,
-          untrusted: false,
-          body: `synthesis covers through #${latestSynthesis.covers_through} — stale by ${staleBy} material events`,
-          why_included: "surface problem synthesis recency and material event drift",
-          stable_prefix: 410,
+      try {
+        // The publication must exist at this cut, not merely cover an older
+        // cut. Use committed, digest-checked bytes under current content
+        // controls; a hidden latest synthesis must not revive an older one.
+        const page = await loadProblemSyntheses(db, session.problem_id, {
+          through: cursor,
+          limit: 1,
         });
+        const latestSynthesis = page.syntheses[0];
+        if (latestSynthesis === undefined) {
+          if (page.omitted.length > 0) throw new Error("synthesis source unavailable");
+        } else {
+          const materialEvents = await db
+            .prepare(
+              `SELECT COUNT(*) AS count FROM events
+               WHERE problem_id = ? AND seq > ? AND seq <= ?
+                 AND object_kind IN ('claim', 'hypothesis', 'review', 'evidence', 'dead_end', 'conflict', 'gap')`,
+            )
+            .bind(session.problem_id, latestSynthesis.covers_through, cursor)
+            .first<{ count: number }>();
+          const staleBy = materialEvents?.count;
+          if (staleBy === undefined || !Number.isSafeInteger(staleBy) || staleBy < 0)
+            throw new Error("synthesis staleness unavailable");
+          candidates.push({
+            kind: "standing-context",
+            id: "SYS-synthesis-staleness",
+            scope: "system",
+            tokens: 1,
+            untrusted: false,
+            body: `synthesis covers through #${latestSynthesis.covers_through} — stale by ${staleBy} material events\nSynthesis ${latestSynthesis.synthesis_id}, published at #${latestSynthesis.seq}; pack cursor #${cursor}.`,
+            why_included:
+              "surface the latest committed synthesis at the pack cursor and material event drift",
+            stable_prefix: 410,
+          });
+        }
+      } catch {
+        synthesisOmissions.push({ reason: "content_unavailable", detail: "synthesis-staleness" });
       }
     }
 
@@ -4295,7 +4309,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const heads = await db
         .prepare(
           `SELECT workshop_id, type, title, workshop_seq, created_at FROM workshop_objects
-           WHERE problem_id = ? AND fellow_id = ? ORDER BY workshop_seq DESC LIMIT 6`,
+           WHERE problem_id = ? AND fellow_id = ? AND state = 'open'
+           ORDER BY workshop_seq DESC, workshop_id DESC LIMIT 6`,
         )
         .bind(session.problem_id, auth.binding.fellowId)
         .all<{
@@ -4306,10 +4321,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           created_at: string;
         }>();
       const headRows = heads.results ?? [];
-      // j9hw: one extra row decides disclosure. Exactly the newest five heads
-      // are composed (workshop_seq DESC, deterministic); when a sixth exists,
-      // the pack must say so via candidate_limit instead of silently dropping
-      // the tail.
+      // j9hw: one extra open row decides disclosure. Archived/discarded work
+      // remains in private history, without displacing resumable objects or
+      // falsely implying the active workshop has a truncated tail.
       workshopHeadsTruncated = headRows.length > 5;
       const emittedHeads = headRows.slice(0, 5);
       if (headRows.length === 0) {
@@ -4319,8 +4333,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           scope: "system",
           tokens: 1,
           untrusted: false,
-          body: "Your workshop is empty.",
-          why_included: "state the private workshop baseline",
+          body: "You have no open workshop objects on this problem.",
+          why_included: "state the active private workshop baseline",
           stable_prefix: 300,
         });
       } else {
@@ -4332,7 +4346,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             tokens: 1,
             untrusted: true,
             body: `[${head.type}] ${head.title}\nPrivate work product: /v1/sessions/${session.session_id}/workshop/${head.workshop_id}`,
-            why_included: "resume a recent object in this Fellow's private workshop",
+            why_included: "resume a recent open object in this Fellow's private workshop",
             stable_prefix: 300 + index,
             requires: ["workshop:read"],
           });
@@ -4346,9 +4360,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const UNCOMPOSED: Partial<Record<PackProfile, string[]>> = {
       claim: targetParam === null ? ["claim-detail"] : [],
       review: ["author-isolation-proof"],
-      graveyard: ["friction-reports"],
-      literature: ["citations"],
-      formal: ["formal-artifacts", "friction-reports", "verification-records"],
       full: ["paginated-export"],
     };
     const actionPermissions = ["workshop:read"];
@@ -4566,6 +4577,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...reviewQueue.omitted,
         ...workingMoves.omitted,
         ...graveyardOmissions,
+        ...synthesisOmissions,
         ...(auth.binding.grantedResources.eventBudget !== undefined &&
         authorizationEventsRecorded >= auth.binding.grantedResources.eventBudget
           ? [{ reason: "event_budget_exhausted" as const, detail: "write affordances" }]

@@ -56,6 +56,7 @@ interface ReviewRow {
   payload_json: string;
   payload_sha256: string;
   author_sponsor_at_event: string;
+  screening_provenance: string | null;
   created_at: string;
   sponsor_at_event: string;
 }
@@ -174,6 +175,7 @@ export async function loadFellowCard(
            r.target_claim_id,
            r.target_version,
            content.payload_json,
+           screening.provenance_json AS screening_provenance,
            e.payload_sha256,
            author.actor_sponsor_id as author_sponsor_at_event,
            e.created_at,
@@ -190,6 +192,7 @@ export async function loadFellowCard(
           AND e.actor_sponsor_id IS NOT NULL
          JOIN event_content content ON content.event_id = e.id
           AND content.payload_sha256 = e.payload_sha256 AND content.redacted_at IS NULL
+         LEFT JOIN screening_publications screening ON screening.event_id = e.id
          JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
          JOIN events author
            ON author.problem_id = r.problem_id
@@ -228,6 +231,7 @@ export async function loadFellowCard(
         row.author_sponsor_at_event,
         row.sponsor_at_event,
       );
+      const screeningNotice = publicationScreeningNotice(row.screening_provenance);
       const item = FellowReviewItemSchema.safeParse({
         review_id: row.review_id,
         problem_id: row.problem_id,
@@ -236,6 +240,7 @@ export async function loadFellowCard(
         verdict: payload.verdict,
         tier,
         basis: payload.basis,
+        ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
         created_at: row.created_at,
         sponsor_at_event: row.sponsor_at_event,
       });

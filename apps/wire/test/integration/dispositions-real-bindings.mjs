@@ -1507,6 +1507,214 @@ await runLocalWorkerJourney(async (context) => {
     console.log(JSON.stringify({ stage: "review-state-tier-floor", status: "pass" }));
   }
 
+  // A later revision must not rewrite the reduction bookkeeping of an exact
+  // publication. claim_deps retains the union of edges across these versions.
+  // Every read below uses genuine D1 and the production mounted write/read paths.
+  // A separate author/problem preserves the original journey's write budget.
+  {
+    const reductionSponsor = "usr_reduction_history_sponsor";
+    const authorA = await enroll("reduction-history-author", reductionSponsor);
+    const reviewerB = await enroll("reduction-history-reader", "usr_reduction_history_reader");
+    const problemId = (
+      await call(
+        "/v1/problems",
+        {
+          title: "Versioned reduction history",
+          statement: "For every natural number n, (n + 0) + 0 = n.",
+          falsifier: "A natural number for which removing two zero summands changes its value.",
+          motivation: "Preserve the recorded premises of each exact reduction version.",
+          areas: ["number-theory"],
+        },
+        authorA,
+        201,
+      )
+    ).problem.id;
+    const lifecycle = `/v1/sponsors/problems/${problemId}/lifecycle`;
+    await sponsorCall(
+      reductionSponsor,
+      "POST",
+      lifecycle,
+      "problem-lifecycle",
+      { action: "publish" },
+      200,
+      lifecycle,
+      "publish-reduction-history",
+    );
+    const reader = await call(
+      "/v1/sessions",
+      { problem_id: problemId, intent: "review" },
+      reviewerB,
+      201,
+    );
+    const reviewerSessionPathB = `/v1/sessions/${reader.session_id}`;
+    await call(
+      `/v1/problems/${problemId}/statement-review`,
+      {
+        session_id: reader.session_id,
+        statement_version: 1,
+        verdict: "statement-clear",
+        basis: "The statement fixes the domain and the two zero summands precisely.",
+      },
+      reviewerB,
+      200,
+    );
+    const author = await call(
+      "/v1/sessions",
+      { problem_id: problemId, intent: "prove" },
+      authorA,
+      201,
+    );
+    const authorSessionPath = `/v1/sessions/${author.session_id}`;
+    const premiseDraft = await call(
+      `${authorSessionPath}/workshop`,
+      { type: "claim-draft", title: "Additive identity", body_md: "n + 0 = n.", relates_to: [] },
+      authorA,
+      201,
+    );
+    const c1Id = (
+      await call(
+        `${authorSessionPath}/promote`,
+        {
+          workshop_id: premiseDraft.workshop_id,
+          kind: "lemma",
+          statement: "For every natural number n, n + 0 = n.",
+        },
+        authorA,
+        201,
+      )
+    ).claim_id;
+    const reductionDraft = await call(
+      `${authorSessionPath}/workshop`,
+      {
+        type: "claim-draft",
+        title: "Versioned reduction premises",
+        body_md: "Record an exact premise only when this reduction actually names it.",
+        relates_to: [],
+      },
+      authorA,
+      201,
+    );
+    const reduction = await call(
+      `${authorSessionPath}/promote`,
+      {
+        workshop_id: reductionDraft.workshop_id,
+        kind: "reduction",
+        statement: "Removing two zero summands is a reduction attempt with no recorded premise.",
+        depends_on: [],
+      },
+      authorA,
+      201,
+    );
+    async function assertReductionVersion(version, cut, expected, currentHead = false) {
+      const target = `${reduction.claim_id}@${version}`;
+      const face = ClaimFaceResponseSchema.parse(
+        await call(`/p/${problemId}/claims/${target}.json?through=${cut}`),
+      );
+      assert.equal(face.claim_state.disposition, expected, `${target} through ${cut}`);
+      assert.equal(
+        face.claim_state.stale,
+        false,
+        "available immutable reduction inputs are current",
+      );
+      if (currentHead) {
+        const working = PackResponseSchema.parse(
+          await call(
+            `${reviewerSessionPathB}/pack?profile=working&max_tokens=8000`,
+            undefined,
+            reviewerB,
+          ),
+        );
+        const item = working.items.find(
+          (candidate) => candidate.kind === "claim" && candidate.id === reduction.claim_id,
+        );
+        assert.ok(item, "the working pack includes the latest reduction");
+        assert.ok(
+          item.body.includes(`, ${expected} · review: unreviewed`),
+          "the bulk scientific reader agrees with the exact claim face",
+        );
+      }
+      const pack = PackResponseSchema.parse(
+        await call(
+          `${reviewerSessionPathB}/pack?${new URLSearchParams({
+            profile: "claim",
+            target,
+            max_tokens: "8000",
+          })}`,
+          undefined,
+          reviewerB,
+        ),
+      );
+      const detail = pack.items.find((item) => item.kind === "claim-detail");
+      assert.ok(detail, "the exact reduction remains available in a claim pack");
+      const content = safeJsonParse(detail.body);
+      assert.equal(content.dependency_assessment.standing.disposition, expected);
+      assert.equal(content.dependency_pins.length, expected === "reduced-to" ? 1 : 0);
+      for (const format of ["md", "html"]) {
+        const response = await worker.fetch(
+          `${origin}/p/${problemId}/claims/${target}.${format}?through=${cut}`,
+          { headers: { "User-Agent": userAgent } },
+        );
+        assert.equal(response.status, 200);
+        const text = await response.text();
+        assert.ok(text.includes(expected));
+        assert.ok(text.includes(face.fingerprint), "every face shares the exact scientific cut");
+      }
+      return face.claim_state;
+    }
+    const originalReduction = await assertReductionVersion(1, reduction.seq, "open", true);
+    const pinnedReduction = await call(
+      `${authorSessionPath}/revise`,
+      {
+        claim_id: reduction.claim_id,
+        base_version: 1,
+        kind: "reduction",
+        statement: "Removing two zero summands reduces to applying the additive identity twice.",
+        depends_on: [c1Id],
+      },
+      authorA,
+      201,
+    );
+    assert.equal(pinnedReduction.version, 2);
+    await assertReductionVersion(2, pinnedReduction.seq, "reduced-to", true);
+    assert.deepEqual(await assertReductionVersion(1, reduction.seq, "open"), originalReduction);
+    const droppedReduction = await call(
+      `${authorSessionPath}/revise`,
+      {
+        claim_id: reduction.claim_id,
+        base_version: 2,
+        kind: "reduction",
+        statement: "The new reduction attempt has withdrawn its previously recorded premise.",
+        depends_on: [],
+      },
+      authorA,
+      201,
+    );
+    assert.equal(droppedReduction.version, 3);
+    await assertReductionVersion(3, droppedReduction.seq, "open", true);
+    await assertReductionVersion(2, pinnedReduction.seq, "reduced-to");
+    assert.deepEqual(await assertReductionVersion(1, reduction.seq, "open"), originalReduction);
+    const retainedEdge = await env.DB.prepare(
+      "SELECT depends_on_claim_id FROM claim_deps WHERE problem_id=? AND claim_id=?",
+    )
+      .bind(problemId, reduction.claim_id)
+      .all();
+    assert.deepEqual(retainedEdge.results, [{ depends_on_claim_id: c1Id }]);
+    const reductionRebuild = await assertProjectionsRebuild(env.DB, problemId);
+    assert.equal(reductionRebuild.counts.claim_versions, 4);
+    for (const [session, token] of [
+      [authorSessionPath, authorA],
+      [reviewerSessionPathB, reviewerB],
+    ]) {
+      await call(
+        `${session}/close`,
+        { handback: "Reduction version readbacks checked.", promote: [], keep: [], discard: [] },
+        token,
+        201,
+      );
+    }
+    console.log(JSON.stringify({ stage: "versioned-reduction-standing", status: "pass" }));
+  }
+
   // Close an ordinary problem only after the production scientific writers
   // earned strong standing. Sponsor disclosure and governance use signed HTTP;
   // the scientific closing declaration is published by the Fellow.

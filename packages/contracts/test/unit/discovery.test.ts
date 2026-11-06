@@ -299,6 +299,43 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
         false,
       );
     });
+    test("Fellow review notices retain only coherent public screening context", () => {
+      const review = {
+        review_id: "R-1",
+        problem_id: "P-4DSP",
+        target_claim_id: "C-1",
+        target_version: 1,
+        verdict: "inform",
+        tier: "T2",
+        basis: "Checked the stated boundary cases.",
+        created_at: "2026-09-05T00:00:00.000Z",
+        sponsor_at_event: "usr_test",
+      } as const;
+      for (const notice of [
+        {
+          category: "dual-use-boundary",
+          action: "published-with-warning",
+          notice: "screening-warning",
+        },
+        { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
+      ] as const) {
+        expect(FellowReviewItemSchema.parse({ ...review, screening_notice: notice })).toEqual({
+          ...review,
+          screening_notice: notice,
+        });
+        for (const invalid of [
+          { ...notice, input_digest: "private-screening-input" },
+          { ...notice, action: "published" },
+          { ...notice, category: "benign" },
+          { ...notice, notice: "undocumented-warning" },
+        ]) {
+          expect(
+            FellowReviewItemSchema.safeParse({ ...review, screening_notice: invalid }).success,
+          ).toBe(false);
+        }
+      }
+      expect(FellowReviewItemSchema.parse(review)).not.toHaveProperty("screening_notice");
+    });
     test("uncomputed outcomes are null, while malformed or negative outcomes remain invalid", () => {
       const record = {
         conjectures_promoted: 1,
@@ -485,6 +522,42 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
         statement: undefined,
       };
       expect(HonorsItemSchema.safeParse(resolvedProblem).success).toBe(true);
+    });
+
+    test("carrying reviewer warnings remain public-safe and independent of the settled statement", () => {
+      const notice = {
+        category: "dual-use-boundary",
+        action: "published-with-warning",
+        notice: "screening-warning",
+      } as const;
+      const warned = {
+        ...validClaimEntry,
+        carrying_reviewers: validClaimEntry.carrying_reviewers.map((review) => ({
+          ...review,
+          screening_notice: notice,
+        })),
+      };
+      const parsed = HonorsItemSchema.parse(warned);
+      expect(parsed.carrying_reviewers[0]?.screening_notice).toEqual(notice);
+      expect(parsed).not.toHaveProperty("screening_notice");
+      expect(parsed.status).toBe(validClaimEntry.status);
+      const claimOnly = HonorsItemSchema.parse({ ...validClaimEntry, screening_notice: notice });
+      expect(claimOnly.carrying_reviewers[0]).not.toHaveProperty("screening_notice");
+      for (const invalid of [
+        { ...notice, model_version: "private-provider-version" },
+        { ...notice, action: "published" },
+        { ...notice, category: "benign" },
+      ]) {
+        expect(
+          HonorsItemSchema.safeParse({
+            ...validClaimEntry,
+            carrying_reviewers: validClaimEntry.carrying_reviewers.map((review) => ({
+              ...review,
+              screening_notice: invalid,
+            })),
+          }).success,
+        ).toBe(false);
+      }
     });
 
     test("refuses non-gated or subjective status", () => {

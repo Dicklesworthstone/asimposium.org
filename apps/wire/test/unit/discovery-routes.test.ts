@@ -372,6 +372,42 @@ function seedAttributedClaim(
   ]);
 }
 
+/** Immutable review sources for read-boundary fixtures, not screening-provider proof. */
+function seedFellowReview(raw: Database, problemId: string, basis: string) {
+  const eventId = `E-FELLOW-REVIEW-${problemId}`;
+  const fellow = "F-01M0HCVW4XTFWMZCQ40EJ0S0J7";
+  const payload = JSON.stringify({
+    target_claim_id: "C-1",
+    target_version: 1,
+    verdict: "inform",
+    basis,
+  });
+  const digest = createHash("sha256").update(payload).digest("hex");
+  const at = "2026-09-09T00:00:00.000Z";
+  raw.run("UPDATE problems SET public_seq=2,chain_digest='sha256:chain',updated_at=? WHERE id=?", [
+    at,
+    problemId,
+  ]);
+  raw.run(
+    `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+      payload_sha256,row_digest,chain_digest,created_at,actor_fellow_id,actor_sponsor_id)
+      VALUES(?,?,2,'review.created','review','R-1',1,?,'sha256:row','sha256:chain',?,?,'SPON-REVIEWER')`,
+    [eventId, problemId, digest, at, fellow],
+  );
+  raw.run("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)", [
+    eventId,
+    digest,
+    payload,
+  ]);
+  raw.run(
+    `INSERT INTO reviews(review_id,problem_id,target_claim_id,target_version,reviewer_fellow_id,
+      tier,verdict,basis,body_md,created_at,source_event_id,source_seq)
+      VALUES('R-1',?,'C-1',1,?,'T0','inform','Retained projection basis','Fixture body',?,?,2)`,
+    [problemId, fellow, at, eventId],
+  );
+  return eventId;
+}
+
 describe("Now withdrawal on migrated SQLite (not deployed D1 proof)", () => {
   function visibility(raw: Database, target: string, visible: boolean, version = 1) {
     raw.run(
@@ -595,6 +631,91 @@ describe("discovery projection regressions on migrated SQLite (not D1 integratio
     try {
       seedDiscoveryData(raw);
       seedPublicationNotice(raw, "E-1", true);
+      await expect(loadFellowCard(db, "gauss-agent")).rejects.toThrow(
+        "PUBLIC_SCREENING_RECEIPT_UNAVAILABLE",
+      );
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("Fellow review warnings bind the exact event, survive restore, and never inherit the claim notice", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      seedAttributedClaim(raw, "P-RIEMANN-01", "C-1", 1, "SPON-01", "2026-08-03T00:00:00Z");
+      seedPublicationNotice(raw, "E-P-RIEMANN-01-C-1", false, offScopeNotice);
+      const warnedEvent = seedFellowReview(raw, "P-4DSP", "Warned exact review basis.");
+      seedFellowReview(raw, "P-RIEMANN-01", "Separate unqualified review basis.");
+      seedPublicationNotice(raw, warnedEvent);
+      const card = await loadFellowCard(db, "gauss-agent");
+      expect(card?.reviews).toHaveLength(2);
+      expect(card?.reviews.find((item) => item.problem_id === "P-4DSP")).toMatchObject({
+        review_id: "R-1",
+        basis: "Warned exact review basis.",
+        screening_notice: publicationNotice,
+      });
+      expect(card?.reviews.find((item) => item.problem_id === "P-RIEMANN-01")).not.toHaveProperty(
+        "screening_notice",
+      );
+      const app = createApp();
+      const request = (suffix: string, init?: RequestInit) =>
+        app.fetch(
+          new Request(`https://a.asimposium.org/a/gauss-agent.${suffix}`, init),
+          mockEnv(db),
+        );
+      const validators = new Map<string, string>();
+      for (const suffix of ["json", "md", "html"]) {
+        const response = await request(suffix);
+        expect(response.status).toBe(200);
+        const etag = response.headers.get("etag");
+        if (etag === null) throw new Error("Expected a Fellow face validator");
+        validators.set(suffix, etag);
+        const body = await response.text();
+        expect(body).toContain("Warned exact review basis.");
+        expect(body).toContain("dual-use-boundary");
+        expect(body).not.toContain("fixture-model");
+        expect(body).not.toContain("input_digest");
+      }
+      const visibility = (visible: boolean, version: number) =>
+        raw.run(
+          `INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,visibility,
+          source,reason_category,actor,reason,version,created_at)
+          VALUES(?,'P-4DSP','ledger-object','R-1@1',?,'operator','privacy',
+            'fixture-operator','Fixture review visibility.',?,'2026-09-10T00:00:00Z')`,
+          [`CC-FELLOW-REVIEW-WARNING-${version}`, visible ? "visible" : "hidden", version],
+        );
+      visibility(false, 1);
+      for (const [suffix, etag] of validators) {
+        for (const method of ["GET", "HEAD"]) {
+          const response = await request(suffix, { method, headers: { "If-None-Match": etag } });
+          expect(response.status).toBe(200);
+          expect(response.headers.get("etag")).not.toBe(etag);
+          const body = await response.text();
+          expect(body).not.toContain("Warned exact review basis.");
+          expect(body).not.toContain("dual-use-boundary");
+          if (method === "HEAD") expect(body).toBe("");
+        }
+      }
+      visibility(true, 2);
+      const restored = await loadFellowCard(db, "gauss-agent");
+      expect(
+        restored?.reviews.find((item) => item.problem_id === "P-4DSP")?.screening_notice,
+      ).toEqual(publicationNotice);
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("a malformed review screening receipt cannot turn into an unqualified Fellow excerpt", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      seedPublicationNotice(
+        raw,
+        seedFellowReview(raw, "P-4DSP", "Review requiring context."),
+        true,
+      );
       await expect(loadFellowCard(db, "gauss-agent")).rejects.toThrow(
         "PUBLIC_SCREENING_RECEIPT_UNAVAILABLE",
       );

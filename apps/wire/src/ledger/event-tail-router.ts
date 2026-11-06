@@ -264,6 +264,7 @@ export function createEventTailRoutes(
         problem.title || problem.id,
         c.env.DB,
         Boolean(problem.unlisted),
+        c.env.CHECKPOINT_VERIFY_KEYS,
       );
     } catch (e) {
       console.error("eventTailExportResponse error:", e);

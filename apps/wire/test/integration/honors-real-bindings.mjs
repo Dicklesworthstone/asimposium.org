@@ -18,7 +18,7 @@ function json(text) {
 }
 
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, env, worker, origin, userAgent }) => {
+  async ({ call, enroll, sponsorCall, env, worker, origin, userAgent, fixtures }) => {
     const OWNER = "usr_honors_owner";
     const author = await enroll("honors-author", OWNER);
     const sameSponsor = await enroll("honors-same-sponsor", OWNER);
@@ -242,7 +242,9 @@ await runLocalWorkerJourney(
         token,
         201,
       );
+    await fixtures.setScreenMode("allow-with-warning");
     const qualifiedB = await verify(reviewB, reviewerB, "claude");
+    await fixtures.setScreenMode("pass");
     const reviewC = await sessionOf(reviewerC, "review");
     const qualifiedC = await verify(reviewC, reviewerC, "gemini");
     assert.ok(
@@ -302,6 +304,29 @@ await runLocalWorkerJourney(
     for (const reviewer of item.carrying_reviewers) {
       assert.ok(["T2", "T3"].includes(reviewer.tier), `carrying tier ${reviewer.tier}`);
     }
+    assert.equal(
+      item.screening_notice,
+      undefined,
+      "a review warning does not label the clean statement",
+    );
+    const warnedReviewer = await env.DB.prepare(
+      "SELECT actor_fellow_id FROM events WHERE problem_id=? AND object_id=?",
+    )
+      .bind(problem, qualifiedB.review_id)
+      .first();
+    for (const reviewer of item.carrying_reviewers) {
+      assert.deepEqual(
+        reviewer.screening_notice,
+        reviewer.fellow_id === warnedReviewer.actor_fellow_id
+          ? {
+              category: "dual-use-boundary",
+              action: "published-with-warning",
+              notice: "screening-warning",
+            }
+          : undefined,
+        "each carrying review retains only its own publication notice",
+      );
+    }
     const htmlResponse = await worker.fetch(`${origin}/results.html`, {
       headers: { "User-Agent": userAgent },
     });
@@ -309,6 +334,14 @@ await runLocalWorkerJourney(
     const html = await htmlResponse.text();
     assert.ok(html.includes("For all natural n, n + 0 = n."), "HTML face lists the honored claim");
     assert.ok(!html.includes("0 + n = n"), "HTML face omits the gamed claim");
+    assert.ok(html.includes("screening context notice: dual-use-boundary"));
+    const markdownResponse = await worker.fetch(`${origin}/results.md`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(markdownResponse.status, 200);
+    assert.ok(
+      (await markdownResponse.text()).includes("screening context notice: dual-use-boundary"),
+    );
 
     const resultItems = async () =>
       (await call("/results.json", undefined, undefined, 200)).results;

@@ -267,6 +267,160 @@ async function ledgerPackFixture(options: LocalD1Options = {}, omitSectionConten
 }
 
 describe("producer-backed ledger pack sections (ceq.5)", () => {
+  test.each(["orient", "working"] as const)(
+    "%s synthesis context excludes a publication committed after the captured cursor",
+    async (profile) => {
+      let interleave: (() => Promise<void>) | undefined;
+      const f = await ledgerPackFixture({
+        afterFirstRead: async (sql) => {
+          if (sql !== "SELECT public_seq FROM problems WHERE id = ?") return;
+          const publish = interleave;
+          interleave = undefined;
+          await publish?.();
+        },
+      });
+      const publish = async (coversThrough: number) =>
+        SynthesizeResponseSchema.parse(
+          await f.post(`${f.path}/synthesize`, {
+            covers_through: coversThrough,
+            body_md: `A synthesis through ${coversThrough}.`,
+            anchors: [{ target_kind: "claim", target_id: "C-1", target_version: 1 }],
+            omitted: [],
+            selection_policy: "Summarize the exact recorded claim.",
+          }),
+        );
+      const earlier = await publish(Number(f.gap.seq));
+      let later: Awaited<ReturnType<typeof publish>> | undefined;
+      interleave = async () => {
+        // Its coverage fits the old cut, but its publication does not. A
+        // covers_through <= cursor filter alone would still borrow it.
+        later = await publish(earlier.sequence);
+      };
+      const response = await f.call(`${f.path}/pack?profile=${profile}&max_tokens=8000`);
+      expect(response.status, await response.clone().text()).toBe(200);
+      const pack = PackResponseSchema.parse(await response.json());
+      expect(interleave).toBeUndefined();
+      if (later === undefined) throw new Error("The interleaved synthesis was not published.");
+      expect(later.sequence).toBeGreaterThan(earlier.sequence);
+      expect(pack.cursor).toBe(earlier.sequence);
+      expect(pack.items.find((item) => item.id === "SYS-synthesis-staleness")?.body).toContain(
+        `synthesis covers through #${earlier.covers_through} — stale by 3 material events`,
+      );
+      const current = PackResponseSchema.parse(
+        await (await f.call(`${f.path}/pack?profile=${profile}&max_tokens=8000`)).json(),
+      );
+      expect(current.cursor).toBe(later.sequence);
+      expect(current.items.find((item) => item.id === "SYS-synthesis-staleness")?.body).toContain(
+        `synthesis covers through #${earlier.sequence} — stale by 0 material events`,
+      );
+    },
+  );
+
+  test("synthesis context uses committed metadata and never revives a hidden latest publication", async () => {
+    const f = await ledgerPackFixture();
+    const publish = async (coversThrough: number) =>
+      SynthesizeResponseSchema.parse(
+        await f.post(`${f.path}/synthesize`, {
+          covers_through: coversThrough,
+          body_md: "A recorded state of the exact claim.",
+          anchors: [{ target_kind: "claim", target_id: "C-1", target_version: 1 }],
+          omitted: [],
+          selection_policy: "Summarize the recorded claim.",
+        }),
+      );
+    const earlier = await publish(Number(f.gap.seq));
+    const latest = await publish(earlier.sequence);
+    // The projection is rebuildable and cannot supply authoritative coverage.
+    await f.db
+      .prepare("UPDATE syntheses SET covers_through = 999999 WHERE synthesis_id = ?")
+      .bind(latest.synthesis_id)
+      .run();
+    for (const profile of ["orient", "working"]) {
+      const pack = PackResponseSchema.parse(
+        await (await f.call(`${f.path}/pack?profile=${profile}&max_tokens=8000`)).json(),
+      );
+      const line = pack.items.find((item) => item.id === "SYS-synthesis-staleness");
+      expect(line?.body).toContain(`synthesis covers through #${latest.covers_through}`);
+      expect(line?.body).toContain(latest.synthesis_id);
+      expect(line?.body).not.toContain("999999");
+    }
+    await redactEventContent(f.db, latest.event_id, "privacy", new Date().toISOString());
+    for (const profile of ["orient", "working"]) {
+      const pack = PackResponseSchema.parse(
+        await (await f.call(`${f.path}/pack?profile=${profile}&max_tokens=8000`)).json(),
+      );
+      expect(pack.items.some((item) => item.id === "SYS-synthesis-staleness")).toBe(false);
+      expect(pack.omitted).toContainEqual({
+        reason: "content_unavailable",
+        detail: "synthesis-staleness",
+      });
+    }
+  });
+
+  test("populated formal, graveyard and literature packs disclose only actual omissions", async () => {
+    const f = await ledgerPackFixture();
+    const target = {
+      bears_on_kind: "claim",
+      bears_on_id: "C-1",
+      bears_on_version: 1,
+      mode: "confirmatory",
+      source: { kind: "locator", locator: "local/pack.lean", excerpt: "Submitted source." },
+    };
+    const artifact = await f.post(`${f.path}/evidence`, {
+      ...target,
+      direction: "supports",
+      kind: "certificate",
+      body_md: "A submitted formal artifact, not platform execution.",
+      formal_artifact: {
+        language: "lean",
+        declaration: "pack_true",
+        source: "theorem pack_true : True := True.intro",
+        toolchain: "Lean fixture",
+        axiom_report: "pack_true: no additional axioms reported.",
+      },
+    });
+    const friction = await f.post(`${f.path}/evidence`, {
+      ...target,
+      direction: "informs",
+      kind: "formalization-friction",
+      body_md: "FRICTION-PACK-CANARY: an unresolved coercion blocks the next formalization step.",
+    });
+    const citation = await f.post(`${f.path}/citations`, {
+      title: "LITERATURE-PACK-CANARY: parity definitions",
+      authors: ["Fixture author"],
+      locator_kind: "url",
+      locator: "https://example.invalid/parity",
+      excerpt: "The cited definition of evenness.",
+      retrieved_at: new Date().toISOString(),
+    });
+    for (const [profile, expected, formerlyMissing] of [
+      [
+        "formal",
+        [
+          ["formal-artifact", artifact.evidence_id],
+          ["formalization-friction", friction.evidence_id],
+        ],
+        ["formal-artifacts", "friction-reports", "verification-records"],
+      ],
+      ["graveyard", [["formalization-friction", friction.evidence_id]], ["friction-reports"]],
+      ["literature", [["citation", `${citation.citation_id}@1`]], ["citations"]],
+    ] as const) {
+      const response = await f.call(`${f.path}/pack?profile=${profile}&max_tokens=8000`);
+      expect(response.status, await response.clone().text()).toBe(200);
+      const pack = PackResponseSchema.parse(await response.json());
+      for (const [kind, id] of expected) {
+        expect(
+          pack.items.some((item) => item.kind === kind && item.id === id),
+          `${profile}:${id}`,
+        ).toBe(true);
+      }
+      for (const detail of formerlyMissing) {
+        expect(pack.omitted).not.toContainEqual({ reason: "profile_section_not_composed", detail });
+      }
+      expect(JSON.stringify(pack)).not.toContain("PRIVATE-PACK-SOURCE");
+    }
+  });
+
   test("review-queue pins public heads, excludes self and reviewed versions, and keeps historical cuts", async () => {
     const f = await ledgerPackFixture();
     // The canonical moves engine recommends a sponsor-independent check. The
@@ -14199,27 +14353,49 @@ describe("committed promotion outbox nudge", () => {
         }),
       });
       expect(pushed.status).toBe(201);
+      return WorkshopPushResponseSchema.parse(await pushed.json());
+    };
+    const pushHistory = async (
+      callFn: (path: string, init?: RequestInit) => Response | Promise<Response>,
+      sessionId: string,
+      key: string,
+    ) => {
+      for (const action of ["archive", "discard"] as const) {
+        const draft = await pushDraft(callFn, sessionId, `${key}-${action}`, `History ${action}`);
+        const revised = await callFn(`/v1/sessions/${sessionId}/workshop`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": `j9hw-history-${key}-${action}`,
+          },
+          body: JSON.stringify({ workshop_id: draft.workshop_id, base_version: 1, action }),
+        });
+        expect(revised.status, await revised.clone().text()).toBe(201);
+      }
     };
 
-    // Five-row case: no omission — the pack is complete.
+    // Five open rows remain complete even when newer historical objects exist.
     const five = await fixture();
     const fiveSession = await openSession(five.call, "five");
     for (let n = 1; n <= 5; n += 1)
       await pushDraft(five.call, fiveSession, `five-${n}`, `J9HW Title ${n}`);
+    await pushHistory(five.call, fiveSession, "five");
     const packFiveResponse = await five.call(`/v1/sessions/${fiveSession}/pack?profile=working`);
     expect(packFiveResponse.status).toBe(200);
     const packFive = PackResponseSchema.parse(await packFiveResponse.json());
     expect(packFive.items.filter((item) => item.kind === "workshop-head")).toHaveLength(5);
+    expect(JSON.stringify(packFive)).not.toContain("History ");
     expect(packFive.omitted).not.toContainEqual({
       reason: "candidate_limit",
       detail: "workshop-heads",
     });
 
-    // Six-row case: newest five compose; the sixth discloses the tail.
+    // Six open rows: newest five compose; inactive history is not the tail.
     const six = await fixture();
     const sixSession = await openSession(six.call, "six");
     for (let n = 1; n <= 6; n += 1)
       await pushDraft(six.call, sixSession, `six-${n}`, `J9HW Title ${n}`);
+    await pushHistory(six.call, sixSession, "six");
     const packSixResponse = await six.call(`/v1/sessions/${sixSession}/pack?profile=working`);
     expect(packSixResponse.status).toBe(200);
     const packSixText = await packSixResponse.text();
@@ -14241,6 +14417,63 @@ describe("committed promotion outbox nudge", () => {
       ),
     );
     expect(packSixText).not.toContain("J9HW Title 1");
+    expect(packSixText).not.toContain("History ");
+  });
+
+  test("an inactive workshop has an honest empty working pack while dead ends remain recoverable", async () => {
+    const f = await fixture();
+    let key = 0;
+    const post = async (path: string, body: unknown) => {
+      const response = await f.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `inactive-${++key}` },
+        body: JSON.stringify(body),
+      });
+      expect(response.status, await response.clone().text()).toBe(201);
+      return response.json();
+    };
+    const session = SessionOpenResponseSchema.parse(
+      await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" }),
+    );
+    const path = `/v1/sessions/${session.session_id}`;
+    const history: string[] = [];
+    for (const action of ["archive", "discard"] as const) {
+      const draft = WorkshopPushResponseSchema.parse(
+        await post(`${path}/workshop`, {
+          type: "dead-end-draft",
+          title: `Retained ${action} dead end`,
+          body_md: `The ${action} route loops on the finite witness.`,
+        }),
+      );
+      history.push(draft.workshop_id);
+      await post(`${path}/workshop`, {
+        workshop_id: draft.workshop_id,
+        base_version: 1,
+        action,
+      });
+    }
+    const working = PackResponseSchema.parse(
+      await (await f.call(`${path}/pack?profile=working&max_tokens=8000`)).json(),
+    );
+    expect(working.items.filter((item) => item.kind === "workshop-head")).toEqual([]);
+    expect(working.items.find((item) => item.id === "SYS-workshop-empty")?.body).toBe(
+      "You have no open workshop objects on this problem.",
+    );
+    expect(working.omitted).not.toContainEqual({
+      reason: "candidate_limit",
+      detail: "workshop-heads",
+    });
+    const graveyard = PackResponseSchema.parse(
+      await (await f.call(`${path}/pack?profile=graveyard&max_tokens=8000`)).json(),
+    );
+    expect(
+      graveyard.items.filter((item) => item.kind === "dead-end").map((item) => item.id),
+    ).toEqual([...history].reverse());
+    for (const id of history) {
+      const recovered = await f.call(`${path}/workshop/${id}`);
+      expect(recovered.status).toBe(200);
+      expect(await recovered.text()).toContain("route loops on the finite witness");
+    }
   });
 
   test("PLANTED: session replay ciphertext is bound to its route context (zdz.8)", async () => {

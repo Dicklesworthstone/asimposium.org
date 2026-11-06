@@ -107,6 +107,32 @@ await runLocalWorkerJourney(
     ]);
     assert.equal(before.signatures.length, 0);
     assert.ok(before.unsigned >= 4, "unsigned checkpoints are disclosed before signing");
+    const pinned = [{ key_id: CHECKPOINT_KEY_ID, public_key: CHECKPOINT_PUBLIC_KEY_HEX }];
+    const download = async () => {
+      const response = await worker.fetch(`${origin}/p/${problem}/export.jsonl.gz`, {
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(response.status, 200);
+      assert.equal(
+        response.headers.get("x-asimposium-export-format"),
+        "asimposium.problem-export.v5",
+      );
+      return gunzipSync(Buffer.from(await response.arrayBuffer())).toString("utf8");
+    };
+    const unsignedExport = await download();
+    const unsignedHeader = JSON.parse(unsignedExport.split("\n")[0]);
+    assert.equal(unsignedHeader.format, "asimposium.problem-export.v5");
+    assert.deepEqual(unsignedHeader.checkpoint_signatures.signatures, []);
+    const unsignedVerification = await verifyExportOffline({
+      ndjson: unsignedExport,
+      trustedKeys: pinned,
+    });
+    assert.equal(unsignedVerification.ok, false);
+    assert.equal(unsignedVerification.chainLinkageValid, true);
+    assert.equal(unsignedVerification.payloadCommitmentRecomputed, true);
+    assert.equal(unsignedVerification.checkpointSignaturesValid, null);
+    assert.equal(unsignedVerification.signatureCoverage, "none");
+    assert.equal(unsignedVerification.authenticated, false);
 
     // Two consumers can observe the same unsigned rows. Report only actual
     // insertions; ON CONFLICT no-ops are not newly signed checkpoints.
@@ -161,6 +187,27 @@ await runLocalWorkerJourney(
     assert.equal(exported.status, 200);
     const ndjson = gunzipSync(Buffer.from(await exported.arrayBuffer())).toString("utf8");
     const header = JSON.parse(ndjson.split("\n")[0]);
+    assert.equal(header.format, "asimposium.problem-export.v5");
+    assert.equal(header.checkpoint_signatures.problem_id, problem);
+    assert.equal(header.checkpoint_signatures.through, header.checkpoints.at(-1).checkpoint_seq);
+    assert.deepEqual(header.checkpoint_signatures.keys, before.keys);
+    assert.equal(
+      header.checkpoint_signatures.signatures.length,
+      1,
+      "one terminal signature authenticates this key's complete chain prefix",
+    );
+    const embedded = await verifyExportOffline({ ndjson, trustedKeys: pinned });
+    assert.equal(embedded.ok, true, JSON.stringify(embedded.failures));
+    assert.equal(embedded.authenticated, true);
+    assert.equal(embedded.authenticationScope, "original-event-chain-only");
+    assert.equal(embedded.trustedThrough, header.checkpoint_signatures.through);
+    assert.equal(embedded.checkpointSignatureCount, 1);
+    assert.equal(embedded.signatureCoverage, "complete");
+    assert.equal(embedded.publicationContextAssurance, "export-self-consistency-only");
+    const untrustedEmbedded = await verifyExportOffline({ ndjson, trustedKeys: [] });
+    assert.equal(untrustedEmbedded.ok, false);
+    assert.equal(untrustedEmbedded.checkpointSignaturesValid, true);
+    assert.equal(untrustedEmbedded.authenticated, false);
     const signedBySeq = new Map(after.signatures.map((s) => [s.checkpoint_seq, s]));
     for (const checkpoint of header.checkpoints) {
       const signature = signedBySeq.get(checkpoint.checkpoint_seq);
@@ -172,7 +219,6 @@ await runLocalWorkerJourney(
     // Offline verification (scripts/verify-export.ts): the real export and
     // signatures verify under the independently pinned key; tampered bytes, a
     // foreign key, or no pinned key fail.
-    const pinned = [{ key_id: CHECKPOINT_KEY_ID, public_key: CHECKPOINT_PUBLIC_KEY_HEX }];
     const good = await verifyExportOffline({ ndjson, signatures: after, trustedKeys: pinned });
     assert.equal(good.ok, true, JSON.stringify(good.failures));
     assert.equal(good.format, header.format);
@@ -220,6 +266,49 @@ await runLocalWorkerJourney(
       })
     ).text();
     assert.ok(markdown.includes(CHECKPOINT_PUBLIC_KEY_HEX) && markdown.includes(first.signature));
+
+    const laterDraft = await call(
+      `/v1/sessions/${session}/workshop`,
+      { type: "claim-draft", title: "Later draft", body_md: "Private later work." },
+      author,
+      201,
+    );
+    await call(
+      `/v1/sessions/${session}/promote`,
+      {
+        workshop_id: laterDraft.workshop_id,
+        kind: "conjecture",
+        statement: "Four squared is even.",
+        falsifier: "A counterexample in range.",
+      },
+      author,
+      201,
+    );
+    const withTail = await download();
+    const tail = await verifyExportOffline({ ndjson: withTail, trustedKeys: pinned });
+    assert.equal(
+      tail.ok,
+      false,
+      "a newly committed unsigned tail cannot inherit older authentication",
+    );
+    assert.equal(tail.chainLinkageValid, true);
+    assert.equal(tail.checkpointSignaturesValid, true);
+    assert.equal(tail.signatureCoverage, "prefix");
+    assert.equal(tail.trustedThrough, embedded.trustedThrough);
+    assert.equal(tail.authenticated, false);
+
+    // A shape-correct but invalid recorded signature must not be shipped as a
+    // successful download. This is a deliberate corruption in the local D1.
+    const tailHeader = JSON.parse(withTail.split("\n")[0]);
+    await env.DB.prepare(`INSERT INTO checkpoint_signatures
+      (problem_id, checkpoint_seq, key_id, algorithm, signature, signed_at)
+      VALUES (?, ?, ?, 'Ed25519', ?, '2026-11-06T00:00:00.000Z')`)
+      .bind(problem, tailHeader.checkpoint_signatures.through, CHECKPOINT_KEY_ID, "ab".repeat(64))
+      .run();
+    const corruptExport = await worker.fetch(`${origin}/p/${problem}/export.jsonl.gz`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(corruptExport.status, 500, "invalid stored checkpoint signature fails closed");
 
     // Signatures are append-only in D1.
     await assert.rejects(

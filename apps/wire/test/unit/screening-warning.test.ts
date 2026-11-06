@@ -10,7 +10,11 @@ import {
 } from "@asimposium/contracts";
 import { createApp } from "../../src/app";
 import type { Env } from "../../src/env";
-import { parsePublicProblemExport, verifyPublicProblemExportChain } from "../../src/krater/export";
+import {
+  PUBLIC_EXPORT_FORMAT,
+  parsePublicProblemExport,
+  verifyPublicProblemExportChain,
+} from "../../src/krater/export";
 import { writeLedgerEvent } from "../../src/krater/krater";
 import { eventTailExportResponse } from "../../src/ledger/event-tail-feeds";
 import { isScreeningPostureChangedError, recordRefusal } from "../../src/moderation/posture";
@@ -50,6 +54,7 @@ async function screen(
   f: Fixture,
   input = candidate(f),
   patch: Partial<PublicationScreeningObservation> = {},
+  route = "promote",
 ) {
   return screenPublicCandidate(
     async (value) => ({
@@ -62,7 +67,7 @@ async function screen(
     }),
     { DB: f.db } as Env,
     input,
-    { sponsorId: SPONSOR, route: "promote" },
+    { sponsorId: SPONSOR, route },
   );
 }
 function published(result: Response | ScreenedPublication): ScreenedPublication {
@@ -182,10 +187,39 @@ describe("published screening warnings", () => {
       expect(count(f, "moderation_log")).toBe(0);
     }));
 
+  test("claim review warnings require the server-selected review writer and retain exact-byte binding", () =>
+    withFixture(async (f) => {
+      for (const category of ["dual-use-boundary", "off-topic"] as const) {
+        const receipt = published(
+          await screen(f, candidate(f, "review"), { coarse_category: category }, "review"),
+        );
+        expect(receipt.provenance.public_action).toEqual(
+          category === "off-topic"
+            ? { category, action: "published-with-warning", notice: "off-scope" }
+            : { category, action: "published-with-warning", notice: "screening-warning" },
+        );
+      }
+      expect(count(f, "screening_cases")).toBe(0);
+      expect(count(f, "screening_refusals")).toBe(0);
+      for (const route of ["statement-review", "promote"]) {
+        const held = await screen(f, candidate(f, "review"), {}, route);
+        expect(held instanceof Response && held.status).toBe(202);
+      }
+      const unbound = await screen(
+        f,
+        candidate(f, "review"),
+        { evaluated_body_digest: `sha256:${"f".repeat(64)}` },
+        "review",
+      );
+      expect(unbound instanceof Response && unbound.status).toBe(202);
+      expect(f.state().events).toEqual([]);
+    }));
+
   test("unsupported kinds still hold, and a warning cannot relax provider failure, incoherence or digest binding", () =>
     withFixture(async (f) => {
       for (const [kind, patch] of [
         ["hypotheses", {}],
+        ["review", {}],
         ["unimplemented-kind", {}],
         ["conjecture", { provider_status: "timeout" }],
         ["conjecture", { coarse_category: "benign-context" }],
@@ -283,9 +317,7 @@ describe("published screening warnings", () => {
         );
       const response = await download();
       expect(response.status).toBe(200);
-      expect(response.headers.get("x-asimposium-export-format")).toBe(
-        "asimposium.problem-export.v4",
-      );
+      expect(response.headers.get("x-asimposium-export-format")).toBe(PUBLIC_EXPORT_FORMAT);
       expect(response.headers.get("cache-control")).toBe("private, no-store");
       const etag = response.headers.get("etag")!;
       const ndjson = await new Response(

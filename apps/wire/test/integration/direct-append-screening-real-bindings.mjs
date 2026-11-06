@@ -25,6 +25,9 @@ await runLocalWorkerJourney(
     clearScreeningPosture,
     workerLogs,
     clearWorkerLogs,
+    worker,
+    origin,
+    userAgent,
   }) => {
     const OWNER = "usr_direct_owner";
     const author = await enroll("direct-author", OWNER);
@@ -233,6 +236,151 @@ await runLocalWorkerJourney(
       for (const text of Object.values(body).filter((v) => typeof v === "string" && v.length > 24))
         assert.ok(!logText.includes(text), "no write body reaches the Worker log");
     }
+
+    // An explicitly publishable review must not require an operator to release
+    // it. Its coarse notice travels with this exact review, not with its claim
+    // or the reviewer's other work. Provider decisions remain fixtures.
+    const warningNotice = {
+      category: "dual-use-boundary",
+      action: "published-with-warning",
+      notice: "screening-warning",
+    };
+    const warnedReviewBody = {
+      ...reviewBody,
+      basis: "Bounded review with a disclosed screening context notice.",
+    };
+    const warningSeq = await publicSeq();
+    const warningCalls = await fixtures.screeningCalls();
+    const warningCases = await env.DB.prepare("SELECT COUNT(*) AS n FROM screening_cases").first();
+    await fixtures.setScreenMode("allow-with-warning");
+    const warnedReview = await call(
+      `/v1/p/${problem}/reviews`,
+      warnedReviewBody,
+      reviewer,
+      201,
+      "warned-review-once",
+    );
+    await fixtures.setScreenMode("pass");
+    assert.equal(await publicSeq(), warningSeq + 1);
+    assert.equal(await fixtures.screeningCalls(), warningCalls + 1);
+    assert.deepEqual(
+      await env.DB.prepare("SELECT COUNT(*) AS n FROM screening_cases").first(),
+      warningCases,
+      "publishable review warnings do not create a review hold",
+    );
+    const reviewReceipt =
+      await env.DB.prepare(`SELECT s.provenance_json FROM screening_publications s
+      JOIN events e ON e.id=s.event_id WHERE e.problem_id=? AND e.object_id=? AND e.type='review.created'`)
+        .bind(problem, warnedReview.review_id)
+        .first();
+    assert.deepEqual(
+      ScreeningPublicationProvenanceSchema.parse(JSON.parse(reviewReceipt.provenance_json))
+        .public_action,
+      warningNotice,
+    );
+    const reviewPath = `/p/${problem}/reviews/${warnedReview.review_id}`;
+    for (const path of [reviewPath, `/p/${problem}/claims/${passed.claim_id}@1`]) {
+      const face = await call(`${path}.json`);
+      assert.deepEqual(
+        face.items.find((item) => item.id === warnedReview.review_id).screening_notice,
+        warningNotice,
+      );
+      assert.equal(
+        face.items.find((item) => item.kind === "claim-detail").screening_notice,
+        undefined,
+      );
+      for (const format of path === reviewPath ? ["md"] : ["md", "html"]) {
+        const response = await worker.fetch(`${origin}${path}.${format}`, {
+          headers: { "User-Agent": userAgent },
+        });
+        assert.equal(response.status, 200);
+        const text = await response.text();
+        assert.ok(text.includes(warnedReviewBody.basis));
+        assert.ok(text.includes("screening context notice: dual-use-boundary"));
+      }
+    }
+    for (const profile of ["claim", "review"]) {
+      const pack = await call(
+        `/v1/sessions/${rs}/pack?${new URLSearchParams({ profile, target: `${passed.claim_id}@1`, max_tokens: "8000" })}`,
+        undefined,
+        reviewer,
+      );
+      assert.deepEqual(
+        pack.items.find((item) => item.id === warnedReview.review_id).screening_notice,
+        warningNotice,
+      );
+      assert.ok(
+        !pack.items.some((item) => item.scope === "workshop"),
+        "review material excludes workshop content",
+      );
+    }
+    const reviewerFace = await call("/a/direct-reviewer.json");
+    assert.deepEqual(
+      reviewerFace.reviews.find((item) => item.review_id === warnedReview.review_id)
+        .screening_notice,
+      warningNotice,
+    );
+    const tail = await call(`/p/${problem}/events.json?since=${warningSeq}`);
+    assert.deepEqual(
+      tail.events.find((item) => item.event?.object_id === warnedReview.review_id).event
+        .screening_notice,
+      warningNotice,
+    );
+    await fixtures.setScreenMode("reject");
+    assert.deepEqual(
+      await call(`/v1/p/${problem}/reviews`, warnedReviewBody, reviewer, 200, "warned-review-once"),
+      warnedReview,
+      "retry recovers the exact committed warning without buying another screen",
+    );
+    const changedWarning = await call(
+      `/v1/p/${problem}/reviews`,
+      {
+        ...warnedReviewBody,
+        basis: "A changed review cannot reuse the accepted receipt.",
+      },
+      reviewer,
+      409,
+      "warned-review-once",
+    );
+    assert.equal(changedWarning.code, "IDEMPOTENCY_CONFLICT");
+    await fixtures.setScreenMode("pass");
+    assert.equal(await fixtures.screeningCalls(), warningCalls + 1);
+    assert.equal(await publicSeq(), warningSeq + 1);
+
+    // Problem-statement reviews share the classifier's kind. Their separate
+    // reader is not warning-enabled by the claim-review producer allowlist.
+    const statementSession = (
+      await call(
+        "/v1/sessions",
+        {
+          problem_id: problem,
+          intent: "review",
+        },
+        secondReviewer,
+        201,
+      )
+    ).session_id;
+    await fixtures.setScreenMode("allow-with-warning");
+    const heldStatement = await call(
+      `/v1/problems/${problem}/statement-review`,
+      {
+        session_id: statementSession,
+        statement_version: 1,
+        verdict: "statement-clear",
+        basis: "A separate statement review still waits for its complete warning faces.",
+      },
+      secondReviewer,
+      202,
+    );
+    await fixtures.setScreenMode("pass");
+    assert.equal(heldStatement.code, "SCREENING_HOLD");
+    assert.equal(await publicSeq(), warningSeq + 1);
+    assert.ok(
+      !workerLogs()
+        .map((log) => log.message)
+        .join("\n")
+        .includes(warnedReviewBody.basis),
+    );
 
     // The mounted convenience route must preserve the real atomic writer's
     // screening, attribution, evidence semantics and replay behavior.

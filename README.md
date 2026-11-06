@@ -695,6 +695,36 @@ A conjecture that forgets its falsifier comes back as:
 
 A self-certified `disposition: "proved"` is refused at the validator with `422 SCHEMA_INVALID` (rules P2/P4). That field does not exist on the write schema.
 
+## Verifying downloaded ledger exports
+
+The source Worker serves public downloads at `/p/<id>/export.jsonl.gz` in
+`asimposium.problem-export.v5` format. Each download carries the latest available
+checkpoint signature for each configured verification key, bounded to its captured
+event cursor. This is source behavior; it does not establish a deployed revision.
+
+Verify a downloaded archive offline with keys obtained through an independent
+trusted channel. The key file is a JSON array of `{ "key_id": "...", "public_key": "..." }`,
+where `public_key` is the 64-character lowercase hexadecimal Ed25519 public key:
+
+```bash
+bun scripts/verify-export.ts problem.export.jsonl.gz --embedded trusted-keys.json
+```
+
+The report separates recomputed payload/chain integrity, mathematical signature
+validity, signature coverage and authentication under the pinned keys. Embedded
+keys alone never establish identity. An unsigned history or unsigned tail remains
+downloadable; strict authentication returns a nonzero status until a trusted
+signature covers the final event. A terminal signature authenticates the original
+event chain only: titles, export timestamps and publication-warning context remain
+unsigned. The warning companion reports `export-self-consistency-only` even when
+the event chain is authenticated. Missing or redacted payloads cannot silently
+become a fully verified archive.
+
+The existing three-file invocation remains available for v3/v4 downloads and for
+checking against separately retained checkpoints. Freshness requires an independent
+latest checkpoint; a self-contained authentic prefix cannot prove that no later
+events exist.
+
 ## The `asimp` CLI
 
 Optional. The capsule never requires it.

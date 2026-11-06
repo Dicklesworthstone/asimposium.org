@@ -614,6 +614,53 @@ export const CheckpointSignaturesResponseSchema = z
   .strict();
 export type CheckpointSignaturesResponse = z.infer<typeof CheckpointSignaturesResponseSchema>;
 
+/** A bounded, self-contained export carries the latest available checkpoint
+ * for each configured verification key. A valid signature authenticates the
+ * event-chain prefix only when its key was independently pinned by the reader;
+ * neither embedded keys nor unsigned export metadata create that trust. */
+export const ExportCheckpointBundleSchema = z
+  .object({
+    format: z.literal("asimposium.export-checkpoints.v1"),
+    problem_id: z.string().regex(/^P-[A-Z0-9][A-Z0-9-]{1,30}$/),
+    through: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    message_format: z.literal(CHECKPOINT_SIGNATURE_MESSAGE_FORMAT),
+    selection: z.literal("latest-per-configured-key"),
+    signed_material: z.literal("original-event-chain-only"),
+    key_trust: z.literal("independently-pinned-keys-required"),
+    keys: CheckpointSignaturesResponseSchema.shape.keys,
+    signatures: z.array(CheckpointSignatureSchema).max(16),
+  })
+  .strict()
+  .superRefine((bundle, context) => {
+    const keys = new Set(bundle.keys.map((key) => key.key_id));
+    const signers = new Set(bundle.signatures.map((signature) => signature.key_id));
+    if (
+      keys.size !== bundle.keys.length ||
+      signers.size !== bundle.signatures.length ||
+      bundle.keys.some((key, index) => {
+        const previous = bundle.keys[index - 1];
+        return previous !== undefined && previous.key_id >= key.key_id;
+      }) ||
+      bundle.signatures.some((signature, index) => {
+        const previous = bundle.signatures[index - 1];
+        return (
+          !Number.isSafeInteger(signature.checkpoint_seq) ||
+          signature.checkpoint_seq > bundle.through ||
+          !keys.has(signature.key_id) ||
+          (previous !== undefined &&
+            (previous.checkpoint_seq > signature.checkpoint_seq ||
+              (previous.checkpoint_seq === signature.checkpoint_seq &&
+                previous.key_id >= signature.key_id)))
+        );
+      })
+    )
+      context.addIssue({
+        code: "custom",
+        message: "export checkpoints must be ordered, unique per key, and bounded by their cut",
+      });
+  });
+export type ExportCheckpointBundle = z.infer<typeof ExportCheckpointBundleSchema>;
+
 /** The exact bytes a checkpoint signature covers. */
 export function checkpointSignatureMessage(input: {
   readonly problemId: string;
@@ -641,6 +688,7 @@ export const LedgerContractsSchema = z
     claim_face_query: ClaimFaceQuerySchema.optional(),
     claim_citation_csl: ClaimCitationCslSchema.optional(),
     checkpoint_signatures_response: CheckpointSignaturesResponseSchema.optional(),
+    export_checkpoint_bundle: ExportCheckpointBundleSchema.optional(),
     claim_dependency_pins: ClaimDependencyPinsSchema.optional(),
     problem_event_tail_response: ProblemEventTailResponseSchema.optional(),
     problem_event_tail_control: ProblemEventTailControlSchema.optional(),

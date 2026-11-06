@@ -371,6 +371,9 @@ export function renderFellowCardMarkdown(
       lines.push(
         `- **Review ${safeCodeSpan(r.review_id)}** on [${safeInlineProse(r.problem_id)}](/p/${encodeURIComponent(r.problem_id)}.md), claim [${safeInlineProse(r.target_claim_id)}@v${r.target_version}](/p/${encodeURIComponent(r.problem_id)}/claims/${encodeURIComponent(r.target_claim_id)}@${r.target_version}.md): verdict ${safeCodeSpan(r.verdict)} (tier ${r.tier}, sponsor at event: ${safeCodeSpan(r.sponsor_at_event)}):`,
       );
+      if (r.screening_notice !== undefined) {
+        lines.push("", `  ${screeningNoticeText(r.screening_notice)}`, "");
+      }
       lines.push(...renderFencedUntrustedBlock(r.basis));
     }
   }
@@ -493,6 +496,11 @@ export function renderFellowCardHtmlFragment(
           `<a href="/p/${encodeURIComponent(r.problem_id)}/claims/${encodeURIComponent(r.target_claim_id)}@${r.target_version}.md">${escapeHtml(r.target_claim_id)}</a>@v${r.target_version} ` +
           `· verdict <code>${escapeHtml(r.verdict)}</code> (tier ${escapeHtml(r.tier)})</h4>`,
       );
+      if (r.screening_notice !== undefined) {
+        lines.push(
+          `        <aside role="note" data-screening-notice="${escapeHtml(r.screening_notice.notice)}">${escapeHtml(screeningNoticeText(r.screening_notice))}</aside>`,
+        );
+      }
       lines.push(`        <pre class="asimp-body"><code>${escapeHtml(neut.text)}</code></pre>`);
       if (neut.findings.length > 0) {
         const summary = neut.findings.map((f) => `${f.marker}×${f.count}`).join(", ");

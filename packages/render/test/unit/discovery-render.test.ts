@@ -33,9 +33,9 @@ function expectVisibleScreeningNotice(md: string, html: string) {
     expect(rendered).toContain(
       "This policy warning does not determine the scientific standing of the work.",
     );
-    expect(rendered).not.toMatch(
-      /<pre[^>]*>[\s\S]*?Published with a screening context notice[\s\S]*?<\/pre>/,
-    );
+    for (const block of rendered.match(/<pre\b[^>]*>[\s\S]*?<\/pre>/g) ?? []) {
+      expect(block).not.toContain("Published with a screening context notice");
+    }
   }
   expect(html).toContain('<aside role="note" data-screening-notice="screening-warning">');
 }
@@ -256,6 +256,31 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       expect(renderFellowCardMarkdown(sampleFellow)).not.toContain(
         "Published with a screening context notice",
       );
+    });
+
+    test("Fellow review excerpts keep their own notice outside untrusted basis text", () => {
+      const review = sampleFellow.reviews[0];
+      if (review === undefined) throw new Error("Expected a review fixture");
+      const warned: FellowCardResponse = {
+        ...sampleFellow,
+        reviews: [
+          { ...review, screening_notice: screeningNotice },
+          { ...review, problem_id: "P-OTHER", basis: "A separate unqualified review." },
+        ],
+      };
+      const md = renderFellowCardMarkdown(warned);
+      const html = renderFellowCardHtmlFragment(warned);
+      expectVisibleScreeningNotice(md, html);
+      for (const rendered of [Bun.markdown.html(md), html]) {
+        expect(rendered.match(/Published with a screening context notice/g)).toHaveLength(1);
+        expect(rendered.indexOf("Published with a screening context notice")).toBeLessThan(
+          rendered.indexOf(review.basis),
+        );
+      }
+      const other = html.split('id="review-P-OTHER-R-1"')[1]?.split("</li>")[0];
+      expect(other).toContain("A separate unqualified review.");
+      expect(other).not.toContain("screening-notice");
+      expect(renderFellowCardHtmlFragment(sampleFellow)).not.toContain("screening-notice");
     });
 
     test("neutralizes adversarial control markers, fence breakouts, and scripts in Fellow Card", () => {
@@ -667,6 +692,32 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       expect(renderHonorsMarkdown(sampleHonors)).not.toContain(
         "Published with a screening context notice",
       );
+    });
+
+    test("Honors carrying-review excerpts display their own notice without relabeling the statement", () => {
+      const warned: HonorsResponse = {
+        ...sampleHonors,
+        results: sampleHonors.results.map((item) => ({
+          ...item,
+          carrying_reviewers: item.carrying_reviewers.map((review) => ({
+            ...review,
+            screening_notice: screeningNotice,
+          })),
+        })),
+      };
+      const md = renderHonorsMarkdown(warned);
+      const html = renderHonorsHtmlFragment(warned);
+      expectVisibleScreeningNotice(md, html);
+      for (const rendered of [Bun.markdown.html(md), html]) {
+        expect(rendered.match(/Published with a screening context notice/g)).toHaveLength(1);
+        const noticeAt = rendered.indexOf("Published with a screening context notice");
+        expect(noticeAt).toBeGreaterThan(
+          rendered.indexOf("Every trisection admits a non-trivial twist."),
+        );
+        expect(noticeAt).toBeLessThan(rendered.indexOf("Independent Lean 4 verification"));
+      }
+      expect(html).toContain('data-status="strongly-supported"');
+      expect(renderHonorsHtmlFragment(sampleHonors)).not.toContain("screening-notice");
     });
 
     test("renderHonorsHtmlFragment formats semantic HTML with Diptych equivalence", () => {

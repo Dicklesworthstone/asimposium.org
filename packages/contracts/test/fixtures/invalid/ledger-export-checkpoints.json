@@ -1,0 +1,11 @@
+{
+  "format": "asimposium.export-checkpoints.v1",
+  "problem_id": "P-EXPORT",
+  "through": 2,
+  "message_format": "asimposium.checkpoint.v1",
+  "selection": "latest-per-configured-key",
+  "signed_material": "original-event-chain-only",
+  "key_trust": "trust-embedded-keys",
+  "keys": [],
+  "signatures": []
+}

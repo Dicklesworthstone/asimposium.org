@@ -13,7 +13,18 @@
  * license line. Nothing here touches a socket.
  */
 
-import { type ScreeningExportContext, ScreeningExportContextSchema } from "@asimposium/contracts";
+import {
+  type ExportCheckpointBundle,
+  ExportCheckpointBundleSchema,
+  type ScreeningExportContext,
+  ScreeningExportContextSchema,
+} from "@asimposium/contracts";
+import {
+  type ExportSignatureAssurance,
+  type ExportTrustedKey,
+  unsignedExportCheckpointBundle,
+  verifyExportCheckpointBundle,
+} from "./export-signatures.ts";
 import {
   canonicalJson,
   checkpointDigest,
@@ -31,9 +42,11 @@ export const EXPORT_LICENSE = "CC BY 4.0";
 
 /** The export format version, so a consumer can reject a future shape. */
 export const EXPORT_FORMAT = "asimposium.problem-export.v3";
-/** Public downloads preserve required publication context in a separate record.
+/** v4 remains readable; v5 adds independently verifiable checkpoint signatures.
+ * Both preserve the mandatory publication context separately from signed events.
  * The v3 format remains the strict backup/restore format. */
-export const PUBLIC_EXPORT_FORMAT = "asimposium.problem-export.v4";
+export const PUBLIC_EXPORT_V4_FORMAT = "asimposium.problem-export.v4";
+export const PUBLIC_EXPORT_FORMAT = "asimposium.problem-export.v5";
 
 /** The `control` value of the first record. Named so the scan cannot drift. */
 export const EXPORT_HEADER_CONTROL = "export_header";
@@ -50,7 +63,8 @@ const EXPORT_HEADER_KEYS = [
   "problem",
   "title",
 ] as const;
-const PUBLIC_EXPORT_HEADER_KEYS = [...EXPORT_HEADER_KEYS, "publication_context_sha256"].sort();
+const PUBLIC_EXPORT_V4_HEADER_KEYS = [...EXPORT_HEADER_KEYS, "publication_context_sha256"].sort();
+const PUBLIC_EXPORT_HEADER_KEYS = [...PUBLIC_EXPORT_V4_HEADER_KEYS, "checkpoint_signatures"].sort();
 
 const EXPORT_CHECKPOINT_KEYS = [
   "chain_version",
@@ -228,6 +242,9 @@ export interface ProblemExportInput {
 
 export interface PublicProblemExportInput extends ProblemExportInput {
   readonly publicationNotices: ScreeningExportContext["notices"];
+  /** The read path supplies validated stored signatures. Pure unsigned export
+   * producers still emit an explicit empty bundle, never an implied signature. */
+  readonly checkpointSignatures?: ExportCheckpointBundle;
 }
 
 /** A separately held context digest can pin the public companion. Existing
@@ -237,9 +254,9 @@ export function publicationContextDigest(context: ScreeningExportContext): Promi
   return sha256Hex(`asimposium.publication-context.v1\n${canonicalJson(fields)}`);
 }
 
-/** v4 adds exactly one mandatory context record; original event records are
- * unchanged. Empty context is explicit, so a missing companion is never read
- * as an assertion that the exported work had no warnings. */
+/** v5 retains v4's mandatory context record and embeds a bounded signature
+ * bundle in the header. Original event records and signature messages remain
+ * unchanged. Empty context and unsigned history are both explicit. */
 export async function serializePublicProblemExport(
   input: PublicProblemExportInput,
 ): Promise<string> {
@@ -255,8 +272,14 @@ export async function serializePublicProblemExport(
   context.context_sha256 = await publicationContextDigest(context);
   const records = serializeProblemExport(input).slice(0, -1).split("\n");
   const header = JSON.parse(records[0] ?? "{}") as Record<string, unknown>;
+  const signatures = ExportCheckpointBundleSchema.parse(
+    input.checkpointSignatures ?? unsignedExportCheckpointBundle(input.problemId, context.through),
+  );
+  if (signatures.problem_id !== input.problemId || signatures.through !== context.through)
+    throw new Error("EXPORT_CHECKPOINT_CUT_MISMATCH");
   header.format = PUBLIC_EXPORT_FORMAT;
   header.publication_context_sha256 = context.context_sha256;
+  header.checkpoint_signatures = signatures;
   return `${[JSON.stringify(header), JSON.stringify(context), ...records.slice(1)].join("\n")}\n`;
 }
 
@@ -536,15 +559,17 @@ export function parseProblemExport(ndjson: string): ExportParseResult {
 
 export type PublicProblemExportParseResult =
   | (Extract<ExportParseResult, { ok: true }> & {
+      readonly format: typeof PUBLIC_EXPORT_FORMAT | typeof PUBLIC_EXPORT_V4_FORMAT;
       readonly publicationContext: ScreeningExportContext;
+      readonly checkpointSignatures: ExportCheckpointBundle | null;
       /** Only for the shared integrity verifier. Restoring this stripped
        * representation would discard publication context and is not authorized. */
       readonly chainNdjson: string;
     })
   | Extract<ExportParseResult, { ok: false }>;
 
-/** Strict public-v4 framing and exact source binding. v3 parsers deliberately
- * keep rejecting v4 so an old backup/restore consumer cannot drop its notices. */
+/** Strict public-v4/v5 framing and exact source binding. v3 parsers deliberately
+ * reject both so an old backup/restore consumer cannot drop their notices. */
 export function parsePublicProblemExport(ndjson: string): PublicProblemExportParseResult {
   const framed = splitExactLfRecords(ndjson);
   if (!framed.ok) return { ok: false, brokenAtSeq: null, detail: framed.reason };
@@ -560,14 +585,15 @@ export function parsePublicProblemExport(ndjson: string): PublicProblemExportPar
   if (!header.ok || !companion.ok) {
     return { ok: false, brokenAtSeq: null, detail: "public export has invalid context framing" };
   }
+  const isV5 = header.value.format === PUBLIC_EXPORT_FORMAT;
   if (
-    !hasExactKeys(header.value, PUBLIC_EXPORT_HEADER_KEYS) ||
-    header.value.format !== PUBLIC_EXPORT_FORMAT
+    !hasExactKeys(header.value, isV5 ? PUBLIC_EXPORT_HEADER_KEYS : PUBLIC_EXPORT_V4_HEADER_KEYS) ||
+    (!isV5 && header.value.format !== PUBLIC_EXPORT_V4_FORMAT)
   ) {
     return {
       ok: false,
       brokenAtSeq: null,
-      detail: "header does not have the exact public v4 shape",
+      detail: "header does not have an exact supported public export shape",
     };
   }
   const context = ScreeningExportContextSchema.safeParse(companion.value);
@@ -578,19 +604,35 @@ export function parsePublicProblemExport(ndjson: string): PublicProblemExportPar
       detail: "public export has invalid publication context",
     };
   }
-  const { publication_context_sha256: _digest, ...baseHeader } = header.value;
+  const signatures = isV5
+    ? ExportCheckpointBundleSchema.safeParse(header.value.checkpoint_signatures)
+    : null;
+  if (signatures !== null && !signatures.success)
+    return {
+      ok: false,
+      brokenAtSeq: null,
+      detail: "public export has invalid checkpoint signatures",
+    };
+  const {
+    publication_context_sha256: _digest,
+    checkpoint_signatures: _signatures,
+    ...baseHeader
+  } = header.value;
   baseHeader.format = EXPORT_FORMAT;
   const chainNdjson = `${[JSON.stringify(baseHeader), ...framed.value.slice(2)].join("\n")}\n`;
   const base = parseProblemExport(chainNdjson);
   if (!base.ok) return base;
   if (
     context.data.problem !== base.header.problem ||
-    context.data.through !== base.trailer.finalCursor
+    context.data.through !== base.trailer.finalCursor ||
+    (signatures?.success &&
+      (signatures.data.problem_id !== base.header.problem ||
+        signatures.data.through !== base.trailer.finalCursor))
   ) {
     return {
       ok: false,
       brokenAtSeq: null,
-      detail: "publication context names a different exported cut",
+      detail: "publication context or checkpoint signatures name a different exported cut",
     };
   }
   const sources = new Map(base.events.map((event) => [event.seq, event]));
@@ -608,7 +650,13 @@ export function parsePublicProblemExport(ndjson: string): PublicProblemExportPar
       };
     }
   }
-  return { ...base, publicationContext: context.data, chainNdjson };
+  return {
+    ...base,
+    format: isV5 ? PUBLIC_EXPORT_FORMAT : PUBLIC_EXPORT_V4_FORMAT,
+    publicationContext: context.data,
+    checkpointSignatures: signatures?.success ? signatures.data : null,
+    chainNdjson,
+  };
 }
 
 export function parseProblemExportSegment(ndjson: string): ExportParseResult {
@@ -698,11 +746,14 @@ export async function verifyProblemExportChain(
 }
 
 export type PublicProblemExportVerification =
-  | (Extract<ProblemExportVerification, { intact: true }> & {
-      readonly publicationContextSha256: string;
-      readonly publicationNoticeCount: number;
-      readonly publicationContextAssurance: "export-self-consistency-only";
-    })
+  | (Extract<ProblemExportVerification, { intact: true }> &
+      ExportSignatureAssurance & {
+        readonly chainLinkageValid: true;
+        readonly payloadCommitmentRecomputed: true;
+        readonly publicationContextSha256: string;
+        readonly publicationNoticeCount: number;
+        readonly publicationContextAssurance: "export-self-consistency-only";
+      })
   | Exclude<ProblemExportVerification, { intact: true }>;
 
 /** Verify both independent integrity domains without treating public context
@@ -711,6 +762,7 @@ export async function verifyPublicProblemExportChain(
   ndjson: string,
   pin?: ProblemExportCheckpointPin,
   contextPin?: string,
+  trustedKeys: readonly ExportTrustedKey[] = [],
 ): Promise<PublicProblemExportVerification> {
   const parsed = parsePublicProblemExport(ndjson);
   if (!parsed.ok) return { intact: false, brokenAtSeq: parsed.brokenAtSeq, detail: parsed.detail };
@@ -727,8 +779,22 @@ export async function verifyPublicProblemExportChain(
   }
   const verified = await verifyProblemExportChain(parsed.chainNdjson, pin);
   if (!verified.intact) return verified;
+  const signatures = await verifyExportCheckpointBundle({
+    bundle:
+      parsed.checkpointSignatures ??
+      unsignedExportCheckpointBundle(parsed.header.problem, parsed.trailer.finalCursor),
+    problemId: parsed.header.problem,
+    through: parsed.trailer.finalCursor,
+    events: parsed.events,
+    checkpoints: parsed.header.checkpoints,
+    trustedKeys,
+  });
+  if (!signatures.ok) return { intact: false, brokenAtSeq: null, detail: signatures.detail };
   return {
     ...verified,
+    ...signatures.assurance,
+    chainLinkageValid: true,
+    payloadCommitmentRecomputed: true,
     publicationContextSha256: digest,
     publicationNoticeCount: parsed.publicationContext.notices.length,
     publicationContextAssurance: "export-self-consistency-only",

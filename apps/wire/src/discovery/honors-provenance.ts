@@ -1,5 +1,4 @@
 import {
-  ClaimDependencyPinsSchema,
   GroundedFalsificationCheckSchema,
   type HonorsItem,
   type ProblemDetail,
@@ -250,13 +249,9 @@ export async function readHonorsClaim(
     .filter((row) => row.claim_id === claim && row.target_version <= version)
     .map((row) => {
       const body = contents.get(row.event_id);
-      const pins = ClaimDependencyPinsSchema.safeParse(body?.dependency_pins);
       return {
         ...row,
         statement: typeof body?.statement === "string" ? body.statement : null,
-        claim_kind: typeof body?.kind === "string" ? body.kind : null,
-        reduced_to_claim_id:
-          body?.kind === "reduction" && pins.success ? (pins.data[0]?.claim_id ?? null) : null,
       };
     });
   const fold = await foldScientificRows(rows);
@@ -387,6 +382,11 @@ export async function readHonorsClaim(
   if (!author?.fellow || !author.sponsor) return null;
   const evidence = new Set<string>();
   const carryingReviewers: HonorsItem["carrying_reviewers"] = [];
+  const reviewNotices = await readPublicationNotices(
+    db,
+    problem,
+    carrying.map((row) => row.seq),
+  );
   for (const row of carrying) {
     const review = support.get(row.object_id);
     const actor = actors.find((candidate) => candidate.event === row.event_id);
@@ -407,6 +407,7 @@ export async function readHonorsClaim(
       typeof payload.verdict !== "string"
     )
       return null;
+    const reviewNotice = reviewNotices.get(row.seq);
     carryingReviewers.push({
       fellow_id: actor.fellow,
       name: publicName(actor.name, actor.fellow),
@@ -414,6 +415,7 @@ export async function readHonorsClaim(
       tier: review.tier,
       verdict: payload.verdict,
       basis: payload.basis.slice(0, 500),
+      ...(reviewNotice === undefined ? {} : { screening_notice: reviewNotice }),
     });
     const verification = ScientificVerificationSchema.safeParse(payload.verification);
     if (verification.success) evidence.add(verification.data.evidence.evidence_id);

@@ -101,6 +101,98 @@ async function changedPayload(source: Row, change: Record<string, unknown>): Pro
   return { ...source, payload_json: payload, payload_sha256: await sha256Hex(payload) };
 }
 
+test("reduction standing comes from the exact publication's immutable dependency pins", async () => {
+  const publication = await row(
+    1,
+    "claim.created",
+    {
+      kind: "reduction",
+      statement,
+      dependency_pins: [
+        {
+          claim_id: "C-2",
+          version: 1,
+          event_id: "EV-PREMISE",
+          payload_digest: "b".repeat(64),
+          content_digest: `sha256:${"c".repeat(64)}`,
+        },
+      ],
+    },
+    { object_id: "C-1", statement, content_digest: targetDigest },
+  );
+  expect(await foldScientificRows([publication])).toMatchObject({
+    disposition: "reduced-to",
+    stale: false,
+    currentVersion: 1,
+  });
+
+  const empty = await changedPayload(publication, {
+    dependency_pins: [],
+    relates_to: ["C-2"],
+  });
+  const laterProjection = { ...empty, reduced_to_claim_id: "C-3" };
+  expect(await foldScientificRows([laterProjection])).toMatchObject({
+    disposition: "open",
+    stale: false,
+  });
+});
+
+test("malformed or unavailable reduction pins cannot fall back to unrelated projected edges", async () => {
+  for (const pins of [null, {}, [{ claim_id: "C-2" }]]) {
+    const publication = await row(
+      1,
+      "claim.created",
+      { kind: "reduction", statement, dependency_pins: pins, relates_to: ["C-2"] },
+      { object_id: "C-1", statement, content_digest: targetDigest },
+    );
+    const misleadingProjection = { ...publication, reduced_to_claim_id: "C-3" };
+    expect(await foldScientificRows([misleadingProjection])).toMatchObject({
+      disposition: "open",
+      stale: true,
+    });
+  }
+  const publication = await row(
+    1,
+    "claim.created",
+    { kind: "reduction", statement, relates_to: ["C-2"] },
+    { object_id: "C-1", statement, content_digest: targetDigest },
+  );
+  for (const payload_json of [null, `${publication.payload_json} `]) {
+    const unavailable = {
+      ...publication,
+      payload_json,
+      claim_kind: "reduction",
+      reduced_to_claim_id: "C-3",
+    };
+    expect(await foldScientificRows([unavailable])).toMatchObject({
+      disposition: "open",
+      stale: true,
+    });
+  }
+});
+
+test("legacy reductions use their own recorded claim relation only when pins are absent", async () => {
+  const publication = await row(
+    1,
+    "claim.created",
+    { kind: "reduction", statement, relates_to: ["C-2"] },
+    { object_id: "C-1", statement, content_digest: targetDigest },
+  );
+  expect((await foldScientificRows([publication])).disposition).toBe("reduced-to");
+  const versioned = await changedPayload(publication, { relates_to: ["C-2@3"] });
+  expect((await foldScientificRows([versioned])).disposition).toBe("reduced-to");
+  for (const target of ["C-1@2", "C-2@0", "C-2@9007199254740992", "H-2"]) {
+    const invalid = await changedPayload(publication, { relates_to: [target] });
+    expect(await foldScientificRows([invalid])).toMatchObject({
+      disposition: "open",
+      stale: true,
+    });
+  }
+  const noRecordedTarget = await changedPayload(publication, { relates_to: [] });
+  const laterProjection = { ...noRecordedTarget, reduced_to_claim_id: "C-3" };
+  expect((await foldScientificRows([laterProjection])).disposition).toBe("open");
+});
+
 test("an explicit independent refutation settles exactly at the immutable 72-hour review cut", async () => {
   for (const [hours, expected] of [
     [0, "disputed"],

@@ -460,6 +460,13 @@ async function composeTargetClaimPack(
   const screeningNotices = await readPublicationNotices(db, problemId, [
     Number(claimBody.seq),
     ...closure.nodes.map((node) => node.row.seq),
+    // Evidence and review notices belong to their own immutable publications,
+    // never to the claim they discuss. All selected records share this cut.
+    ...[1, 2].flatMap((index) =>
+      ((results[index]?.results ?? []) as TargetRow[])
+        .slice(0, LEDGER_PACK_CANDIDATE_LIMIT)
+        .flatMap((row) => (row.body === null ? [] : [Number(JSON.parse(row.body).seq)])),
+    ),
   ]);
   const scienceRows = results[4]?.results as DependencyScientificRow[] | undefined;
   if (scienceRows === undefined) throw new Error("Premise scientific snapshot unavailable");

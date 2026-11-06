@@ -1,7 +1,9 @@
 import {
   AuthorConcessionPublicationSchema,
+  ClaimDependencyPinsSchema,
   GroundedFalsificationCheckSchema,
   type PublicClaimState,
+  PublicClaimTargetSchema,
   ScientificVerificationSchema,
 } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
@@ -45,8 +47,6 @@ export interface ScientificRow {
   content_digest: string | null;
   statement: string | null;
   direction: string | null;
-  claim_kind?: string | null;
-  reduced_to_claim_id?: string | null;
   weighted_refutation?: number;
   withdrawn_event_id?: string | null;
   withdrawn_kind?: string | null;
@@ -177,7 +177,7 @@ export function prepareScientificDispositions(
       ret.target_object AS retraction_target,
       e.payload_sha256, c.payload_json, e.created_at, e.actor_fellow_id AS fellow_id,
       e.actor_sponsor_id AS sponsor_id, v.content_digest, v.statement, x.direction,
-      v.kind AS claim_kind, w.source_event_id AS withdrawn_event_id,
+      w.source_event_id AS withdrawn_event_id,
       CASE WHEN e.object_kind = 'claim' THEN ${directiveDisclosureStatusSql(
         "e.problem_id",
         "e.object_id",
@@ -185,7 +185,6 @@ export function prepareScientificDispositions(
         "disclosure_cut.cursor",
       )} ELSE NULL END AS directive_disclosure,
       w.target_kind AS withdrawn_kind, w.source_sha256 AS withdrawn_sha256,
-      (SELECT cd.depends_on_claim_id FROM claim_deps cd WHERE cd.problem_id = e.problem_id AND cd.claim_id = s.id LIMIT 1) AS reduced_to_claim_id,
       CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce')
         AND length(trim(coalesce(r.capable_of_failure, ''))) > 0 THEN 1 ELSE 0 END AS weighted_refutation
     FROM events e CROSS JOIN disclosure_cut
@@ -484,22 +483,32 @@ export async function foldScientificRows(
       if (!adverseEvidence && !adverseReview) continue;
     }
     if (row.type === "claim.created" || row.type === "claim.revised") {
-      const targetClaimId =
-        row.reduced_to_claim_id ??
-        (payload &&
-        Array.isArray(payload.relates_to) &&
-        payload.relates_to.length > 0 &&
-        typeof payload.relates_to[0] === "string"
-          ? (payload.relates_to[0] as string)
-          : undefined);
-      const isReduction =
-        (row.claim_kind === "reduction" || (payload && payload.kind === "reduction")) &&
-        Boolean(targetClaimId);
+      let targetClaimId: string | undefined;
+      if (payload?.kind === "reduction") {
+        // claim_deps accumulates edges across revisions. Only this verified
+        // publication's pins can establish its reduction, including an empty
+        // list that deliberately removes the previous version's premises.
+        if (payload.dependency_pins !== undefined) {
+          const pins = ClaimDependencyPinsSchema.safeParse(payload.dependency_pins);
+          if (!pins.success || pins.data.some((pin) => pin.claim_id === row.claim_id)) {
+            markStale(row);
+          } else {
+            targetClaimId = pins.data[0]?.claim_id;
+          }
+        } else if (Array.isArray(payload.relates_to) && payload.relates_to.length > 0) {
+          // Legacy publications predate dependency pins. Their own recorded
+          // relation may establish bookkeeping, never a present-day graph edge.
+          const target = PublicClaimTargetSchema.safeParse(payload.relates_to[0]);
+          if (target.success && target.data.split("@")[0] !== row.claim_id)
+            targetClaimId = target.data;
+          else markStale(row);
+        }
+      }
       timeline.push({
         kind: row.type === "claim.created" ? "claim-created" : "claim-revised",
         sequence: row.seq,
         version: row.object_version,
-        targetClaimId: isReduction ? targetClaimId : undefined,
+        targetClaimId,
       });
       continue;
     }
