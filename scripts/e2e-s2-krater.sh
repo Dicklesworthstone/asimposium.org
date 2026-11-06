@@ -556,6 +556,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/commentary/router.ts
   apps/wire/src/commentary/service.ts
   apps/wire/src/krater/export.ts
+  apps/wire/src/krater/export-signatures.ts
   apps/wire/src/krater/claim-version.ts
   apps/wire/src/krater/batch.ts
   # Reached through `sessions/router.ts` since the W5.3 claim-versions slice

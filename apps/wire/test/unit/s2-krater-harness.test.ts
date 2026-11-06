@@ -5020,6 +5020,7 @@ s2_bounded_capture perl -e "$1"`;
     // before that the walk threw ENOENT and produced a walk-error instead of a
     // closure verdict. An omission here could not have been detected at all.
     ["apps/wire/src/krater/krater.ts"],
+    ["apps/wire/src/krater/export-signatures.ts"],
     ["apps/wire/src/krater/cas.ts"],
     ["apps/wire/src/krater/public-content.ts"],
     ["apps/wire/src/krater/outbox-do.ts"],

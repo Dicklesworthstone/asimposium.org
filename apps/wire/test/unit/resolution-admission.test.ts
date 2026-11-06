@@ -60,7 +60,8 @@ function fixture(
     CREATE TABLE evidence(evidence_id TEXT,problem_id TEXT,source_event_id TEXT,source_seq INTEGER,
       bears_on_kind TEXT,bears_on_id TEXT,bears_on_version INTEGER,direction TEXT);
     CREATE TABLE reviews(review_id TEXT,problem_id TEXT,source_event_id TEXT,source_seq INTEGER,
-      target_claim_id TEXT,target_version INTEGER,verdict TEXT,capable_of_failure TEXT);
+      target_claim_id TEXT,target_version INTEGER,verdict TEXT,capable_of_failure TEXT,
+      rubric_json TEXT DEFAULT '[]');
     CREATE TABLE retractions(problem_id TEXT,retraction_id TEXT,target_object TEXT,seq INTEGER,author_fellow_id TEXT);
     CREATE TABLE scientific_withdrawals(event_id TEXT,event_sha256 TEXT,problem_id TEXT,retraction_id TEXT,
       target_object TEXT,fellow_id TEXT,seq INTEGER,source_event_id TEXT,claim_version INTEGER,
@@ -239,6 +240,7 @@ function fixture(
       target_version: pin.version,
       verdict: "confirm",
       capable_of_failure: "The exact equality could fail.",
+      rubric: [],
       tier: "T2",
       independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
       scientific_provenance: { model_family_self_declared: reviewer },
@@ -246,7 +248,7 @@ function fixture(
     };
     const source = append("review.created", "review", id, body, 1, reviewer, `usr_${reviewer}`);
     sql
-      .query("INSERT INTO reviews VALUES(?,?,?,?,?,?,?,?)")
+      .query("INSERT INTO reviews VALUES(?,?,?,?,?,?,?,?,?)")
       .run(
         id,
         PROBLEM,
@@ -256,6 +258,7 @@ function fixture(
         pin.version,
         String(body.verdict),
         String(body.capable_of_failure),
+        JSON.stringify(body.rubric),
       );
     return source;
   }
