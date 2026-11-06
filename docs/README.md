@@ -23,8 +23,9 @@ are unchanged. Upstream's own fix retries eligible GET/HEAD requests internally;
 no application retry was added. The exact unpinned and parallel S1 plants pass
 three tests/67 expectations in 33.970 seconds. All three captures record free
 ports and no child survivors before success; 24 retained logs contain no raw
-500 or ProxyWorker network-loss diagnostic. Independent final-revision execution
-is still required for `e9y6.1` and its parent.
+500 or ProxyWorker network-loss diagnostic. The independent verifier subsequently
+qualifies exact `f96214d6` and closes `e9y6.1` and its parent `e9y6`, with original
+acceptance and history retained. This does not close the separate S2 startup issue.
 
 The security review patches Next/eslint-config-next to 16.4.5, Hono to 4.13.16,
 Zod to 4.6.7, AJV to 8.18.0 and Playwright to 1.55.1. Compatible transitive URI,
@@ -104,6 +105,55 @@ used to replace this failure. Cloudflare deployment authority remains unavailabl
 (`rs5n`), and old immutable Vercel deployments are not patched by a new Preview.
 Raw records are retained under `e2e/artifacts/dae7-repair-20261104/` with the
 `e9y6-*`, `ii92-*` and `l1yg-*` prefixes.
+
+At `f96214d6`, the corrected independent root run passes all eight groups in
+1,484.091 seconds: Wire 6,672, Agora 883 and toolchain 406, with its 54 existing
+individual skips retained. The unfiltered native discovery file passes 33/33 in
+658.992 seconds. Independent typecheck/lint pass eight groups each; full contracts
+947, drift, render 584, Worker contracts 178 and security 33 also pass.
+
+The production-browser prerequisite first blocks at exit 78: both shared-cache
+Chromium 1193 directories are absent despite their earlier successful use. Their
+loss is unattributed. The retained official archives still match their hashes;
+the exact full/headless binaries are restored into a new project-owned cache,
+with an SBH protection marker and exact-path registration. The original default
+headless shell is selected through `PLAYWRIGHT_BROWSERS_PATH`, without changing
+the actions or bounds. The next original production build succeeds and passes
+108 checks, then fails its 30-second native click on the exact claim link at
+`agora-local-lane.mjs:333`: unstable geometry and DOM detachment. No subsequent
+URL/heading assertion executes. `3soe` owns this related unclassified observation;
+the different link does not establish a shared cause with its older source-summary
+failure. `ii92` remains in progress; the full 209-check criterion is unmet.
+
+The new diagnostic reuses the existing safe failure snapshot for that link and
+caps failure-only RPC collection at one second, preserving the original click,
+bound, subsequent assertions and error. A source-extracted four-case unit check
+confirms that the old collector remains pending while the new collector returns
+after 1,000.627 ms; this is not browser or D1 evidence. Compiler/lint and 50 E2E
+harness units pass after the change. A successful diagnostic control would not
+explain the original timeout. Diagnostic elapsed time includes snapshot collection.
+
+Vercel deployment `dpl_4jFdhCr9bJ6covDk15YWufZejXXY` is READY at exact `f96214d6`;
+actual logs show Bun 1.4.4, frozen installation, Next 16.4.5 and successful build.
+Primary live QA passes 26 HTTP checks, three exact static copies and four Chromium
+views in 20.960 seconds; all four screenshots are inspected. Three actual share
+images are valid 1200-by-630 PNGs. Runtime error/fatal and request 5xx queries cover
+03:35:17–04:01:30 UTC, each returning zero records with no next page or excluded
+interval. Sixteen precisely identified canceled RSC prefetches are recorded
+separately. Independent live browser reexecution remains unrun after the local
+browser failure. Ledger pages visibly retain their unavailable upstream state.
+
+Concurrent peer commit `b3fd95d0` adds 22 functional changes to enrollment privacy,
+move selection, captured pack heads and grounded scientific support. Read-only
+review finds no concrete blocker, and current compiler/lint/E2E units pass; the
+earlier runtime qualifications do not transfer to that new source. Further full
+checks use a frozen main checkout to preserve their inputs while peers continue.
+The supported later Wrangler 4.158.0 bundles patched Sharp 0.35.5/Undici 7.30.1,
+making it a concrete next candidate for `l1yg`; it is not installed or qualified.
+The latest math extension and TypeScript parser still retain their older KaTeX
+and Minimatch ranges. These remaining families are not all awaiting a missing
+upstream release. Cloudflare authority, optional Rust execution and launch remain
+blocked at their existing boundaries.
 
 ### Broad scanner investigation — 2026-11-06
 

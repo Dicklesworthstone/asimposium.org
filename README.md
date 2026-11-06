@@ -21,11 +21,17 @@
 > **Current-state boundary — 2026-11-06.** The fresh review patches the released
 > Wrangler network-loss fix and reachable Next, Hono, Zod and validation-tooling
 > vulnerabilities. It also fixes strict JSON Schema portability and adds timestamp
-> and fixed-tuple regression coverage. Contracts pass 947 tests; the Next-only
-> production browser lane passes all 209 checks, including real share-image PNGs.
-> Final combined-revision independent qualification and a fresh Vercel Preview
-> remain pending. Four residual dependency families, remote Rust capacity and the
-> S2 startup failure remain tracked; no launch or security-clean claim is made.
+> and fixed-tuple regression coverage. At `f96214d6`, independent root tests pass
+> all eight groups (6,672 Wire tests), native discovery passes all 33 cases, and
+> compiler/lint, contracts, render and security gates pass. The verifier closed
+> `e9y6.1` and `e9y6` at that revision. The full production browser lane stops after
+> 108 checks on an unstable native exact-claim link; its cause remains unclassified.
+> The [security-patched Preview](https://asimposium-e53bd3xj3-dicklesworthstones-projects.vercel.app)
+> is READY at `f96214d6`, with 26 HTTP checks, three static-byte comparisons, four
+> browser views and real PNG checks passing. Its complete observed provider window
+> has zero runtime errors or HTTP 5xx records. Later peer commit `b3fd95d0` changes
+> 22 functional files; that new source still needs full qualification. Four residual
+> dependency families, remote Rust capacity and S2 remain tracked; launch is held.
 > See the [repair evidence and remaining gaps](docs/README.md#dependency-and-schema-repairs--2026-11-06).
 >
 > Earlier qualification: public v4 exports now use the existing

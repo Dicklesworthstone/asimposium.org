@@ -124,6 +124,45 @@ function record(name, pass, detail = null) {
   console.log(JSON.stringify({ check: name, pass, ...(detail === null ? {} : { detail }) }));
 }
 
+// Failure-only observation must not hide the original native action timeout if
+// the renderer or its protocol connection has stopped responding.
+async function nativeClickFailureState(page, selector) {
+  let timer;
+  try {
+    return await Promise.race([
+      page.evaluate((selector) => {
+        const sources = [...document.querySelectorAll(selector)];
+        return {
+          ready: document.readyState,
+          fonts: document.fonts.status,
+          visibility: document.visibilityState,
+          time_origin: performance.timeOrigin,
+          now_ms: performance.now(),
+          scroll_y: window.scrollY,
+          viewport_height: window.innerHeight,
+          navigation: performance.getEntriesByType("navigation").slice(0, 8).map((entry) => ({
+            type: entry.type, response_end_ms: entry.responseEnd,
+            load_end_ms: entry.loadEventEnd, duration_ms: entry.duration,
+          })),
+          animation_count: document.getAnimations().length,
+          source_count: sources.length,
+          sources: sources.slice(0, 8).map((element) => {
+            const box = element.getBoundingClientRect();
+            return { x: box.x, y: box.y, width: box.width, height: box.height, connected: element.isConnected };
+          }),
+        };
+      }, selector),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ unavailable: true, reason: "diagnostic-timeout" }), 1000);
+      }),
+    ]);
+  } catch {
+    return { unavailable: true };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function freePort() {
   const server = createServer();
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -330,7 +369,25 @@ async function proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCu
       (await exact.getAttribute("href")) ===
         `/p/${problemId}/claims/${claimId}%401?through=${gapCursor}`,
   );
-  await exact.click();
+  const clickStarted = performance.now();
+  const navigations = [];
+  const onNavigation = (frame) => {
+    if (frame === page.mainFrame() && navigations.length < 8) {
+      navigations.push({ elapsed_ms: performance.now() - clickStarted,
+        path: new URL(frame.url()).pathname });
+    }
+  };
+  page.on("framenavigated", onNavigation);
+  try {
+    await exact.click();
+  } catch (error) {
+    const state = await nativeClickFailureState(page, ".claim-card > p > a");
+    console.error(JSON.stringify({ stage: "proof-gap-exact-claim-click-failed", mode,
+      path: listPath, elapsed_ms: performance.now() - clickStarted, navigations, state }));
+    throw error;
+  } finally {
+    page.off("framenavigated", onNavigation);
+  }
   await page.waitForURL(
     (url) => decodeURIComponent(url.pathname) === `/p/${problemId}/claims/${claimId}@1`,
   );
@@ -944,29 +1001,7 @@ async function main() {
           } catch (error) {
             // Retain geometry and load state when native disclosure controls
             // fail actionability. Never include authored text or credentials.
-            let state = { unavailable: true };
-            try {
-              state = await page.evaluate(() => ({
-                ready: document.readyState,
-                fonts: document.fonts.status,
-                visibility: document.visibilityState,
-                time_origin: performance.timeOrigin,
-                now_ms: performance.now(),
-                scroll_y: window.scrollY,
-                viewport_height: window.innerHeight,
-                navigation: performance.getEntriesByType("navigation").map((entry) => ({
-                  type: entry.type, response_end_ms: entry.responseEnd,
-                  load_end_ms: entry.loadEventEnd, duration_ms: entry.duration,
-                })),
-                animation_count: document.getAnimations().length,
-                sources: [...document.querySelectorAll(".scientific-markdown .asimp-source summary")].map((element) => {
-                  const box = element.getBoundingClientRect();
-                  return { x: box.x, y: box.y, width: box.width, height: box.height, connected: element.isConnected };
-                }),
-              }));
-            } catch {
-              // A detached/closed page must not replace the original click error.
-            }
+            const state = await nativeClickFailureState(page, ".scientific-markdown .asimp-source summary");
             console.error(JSON.stringify({ stage: "math-source-click-failed", mode, path,
               elapsed_ms: performance.now() - clickStarted, navigations, state }));
             throw error;
