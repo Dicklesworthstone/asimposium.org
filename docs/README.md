@@ -65,6 +65,25 @@ four manifest inputs with zero findings, and the three changed contract sources
 with zero critical/nine warnings. All nine warnings are deliberate fail-hard
 `JSON.parse` calls in contract tests; malformed generated artifacts should fail.
 
+The first independent root run at `c86a7dcb` fails normally in 1,446.872 seconds:
+seven groups pass, Wire has 6,671 passes and one failure. The missed dependent
+golden is the discovery schema index, whose nineteen body-byte counts still
+describe the old exports. A full independent old/new census confirms all 38 old
+bodies match that golden, and exactly nineteen current bodies change: 120
+timestamp patterns, 29 nullable compactions, eighteen equivalent prefix patterns
+and five tuple closures. There are no other structural changes. OpenAPI and the
+well-known document remain byte-identical. Only the nineteen byte counts are
+updated; the original exact golden and registry assertions remain. The three
+focused discovery/registry files then pass 57 tests/2,223 expectations in 2.842
+seconds. A new complete independent run is required; the failed control remains.
+
+That control's positive S1 captures pass cleanup and show no raw HTTP 500 or
+literal `Network connection lost`, but one actual upstream warning records a
+GET card request recovered on attempt two after a dropped development connection.
+This is the pinned upstream fix's recovery path, not evidence of zero transient
+connection drops. The original log and independent process/source audits remain
+retained; no S2 reliability diagnosis follows from it.
+
 The final npm registry census at 02:50:16 UTC covers 582 package names/636 locked
 versions and reports four advisory-bearing families: Miniflare's exact Sharp
 0.35.2 and Undici 7.29.0 pins, tooling Minimatch 10.2.6, and KaTeX 0.16.47 through
