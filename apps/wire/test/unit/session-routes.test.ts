@@ -101,6 +101,7 @@ import {
   type WorkersAIPromotionInput,
 } from "../../src/screening/workers-ai.ts";
 import {
+  type PackClaimHead,
   preparePackClaimHeads,
   readLedgerPackSection,
   readReviewQueuePack,
@@ -11212,7 +11213,7 @@ describe("session protocol routes", () => {
         "P-4DSP",
         before.public_seq,
         128,
-      ).all<{ id: string; version: number; statement: string | null }>();
+      ).all<PackClaimHead>();
       expect(capturedHeads.results).toContainEqual({
         id: "C-1",
         source_seq: 1,
