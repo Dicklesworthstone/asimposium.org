@@ -313,6 +313,11 @@ import {
   type SessionCloseWorkshopPlan,
   type SessionCloseWorkshopPromotion,
 } from "./session-close-workshop";
+import {
+  type ClientStatementContext,
+  clientStatementContextConflict,
+  clientStatementContextGuard,
+} from "./statement-context";
 import { readWorkingMovesPack } from "./working-moves";
 import { logFellowWrite } from "./write-ops-log";
 
@@ -1205,7 +1210,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     throw new Error("session replay retry budget exhausted");
   }
 
-  type AtomicCompanionInput<T> =
+  type AtomicCompanionInput<T> = AtomicCompanionBaseInput<T> & {
+    readonly statementContext?: ClientStatementContext;
+  };
+
+  type AtomicCompanionBaseInput<T> =
     | {
         readonly db: Env["DB"];
         readonly scope: "workshop_push";
@@ -1371,6 +1380,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
         const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
         return [
+          ...(input.statementContext === undefined
+            ? []
+            : [
+                clientStatementContextGuard(
+                  input.db,
+                  input.session.problem_id,
+                  input.statementContext,
+                  settlement.eventId,
+                ),
+              ]),
           ...(await prepareDeadEndTriggers(
             input.db,
             input.session.problem_id,
@@ -5353,6 +5372,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly cleanupOnFailure?: () => Promise<void>;
     readonly checkSessionStillOpen?: boolean;
     readonly expectedStatementVersion?: number;
+    readonly statementContext?: ClientStatementContext;
     readonly workshopPublication?: WorkshopPublicationSource;
   }
 
@@ -5839,7 +5859,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       };
     }
     const { c, auth, db, key, digest, session, ownedWorkshop, data } = input;
+    const statementContext =
+      input.statementContext ?? publicationStatementContext(c, data, session.opened_at);
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
+    if (input.statementContext === undefined) {
+      const contextRefusal = await clientStatementContextConflict(
+        db,
+        session.problem_id,
+        statementContext,
+      );
+      if (contextRefusal) {
+        await cleanupOnFailure();
+        return contextRefusal;
+      }
+    }
     const sponsorActing = auth.kind === "sponsor";
     const replayScope: ReplayScope = sponsorActing ? "workshop_push" : "promote";
     const replayPrincipal = sponsorActing
@@ -6009,6 +6042,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             );
             const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
             return [
+              clientStatementContextGuard(
+                db,
+                session.problem_id,
+                statementContext,
+                settlement.eventId,
+              ),
               ...scientificContentGuards(
                 db,
                 dependencyPins.map((pin) => ({
@@ -6185,6 +6224,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      const contextRefusal = await clientStatementContextConflict(
+        db,
+        session.problem_id,
+        statementContext,
+      );
+      if (contextRefusal) return contextRefusal;
       if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
       if (isScientificReferenceChanged(error)) return dependencyUnavailableProblem();
       if (
@@ -6260,17 +6305,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               currentWorkshop?.current_version ?? ownedWorkshop.current_version,
             );
       }
-      if (sponsorActing && input.expectedStatementVersion !== undefined) {
-        const contextRefusal = await verifyClientContextCursor(
-          db,
-          session.problem_id,
-          data.client_context_cursor,
-          session.opened_at,
-        );
-        if (contextRefusal) return contextRefusal;
-      }
       throw error;
     }
+  }
+
+  function publicationStatementContext(
+    c: Context<{ Bindings: Env }>,
+    data: { readonly client_context_cursor?: number },
+    sessionOpenedAt?: string,
+  ): ClientStatementContext {
+    return {
+      cursor:
+        data.client_context_cursor ??
+        (c.req.header("asimp-client-context-cursor") === undefined
+          ? undefined
+          : Number(c.req.header("asimp-client-context-cursor"))),
+      sessionOpenedAt,
+    };
   }
 
   async function verifyClientContextCursor(
@@ -6279,41 +6330,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     clientContextCursor: number | undefined,
     sessionOpenedAt?: string,
   ): Promise<Response | null> {
-    const query =
-      clientContextCursor === undefined
-        ? sessionOpenedAt !== undefined
-          ? "SELECT seq, object_version FROM events WHERE problem_id = ? AND type = 'problem.statement-revised' AND created_at >= ? ORDER BY seq DESC LIMIT 1"
-          : "SELECT seq, object_version FROM events WHERE problem_id = ? AND type = 'problem.statement-revised' ORDER BY seq DESC LIMIT 1"
-        : "SELECT seq, object_version FROM events WHERE problem_id = ? AND type = 'problem.statement-revised' AND seq > ? ORDER BY seq DESC LIMIT 1";
-
-    const stmt =
-      clientContextCursor === undefined
-        ? sessionOpenedAt !== undefined
-          ? db.prepare(query).bind(problemId, sessionOpenedAt)
-          : db.prepare(query).bind(problemId)
-        : db.prepare(query).bind(problemId, clientContextCursor);
-
-    const revised = await stmt.first<{ seq: number; object_version: number }>();
-    if (!revised) return null;
-
-    return validatedProblem({
-      status: 409,
-      code: "STATEMENT_REVISED_SINCE",
-      title: "Problem statement revised since context cursor",
-      detail: `The problem statement was revised at cursor ${revised.seq} (version ${revised.object_version}) after your context cursor ${clientContextCursor ?? 0}.`,
-      fixHint: `Re-orient with GET /p/${problemId}.md or check your /v1/inbox, then retry with the current cursor.`,
-      rule: "A5",
-      extensions: {
-        schema: "https://a.asimposium.org/schemas/problem.v1.json",
-        example: {
-          client_context_cursor: revised.seq,
-        },
-        delta_pointer: `/p/${problemId}.md`,
-        problem_id: problemId,
-        client_context_cursor: clientContextCursor ?? 0,
-        revised_at_cursor: revised.seq,
-        statement_version: revised.object_version,
-      },
+    return clientStatementContextConflict(db, problemId, {
+      cursor: clientContextCursor,
+      sessionOpenedAt,
     });
   }
 
@@ -6526,6 +6545,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       session,
       ownedWorkshop: resolved.ownedWorkshop,
       data: resolved.data,
+      statementContext: { cursor: clientContextCursor, sessionOpenedAt: session.opened_at },
       workshopPublication: resolved.workshopPublication,
       checkSessionStillOpen: true,
     });
@@ -6555,6 +6575,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly workshopPublication?: WorkshopPublicationSource;
     readonly cleanupOnFailure?: () => Promise<void>;
     readonly checkSessionStillOpen?: boolean;
+    readonly statementContext?: ClientStatementContext;
   }
 
   interface FellowClaimRevisionExecutionInput extends ClaimRevisionExecutionInput {
@@ -6855,6 +6876,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
   async function executeClaimRevision(input: ClaimRevisionExecutionInput): Promise<Response> {
     const { c, auth, db, key, digest, session, data } = input;
+    const statementContext =
+      input.statementContext ?? publicationStatementContext(c, data, session.opened_at);
     const sponsorActing = "kind" in auth && auth.kind === "sponsor";
     const replayScope: ReplayScope = sponsorActing ? "workshop_push" : "revise";
     const replayPrincipal = sponsorActing
@@ -6875,6 +6898,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (sponsorActing && input.workshopSource === undefined)
       throw new Error("Sponsor revision requires an immutable workshop source");
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
+    if (input.statementContext === undefined) {
+      const contextRefusal = await clientStatementContextConflict(
+        db,
+        session.problem_id,
+        statementContext,
+      );
+      if (contextRefusal) {
+        await cleanupOnFailure();
+        return contextRefusal;
+      }
+    }
     const content = await prepareClaimRevisionContent(input);
     if (content instanceof Response) {
       await cleanupOnFailure();
@@ -7006,6 +7040,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             );
             const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
             return [
+              clientStatementContextGuard(
+                db,
+                session.problem_id,
+                statementContext,
+                settlement.eventId,
+              ),
               ...(await prepareDeadEndTriggers(db, session.problem_id, settlement)),
               ...scientificContentGuards(
                 db,
@@ -7199,6 +7239,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      const contextRefusal = await clientStatementContextConflict(
+        db,
+        session.problem_id,
+        statementContext,
+      );
+      if (contextRefusal) return contextRefusal;
       if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
       if (error instanceof Error && /CLAIM_DEPENDENCY_CYCLE/.test(error.message)) {
         return dependencyCycleProblem();
@@ -7518,6 +7564,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       digest,
       session,
       data: replacement,
+      statementContext: { cursor: clientContextCursor, sessionOpenedAt: session.opened_at },
       workshopSource,
       workshopPublication,
       checkSessionStillOpen: true,
@@ -9260,6 +9307,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   ): Promise<PreparedSimpleCreate | Response> {
     const { auth, db, digest, session, data } = input;
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
+    const statementContext = publicationStatementContext(input.c, data, session.opened_at);
 
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const decision = authorizeFellowWrite({
@@ -9281,6 +9329,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (decision.decision !== "allow" || !(await simpleCreateAuthorityIsLive(input, "review"))) {
       await cleanupOnFailure();
       return writeRefusedProblem();
+    }
+    const contextRefusal = await clientStatementContextConflict(
+      db,
+      session.problem_id,
+      statementContext,
+    );
+    if (contextRefusal) {
+      await cleanupOnFailure();
+      return contextRefusal;
     }
 
     // Reviews pin an exact immutable version. Looking only at the claim head
@@ -9550,6 +9607,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       scope: "review",
       claimToken,
       screeningInput,
+      statementContext,
       targetGuard,
       responseFor: () =>
         ReviewResponseSchema.parse({
@@ -9767,6 +9825,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly scope: SimpleCreateScope;
     readonly claimToken: string;
     readonly screeningInput: PromotionScreeningInput;
+    readonly statementContext?: ClientStatementContext;
     readonly command: KraterLedgerCommand & Pick<KraterLedgerBatchMember, "resolveForAttempt">;
     readonly responseFor: (
       settlement: {
@@ -10007,6 +10066,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         db: input.db,
         scope: prepared.scope,
         screening,
+        statementContext: prepared.statementContext,
         principal: input.auth.binding.fellowId,
         target: input.c.req.path,
         callerKey: input.key,
@@ -10123,6 +10183,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, screened.reservation.reservationId, "settled_failed");
+      if (prepared.statementContext !== undefined) {
+        const contextRefusal = await clientStatementContextConflict(
+          db,
+          session.problem_id,
+          prepared.statementContext,
+        );
+        if (contextRefusal) return contextRefusal;
+      }
       if (workshopSource !== undefined && "publicationContextCursor" in input) {
         const contextRefusal = await verifyClientContextCursor(
           db,
@@ -10224,6 +10292,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     input: FellowClaimRevisionExecutionInput,
   ): Promise<PreparedSimpleCreate | Response> {
     const { c, auth, db, session, data } = input;
+    const statementContext = publicationStatementContext(c, data, session.opened_at);
     if (!(await simpleCreatePreflight(input, "revise"))) return writeRefusedProblem();
     const boardRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "revise");
     if (boardRefusal) return boardRefusal;
@@ -10344,6 +10413,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       scope: "revise",
       claimToken,
       screeningInput: content.screeningInput,
+      statementContext,
       targetGuard,
       revisionInput: input,
       revisionContent: content,
@@ -10388,6 +10458,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     input: ClaimCreateExecutionInput,
   ): Promise<PreparedSimpleCreate | Response> {
     const { c, auth, db, session, data } = input;
+    const statementContext = publicationStatementContext(c, data, input.sessionOpenedAt);
     if (!(await simpleCreatePreflight(input, "promote"))) return writeRefusedProblem();
     const boardRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "promote");
     if (boardRefusal) return boardRefusal;
@@ -10548,6 +10619,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       scope: "promote",
       claimToken,
       screeningInput: content.screeningInput,
+      statementContext,
       targetGuard,
       claimContent: content,
       claimData: data,
@@ -17402,6 +17474,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       await settleFailed();
       if (error instanceof ReplayConflictError || error instanceof KraterIdempotencyConflictError)
         return idempotencyConflictProblem();
+      if (session) {
+        for (const { prepared } of preparedMembers) {
+          if (prepared.statementContext === undefined) continue;
+          const contextRefusal = await clientStatementContextConflict(
+            db,
+            session.problem_id,
+            prepared.statementContext,
+          );
+          if (contextRefusal) return contextRefusal;
+        }
+      }
       if (error instanceof SessionClosePublicationError)
         return closePublicationProblem(
           error.code === "CHANGED" || pending !== undefined
@@ -18082,6 +18165,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               digest,
               session: sourceSession,
               data: replacement.data,
+              statementContext: {
+                cursor: replacement.data.client_context_cursor,
+                sessionOpenedAt: sourceSession.opened_at,
+              },
               auth: {
                 kind: "sponsor",
                 binding: {
@@ -18208,6 +18295,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               expected_workshop_version: data.expected_workshop_version,
             }),
             expectedStatementVersion: problem.current_statement_version,
+            statementContext: {
+              cursor: publication.data.client_context_cursor,
+              sessionOpenedAt: session.opened_at,
+            },
           }),
         );
       }
@@ -19120,6 +19211,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         session,
         ownedWorkshop,
         data: parsed.data,
+        statementContext: { cursor: clientContextCursor },
         cleanupOnFailure,
       }),
     );
@@ -20437,6 +20529,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         const completed = await replay();
         if (completed) return completed;
         await settleFailed();
+        for (const { prepared } of preparedMembers) {
+          if (prepared.statementContext === undefined) continue;
+          const contextRefusal = await clientStatementContextConflict(
+            db,
+            problemId,
+            prepared.statementContext,
+          );
+          if (contextRefusal) return contextRefusal;
+        }
         if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
         if (
           isEventBudgetAbort(error) ||
@@ -20915,6 +21016,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             });
           }
 
+          // Like POST /claims and a multi-member claim, a convenience batch
+          // does not acquire a fresh statement context by opening a session.
+          const statementContext = publicationStatementContext(c, parsedClaim.data);
+          const contextRefusal = await clientStatementContextConflict(
+            db,
+            problemId,
+            statementContext,
+          );
+          if (contextRefusal) return contextRefusal;
+
           let ownedWorkshop: { readonly workshop_id: string; readonly current_version: number };
           let cleanupBatchDraft: (() => Promise<void>) | undefined;
           if (parsedClaim.data.workshop_id !== undefined) {
@@ -21002,6 +21113,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 session: sessionResult.session,
                 ownedWorkshop,
                 data: parsedClaim.data,
+                statementContext,
                 ...(cleanupBatchDraft ? { cleanupOnFailure: cleanupBatchDraft } : {}),
               }),
           );
