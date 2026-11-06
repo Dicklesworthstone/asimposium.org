@@ -10,9 +10,11 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 const FELLOW_TOKEN = `asimp_ag_${"0123456789ABCDEFGHJKMNPQRS"}_${"z".repeat(43)}`;
 const JOIN_URL = `https://a.asimposium.org/join/ASIMP-EN-0123456789ABCDEF#v1.${"Q".repeat(43)}`;
+const ENROLLMENT_SECRET = `v1.${"Q".repeat(43)}`;
+const FLOW_HANDLE = `flow_v1.${"r".repeat(43)}`;
 const PRIVATE_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----";
 
-await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
+await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, fixtures, workerLogs }) => {
   const OWNER = "usr_secret_owner";
   const author = await enroll("secret-author", OWNER);
   const reviewer = await enroll("secret-reviewer", "usr_secret_reviewer");
@@ -69,7 +71,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
       refusal.secret_findings.some((finding) => finding.path === path && finding.kind === kind),
       `finding at ${path}: ${JSON.stringify(refusal.secret_findings)}`,
     );
-    for (const secret of [FELLOW_TOKEN, "Q".repeat(43), PRIVATE_KEY]) {
+    for (const secret of [FELLOW_TOKEN, "Q".repeat(43), FLOW_HANDLE, PRIVATE_KEY]) {
       assert.ok(!raw.includes(secret), "the refusal never echoes the credential");
     }
   };
@@ -168,7 +170,78 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
     .first();
   assert.equal(status.closed_at, null, "the session was not closed");
 
-  // 5. Clean text still flows end to end.
+  // Body-only exchange credentials are authority even without a join URL.
+  // Both the join secret and the flow/device polling handle must be refused
+  // before private storage, public append, handback persistence or a model call.
+  for (const [secret, kind] of [
+    [ENROLLMENT_SECRET, "enrollment-secret"],
+    [FLOW_HANDLE, "prefixed-grant"],
+  ]) {
+    const before = {
+      events: await events(),
+      workshop: await workshopRows(),
+      screens: await fixtures.screeningCalls(),
+    };
+    assertRefused(
+      await call(
+        `/v1/sessions/${session}/workshop`,
+        { type: "scratch", title: "Continuation", body_md: `Private notes: ${secret}` },
+        author,
+        422,
+      ),
+      "body_md",
+      kind,
+    );
+    assertRefused(
+      await call(
+        `/v1/p/${problem}/evidence`,
+        {
+          bears_on_kind: "claim",
+          bears_on_id: claim,
+          bears_on_version: 1,
+          direction: "supports",
+          kind: "argument",
+          source: { kind: "model_memory" },
+          mode: "confirmatory",
+          body_md: `Reproduction material: ${secret}`,
+        },
+        author,
+        422,
+      ),
+      "body_md",
+      kind,
+    );
+    assertRefused(
+      await call(
+        `/v1/sessions/${session}/close`,
+        { handback: `Continue with ${secret}`, promote: [], keep: [], discard: [] },
+        author,
+        422,
+      ),
+      "handback",
+      kind,
+    );
+    assert.equal(await events(), before.events, "refused credentials leave the public log alone");
+    assert.equal(await workshopRows(), before.workshop, "no private credential body was stored");
+    assert.equal(
+      await fixtures.screeningCalls(),
+      before.screens,
+      "credentials never reach the model",
+    );
+    const open = await env.DB.prepare(
+      "SELECT closed_at, handback FROM sessions WHERE session_id = ?",
+    )
+      .bind(session)
+      .first();
+    assert.equal(open.closed_at, null, "a refused handback keeps the session open");
+    assert.equal(open.handback, null, "a refused handback is not persisted");
+    assert.ok(
+      !workerLogs().includes(secret),
+      "credential material never reaches Worker diagnostics",
+    );
+  }
+
+  // Clean text still flows end to end.
   await call(
     `/v1/sessions/${session}/close`,
     {

@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { ProblemDocumentSchema } from "@asimposium/contracts";
+import {
+  EnrollmentFlowHandleSchema,
+  EnrollmentSecretSchema,
+  ProblemDocumentSchema,
+} from "@asimposium/contracts";
+import { scanBodyForSecrets } from "../../src/krater/cas";
 
 import {
   scanFieldForCredentials,
@@ -11,6 +16,8 @@ import {
 // Synthetic credential shapes. None is a live credential.
 const FELLOW_TOKEN = `asimp_ag_${"0123456789ABCDEFGHJKMNPQRS"}_${"a".repeat(43)}`;
 const JOIN_URL = `https://a.asimposium.org/join/ASIMP-EN-0123456789ABCDEF#v1.${"Q".repeat(43)}`;
+const ENROLLMENT_SECRET = `v1.${"Q".repeat(43)}`;
+const FLOW_HANDLE = `flow_v1.${"r".repeat(43)}`;
 const PRIVATE_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----";
 const GITHUB = `ghp_${"x".repeat(36)}`;
 const AWS = "AKIAABCDEFGHIJKLMNOP";
@@ -42,6 +49,28 @@ test("third-party credentials are refused too", () => {
   }
 });
 
+test("body-only enrollment and device credentials are refused by text and artifact scans", async () => {
+  expect(EnrollmentSecretSchema.safeParse(ENROLLMENT_SECRET).success).toBe(true);
+  expect(EnrollmentFlowHandleSchema.safeParse(FLOW_HANDLE).success).toBe(true);
+  for (const [value, kind] of [
+    [ENROLLMENT_SECRET, "enrollment-secret"],
+    [FLOW_HANDLE, "prefixed-grant"],
+  ] as const) {
+    const body = `Notes\n𝔽 ${value}.`;
+    const findings = scanTextForCredentials("body_md", body);
+    expect(findings).toEqual([{ path: "body_md", kind, line: 2, column: 3 }]);
+    expect(scanBodyForSecrets(body)).toEqual([{ kind, line: 2, column: 3 }]);
+    const response = await secretShapedContentProblem(findings).text();
+    expect(ProblemDocumentSchema.parse(JSON.parse(response)).code).toBe("SECRET_SHAPED_CONTENT");
+    expect(response).not.toContain(value);
+    expect(JSON.stringify(findings)).not.toContain(value);
+    expect(scanTextForCredentials("body_md", `${value}extra`)).toHaveLength(1);
+  }
+  expect(scanBodyForSecrets(JOIN_URL)).toEqual([
+    { kind: "enrollment-secret", line: 1, column: 31 },
+  ]);
+});
+
 test("mathematical prose and Lean syntax are not credentials", () => {
   const benign = [
     "theorem foo (h : n > 0) : n ≥ 1 := by rw [h@Nat.succ_le]; exact h",
@@ -49,6 +78,9 @@ test("mathematical prose and Lean syntax are not credentials", () => {
     "Contact: the authors' group at math.example.edu.",
     "Let AKIA be the incidence algebra.",
     "The asimp_ag_ prefix names Fellow tokens.",
+    "Protocol v1.2, v1.0-rc1-build-2026 and capsule.v1.json are version labels.",
+    `A dotted version is v1.${"1.".repeat(25)}0.`,
+    `The identifier workflow_v1.${"x".repeat(43)} is not a polling credential.`,
   ].join("\n");
   expect(scanTextForCredentials("body_md", benign)).toEqual([]);
 });
@@ -106,7 +138,7 @@ test("every JSON leaf is inspected beyond the former 512-leaf cutoff", () => {
 });
 
 test("JSON keys are screened without exposing their bytes through diagnostic paths", async () => {
-  for (const key of [GITHUB, FELLOW_TOKEN, PRIVATE_KEY]) {
+  for (const key of [GITHUB, FELLOW_TOKEN, PRIVATE_KEY, ENROLLMENT_SECRET, FLOW_HANDLE]) {
     const onlyKey = scanFieldForCredentials("body_md", JSON.stringify({ [key]: "ordinary" }));
     expect(onlyKey.length).toBeGreaterThan(0);
     expect(onlyKey[0]?.path).toBe("[key:0]");
@@ -131,6 +163,21 @@ test("escaped keys and shadowed duplicate values cannot disappear during JSON sc
   expect(scanFieldForCredentials("body_md", duplicate)).toEqual([
     { path: "payload", kind: "access-token", line: 1, column: 1 },
   ]);
+});
+
+test("escaped body-only credentials survive JSON token and duplicate-key screening", () => {
+  for (const [value, kind] of [
+    [ENROLLMENT_SECRET, "enrollment-secret"],
+    [FLOW_HANDLE, "prefixed-grant"],
+  ] as const) {
+    const source = `{"payload":"${escaped(value)}","payload":"ordinary"}`;
+    expect(scanFieldForCredentials("request", JSON.stringify({ body_md: source }))).toEqual([
+      { path: "body_md.payload", kind, line: 1, column: 1 },
+    ]);
+    expect(scanFieldForCredentials("body_md", `{"${escaped(value)}":"ordinary"}`)).toEqual([
+      { path: "[key:0]", kind, line: 1, column: 1 },
+    ]);
+  }
 });
 
 test("JSON-encoded workshop source and scalar strings retain decoded credential detection", () => {
