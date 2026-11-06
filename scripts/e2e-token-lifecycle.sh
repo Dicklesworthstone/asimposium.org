@@ -1297,7 +1297,7 @@ assert_migration_journal() {
 }
 
 seed_session_problem() {
-  local genesis pack_genesis now claim_seq publication_sql=""
+  local genesis pack_genesis now claim_seq versions_json publication_sql=""
   genesis="$(TOKEN_LIFECYCLE_SESSION_PROBLEM_ID="${SESSION_PROBLEM_ID}" "${BUN}" --eval '
     import { genesisChainDigest } from "./apps/wire/src/krater/krater.ts";
     const problemId = process.env.TOKEN_LIFECYCLE_SESSION_PROBLEM_ID;
@@ -1329,8 +1329,23 @@ seed_session_problem() {
     fail "TOKEN_LIFECYCLE_SESSION_TIME_INVALID"
     return 1
   }
+  versions_json="$("${BUN}" --eval '
+    import { claimContentDigest } from "./apps/wire/src/krater/claim-version.ts";
+    import { sha256Hex } from "./apps/wire/src/krater/krater.ts";
+    const versions = [];
+    for (let seq = 1; seq <= 130; seq += 1) {
+      versions.push(["C-" + seq, await claimContentDigest({
+        kind: "lemma", statement: "pack-measurement-" + seq, falsifier: null,
+      }, sha256Hex)]);
+    }
+    console.log(JSON.stringify(versions));
+  ')" || {
+    fail "TOKEN_LIFECYCLE_PACK_MEASUREMENT_VERSIONS_UNAVAILABLE"
+    return 1
+  }
   # SQL read-benchmark fixtures, not promotion or integrity-chain proof. Each
-  # readable claim has an explicit source; keep D1's head and contiguity guards.
+  # readable claim has an explicit source and immutable version; keep D1's
+  # head and contiguity guards. Packs must never fall back to mutable text.
   for ((claim_seq = 1; claim_seq <= 130; claim_seq++)); do
     publication_sql+="
       UPDATE problems SET public_seq = ${claim_seq} WHERE id = '${PACK_MEASUREMENT_PROBLEM_ID}';
@@ -1364,6 +1379,14 @@ seed_session_problem() {
       INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
       SELECT 'C-' || value, '${PACK_MEASUREMENT_PROBLEM_ID}', 'pack-measurement-' || value,
         printf('%064x', value), value, '${now}' FROM claim_numbers;
+      INSERT INTO claim_versions
+        (claim_id, problem_id, version, kind, statement, falsifier,
+          content_digest, editor_fellow_id, created_at)
+      SELECT c.id, c.problem_id, 1, 'lemma', c.statement, NULL,
+        json_extract(v.value, '\$[1]'), 'F-pack-measurement', c.created_at
+      FROM claims c JOIN json_each('${versions_json}') v
+        ON json_extract(v.value, '\$[0]') = c.id
+      WHERE c.problem_id = '${PACK_MEASUREMENT_PROBLEM_ID}';
       ${publication_sql}
       INSERT INTO event_content (event_id, payload_sha256, payload_json)
       SELECT 'E-pack-measurement-' || source_seq, payload_sha256,
