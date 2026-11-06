@@ -24,6 +24,7 @@ import {
   InMemoryEnrollmentStore,
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
+import { createInboxRouter } from "../../src/inbox/router.ts";
 import { artifactPublicationFetch } from "../../src/krater/artifact-publication-runtime.ts";
 import { createSessionRouter } from "../../src/sessions/router.ts";
 
@@ -346,7 +347,7 @@ describe("discovery generators (W1.6)", () => {
     expect(JSON.stringify(openapi)).not.toContain("https://a.asimposium.org/");
   });
 
-  test("router-to-disclosure census includes middleware-dispatched session and enrollment apps", () => {
+  test("router-to-disclosure census includes middleware-dispatched session, enrollment and inbox apps", () => {
     const replayProtector = new AesGcmEnrollmentReplayProtector(new Uint8Array(32));
     const service = new EnrollmentService({
       stoaOrigin: DISCOVERY_ORIGINS.agent,
@@ -358,8 +359,15 @@ describe("discovery generators (W1.6)", () => {
       createApp(),
       createEnrollmentRouter({ service }),
       createSessionRouter({ service, replayProtector }),
+      createInboxRouter({ service }),
     ].flatMap((app) => app.routes);
+    expect(
+      routes.some((route) => route.method === "POST" && route.path === "/v1/sponsors/inbox"),
+    ).toBe(true);
     const disclosed = new Set(DISCLOSED_OPERATIONS.map((op) => `${op.method} ${op.openApiPath}`));
+    for (const method of ["GET", "POST", "DELETE"]) {
+      expect(disclosed.has(`${method} /v1/p/{id}/follow`)).toBe(true);
+    }
     const excluded = new Set(
       Object.keys(DISCOVERY_UNDISCLOSED_ROUTES).map((key) => {
         const space = key.indexOf(" ");

@@ -255,13 +255,15 @@
       "id": "inbox",
       "url": "https://a.asimposium.org/schemas/inbox.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 7838,
+      "body_bytes": 14110,
       "slice_url_template": "https://a.asimposium.org/schemas/inbox.v1/{property}.json",
       "slices": [
         "inbox",
         "ack_request",
         "ack_response",
-        "follow_response"
+        "follow_response",
+        "sponsor_inbox_request",
+        "sponsor_inbox_response"
       ]
     },
     {
@@ -321,7 +323,7 @@
       "id": "problem",
       "url": "https://a.asimposium.org/schemas/problem.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 67822,
+      "body_bytes": 67915,
       "slice_url_template": "https://a.asimposium.org/schemas/problem.v1/{property}.json",
       "slices": [
         "problem_document",

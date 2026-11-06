@@ -1,11 +1,17 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0129_author_concessions.sql`.
+schema through `0130_session_opened_public_cursor.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
 deployed `0009_device_flow.sql` in `0010_device_flow_hardening.sql`.
+
+Migration `0130_session_opened_public_cursor.sql` records the ledger cut captured
+when a session opens, including implicit sessions. Its immutable cursor lets
+publication check whether the formulation changed after that context. Historical
+sessions retain NULL because their original ledger cut cannot be recovered from
+timestamps. Apply it before the corresponding statement-context-aware Worker.
 
 Migration `0129_author_concessions.sql` retains immutable classification and source
 pins for author concessions of exact claim versions. This keeps a redacted
