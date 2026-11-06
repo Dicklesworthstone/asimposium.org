@@ -3,10 +3,13 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
+  EnrollmentHelloResponseSchema,
+  encodeSponsorFellowCursor,
   ProblemDocumentSchema,
   SponsorAccountDeletePreviewResponseSchema,
   SponsorAccountDeleteResponseSchema,
   SponsorAccountExportResponseSchema,
+  SponsorFellowListResponseSchema,
   SponsorFellowTransferAcceptResponseSchema,
   SponsorFellowTransferInitiateResponseSchema,
   SponsorFellowTransferListResponseSchema,
@@ -211,8 +214,11 @@ describe("W3.8 Sponsor/Fellow Lifecycle: Transfer, Export, Deletion", () => {
       await service.bootstrapSponsor(sponsorBPrincipal);
 
       // Mint and approve a Fellow for sponsor A
+      const firstDirective = "PRIVATE_TRANSFER_DIRECTIVE: check the finite boundary cases.";
       const mint = await service.mint(sponsorAPrincipal, {
         requested_scopes: ["review"],
+        first_directive: firstDirective,
+        event_budget: 75,
       });
       const claim = await service.claim({
         enrollment_id: mint.enrollmentId,
@@ -233,6 +239,13 @@ describe("W3.8 Sponsor/Fellow Lifecycle: Transfer, Export, Deletion", () => {
       const initialBinding = await service.credentialBinding(approved.token);
       expect(initialBinding).toBeDefined();
       expect(initialBinding?.sponsorId).toBe(SPONSOR_A);
+      expect((await service.fellows(sponsorAPrincipal))[0]?.grantedResources).toEqual({
+        eventBudget: 75,
+      });
+      // The summary is a copy: reading it cannot erase the Fellow's private grant.
+      expect(
+        (await service.credentialBinding(approved.token))?.grantedResources.firstDirective,
+      ).toBe(firstDirective);
       const fellowId = initialBinding!.fellowId;
       const initialToken = approved.token;
 
@@ -367,6 +380,15 @@ describe("W3.8 Sponsor/Fellow Lifecycle: Transfer, Export, Deletion", () => {
       // Fellow is now owned by Sponsor B
       const fellowsB = await service.fellowPage(sponsorBPrincipal);
       expect(fellowsB.fellows.some((f) => f.fellowId === fellowId)).toBe(true);
+      expect(fellowsB.fellows[0]?.grantedResources).toEqual({ eventBudget: 75 });
+      expect(
+        JSON.stringify(
+          await service.fellowPage(sponsorBPrincipal, {
+            granted_at: clock.now() + 1,
+            fellow_id: fellowId,
+          }),
+        ),
+      ).not.toContain(firstDirective);
       const fellowsA = await service.fellowPage(sponsorAPrincipal);
       expect(fellowsA.fellows.some((f) => f.fellowId === fellowId)).toBe(false);
     });
@@ -1180,6 +1202,7 @@ test("private export transfer isolates original grant directives and returns a t
     const mint = await service.mint(a, {
       requested_scopes: ["review"],
       first_directive: firstDirective,
+      event_budget: 75,
     });
     const claim = await service.claim({
       enrollment_id: mint.enrollmentId,
@@ -1244,6 +1267,30 @@ test("private export transfer isolates original grant directives and returns a t
       confirm: "accept-fellow-transfer",
       step_up_authenticated_at: Math.floor(clock.now() / 1000),
     });
+    const readFellows = async (cursor?: string) => {
+      const route = cursor === undefined ? "/v1/fellows" : "/v1/fellows/after/:cursor";
+      const path = cursor === undefined ? route : `/v1/fellows/after/${cursor}`;
+      const headers = await sign("", route, "fellows.list", "GET", SPONSOR_B);
+      const response = await app.fetch(new Request(`https://a.asimposium.org${path}`, { headers }));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      const page = SponsorFellowListResponseSchema.parse(await response.json());
+      expect(JSON.stringify(page)).not.toContain(firstDirective);
+      expect(page.fellows).toMatchObject([
+        {
+          fellow_id: fellow.fellowId,
+          status: "paused",
+          granted_scopes: ["review"],
+          granted_resources: { event_budget: 75 },
+        },
+      ]);
+      return page;
+    };
+    const firstFellows = await readFellows();
+    const nextFellows = await readFellows(
+      encodeSponsorFellowCursor({ granted_at: clock.now() + 1, fellow_id: fellow.fellowId }),
+    );
+    expect(nextFellows.fellows).toEqual(firstFellows.fellows);
     await read(SPONSOR_A, first.next_cursor, 409);
     const receiving = await read(SPONSOR_B);
     if (!receiving) throw new Error("Receiver account page missing");
@@ -1304,6 +1351,18 @@ test("private export transfer isolates original grant directives and returns a t
       { idempotencyKey: "resume-after-original-sponsor-deletion" },
     );
     expect((await service.credentialBinding(replacement.token))?.sponsorId).toBe(SPONSOR_B);
+    const hello = await app.fetch(
+      new Request("https://a.asimposium.org/v1/hello", {
+        headers: { authorization: `Bearer ${replacement.token}` },
+      }),
+    );
+    expect(hello.status).toBe(200);
+    expect(EnrollmentHelloResponseSchema.parse(await hello.json()).granted_resources).toMatchObject(
+      {
+        first_directive: firstDirective,
+        event_budget: 75,
+      },
+    );
   } finally {
     raw.close();
   }

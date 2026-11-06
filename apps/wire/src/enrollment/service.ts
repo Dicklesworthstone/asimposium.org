@@ -4303,7 +4303,19 @@ export class EnrollmentService {
     after?: SponsorFellowCursorKey,
   ): Promise<SponsorFellowPage> {
     assertSponsor(sponsor);
-    return this.#store.fellowsBySponsor(sponsor.sponsorId, this.#clock.now(), after);
+    const page = await this.#store.fellowsBySponsor(sponsor.sponsorId, this.#clock.now(), after);
+    return {
+      ...page,
+      fellows: page.fellows.map((fellow) => {
+        // The grant follows a transferred Fellow, but its first directive
+        // remains private to its original sponsor and the Fellow. Inventory
+        // summaries, like account-export Fellow rows, expose only grant limits.
+        // Copy before redacting: credential authority and hello use the full grant.
+        const grantedResources = { ...fellow.grantedResources };
+        delete grantedResources.firstDirective;
+        return { ...fellow, grantedResources };
+      }),
+    };
   }
 
   async revokeCredential(

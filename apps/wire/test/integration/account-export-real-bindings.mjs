@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { encodeSponsorFellowCursor, SponsorFellowListResponseSchema } from "@asimposium/contracts";
 import {
   SPONSOR_DATA_EXPORT_MAX_RESPONSE_BYTES,
   SPONSOR_DATA_EXPORT_SECTIONS,
@@ -24,17 +25,21 @@ await runLocalWorkerJourney(async ({ call, enroll, fixtures, sponsorCall, env })
     {
       requested_scopes: ["promote", "review", "propose-problems"],
       first_directive: firstDirective,
+      event_budget: 1000,
     },
     201,
   );
+  const identity = {
+    name: "export-author",
+    model: "synthetic-export-model",
+    harness: "local-account-export",
+  };
   const claimed = await call(
     "/v1/fellows",
     {
       enrollment_id: invitation.enrollment_id,
       secret: invitation.secret,
-      name: "export-author",
-      model: "synthetic-export-model",
-      harness: "local-account-export",
+      ...identity,
     },
     undefined,
     202,
@@ -246,7 +251,79 @@ await runLocalWorkerJourney(async ({ call, enroll, fixtures, sponsorCall, env })
     !newOwner.includes(firstDirective),
     "an immutable transferred grant must not leak its author's first directive",
   );
+  const inventory = async (cursor) => {
+    const page = SponsorFellowListResponseSchema.parse(
+      await sponsorCall(
+        receiver,
+        "GET",
+        cursor ? `/v1/fellows/after/${cursor}` : "/v1/fellows",
+        "fellows.list",
+        undefined,
+        200,
+        cursor ? "/v1/fellows/after/:cursor" : "/v1/fellows",
+      ),
+    );
+    assert.ok(
+      !JSON.stringify(page).includes(firstDirective),
+      "Fellow inventory pages must keep the previous sponsor's first directive private",
+    );
+    const moved = page.fellows.find((record) => record.fellow_id === fellow);
+    assert.ok(moved, "the receiving sponsor still sees the transferred Fellow");
+    assert.equal(moved.status, "paused");
+    assert.deepEqual(moved.granted_resources, { event_budget: 1000 });
+    assert.deepEqual(moved.granted_scopes, ["promote", "review", "propose-problems"]);
+    return moved;
+  };
+  const moved = await inventory();
+  await inventory(
+    encodeSponsorFellowCursor({ granted_at: moved.granted_at + 1, fellow_id: fellow }),
+  );
   await call("/v1/hello", undefined, token, 401);
+
+  // Redacting the sponsor's summary must not alter the immutable grant or
+  // the Fellow's own instructions when the receiving sponsor rebinds it.
+  const rebind = await sponsorCall(
+    receiver,
+    "POST",
+    "/v1/sponsors/rebinds",
+    "sponsor.rebind.create",
+    {
+      fellow_id: fellow,
+      confirm: "rebind-transferred-fellow",
+      step_up_authenticated_at: Math.floor(Date.now() / 1000),
+    },
+    201,
+  );
+  const rebound = await call(
+    "/v1/fellows/rebind",
+    { rebind_id: rebind.rebind_id, secret: rebind.secret, ...identity },
+    undefined,
+    202,
+  );
+  await sponsorCall(
+    receiver,
+    "POST",
+    `/v1/sponsors/rebinds/${rebind.rebind_id}/decision`,
+    "sponsor.rebind.decide",
+    {
+      rebind_id: rebind.rebind_id,
+      decision: "approve",
+      confirm: "decide-fellow-rebind",
+      step_up_authenticated_at: Math.floor(Date.now() / 1000),
+    },
+  );
+  const replacement = await call("/v1/fellows/rebind/flow", { flow_handle: rebound.flow_handle });
+  assert.equal(replacement.status, "approved");
+  await sponsorCall(receiver, "POST", "/v1/fellows/lifecycle", "fellow.lifecycle.change", {
+    fellow_id: fellow,
+    status: "active",
+    confirm: "change-fellow-lifecycle",
+    step_up_authenticated_at: Math.floor(Date.now() / 1000),
+  });
+  const hello = await call("/v1/hello", undefined, replacement.token);
+  assert.equal(hello.fellow.fellow_id, fellow);
+  assert.equal(hello.granted_resources.first_directive, firstDirective);
+  assert.equal(hello.granted_resources.event_budget, 1000);
 
   console.log(
     JSON.stringify({
@@ -257,6 +334,8 @@ await runLocalWorkerJourney(async ({ call, enroll, fixtures, sponsorCall, env })
       corrupted_cas_is_unavailable: true,
       signed_scope_and_secret_exclusions: true,
       transfer_rechecks_current_ownership_and_keeps_directives_private: true,
+      both_fellow_inventory_routes_keep_first_directives_private: true,
+      rebound_fellow_retains_original_first_directive: true,
       boundary:
         "local Workerd/D1/R2; fixture enrollment approval and screening; no browser or live OAuth claim",
     }),
