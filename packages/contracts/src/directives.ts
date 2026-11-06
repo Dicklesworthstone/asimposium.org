@@ -112,7 +112,10 @@ const ActiveDirectiveResponseBase = z
     snapshot_seq: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     focus: ActiveDirectiveFocusSchema.nullable(),
     forbids: z.array(ActiveDirectiveForbidSchema).max(100),
-    restart_url: z.string().startsWith("/v1/directives/active").max(256),
+    restart_url: z
+      .string()
+      .regex(/^\/v1\/directives\/active/)
+      .max(256),
     omitted: z.array(z.string().min(1).max(500)).max(8),
   })
   .strict();
@@ -122,7 +125,10 @@ const lastPage = { has_more: z.literal(false), next_cursor: z.null(), next_url: 
 const continuingPage = {
   has_more: z.literal(true),
   next_cursor: ActiveDirectiveCursorSchema,
-  next_url: z.string().startsWith("/v1/directives/active?").max(512),
+  next_url: z
+    .string()
+    .regex(/^\/v1\/directives\/active\?/)
+    .max(512),
 };
 // Keep these invariants structural so generated JSON Schema rejects the same
 // contradictory completion/scope shapes as the Worker validator.

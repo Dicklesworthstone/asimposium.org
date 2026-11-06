@@ -105,13 +105,9 @@
             ]
           },
           "retrieved_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "source_provenance": {

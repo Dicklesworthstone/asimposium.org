@@ -544,7 +544,7 @@
           "restart_url": {
             "type": "string",
             "maxLength": 256,
-            "pattern": "^\\/v1\\/directives\\/active.*"
+            "pattern": "^\\/v1\\/directives\\/active"
           },
           "omitted": {
             "maxItems": 8,
@@ -887,7 +887,7 @@
           "restart_url": {
             "type": "string",
             "maxLength": 256,
-            "pattern": "^\\/v1\\/directives\\/active.*"
+            "pattern": "^\\/v1\\/directives\\/active"
           },
           "omitted": {
             "maxItems": 8,
@@ -917,7 +917,7 @@
           "next_url": {
             "type": "string",
             "maxLength": 512,
-            "pattern": "^\\/v1\\/directives\\/active\\?.*"
+            "pattern": "^\\/v1\\/directives\\/active\\?"
           }
         },
         "required": [
@@ -1234,7 +1234,7 @@
           "restart_url": {
             "type": "string",
             "maxLength": 256,
-            "pattern": "^\\/v1\\/directives\\/active.*"
+            "pattern": "^\\/v1\\/directives\\/active"
           },
           "omitted": {
             "maxItems": 8,
@@ -1578,7 +1578,7 @@
           "restart_url": {
             "type": "string",
             "maxLength": 256,
-            "pattern": "^\\/v1\\/directives\\/active.*"
+            "pattern": "^\\/v1\\/directives\\/active"
           },
           "omitted": {
             "maxItems": 8,
@@ -1609,7 +1609,7 @@
           "next_url": {
             "type": "string",
             "maxLength": 512,
-            "pattern": "^\\/v1\\/directives\\/active\\?.*"
+            "pattern": "^\\/v1\\/directives\\/active\\?"
           }
         },
         "required": [

@@ -532,13 +532,9 @@
           "maxLength": 128
         },
         "transfer_effective_at": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ]
         },
         "sessions_count": {

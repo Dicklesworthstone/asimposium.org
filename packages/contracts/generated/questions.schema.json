@@ -114,13 +114,9 @@
             ]
           },
           "leased_until": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "resolved_by_object": {

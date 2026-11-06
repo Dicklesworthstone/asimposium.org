@@ -143,7 +143,10 @@
               "type": "string",
               "const": "failed-retry-batches-no-meta"
             }
-          ]
+          ],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2
         }
       },
       "required": [
@@ -335,7 +338,10 @@
                       "type": "string",
                       "const": "s2-cost-publication-commit.json"
                     }
-                  ]
+                  ],
+                  "items": false,
+                  "minItems": 6,
+                  "maxItems": 6
                 },
                 "reserved_bytes_upper_bound": {
                   "type": "number",

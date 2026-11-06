@@ -455,7 +455,10 @@ const teachingFields = {
 } as const;
 
 const problemBase = {
-  type: z.string().startsWith(PROBLEM_TYPE_PREFIX).max(200),
+  type: z
+    .string()
+    .regex(/^https:\/\/asimposium\.org\/errors\//)
+    .max(200),
   title: z.string().min(1).max(160),
   status: z.number().int().min(400).max(599),
   code: ProblemCodeSchema,
@@ -492,7 +495,11 @@ const generalContractProblem = z
     suggested_action: z.string().optional(),
     refetch_url: z.string().optional(),
     /** Fresh, credential-free read after a refused directive continuation. */
-    restart_url: z.string().startsWith("/v1/directives/active").max(256).optional(),
+    restart_url: z
+      .string()
+      .regex(/^\/v1\/directives\/active/)
+      .max(256)
+      .optional(),
     open_workshop_count: z.number().int().min(0).optional(),
     /** Open sessions to close first, present only on SESSION_CAP_REACHED. */
     open_session_ids: z.array(z.string().min(1).max(64)).max(2).optional(),

@@ -15,7 +15,7 @@
                 "type": {
                   "type": "string",
                   "maxLength": 200,
-                  "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
+                  "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/"
                 },
                 "title": {
                   "type": "string",
@@ -331,7 +331,7 @@
                 "restart_url": {
                   "type": "string",
                   "maxLength": 256,
-                  "pattern": "^\\/v1\\/directives\\/active.*"
+                  "pattern": "^\\/v1\\/directives\\/active"
                 },
                 "open_workshop_count": {
                   "type": "integer",
@@ -538,7 +538,7 @@
                 "type": {
                   "type": "string",
                   "maxLength": 200,
-                  "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
+                  "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/"
                 },
                 "title": {
                   "type": "string",
@@ -632,7 +632,7 @@
                 "type": {
                   "type": "string",
                   "maxLength": 200,
-                  "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
+                  "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/"
                 },
                 "title": {
                   "type": "string",
@@ -726,7 +726,7 @@
                 "type": {
                   "type": "string",
                   "maxLength": 200,
-                  "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
+                  "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/"
                 },
                 "title": {
                   "type": "string",
@@ -838,7 +838,7 @@
             "type": {
               "type": "string",
               "maxLength": 200,
-              "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
+              "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/"
             },
             "title": {
               "type": "string",
@@ -924,7 +924,7 @@
             "type": {
               "type": "string",
               "maxLength": 200,
-              "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
+              "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/"
             },
             "title": {
               "type": "string",
@@ -1240,7 +1240,7 @@
             "restart_url": {
               "type": "string",
               "maxLength": 256,
-              "pattern": "^\\/v1\\/directives\\/active.*"
+              "pattern": "^\\/v1\\/directives\\/active"
             },
             "open_workshop_count": {
               "type": "integer",
@@ -1447,7 +1447,7 @@
             "type": {
               "type": "string",
               "maxLength": 200,
-              "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
+              "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/"
             },
             "title": {
               "type": "string",
@@ -1541,7 +1541,7 @@
             "type": {
               "type": "string",
               "maxLength": 200,
-              "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
+              "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/"
             },
             "title": {
               "type": "string",
@@ -1635,7 +1635,7 @@
             "type": {
               "type": "string",
               "maxLength": 200,
-              "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
+              "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/"
             },
             "title": {
               "type": "string",
@@ -1747,7 +1747,7 @@
         "type": {
           "type": "string",
           "maxLength": 200,
-          "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
+          "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/"
         },
         "title": {
           "type": "string",
