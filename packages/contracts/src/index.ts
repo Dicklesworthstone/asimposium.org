@@ -538,6 +538,8 @@ export {
   type ClaimReviewState,
   ClaimReviewStateSchema,
   checkpointSignatureMessage,
+  type ExportCheckpointBundle,
+  ExportCheckpointBundleSchema,
   type HypothesisEvidenceItemResponse,
   HypothesisEvidenceItemResponseSchema,
   LedgerContractsSchema,

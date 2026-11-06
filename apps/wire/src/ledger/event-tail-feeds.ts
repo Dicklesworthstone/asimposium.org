@@ -6,6 +6,7 @@ import {
   serializePublicProblemExport,
   verifyPublicProblemExportChain,
 } from "../krater/export";
+import { readExportCheckpointBundle } from "../krater/export-signatures";
 import { readCheckpoints, readEvents } from "../krater/krater";
 import {
   collectPublicExportEvents,
@@ -31,6 +32,7 @@ async function buildPublicExportResponse(
   problemTitle: string,
   db: D1Database,
   unlisted: boolean,
+  checkpointVerifyKeys?: string,
 ): Promise<Response> {
   const cut = await readPublicExportCut(db, problemId);
   const events = await collectPublicExportEvents(
@@ -47,6 +49,12 @@ async function buildPublicExportResponse(
     if (payloadJson === undefined) throw new PublicExportUnavailableError();
     return { ...event, payloadJson };
   });
+  const checkpointSignatures = await readExportCheckpointBundle(
+    db,
+    checkpointVerifyKeys,
+    problemId,
+    cut.through,
+  );
 
   const ndjson = await serializePublicProblemExport({
     problemId,
@@ -55,12 +63,13 @@ async function buildPublicExportResponse(
     checkpoints,
     generatedAt: new Date().toISOString(),
     publicationNotices: snapshot.notices,
+    checkpointSignatures,
   });
 
   if (new TextEncoder().encode(ndjson).byteLength > PUBLIC_EXPORT_MAX_BYTES) {
     throw new PublicExportUnavailableError();
   }
-  // Use the same strict v4 context grammar and event integrity law as offline consumers.
+  // Use the same strict v5 grammar, signature association and event integrity law as offline consumers.
   // Never publish a successful terminal record for a broken or incomplete archive.
   if (!(await verifyPublicProblemExportChain(ndjson)).intact)
     throw new PublicExportUnavailableError();
@@ -86,7 +95,9 @@ async function buildPublicExportResponse(
     "x-content-type-options": "nosniff",
     "referrer-policy": "no-referrer",
     "x-asimposium-export-format": PUBLIC_EXPORT_FORMAT,
-    link: '<https://a.asimposium.org/schemas/screening.v1.json>; rel="describedby"',
+    link:
+      '<https://a.asimposium.org/schemas/screening.v1.json>; rel="describedby", ' +
+      '<https://a.asimposium.org/schemas/ledger.v1.json>; rel="describedby"',
     etag,
   });
   if (noindex) headers.set("x-robots-tag", "noindex, nofollow");
@@ -109,9 +120,17 @@ export async function eventTailExportResponse(
   problemTitle: string,
   db: D1Database,
   unlisted: boolean,
+  checkpointVerifyKeys?: string,
 ): Promise<Response> {
   try {
-    return await buildPublicExportResponse(request, problemId, problemTitle, db, unlisted);
+    return await buildPublicExportResponse(
+      request,
+      problemId,
+      problemTitle,
+      db,
+      unlisted,
+      checkpointVerifyKeys,
+    );
   } catch (error) {
     if (!(error instanceof PublicExportUnavailableError)) throw error;
     if ((await countWithheldExportPayloads(db, problemId)) > 0) {
@@ -138,7 +157,7 @@ export async function eventTailExportResponse(
       code: "INTERNAL_ERROR",
       title: "The public archive is unavailable",
       detail:
-        `A complete, currently public v4 archive within ${PUBLIC_EXPORT_MAX_EVENTS} events and ` +
+        `A complete, currently public v5 archive within ${PUBLIC_EXPORT_MAX_EVENTS} events and ` +
         `${PUBLIC_EXPORT_MAX_BYTES} uncompressed bytes could not be established. No partial archive was returned.`,
       fixHint:
         `Read /p/${encodeURIComponent(problemId)}/events.ndjson?since=0&limit=200 instead. ` +

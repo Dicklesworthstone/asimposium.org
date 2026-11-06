@@ -5,6 +5,7 @@ import {
   EXPORT_LICENSE,
   type ProblemExportEvent,
   PUBLIC_EXPORT_FORMAT,
+  PUBLIC_EXPORT_V4_FORMAT,
   parseExportHeader,
   parsePublicProblemExport,
   publicationContextDigest,
@@ -296,10 +297,17 @@ async function publicExportFixture() {
       },
     ],
   };
+  const v5 = await serializePublicProblemExport(input);
+  const legacy = v5.trimEnd().split("\n");
+  const header = JSON.parse(legacy[0]!);
+  header.format = PUBLIC_EXPORT_V4_FORMAT;
+  delete header.checkpoint_signatures;
+  legacy[0] = JSON.stringify(header);
   return {
     input,
     v3: serializeProblemExport(input),
-    v4: await serializePublicProblemExport(input),
+    v4: `${legacy.join("\n")}\n`,
+    v5,
   };
 }
 
@@ -307,7 +315,7 @@ describe("public v4 archives preserve publication context without changing the l
   test("original event records and roots survive, and legacy restore readers refuse the context-bearing format", async () => {
     const { v3, v4, input } = await publicExportFixture();
     const rows = v4.trimEnd().split("\n");
-    expect(JSON.parse(rows[0]!).format).toBe(PUBLIC_EXPORT_FORMAT);
+    expect(JSON.parse(rows[0]!).format).toBe(PUBLIC_EXPORT_V4_FORMAT);
     expect(rows.slice(2)).toEqual(v3.trimEnd().split("\n").slice(1));
     const parsed = parsePublicProblemExport(v4);
     expect(parsed.ok).toBe(true);

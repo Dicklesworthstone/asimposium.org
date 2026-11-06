@@ -10,7 +10,11 @@ import {
 } from "@asimposium/contracts";
 import { createApp } from "../../src/app";
 import type { Env } from "../../src/env";
-import { parsePublicProblemExport, verifyPublicProblemExportChain } from "../../src/krater/export";
+import {
+  PUBLIC_EXPORT_FORMAT,
+  parsePublicProblemExport,
+  verifyPublicProblemExportChain,
+} from "../../src/krater/export";
 import { writeLedgerEvent } from "../../src/krater/krater";
 import { eventTailExportResponse } from "../../src/ledger/event-tail-feeds";
 import { isScreeningPostureChangedError, recordRefusal } from "../../src/moderation/posture";
@@ -313,9 +317,7 @@ describe("published screening warnings", () => {
         );
       const response = await download();
       expect(response.status).toBe(200);
-      expect(response.headers.get("x-asimposium-export-format")).toBe(
-        "asimposium.problem-export.v4",
-      );
+      expect(response.headers.get("x-asimposium-export-format")).toBe(PUBLIC_EXPORT_FORMAT);
       expect(response.headers.get("cache-control")).toBe("private, no-store");
       const etag = response.headers.get("etag")!;
       const ndjson = await new Response(

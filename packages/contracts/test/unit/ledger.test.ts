@@ -8,6 +8,7 @@ import {
   ClaimDependencyPinsSchema,
   ClaimFaceQuerySchema,
   ClaimFaceResponseSchema,
+  ExportCheckpointBundleSchema,
   LedgerContractsSchema,
   ProblemEventTailControlSchema,
   ProblemEventTailQuerySchema,
@@ -21,6 +22,45 @@ import {
   PublicLedgerProblemIdSchema,
 } from "../../src/ledger.ts";
 import { ProblemDocumentSchema } from "../../src/problem.ts";
+
+test("export checkpoint bundles state their bounded scope and independent trust requirement", async () => {
+  const good = await fixture(
+    new URL("../fixtures/valid/ledger-export-checkpoints.json", import.meta.url),
+  );
+  const bad = await fixture(
+    new URL("../fixtures/invalid/ledger-export-checkpoints.json", import.meta.url),
+  );
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/ledger.schema.json", import.meta.url), "utf8"),
+  );
+  const ajv = new Ajv2020({ strict: true });
+  addFormats(ajv);
+  const published = ajv.compile(schema.properties.export_checkpoint_bundle);
+  const bundle = ExportCheckpointBundleSchema.parse(good);
+  for (const value of [bundle, { ...bundle, through: 0, keys: [], signatures: [] }]) {
+    expect(ExportCheckpointBundleSchema.safeParse(value).success).toBe(true);
+    expect(published(value)).toBe(true);
+  }
+  for (const value of [
+    bad,
+    { ...bundle, signed_material: "entire-export" },
+    { ...bundle, through: Number.MAX_SAFE_INTEGER + 1 },
+    { ...bundle, signatures: Array(17).fill(bundle.signatures[0]) },
+    { ...bundle, authenticated: true },
+  ]) {
+    expect(ExportCheckpointBundleSchema.safeParse(value).success).toBe(false);
+    expect(published(value)).toBe(false);
+  }
+  // Relational constraints are checked by the canonical Zod contract and
+  // again against the actual export's chain, not asserted by JSON Schema.
+  for (const value of [
+    { ...bundle, through: 1 },
+    { ...bundle, keys: [] },
+    { ...bundle, keys: [...bundle.keys, ...bundle.keys] },
+    { ...bundle, signatures: [...bundle.signatures, ...bundle.signatures] },
+  ])
+    expect(ExportCheckpointBundleSchema.safeParse(value).success).toBe(false);
+});
 
 test("problem digests require public lifecycle state in Zod and generated JSON Schema", async () => {
   const good = await fixture(

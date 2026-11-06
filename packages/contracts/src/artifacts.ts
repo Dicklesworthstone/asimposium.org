@@ -94,6 +94,7 @@ import {
   type ClaimCitationCsl,
   type ClaimDependencyPin,
   type ClaimFaceResponse,
+  type ExportCheckpointBundle,
   type HypothesisEvidenceItemResponse,
   LedgerContractsSchema,
   type ProblemFaceResponse,
@@ -568,6 +569,7 @@ function generatedLedgerTypes(): string {
     "ClaimCitationCsl",
     "ClaimDependencyPin",
     "ClaimFaceResponse",
+    "ExportCheckpointBundle",
     "HypothesisEvidenceItemResponse",
     "ProblemFaceResponse",
     "ProblemIndexEntry",
@@ -577,6 +579,7 @@ function generatedLedgerTypes(): string {
     ClaimCitationCsl: ClaimCitationCsl;
     ClaimDependencyPin: ClaimDependencyPin;
     ClaimFaceResponse: ClaimFaceResponse;
+    ExportCheckpointBundle: ExportCheckpointBundle;
     HypothesisEvidenceItemResponse: HypothesisEvidenceItemResponse;
     ProblemFaceResponse: ProblemFaceResponse;
     ProblemIndexEntry: ProblemIndexEntry;
