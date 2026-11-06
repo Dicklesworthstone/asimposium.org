@@ -31,6 +31,7 @@ test.each([
   "herald-room",
   "governance",
   "statement-review",
+  "statement-context",
   "credential-liveness",
   "workshop-read",
   "unlisted",
@@ -87,8 +88,8 @@ test.each([
                   ? "workshop-read-real-bindings.mjs"
                   : screenMode === "credential-liveness"
                     ? "claim-credential-liveness-real-bindings.mjs"
-                    : screenMode === "statement-review"
-                      ? "statement-review-real-bindings.mjs"
+                    : screenMode === "statement-review" || screenMode === "statement-context"
+                      ? `${screenMode}-real-bindings.mjs`
                       : screenMode === "unlisted"
                         ? "unlisted-real-bindings.mjs"
                         : screenMode === "governance"
@@ -171,8 +172,8 @@ test.each([
               ? "workshop-read-real-bindings"
               : screenMode === "credential-liveness"
                 ? "claim-credential-liveness-real-bindings"
-                : screenMode === "statement-review"
-                  ? "statement-review-real-bindings"
+                : screenMode === "statement-review" || screenMode === "statement-context"
+                  ? `${screenMode}-real-bindings`
                   : screenMode === "unlisted"
                     ? "unlisted-real-bindings"
                     : screenMode === "governance"
@@ -226,6 +227,7 @@ test.each([
       screenMode === "governance" ||
       screenMode === "unlisted" ||
       screenMode === "statement-review" ||
+      screenMode === "statement-context" ||
       screenMode === "credential-liveness" ||
       screenMode === "workshop-read" ||
       screenMode === "working-review" ||

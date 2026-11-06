@@ -281,6 +281,8 @@ interface CompetingEvent {
   readonly eventType: string;
   readonly objectKind: string;
   readonly objectId: string;
+  readonly objectVersion?: number;
+  readonly createdAt?: string;
   readonly payload: Record<string, unknown>;
 }
 
@@ -295,6 +297,7 @@ let competingLedgerWriteBeforeNextBatch: {
   readonly sql?: string;
   readonly bindings?: unknown[];
   readonly event?: CompetingEvent;
+  readonly matchSql?: string;
 } | null = null;
 
 async function competingLedgerWrite(
@@ -319,9 +322,9 @@ async function competingLedgerWrite(
       eventType: event?.eventType ?? "lane.competing-write",
       objectKind: event?.objectKind ?? "lane",
       objectId: event?.objectId ?? `LANE-${id}`,
-      objectVersion: 1,
+      objectVersion: event?.objectVersion ?? 1,
       payloadJson: JSON.stringify(event?.payload ?? { competing: true }),
-      createdAt: new Date().toISOString(),
+      createdAt: event?.createdAt ?? new Date().toISOString(),
       attribution: {
         fellowId: "F-LANE-COMPETITOR",
         sponsorId: "usr_lane_competitor",
@@ -331,14 +334,24 @@ async function competingLedgerWrite(
       },
     },
     {
-      statementsAfterEvent: ({ eventId }) =>
-        change === undefined
+      statementsAfterEvent: ({ eventId }) => [
+        ...(change === undefined
           ? []
           : [
               db
                 .prepare(`${change.sql} AND EXISTS (SELECT 1 FROM events WHERE id = ?)`)
                 .bind(...change.bindings, eventId),
-            ],
+            ]),
+        ...(event?.eventType !== "problem.statement-revised"
+          ? []
+          : [
+              db
+                .prepare(`UPDATE claims SET statement_drift = 1
+              WHERE problem_id = ? AND statement_version < ?
+                AND EXISTS (SELECT 1 FROM events WHERE id = ?)`)
+                .bind(problemId, event.objectVersion ?? 1, eventId),
+            ]),
+      ],
     },
   );
 }
@@ -401,7 +414,9 @@ function racingDb(db: D1Database): D1Database {
           const competing = competingLedgerWriteBeforeNextBatch;
           if (
             competing !== null &&
-            native.some((statement) => sqlOf.get(statement)?.includes("INSERT INTO events"))
+            native.some((statement) =>
+              sqlOf.get(statement)?.includes(competing.matchSql ?? "INSERT INTO events"),
+            )
           ) {
             competingLedgerWriteBeforeNextBatch = null;
             await competingLedgerWrite(
@@ -488,11 +503,13 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     sql?: string,
     bindings?: unknown[],
     event?: CompetingEvent,
+    matchSql?: string,
   ): void {
     competingLedgerWriteBeforeNextBatch = {
       problemId,
       ...(sql === undefined ? {} : { sql, bindings: bindings ?? [] }),
       ...(event === undefined ? {} : { event }),
+      ...(matchSql === undefined ? {} : { matchSql }),
     };
   }
 

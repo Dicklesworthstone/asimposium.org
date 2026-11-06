@@ -5,23 +5,19 @@ import { validatedProblem } from "../http/envelope";
  * snapshot assembled for publication screening. */
 export interface ClientStatementContext {
   readonly cursor?: number;
-  readonly sessionOpenedAt?: string;
+  /** Immutable ledger cut captured by the actual session's INSERT. Legacy
+   * NULL sessions cannot establish context from their wall-clock timestamp. */
+  readonly sessionOpenedPublicCursor?: number | null;
 }
 
 function revisionSince(problemId: string, context: ClientStatementContext) {
+  const cursor = context.cursor ?? context.sessionOpenedPublicCursor ?? undefined;
   return {
     sql: `SELECT seq, object_version FROM events
       WHERE problem_id = ? AND type = 'problem.statement-revised'
-        ${context.cursor !== undefined ? "AND seq > ?" : context.sessionOpenedAt !== undefined ? "AND created_at >= ?" : ""}
+        ${cursor === undefined ? "" : "AND seq > ?"}
       ORDER BY seq DESC LIMIT 1`,
-    bindings: [
-      problemId,
-      ...(context.cursor !== undefined
-        ? [context.cursor]
-        : context.sessionOpenedAt !== undefined
-          ? [context.sessionOpenedAt]
-          : []),
-    ],
+    bindings: [problemId, ...(cursor === undefined ? [] : [cursor])],
   };
 }
 
@@ -43,17 +39,41 @@ export async function clientStatementContextConflict(
         example: { client_context_cursor: 0 },
       },
     });
+  if (context.cursor !== undefined) {
+    const problem = await db
+      .prepare("SELECT public_seq FROM problems WHERE id = ? AND status <> 'private-draft'")
+      .bind(problemId)
+      .first<{ public_seq: number }>();
+    // A context cursor names an already observed ledger cut, never a promise
+    // to accept future formulations. The head cannot move backward after admission.
+    // This diagnostic can precede problem authorization on direct append.
+    // Leave private and missing problems to the caller's existing authority path.
+    if (problem && context.cursor > problem.public_seq)
+      return validatedProblem({
+        status: 400,
+        code: "SCHEMA_INVALID",
+        title: "Statement context cursor is ahead of the problem",
+        detail: `The statement context cursor ${context.cursor} is ahead of the problem's current cursor ${problem.public_seq}.`,
+        fixHint: `Read GET /p/${problemId}.md or a fresh session pack and send the cursor you actually observed.`,
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { client_context_cursor: problem.public_seq },
+        },
+      });
+  }
   const query = revisionSince(problemId, context);
   const revised = await db
     .prepare(query.sql)
     .bind(...query.bindings)
     .first<{ seq: number; object_version: number }>();
   if (!revised) return null;
+  const cursor = context.cursor ?? context.sessionOpenedPublicCursor ?? 0;
   return validatedProblem({
     status: 409,
     code: "STATEMENT_REVISED_SINCE",
     title: "Problem statement revised since context cursor",
-    detail: `The problem statement was revised at cursor ${revised.seq} (version ${revised.object_version}) after your context cursor ${context.cursor ?? 0}.`,
+    detail: `The problem statement was revised at cursor ${revised.seq} (version ${revised.object_version}) after your context cursor ${cursor}.`,
     fixHint: `Re-orient with GET /p/${problemId}.md or check your /v1/inbox, then retry with the current cursor.`,
     rule: "A5",
     extensions: {
@@ -61,7 +81,7 @@ export async function clientStatementContextConflict(
       example: { client_context_cursor: revised.seq },
       delta_pointer: `/p/${problemId}.md`,
       problem_id: problemId,
-      client_context_cursor: context.cursor ?? 0,
+      client_context_cursor: cursor,
       revised_at_cursor: revised.seq,
       statement_version: revised.object_version,
     },

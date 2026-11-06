@@ -686,6 +686,7 @@ interface SessionRow {
   readonly problem_id: string;
   readonly intent: string | null;
   readonly opened_at: string;
+  readonly opened_public_cursor: number | null;
   readonly closed_at: string | null;
   readonly handback: string | null;
   readonly provenance_json: string | null;
@@ -2032,10 +2033,21 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         .prepare(
           `INSERT INTO sessions
              (session_id, fellow_id, problem_id, intent, opened_at,
-              last_heartbeat_at, idle_close_at, implicit_inflight, provenance_json)
-           VALUES (?, ?, ?, 'explore', ?, ?, ?, 1, ?)`,
+              last_heartbeat_at, idle_close_at, implicit_inflight, provenance_json,
+              opened_public_cursor)
+           VALUES (?, ?, ?, 'explore', ?, ?, ?, 1, ?,
+             (SELECT public_seq FROM problems WHERE id = ?))`,
         )
-        .bind(sessionId, fellowId, problemId, openedAt, openedAt, idleCloseAt, provenanceJson),
+        .bind(
+          sessionId,
+          fellowId,
+          problemId,
+          openedAt,
+          openedAt,
+          idleCloseAt,
+          provenanceJson,
+          problemId,
+        ),
       db
         .prepare(
           `INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
@@ -2086,16 +2098,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       throw error;
     }
 
-    return using({
-      session_id: sessionId,
-      fellow_id: fellowId,
-      problem_id: problemId,
-      intent: "explore",
-      opened_at: openedAt,
-      closed_at: null,
-      handback: null,
-      provenance_json: provenanceJson,
-    });
+    // Track the committed session before another read can fail, so the outer
+    // finally still releases its in-flight count and closes the implicit slot.
+    trackDirectAppendSession(request, sessionId, fellowId);
+    // Read the cut stored by the INSERT, never the newer problem head after
+    // the transaction. A statement may have committed while this awaited.
+    const session = await db
+      .prepare("SELECT * FROM sessions WHERE session_id = ?")
+      .bind(sessionId)
+      .first<SessionRow>();
+    if (!session) throw new Error("New implicit session is unavailable");
+    return { ok: true, session };
   }
 
   /**
@@ -3270,8 +3283,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 .prepare(
                   `INSERT INTO sessions
                      (session_id, fellow_id, problem_id, intent, opened_at,
-                      last_heartbeat_at, idle_close_at, provenance_json)
-                   SELECT ?, ?, ?, ?, ?, ?, ?, ?
+                      last_heartbeat_at, idle_close_at, provenance_json, opened_public_cursor)
+                   SELECT ?, ?, ?, ?, ?, ?, ?, ?,
+                     (SELECT public_seq FROM problems WHERE id = ?)
                    FROM session_write_replays
                    WHERE scope = 'session_open' AND principal_scope = ?
                      AND idempotency_key = ? AND request_digest = ? AND claim_token = ?`,
@@ -3285,6 +3299,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   openedAt,
                   idleCloseAt,
                   JSON.stringify(provenance),
+                  parsed.data.problem_id,
                   auth.binding.fellowId,
                   key,
                   digest,
@@ -5860,7 +5875,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     const { c, auth, db, key, digest, session, ownedWorkshop, data } = input;
     const statementContext =
-      input.statementContext ?? publicationStatementContext(c, data, session.opened_at);
+      input.statementContext ?? publicationStatementContext(c, data, session.opened_public_cursor);
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
     if (input.statementContext === undefined) {
       const contextRefusal = await clientStatementContextConflict(
@@ -6312,7 +6327,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   function publicationStatementContext(
     c: Context<{ Bindings: Env }>,
     data: { readonly client_context_cursor?: number },
-    sessionOpenedAt?: string,
+    sessionOpenedPublicCursor?: number | null,
   ): ClientStatementContext {
     return {
       cursor:
@@ -6320,7 +6335,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         (c.req.header("asimp-client-context-cursor") === undefined
           ? undefined
           : Number(c.req.header("asimp-client-context-cursor"))),
-      sessionOpenedAt,
+      sessionOpenedPublicCursor,
     };
   }
 
@@ -6328,11 +6343,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     db: D1Database,
     problemId: string,
     clientContextCursor: number | undefined,
-    sessionOpenedAt?: string,
+    sessionOpenedPublicCursor?: number | null,
   ): Promise<Response | null> {
     return clientStatementContextConflict(db, problemId, {
       cursor: clientContextCursor,
-      sessionOpenedAt,
+      sessionOpenedPublicCursor,
     });
   }
 
@@ -6427,7 +6442,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       db,
       session.problem_id,
       clientContextCursor,
-      session.opened_at,
+      session.opened_public_cursor,
     );
     if (cursorConflict !== null) return cursorConflict;
 
@@ -6545,7 +6560,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       session,
       ownedWorkshop: resolved.ownedWorkshop,
       data: resolved.data,
-      statementContext: { cursor: clientContextCursor, sessionOpenedAt: session.opened_at },
+      statementContext: {
+        cursor: clientContextCursor,
+        sessionOpenedPublicCursor: session.opened_public_cursor,
+      },
       workshopPublication: resolved.workshopPublication,
       checkSessionStillOpen: true,
     });
@@ -6877,7 +6895,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   async function executeClaimRevision(input: ClaimRevisionExecutionInput): Promise<Response> {
     const { c, auth, db, key, digest, session, data } = input;
     const statementContext =
-      input.statementContext ?? publicationStatementContext(c, data, session.opened_at);
+      input.statementContext ?? publicationStatementContext(c, data, session.opened_public_cursor);
     const sponsorActing = "kind" in auth && auth.kind === "sponsor";
     const replayScope: ReplayScope = sponsorActing ? "workshop_push" : "revise";
     const replayPrincipal = sponsorActing
@@ -7482,7 +7500,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       db,
       session.problem_id,
       clientContextCursor,
-      session.opened_at,
+      session.opened_public_cursor,
     );
     if (cursorConflict !== null) return cursorConflict;
 
@@ -7564,7 +7582,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       digest,
       session,
       data: replacement,
-      statementContext: { cursor: clientContextCursor, sessionOpenedAt: session.opened_at },
+      statementContext: {
+        cursor: clientContextCursor,
+        sessionOpenedPublicCursor: session.opened_public_cursor,
+      },
       workshopSource,
       workshopPublication,
       checkSessionStillOpen: true,
@@ -9296,6 +9317,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly stableEventId?: string;
     readonly data: ReviewRequest;
     readonly cleanupOnFailure?: () => Promise<void>;
+    readonly statementContext?: ClientStatementContext;
   }
 
   async function executeReviewCreate(input: ReviewExecutionInput): Promise<Response> {
@@ -9307,7 +9329,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   ): Promise<PreparedSimpleCreate | Response> {
     const { auth, db, digest, session, data } = input;
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
-    const statementContext = publicationStatementContext(input.c, data, session.opened_at);
+    const statementContext =
+      input.statementContext ??
+      publicationStatementContext(input.c, data, session.opened_public_cursor);
 
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const decision = authorizeFellowWrite({
@@ -9736,7 +9760,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       db,
       session.problem_id,
       clientContextCursor,
-      session.opened_at,
+      session.opened_public_cursor,
     );
     if (cursorConflict !== null) return cursorConflict;
 
@@ -9796,7 +9820,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly data: DirectClaimRequest;
     readonly cleanupOnFailure?: () => Promise<void>;
     readonly expectedStatementVersion?: number;
-    readonly sessionOpenedAt?: string;
+    readonly sessionOpenedPublicCursor?: number | null;
     readonly ownedWorkshop?: { readonly workshop_id: string; readonly current_version: number };
     readonly workshopPublication?: WorkshopPublicationSource;
   }
@@ -10196,7 +10220,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           db,
           session.problem_id,
           input.publicationContextCursor,
-          session.opened_at,
+          session.opened_public_cursor,
         );
         if (contextRefusal) return contextRefusal;
       }
@@ -10292,18 +10316,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     input: FellowClaimRevisionExecutionInput,
   ): Promise<PreparedSimpleCreate | Response> {
     const { c, auth, db, session, data } = input;
-    const statementContext = publicationStatementContext(c, data, session.opened_at);
+    const statementContext =
+      input.statementContext ?? publicationStatementContext(c, data, session.opened_public_cursor);
     if (!(await simpleCreatePreflight(input, "revise"))) return writeRefusedProblem();
     const boardRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "revise");
     if (boardRefusal) return boardRefusal;
-    const contextRefusal = await verifyClientContextCursor(
+    const contextRefusal = await clientStatementContextConflict(
       db,
       session.problem_id,
-      data.client_context_cursor ??
-        (c.req.header("asimp-client-context-cursor") === undefined
-          ? undefined
-          : Number(c.req.header("asimp-client-context-cursor"))),
-      session.opened_at,
+      statementContext,
     );
     if (contextRefusal) return contextRefusal;
     const problem = await db
@@ -10458,7 +10479,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     input: ClaimCreateExecutionInput,
   ): Promise<PreparedSimpleCreate | Response> {
     const { c, auth, db, session, data } = input;
-    const statementContext = publicationStatementContext(c, data, input.sessionOpenedAt);
+    const statementContext = publicationStatementContext(c, data, input.sessionOpenedPublicCursor);
     if (!(await simpleCreatePreflight(input, "promote"))) return writeRefusedProblem();
     const boardRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "promote");
     if (boardRefusal) return boardRefusal;
@@ -10469,7 +10490,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         (c.req.header("asimp-client-context-cursor") === undefined
           ? undefined
           : Number(c.req.header("asimp-client-context-cursor"))),
-      input.sessionOpenedAt,
+      input.sessionOpenedPublicCursor,
     );
     if (contextRefusal) return contextRefusal;
     const problem = await db
@@ -12438,16 +12459,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           : data.retry_when?.kind === "gap-closed"
             ? [session.problem_id, data.retry_when.gap_id]
             : [];
+      const contextCursor = input.publicationContextCursor ?? session.opened_public_cursor;
       const contextGuard =
         input.workshopPublication === undefined
           ? ""
           : ` AND NOT EXISTS (SELECT 1 FROM events context_change
             WHERE context_change.problem_id = ? AND context_change.type = 'problem.statement-revised'
-              AND ${input.publicationContextCursor === undefined ? "context_change.created_at >= ?" : "context_change.seq > ?"})`;
+              ${contextCursor == null ? "" : "AND context_change.seq > ?"})`;
       const contextBindings =
         input.workshopPublication === undefined
           ? []
-          : [session.problem_id, input.publicationContextCursor ?? session.opened_at];
+          : [session.problem_id, ...(contextCursor == null ? [] : [contextCursor])];
       return {
         input: {
           problemId: session.problem_id,
@@ -12712,7 +12734,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         db,
         session.problem_id,
         publicationContextCursor,
-        session.opened_at,
+        session.opened_public_cursor,
       );
       if (contextRefusal) return contextRefusal;
       return executeDeadEndCreate({
@@ -17209,7 +17231,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         } else {
           const claimInput: ClaimCreateExecutionInput = {
             ...common,
-            sessionOpenedAt: session.opened_at,
+            sessionOpenedPublicCursor: session.opened_public_cursor,
             data: publication.data,
             ownedWorkshop: {
               workshop_id: pin.workshopId,
@@ -18154,7 +18176,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             db,
             data.problem_id,
             replacement.data.client_context_cursor,
-            sourceSession.opened_at,
+            sourceSession.opened_public_cursor,
           );
           if (contextRefusal) return privateNoStore(contextRefusal);
           return privateNoStore(
@@ -18167,7 +18189,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               data: replacement.data,
               statementContext: {
                 cursor: replacement.data.client_context_cursor,
-                sessionOpenedAt: sourceSession.opened_at,
+                sessionOpenedPublicCursor: sourceSession.opened_public_cursor,
               },
               auth: {
                 kind: "sponsor",
@@ -18269,7 +18291,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           db,
           data.problem_id,
           publication.data.client_context_cursor,
-          session.opened_at,
+          session.opened_public_cursor,
         );
         if (contextRefusal) return privateNoStore(contextRefusal);
         return privateNoStore(
@@ -18297,7 +18319,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             expectedStatementVersion: problem.current_statement_version,
             statementContext: {
               cursor: publication.data.client_context_cursor,
-              sessionOpenedAt: session.opened_at,
+              sessionOpenedPublicCursor: session.opened_public_cursor,
             },
           }),
         );
@@ -19426,6 +19448,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         digest,
         session: sessionResult.session,
         data: parsed.data,
+        statementContext: publicationStatementContext(c, parsed.data),
       }),
     );
   };
@@ -19988,7 +20011,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           data: parsed.data,
           ownedWorkshop: workshop?.ownedWorkshop,
           workshopPublication: workshop?.workshopPublication,
-          sessionOpenedAt: member.action === "promote" ? session.opened_at : undefined,
+          sessionOpenedPublicCursor:
+            member.action === "promote" ? session.opened_public_cursor : undefined,
         };
         prepared = await prepareClaimCreate(input);
         if (!(prepared instanceof Response)) {
@@ -20088,6 +20112,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           session,
           stableEventId,
           data: parsed.data,
+          statementContext: publicationStatementContext(
+            c,
+            parsed.data,
+            workshopRevisions.has(tempId) ? session.opened_public_cursor : undefined,
+          ),
           workshopSource: workshopRevisions.get(tempId)?.workshopSource,
           workshopPublication: workshopRevisions.get(tempId)?.workshopPublication,
         };
@@ -20292,7 +20321,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               },
             },
           });
-        input = { c, auth, db, key: memberKey, digest, session, stableEventId, data: parsed.data };
+        input = {
+          c,
+          auth,
+          db,
+          key: memberKey,
+          digest,
+          session,
+          stableEventId,
+          data: parsed.data,
+          statementContext: publicationStatementContext(c, parsed.data),
+        };
         prepared = await prepareReviewCreate(input);
       } else {
         throw new Error("Unsupported member reached the atomic scientific batch executor");
@@ -21213,6 +21252,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             revisionData = parsedRevise.data;
           }
 
+          const statementContext = publicationStatementContext(
+            c,
+            revisionData,
+            workshopSource === undefined ? undefined : sessionResult.session.opened_public_cursor,
+          );
+          const contextRefusal = await clientStatementContextConflict(
+            db,
+            problemId,
+            statementContext,
+          );
+          if (contextRefusal) return contextRefusal;
+
           memberResponse = await withJoinedSessionRefusal(
             db,
             sessionResult,
@@ -21226,6 +21277,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 digest: memberDigest,
                 session: sessionResult.session,
                 data: revisionData,
+                statementContext,
                 workshopSource,
                 workshopPublication,
               }),
@@ -21357,6 +21409,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 digest: memberDigest,
                 session: sessionResult.session,
                 data: parsedReview.data,
+                statementContext: publicationStatementContext(c, parsedReview.data),
               }),
           );
           break;

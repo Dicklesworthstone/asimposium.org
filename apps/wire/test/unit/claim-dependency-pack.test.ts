@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
+import { ClaimFaceResponseSchema } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import {
   loadReviewQueue,
@@ -559,16 +560,16 @@ test("public novelty faces retain the twenty-first adverse review beyond display
       { DB: f.d1 } as Env,
     );
     expect(response.status).toBe(200);
-    return response.json();
+    return ClaimFaceResponseSchema.parse(await response.json());
   };
   expect((await face("C-1@1", 21)).claim_state.novelty).toBe("new");
   const current = await face();
   expect(current.claim_state.novelty).toBe("contested");
-  expect(current.items.some((item: { id: string }) => item.id === adverse.id)).toBe(false);
+  expect(current.items.some((item) => item.id === adverse.id)).toBe(false);
   expect(current.omitted).toContainEqual(expect.objectContaining({ reason: "candidate_limit" }));
-  control(f, `#22`);
+  control(f, "#22");
   expect((await face()).claim_state).toMatchObject({ novelty: "unresolved", stale: true });
-  control(f, `#22`, "visible");
+  control(f, "#22", "visible");
   expect((await face()).claim_state.novelty).toBe("contested");
   await f.add(1, [], "The revised bound has no earlier publication.", 2, "novelty-claim");
   expect((await face("C-1@2", 23)).claim_state.novelty).toBe("unreviewed");
