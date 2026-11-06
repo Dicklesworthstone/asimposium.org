@@ -16,6 +16,43 @@ observed.
 
 ### Dependency and schema repairs — 2026-11-06
 
+The newest repair addresses the repeated no-JS click failure (`3soe`). Exact
+`92ce6a4d` independently passes all eight root groups (Wire 6,683), uninterrupted
+Discovery 33, the separate atomic-batch journey (34.233 seconds) and account export
+(8.472 seconds). Its original production browser nevertheless fails normally in
+161.631 seconds after 108 passing checks. The original 30-second exact-claim click
+waits after two instability attempts; no downstream statics, independent live QA
+or closure follows. Final source/dependency/process audits match, with recorded
+visibility limits retained. Primary Preview QA remains a separate pass.
+
+A static browser comparison reproduces the same wait without ASImposium, Next
+or Workerd. Plain no-JS clicks pass; the site's finite 0.5-second entrance CSS
+triggers long waits and then the original 30-second timeout. The installed
+Playwright retry path waits on an in-page timer, whose callback cannot run with
+JavaScript disabled. Promise collection can then be misreported as detachment.
+The official fix moves the retry delay into the driver:
+[issue 42977](https://github.com/microsoft/playwright/issues/42977),
+[PR 43012](https://github.com/microsoft/playwright/pull/43012).
+The first fixed stable release is 1.64.0; current stable 1.65.0 is adopted as the
+coherent three-package family. It explicitly supports Ubuntu 26.04 and Node 24.
+
+The candidate's unchanged 209-check production lane passes in 99.488 seconds;
+typecheck/lint pass eight groups each in 124.428 seconds. The same static control
+passes all twenty cases, including animated no-JS clicks, in at most 936.888 ms
+per click. It retains the original action and 30-second bound. The application
+animation, public behavior and assertions are unchanged. Default Chromium/headless
+revision 1254 (158.0.8127.18) and FFmpeg 1013 use a new protected cache; old caches,
+packages, archives and failures remain. The managed-lock change affects only the
+three Playwright versions and removes their obsolete optional fsevents descriptor.
+Next/Auth.js versions and integrity descriptors are unchanged; Bun's peer-context
+stores change. Primary hydration preserves all eight old links and matches every
+candidate link. The new 575-name/601-version census retains the same two alerts.
+Final exact-revision independent gates and matching deployment checks are pending.
+`3soe` now blocks both `1mag` and `hdc1`; none is self-closed.
+
+The following earlier qualification names its own exact source and does not
+substitute for those pending gates.
+
 The latest review finds a concrete nested-data validation discrepancy (`1mag`):
 the temporary-ID resolver can convert an own `__proto__` key into a local object's
 prototype, allowing inherited evidence-source fields to satisfy the leaf schema.

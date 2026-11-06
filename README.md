@@ -18,7 +18,13 @@
 
 </div>
 
-> **Current-state boundary — 2026-11-06.** The latest review found a nested
+> **Current-state boundary — 2026-11-06.** The repeated no-JS browser timeout
+> is reproduced in a static control and traced to Playwright's in-page retry timer.
+> The supported 1.65.0 update passes the unchanged 209-check production lane and
+> all candidate typecheck/lint groups. It is adopted; final independent qualification
+> remains pending. At `92ce6a4d`, root and native gates pass, but the old driver's
+> browser gate fails after 108 checks. The results below retain their own revisions.
+> The latest review also found a nested
 > batch-source validation discrepancy (`1mag`); its repair and final qualification
 > are in progress. The results below name the preceding exact revision.
 > Fresh review patches Next, Hono,
