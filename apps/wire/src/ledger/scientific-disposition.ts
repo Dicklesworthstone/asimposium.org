@@ -48,6 +48,8 @@ export interface ScientificRow {
   statement: string | null;
   direction: string | null;
   weighted_refutation?: number;
+  /** Immutable review rubric/weight survives withholding its public body. */
+  weighted_statement_defect?: number;
   withdrawn_event_id?: string | null;
   withdrawn_kind?: string | null;
   withdrawn_sha256?: string | null;
@@ -186,7 +188,12 @@ export function prepareScientificDispositions(
       )} ELSE NULL END AS directive_disclosure,
       w.target_kind AS withdrawn_kind, w.source_sha256 AS withdrawn_sha256,
       CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce')
-        AND length(trim(coalesce(r.capable_of_failure, ''))) > 0 THEN 1 ELSE 0 END AS weighted_refutation
+        AND length(trim(coalesce(r.capable_of_failure, ''))) > 0 THEN 1 ELSE 0 END AS weighted_refutation,
+      CASE WHEN length(trim(coalesce(r.capable_of_failure, ''))) > 0
+        AND json_type(r.rubric_json) = 'array'
+        AND EXISTS (SELECT 1 FROM json_each(r.rubric_json) rubric
+          WHERE rubric.type = 'text' AND rubric.value IN ('statement-defect', 'statement-fails-review'))
+        THEN 1 ELSE 0 END AS weighted_statement_defect
     FROM events e CROSS JOIN disclosure_cut
     LEFT JOIN reviews r ON r.source_event_id = e.id AND r.problem_id = e.problem_id
       AND r.review_id = e.object_id AND r.source_seq = e.seq AND e.type = 'review.created'
@@ -479,7 +486,8 @@ export async function foldScientificRows(
         (row.direction === "refutes" || row.direction === "fails-to-reproduce");
       const adverseReview =
         row.type === "review.created" &&
-        (isNegativeReview(payload) || (!payload && row.weighted_refutation === 1));
+        (isNegativeReview(payload) ||
+          (!payload && (row.weighted_refutation === 1 || row.weighted_statement_defect === 1)));
       if (!adverseEvidence && !adverseReview) continue;
     }
     if (row.type === "claim.created" || row.type === "claim.revised") {
@@ -573,15 +581,20 @@ export async function foldScientificRows(
       continue;
     }
     const claim = claims.get(row.target_version);
-    if (row.type === "review.created" && row.weighted_refutation === 1 && (!payload || !claim)) {
-      // Unavailable counterevidence does not constitute a recorded resolution.
-      // Keep the contest visible without republishing the withdrawn body.
+    if (
+      row.type === "review.created" &&
+      (row.weighted_refutation === 1 || row.weighted_statement_defect === 1) &&
+      (!payload || !claim)
+    ) {
+      // Withholding an adverse review cannot resolve its recorded finding.
+      // A statement defect clears only through a new version, not redaction.
       timeline.push({
         kind: "review-created",
         sequence: row.seq,
         targetVersion: row.target_version,
         carriesWeight: true,
         verdict: "refute",
+        rubric: row.weighted_statement_defect === 1 ? ["statement-defect"] : undefined,
         review: {
           review_id: row.object_id,
           reviewer_id: row.fellow_id,

@@ -123,7 +123,7 @@ function fixture(reaches = "corroborated") {
     if (kind === "review")
       statements.push(
         f.db
-          .prepare("INSERT INTO reviews VALUES('P-DEMO',?,?,?,?,?,?,?,?)")
+          .prepare("INSERT INTO reviews VALUES('P-DEMO',?,?,?,?,?,?,?,?,?)")
           .bind(
             event.objectId,
             settlement.eventId,
@@ -133,6 +133,7 @@ function fixture(reaches = "corroborated") {
             payload.target_version,
             payload.verdict,
             payload.capable_of_failure,
+            JSON.stringify(payload.rubric ?? []),
           ),
       );
     return statements;

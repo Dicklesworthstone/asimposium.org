@@ -1418,6 +1418,66 @@ export async function scientificJourney({
     assert.ok(!JSON.stringify(card).includes(privateCanary));
   }
 
+  // Withholding a recorded defect is not a revision of its target statement.
+  const defectCanary = "STATEMENT_DEFECT_REVIEW_BODY_MUST_DISAPPEAR";
+  const defectReview = await call(
+    `${reviewer.path}/review`,
+    {
+      ...reviewBody,
+      target_claim_id: falseClaim.claim_id,
+      verdict: "cannot-verify",
+      rubric: ["statement-defect"],
+      body_md: `${defectCanary}: the quantified statement includes n=1, where no prime is at most n.`,
+      scientific_provenance: reviewer.provenance,
+    },
+    reviewer.token,
+    201,
+  );
+  const defectFacePath = `/p/${problem}/claims/${falseClaim.claim_id}.json`;
+  const beforeDefectRedaction = await worker.fetch(`${origin}${defectFacePath}`, {
+    headers: { "user-agent": userAgent },
+  });
+  assert.equal(beforeDefectRedaction.status, 200);
+  const defectEtag = beforeDefectRedaction.headers.get("etag");
+  assert.ok(defectEtag);
+  const defectBefore = ClaimFaceResponseSchema.parse(await beforeDefectRedaction.json());
+  assert.equal(defectBefore.claim_state.disposition, "malformed");
+  const defectEvent = await env.DB.prepare(
+    "SELECT source_event_id AS id FROM reviews WHERE problem_id=? AND review_id=?",
+  )
+    .bind(problem, defectReview.review_id)
+    .first();
+  assert.ok(defectEvent?.id);
+  await fixtures.redactPublicContent(defectEvent.id);
+  const afterDefectRedaction = await worker.fetch(`${origin}${defectFacePath}`, {
+    headers: { "user-agent": userAgent, "if-none-match": defectEtag },
+  });
+  assert.equal(afterDefectRedaction.status, 200);
+  assert.notEqual(afterDefectRedaction.headers.get("etag"), defectEtag);
+  const defectAfterText = await afterDefectRedaction.text();
+  assert.ok(!defectAfterText.includes(defectCanary));
+  const defectAfter = ClaimFaceResponseSchema.parse(JSON.parse(defectAfterText));
+  assert.equal(defectAfter.claim_state.disposition, "malformed");
+  assert.equal(defectAfter.claim_state.stale, true);
+  assert.ok(!defectAfter.items.some((item) => item.id === defectReview.review_id));
+  await standing("malformed · stale", falseClaim.claim_id);
+  for (const readback of [
+    await pack(reviewer),
+    await pack(reviewer, "review", `${falseClaim.claim_id}@1`),
+  ]) {
+    assert.ok(!JSON.stringify(readback).includes(defectCanary));
+  }
+  for (const suffix of ["md", "html"]) {
+    const response = await worker.fetch(
+      `${origin}/p/${problem}/claims/${falseClaim.claim_id}.${suffix}`,
+      { headers: { "user-agent": userAgent } },
+    );
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.ok(text.includes("malformed"));
+    assert.ok(!text.includes(defectCanary));
+  }
+
   const privateHandback = "SCIENCE_PRIVATE_HANDBACK_NEVER_PUBLIC";
   await call(`${author.path}/close`, { handback: privateHandback }, author.token, 201);
   // Digest profiles share the fold. Full is an immutable, paginated event
@@ -1601,6 +1661,7 @@ export async function scientificJourney({
         "reference admission before screening",
         "redaction transaction rollback",
         "transitive evidence loss revokes derived standing at current and retained cursors",
+        "withheld statement-defect review preserves malformed standing and removes its public bytes",
         "stale read parity",
         "anonymous md/json/html scientific standing and privacy parity",
         "historical version standing, withdrawal and conditional-read invalidation",

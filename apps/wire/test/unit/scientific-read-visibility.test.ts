@@ -158,6 +158,83 @@ for (const kind of ["evidence", "review"] as const) {
     }));
 }
 
+for (const rubric of ["statement-defect", "statement-fails-review"]) {
+  for (const visibility of ["redacted", "hidden", "corrupt", "missing", "withdrawn-hidden"]) {
+    test(`${visibility} ${rubric} review cannot clear malformed standing without revision`, () =>
+      using(async (f) => {
+        const review = f.source("review", "R-defect", { rubric: [rubric] });
+        assert.equal((await fold(f)).disposition, "malformed");
+        const cut = review.event.seq;
+        if (visibility === "redacted")
+          f.sql
+            .query("UPDATE event_content SET redacted_at=? WHERE event_id=?")
+            .run(iso(), review.event.id);
+        else if (visibility === "corrupt")
+          f.sql
+            .query("UPDATE event_content SET payload_json=? WHERE event_id=?")
+            .run('{"rubric":[]}', review.event.id);
+        else if (visibility === "missing")
+          f.sql
+            .query("UPDATE event_content SET payload_sha256=? WHERE event_id=?")
+            .run("0".repeat(64), review.event.id);
+        else {
+          if (visibility === "withdrawn-hidden")
+            await withdrawScientificInput(
+              f.options,
+              f.actor,
+              SESSION,
+              "review",
+              review.id,
+              review.request,
+              "withheld-defect",
+            );
+          control(f, review.id);
+        }
+        const after = await fold(f);
+        assert.equal(after.disposition, "malformed");
+        assert.equal(after.stale, true);
+        assert.equal((await fold(f, cut)).disposition, "malformed");
+        f.append(
+          "E-revision",
+          "claim.revised",
+          "claim",
+          "C-1",
+          {
+            claim_id: "C-1",
+            base_version: 1,
+            statement: "A precise revised statement.",
+          },
+          "fellow-b",
+          "P-DEMO",
+          2,
+        );
+        f.sql
+          .query("INSERT INTO claim_versions VALUES('P-DEMO','C-1',2,?,?,'conjecture')")
+          .run(`sha256:${sha("revision")}`, "A precise revised statement.");
+        const revised = await fold(f);
+        assert.equal(revised.currentVersion, 2);
+        assert.equal(revised.disposition, "open");
+        assert.equal(revised.stale, false);
+      }));
+  }
+}
+
+test("withheld unweighted or unrelated review rubrics cannot mint a statement defect", () =>
+  using(async (f) => {
+    const unweighted = [null, "", "   "].map((capable_of_failure, index) =>
+      f.source("review", `R-unweighted-${index}`, {
+        rubric: ["statement-defect"],
+        capable_of_failure,
+      }),
+    );
+    const unrelated = f.source("review", "R-unrelated", { rubric: ["soundness-of-inference"] });
+    assert.equal((await fold(f)).disposition, "open");
+    for (const review of [...unweighted, unrelated]) control(f, review.id);
+    const after = await fold(f);
+    assert.equal(after.disposition, "open");
+    assert.equal(after.stale, true);
+  }));
+
 test("a hidden withdrawal explanation never resurrects its withdrawn positive review", () =>
   using(async (f) => {
     const { review } = support(f);

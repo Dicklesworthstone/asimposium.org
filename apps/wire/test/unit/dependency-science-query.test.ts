@@ -37,7 +37,8 @@ function fixture() {
     CREATE TABLE evidence (evidence_id TEXT, problem_id TEXT, source_event_id TEXT, source_seq INTEGER,
       bears_on_kind TEXT, bears_on_id TEXT, bears_on_version INTEGER, direction TEXT);
     CREATE TABLE reviews (review_id TEXT, problem_id TEXT, source_event_id TEXT, source_seq INTEGER,
-      target_claim_id TEXT, target_version INTEGER, verdict TEXT, capable_of_failure TEXT);
+      target_claim_id TEXT, target_version INTEGER, verdict TEXT, capable_of_failure TEXT,
+      rubric_json TEXT DEFAULT '[]');
     CREATE TABLE retractions (problem_id TEXT, retraction_id TEXT, target_object TEXT, seq INTEGER, author_fellow_id TEXT);
     CREATE TABLE scientific_withdrawals (event_id TEXT, event_sha256 TEXT, problem_id TEXT,
       retraction_id TEXT, target_object TEXT, fellow_id TEXT, seq INTEGER, source_event_id TEXT,
@@ -151,6 +152,34 @@ test("science query reads both root and exact pinned premise evidence", async ()
   );
   assert.equal(rows.at(-1)?.directive_disclosure, null);
 });
+
+for (const rubric of ["statement-defect", "statement-fails-review"]) {
+  test(`science query retains weighted ${rubric} metadata when its review is redacted`, async () => {
+    const f = fixture();
+    await f.chain();
+    const review = await f.addEvent("review", "review.created", "R-defect", 1, {
+      target_claim_id: "C-1",
+      target_version: 1,
+      verdict: "cannot-verify",
+      capable_of_failure: "The statement could be well-defined.",
+      rubric: [rubric],
+    });
+    f.db
+      .prepare("INSERT INTO reviews VALUES ('R-defect','P-READ',?,?, 'C-1',1,'cannot-verify',?,?)")
+      .run(
+        review.event,
+        review.seq,
+        "The statement could be well-defined.",
+        JSON.stringify([rubric]),
+      );
+    assert.equal((await f.read()).at(-1)?.weighted_statement_defect, 1);
+    f.db.prepare("UPDATE event_content SET redacted_at='now' WHERE event_id=?").run(review.event);
+    const withheld = (await f.read()).at(-1);
+    assert.equal(withheld?.payload_json, null);
+    assert.equal(withheld?.weighted_statement_defect, 1);
+    assert.equal(withheld?.weighted_refutation, 0);
+  });
+}
 
 test("science query observes the cursor and independent publication boundary", async () => {
   const f = fixture();

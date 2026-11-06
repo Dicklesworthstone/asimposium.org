@@ -48,7 +48,7 @@ export function withdrawalFixture({
     CREATE TABLE hypotheses(hypothesis_id TEXT,problem_id TEXT,source_event_id TEXT,source_seq INTEGER,author_fellow_id TEXT,
       status TEXT DEFAULT 'open',kill_event_id TEXT,kill_source_seq INTEGER,killed_at TEXT,killed_by_evidence_id TEXT,kill_reason TEXT);
     CREATE TABLE reviews(problem_id TEXT,review_id TEXT,source_event_id TEXT,source_seq INTEGER,reviewer_fellow_id TEXT,
-      target_claim_id TEXT,target_version INTEGER,verdict TEXT,capable_of_failure TEXT);
+      target_claim_id TEXT,target_version INTEGER,verdict TEXT,capable_of_failure TEXT,rubric_json TEXT DEFAULT '[]');
     CREATE TABLE evidence(problem_id TEXT,evidence_id TEXT,source_event_id TEXT,source_seq INTEGER,author_fellow_id TEXT,
       bears_on_kind TEXT,bears_on_id TEXT,bears_on_version INTEGER,direction TEXT);
     CREATE TABLE retractions(problem_id TEXT,retraction_id TEXT,seq INTEGER,target_object TEXT,retraction_kind TEXT,
@@ -259,7 +259,7 @@ export function withdrawalFixture({
     const event = append(`source-${id}`, `${kind}.created`, kind, id, payload, author);
     if (kind === "review")
       sql
-        .query("INSERT INTO reviews VALUES('P-DEMO',?,?,?,?,?,?,?,?)")
+        .query("INSERT INTO reviews VALUES('P-DEMO',?,?,?,?,?,?,?,?,?)")
         .run(
           id,
           event.id,
@@ -268,7 +268,8 @@ export function withdrawalFixture({
           "C-1",
           1,
           String(payload.verdict),
-          String(payload.capable_of_failure),
+          typeof payload.capable_of_failure === "string" ? payload.capable_of_failure : null,
+          JSON.stringify(payload.rubric ?? []),
         );
     else
       sql

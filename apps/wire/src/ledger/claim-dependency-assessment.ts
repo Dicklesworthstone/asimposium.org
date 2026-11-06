@@ -88,6 +88,11 @@ source_rows AS (
     w.source_sha256 AS withdrawn_sha256,
     CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce')
       AND length(trim(coalesce(r.capable_of_failure, ''))) > 0 THEN 1 ELSE 0 END AS weighted_refutation,
+    CASE WHEN length(trim(coalesce(r.capable_of_failure, ''))) > 0
+      AND json_type(r.rubric_json) = 'array'
+      AND EXISTS (SELECT 1 FROM json_each(r.rubric_json) rubric
+        WHERE rubric.type = 'text' AND rubric.value IN ('statement-defect', 'statement-fails-review'))
+      THEN 1 ELSE 0 END AS weighted_statement_defect,
     CASE WHEN e.object_kind = 'claim' THEN e.object_version
       WHEN e.object_kind = 'review' THEN r.target_version
       WHEN w.source_event_id IS NOT NULL THEN w.claim_version
