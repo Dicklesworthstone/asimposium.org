@@ -12,11 +12,116 @@ provisioned provider resource, a completed recovery exercise, or a green launch
 gate. Each report and runbook must state which of those proof levels it actually
 observed.
 
-## Current reality check — 2026-11-05
+## Current reality check — 2026-11-06
 
 ### Dependency and schema repairs — 2026-11-06
 
-The released fix for Cloudflare workers-sdk #15252 is now pinned: Wrangler
+The latest review finds a concrete nested-data validation discrepancy (`1mag`):
+the temporary-ID resolver can convert an own `__proto__` key into a local object's
+prototype, allowing inherited evidence-source fields to satisfy the leaf schema.
+Direct evidence rejects the same malformed source. This is not a demonstrated
+global prototype mutation or authentication escalation. The minimal repair uses
+a null-prototype copy. The mounted unit passes eight expectations; the existing
+real-bindings atomic journey fails before repair (batch 201 versus direct 422,
+7.864 seconds) and passes afterward in 36.716 seconds. All original atomic checks
+remain. Final independent qualification and deployment must follow the corrected
+source. The preceding qualified source is
+`44e8b99c1109371ce5aeadbcf03512111e72070f`.
+Wrangler 4.158.0 and Workers types 5.20261104.1 use the published dependency
+family: Miniflare 5.20261104.0-beta, Workerd 1.20261104.1, Sharp 0.35.5 and
+Undici 7.30.1. This supersedes the first fixed 4.129.1 runtime below. There is
+no dependency override, compatibility-date change or application retry. The
+original three strict-pin/unpinned/parallel S1 cases pass 67 expectations in
+52.676 seconds. Existing dependency stores and replaced links are retained.
+
+Independent exact-revision qualification passes all eight root groups in
+1,425.068 seconds: Wire 6,682, Agora 883, and toolchain 460 with its 54 existing
+individual skips retained. The uninterrupted discovery file passes 33/33 in
+419.036 seconds. Its real Workerd/D1/R2 cases include the changed move and pack
+readers. The registered account-export journey passes directly in 9.733 seconds,
+including transfer privacy; this is not a pass for the whole integration registry.
+The original production-build browser lane passes all 209 checks in 177.915
+seconds, including the formerly unstable exact-claim link, real PNG responses,
+Chromium image decoding and changed image bytes after a public write. Sponsor
+identity and screening are local fixtures, not Google OAuth or deployed G-C proof.
+
+Separate independent gates pass: typecheck eight groups, lint eight groups,
+full contracts 947, schema drift, render 584, Worker contracts 178 and security
+33. Every gate's source/dependency audit matches 2,467 tracked blobs/modes and
+19 runtime identities in a standalone frozen checkout. The root process audit
+finds all twenty recorded process births retired and all eight known groups
+empty; earlier visibility limits are retained. These results qualify the 22
+peer changes in `b3fd95d0`, without attributing authorship or importing their
+earlier proof. The historical click failures remain unclassified (`3soe`).
+
+The fixture repair (`fec9eff6`, `hdc1`) follows an actual independent root
+failure at `ae2cb4bc`: Wire 6,681 pass and one fail. Retained Workerd-created
+D1 state has 130 claim publications and no immutable versions, so the correct
+cursor reader omits all their statements. The seed now inserts exact v1 rows
+using the existing canonical digest helpers. Read-only forensic inspection
+confirms all 130 resulting semantic digests and bindings. DB/WAL hashes remain
+unchanged; SQLite reader bookkeeping changes the SHM file. This is retained-file
+forensics, not a new bindings API gate or scientific integrity proof. The original
+named positive passes 57 expectations; five mounted reads select 78 items each,
+with median 115.515 ms and maximum 165.366 ms inside the unchanged 600 ms bound.
+The full lifecycle matrix passes in both subsequent independent root runs.
+
+The final registry census covers 575 names/602 locked versions and leaves two
+advisory-bearing families: low-severity KaTeX 0.16.47 in the Markdown extension
+and moderate Minimatch 10.2.6 in TypeScript tooling. The public renderer calls
+direct KaTeX 0.19.1 with existing bounds and `trust: false`; invocation of the old
+extension's HTML helper is not established. This does not prove bundle absence
+or immunity. The identified Minimatch caller requires project-service options
+absent from current ESLint configuration. Current published parents still require
+the older major ranges, so unsupported overrides are not used. `l1yg` stays open.
+`ii92` also stays open: the official normalized Next 16.4.5 advisory query is
+empty, but historical raw open-ended ranges still match. Its literal acceptance
+requires all raw ranges to exclude the version; runtime passes cannot satisfy that.
+
+Required remote Rust verification initially blocks on admission. After admission
+changes, one new attempt transfers source but stops before compilation with
+`RCH-E330`, exit 120: the remote disk-reservation guard cannot fit active builds,
+the required floor and this job's reservation. No Rust tests execute, and no local
+fallback, guard reduction, cache deletion or unchanged retry follows.
+
+Vercel Preview `dpl_5E7oV9Rky4f83gBVwBtq5VvvgbYb` is READY at exact `44e8b99c`:
+[open Preview](https://asimposium-hqse9xjno-dicklesworthstones-projects.vercel.app).
+Actual build logs show Bun 1.4.4, frozen installation, Next 16.4.5 and Node 24.
+The provider's retained source archive contains 2,423 regular files, all matching
+tracked source bytes/modes; its only omissions are Beads metadata and `.gitignore`
+files. No private artifacts, dependencies or environment files are uploaded.
+Primary QA passes 26 HTTP checks, three exact static copies and four Chromium
+views in 20.874 seconds; all screenshots are inspected. Three actual share-image
+responses have valid 1200-by-630 PNG bytes. Seventeen specifically identified
+canceled RSC prefetches are recorded separately. Independent live QA and the final
+provider-log window for the corrected source are still pending.
+
+The 22-file scan completes with a full 7,210-location export; independent review
+of all 86 critical and 347 warning locations identifies the one `1mag` defect.
+No additional concrete defect is established. The corrected three-file diff
+and staged analyses finish in 209.744 and 289.323 seconds within the unchanged
+300-second module cap. Both locate the same 5,876 findings (67 critical, 276
+warnings); all critical/warning locations are reviewed. The stock staged export
+omits inline code for 123 locations, so its export-completeness flag remains false.
+Their source lines are recovered from unchanged retained indexed copies and
+match the diff report exactly. The original reports are preserved. This does not
+close the separate broad scanner gap (`g4b4`) or establish whole-project security.
+
+Fresh public reads at 06:01:27 UTC retain both old `0.1.0-draft` Worker capability
+bodies and `/protocol.json` 404s. Presence-only checks in both Node and Bun's
+environment find the four required Cloudflare authority variables absent. Ledger
+views honestly display unavailable upstream data. `rs5n` still requires operator
+deployment authority and reconciliation of existing resources. There is no
+production promotion, new Cloudflare provisioning, Google verification, deployed
+cost evidence, S2 closure or launch claim. The new Preview does not patch old
+immutable deployments. Final raw records use the `l1yg-wrangler4158-*` and
+`independent-44e8b99c-20261106/` prefixes under
+`e2e/artifacts/dae7-repair-20261104/`; deployed checks are under
+`e2e/artifacts/ii92-preview-20261106-44e8b99c/`.
+
+Earlier controls and failures, retained to show the limits of the final result:
+
+The released fix for Cloudflare workers-sdk #15252 was first pinned at Wrangler
 4.129.1, with Workers types 5.20260907.1. The temporary older Wrangler alias
 is removed from its actual consumers. Compatibility dates and request assertions
 are unchanged. Upstream's own fix retries eligible GET/HEAD requests internally;
@@ -85,12 +190,12 @@ This is the pinned upstream fix's recovery path, not evidence of zero transient
 connection drops. The original log and independent process/source audits remain
 retained; no S2 reliability diagnosis follows from it.
 
-The final npm registry census at 02:50:16 UTC covers 582 package names/636 locked
+The earlier npm registry census at 02:50:16 UTC covers 582 package names/636 locked
 versions and reports four advisory-bearing families: Miniflare's exact Sharp
 0.35.2 and Undici 7.29.0 pins, tooling Minimatch 10.2.6, and KaTeX 0.16.47 through
 the Markdown math extension. That older KaTeX is installed, but invocation of its
 vulnerable helper is not established; the active math renderer uses direct KaTeX
-0.19.1 with its existing trust and sanitization controls. These residuals do not
+0.19.1 with its existing trust setting and output bounds. These residuals do not
 justify unsupported dependency overrides or a security-clean claim. `l1yg` stays
 open. Rust verification stops before compilation: required RCH remote admission
 returns exit 103, `disk_headroom=8`; fleet readiness does not satisfy that job's
@@ -148,8 +253,9 @@ move selection, captured pack heads and grounded scientific support. Read-only
 review finds no concrete blocker, and current compiler/lint/E2E units pass; the
 earlier runtime qualifications do not transfer to that new source. Further full
 checks use a frozen main checkout to preserve their inputs while peers continue.
-The supported later Wrangler 4.158.0 bundles patched Sharp 0.35.5/Undici 7.30.1,
-making it a concrete next candidate for `l1yg`; it is not installed or qualified.
+At that point, the supported later Wrangler 4.158.0 bundles patched Sharp
+0.35.5/Undici 7.30.1, making it a concrete candidate for `l1yg`; the subsequent
+adoption and exact-revision qualification are recorded above.
 The latest math extension and TypeScript parser still retain their older KaTeX
 and Minimatch ranges. These remaining families are not all awaiting a missing
 upstream release. Cloudflare authority, optional Rust execution and launch remain

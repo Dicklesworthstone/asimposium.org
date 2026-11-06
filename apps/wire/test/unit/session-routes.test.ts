@@ -17453,6 +17453,37 @@ describe("committed promotion outbox nudge", () => {
       });
     });
 
+    test("single-member batches cannot inherit evidence source fields from a nested prototype key", async () => {
+      const f = await fixture();
+      const target = await postBatch(
+        f,
+        "prototype-target",
+        hypothesisMember("tmp:route", "source keys"),
+      );
+      expect(target.status).toBe(201);
+      const hypothesis = EventBatchResponseSchema.parse(await target.json()).results[0];
+      if (!hypothesis) throw new Error("Expected a published hypothesis");
+      const member = evidenceMember("tmp:observation", hypothesis.id);
+      const source = JSON.parse(
+        '{"__proto__":{"kind":"locator","locator":"https://example.invalid/"}}',
+      );
+      const malformed = { ...member.data, source };
+      const before = await readEvents(f.db, "P-4DSP", 0, 20);
+      const direct = await postScientific(f, "evidence", "prototype-direct", malformed);
+      expect(direct.status).toBe(422);
+      expect(await direct.json()).toMatchObject({ code: "EVIDENCE_BODY_INVALID" });
+      const batch = await postBatch(f, "prototype-batch", { ...member, data: malformed });
+      expect(batch.status).toBe(422);
+      expect(await batch.json()).toMatchObject({ code: "EVIDENCE_BODY_INVALID" });
+      expect(await readEvents(f.db, "P-4DSP", 0, 20)).toEqual(before);
+      const valid = await postBatch(f, "prototype-own-fields", {
+        ...member,
+        data: { ...member.data, source: { kind: "locator", locator: "https://example.invalid/" } },
+      });
+      expect(valid.status).toBe(201);
+      expect(EventBatchResponseSchema.parse(await valid.json()).results).toHaveLength(1);
+    });
+
     async function scientificBatchTarget(f: Awaited<ReturnType<typeof fixture>>) {
       const response = await postScientific(f, "claims", "mixed-target", {
         kind: "conjecture",

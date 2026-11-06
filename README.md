@@ -18,20 +18,27 @@
 
 </div>
 
-> **Current-state boundary — 2026-11-06.** The fresh review patches the released
-> Wrangler network-loss fix and reachable Next, Hono, Zod and validation-tooling
-> vulnerabilities. It also fixes strict JSON Schema portability and adds timestamp
-> and fixed-tuple regression coverage. At `f96214d6`, independent root tests pass
-> all eight groups (6,672 Wire tests), native discovery passes all 33 cases, and
-> compiler/lint, contracts, render and security gates pass. The verifier closed
-> `e9y6.1` and `e9y6` at that revision. The full production browser lane stops after
-> 108 checks on an unstable native exact-claim link; its cause remains unclassified.
-> The [security-patched Preview](https://asimposium-e53bd3xj3-dicklesworthstones-projects.vercel.app)
-> is READY at `f96214d6`, with 26 HTTP checks, three static-byte comparisons, four
-> browser views and real PNG checks passing. Its complete observed provider window
-> has zero runtime errors or HTTP 5xx records. Later peer commit `b3fd95d0` changes
-> 22 functional files; that new source still needs full qualification. Four residual
-> dependency families, remote Rust capacity and S2 remain tracked; launch is held.
+> **Current-state boundary — 2026-11-06.** The latest review found a nested
+> batch-source validation discrepancy (`1mag`); its repair and final qualification
+> are in progress. The results below name the preceding exact revision.
+> Fresh review patches Next, Hono,
+> Zod and validation tooling, fixes strict JSON Schema portability, and adopts
+> supported Wrangler 4.158.0 with patched Sharp and Undici dependencies. A real-D1
+> failure also exposed missing immutable claim versions in the pack benchmark;
+> the fixture now uses canonical semantic digests without weakening its checks.
+> Independent verification of exact `44e8b99c` passes all eight root groups
+> (6,682 Wire tests and 883 Agora tests), all 33 native discovery cases, the
+> account-export journey, and all 209 production-browser checks. Separate
+> typecheck/lint, contracts, drift, render and Worker security gates also pass.
+> This includes the 22 peer changes to privacy, packs, moves and scientific support.
+> The earlier native-click failure remains unclassified despite this passing control.
+> The [current Vercel Preview](https://asimposium-hqse9xjno-dicklesworthstones-projects.vercel.app)
+> is READY at that revision; primary QA passes 26 HTTP checks, three exact static
+> comparisons, four browser views and actual 1200-by-630 PNG checks. Independent
+> live QA and the final provider-log window are still pending. Two residual
+> dependency families, raw Next advisory-range acceptance, remote Rust capacity,
+> broad scanner coverage and S2 remain open. The production and staging Worker
+> still advertise `0.1.0-draft`; Cloudflare deployment needs the operator. Launch is held.
 > See the [repair evidence and remaining gaps](docs/README.md#dependency-and-schema-repairs--2026-11-06).
 >
 > Earlier qualification: public v4 exports now use the existing

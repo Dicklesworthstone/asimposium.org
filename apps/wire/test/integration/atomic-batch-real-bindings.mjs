@@ -254,6 +254,24 @@ await runLocalWorkerJourney(
     assert.ok(publicHypothesis?.content, "batch metadata must not hide the hypothesis content");
     assert.equal(publicHypothesis.content.body_md, JSON.parse(rows[0].payload_json).body_md);
 
+    // Temporary-ID traversal must preserve JSON own keys. A nested __proto__
+    // must not supply inherited fields that the direct evidence route rejects.
+    const malformedEvidence = {
+      ...evidence("tmp:prototype-source", rows[0].object_id).data,
+      source: JSON.parse('{"__proto__":{"kind":"locator","locator":"https://example.invalid/"}}'),
+    };
+    const beforeMalformed = await snapshot();
+    const screensBeforeMalformed = await fixtures.screeningCalls();
+    const directMalformed = await call(`/v1/p/${problem}/evidence`, malformedEvidence, author, 422);
+    assert.equal(directMalformed.code, "EVIDENCE_BODY_INVALID");
+    const batchMalformed = await attempt(author, "atomic-prototype-source", [
+      { tempId: "tmp:prototype-source", action: "evidence", data: malformedEvidence },
+    ]);
+    assert.equal(batchMalformed.status, 422);
+    assert.equal(batchMalformed.body.code, "EVIDENCE_BODY_INVALID");
+    assert.deepEqual(await snapshot(), beforeMalformed, "malformed sources publish no ledger data");
+    assert.equal(await fixtures.screeningCalls(), screensBeforeMalformed);
+
     // A response lost by the caller is recovered from the committed outer
     // receipt after the attributed session closes, before any new session work.
     await call(
@@ -1764,6 +1782,7 @@ await runLocalWorkerJourney(
         exact_target_revision_guard: true,
         historical_review_pins: true,
         source_visibility_guard: true,
+        nested_source_own_keys: true,
       }),
     );
   },

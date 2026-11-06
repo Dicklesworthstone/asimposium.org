@@ -20582,7 +20582,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       return value.map((item) => resolveBatchTempIds(item, resolved));
     }
     if (value !== null && typeof value === "object") {
-      const out: Record<string, unknown> = {};
+      // Preserve special JSON keys as data. Invoking the __proto__ setter
+      // would let inherited fields satisfy a later operation schema.
+      const out: Record<string, unknown> = Object.create(null);
       for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
         out[k] = resolveBatchTempIds(v, resolved);
       }
