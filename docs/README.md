@@ -53,6 +53,12 @@ The Next-only production browser lane passes all 209 checks, including actual
 with cleanup proved; the remaining two pass once separately. This is coverage
 across two invocations, not an uninterrupted 33-case pass. Final combined-source
 independent root/native/browser qualification and a fresh Vercel Preview are pending.
+The first new Preview exposes a build configuration gap: Vercel selects Bun
+1.3.14 despite the repository's 1.4.4 pin. The configured `apps/web` root now
+explicitly pins both install and build commands to Bun 1.4.4, following Vercel's
+documented version-pinning mechanism. Node 24 remains the function runtime.
+The verifier held before launching its long gates; final evidence must name the
+subsequent revision and the corrected deployment, not transfer the first build.
 The combined primary typecheck/lint (eight groups each), contracts/render and
 Worker contract/security gates pass in 175.626 seconds. UBS completes the current
 four manifest inputs with zero findings, and the three changed contract sources
