@@ -14,9 +14,79 @@ observed.
 
 ## Current reality check — 2026-11-06
 
+### Scientific standing and HEAD repair — 2026-11-06
+
+The current source is `b31d54e8e98c963e598463404e23a8be73ed9f1b`.
+The new scientific fix (`t5cf`, functional commit `1c662be8`) preserves a
+recorded statement defect when its review text is withheld. Before repair,
+redacting only the review body changes a malformed claim to open/stale. The
+reader now retains the adverse classification from immutable review metadata
+without exposing withheld text or granting positive review authority. A new
+claim version still resets standing. Missing dependency inputs remain
+unavailable rather than acquiring a positive assessment.
+
+Ten new unit regressions fail before repair, covering both defect rubric names
+and five withholding modes. Counter-controls cover unweighted and unrelated
+reviews, historical cursors and version reset. The focused final suite passes
+104 tests. The existing complete local science journey passes in 19.298 seconds
+with new anonymous JSON/Markdown/HTML, pack-privacy and ETag checks, alongside
+all original assertions. Workerd, D1 and R2 are real; identity and screening are
+local fixtures. These results do not establish Google OAuth or deployed G-C.
+
+The first independent unfiltered root run at `1c662be8` fails normally in
+1,599.362 seconds: seven groups pass and Wire reports 6,680 passes/35 failures.
+Sixteen failures expose a missed indirect unit fixture: its modeled review
+table lacks the real rubric column. Nineteen S2 failures expose an upstream
+import missing from the canonical source inventory. The closure guard correctly
+refuses before those scenarios run. Correction `b31d54e8` supplies the real
+fixture column/value and the actual imported export-signature module, adding
+that module to the existing omission plant. Assertions, deadlines and source
+closure checks are unchanged. The full resolution fixture passes 18/18; focused
+S2 positive and negative controls pass 13/13. This repairs current HEAD wiring,
+not the historical S2 listener/cost/deployed failures.
+
+The corrected independent root passes all eight groups at exact `b31d54e8`
+in 1,791.056 seconds: Wire 6,716/0 across 285 files, Agora 886, and all 129
+registered S2 harness cases. The toolchain retains 54 existing individual skips;
+no dispatcher group is skipped or blocked. Before/after audits match all 2,471
+tracked blobs/modes and nineteen selected dependency identities. All 24 recorded
+process births retire and eight known groups have no hits; 488 unreadable cwd
+records remain a visibility limit. Two inner S1 fixtures print post-exit drain
+expiry notices, so this does not claim every inner byte was retained. Native,
+production-browser and separate static qualification are still pending for
+`t5cf`. StormyGorge independently closes `iajo` against its original acceptance
+criteria in comment 2860, citing the exact source and full registered gates.
+Its criteria, dependencies and earlier comments remain unchanged.
+
+The new [Vercel Preview](https://asimposium-dfr2p9skt-dicklesworthstones-projects.vercel.app)
+(`dpl_Z9fs88X9sxeghNpHriVZ9m8sPCks`) is READY at exact `1c662be8`.
+Its provider source archive contains 2,427 regular files matching tracked bytes
+and modes, with only 39 Beads and five `.gitignore` omissions. The six changed
+paths through `b31d54e8` are two unit files, the S2 script and three tracker files;
+the other 2,465 tracked blobs/modes, including all application and dependency
+sources, are identical. This is disclosed runtime-source equivalence, not an
+exact-`b31d54e8` deployment or a rebuilt-binary claim. Three actual share images
+pass 1200-by-630 PNG checks and show the unavailable-ledger fallback. Primary
+live QA passes the unchanged 26 HTTP, three exact static-byte and four Chromium
+view checks in 22.335 seconds, with no observed browser errors. All four
+screenshots are inspected. Independent live QA and the final provider log window
+remain pending. The complete first window, 17:06:43–17:58:22 UTC, reports zero
+runtime error/fatal and HTTP 5xx records, with no further pages or excluded
+intervals. A separate HTTP 200 record confirms visibility. Earlier local CLI
+project-context rejections queried no provider logs; explicit team scope fixes
+that invocation. No whole-window or permanent no-error claim is made.
+
+At 17:05 UTC, both Cloudflare Workers still advertise the retained
+`0.1.0-draft` capability bytes and return 404 for `/protocol.json`. Four required
+authority/configuration variables are absent in a Bun presence-only check.
+No Worker deploy, duplicate provisioning, DNS change or production promotion
+occurs. A fresh read-only Rust admission query finds no eligible worker with the
+pinned compiler and required disk headroom; cargo execution is NOTRUN. Neither
+local proof nor the Vercel Preview closes these operator/deployed gaps.
+
 ### Dependency and schema repairs — 2026-11-06
 
-The final functional revision is `c6fb716b0836b7cc96b66cffb6c09a37b15b8310`.
+The earlier qualified functional revision is `c6fb716b0836b7cc96b66cffb6c09a37b15b8310`.
 Independent verification in a standalone frozen checkout passes the original
 gates below, with source bytes, Git modes and nineteen selected dependency
 identities checked before and after execution. The source inventory contains

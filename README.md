@@ -18,7 +18,24 @@
 
 </div>
 
-> **Current-state boundary — 2026-11-06.** Fresh review fixes nested batch-source
+> **Current-state boundary — 2026-11-06, later review.** Source `b31d54e8`
+> preserves malformed standing when statement-defect review text is withheld,
+> keeps withheld bytes private, and repairs a missed unit fixture and S2 source
+> inventory entry. Focused tests and the complete local science journey pass.
+> The first independent full root fails; the corrected exact-revision run passes
+> all eight groups, including 6,716 Worker and 886 Agora tests. The independent
+> verifier closes `iajo`; native, browser and separate static qualification for
+> `t5cf` remain pending. A new
+> [Vercel Preview](https://asimposium-dfr2p9skt-dicklesworthstones-projects.vercel.app)
+> is READY at `1c662be8`, whose application/dependency sources are unchanged by
+> the test/inventory-only correction. Primary live QA passes 26 HTTP, three static
+> byte and four browser-view checks without observed browser errors. Independent
+> live QA and the final provider log window are pending.
+> The Cloudflare Worker still serves the old draft; operator deployment authority,
+> remote Rust capacity and the original deployed launch gates remain outstanding.
+> See [the current repair evidence](docs/README.md#scientific-standing-and-head-repair--2026-11-06).
+>
+> **Earlier qualification — 2026-11-06.** Fresh review fixes nested batch-source
 > validation, missing immutable versions in the pack benchmark, and a reproduced
 > Playwright retry-timer defect behind no-JavaScript click timeouts. The supported
 > Playwright 1.65.0 family repairs the driver without changing application animations,
