@@ -25,7 +25,13 @@ import {
 } from "../../src/artifacts.ts";
 import { BatchContractsSchema } from "../../src/batch.ts";
 import { type DiagnosticCode, REPRODUCE, safeDiagnostic } from "../../src/diagnostics.ts";
-import { ProposeProblemRequestSchema } from "../../src/problems.ts";
+import { ProblemDormancyEventSchema, ProposeProblemRequestSchema } from "../../src/problems.ts";
+import {
+  REQUIRED_ROW_TOTAL_EXCLUSIONS,
+  S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES,
+  S2CostEvidenceManifestSchema,
+  S2CostMeasurementReceiptSchema,
+} from "../../src/s2-cost-receipt.ts";
 import { ScreeningContractsSchema, ScreeningSchemaDocumentSchema } from "../../src/screening.ts";
 import { SessionsContractsSchema } from "../../src/sessions.ts";
 
@@ -36,6 +42,86 @@ const minimalRevision = {
   statement: "An even integer is divisible by two.",
 };
 const minimalWorkshop = { type: "claim-draft", title: "Boundary", body_md: "Private draft." };
+
+test("emitted string schemas compile for strict standard-format consumers", () => {
+  const ajv = new Ajv2020({ strict: true });
+  addFormats(ajv);
+  const seen = new Set<string>();
+  function visit(value: unknown) {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (typeof value !== "object" || value === null) return;
+    const node = value as Record<string, unknown>;
+    if (node.type === "string") {
+      const key = JSON.stringify(node);
+      if (!seen.has(key)) {
+        seen.add(key);
+        expect(() => ajv.compile(node)).not.toThrow();
+      }
+    }
+    for (const [key, child] of Object.entries(node)) {
+      if (!["examples", "default", "const", "enum"].includes(key)) visit(child);
+    }
+  }
+  for (const artifact of generatedArtifacts()) {
+    if (artifact.relativePath.endsWith(".schema.json")) visit(JSON.parse(artifact.content));
+  }
+  expect(seen.size).toBeGreaterThan(0);
+});
+
+test("UTC timestamp exports and the Worker contract require RFC3339 seconds", () => {
+  const document = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
+  const ajv = new Ajv2020({ strict: true });
+  addFormats(ajv);
+  const validate = ajv.compile(document.properties.dormancy_event.properties.quiet_since);
+  for (const [value, accepted] of [
+    ["2026-01-01T12:34:00Z", true],
+    ["2026-01-01T12:34:00.123Z", true],
+    ["2024-02-29T00:00:00Z", true],
+    ["2026-01-01T12:34Z", false],
+    ["2026-02-29T00:00:00Z", false],
+    ["2026-01-01T25:00:00Z", false],
+    ["2026-01-01T12:34:00+00:00", false],
+  ] as const) {
+    expect(ProblemDormancyEventSchema.shape.quiet_since.safeParse(value).success).toBe(accepted);
+    expect(validate(value)).toBe(accepted);
+  }
+});
+
+test("exported fixed tuples reject missing and surplus receipt items", () => {
+  const document = JSON.parse(
+    readFileSync(new URL("../../generated/s2-cost-receipt.schema.json", import.meta.url), "utf8"),
+  );
+  for (const [source, exported, valid] of [
+    [
+      S2CostMeasurementReceiptSchema.shape.known_row_total_exclusions,
+      document.properties.receipt.properties.known_row_total_exclusions,
+      REQUIRED_ROW_TOTAL_EXCLUSIONS,
+    ],
+    [
+      S2CostEvidenceManifestSchema.shape.retention.shape.durable_publication_reservation.shape
+        .retained_names,
+      document.properties.manifest.properties.retention.properties.durable_publication_reservation
+        .properties.retained_names,
+      S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES,
+    ],
+  ] as const) {
+    const validate = new Ajv2020({ strict: true }).compile(exported);
+    for (const [value, accepted] of [
+      [[...valid], true],
+      [valid.slice(0, -1), false],
+      [[...valid, "unexpected"], false],
+    ] as const) {
+      expect(source.safeParse(value).success).toBe(accepted);
+      expect(validate(value)).toBe(accepted);
+    }
+  }
+});
+
 const defaultedRequests = [
   {
     root: "workshop_push_request",
