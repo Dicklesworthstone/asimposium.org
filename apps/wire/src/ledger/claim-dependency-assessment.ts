@@ -77,7 +77,7 @@ source_rows AS (
       AND cc.event_sha256 = e.payload_sha256 AND cc.problem_id = e.problem_id
       AND cc.claim_id = s.claim_id) AS concession_event_id,
     e.actor_fellow_id AS fellow_id, e.actor_sponsor_id AS sponsor_id,
-    v.content_digest, v.kind AS claim_kind, x.direction, s.max_version,
+    v.content_digest, x.direction, s.max_version,
     CASE WHEN e.object_kind = 'claim' THEN ${directiveDisclosureStatusSql(
       "e.problem_id",
       "e.object_id",
@@ -293,13 +293,9 @@ export async function composeDependencyAssessment(
       // Content bytes, not a mutable statement/dependency projection, feed the fold.
       const timeline = rows.map((row) => {
         const payload = contents.get(row.event_id)!;
-        const pins = ClaimDependencyPinsSchema.safeParse(payload.dependency_pins);
         return {
           ...row,
           statement: typeof payload.statement === "string" ? payload.statement : null,
-          claim_kind: typeof payload.kind === "string" ? payload.kind : null,
-          reduced_to_claim_id:
-            payload.kind === "reduction" && pins.success ? (pins.data[0]?.claim_id ?? null) : null,
         };
       });
       const fold = await foldScientificRows(timeline);

@@ -1,5 +1,4 @@
 import {
-  ClaimDependencyPinsSchema,
   GroundedFalsificationCheckSchema,
   type HonorsItem,
   type ProblemDetail,
@@ -250,13 +249,9 @@ export async function readHonorsClaim(
     .filter((row) => row.claim_id === claim && row.target_version <= version)
     .map((row) => {
       const body = contents.get(row.event_id);
-      const pins = ClaimDependencyPinsSchema.safeParse(body?.dependency_pins);
       return {
         ...row,
         statement: typeof body?.statement === "string" ? body.statement : null,
-        claim_kind: typeof body?.kind === "string" ? body.kind : null,
-        reduced_to_claim_id:
-          body?.kind === "reduction" && pins.success ? (pins.data[0]?.claim_id ?? null) : null,
       };
     });
   const fold = await foldScientificRows(rows);

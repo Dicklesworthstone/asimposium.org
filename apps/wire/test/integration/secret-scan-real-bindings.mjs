@@ -236,7 +236,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, fixtures, w
     assert.equal(open.closed_at, null, "a refused handback keeps the session open");
     assert.equal(open.handback, null, "a refused handback is not persisted");
     assert.ok(
-      !workerLogs().includes(secret),
+      !JSON.stringify(workerLogs()).includes(secret),
       "credential material never reaches Worker diagnostics",
     );
   }
