@@ -18,8 +18,47 @@ observed.
 delivered the public instrument promised by Fable. The main obstacle is now
 finishing and deploying a qualified candidate, then earning the external
 collaboration, safety and operational evidence. Rebuilding the existing source
-subsystems would miss that obstacle. Current lint and Worker contract checks
-also fail, so this checkout is not a fully green candidate.**
+subsystems would miss that obstacle. The initial lint and Worker contract
+failures are repaired below; current candidate qualification is still running.**
+
+### Implementation follow-through at `ad6d3c7c`
+
+Commit `6e1b72aa` fixes the two observed candidate-check failures without
+changing the private inbox's authority or the fault plant's replacement bytes.
+It also fixes `9o8v`: product smoke failures now recommend product mode, while
+self-tests recommend self-test mode. The existing receipt consumer replays
+both modes and rejects deliberately wrong-mode receipts. The full original
+entrypoint suite passes; authenticated gallery implementation remains open.
+
+Commit `ad6d3c7c` connects existing Explore/area need chips to the canonical
+public review queue (`80s3`). Reads sample one bounded page, fence membership
+against current visibility/cursors, and disclose partial or unavailable
+selection. No new schema, table, public route, ranking or permission is added.
+The native Workerd/D1/R2 lane passes actual claim publication, all faces/ETags,
+private workshop stability, operator hide/restore, withdrawal, pagination,
+projection replay, search and credential-log checks. Shared contracts pass
+953 tests and render passes 586. Root typecheck and lint each pass all eight
+groups; contract passes all five required groups. The full unit run is pending.
+
+The production browser build passes. The primary attempt initially stalls
+during detector self-tests, resumes without intervention, then times out on
+the first no-JavaScript root navigation after 77 passing checks. Independently,
+the complete browser subject passes all 239 checks and exits zero, including
+both JavaScript and no-JavaScript area assertions, but its existing process
+owner reports `descendant-leaked`. Its aggregate lifecycle result is red.
+The independent discovery run records 39 passes and one existing Now-case
+timeout at its unchanged five-second limit, including all new area checks
+passing. The earlier focused run's 40 passes do not erase that failure.
+Independent acceptance is in progress; neither implementation bead is closed.
+The distinct unresolved runtime observations are `pjuf`, which blocks `80s3`;
+no common cause or diagnosis is inferred from later passing controls.
+UBS completes all nine changed code files; its four critical flags are existing
+test/fault strings or browser URL/status comparisons, reviewed without
+suppressing analyzer rules. Evidence is retained under
+`e2e/artifacts/implementation-20261107-coppertiger/`. The original assessment
+and failures below remain dated evidence for the earlier source.
+
+### Initial assessment and evidence boundaries
 
 This assessment is `asimposiumorg-sewo`, at `main`
 `184662b432ac5301f50b870414ab612538297e98`. Its application source is the
@@ -30,6 +69,18 @@ and governing Fable Revision 3.1 plan were read. Package documentation, selected
 runbooks, implementation and tests were examined. The competing plans remain
 historical designs, interpreted through Fable's adoption/rejection ledger;
 this is not a new full audit of those sketches or every source line.
+
+While the long gates run, concurrent commit `15e642d4` records this assessment
+and its tracker/pointer edits. Its diff from the starting revision contains
+only the three documentation files and three Beads publication files; all
+application, test, contract, migration, infrastructure and gate-script bytes
+remain identical. The run spans those documentation revisions and is not an
+isolated all-blobs qualification of a newly committed candidate.
+
+The root unit run overlaps the initial static/contract checks and later native
+and browser lanes on this host. Results below are functional/source evidence,
+not an isolated load experiment or an attribution of any historical timing
+failure to host contention.
 
 Fresh records are under `e2e/artifacts/reality-check-20261107-coppertiger/`.
 That is retained local evidence, not a hosted acceptance receipt. Source and
@@ -97,10 +148,11 @@ are not substituted for these executions.
 | `bun run typecheck` | PASS: all eight groups, 311.50 s. | Installed Bun 1.4.4 / TypeScript 5.9.3; no missing group. |
 | `bun run lint` | FAIL: seven groups pass, one fails, 144.49 s. | Toolchain Biome reports one formatting error in `scripts/planted-defects.mjs`, plus warnings. |
 | `bun run test:contract` | FAIL: four executed groups pass, Worker fails, 59.00 s; two policy skips. | `test/contract/capabilities-census.test.ts:478` finds exactly `POST /v1/sponsors/inbox` unclassified. |
-| `bun run test` | RUNNING; no complete root result yet. | A completed workspace result does not qualify the whole dispatcher. |
+| `bun run test` | PASS: all eight groups, 1,985.08 s; Wire 6,751 tests / 31,724 expectations, Agora 900 tests. | No failed, blocked, missing or skipped group; the toolchain retains 54 individual skips. |
 | `bun run --filter @asimposium/contracts test` | PASS: 953 tests, 7,070 expectations. | Complete contracts package; the separate Worker disclosure-census failure remains. |
+| `bun run --filter @asimposium/contracts check:drift` | PASS. | Generated canonical schema bytes agree; does not cure the separate served-capabilities census. |
 | `bun run --filter @asimposium/render test` | PASS: 586 tests, 5,955 expectations. | Shared rendering/face tests; not complete hosted face coverage. |
-| `bun run --filter @asimposium/wire test:integration:discovery` | RUNNING: original unfiltered 34-mode file. | Real local Workerd/D1/R2; identity and model decisions are fixtures. |
+| `bun run --filter @asimposium/wire test:integration:discovery` | PASS: original unfiltered 34-mode file, normal exit 0. | Real local Workerd/D1/R2; identity and model decisions are fixtures. Per-lane trigger exclusions remain. |
 | `node e2e/playwright/agora-local-lane.mjs --build` with matching retained browser cache | PASS: 219 checks; production server mode. | Locally minted Auth.js sponsor session, real browser and bindings; no Google/staging/provider claim. |
 | `bash e2e/gauntlet/run.sh --target local` | PASS: two scripted completions, four correctly rejected controls. | State-derived reference rehearsal; not G-C or S-1. |
 | `moderation-real-bindings.mjs`, `publication-context-real-bindings.mjs`, `screening-appeals-real-bindings.mjs` under `apps/wire/test/integration/` | PASS, each original whole command. | Durable moderation, context fences and independent decision/replay/privacy checks; classifier fixtures. |
@@ -113,6 +165,12 @@ are not substituted for these executions.
 | Staging gauntlet with the explicit configured Stoa origin | BLOCKED: exit 78, `GAUNTLET_JOIN_URLS_UNPROVISIONED`. | Separate from the provisioned-input implementation stop; neither is a model trial. |
 | Required remote-only Rust `cargo test` invocation documented in `cli/README.md` | UNAVAILABLE: exit 103, nine disk-headroom denials, no admissible worker. | Transfer/compilation/tests do not execute. No local fallback or worker reconfiguration. |
 
+The root unit result retains its existing inner warnings and external-prerequisite
+refusal output. In particular, lsof reports incomplete namespace visibility and
+the S-3 paired-staging probe reports unavailable identity/browser inputs. Those
+are not a completed hosted journey or proof that every descendant was observed;
+the outer unit result does not turn them into acceptance.
+
 The two fresh failures belong to the current candidate qualification (`bwal`).
 Production discovery already classifies the private signed sponsor inbox read;
 the separate served-capabilities census lacks that classification. Preserve the
@@ -120,6 +178,16 @@ fail-on-new-route guard and the private sponsor disclosure policy. A failed
 inventory check alone establishes neither an auth bypass nor a reason to
 advertise sponsor internals. Formatting repair must preserve the actual fault
 plants and their detectors. No code repair is made by this assessment.
+
+A separate, newly reproduced diagnostic defect is `9o8v`. The real gallery
+failure recommends `scripts/smoke-gallery.sh --self-test`, which passes without
+exercising the failed journey. A no-network agent run with its staging origin
+absent exits 78 but also recommends a passing self-test. Both scripts initialize
+the reproduction field to self-test for every mode (`smoke-agent.sh:48`,
+`smoke-gallery.sh:13`). Preserve the honest failure while fixing the wrong-mode
+instruction and testing its consumer. `9lqv` depends on this bounded repair;
+neither the bug nor its fix establishes a product auth/privacy failure or
+completes the absent gallery journey.
 
 The complete integration aggregate, hosted Google browser journey, provider
 logs, live screening corpus, performance/load and full restore drills are not
@@ -161,7 +229,7 @@ not a claim that its whole subsystem is absent.
 
 | # | Testable Fable promise | Current code and bounded evidence | Remaining outcome / existing owner |
 | --- | --- | --- | --- |
-| 1 | One Worker writer; canonical strict contracts (§3/§14.1) | Signed sponsor envelope and bearer ingress use Worker validators; Zod generation exists. Typecheck passes. | PARTIAL: current disclosure census fails; complete every-kind/error and CLI agreement remain W1, `bwal`, `uir`, `psl`. |
+| 1 | One Worker writer; canonical strict contracts (§3/§14.1) | Signed sponsor envelope and bearer ingress use Worker validators; Zod generation exists. Typecheck and repaired disclosure census pass. | PARTIAL: complete every-kind/error and CLI agreement remain W1, `bwal`, `uir`, `psl`. |
 | 2 | Fresh fragment enrollment followed by explicit approval (§5, S-1) | Real local join/proposal/approval/token/session flow and rejection controls pass. | UNPROVEN for three unaided named harnesses on the actual environment; `mn7`, `pcsn`, `nvo`, `krn`. |
 | 3 | Google human identity and principal separation (§5, S-6) | Auth.js and signed envelope paths exist; current browser uses a real locally minted cookie. S-6 retains its historical bounded closure. | PARTIAL: real Google exchange, verification, step-up and current hosted/browser acceptance; `4y3`, `ggv`, `qnh`, `3zn`. |
 | 4 | Work survives close, interruption and resume (§5.5/§7) | Persisted session metadata, immutable opening cursor, private draft revisions/full reads, heartbeat and idle recovery exist. | PARTIAL: original full lifecycle/race/recovery and deployed proof; W3/W4, `9p4`, `mtx`, `ana`. |
@@ -174,7 +242,7 @@ not a claim that its whole subsystem is absent.
 | 11 | Synthesis follows a frozen ledger cut (P13) | `ledger/synthesis-read.ts` reads anchored event content with captured cursor and current visibility controls. | PARTIAL: full selection/minority disclosure, approval, closing-boundary and dogfood outcomes; W5, `wnd`, `8ku`. |
 | 12 | All twelve packs provide bounded, useful context (§7.3) | Profile composers, exact-version review/dependency reads, budget omissions, full pagination and move adapters exist. | PARTIAL: complete populated-profile/isolation/determinism acceptance and real harness usefulness within token budget; W4/W6, `zai`. |
 | 13 | Every public resource has truthful canonical faces (A1/§7.9) | Shared rendering, generic/specialized human routes, feeds, TOON, exports and revalidation exist. Render tests pass. | PARTIAL: complete registry/corpus and deployed parity; `92x`, `0et`, `uir`, `9lqv`, `bwal`. |
-| 14 | Moves direct effort at scientific needs (§9.4/9.6) | Canonical live selection, materiality, retries, gaps, formalization and working-pack consumers exist. | PARTIAL: original replay/consumer/fault controls and dynamic cross-problem needs scope; `z8y`, `codz`, `mip`. |
+| 14 | Moves direct effort at scientific needs (§9.4/9.6) | Canonical live selection, materiality, retries, gaps, formalization, working-pack consumers and dynamic global public moves exist. Area need chips now consume a bounded canonical review sample. | PARTIAL: original replay/consumer/fault controls and complete discovery acceptance; `z8y`, `codz`, `mip`, `80s3`. |
 | 15 | Slots, leases, review requests and private inbox coordinate work (§7/§9.3) | Mounted stores/routers, sponsor inbox and browser delivery/acknowledgment/foreign-principal checks exist. | PARTIAL: full notice taxonomy, outbox/DO replay, fairness/races and operational delivery; `1ar`, `mip`, `1e7`, W7. |
 | 16 | Contextual screening and independent human decisions precede release (§9.1) | Fresh real-binding moderation/context/appeal lanes pass; source binds decisions to candidate/context. | PARTIAL: all ingress fields/sinks, production provider and complete independent operator acceptance; `b9y9`, `axq`, `drv`, `cm5`, `bum`. |
 | 17 | Warnings and off-scope decisions preserve legitimate science (§9.1) | Supported publication kinds carry warnings; unsupported kinds remain held by `supportsPublishedWarning`. | PARTIAL: full kind/face/export parity and original policy lattice; `axq`, `drv`. Do not turn unsupported warning holds into silent allows. |
@@ -188,7 +256,8 @@ not a claim that its whole subsystem is absent.
 | 25 | Optional CLI remains curl-complete and safe (§12) | Public/authenticated reads and explicit session/scientific writes exist. Rust execution is unavailable before compilation. | PARTIAL: login/connect/keychain, validate/scrub parity, spool/watch/pull/doctor and signed release; W11, `psl`, `85s`. |
 | 26 | G0–G3 follow real collaboration and sustained operation (§16/§17) | Local journeys, seed dossiers and numerous regression controls exist. | UNPROVEN: provisioned G-C runner, multi-sponsor dogfood, seeds, legal/IP/naming/OAuth, red team, load/restore and +30-day cost/moderation receipts; W10/W12/OPS. |
 
-No wholly untracked product subsystem was found. Completing the **original
+No wholly untracked product subsystem was found. The new bounded diagnostic
+defect is now tracked by `9o8v`. Completing the **original
 acceptance** of the unfinished roadmap would cover the documented launch
 scope in principle. Merely completing current implementations or closing issue
 statuses would not: empirical external trials, operator decisions, deployed
@@ -247,13 +316,17 @@ returns six open tasks; `bv` counts 26 actionable by also including active
 work. Neither is a completion percentage. The graph has 574 nodes, 573 edges
 and no cycles.
 
+The later diagnostic finding adds `9o8v` and one dependency from its acceptance
+consumer `9lqv`: 575 issues, 434 closed, 106 open, 23 in progress and 12 explicitly
+blocked; seven open-ready tasks. The 575-node, 574-edge graph has no cycles.
+
 Existing owners receive appended, source-specific evidence rather than new
 duplicate feature epics. The current qualification, deployment, executable
 acceptance, cursor, gauntlet, math, dogfood, readiness, warning, backup and
 storage tasks retain their original scope and acceptance. No implementation
 bead or old spike is self-closed.
 
-The skill's two ambition rounds and five refinement passes make these concrete
+The skill's two ambition rounds, five refinement passes and final recheck make these concrete
 changes to the existing bridge:
 
 | Pass | Decision / effect |
@@ -264,7 +337,8 @@ changes to the existing bridge:
 | Refinement 2 | Replace obsolete math/cache/warning absence claims with current bounded implementation evidence; preserve the remaining original acceptance. |
 | Refinement 3 | Record exact browser-cache and remote Rust prerequisites, map the 57 missing command references, and distinguish blocked execution from a failed assertion. |
 | Refinement 4 | Keep conditional-cache D1 costs, unsupported warning holds, absent protected corpus bodies, full recovery and real harness token counts explicit; no fixture-derived launch claims. |
-| Refinement 5 | Recheck goal-to-owner coverage, original feature/test preservation, dependency direction, source stability and final results; do not manufacture new tasks when existing owners cover the gap. |
+| Refinement 5 | Recheck goal-to-owner coverage and actual reproduction behavior. The late smoke probe finds the bounded wrong-mode diagnostic defect; create `9o8v` with a behavioral negative control and make the existing proof consumer depend on it. |
+| Final recheck | Preserve original features/tests, verify dependency direction and source equivalence, retain every failing/blocked result, and reconcile final gate outcomes before handoff. |
 
 The AST census examines 587 production TypeScript/TSX files and 4,300 function
 bodies. It finds no single-throw “not implemented” stub; the 27 empty-body hits
@@ -274,9 +348,22 @@ surfaces such as staging G-C, gallery smoke, readiness and statistics. A narrow
 AST result is not proof that every implementation is complete or correct.
 
 Application source is unchanged; only this assessment, its entry pointers and
-tracker records are revised. Source/gate results, final graph checks and the
-sanitized Beads publication are recorded before handoff. The assessment stays
-available for independent review and supplies no new product closure.
+tracker records are revised. The final postcheck matches all 2,485 tracked files
+outside the six expected documentation/Beads paths and all seventeen selected
+installed dependency manifests. All 573 original issues preserve their scope,
+acceptance, priority and status. The final graph is acyclic; the sanctioned
+Beads flush and its self-test pass, and the staged public projection contains
+575 issues with zero top-level `source_repo_path` fields. Only that projection
+and the two certificate files are staged by the helper.
+
+`git diff --check` passes. `ubs --diff` exits 3 because only Markdown/tracker
+changes are in scope: no supported language scanner runs, which is explicitly
+not a clean code-security scan. Primary storage later shows 11 GiB available;
+the cause and durability of that increase are unverified. Existing untracked
+Beads index directories and retained failed receipts are preserved. No
+application code, test threshold, deployment or provider configuration changes
+are made. The assessment remains available for independent review (`sewo`);
+no implementation issue or product gate is self-closed.
 
 ## Prior qualification record — 2026-11-06
 

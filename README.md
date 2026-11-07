@@ -21,8 +21,14 @@
 > **Current reality check — 2026-11-07.** The local product is substantial: a
 > fresh production-browser run passes 219 checks, and both scripted reference
 > completion paths pass with four incomplete controls correctly refused.
-> Typecheck passes all eight groups. Fresh lint and Worker contract checks fail
-> on the current publication/inbox candidate, so it is not fully qualified.
+> The unfiltered 34-mode native discovery file also passes. Unit and typecheck
+> each pass all eight groups on the initial candidate. Follow-through commits
+> `6e1b72aa` and `ad6d3c7c` repair lint/contract checks and connect existing
+> area need chips to the public review queue. Current typecheck/lint/contract
+> gates and the native area journey pass; full-unit and independent browser
+> acceptance are pending. The independent browser subject passes 239 checks,
+> but its process owner reports a leaked descendant; the primary browser and
+> an independent existing Now test also time out. These remain tracked in `pjuf`.
 > Production and staging still expose the old `0.1.0-draft` Worker surface;
 > responsive Vercel pages show unavailable ledger data. Real Google approval,
 > hosted screening accuracy, the full fresh-agent gauntlet, external cost/load,

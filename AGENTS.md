@@ -273,11 +273,16 @@ Gate **G0** (Fable §17) retires load-bearing unknowns as running spikes:
 
 **2026-11-07 refresh:** use the [current assessment](docs/README.md#current-reality-check--2026-11-07),
 not the dated inventories below, to choose work. The assessed source is
-`184662b4` (application candidate `719cf5cb`) through migration 0130. Fresh
-typecheck passes all eight groups; lint fails toolchain formatting and the
-Worker contract census leaves the signed sponsor-inbox read unclassified
-(`asimposiumorg-bwal`). Current whole-unit/native results and their scope are
-recorded in the assessment. A production local browser run passes 219 checks;
+`184662b4` (application candidate `719cf5cb`) through migration 0130. Its
+typecheck and unit each pass all eight groups. Follow-through `6e1b72aa` repairs
+lint formatting, the private inbox census and smoke reproduction mode;
+`ad6d3c7c` connects area need chips to the canonical public review sample.
+Current typecheck/lint/contract and native area proof pass; full-unit and
+independent browser acceptance are pending. The browser subject passes239
+checks but its process owner reports a leaked descendant; the primary browser
+and an independent existing Now test also time out (`asimposiumorg-pjuf`).
+Preserve these outcomes, not only earlier green runs. A production
+local browser run on the original candidate passes 219 checks;
 two scripted reference completions and four negative controls pass. These use
 fixture identity/screening, not Google OAuth or hosted accuracy. GFM/math,
 cursor caching, warning publication for supported kinds and the private sponsor
