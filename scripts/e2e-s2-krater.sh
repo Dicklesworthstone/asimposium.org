@@ -4932,7 +4932,7 @@ most_recent_supervisor_is_tracked() {
 # the packed record alone never authorizes a numeric process-group signal.
 # shellcheck disable=SC2329
 stop_most_recent_untracked_supervisor() {
-  local pid pgid expected_ppid marker watchdog_pid watchdog_health persist port proof_scope phase
+  local pid pgid expected_ppid marker watchdog_pid watchdog_health persist port proof_scope phase release_fifo
   [[ -n "${S2_MOST_RECENT_SUPERVISOR}" ]] || return 0
   read -r pid pgid expected_ppid marker watchdog_pid watchdog_health persist port proof_scope phase \
     <<<"${S2_MOST_RECENT_SUPERVISOR}"
@@ -4949,6 +4949,12 @@ stop_most_recent_untracked_supervisor() {
     server|client) ;;
     *) return 1 ;;
   esac
+  # A startup interruption can leave the controller's release descriptor open.
+  # Retire only that exact FIFO before scanners inherit it or test state holders.
+  release_fifo="${watchdog_health%.watchdog.health}.release"
+  if [[ -p "${release_fifo}" && ! -L "${release_fifo}" && /dev/fd/7 -ef "${release_fifo}" ]]; then
+    exec 7>&- || return 1
+  fi
   if most_recent_supervisor_is_tracked "${marker}"; then
     clear_most_recent_supervisor_if_marker "${marker}"
     return 0

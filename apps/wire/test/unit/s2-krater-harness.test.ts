@@ -3080,6 +3080,55 @@ printf 'cleanup-status %s child-live %s record-retained %s\\n' "$result" "$live"
     );
   });
 
+  test.each(["owned-release", "unrelated-caller"])(
+    "pending cleanup closes only its own live controller gate: %s",
+    (gateKind) => {
+      const source = readFileSync(resolve(REPOSITORY_ROOT, SCRIPT), "utf8");
+      const start = source.indexOf("stop_most_recent_untracked_supervisor() {");
+      const stop = source.slice(start, source.indexOf("# Hold a raw recursive child", start));
+      const fixture = mkdtempSync(join(tmpdir(), "asimposium-s2-pending-descriptor-"));
+      const run = runCaptured(
+        "bash",
+        [
+          "-c",
+          `
+${stop}
+is_decimal() { [[ "$1" =~ ^[0-9]+$ ]]; }
+most_recent_supervisor_is_tracked() { return 1; }
+clear_most_recent_supervisor_if_marker() { S2_MOST_RECENT_SUPERVISOR=""; }
+S2_PARENT_PID=$$
+persist="$S2_TEST_FIXTURE/state"
+mkdir "$persist" || exit 125
+release_fifo="$persist/client.release"
+mkfifo "$release_fifo" "$S2_TEST_FIXTURE/unrelated" || exit 125
+if [[ "$S2_TEST_GATE_KIND" == owned-release ]]; then gate="$release_fifo"; else gate="$S2_TEST_FIXTURE/unrelated"; fi
+exec 7<>"$gate" || exit 125
+sleep 0.01 &
+child=$!
+wait "$child" || exit 125
+S2_MOST_RECENT_SUPERVISOR="$child $child $$ unit pending $persist/client.watchdog.health $persist 12345 client pre-release"
+stop_most_recent_untracked_supervisor || exit 125
+[[ /dev/fd/7 -ef "$gate" ]] && open=1 || open=0
+printf 'controller-alive %s gate-open %s\\n' "$$" "$open"
+holder_status=0
+holders="$(lsof -a -p "$$" -nP -t +w +D "$persist")" || holder_status=$?
+if [[ -n "$holders" ]]; then holder=1; else holder=0; fi
+printf 'state-holder %s scan-status %s\\n' "$holder" "$holder_status"
+`,
+        ],
+        { S2_TEST_FIXTURE: fixture, S2_TEST_GATE_KIND: gateKind },
+        10_000,
+      );
+      expect(run.exitCode, run.retainedLogs).toBe(0);
+      expect(run.stdout, run.retainedLogs).toMatch(
+        gateKind === "owned-release"
+          ? /controller-alive [0-9]+ gate-open 0/
+          : /controller-alive [0-9]+ gate-open 1/,
+      );
+      expect(run.stdout, run.retainedLogs).toContain("state-holder 0 scan-status 1");
+    },
+  );
+
   test("TERM before the first gate retires pending startup before sealing evidence", () => {
     const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
     const run = runHarnessSync(
