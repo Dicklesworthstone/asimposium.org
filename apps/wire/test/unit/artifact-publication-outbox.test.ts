@@ -1,6 +1,10 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import {
+  EvidenceArtifactsSchema,
+  PublicArtifactManifestSchema,
+} from "@asimposium/contracts/artifact-publications";
 import { ArtifactInspectionError, artifactSha256 } from "../../src/krater/artifact-inspection.ts";
 import { handleArtifactPublicationHttp } from "../../src/krater/artifact-publication-http.ts";
 import {
@@ -18,8 +22,8 @@ import {
 import type { ArtifactRuntimeEnv } from "../../src/krater/artifact-runtime.ts";
 import { publicationFixture } from "./artifact-publication-fixture.ts";
 
-const queued = async () => {
-  const f = await publicationFixture();
+const queued = async (targetKind: "claim" | "hypothesis" = "claim") => {
+  const f = await publicationFixture(targetKind);
   const receipt = await requestArtifactPublication(
     f.options,
     f.actor,
@@ -707,6 +711,7 @@ test("public manifests expose evidence-bound attachments, never private upload m
   await deliverArtifactPublication(f.drainer, f.id);
   const result = await readPublicArtifactManifest(f.db, f.options.artifactOrigin, f.problem, f.id);
   assert.equal(result.face.evidence.digest, `sha256:${f.evidenceDigest}`);
+  assert.equal(result.face.evidence.screening_notice, undefined);
   assert.equal(result.face.artifact.download_url, `${f.options.artifactOrigin}/sha256/${f.digest}`);
   assert.equal(result.face.verification, "bytes-only");
   assert.equal(result.face.delivery_cursor, 4);
@@ -719,6 +724,104 @@ test("public manifests expose evidence-bound attachments, never private upload m
     "screening_sha256",
   ])
     assert.equal(text.includes(secret), false);
+});
+for (const targetKind of ["claim", "hypothesis"] as const) {
+  test(`artifact manifests retain the exact ${targetKind} evidence publication notice separately from artifact screening`, async () => {
+    const { readEvidenceArtifacts, readPublicArtifactManifest } = await import(
+      "../../src/krater/artifact-publication-read.ts"
+    );
+    const f = await queued(targetKind);
+    try {
+      const receipt = JSON.parse(
+        readFileSync(
+          new URL(
+            "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      );
+      if (targetKind === "hypothesis")
+        receipt.public_action = {
+          category: "off-topic",
+          action: "published-with-warning",
+          notice: "off-scope",
+        };
+      f.sql
+        .query("INSERT INTO screening_publications VALUES('EV-1',?,?)")
+        .run(f.evidenceDigest, JSON.stringify(receipt));
+      // A different publication receipt cannot replace the source evidence's
+      // context, and the artifact's own byte screen still runs independently.
+      f.sql.query("INSERT INTO screening_publications VALUES(?,?,?)").run(
+        f.receipt.event_id,
+        f.evidenceDigest,
+        JSON.stringify({
+          ...receipt,
+          public_action: {
+            category: targetKind === "claim" ? "off-topic" : "dual-use-boundary",
+            action: "published-with-warning",
+            notice: targetKind === "claim" ? "off-scope" : "screening-warning",
+          },
+        }),
+      );
+      assert.equal(await deliverArtifactPublication(f.drainer, f.id), "published");
+      const result = await readPublicArtifactManifest(
+        f.db,
+        f.options.artifactOrigin,
+        f.problem,
+        f.id,
+      );
+      const manifest = PublicArtifactManifestSchema.parse(result.face);
+      assert.deepEqual(manifest.evidence.screening_notice, receipt.public_action);
+      assert.equal(manifest.verification, "bytes-only");
+      assert.equal("screening_notice" in manifest.artifact, false);
+      const page = EvidenceArtifactsSchema.parse(
+        await readEvidenceArtifacts(f.db, f.options.artifactOrigin, f.problem, "E-1"),
+      );
+      assert.deepEqual(page.artifacts, [manifest]);
+      const publicBytes = JSON.stringify(page);
+      for (const field of [
+        "input_digest",
+        "configuration_digest",
+        "model_version",
+        "provenance_json",
+      ])
+        assert.equal(publicBytes.includes(field), false);
+    } finally {
+      f.sql.close();
+    }
+  });
+}
+test("malformed evidence screening receipts fail closed before artifact manifests or lists are served", async () => {
+  const { readEvidenceArtifacts, readPublicArtifactManifest } = await import(
+    "../../src/krater/artifact-publication-read.ts"
+  );
+  const f = await queued();
+  try {
+    await deliverArtifactPublication(f.drainer, f.id);
+    f.sql
+      .query("INSERT INTO screening_publications VALUES('EV-1',?,?)")
+      .run(f.evidenceDigest, JSON.stringify({ private_pattern: "UNPUBLISHED-SCREENING-DETAIL" }));
+    await assert.rejects(
+      readPublicArtifactManifest(f.db, f.options.artifactOrigin, f.problem, f.id),
+      /PUBLIC_SCREENING_RECEIPT_UNAVAILABLE/,
+    );
+    await assert.rejects(
+      readEvidenceArtifacts(f.db, f.options.artifactOrigin, f.problem, "E-1"),
+      /PUBLIC_SCREENING_RECEIPT_UNAVAILABLE/,
+    );
+    f.sql.query("INSERT INTO content_controls VALUES(?, 'E-1', 'hidden', 1)").run(f.problem);
+    await assert.rejects(
+      readPublicArtifactManifest(f.db, f.options.artifactOrigin, f.problem, f.id),
+      errorCode("NOT_FOUND"),
+    );
+    await assert.rejects(
+      readEvidenceArtifacts(f.db, f.options.artifactOrigin, f.problem, "E-1"),
+      errorCode("NOT_FOUND"),
+    );
+  } finally {
+    f.sql.close();
+  }
 });
 test("redacted evidence and changed publication bodies cannot support public manifests", async () => {
   const { readPublicArtifactManifest } = await import(

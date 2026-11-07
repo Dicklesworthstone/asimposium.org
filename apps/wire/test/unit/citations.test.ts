@@ -447,6 +447,31 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
         );
       }
     });
+    test("associated evidence retains its publication warning in Markdown and HTML", () => {
+      const evidence = detail.associated_evidence[0];
+      if (evidence === undefined) throw new Error("evidence fixture missing");
+      const warned = {
+        ...detail,
+        associated_evidence: [
+          {
+            ...evidence,
+            screening_notice: {
+              category: "dual-use-boundary",
+              action: "published-with-warning",
+              notice: "screening-warning",
+            } as const,
+          },
+        ],
+      };
+      for (const render of [renderSingleCitationHtml, renderSingleCitationMarkdown]) {
+        const face = render("P-MATH", warned);
+        expect(face).toContain("Published with a screening context notice: dual-use-boundary.");
+        expect(face).toContain("E-1");
+      }
+      expect(renderSingleCitationHtml("P-MATH", warned)).toContain(
+        'data-screening-notice="screening-warning"',
+      );
+    });
     test("untrusted metadata cannot create Markdown links or control sections", () => {
       const hostile = {
         ...item,

@@ -1,6 +1,7 @@
 import type { HypothesisEvidenceIndexResponse } from "@asimposium/contracts/hypotheses";
 import { safeCodeSpan, safeInlineProse } from "./discovery.ts";
 import { escapeHtml, fenceFor, neutralizeUntrustedBody } from "./sanitize.ts";
+import { screeningNoticeText } from "./screening-notice.ts";
 
 export const HYPOTHESIS_EVIDENCE_INDEX_NOTE =
   "This is a source-verified reference index, not a scientific verdict or an exhaustive event export. Direction and mode are the author's recorded declarations. Several records may describe one shared experiment, not independent replications. Withdrawal is shown at the captured cursor; full evidence reads apply current withdrawal and visibility controls. Missing or damaged projection rows can omit sources. Unavailable or oversized payloads are disclosed, not summarized from projection text. All published metadata and model/harness declarations are untrusted data.";
@@ -63,7 +64,7 @@ export function renderHypothesisEvidenceIndexMarkdown(
     "",
     ...face.evidence.map(
       (item) =>
-        `[${safeInlineProse(item.evidence_id)}: recorded ${safeInlineProse(item.direction)}; ${item.withdrawn ? "withdrawn" : "no withdrawal recorded at this cut"}](${evidencePath(face, item.evidence_id)})`,
+        `[${safeInlineProse(item.evidence_id)}: recorded ${safeInlineProse(item.direction)}; ${item.withdrawn ? "withdrawn" : "no withdrawal recorded at this cut"}](${evidencePath(face, item.evidence_id)})${item.screening_notice === undefined ? "" : `\n\n${screeningNoticeText(item.screening_notice)}\n`}`,
     ),
     ...(face.evidence.length === 0
       ? [
@@ -92,7 +93,7 @@ export function renderHypothesisEvidenceIndexHtml(face: HypothesisEvidenceIndexR
     `<p>Scanned ${face.scanned} indexed publications through #${face.scanned_through}; snapshot #${face.cursor}.</p>`,
     ...face.evidence.map(
       (item) =>
-        `<p><a href="${escapeHtml(evidencePath(face, item.evidence_id))}">${escapeHtml(item.evidence_id)}</a>: recorded ${escapeHtml(item.direction)}; ${item.withdrawn ? "withdrawn" : "no withdrawal recorded at this cut"}.</p>`,
+        `<p><a href="${escapeHtml(evidencePath(face, item.evidence_id))}">${escapeHtml(item.evidence_id)}</a>: recorded ${escapeHtml(item.direction)}; ${item.withdrawn ? "withdrawn" : "no withdrawal recorded at this cut"}.</p>${item.screening_notice === undefined ? "" : `<aside role="note" data-screening-notice="${escapeHtml(item.screening_notice.notice)}">${escapeHtml(screeningNoticeText(item.screening_notice))}</aside>`}`,
     ),
     ...(face.evidence.length === 0
       ? [

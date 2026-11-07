@@ -556,7 +556,7 @@ export function renderSingleCitationMarkdown(
     lines.push("### Associated Evidence");
     for (const ev of associated_evidence) {
       lines.push(
-        `- ${safeCodeSpan(ev.evidence_id)} ${safeInlineProse(ev.direction)} ${safeCodeSpan(ev.bears_on_id)} (${safeInlineProse(ev.computed_class)})`,
+        `- ${safeCodeSpan(ev.evidence_id)} ${safeInlineProse(ev.direction)} ${safeCodeSpan(ev.bears_on_id)} (${safeInlineProse(ev.computed_class)})${ev.screening_notice === undefined ? "" : ` — ${screeningNoticeText(ev.screening_notice)}`}`,
       );
     }
     lines.push("");
@@ -618,6 +618,7 @@ export function renderSingleCitationHtml(
             (ev) => `
         <li class="py-2 border-b border-slate-100 dark:border-slate-800 last:border-0 text-xs">
           <span class="font-mono font-semibold text-slate-900 dark:text-slate-100">${escapeHtml(ev.evidence_id)}</span>
+          ${ev.screening_notice === undefined ? "" : `<aside role="note" data-screening-notice="${escapeHtml(ev.screening_notice.notice)}">${escapeHtml(screeningNoticeText(ev.screening_notice))}</aside>`}
           <span class="ml-2 font-mono text-slate-600 dark:text-slate-400">${escapeHtml(ev.direction)} &rarr; ${escapeHtml(ev.bears_on_id)}</span>
           <span class="ml-2 px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-mono">${escapeHtml(ev.computed_class)}</span>
         </li>`,

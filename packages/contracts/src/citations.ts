@@ -363,6 +363,7 @@ export const AssociatedEvidenceRefSchema = z
     direction: z.string(),
     bears_on_id: z.string(),
     computed_class: z.string(),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
   })
   .strict();
 

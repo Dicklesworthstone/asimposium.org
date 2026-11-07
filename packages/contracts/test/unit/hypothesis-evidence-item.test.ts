@@ -37,6 +37,11 @@ const item = {
   },
   omitted: ["item_face_scope"],
 };
+const warning = {
+  category: "dual-use-boundary",
+  action: "published-with-warning",
+  notice: "screening-warning",
+};
 
 test("hypothesis evidence read schema retains full write vocabulary while excluding private data and invented claim pins in Zod and JSON Schema", () => {
   const validate = new Ajv2020({ strict: true }).compile(
@@ -44,6 +49,7 @@ test("hypothesis evidence read schema retains full write vocabulary while exclud
   );
   for (const value of [
     item,
+    { ...item, screening_notice: warning },
     { ...item, withdrawn: true },
     { ...item, content: null, computed: null, omitted: ["item_face_scope", "content_unavailable"] },
   ]) {
@@ -56,6 +62,8 @@ test("hypothesis evidence read schema retains full write vocabulary while exclud
     { ...item, content: { ...item.content, bears_on_kind: "claim", bears_on_version: 1 } },
     { ...item, publication: { ...item.publication, credential_id: "private-token" } },
     { ...item, computed: { ...item.computed, computed_class: "proven" } },
+    { ...item, screening_notice: { ...warning, model_version: "private-detector" } },
+    { ...item, screening_notice: { ...warning, notice: "not-screened" } },
   ]) {
     expect(HypothesisEvidenceItemResponseSchema.safeParse(value).success).toBe(false);
     expect(validate(value), JSON.stringify(validate.errors)).toBe(false);
@@ -69,6 +77,13 @@ test("read schema refuses inconsistent cursor, target, withdrawal and unavailabl
     { ...item, withdrawn: true, computed: { ...item.computed, drives_promotion: true } },
     { ...item, content: null },
     { ...item, content: null, computed: null },
+    {
+      ...item,
+      content: null,
+      computed: null,
+      omitted: ["item_face_scope", "content_unavailable"],
+      screening_notice: warning,
+    },
   ])
     expect(HypothesisEvidenceItemResponseSchema.safeParse(value).success).toBe(false);
 });

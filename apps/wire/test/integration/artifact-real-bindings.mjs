@@ -956,7 +956,9 @@ try {
   );
   const claimId = claimRes.data.claim_id;
 
-  // Submit Evidence
+  // Publish warned evidence through the real writer. Artifact byte screening
+  // below still uses its separate pass decision; these are distinct contexts.
+  await fixtures.setScreenMode("allow-with-warning");
   const evRes = await call(
     `/v1/sessions/${sessionIdA}/evidence`,
     {
@@ -972,6 +974,12 @@ try {
     authorTokenA,
     201,
   );
+  await fixtures.setScreenMode("pass");
+  const sourceEvidenceNotice = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  };
   const evidenceId = evRes.data.evidence_id;
   const evidenceDigest = await fixtures.getEvidenceDigest(evidenceId);
   assert.ok(evidenceDigest, "Evidence digest must be found in ledger events");
@@ -1081,6 +1089,10 @@ try {
   assert.equal(publicManifest.license, "CC-BY-4.0");
   assert.equal(publicManifest.verification, "bytes-only");
   assert.equal(publicManifest.evidence.evidence_id, evidenceId);
+  assert.deepEqual(publicManifest.evidence.screening_notice, sourceEvidenceNotice);
+  assert.equal("screening_notice" in publicManifest.artifact, false);
+  for (const field of ["input_digest", "configuration_digest", "model_version", "provenance_json"])
+    assert.equal(manifestRes.raw.includes(field), false);
   assert.equal(
     publicManifest.artifact.download_url,
     `https://artifacts-staging.asimposium.org/sha256/${textSha256}`,
@@ -1097,6 +1109,17 @@ try {
   assert.ok(evArtifacts.artifacts.length >= 1);
   assert.equal(evArtifacts.artifacts[0].publication_id, pubId);
   assert.equal(evArtifacts.artifacts[0].artifact.sha256, textSha256);
+  assert.deepEqual(evArtifacts.artifacts[0].evidence.screening_notice, sourceEvidenceNotice);
+  const manifestEtag = manifestRes.headers.get("etag");
+  assert.ok(manifestEtag);
+  assert.equal(
+    (
+      await call(pubReceipt.manifest_path, undefined, undefined, 304, undefined, {
+        "if-none-match": manifestEtag,
+      })
+    ).raw,
+    "",
+  );
 
   // 14. Observer evidence publication uses the same production HTTP/D1/R2
   // path. Fixture setup supplies the roster role; no publication is injected.
@@ -1209,7 +1232,9 @@ try {
     );
   const attemptsBeforeHidden = await publicationAttempts();
   await fixtures.setArtifactSourceVisibility(problemId, claimId, "hidden");
-  await call(pubReceipt.manifest_path, undefined, undefined, 404);
+  await call(pubReceipt.manifest_path, undefined, undefined, 404, undefined, {
+    "if-none-match": manifestEtag,
+  });
   await call(observerPublication.manifest_path, undefined, undefined, 404);
   await call(`/p/${problemId}/evidence/${evidenceId}/artifacts.json`, undefined, undefined, 404);
   await call(

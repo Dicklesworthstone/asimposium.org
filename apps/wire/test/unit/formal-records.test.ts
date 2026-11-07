@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { EvidenceRequest, ReviewRequest } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
@@ -49,6 +50,7 @@ function fixture() {
       object_version INTEGER,payload_sha256 TEXT,actor_fellow_id TEXT,actor_sponsor_id TEXT,actor_session_id TEXT,
       model_string_self_declared TEXT,harness TEXT,created_at TEXT,UNIQUE(problem_id,seq));
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
+    CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY,provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, version INTEGER, visibility TEXT,
       PRIMARY KEY(problem_id,target_ref,version));
     INSERT INTO problems VALUES('P-DEMO',100,'active',0),('P-OTHER',100,'active',0);`);
@@ -130,6 +132,64 @@ function fixture() {
     read: (cursor = 100, after = 0) => readFormalRecords(db, "P-DEMO", cursor, decoders, after),
   };
 }
+
+test("formal evidence and verification history preserve source warnings without private screening receipts", async () => {
+  const f = fixture();
+  const receipt = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  try {
+    const artifactEvent = f.publish(2, artifact());
+    const reviewEvent = f.publish(
+      3,
+      {
+        target_claim_id: "C-1",
+        target_version: 1,
+        basis: "Checked the submitted source.",
+        body_md: "An independent verification report.",
+        verification: { reported: true },
+      },
+      { type: "review.created" },
+    );
+    const frictionEvent = f.publish(4, {
+      ...artifact(),
+      formal_artifact: undefined,
+      kind: "formalization-friction",
+      direction: "informs",
+    });
+    f.publish(5, artifact());
+    for (const eventId of [artifactEvent, reviewEvent, frictionEvent])
+      f.sqlite
+        .query("INSERT INTO screening_publications VALUES(?,?)")
+        .run(eventId, JSON.stringify(receipt));
+    const page = await f.read();
+    assert.deepEqual(
+      page.records.map((record) => record.kind),
+      ["formal-artifact", "verification-report", "formalization-friction", "formal-artifact"],
+    );
+    for (const record of page.records.slice(0, 3))
+      assert.deepEqual(record.screening_notice, receipt.public_action);
+    assert.equal(page.records[3]?.screening_notice, undefined);
+    assert.ok(!JSON.stringify(page).includes(receipt.input_digest));
+    assert.ok(!JSON.stringify(page).includes(receipt.model_version));
+    f.sqlite
+      .query("UPDATE screening_publications SET provenance_json=? WHERE event_id=?")
+      .run(JSON.stringify({ ...receipt, private_detail: "PRIVATE_DETECTOR_CANARY" }), reviewEvent);
+    await assert.rejects(f.read(), /PUBLIC_SCREENING_RECEIPT_UNAVAILABLE/);
+    f.sqlite.query("INSERT INTO content_controls VALUES('P-DEMO','R-3',1,'hidden')").run();
+    const hidden = await f.read();
+    assert.ok(!hidden.records.some((record) => record.publication.object_id === "R-3"));
+    assert.ok(hidden.omitted.includes("content_unavailable"));
+  } finally {
+    f.sqlite.close();
+  }
+});
 
 test("formal records include exact artifact source and immutable attribution", async () => {
   const f = fixture();

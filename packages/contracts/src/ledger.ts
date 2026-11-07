@@ -455,6 +455,7 @@ export const HypothesisEvidenceItemResponseSchema = z
     withdrawn: z.boolean(),
     content: EvidenceRequestSchema.options[1].nullable(),
     computed: EvidenceResponseSchema.omit({ evidence_id: true }).nullable(),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
     omitted: z
       .array(z.enum(["item_face_scope", "content_unavailable"]))
       .min(1)
@@ -467,6 +468,7 @@ export const HypothesisEvidenceItemResponseSchema = z
       (face.content === null) !== (face.computed === null) ||
       (face.content !== null && face.content.bears_on_id !== face.bears_on.id) ||
       (face.content === null && !face.omitted.includes("content_unavailable")) ||
+      (face.content === null && face.screening_notice !== undefined) ||
       (face.withdrawn && face.computed?.drives_promotion === true)
     )
       context.addIssue({ code: "custom", message: "inconsistent hypothesis evidence item" });

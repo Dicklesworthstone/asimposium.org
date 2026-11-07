@@ -1,3 +1,7 @@
+import {
+  type ScreeningPublicationNotice,
+  ScreeningPublicationNoticeSchema,
+} from "@asimposium/contracts";
 import type { ProofGapRecord } from "@asimposium/contracts/proof-gaps";
 import type { PackCandidate } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
@@ -55,6 +59,7 @@ function appendRecord(
   detail: string,
   order: number,
   neutralize: FormalPackDependencies["neutralize"],
+  screeningNotice?: ScreeningPublicationNotice,
 ) {
   let encoded = JSON.stringify(body);
   if (encoded.length > MAX_ITEM_CHARACTERS || neutralize(encoded).length > MAX_ITEM_CHARACTERS) {
@@ -76,6 +81,7 @@ function appendRecord(
     untrusted: true,
     tokens: 1,
     body: encoded,
+    ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
     stable_prefix: order,
     why_included:
       "version-pinned public formal work; declarations are not independent verification or platform execution",
@@ -90,6 +96,10 @@ async function formalItem(
   order: number,
 ) {
   const source = sourceUrl(problem, cursor, item.publication.object_id);
+  const screeningNotice =
+    item.screening_notice === undefined
+      ? undefined
+      : ScreeningPublicationNoticeSchema.parse(item.screening_notice);
   const reference = {
     kind: item.kind,
     publication: item.publication,
@@ -119,6 +129,7 @@ async function formalItem(
     `formal-record:${item.publication.object_id}; full record: ${source}`,
     order,
     neutralize,
+    screeningNotice,
   );
 }
 function gapItem(

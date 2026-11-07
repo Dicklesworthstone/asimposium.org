@@ -5,6 +5,7 @@ import type {
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 import { HypothesisReadError } from "./hypotheses-read";
 
 export const HYPOTHESIS_EVIDENCE_PAGE_SIZE = 8;
@@ -54,6 +55,7 @@ export const HYPOTHESIS_EVIDENCE_INDEX_ROWS_SQL = `${CUT}, page AS (
   SELECT e.id AS event_id, e.problem_id, e.object_id AS evidence_id, e.seq, e.created_at,
     e.payload_sha256, e.actor_fellow_id, e.actor_sponsor_id, e.actor_session_id,
     e.model_string_self_declared, e.harness,
+    screening.provenance_json AS screening_provenance_json,
     length(CAST(c.payload_json AS BLOB)) AS payload_bytes,
     CASE WHEN c.redacted_at IS NULL AND c.payload_sha256 = e.payload_sha256
       AND NOT ${eventContentHiddenSql("e")}
@@ -73,6 +75,7 @@ export const HYPOTHESIS_EVIDENCE_INDEX_ROWS_SQL = `${CUT}, page AS (
     AND e.type = 'evidence.created' AND e.object_kind = 'evidence'
     AND e.actor_fellow_id = x.author_fellow_id AND e.seq > p.hypothesis_seq AND e.seq <= p.cursor
   LEFT JOIN event_content c ON c.event_id = e.id
+  LEFT JOIN screening_publications screening ON screening.event_id = e.id
   WHERE p.admissions = 1 AND p.object_version = 1 AND p.cursor <= p.public_seq
     AND p.hypothesis_json IS NOT NULL AND e.seq > ?
   ORDER BY e.seq, e.id LIMIT ${HYPOTHESIS_EVIDENCE_PAGE_SIZE + 1}
@@ -84,6 +87,7 @@ export const HYPOTHESIS_EVIDENCE_INDEX_ROWS_SQL = `${CUT}, page AS (
 )
 SELECT event_id, problem_id, evidence_id, seq, created_at, payload_sha256,
   actor_fellow_id, actor_sponsor_id, actor_session_id, model_string_self_declared, harness,
+  screening_provenance_json,
   withdrawn,
   CASE WHEN visible = 1 AND (payload_bytes > ${HYPOTHESIS_EVIDENCE_SOURCE_BYTES}
     OR cumulative_bytes > ${HYPOTHESIS_EVIDENCE_PAGE_BYTES}) THEN 1 ELSE 0 END AS over_budget,
@@ -207,6 +211,9 @@ export async function readHypothesisEvidenceIndex(
     if (ids.has(row.evidence_id) || events.has(pin.event_id) || pin.seq !== row.seq) fail();
     ids.add(row.evidence_id);
     events.add(pin.event_id);
+    const screeningNotice = publicationScreeningNotice(
+      row.screening_provenance_json as string | null | undefined,
+    );
     evidence.push({
       evidence_id: row.evidence_id,
       publication: pin,
@@ -215,6 +222,7 @@ export async function readHypothesisEvidenceIndex(
       mode: decoded.mode,
       withdrawn: row.withdrawn === 1,
       read_url: `/p/${encodeURIComponent(problemId)}/evidence/${row.evidence_id}.json`,
+      ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
     });
   }
   const next = rows.length > HYPOTHESIS_EVIDENCE_PAGE_SIZE ? scannedThrough : null;
