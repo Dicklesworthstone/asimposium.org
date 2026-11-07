@@ -617,8 +617,7 @@ export const PLANTS = [
     // assertion and both call sites intact.
     file: "apps/wire/src/sessions/statement-context.ts",
     find: "      WHERE problem_id = ? AND type = 'problem.statement-revised'",
-    replace:
-      "      WHERE problem_id = ? AND type = 'problem.statement-revised-ignored'",
+    replace: "      WHERE problem_id = ? AND type = 'problem.statement-revised-ignored'",
     command: LANE("stoa-surface"),
   },
   {

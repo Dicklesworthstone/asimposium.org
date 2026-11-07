@@ -24,6 +24,82 @@ for self_test in \
   fi
 done
 
+# Consume the receipt as a verifier would, then replay its closed command
+# vocabulary without eval. Product failures must never recommend a passing
+# harness self-test. Clearing both origins keeps these probes network-free.
+smoke_reproduction_command() {
+  python3 -c '
+import json, sys
+name, mode, exit_code = sys.argv[1:]
+record = json.load(sys.stdin)
+expected = "scripts/" + name
+if mode == "self-test":
+    expected += " --self-test"
+    code, status, wanted_exit = "HARNESS_SELF_TEST_OK", "pass", 0
+else:
+    code = {
+        "smoke-agent.sh": "STAGING_AGENT_BASE_URL_MISSING",
+        "smoke-gallery.sh": "STAGING_AGORA_BASE_URL_MISSING",
+    }[name]
+    status, wanted_exit = "fail", 78
+if (record.get("reproduce") != expected or record.get("code") != code
+        or record.get("status") != status or int(exit_code) != wanted_exit):
+    sys.exit(1)
+print(record["reproduce"])
+' "$1" "$2" "$3"
+}
+
+for smoke_name in smoke-agent.sh smoke-gallery.sh; do
+  for smoke_mode in self-test product; do
+    smoke_args=()
+    if [[ "$smoke_mode" == "self-test" ]]; then
+      smoke_args=(--self-test)
+    fi
+    set +e
+    smoke_receipt="$(
+      env -u ASIMPOSIUM_STAGING_AGENT_BASE_URL -u ASIMPOSIUM_STAGING_AGORA_BASE_URL \
+        "$repository_root/scripts/$smoke_name" "${smoke_args[@]}" 2>&1
+    )"
+    smoke_exit=$?
+    set -e
+    if ! smoke_command="$(
+      printf '%s' "$smoke_receipt" \
+        | smoke_reproduction_command "$smoke_name" "$smoke_mode" "$smoke_exit"
+    )"; then
+      emit "fail" "SMOKE_REPRODUCTION_MODE_INVALID"
+      exit 1
+    fi
+
+    wrong_mode_receipt="$(printf '%s' "$smoke_receipt" | python3 -c '
+import json, sys
+record = json.load(sys.stdin)
+command = record["reproduce"]
+record["reproduce"] = (command.removesuffix(" --self-test")
+    if command.endswith(" --self-test") else command + " --self-test")
+print(json.dumps(record))
+')"
+    if printf '%s' "$wrong_mode_receipt" \
+      | smoke_reproduction_command "$smoke_name" "$smoke_mode" "$smoke_exit" >/dev/null; then
+      emit "fail" "SMOKE_WRONG_MODE_RECEIPT_ACCEPTED"
+      exit 1
+    fi
+
+    read -r -a smoke_replay_args <<< "$smoke_command"
+    set +e
+    smoke_replayed_receipt="$(
+      env -u ASIMPOSIUM_STAGING_AGENT_BASE_URL -u ASIMPOSIUM_STAGING_AGORA_BASE_URL \
+        "$repository_root/${smoke_replay_args[0]}" "${smoke_replay_args[@]:1}" 2>&1
+    )"
+    smoke_replayed_exit=$?
+    set -e
+    if ! printf '%s' "$smoke_replayed_receipt" \
+      | smoke_reproduction_command "$smoke_name" "$smoke_mode" "$smoke_replayed_exit" >/dev/null; then
+      emit "fail" "SMOKE_REPRODUCTION_REPLAY_MISMATCH"
+      exit 1
+    fi
+  done
+done
+
 # The shared artifact writer now refuses unclaimed namespaces. Pin each common
 # entry point's ordering so a future refactor cannot start validation, emit a
 # recorded blocker, or launch product work before its exclusive mkdir claim.

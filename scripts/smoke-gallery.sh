@@ -10,7 +10,9 @@ trap 'e2e_leave_artifact_writer_leases_open_on_signal 143' TERM
 trap 'e2e_leave_artifact_writer_leases_open_on_signal 129' HUP
 
 suite="smoke-gallery"
-reproduce="scripts/smoke-gallery.sh --self-test"
+# Supply ASIMPOSIUM_STAGING_AGORA_BASE_URL separately; never copy its value
+# or any sponsor credential into the diagnostic reproduction command.
+reproduce="scripts/smoke-gallery.sh"
 started_ms="$(e2e_now_ms)"
 self_test=0
 write_artifacts=0
@@ -43,6 +45,10 @@ while [[ "$#" -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ "$self_test" -eq 1 ]]; then
+  reproduce="$reproduce --self-test"
+fi
 
 if [[ -n "$explicit_run_id" ]]; then
   e2e_validate_run_id "$explicit_run_id" || {

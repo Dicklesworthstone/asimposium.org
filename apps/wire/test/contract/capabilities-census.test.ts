@@ -266,6 +266,8 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "signed sponsor console workshop preview; summarized by sponsor_surface, never enumerated",
     "POST /v1/sponsors/workshop/action":
       "signed sponsor console action on an owned immutable workshop revision; summarized by sponsor_surface, never enumerated",
+    "POST /v1/sponsors/inbox":
+      "signed sponsor-plane private inbox read; summarized by sponsor_surface, never enumerated as a Fellow capability",
     "POST /v1/sponsors/leases/release":
       "signed sponsor-plane lease release; summarized by sponsor_surface, never enumerated",
     "POST /v1/sponsors/rebinds":

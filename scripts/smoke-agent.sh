@@ -45,7 +45,9 @@ trap 'e2e_leave_artifact_writer_leases_open_on_signal 143' TERM
 trap 'e2e_leave_artifact_writer_leases_open_on_signal 129' HUP
 
 suite="smoke-agent"
-reproduce="scripts/smoke-agent.sh --self-test"
+# Product mode needs ASIMPOSIUM_STAGING_AGENT_BASE_URL and, for the full loop,
+# ASIMPOSIUM_SMOKE_FELLOW_TOKEN. Their values never enter diagnostic commands.
+reproduce="scripts/smoke-agent.sh"
 started_ms="$(e2e_now_ms)"
 self_test=0
 write_artifacts=0
@@ -448,6 +450,10 @@ while [[ "$#" -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ "$self_test" -eq 1 ]]; then
+  reproduce="$reproduce --self-test"
+fi
 
 if [[ -n "$explicit_run_id" ]]; then
   e2e_validate_run_id "$explicit_run_id" || {
