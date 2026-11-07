@@ -2450,8 +2450,21 @@ S2_LEGACY_POSTCONDITION_HOLDER_PGID=""
 # gap: an EXIT trap can still prove and release the exact newest supervisor while a caller is
 # between start_pinned_supervisor and its Worker/lifecycle bookkeeping. Fields are PID, PGID,
 # expected PPID, marker, watchdog PID, watchdog health path, persistence directory, port, and
-# proof scope. Every path is generated beneath the safe S2 run directory and contains no space.
+# proof scope, and startup phase. Before watchdog proof its PID field is explicitly pending.
+# Every path is generated beneath the safe S2 run directory and contains no space.
 S2_MOST_RECENT_SUPERVISOR=""
+S2_SUPERVISOR_ENROLLING=0
+S2_DEFERRED_SIGNAL_STATUS=""
+
+# A caught signal cannot run EXIT cleanup between the fork and its ownership
+# record. Preserve the first status, then deliver it immediately after enrollment.
+s2_exit_on_signal() {
+  if [[ ${S2_SUPERVISOR_ENROLLING} -eq 1 ]]; then
+    [[ -n "${S2_DEFERRED_SIGNAL_STATUS}" ]] || S2_DEFERRED_SIGNAL_STATUS="$1"
+    return 0
+  fi
+  exit "${S2_DEFERRED_SIGNAL_STATUS:-$1}"
+}
 
 is_decimal() {
   [[ "$1" =~ ^[0-9]+$ ]]
@@ -2733,6 +2746,7 @@ kill_pre_release_owned_group_to_zero() {
       if [[ "${proof_scope}" == "server" ]]; then
         assert_no_run_survivors "${persist}" "${port}" "${marker}" || return 1
       fi
+      clear_most_recent_supervisor_if_marker "${marker}"
       return 0
     fi
     sleep 0.1
@@ -2768,6 +2782,7 @@ kill_pre_release_owned_group_to_zero() {
         assert_no_run_survivors "${persist}" "${port}" "${marker}" || return 1
       fi
       S2_PRE_RELEASE_REAPED_PGID="${pgid}"
+      clear_most_recent_supervisor_if_marker "${marker}"
       return 0
     fi
     sleep 0.1
@@ -2803,6 +2818,7 @@ abort_pre_release_supervisor_to_zero() {
         assert_no_run_survivors "${persist}" "${port}" "${marker}" || return 1
       fi
       S2_PRE_RELEASE_REAPED_PGID="${pgid}"
+      clear_most_recent_supervisor_if_marker "${marker}"
       return 0
     fi
     sleep 0.1
@@ -2996,6 +3012,7 @@ start_pinned_supervisor() {
   # creates a fresh session/process group without Bash job-control mode, which otherwise can
   # detach background jobs from the harness runner and leave their parent identity unusable.
   command -v perl >/dev/null 2>&1 || return 1
+  S2_SUPERVISOR_ENROLLING=1
   perl -MPOSIX=setsid,dup2,close -MFcntl=:DEFAULT -e '
     setsid() or exit 125;
     $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "DEFAULT";
@@ -3294,7 +3311,7 @@ start_pinned_supervisor() {
       # branch must prove or refuse the remaining TERM-resistant group without a PID fallback.
       trap "exit 0" TERM HUP INT
     else
-      trap "child_wait_interrupted=1" TERM HUP INT
+      trap : TERM HUP INT
     fi
     trap "exit 0" USR1
     # One leader signal closes the controller-loss window: the still-pinned leader releases and
@@ -3313,15 +3330,14 @@ start_pinned_supervisor() {
     exec 6>&-
     "$@" &
     child="$!"
-    # A caught group signal interrupts Bash wait before payload EXIT cleanup
-    # finishes. Repeat the wait on this known child rather than publishing the
-    # interrupted wait status as completed work. No numeric PID probe is proof
-    # of settlement, and no new signal authority is needed here.
-    while :; do
-      child_wait_interrupted=0
-      if wait "${child}"; then child_status=0; else child_status="$?"; fi
-      [[ "${child_wait_interrupted}" == 1 ]] || break
-    done
+    # Ignore these signals only after the payload has inherited the caught
+    # dispositions (which exec resets). The leader can then wait once for real
+    # settlement without an interrupted wait or a second wait losing its status.
+    # The deliberate leader-exit plant keeps its original signal behavior.
+    if [[ "${plant_supervisor_exit_on_term}" != 1 ]]; then
+      trap "" TERM HUP INT
+    fi
+    if wait "${child}"; then child_status=0; else child_status="$?"; fi
     case "${child_status}" in
       ""|*[!0-9]*) exit 125 ;;
     esac
@@ -3360,7 +3376,12 @@ start_pinned_supervisor() {
     "${plant_startup_journal_exact_fd6}" \
     "${watchdog_journal_fd6_observed}" \
     "$@" &
+  # Publish pending ownership in the first operation after the fork. A signal
+  # during first-gate setup must not leave an untracked child holding state.
+  S2_MOST_RECENT_SUPERVISOR="$! $! ${S2_PARENT_PID} ${marker} pending ${watchdog_health} ${persist} ${port} ${proof_scope} pre-release"
   pid=$!
+  S2_SUPERVISOR_ENROLLING=0
+  [[ -z "${S2_DEFERRED_SIGNAL_STATUS}" ]] || exit "${S2_DEFERRED_SIGNAL_STATUS}"
   S2_LAST_SUPERVISOR_PGID="${pid}"
   S2_LAST_SUPERVISOR_MARKER="${marker}"
   S2_START_FAILURE_STAGE="pre-arm-release-fifo"
@@ -3507,7 +3528,7 @@ start_pinned_supervisor() {
       # This assignment precedes every release write. An EXIT trap can therefore use the same
       # exact persistence, port, and proof scope that the eventual owner would use, even if a
       # signal lands between this line and the caller recording its own ownership fields.
-      S2_MOST_RECENT_SUPERVISOR="${pid} ${pid} ${S2_PARENT_PID} ${marker} ${watchdog_pid} ${watchdog_health} ${persist} ${port} ${proof_scope}"
+      S2_MOST_RECENT_SUPERVISOR="${pid} ${pid} ${S2_PARENT_PID} ${marker} ${watchdog_pid} ${watchdog_health} ${persist} ${port} ${proof_scope} post-release"
       S2_START_FAILURE_STAGE="payload-release"
       if [[ "${S2_PLANT_RELEASE_INTERLEAVING:-0}" == 1 ]]; then
         # FD 8 remains continuously open across watchdog publication and this release write;
@@ -4905,25 +4926,49 @@ most_recent_supervisor_is_tracked() {
   return 1
 }
 
-# The ordinary Worker and explicit lifecycle arrays own their own release paths. This covers
-# only the short, otherwise-unowned interval after the newest pinned supervisor reports ready
-# and before its caller records that ownership. It never signals a bare numeric group:
-# supervisor_is_owned proves PID, PGID, PPID, and randomized marker immediately before cleanup.
+# The ordinary Worker and lifecycle arrays own their release paths. This record
+# covers startup before watchdog proof and the ready-but-unenrolled interval.
+# Its phase selects the existing pre-release or ordinary exact identity proof;
+# the packed record alone never authorizes a numeric process-group signal.
 # shellcheck disable=SC2329
 stop_most_recent_untracked_supervisor() {
-  local pid pgid expected_ppid marker watchdog_pid watchdog_health persist port proof_scope
+  local pid pgid expected_ppid marker watchdog_pid watchdog_health persist port proof_scope phase
   [[ -n "${S2_MOST_RECENT_SUPERVISOR}" ]] || return 0
-  read -r pid pgid expected_ppid marker watchdog_pid watchdog_health persist port proof_scope \
+  read -r pid pgid expected_ppid marker watchdog_pid watchdog_health persist port proof_scope phase \
     <<<"${S2_MOST_RECENT_SUPERVISOR}"
   is_decimal "${pid}" && is_decimal "${pgid}" && is_decimal "${expected_ppid}" && \
-    is_decimal "${watchdog_pid}" && [[ "${pid}" == "${pgid}" && \
+    [[ "${pid}" == "${pgid}" && \
     "${expected_ppid}" == "${S2_PARENT_PID}" && -n "${marker}" && -n "${watchdog_health}" && \
     -d "${persist}" && ! -L "${persist}" && "${port}" =~ ^[0-9]+$ ]] || return 1
+  case "${phase}" in
+    pre-release) [[ "${watchdog_pid}" == pending ]] || return 1 ;;
+    post-release) is_decimal "${watchdog_pid}" || return 1 ;;
+    *) return 1 ;;
+  esac
   case "${proof_scope}" in
     server|client) ;;
     *) return 1 ;;
   esac
   if most_recent_supervisor_is_tracked "${marker}"; then
+    clear_most_recent_supervisor_if_marker "${marker}"
+    return 0
+  fi
+
+  if [[ "${phase}" == pre-release ]]; then
+    if ! kill -0 -- "-${pgid}" 2>/dev/null; then
+      # The fork may not have reached setsid yet. A live known child without
+      # its group is not a settled child and gives no group-signal authority.
+      kill -0 "${pid}" 2>/dev/null && return 1
+      wait "${pid}" 2>/dev/null || :
+      if [[ "${proof_scope}" == server ]]; then
+        assert_no_run_survivors "${persist}" "${port}" "${marker}" || return 1
+      fi
+    else
+      # No watchdog or payload is required at this stage. Reuse the existing
+      # detached exact-leader proof and bounded pre-release retirement path.
+      kill_pre_release_owned_group_to_zero \
+        "${pid}" "${pgid}" "${marker}" "${persist}" "${port}" "${proof_scope}" || return 1
+    fi
     clear_most_recent_supervisor_if_marker "${marker}"
     return 0
   fi
@@ -5988,6 +6033,9 @@ create_evidence_subdir() {
 # shellcheck disable=SC2329
 on_exit() {
   local original_status="$?" final_status cleanup_proven=true
+  # A signal may enter this trap from IFS= read. Delimited ownership records
+  # must still be parsed with their own normal separator during exact cleanup.
+  local IFS=$' \t\n'
   trap - EXIT
   # A first signal has already selected the preserved status. Ignore follow-up
   # termination signals while exact cleanup and immutable evidence publication run.
@@ -6080,16 +6128,16 @@ on_exit() {
 }
 
 trap on_exit EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
+trap 's2_exit_on_signal 130' INT
+trap 's2_exit_on_signal 143' TERM
+trap 's2_exit_on_signal 129' HUP
 if [[ "${S2_SHELL_REGRESSION_TEST:-}" == post-release-safe-checkpoint-child && \
   "${S2_PLANT_POST_RELEASE_CONTROLLER_IGNORE_FIRST_TERM:-0}" == 1 ]]; then
   # Dedicated cleanup fault injection. The nested controller absorbs exactly the first TERM, so
   # its parent must enter the KILL branch under test. A later cleanup TERM exits normally and
   # gives the child's own exact-supervisor cleanup a chance to finish.
   S2_POST_RELEASE_CONTROLLER_TERM_PLANT_COUNT=0
-  trap 'if [[ ${S2_POST_RELEASE_CONTROLLER_TERM_PLANT_COUNT} -eq 0 ]]; then S2_POST_RELEASE_CONTROLLER_TERM_PLANT_COUNT=1; else exit 143; fi' TERM
+  trap 'if [[ ${S2_POST_RELEASE_CONTROLLER_TERM_PLANT_COUNT} -eq 0 ]]; then S2_POST_RELEASE_CONTROLLER_TERM_PLANT_COUNT=1; else s2_exit_on_signal 143; fi' TERM
 fi
 
 start_worker() {
@@ -7079,6 +7127,12 @@ run_s2_shell_regression_test() {
 
   if [[ "${mode}" == "pre-arm-owner-loss" ]]; then
     local planted_helper_pid child_persist child_port child_run_id child_run_identity
+    local owner_signal="${S2_PLANT_PRE_ARM_OWNER_SIGNAL:-KILL}" expected_owner_status
+    case "${owner_signal}" in
+      KILL) expected_owner_status=137 ;;
+      TERM) expected_owner_status=143 ;;
+      *) return 2 ;;
+    esac
     parent_loss_record="${S2_STATE_DIR}/pre-arm-owner-loss-record-$(random_hex 8)"
     child_run_id="s2c-$(random_hex 24)" || return 1
     s2_prepare_inherited_child_run "${child_run_id}" || return 1
@@ -7097,7 +7151,8 @@ run_s2_shell_regression_test() {
       perl -MPOSIX=setsid -e 'setsid() or exit 125; exec @ARGV' -- \
       bash -c "${S2_RAW_INHERITED_CHILD_WRAPPER}" s2-raw-wrapper \
         "${S2_PARENT_PID}" "${S2_RAW_INHERITED_CHILD_GATE}" \
-        "${S2_RAW_INHERITED_CHILD_MARKER}" "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
+        "${S2_RAW_INHERITED_CHILD_MARKER}" "${S2_SCRIPT_PATH}" \
+        >"${S2_STATE_DIR}/pre-arm-child.log" 2>&1 &
     parent_loss_child=$!
     s2_register_raw_inherited_child "${parent_loss_child}" || return 1
     deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
@@ -7120,13 +7175,13 @@ run_s2_shell_regression_test() {
       -d "${child_persist}" && ! -L "${child_persist}" ]] || return 1
     kill -0 "${planted_helper_pid}" 2>/dev/null || return 1
     s2_raw_inherited_child_command_is_exact "${parent_loss_child}" || return 1
-    kill -KILL -- "-${parent_loss_child}" 2>/dev/null || return 1
+    kill "-${owner_signal}" -- "-${parent_loss_child}" 2>/dev/null || return 1
     if wait "${parent_loss_child}" 2>/dev/null; then
       parent_loss_status=0
     else
       parent_loss_status=$?
     fi
-    [[ ${parent_loss_status} -eq 137 ]] || return 1
+    [[ ${parent_loss_status} -eq ${expected_owner_status} ]] || return 1
     deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while kill -0 -- "-${supervisor_pgid}" 2>/dev/null; do
       if (( SECONDS >= deadline )); then
@@ -7141,6 +7196,10 @@ run_s2_shell_regression_test() {
     assert_no_run_survivors \
       "${child_persist}" "${child_port}" "${supervisor_marker}" || return 1
     cleanup_raw_inherited_child || return 1
+    if [[ "${owner_signal}" == TERM ]]; then
+      emit "{\"tool\":\"bash+fifo\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"controller-term-before-first-gate-reaps-supervisor-and-planted-helper\",\"child_run_id\":\"${child_run_id}\",\"controller_exit_status\":143,\"no_exact_group_survivor\":true,\"reproduce\":\"S2_SHELL_REGRESSION_TEST=pre-arm-owner-loss S2_PLANT_PRE_ARM_OWNER_SIGNAL=TERM scripts/e2e-s2-krater.sh\"}"
+      return 0
+    fi
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"controller-death-before-first-gate-reaps-supervisor-and-planted-helper","reproduce":"S2_SHELL_REGRESSION_TEST=pre-arm-owner-loss scripts/e2e-s2-krater.sh"}'
     return 0
   fi
@@ -7476,13 +7535,20 @@ run_s2_shell_regression_test() {
     [[ -n "${interrupt_record}" && -n "${interrupt_secret}" && \
       ! -e "${interrupt_record}" && ! -L "${interrupt_record}" ]] || return 2
     status_file="${S2_STATE_DIR}/parent-term-control-$(random_hex 8).status"
-    # This is the exact former orphan shape: the payload resists group TERM, its status/control
-    # phase is observed, then the controlling parent receives TERM before it can assign the
-    # start result to the Worker or lifecycle ownership tables.
+    # The direct child exits143 on TERM; its distinct descendant keeps resisting.
+    # This retains the former orphan topology after a real child status exists,
+    # before the caller enrolls the supervisor in Worker/lifecycle ownership.
     # shellcheck disable=SC2016
     S2_PLANT_WATCHDOG_EXIT_ON_TERM=1 \
       start_pinned_supervisor "${status_file}" parent-term-control "${S2_STATE_DIR}" "${S2_PORT}" client \
-        bash -c 'trap "" TERM; deadline=$((SECONDS + 4)); while (( SECONDS < deadline )); do read -r -t 1 ignored || :; done' || return 1
+        bash -c '
+          trap "exit 143" TERM
+          bash -c "trap \"\" TERM; echo \$\$ >\"\$1\"; deadline=\$((SECONDS + 4)); while (( SECONDS < deadline )); do read -r -t 1 ignored || :; done" \
+            s2-term-resistant-descendant "$1" &
+          deadline=$((SECONDS + 4))
+          while (( SECONDS < deadline )); do read -r -t 1 ignored || :; done
+          exit 125
+        ' s2-parent-term-payload "${status_file}.payload-ready" || return 1
     supervisor_pid="${S2_STARTED_PID}"
     supervisor_pgid="${S2_STARTED_PGID}"
     supervisor_marker="${S2_STARTED_MARKER}"
@@ -7492,7 +7558,7 @@ run_s2_shell_regression_test() {
     deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while :; do
       group_members "${supervisor_pgid}" || return 1
-      [[ ${S2_GROUP_MEMBER_COUNT} -ge 3 ]] && break
+      [[ ${S2_GROUP_MEMBER_COUNT} -ge 3 && -f "${status_file}.payload-ready" ]] && break
       (( SECONDS < deadline )) || return 1
       sleep 0.05
     done
@@ -7513,6 +7579,19 @@ run_s2_shell_regression_test() {
     printf '%s %s %s %s %s %s %s %s\n' \
       "${supervisor_pid}" "${supervisor_pgid}" "${supervisor_marker}" "${S2_STATE_DIR}" \
       "${S2_PORT}" "${S2_RUN_DIR}" "${supervisor_status}" "${child_diagnostic}" >"${interrupt_record}"
+    # Require the resistant descendant now, not merely before the first TERM.
+    # Its original four-second lifetime is a bound, never a substitute for proof.
+    local resistant_pid resistant_line seen_pid seen_pgid seen_ppid seen_stat seen_command
+    single_decimal_file "${status_file}.payload-ready" || return 1
+    IFS= read -r resistant_pid <"${status_file}.payload-ready" || return 1
+    group_members "${supervisor_pgid}" || return 1
+    group_contains_pid "${resistant_pid}" || return 1
+    read_detached_process_snapshot -o pid=,pgid=,ppid=,stat=,command= -p "${resistant_pid}" || return 1
+    resistant_line="${S2_DETACHED_PROCESS_SNAPSHOT}"
+    read -r seen_pid seen_pgid seen_ppid seen_stat seen_command <<<"${resistant_line}"
+    [[ "${seen_pid}" == "${resistant_pid}" && "${seen_pgid}" == "${supervisor_pgid}" && \
+      "${seen_stat}" != Z* && "${seen_stat}" != T* && \
+      "${seen_command}" == *s2-term-resistant-descendant* ]] || return 1
     # Invoke the ordinary TERM -> EXIT cleanup path. It must consume S2_MOST_RECENT_SUPERVISOR
     # before this caller can ever enroll it in a narrower owner slot.
     kill -TERM "$$"

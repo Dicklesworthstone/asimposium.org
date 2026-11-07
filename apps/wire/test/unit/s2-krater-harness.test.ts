@@ -1865,11 +1865,11 @@ describe("S2 to S7 normalized cost receipt", () => {
       shell.indexOf('if [[ "${mode}" == "parent-loss-child" ]]'),
     );
     expect(preArmOwnerLoss).toContain(
-      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
-      's2_raw_inherited_child_command_is_exact "${parent_loss_child}" || return 1\n' +
-        // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
-        '    kill -KILL -- "-${parent_loss_child}"',
+      `s2_raw_inherited_child_command_is_exact "\${parent_loss_child}" || return 1\n` +
+        `    kill "-\${owner_signal}" -- "-\${parent_loss_child}"`,
     );
+    expect(preArmOwnerLoss).toContain(`owner_signal="\${S2_PLANT_PRE_ARM_OWNER_SIGNAL:-KILL}"`);
+    expect(preArmOwnerLoss).toContain("KILL) expected_owner_status=137");
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(preArmOwnerLoss).not.toContain('kill -KILL "${parent_loss_child}"');
     expect(onExit.indexOf("e2e_close_artifact_writer_lease")).toBeLessThan(
@@ -1902,6 +1902,16 @@ describe("S2 to S7 normalized cost receipt", () => {
       shell.indexOf("read_child_status()"),
     );
     expect(start).toContain('persist="$3" port="$4" proof_scope="$5"');
+    const pending = start.indexOf('S2_MOST_RECENT_SUPERVISOR="$! $!');
+    const complete = start.indexOf(`\${proof_scope} post-release"`);
+    expect(pending).toBeGreaterThanOrEqual(0);
+    expect(pending).toBeLessThan(start.indexOf('S2_START_FAILURE_STAGE="pre-arm-release-fifo"'));
+    expect(complete).toBeGreaterThan(start.indexOf("watchdog_proved=1"));
+    expect(complete).toBeLessThan(start.indexOf(`printf '%s\\n' "\${release_token}" >&7`));
+    const enrolling = start.indexOf("S2_SUPERVISOR_ENROLLING=1");
+    expect(enrolling).toBeGreaterThanOrEqual(0);
+    expect(enrolling).toBeLessThan(start.indexOf("perl -MPOSIX=setsid,dup2,close"));
+    expect(start.indexOf("S2_SUPERVISOR_ENROLLING=0")).toBeGreaterThan(pending);
     expect(start.indexOf("S2_MOST_RECENT_SUPERVISOR=")).toBeLessThan(
       // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
       start.indexOf("printf '%s\\n' \"${release_token}\" >&7"),
@@ -2974,6 +2984,149 @@ finish
     expect(run.stdout, run.retainedLogs).toContain("status-before-cleanup 0");
     expect(readFileSync(join(fixture, "cleanup-done"), "utf8")).toBe("done\n");
     expect(readFileSync(join(fixture, "status"), "utf8")).toBe("143\n");
+  });
+
+  test.each(["during-enrollment", "after-enrollment"])(
+    "a signal between fork and enrollment preserves its first status through %s",
+    (signalStage) => {
+      const source = readFileSync(resolve(REPOSITORY_ROOT, SCRIPT), "utf8");
+      const handler = source.slice(
+        source.indexOf("S2_SUPERVISOR_ENROLLING=0\n"),
+        source.indexOf("is_decimal() {"),
+      );
+      const enrollmentStart = source.indexOf('  S2_MOST_RECENT_SUPERVISOR="$! $!');
+      const enrollment = source.slice(
+        enrollmentStart,
+        source.indexOf("  S2_LAST_SUPERVISOR_PGID=", enrollmentStart),
+      );
+      const delivery = enrollment.indexOf('  [[ -z "');
+      expect(enrollmentStart).toBeGreaterThan(0);
+      expect(delivery).toBeGreaterThan(0);
+      const run = runCaptured(
+        "bash",
+        [
+          "-c",
+          `
+${handler}
+S2_MOST_RECENT_SUPERVISOR=""
+S2_PARENT_PID=$$
+marker=unit
+watchdog_health=unit-health
+persist=unit-persist
+port=12345
+proof_scope=client
+trap 's2_exit_on_signal 143' TERM
+trap 's2_exit_on_signal 129' HUP
+finish() {
+  result=$?
+  trap - EXIT
+  [[ -n "$S2_MOST_RECENT_SUPERVISOR" ]] && enrolled=1 || enrolled=0
+  printf 'exit-status %s enrolled %s\\n' "$result" "$enrolled"
+  wait "$child" 2>/dev/null || :
+  exit "$result"
+}
+trap finish EXIT
+S2_SUPERVISOR_ENROLLING=1
+sleep 0.1 &
+child=$!
+kill -TERM "$$"
+${signalStage === "during-enrollment" ? 'kill -HUP "$$"' : ""}
+printf 'deferred-status %s\\n' "$S2_DEFERRED_SIGNAL_STATUS"
+${enrollment.slice(0, delivery)}
+${signalStage === "after-enrollment" ? 'kill -HUP "$$"' : ""}
+${enrollment.slice(delivery)}
+exit 125
+`,
+        ],
+        {},
+        5_000,
+      );
+      expect(run.exitCode, run.retainedLogs).toBe(143);
+      expect(run.stdout).toContain("deferred-status 143");
+      expect(run.stdout).toContain("exit-status 143 enrolled 1");
+    },
+  );
+
+  test("pending cleanup refuses a live child that has not created its detached group", () => {
+    const source = readFileSync(resolve(REPOSITORY_ROOT, SCRIPT), "utf8");
+    const start = source.indexOf("stop_most_recent_untracked_supervisor() {");
+    const stop = source.slice(start, source.indexOf("# Hold a raw recursive child", start));
+    const run = runCaptured(
+      "bash",
+      [
+        "-c",
+        `
+${stop}
+is_decimal() { [[ "$1" =~ ^[0-9]+$ ]]; }
+most_recent_supervisor_is_tracked() { return 1; }
+clear_most_recent_supervisor_if_marker() { S2_MOST_RECENT_SUPERVISOR=""; }
+S2_PARENT_PID=$$
+sleep 0.4 &
+child=$!
+trap 'wait "$child" 2>/dev/null || :' EXIT
+S2_MOST_RECENT_SUPERVISOR="$child $child $$ unit pending health . 12345 client pre-release"
+stop_most_recent_untracked_supervisor && result=0 || result=$?
+kill -0 "$child" 2>/dev/null && live=1 || live=0
+[[ -n "$S2_MOST_RECENT_SUPERVISOR" ]] && retained=1 || retained=0
+printf 'cleanup-status %s child-live %s record-retained %s\\n' "$result" "$live" "$retained"
+`,
+      ],
+      {},
+      5_000,
+    );
+    expect(run.exitCode, run.retainedLogs).toBe(0);
+    expect(run.stdout, run.retainedLogs).toContain(
+      "cleanup-status 1 child-live 1 record-retained 1",
+    );
+  });
+
+  test("TERM before the first gate retires pending startup before sealing evidence", () => {
+    const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+    const run = runHarnessSync(
+      {
+        S2_RUN_ID: runId,
+        S2_SHELL_REGRESSION_TEST: "pre-arm-owner-loss",
+        S2_PLANT_PRE_ARM_OWNER_SIGNAL: "TERM",
+        S2_PLANT_ON_EXIT_SECOND_SIGNAL: "1",
+      },
+      S2_SHELL_REGRESSION_WATCHDOG_MS,
+    );
+    const record = ndjsonRecords(run).find(
+      (row) =>
+        row.scenario === "controller-term-before-first-gate-reaps-supervisor-and-planted-helper",
+    );
+    const childRunId = typeof record?.child_run_id === "string" ? record.child_run_id : undefined;
+    assertS2RunThenScanForSurvivors(
+      "pre-arm-term-sealed-evidence",
+      () => {
+        expect(run.exitCode, run.retainedLogs).toBe(0);
+        expect(record).toMatchObject({
+          controller_exit_status: 143,
+          no_exact_group_survivor: true,
+        });
+        expect(childRunId).toMatch(/^s2c-[a-f0-9]{48}$/);
+        if (childRunId === undefined) throw new Error("missing child run id");
+        const root = resolve(REPOSITORY_ROOT, "e2e/artifacts/s2-krater", childRunId);
+        const manifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8")) as {
+          exit_code: number;
+          files: { path: string; bytes: number; kind: string }[];
+        };
+        expect(manifest.exit_code).toBe(143);
+        const files = manifest.files.filter((file) => file.kind === "file");
+        expect(files.length).toBeGreaterThan(0);
+        expect(files.some((file) => file.path.endsWith(".watchdog.startup"))).toBe(true);
+        for (const file of files) {
+          const path = resolve(root, file.path);
+          expect(path.startsWith(`${root}/`)).toBe(true);
+          expect(lstatSync(path).isFile()).toBe(true);
+          expect(lstatSync(path).size).toBe(file.bytes);
+        }
+      },
+      () => [
+        ...liveS2LifecycleProcesses(runId),
+        ...(childRunId === undefined ? [] : liveS2LifecycleProcesses(childRunId)),
+      ],
+    );
   });
 
   test(
