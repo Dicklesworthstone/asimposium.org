@@ -2102,7 +2102,9 @@ if [[ "${exit_on_term}" == 1 ]]; then
   # Normal watchdogs ignore group TERM until the leader dismisses them with USR1.
   trap "exit 0" TERM HUP INT
 else
-  trap : TERM HUP INT
+  # Ignore in the kernel so execed inspection helpers inherit immunity too.
+  # A caught no-op trap protects only this shell and resets across exec.
+  trap "" TERM HUP INT
 fi
 publish_health() {
   [[ "$1" == "${last_health}" ]] && return 0
@@ -3292,7 +3294,7 @@ start_pinned_supervisor() {
       # branch must prove or refuse the remaining TERM-resistant group without a PID fallback.
       trap "exit 0" TERM HUP INT
     else
-      trap ":" TERM HUP INT
+      trap "child_wait_interrupted=1" TERM HUP INT
     fi
     trap "exit 0" USR1
     # One leader signal closes the controller-loss window: the still-pinned leader releases and
@@ -3311,7 +3313,15 @@ start_pinned_supervisor() {
     exec 6>&-
     "$@" &
     child="$!"
-    if wait "${child}"; then child_status=0; else child_status="$?"; fi
+    # A caught group signal interrupts Bash wait before payload EXIT cleanup
+    # finishes. Repeat the wait on this known child rather than publishing the
+    # interrupted wait status as completed work. No numeric PID probe is proof
+    # of settlement, and no new signal authority is needed here.
+    while :; do
+      child_wait_interrupted=0
+      if wait "${child}"; then child_status=0; else child_status="$?"; fi
+      [[ "${child_wait_interrupted}" == 1 ]] || break
+    done
     case "${child_status}" in
       ""|*[!0-9]*) exit 125 ;;
     esac

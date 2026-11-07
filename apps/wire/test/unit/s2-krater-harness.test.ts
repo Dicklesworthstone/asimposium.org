@@ -2772,6 +2772,210 @@ fi
     expect(`${run.stdout}\n${run.stderr}`).not.toContain(payload);
   });
 
+  test("a normal watchdog's active inspection survives owned group TERM", () => {
+    const source = readFileSync(resolve(REPOSITORY_ROOT, SCRIPT), "utf8");
+    const assignment = source.slice(
+      source.indexOf("readonly S2_WATCHDOG_PROGRAM="),
+      source.indexOf("# shellcheck disable=SC2090\nexport S2_WATCHDOG_PROGRAM"),
+    );
+    const fixture = mkdtempSync(join(tmpdir(), "asimposium-s2-watchdog-term-"));
+    writeFileSync(
+      join(fixture, "ps"),
+      `#!/usr/bin/env bash
+if [[ ! -e "$S2_TEST_SCAN_ARMED" ]]; then
+  printf '%s\\n' armed >"$S2_TEST_SCAN_ARMED"
+  while [[ ! -f "$S2_TEST_SCAN_CONTINUE" ]]; do
+    sleep 0.005
+  done
+fi
+exec /usr/bin/ps "$@"
+`,
+      { mode: 0o700, flag: "wx" },
+    );
+    const run = runCaptured(
+      "bash",
+      [
+        "-c",
+        `${assignment}
+export S2_WATCHDOG_PROGRAM
+supervisor_program='
+  trap : TERM HUP INT
+  supervisor_pid=$$
+  owner_pid=$PPID
+  bash -c "$S2_WATCHDOG_PROGRAM" "s2-parent-watchdog-$S2_TEST_MARKER" \\
+    "$supervisor_pid" "$owner_pid" "$S2_TEST_MARKER" "$S2_TEST_HEALTH" \\
+    0 10 0 0 "$S2_TEST_SCAN_ARMED" &
+  watchdog_pid=$!
+  printf "%s %s\\n" "$supervisor_pid" "$watchdog_pid" >"$S2_TEST_READY"
+  for ((tick=0; tick<500; tick++)); do
+    [[ -f "$S2_TEST_RELEASE" ]] && break
+    sleep 0.01
+  done
+  kill -USR1 "$watchdog_pid" 2>/dev/null || :
+  if wait "$watchdog_pid"; then watchdog_status=0; else watchdog_status=$?; fi
+  printf "%s\\n" "$watchdog_status" >"$S2_TEST_WATCHDOG_EXIT"
+  exit 0
+'
+perl -MPOSIX=setsid -e 'setsid() or exit 125; exec @ARGV;' -- \\
+  bash -c "$supervisor_program" "s2-pinned-supervisor-$S2_TEST_MARKER" &
+child=$!
+finished=0
+finish() {
+  [[ "$finished" == 0 ]] || return 0
+  finished=1
+  [[ -f "$S2_TEST_SCAN_CONTINUE" ]] || : >"$S2_TEST_SCAN_CONTINUE"
+  [[ -f "$S2_TEST_RELEASE" ]] || : >"$S2_TEST_RELEASE"
+  if wait "$child"; then result=0; else result=$?; fi
+  printf 'supervisor-exit %s\\n' "$result"
+}
+trap finish EXIT
+for ((tick=0; tick<200; tick++)); do
+  if [[ -f "$S2_TEST_READY" && -f "$S2_TEST_SCAN_ARMED" ]] && \\
+    read -r leader watchdog <"$S2_TEST_READY" && [[ "$leader" == "$child" ]]; then break; fi
+  sleep 0.005
+done
+[[ -f "$S2_TEST_SCAN_ARMED" && "$leader" == "$child" ]] || exit 125
+group="$(/usr/bin/ps -o pgid= -p "$child")" || exit 125
+read -r group <<<"$group"
+[[ "$group" == "$child" ]] || exit 125
+kill -TERM -- "-$child" || exit 125
+: >"$S2_TEST_SCAN_CONTINUE"
+for ((tick=0; tick<200; tick++)); do
+  [[ -s "$S2_TEST_HEALTH" ]] && break
+  sleep 0.005
+done
+finish
+cat "$S2_TEST_HEALTH"
+printf 'watchdog-exit %s\\n' "$(<"$S2_TEST_WATCHDOG_EXIT")"
+`,
+      ],
+      {
+        PATH: `${fixture}:${process.env.PATH ?? ""}`,
+        S2_TEST_MARKER: randomUUID(),
+        S2_TEST_SCAN_ARMED: join(fixture, "scan-armed"),
+        S2_TEST_SCAN_CONTINUE: join(fixture, "scan-continue"),
+        S2_TEST_RELEASE: join(fixture, "release"),
+        S2_TEST_READY: join(fixture, "ready"),
+        S2_TEST_HEALTH: join(fixture, "health"),
+        S2_TEST_WATCHDOG_EXIT: join(fixture, "watchdog-exit"),
+      },
+      10_000,
+    );
+    expect(run.exitCode, run.retainedLogs).toBe(0);
+    expect(run.stdout, run.retainedLogs).toMatch(/^healthy [0-9]+$/m);
+    expect(run.stdout).not.toContain("inspection-uncertain");
+    expect(run.stdout).toContain("watchdog-exit 0");
+    expect(run.stdout).toContain("supervisor-exit 0");
+  });
+
+  test("the supervisor's actual post-release wait settles payload cleanup before publishing", () => {
+    const source = readFileSync(resolve(REPOSITORY_ROOT, SCRIPT), "utf8");
+    const start = source.indexOf(
+      `    if [[ "\${plant_supervisor_exit_on_term}" == 1 ]]; then\n      # Regression-only: make the post-release leader`,
+    );
+    const end = source.indexOf(`    control_fifo="\${status_file}.control"`, start);
+    if (start < 0 || end <= start) throw new Error("post-release supervisor block not found");
+    const fixture = mkdtempSync(join(tmpdir(), "asimposium-s2-wait-settlement-"));
+    const payload = join(fixture, "payload.sh");
+    writeFileSync(
+      payload,
+      `#!/usr/bin/env bash
+cleanup() {
+  trap "" TERM HUP INT
+  printf '%s\\n' entered >"$S2_TEST_CLEANUP_ENTERED"
+  for ((tick=0; tick<200; tick++)); do
+    [[ -f "$S2_TEST_CLEANUP_RELEASE" ]] && break
+    sleep 0.005
+  done
+  printf '%s\\n' done >"$S2_TEST_CLEANUP_DONE"
+  exit 143
+}
+trap cleanup TERM
+printf '%s\\n' ready >"$S2_TEST_PAYLOAD_READY"
+for ((tick=0; tick<500; tick++)); do sleep 0.005; done
+exit 0
+`,
+      { mode: 0o700, flag: "wx" },
+    );
+    // Unit scope: execute the unchanged post-release block. Startup and watchdog
+    // dismissal are separate subjects; the real binding gate exercises the join.
+    const program = `
+plant_supervisor_exit_on_term=0
+plant_post_release_checkpoint_delay=0
+checkpoint_io_status=74
+watchdog_pid=""
+status_file="$S2_TEST_STATUS"
+record_startup_phase() { printf '%s\\n' "$1" >&6; }
+exec 6>"$S2_TEST_JOURNAL"
+${source.slice(start, end)}
+for ((tick=0; tick<400; tick++)); do
+  [[ -f "$S2_TEST_SUPERVISOR_RELEASE" ]] && break
+  sleep 0.005
+done
+exit 0
+`;
+    const run = runCaptured(
+      "bash",
+      [
+        "-c",
+        `
+perl -MPOSIX=setsid -e 'setsid() or exit 125; exec @ARGV;' -- \\
+  bash -c "$S2_TEST_PROGRAM" "s2-pinned-supervisor-$S2_TEST_MARKER" "$S2_TEST_PAYLOAD" &
+child=$!
+finish() {
+  [[ -f "$S2_TEST_CLEANUP_RELEASE" ]] || : >"$S2_TEST_CLEANUP_RELEASE"
+  [[ -f "$S2_TEST_SUPERVISOR_RELEASE" ]] || : >"$S2_TEST_SUPERVISOR_RELEASE"
+  wait "$child" 2>/dev/null || :
+}
+trap finish EXIT
+for ((tick=0; tick<200; tick++)); do
+  [[ -f "$S2_TEST_PAYLOAD_READY" ]] && break
+  sleep 0.005
+done
+[[ -f "$S2_TEST_PAYLOAD_READY" ]] || exit 125
+group="$(/usr/bin/ps -o pgid= -p "$child")" || exit 125
+read -r group <<<"$group"
+[[ "$group" == "$child" ]] || exit 125
+kill -TERM -- "-$child" || exit 125
+for ((tick=0; tick<200; tick++)); do
+  [[ -f "$S2_TEST_CLEANUP_ENTERED" ]] && break
+  sleep 0.005
+done
+[[ -f "$S2_TEST_CLEANUP_ENTERED" ]] || exit 125
+[[ ! -e "$S2_TEST_CLEANUP_DONE" ]] || exit 125
+kill -TERM -- "-$child" || exit 125
+premature=0
+for ((tick=0; tick<20; tick++)); do
+  [[ -e "$S2_TEST_STATUS" ]] && premature=1
+  sleep 0.005
+done
+[[ ! -e "$S2_TEST_CLEANUP_DONE" ]] || exit 125
+printf '%s\\n' 'cleanup-held-before-release true'
+printf 'status-before-cleanup %s\\n' "$premature"
+finish
+`,
+      ],
+      {
+        S2_TEST_PROGRAM: program,
+        S2_TEST_MARKER: randomUUID(),
+        S2_TEST_PAYLOAD: payload,
+        S2_TEST_PAYLOAD_READY: join(fixture, "payload-ready"),
+        S2_TEST_CLEANUP_ENTERED: join(fixture, "cleanup-entered"),
+        S2_TEST_CLEANUP_RELEASE: join(fixture, "cleanup-release"),
+        S2_TEST_CLEANUP_DONE: join(fixture, "cleanup-done"),
+        S2_TEST_SUPERVISOR_RELEASE: join(fixture, "supervisor-release"),
+        S2_TEST_STATUS: join(fixture, "status"),
+        S2_TEST_JOURNAL: join(fixture, "journal"),
+      },
+      10_000,
+    );
+    expect(run.exitCode, run.retainedLogs).toBe(0);
+    expect(run.stdout).toContain("cleanup-held-before-release true");
+    expect(run.stdout, run.retainedLogs).toContain("status-before-cleanup 0");
+    expect(readFileSync(join(fixture, "cleanup-done"), "utf8")).toBe("done\n");
+    expect(readFileSync(join(fixture, "status"), "utf8")).toBe("143\n");
+  });
+
   test(
     "PLANTED: the owner-loss parent retains a raw child's actual refusal diagnosis",
     () => {
