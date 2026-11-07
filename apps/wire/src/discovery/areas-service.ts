@@ -8,14 +8,20 @@ import {
   AreaSummarySchema,
   type AreasIndexResponse,
   AreasIndexResponseSchema,
+  SCIENTIFIC_NEED_TYPES,
   type ScientificNeedType,
   SEED_AREA_SLUGS,
   SEED_AREAS,
 } from "@asimposium/contracts";
+import {
+  REVIEW_QUEUE_PAGE_SIZE,
+  type ReviewQueueResponse,
+} from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
 import { hiddenByContentControlSql } from "../krater/public-content";
 import { readPublishedProblemFormulations } from "../ledger/problem-formulation-read.ts";
 import { offScopeProblemSql } from "./public-scope.ts";
+import { loadReviewQueue } from "./review-queue-service.ts";
 
 const AREA_LIMIT = 64;
 const PROBLEM_LIMIT = 50;
@@ -28,8 +34,103 @@ const VISIBLE = `p.unlisted = 0 AND p.status NOT IN ('private-draft', 'dormant')
 const SEEDS_SQL = SEED_AREA_SLUGS.map((slug) => `'${slug}'`).join(", ");
 const OMITTED = [
   "private, unlisted, dormant and off-scope problems are excluded from area discovery",
-  "scientific needs and review eligibility are unavailable; assignments do not establish readiness",
+  "Other scientific needs and current Fellow review eligibility are unavailable; review recommendations do not grant permission.",
 ];
+const REVIEW_NEEDS_BOUNDARY = `Need chips sample at most ${REVIEW_QUEUE_PAGE_SIZE} candidates from the public review queue's first page. Empty chips do not establish no needs; read /reviews.json for more.`;
+
+interface ReviewMembership {
+  id: string;
+  cursor: number;
+  areas: string;
+}
+
+interface AreaReviewNeeds {
+  problems: Map<string, { cursor: number; needs: ScientificNeedType[] }>;
+  areas: Map<AreaSlug, ScientificNeedType[]>;
+  omitted: string[];
+}
+
+async function areaReviewQueue(db: D1Database): Promise<ReviewQueueResponse | undefined> {
+  try {
+    return await loadReviewQueue(db);
+  } catch {
+    // Review enrichment must not take the existing formulation/count reads down.
+    return undefined;
+  }
+}
+
+function reviewMemberships(db: D1Database, queue: ReviewQueueResponse | undefined) {
+  const pins = queue?.candidates.map(({ problem_id, cursor }) => ({ problem_id, cursor })) ?? [];
+  // Run in the same batch as counts and cards. A changed, hidden, unlisted,
+  // dormant or off-scope problem cannot attach an old review need to an area.
+  return db
+    .prepare(`SELECT DISTINCT p.id, p.public_seq AS cursor, p.areas
+      FROM problems p JOIN json_each(?) pin
+        ON p.id = json_extract(pin.value, '$.problem_id')
+        AND p.public_seq = json_extract(pin.value, '$.cursor')
+      WHERE ${VISIBLE}`)
+    .bind(JSON.stringify(pins));
+}
+
+function areaReviewNeeds(
+  queue: ReviewQueueResponse | undefined,
+  rows: readonly ReviewMembership[] | undefined,
+): AreaReviewNeeds {
+  const result: AreaReviewNeeds = {
+    problems: new Map(),
+    areas: new Map(),
+    omitted: [REVIEW_NEEDS_BOUNDARY],
+  };
+  if (!queue || !Array.isArray(rows)) {
+    result.omitted.push(
+      "Public review-need discovery is unavailable; area assignments and counts remain readable.",
+    );
+    return result;
+  }
+  const problemNeeds = new Map<string, Set<ScientificNeedType>>();
+  const areaNeeds = new Map<AreaSlug, Set<ScientificNeedType>>();
+  let changed = false;
+  for (const candidate of queue.candidates) {
+    const membership = rows.find(
+      (row) => row.id === candidate.problem_id && row.cursor === candidate.cursor,
+    );
+    if (!membership) {
+      changed = true;
+      continue;
+    }
+    const slugs: unknown = JSON.parse(membership.areas);
+    if (!Array.isArray(slugs) || slugs.some((slug) => !AreaSlugSchema.safeParse(slug).success))
+      throw new Error("AREA_REVIEW_MEMBERSHIP_INVALID");
+    const needs = problemNeeds.get(candidate.problem_id) ?? new Set<ScientificNeedType>();
+    needs.add("review-ready");
+    if (candidate.need === "cross-family-review") needs.add("cross-family-reviewer-wanted");
+    if (candidate.need === "falsification-attempt") needs.add("counterexample-wanted");
+    problemNeeds.set(candidate.problem_id, needs);
+    result.problems.set(candidate.problem_id, {
+      cursor: candidate.cursor,
+      needs: SCIENTIFIC_NEED_TYPES.filter((need) => needs.has(need)),
+    });
+    for (const slug of slugs as AreaSlug[]) {
+      const current = areaNeeds.get(slug) ?? new Set<ScientificNeedType>();
+      for (const need of needs) current.add(need);
+      areaNeeds.set(slug, current);
+    }
+  }
+  for (const [slug, needs] of areaNeeds)
+    result.areas.set(
+      slug,
+      SCIENTIFIC_NEED_TYPES.filter((need) => needs.has(need)),
+    );
+  if (changed)
+    result.omitted.push(
+      "Some sampled review needs changed or are no longer discoverable; their chips were omitted.",
+    );
+  if (queue.next_after || queue.omitted.length > 0)
+    result.omitted.push(
+      "The sampled review queue omits additional or unavailable work; follow /reviews.json for its continuation and details.",
+    );
+  return result;
+}
 
 interface VisibleCounts {
   total: number;
@@ -42,9 +143,10 @@ function visibleCounts(db: D1Database) {
     FROM problems p WHERE ${VISIBLE}`);
 }
 
-function omissions(counts: VisibleCounts): string[] {
+function omissions(counts: VisibleCounts, needs: AreaReviewNeeds): string[] {
   return [
     ...OMITTED,
+    ...needs.omitted,
     ...(counts.unassigned > 0
       ? [
           `${counts.unassigned} visible problems have no recorded area assignments; area counts cover recorded assignments only`,
@@ -94,9 +196,10 @@ export function getAreaInfo(
  * Fetch all areas with active problem counts and scientific need chips.
  */
 export async function loadAreasIndex(db: D1Database): Promise<AreasIndexResponse> {
+  const queue = await areaReviewQueue(db);
   // Seed rows sort first so a custom-area cap cannot erase a seed's real count.
   // Window totals retain the exact taxonomy size even when the list is bounded.
-  const [countResult, areaResult] = await db.batch([
+  const [countResult, areaResult, reviewResult] = await db.batch([
     visibleCounts(db),
     db.prepare(`SELECT a.value AS slug, COUNT(DISTINCT p.id) AS count,
       SUM(CASE WHEN a.value IN (${SEEDS_SQL}) THEN 0 ELSE 1 END) OVER () AS custom_total
@@ -105,7 +208,9 @@ export async function loadAreasIndex(db: D1Database): Promise<AreasIndexResponse
       GROUP BY a.value
       ORDER BY CASE WHEN a.value IN (${SEEDS_SQL}) THEN 0 ELSE 1 END, a.value
       LIMIT ${SEED_AREA_SLUGS.length + AREA_LIMIT}`),
+    reviewMemberships(db, queue),
   ]);
+  const needs = areaReviewNeeds(queue, reviewResult?.results as unknown as ReviewMembership[]);
   const counts = countResult?.results[0] as unknown as VisibleCounts | undefined;
   if (!counts) throw new Error("Problem count unavailable");
   const rows = areaResult?.results as unknown as {
@@ -115,10 +220,18 @@ export async function loadAreasIndex(db: D1Database): Promise<AreasIndexResponse
   }[];
   const recorded = rows.map((row) => ({ ...row, slug: AreaSlugSchema.parse(row.slug) }));
   const summaries = SEED_AREA_SLUGS.map((slug) =>
-    getAreaInfo(slug, recorded.find((row) => row.slug === slug)?.count ?? 0, []),
+    getAreaInfo(
+      slug,
+      recorded.find((row) => row.slug === slug)?.count ?? 0,
+      needs.areas.get(slug) ?? [],
+    ),
   );
   const custom = recorded.filter((row) => !SEED_AREA_SLUGS.some((seed) => seed === row.slug));
-  summaries.push(...custom.slice(0, AREA_LIMIT).map((row) => getAreaInfo(row.slug, row.count, [])));
+  summaries.push(
+    ...custom
+      .slice(0, AREA_LIMIT)
+      .map((row) => getAreaInfo(row.slug, row.count, needs.areas.get(row.slug) ?? [])),
+  );
   summaries.sort((a, b) => a.label.localeCompare(b.label));
   const customTotal = recorded[0]?.custom_total ?? 0;
 
@@ -127,7 +240,7 @@ export async function loadAreasIndex(db: D1Database): Promise<AreasIndexResponse
     total_areas: SEED_AREA_SLUGS.length + customTotal,
     total_problems: counts.total,
     omitted: [
-      ...omissions(counts),
+      ...omissions(counts, needs),
       ...(customTotal > AREA_LIMIT
         ? [
             `${customTotal - AREA_LIMIT} custom areas omitted after the first ${AREA_LIMIT} by slug; known area URLs remain readable`,
@@ -144,11 +257,12 @@ export async function loadAreaDetail(
   db: D1Database,
   slug: AreaSlug,
 ): Promise<AreaDetailResponse | null> {
+  const queue = await areaReviewQueue(db);
   const membership = `${VISIBLE} AND EXISTS (SELECT 1 FROM json_each(p.areas) a WHERE a.value = ?)`;
   const metadata = "length(trim(p.title)) > 0 AND v.problem_id IS NOT NULL";
   // Capture membership and current version/cursor together; then hydrate only
   // their verified public formulations, including the exact source notice.
-  const [visibleResult, countResult, problemResult] = await db.batch([
+  const [visibleResult, countResult, problemResult, reviewResult] = await db.batch([
     visibleCounts(db),
     db
       .prepare(`SELECT COUNT(*) AS total,
@@ -164,7 +278,9 @@ export async function loadAreaDetail(
       WHERE ${membership} AND ${metadata}
       ORDER BY p.id LIMIT ${PROBLEM_LIMIT}`)
       .bind(slug),
+    reviewMemberships(db, queue),
   ]);
+  const needs = areaReviewNeeds(queue, reviewResult?.results as unknown as ReviewMembership[]);
   const visible = visibleResult?.results[0] as unknown as VisibleCounts | undefined;
   const count = countResult?.results[0] as unknown as
     | { total: number; missing: number }
@@ -203,17 +319,20 @@ export async function loadAreaDetail(
       preamble: problem.statement.slice(0, 2048).replace(/[\uD800-\uDBFF]$/, ""),
       falsifier_present: problem.falsifier.trim().length > 0,
       ...(screening_notice === undefined ? {} : { screening_notice }),
-      needs: [],
+      needs:
+        needs.problems.get(row.id)?.cursor === row.public_seq
+          ? (needs.problems.get(row.id)?.needs ?? [])
+          : [],
     });
   }
   const unavailable = rows.length - problems.length;
   const remaining = count.total - count.missing - rows.length;
 
   return AreaDetailResponseSchema.parse({
-    area: getAreaInfo(slug, count.total, []),
+    area: getAreaInfo(slug, count.total, needs.areas.get(slug) ?? []),
     problems,
     omitted: [
-      ...omissions(visible),
+      ...omissions(visible, needs),
       ...(count.missing > 0
         ? [
             `${count.missing} assigned problems lack a published title or current statement and cannot be listed`,

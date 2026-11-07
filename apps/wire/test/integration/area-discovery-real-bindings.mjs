@@ -10,7 +10,16 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Actual proposal -> signed sponsor publication -> public discovery on Workerd/D1.
 // No Google/browser/staging completion is implied by this local lane.
-async function areaDiscoveryJourney({ call, enroll, sponsorCall, worker, origin, userAgent, env }) {
+async function areaDiscoveryJourney({
+  call,
+  enroll,
+  sponsorCall,
+  operatorCall,
+  worker,
+  origin,
+  userAgent,
+  env,
+}) {
   const sponsor = "usr_area_discovery";
   const token = await enroll("area-discovery-author", sponsor);
   const proposal = {
@@ -215,6 +224,128 @@ async function areaDiscoveryJourney({ call, enroll, sponsorCall, worker, origin,
     assert.ok(!body.includes(proposal.statement));
   }
 
+  // Real publication drives existing area chips; private work must neither
+  // enter the sample nor invalidate public face validators.
+  const needPaths = [
+    "/areas.json",
+    "/areas.md",
+    "/areas.html",
+    "/area/combinatorics.json",
+    "/area/combinatorics.md",
+    "/area/combinatorics.html",
+  ];
+  const needEtags = new Map();
+  for (const path of needPaths) needEtags.set(path, (await face(path)).headers.get("etag"));
+  const authorSession = await call(
+    "/v1/sessions",
+    { problem_id: problemId, intent: "prove" },
+    token,
+    201,
+  );
+  const sessionPath = `/v1/sessions/${authorSession.session_id}`;
+  const privateCanary = "AREA-NEEDS-PRIVATE-WORKSHOP-CANARY";
+  const needDraft = await call(
+    `${sessionPath}/workshop`,
+    {
+      type: "claim-draft",
+      title: "Finite path claim notes",
+      body_md: privateCanary,
+    },
+    token,
+    201,
+  );
+  for (const path of needPaths) {
+    assert.equal(
+      (await face(path, needEtags.get(path))).status,
+      304,
+      "Private workshop work cannot change public area faces",
+    );
+  }
+  const needClaim = await call(
+    `${sessionPath}/promote`,
+    {
+      workshop_id: needDraft.workshop_id,
+      kind: "conjecture",
+      statement: "Every finite simple path with at least two edges has at least three vertices.",
+      falsifier: "A finite simple path with two edges and fewer than three vertices.",
+    },
+    token,
+    201,
+  );
+  const needsIndex = AreasIndexResponseSchema.parse(await call("/areas.json"));
+  for (const slug of proposal.areas) {
+    assert.deepEqual(needsIndex.areas.find((area) => area.slug === slug).active_needs, [
+      "review-ready",
+    ]);
+  }
+  assert.deepEqual(needsIndex.areas.find((area) => area.slug === "algebra").active_needs, []);
+  const needsDetail = AreaDetailResponseSchema.parse(await call("/area/combinatorics.json"));
+  assert.deepEqual(needsDetail.area.active_needs, ["review-ready"]);
+  assert.deepEqual(needsDetail.problems.find((problem) => problem.id === problemId).needs, [
+    "review-ready",
+  ]);
+  assert.ok(needsDetail.omitted.some((note) => note.includes("Empty chips do not establish")));
+  for (const path of needPaths) {
+    const response = await face(path, needEtags.get(path));
+    assert.equal(response.status, 200, "Publishing a review candidate invalidates every area face");
+    const body = await response.text();
+    assert.ok(body.includes("review-ready") && !body.includes(privateCanary));
+    const etag = response.headers.get("etag");
+    assert.ok(etag && etag !== needEtags.get(path));
+    needEtags.set(path, etag);
+    assert.equal((await face(path, etag)).status, 304);
+  }
+  await call(
+    `${sessionPath}/workshop`,
+    {
+      type: "scratch",
+      title: "Unpublished area notes",
+      body_md: privateCanary,
+    },
+    token,
+    201,
+  );
+  for (const path of needPaths) assert.equal((await face(path, needEtags.get(path))).status, 304);
+
+  const controlClaim = (action) =>
+    operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+      target_id: `${problemId}/${needClaim.claim_id}`,
+      target_kind: "claim",
+      action,
+      reason: "Check area discovery visibility under an actual operator control.",
+    });
+  await controlClaim("hide");
+  const hiddenNeeds = AreasIndexResponseSchema.parse(await call("/areas.json"));
+  assert.ok(hiddenNeeds.areas.every((area) => area.active_needs.length === 0));
+  const hiddenDetail = AreaDetailResponseSchema.parse(await call("/area/combinatorics.json"));
+  assert.deepEqual(hiddenDetail.problems[0].needs, []);
+  for (const path of needPaths) {
+    const response = await face(path, needEtags.get(path));
+    assert.equal(response.status, 200, "Hiding the sole candidate invalidates area needs");
+    assert.ok(!(await response.text()).includes("review-ready"));
+  }
+  await controlClaim("restore");
+  assert.deepEqual((await call("/area/combinatorics.json")).problems[0].needs, ["review-ready"]);
+  await call(
+    `${sessionPath}/retract`,
+    {
+      target_object: needClaim.claim_id,
+      reason: "Withdraw this claim after checking discovery against a real publication.",
+    },
+    token,
+    201,
+  );
+  const withdrawnNeeds = AreasIndexResponseSchema.parse(await call("/areas.json"));
+  assert.ok(withdrawnNeeds.areas.every((area) => area.active_needs.length === 0));
+  assert.deepEqual((await call("/area/combinatorics.json")).problems[0].needs, []);
+  console.log(
+    JSON.stringify({
+      stage: "area-review-needs",
+      status: "pass",
+      checked: ["publication", "faces", "etag", "private-workshop", "hide", "restore", "retract"],
+    }),
+  );
+
   const unlisted = await call(
     "/v1/problems",
     {
@@ -244,7 +375,7 @@ async function areaDiscoveryJourney({ call, enroll, sponsorCall, worker, origin,
   const afterUnlisted = AreasIndexResponseSchema.parse(await call("/areas.json"));
   assert.deepEqual(
     afterUnlisted,
-    index,
+    withdrawnNeeds,
     "Unlisted publication must not change public taxonomy or counts",
   );
   await call("/area/other-unlisted-canary.json", undefined, undefined, 404);

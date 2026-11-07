@@ -23,6 +23,7 @@ import { loadAreaDetail, loadAreasIndex } from "../../src/discovery/areas-servic
 import { loadFellowCard } from "../../src/discovery/fellow-service.ts";
 import { loadHonorsRecord } from "../../src/discovery/honors-service.ts";
 import { loadNowStrip } from "../../src/discovery/now-service.ts";
+import { REVIEW_QUEUE_DISCOVERY_SQL } from "../../src/discovery/review-queue-sql.ts";
 import type { Env } from "../../src/env.ts";
 import { migratedSqlite } from "../support/migrated-sqlite";
 
@@ -977,6 +978,133 @@ describe("discovery projection regressions on migrated SQLite (not D1 integratio
       expect(body).toContain("INTERNAL_ERROR");
       expect(body).not.toContain('"events":[]');
       expect(body).not.toContain("SQLITE");
+    }
+  });
+});
+
+describe("area review needs on migrated SQLite (not D1 integration proof)", () => {
+  test("canonical review-ready work reaches its recorded areas and cards, excluding private discovery", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedScopeProblem(raw, "P-NEEDS");
+      seedScopeClaim(raw, "P-NEEDS", "C-1", 2);
+      raw.run(`UPDATE problems SET areas='["algebra","other-review-work"]' WHERE id='P-NEEDS'`);
+      for (const [id, state] of [
+        ["P-PRIVATE-NEED", "private-draft"],
+        ["P-UNLISTED-NEED", "active"],
+        ["P-DORMANT-NEED", "dormant"],
+      ]) {
+        if (!id || !state) throw new Error("Missing fixture identity");
+        seedScopeProblem(raw, id);
+        seedScopeClaim(raw, id, "C-1", 2);
+        raw.run("UPDATE problems SET status=?,unlisted=?,areas=? WHERE id=?", [
+          state,
+          id === "P-UNLISTED-NEED" ? 1 : 0,
+          '["other-private-need-canary"]',
+          id,
+        ]);
+      }
+      const index = await loadAreasIndex(db);
+      expect(index.total_problems).toBe(1);
+      expect(index.areas.find((area) => area.slug === "algebra")?.active_needs).toEqual([
+        "review-ready",
+      ]);
+      expect(index.areas.find((area) => area.slug === "other-review-work")?.active_needs).toEqual([
+        "review-ready",
+      ]);
+      expect(index.areas.find((area) => area.slug === "combinatorics")?.active_needs).toEqual([]);
+      expect(JSON.stringify(index)).not.toContain("canary");
+      const detail = await loadAreaDetail(db, "algebra");
+      expect(detail?.area.active_needs).toEqual(["review-ready"]);
+      expect(detail?.problems.map((problem) => [problem.id, problem.needs])).toEqual([
+        ["P-NEEDS", ["review-ready"]],
+      ]);
+      expect(detail?.omitted.join(" ")).toContain("Empty chips do not establish no needs");
+    } finally {
+      raw.close();
+    }
+  });
+
+  test.each(["unlisted", "cursor"])(
+    "a %s change after selection cannot attach the old need to current counts",
+    async (change) => {
+      const { db, raw } = createMigratedDb();
+      try {
+        seedScopeProblem(raw, "P-NEEDS");
+        seedScopeClaim(raw, "P-NEEDS", "C-1", 2);
+        let changed = false;
+        const changingDb = {
+          ...db,
+          prepare(sql: string) {
+            if (sql.includes("FROM problems p JOIN json_each(?) pin") && !changed) {
+              changed = true;
+              raw.run(
+                change === "unlisted"
+                  ? "UPDATE problems SET unlisted=1 WHERE id='P-NEEDS'"
+                  : "UPDATE problems SET public_seq=public_seq+1 WHERE id='P-NEEDS'",
+              );
+            }
+            return db.prepare(sql);
+          },
+        } as Env["DB"];
+        const index = await loadAreasIndex(changingDb);
+        expect(changed).toBe(true);
+        expect(index.total_problems).toBe(change === "unlisted" ? 0 : 1);
+        expect(index.areas.find((area) => area.slug === "algebra")?.active_needs).toEqual([]);
+        expect(index.omitted.join(" ")).toContain("Some sampled review needs changed");
+      } finally {
+        raw.close();
+      }
+    },
+  );
+
+  test("unavailable review selection preserves counts and readable formulations", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedScopeProblem(raw, "P-NEEDS");
+      seedScopeClaim(raw, "P-NEEDS", "C-1", 2);
+      const unavailableDb = {
+        ...db,
+        prepare(sql: string) {
+          if (sql === REVIEW_QUEUE_DISCOVERY_SQL) throw new Error("private selector failure");
+          return db.prepare(sql);
+        },
+      } as Env["DB"];
+      const index = await loadAreasIndex(unavailableDb);
+      const detail = await loadAreaDetail(unavailableDb, "algebra");
+      expect(index.total_problems).toBe(1);
+      expect(detail?.problems).toHaveLength(1);
+      expect(detail?.problems[0]?.preamble).toContain("Published formulation");
+      expect(detail?.problems[0]?.needs).toEqual([]);
+      expect(index.omitted.join(" ")).toContain("review-need discovery is unavailable");
+      expect(JSON.stringify({ index, detail })).not.toContain("private selector failure");
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("enrichment reads one bounded admission page instead of walking the review archive", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedScopeProblem(raw, "P-NEEDS");
+      for (let i = 1; i <= 11; i++) seedScopeClaim(raw, "P-NEEDS", `C-${i}`, i + 1);
+      let pages = 0;
+      const countedDb = {
+        ...db,
+        prepare(sql: string) {
+          if (sql === REVIEW_QUEUE_DISCOVERY_SQL) pages += 1;
+          return db.prepare(sql);
+        },
+      } as Env["DB"];
+      const index = await loadAreasIndex(countedDb);
+      expect(pages).toBe(1);
+      expect(index.areas.find((area) => area.slug === "algebra")?.active_needs).toEqual([
+        "review-ready",
+      ]);
+      expect(index.omitted.join(" ")).toContain("at most 8 candidates");
+      expect(index.omitted.join(" ")).toContain("omits additional or unavailable work");
+    } finally {
+      raw.close();
     }
   });
 });

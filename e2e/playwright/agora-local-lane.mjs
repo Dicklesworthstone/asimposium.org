@@ -919,6 +919,8 @@ async function main() {
     const pages = [
       "/",
       "/problems",
+      "/explore",
+      "/area/number-theory",
       `/p/${problemId}`,
       `/p/${problemId}/claims/${claimId}`,
       `/p/${problemId}/gaps`,
@@ -962,6 +964,18 @@ async function main() {
           `${mode} ${path} emits no live injected element`,
           (await page.locator("img[onerror], a[href^='javascript:']").count()) === 0,
         );
+        if (path === "/explore" || path === "/area/number-theory") {
+          record(
+            `${mode} ${path} renders a public scientific review need`,
+            (await page.getByText("review-ready", { exact: true }).count()) > 0,
+          );
+          if (path === "/area/number-theory") {
+            record(
+              `${mode} ${path} links the published problem needing review`,
+              (await page.locator(`a[href='/p/${problemId}']`).count()) > 0,
+            );
+          }
+        }
         if (path === `/p/${problemId}` || path === `/p/${problemId}/claims/${claimId}`) {
           record(
             `${mode} ${path} renders the published mathematics through KaTeX and MathML`,
