@@ -499,10 +499,11 @@ describe("full public ledger packs", () => {
       expect(result.records[0].publication.screening_notice).toEqual(receipt.public_action);
       expect(result.records[1].content).toBe(null);
       expect(result.records[1].content_omitted).toBe("item_size_limit");
-      expect(result.face.items.find((item) => item.id === "FULL-1")?.screening_notice).toEqual(
+      const publicItems = result.face.items.filter((item) => item.scope === "ledger");
+      expect(publicItems.find((item) => item.id === "FULL-1")?.screening_notice).toEqual(
         receipt.public_action,
       );
-      expect(result.face.items.find((item) => item.id === "FULL-2")?.screening_notice).toEqual(
+      expect(publicItems.find((item) => item.id === "FULL-2")?.screening_notice).toEqual(
         correctedReceipt.public_action,
       );
       expect(result.face.tokens_estimate).toBeLessThanOrEqual(8000);
@@ -515,7 +516,8 @@ describe("full public ledger packs", () => {
       }
       const historical = await f.read({ through: 1 });
       expect(historical.records).toHaveLength(1);
-      expect(historical.face.items.find((item) => item.id === "FULL-1")?.screening_notice).toEqual(
+      const historicalItems = historical.face.items.filter((item) => item.scope === "ledger");
+      expect(historicalItems.find((item) => item.id === "FULL-1")?.screening_notice).toEqual(
         receipt.public_action,
       );
       f.sql

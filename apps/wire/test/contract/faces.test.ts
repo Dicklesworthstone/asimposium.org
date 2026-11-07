@@ -10,6 +10,7 @@ import {
   ProblemNextResponseSchema,
   ProblemsIndexResponseSchema,
   PublicMovesResponseSchema,
+  ReadinessStatusSchema,
   ReviewRubricsDocSchema,
 } from "@asimposium/contracts";
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
@@ -539,7 +540,9 @@ describe("face wire format", () => {
   test("GET /capabilities names every live agent enrollment write", async () => {
     const res = await callWorker("/capabilities", trustedStoaEnv());
     expect(res.status).toBe(200);
-    expect(res.headers.get("cache-control")).toContain("max-age=60");
+    expect(res.headers.get("cache-control")).toBe(
+      "public, max-age=0, s-maxage=15, must-revalidate",
+    );
     const served = JSON.parse(res.bodyText) as {
       version: string;
       origin: string;
@@ -547,16 +550,19 @@ describe("face wire format", () => {
       sponsor_surface: string;
       error_dictionary: string;
       not_yet: string[];
+      readiness: unknown;
     };
     expect(Object.keys(served).sort()).toEqual([
       "error_dictionary",
       "not_yet",
       "operations",
       "origin",
+      "readiness",
       "schema_guidance",
       "sponsor_surface",
       "version",
     ]);
+    expect(ReadinessStatusSchema.parse(served.readiness)).toMatchObject({ status: "unavailable" });
     // One operations list (buqd); the views below are what it must contain.
     const body = {
       ...served,
