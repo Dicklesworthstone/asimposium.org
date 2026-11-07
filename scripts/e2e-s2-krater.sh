@@ -409,6 +409,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/scientific-provenance.ts
   packages/contracts/src/sessions.ts
   packages/contracts/src/health.ts
+  packages/contracts/src/readiness.ts
   packages/contracts/src/search.ts
   packages/contracts/src/search-pagination.ts
   packages/contracts/src/moderation.ts
@@ -458,6 +459,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/diagnostics.ts
   packages/contracts/test/unit/schema.test.ts
   packages/contracts/generated/s2-cost-receipt.schema.json
+  packages/contracts/generated/readiness.schema.json
   packages/contracts/generated/s2-cost-receipt.types.ts
   # The S-2 harness worker now imports createApp so the mounted promotion route
   # runs the real Stoa app against this run's D1 + DO. That pulls the entire
@@ -467,6 +469,7 @@ readonly -a S2_SOURCE_PATHS=(
   # and generated schema the imports read is listed here so the mechanical
   # `s2_verify_source_closure` walk stays exact.
   apps/wire/src/app.ts
+  apps/wire/src/readiness.ts
   apps/wire/src/env.ts
   apps/wire/src/ledger-face.ts
   apps/wire/src/krater/citation.ts

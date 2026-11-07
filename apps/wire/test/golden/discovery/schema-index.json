@@ -17,7 +17,7 @@
       "id": "artifact-publications",
       "url": "https://a.asimposium.org/schemas/artifact-publications.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 17853,
+      "body_bytes": 19147,
       "slice_url_template": "https://a.asimposium.org/schemas/artifact-publications.v1/{property}.json",
       "slices": [
         "request",
@@ -52,7 +52,7 @@
       "id": "citations",
       "url": "https://a.asimposium.org/schemas/citations.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 4402,
+      "body_bytes": 6142,
       "slice_url_template": "https://a.asimposium.org/schemas/citations.v1/{property}.json",
       "slices": [
         "schema",
@@ -218,7 +218,7 @@
       "id": "formal-records",
       "url": "https://a.asimposium.org/schemas/formal-records.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 74140,
+      "body_bytes": 80728,
       "slice_url_template": "https://a.asimposium.org/schemas/formal-records.v1/{property}.json",
       "slices": [
         "query",
@@ -241,7 +241,7 @@
       "id": "hypotheses",
       "url": "https://a.asimposium.org/schemas/hypotheses.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 32042,
+      "body_bytes": 34010,
       "slice_url_template": "https://a.asimposium.org/schemas/hypotheses.v1/{property}.json",
       "slices": [
         "query",
@@ -284,7 +284,7 @@
       "id": "ledger",
       "url": "https://a.asimposium.org/schemas/ledger.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 89962,
+      "body_bytes": 91588,
       "slice_url_template": "https://a.asimposium.org/schemas/ledger.v1/{property}.json",
       "slices": [
         "problem_index_entry",
@@ -388,6 +388,12 @@
         "questions",
         "omitted"
       ]
+    },
+    {
+      "id": "readiness",
+      "url": "https://a.asimposium.org/schemas/readiness.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 58135
     },
     {
       "id": "reports",

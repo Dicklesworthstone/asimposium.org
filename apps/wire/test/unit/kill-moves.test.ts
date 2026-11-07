@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { NextMoveCandidateSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { HYPOTHESIS_EVIDENCE_ITEM_SQL } from "../../src/ledger/hypothesis-evidence-read.ts";
@@ -34,6 +35,15 @@ function fixture() {
       retraction_id TEXT,target_kind TEXT,target_object TEXT,source_event_id TEXT,source_sha256 TEXT);
     INSERT INTO problems VALUES ('P-KILL',0,'active',0),('P-OTHER',0,'active',0);
   `);
+  sql.exec(
+    readFileSync(
+      new URL(
+        "../../../../db/migrations/0043_screening_publication_provenance.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
   const payloads = new Map<string, Record<string, unknown>>();
   const event = (
     seq: number,

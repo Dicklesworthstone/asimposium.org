@@ -801,7 +801,11 @@ async function main() {
   // Blocked, not failed, when there is no browser to drive; probed with a real
   // launch first so a missing binary costs seconds, not a Next build.
   try {
-    await (await chromium.launch(browserOptions)).close();
+    console.log(JSON.stringify({ kind: "agora-local-lane-stage", stage: "browser-preflight-launch" }));
+    const preflightBrowser = await chromium.launch(browserOptions);
+    console.log(JSON.stringify({ kind: "agora-local-lane-stage", stage: "browser-preflight-launched" }));
+    await preflightBrowser.close();
+    console.log(JSON.stringify({ kind: "agora-local-lane-stage", stage: "browser-preflight-closed" }));
   } catch (error) {
     if (!/Executable doesn't exist|browserType\.launch/i.test(String(error?.message ?? error))) {
       throw error;

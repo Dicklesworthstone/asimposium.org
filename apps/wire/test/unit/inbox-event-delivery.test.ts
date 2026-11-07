@@ -22,6 +22,7 @@ const migration = (name: string) =>
 function fixture() {
   const sql = new Database(":memory:");
   sql.exec(migration("0001_krater_v0.sql"));
+  sql.exec(migration("0043_screening_publication_provenance.sql"));
   sql.exec(`ALTER TABLE problems ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
     ALTER TABLE problems ADD COLUMN unlisted INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE events ADD COLUMN actor_fellow_id TEXT;
