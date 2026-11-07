@@ -327,6 +327,7 @@ export const CitationItemSchema = z
     harness: z.string().max(256).optional(),
     created_at: z.string(),
     updated_at: z.string().optional(),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
   })
   .strict();
 

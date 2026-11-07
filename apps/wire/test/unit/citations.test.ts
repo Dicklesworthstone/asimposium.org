@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   type CitationItem,
   CitationsListResponseSchema,
@@ -164,6 +165,12 @@ async function withPublicCitation(
 
 const app = createLedgerFaceRoutes();
 const publicUrl = "https://a.asimposium.org/p/P-CITATIONS";
+const citationWarning = {
+  category: "dual-use-boundary",
+  action: "published-with-warning",
+  notice: "screening-warning",
+} as const;
+const citationWarningText = "Published with a screening context notice: dual-use-boundary.";
 
 describe("W5.8c / citations & source-provenance unit tests", () => {
   const validDoiRequest: RecordCitationRequest = {
@@ -368,6 +375,40 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
       expect(csl.issued).toEqual({ "date-parts": [[1977]] });
       expect(csl.ISBN).toBe("9780387953854");
     });
+    test("warning exports retain one standard note alongside retrieval or model-memory provenance", () => {
+      for (const item of [
+        sampleCitation({ screening_notice: citationWarning }),
+        sampleCitation({
+          screening_notice: citationWarning,
+          locator_kind: "model_memory",
+          locator: null,
+          canonical_locator: null,
+          retrieved_at: null,
+          source_provenance: "model_memory",
+          unanchored: true,
+        }),
+      ]) {
+        const bib = bibtexForCitation(item);
+        expect(bib).toContain(citationWarningText);
+        expect(bib.match(/^ {2}note = /gm)).toHaveLength(1);
+        expect(bib).toContain(
+          item.retrieved_at ? `Retrieved: ${item.retrieved_at}` : "Source: model memory",
+        );
+        const csl = cslForCitation(item);
+        expect(csl.note).toContain(citationWarningText);
+        expect(csl).not.toHaveProperty("screening_notice");
+        if (item.retrieved_at) expect(csl.accessed).toEqual({ raw: item.retrieved_at });
+        else expect(csl.note).toContain("Source: model memory");
+      }
+      const forged = bibtexForCitation(
+        sampleCitation({
+          screening_notice: citationWarning,
+          retrieved_at: "2026-09-01},\n  note = {FORGED-NOTE",
+        }),
+      );
+      expect(forged).toContain(citationWarningText);
+      expect(forged).not.toContain("2026-09-01},");
+    });
   });
 
   describe("renderCitationsMarkdown & renderCitationsHtml", () => {
@@ -422,6 +463,35 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
       expect(html).toContain("/p/P-MATH/citations/L-1@2.csl.json");
       expect(html).toContain("/p/P-MATH/claims/C-1@1.html");
       expect(html).not.toContain("/citations/L-1.bib");
+    });
+    test("citation reading faces retain current and historical warnings on the corresponding version", () => {
+      const warned = { ...item, screening_notice: citationWarning };
+      for (const body of [
+        renderCitationsMarkdown("P-MATH", [warned]),
+        renderCitationsHtml("P-MATH", [warned]),
+      ]) {
+        expect(body).toContain(citationWarningText);
+        expect(body.indexOf(citationWarningText)).toBeLessThan(
+          body.indexOf("Foundational prime gap bounds."),
+        );
+      }
+      const original = detail.versions[0];
+      if (original === undefined) throw new Error("missing historical citation fixture");
+      const history = {
+        ...detail,
+        versions: [{ ...original, screening_notice: citationWarning }, item],
+      };
+      for (const render of [renderSingleCitationHtml, renderSingleCitationMarkdown]) {
+        const body = render("P-MATH", history);
+        expect(body).toContain(citationWarningText);
+        expect(body.indexOf(citationWarningText)).toBeLessThan(body.indexOf("Initial Title"));
+        expect(body.split(citationWarningText)).toHaveLength(2);
+        const current = render("P-MATH", { ...detail, citation: warned, versions: [warned] });
+        expect(current).toContain(citationWarningText);
+        expect(current.indexOf(citationWarningText)).toBeLessThan(
+          current.indexOf("Foundational prime gap bounds."),
+        );
+      }
     });
     test("associated claim notices precede the full statement in Markdown and HTML", () => {
       const claim = detail.associated_claims[0];
@@ -553,6 +623,79 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
   });
 
   describe("Public Ledger Face Routes for Citations", () => {
+    test("citation warnings survive all public faces and bibliography exports, invalidate caches, and stay withheld with hidden content", async () => {
+      const receipt = JSON.parse(
+        readFileSync(
+          new URL(
+            "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      );
+      await withPublicCitation(async (fixture, env) => {
+        const targets = [
+          "citations.json",
+          "citations.md",
+          "citations.html",
+          "literature.json",
+          ...["json", "md", "html", "bib", "csl.json"].map((suffix) => `citations/L-1@1.${suffix}`),
+        ];
+        const originalEtags = new Map<string, string>();
+        for (const target of targets) {
+          const response = await app.request(`${publicUrl}/${target}`, {}, env);
+          expect(response.status).toBe(200);
+          const etag = response.headers.get("etag");
+          if (etag === null) throw new Error("missing citation ETag");
+          originalEtags.set(target, etag);
+        }
+        fixture.sqlite
+          .query("INSERT INTO screening_publications VALUES('P-CITATIONS-2',?)")
+          .run(JSON.stringify(receipt));
+        for (const target of targets) {
+          const response = await app.request(
+            `${publicUrl}/${target}`,
+            { headers: { "if-none-match": originalEtags.get(target) ?? "" } },
+            env,
+          );
+          expect(response.status).toBe(200);
+          expect(response.headers.get("etag")).not.toBe(originalEtags.get(target));
+          const body = await response.text();
+          expect(body).not.toContain(receipt.input_digest);
+          expect(body).not.toContain(receipt.model_version);
+          if (target.endsWith(".csl.json")) {
+            expect(JSON.parse(body).note).toContain(citationWarningText);
+          } else if (target.endsWith(".json")) {
+            if (target.includes("L-1")) {
+              const face = SingleCitationResponseSchema.parse(JSON.parse(body));
+              expect(face.citation.screening_notice).toEqual(receipt.public_action);
+              expect(face.versions[0]?.screening_notice).toEqual(receipt.public_action);
+            } else {
+              expect(
+                CitationsListResponseSchema.parse(JSON.parse(body)).citations[0]?.screening_notice,
+              ).toEqual(receipt.public_action);
+            }
+          } else expect(body).toContain(citationWarningText);
+        }
+        fixture.sqlite
+          .query("UPDATE screening_publications SET provenance_json=?")
+          .run(JSON.stringify({ ...receipt, private_detail: "PRIVATE-DETECTOR-CANARY" }));
+        const corrupt = await app.request(`${publicUrl}/citations/L-1@1.bib`, {}, env);
+        expect(corrupt.status).toBeGreaterThanOrEqual(500);
+        expect(await corrupt.text()).not.toContain("PRIVATE-DETECTOR-CANARY");
+        fixture.sqlite
+          .query("INSERT INTO content_controls VALUES('P-CITATIONS','L-1@1','hidden',1)")
+          .run();
+        for (const suffix of ["json", "md", "html", "bib", "csl.json"]) {
+          const hidden = await app.request(`${publicUrl}/citations/L-1@1.${suffix}`, {}, env);
+          expect(hidden.status).toBe(404);
+          expect(await hidden.text()).not.toContain(citationWarningText);
+        }
+        const list = await app.request(`${publicUrl}/citations.json`, {}, env);
+        expect(list.status).toBe(200);
+        expect(CitationsListResponseSchema.parse(await list.json()).citations).toEqual([]);
+      });
+    });
     test("serves GET /p/:id/citations.json", async () => {
       await withPublicCitation(async (_fixture, env) => {
         const response = await app.request(`${publicUrl}/citations.json`, {}, env);
@@ -651,6 +794,48 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
         expect(section.candidates[0]?.untrusted).toBe(true);
         expect(section.candidates[0]?.body).toContain("/citations/L-1@1.md?through=10");
         expect(section.omitted).toHaveLength(0);
+      });
+    });
+    test("literature packs preserve warnings on the exact citation version outside untrusted text", async () => {
+      await withPublicCitation(async (fixture) => {
+        const receipt = await Bun.file(
+          new URL(
+            "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+            import.meta.url,
+          ),
+        ).json();
+        fixture.sqlite
+          .query("INSERT INTO screening_publications VALUES (?, ?)")
+          .run("P-CITATIONS-2", JSON.stringify(receipt));
+        const warned = await readLedgerPackSection(fixture.db, "P-CITATIONS", 10, "literature");
+        expect(warned.candidates[0]?.screening_notice).toEqual(receipt.public_action);
+        expect(JSON.parse(warned.candidates[0]?.body ?? "{}").screening_notice).toBeUndefined();
+        expect(JSON.stringify(warned)).not.toContain("configuration_digest");
+        expect(JSON.stringify(warned)).not.toContain("input_digest");
+        await fixture.seed(
+          sampleCitation({
+            problem_id: "P-CITATIONS",
+            version: 2,
+            seq: 11,
+            title: "Corrected metadata without a publication warning",
+          }),
+        );
+        const older = await readLedgerPackSection(fixture.db, "P-CITATIONS", 10, "literature");
+        const current = await readLedgerPackSection(fixture.db, "P-CITATIONS", 11, "literature");
+        expect(older.candidates[0]?.id).toBe("L-1@1");
+        expect(older.candidates[0]?.screening_notice).toEqual(receipt.public_action);
+        expect(current.candidates[0]?.id).toBe("L-1@2");
+        expect(current.candidates[0]?.screening_notice).toBeUndefined();
+        fixture.sqlite
+          .query("UPDATE screening_publications SET provenance_json = ? WHERE event_id = ?")
+          .run(JSON.stringify({ private_detail: "PRIVATE_SCREENING_CANARY" }), "P-CITATIONS-2");
+        await expect(
+          readLedgerPackSection(fixture.db, "P-CITATIONS", 10, "literature"),
+        ).rejects.toThrow("PUBLIC_SCREENING_RECEIPT_UNAVAILABLE");
+        expect(
+          (await readLedgerPackSection(fixture.db, "P-CITATIONS", 11, "literature")).candidates[0]
+            ?.screening_notice,
+        ).toBeUndefined();
       });
     });
     test("metadata corrections preserve older pack and face snapshots", async () => {
@@ -773,7 +958,7 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
     });
     test("literature packs omit oversized records whole and explain the omission", async () => {
       await withPublicCitation(async (fixture) => {
-        await fixture.seed(
+        const eventId = await fixture.seed(
           sampleCitation({
             problem_id: "P-CITATIONS",
             version: 2,
@@ -781,9 +966,23 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
             authors: Array.from({ length: 64 }, () => '"'.repeat(200)),
           }),
         );
+        const receipt = await Bun.file(
+          new URL(
+            "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+            import.meta.url,
+          ),
+        ).json();
+        fixture.sqlite
+          .query("INSERT INTO screening_publications VALUES (?, ?)")
+          .run(eventId, JSON.stringify(receipt));
         const pack = await readLedgerPackSection(fixture.db, "P-CITATIONS", 11, "literature");
         expect(pack.candidates).toHaveLength(0);
         expect(pack.omitted.some((item) => item.reason === "item_too_large")).toBe(true);
+        expect(pack.omitted).toContainEqual({
+          reason: "item_too_large",
+          detail: "literature:L-1@2",
+        });
+        expect(JSON.stringify(pack)).not.toContain("configuration_digest");
       });
     });
   });

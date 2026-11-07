@@ -215,6 +215,41 @@ describe("published screening warnings", () => {
       expect(f.state().events).toEqual([]);
     }));
 
+  test("citation warnings publish only through record and correction writers with exact binding", () =>
+    withFixture(async (f) => {
+      for (const route of ["citations", "citations/correct"]) {
+        for (const notice of [
+          {
+            category: "dual-use-boundary",
+            action: "published-with-warning",
+            notice: "screening-warning",
+          },
+          { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
+        ] as const) {
+          const receipt = published(
+            await screen(f, candidate(f, "citation"), { coarse_category: notice.category }, route),
+          );
+          expect(receipt.provenance.public_action).toEqual(notice);
+        }
+      }
+      expect(count(f, "screening_cases")).toBe(0);
+      expect(count(f, "screening_refusals")).toBe(0);
+      for (const route of ["promote", "review", "evidence", "statement-review"]) {
+        const held = await screen(f, candidate(f, "citation"), {}, route);
+        expect(held instanceof Response && held.status).toBe(202);
+      }
+      for (const patch of [
+        { evaluated_body_digest: `sha256:${"f".repeat(64)}` },
+        { evaluated_context_digest: `sha256:${"f".repeat(64)}` },
+        { provider_status: "timeout" },
+        { coarse_category: "provider-unavailable" },
+      ] as const) {
+        const held = await screen(f, candidate(f, "citation"), patch, "citations/correct");
+        expect(held instanceof Response && held.status).toBe(202);
+      }
+      expect(f.state().events).toEqual([]);
+    }));
+
   test("evidence warnings publish only through the evidence writer with exact candidate and context binding", () =>
     withFixture(async (f) => {
       for (const notice of [

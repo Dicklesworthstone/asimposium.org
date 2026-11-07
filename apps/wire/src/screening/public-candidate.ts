@@ -107,6 +107,10 @@ function supportsPublishedWarning(
     // atomic batches. Its canonical claim/hypothesis, citation and formal-work
     // readers preserve the notice bound to this exact publication.
     (kind === "evidence" && holdContext?.route === "evidence") ||
+    // Citation records and corrections share exact-version reading faces,
+    // bibliography exports and literature packs that retain their own notice.
+    (kind === "citation" &&
+      (holdContext?.route === "citations" || holdContext?.route === "citations/correct")) ||
     // Claim and statement reviews share a classifier kind. Only the server's
     // claim-review writer has complete public notice propagation.
     (kind === "review" && holdContext?.route === "review")

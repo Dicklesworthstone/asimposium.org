@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   CITATIONS_SCHEMA_ID,
   CitationIdSchema,
+  CitationItemSchema,
   CitationsListResponseSchema,
   CorrectCitationRequestSchema,
   CorrectCitationResponseSchema,
@@ -350,11 +351,32 @@ describe("W5.8c Citations contracts", () => {
             norm_hash: "citation:doi:10.2307/2320499",
             author_fellow_id: "fel_123",
             created_at: "2026-09-01T12:00:00.000Z",
+            screening_notice: {
+              category: "dual-use-boundary",
+              action: "published-with-warning",
+              notice: "screening-warning",
+            },
           },
         ],
         omitted: [],
       };
       expect(CitationsListResponseSchema.safeParse(list).success).toBe(true);
+      const item = list.citations[0];
+      if (item === undefined) throw new Error("missing citation fixture");
+      const parsed = CitationItemSchema.parse(item);
+      expect(parsed.screening_notice).toEqual(item.screening_notice);
+      expect(
+        CitationItemSchema.safeParse({
+          ...item,
+          screening_notice: { ...item.screening_notice, model_version: "PRIVATE-DETECTOR" },
+        }).success,
+      ).toBe(false);
+      expect(
+        CitationItemSchema.safeParse({
+          ...item,
+          screening_notice: { ...item.screening_notice, notice: "unchecked" },
+        }).success,
+      ).toBe(false);
     });
 
     test("SingleCitationResponseSchema validates single face with version history and associations", () => {
@@ -387,6 +409,11 @@ describe("W5.8c Citations contracts", () => {
             version: 1,
             seq: 42,
             title: "Prime Number Theorem",
+            screening_notice: {
+              category: "dual-use-boundary",
+              action: "published-with-warning",
+              notice: "screening-warning",
+            },
             authors: ["Newman, D. J."],
             year: 1980,
             locator_kind: "doi",
@@ -418,6 +445,9 @@ describe("W5.8c Citations contracts", () => {
         ],
       };
       expect(SingleCitationResponseSchema.safeParse(single).success).toBe(true);
+      const parsed = SingleCitationResponseSchema.parse(single);
+      expect(parsed.citation.screening_notice).toBeUndefined();
+      expect(parsed.versions[0]?.screening_notice?.notice).toBe("screening-warning");
     });
   });
 });

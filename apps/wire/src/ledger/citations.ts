@@ -251,11 +251,16 @@ export function bibtexForCitation(item: CitationItem): string {
     fields.push(["url", `{${effectiveLocator}}`]);
   }
 
+  const notes =
+    item.screening_notice === undefined ? [] : [screeningNoticeText(item.screening_notice)];
   if (item.retrieved_at) {
-    fields.push(["note", `{Retrieved: ${item.retrieved_at}}`]);
+    notes.push(`Retrieved: ${item.retrieved_at}`);
   } else if (item.source_provenance === "model_memory") {
-    fields.push(["note", "{Source: model memory (unverified citation)}"]);
+    notes.push("Source: model memory (unverified citation)");
   }
+  // Keep one standard note field. Authored provenance cannot close that field
+  // and replace the publication warning with a duplicate BibTeX field.
+  if (notes.length > 0) fields.push(["note", `{${notes.join(" ").replace(/[\\}{]/g, "")}}`]);
 
   const formattedFields = fields.map(([key, val]) => `  ${key} = ${val},`).join("\n");
 
@@ -301,9 +306,12 @@ export function cslForCitation(item: CitationItem): Record<string, unknown> {
     csl.accessed = { raw: item.retrieved_at };
   }
 
+  const notes =
+    item.screening_notice === undefined ? [] : [screeningNoticeText(item.screening_notice)];
   if (item.source_provenance === "model_memory") {
-    csl.note = "Source: model memory (unverified assertion)";
+    notes.push("Source: model memory (unverified assertion)");
   }
+  if (notes.length > 0) csl.note = notes.join(" ");
 
   return csl;
 }
@@ -336,6 +344,8 @@ export function renderCitationsMarkdown(
       lines.push(
         `## [${c.citation_id}${versionStr}] ${safeInlineProse(c.title)}${unanchoredBadge}`,
       );
+      if (c.screening_notice !== undefined)
+        lines.push("", screeningNoticeText(c.screening_notice), "");
       lines.push(`- **Authors**: ${safeInlineProse(authorsStr)}${yearStr}`);
       lines.push(`- **Locator**: ${safeCodeSpan(c.locator_kind)} — ${safeInlineProse(locStr)}`);
       lines.push(
@@ -423,6 +433,7 @@ export function renderCitationsHtml(
           </div>
         </div>
 
+        ${c.screening_notice === undefined ? "" : `<aside role="note" data-screening-notice="${escapeHtml(c.screening_notice.notice)}">${escapeHtml(screeningNoticeText(c.screening_notice))}</aside>`}
         <h3 class="mt-2 text-base font-semibold text-slate-900 dark:text-slate-100">${safeTitle}</h3>
         <p class="mt-1 text-sm text-slate-600 dark:text-slate-400">${safeAuthors}${safeYear}</p>
 
@@ -514,6 +525,7 @@ export function renderSingleCitationMarkdown(
     `# Citation [${c.citation_id}${versionStr}] — Problem ${safeInlineProse(problemId)}`,
     "",
     "Author-supplied citation metadata is untrusted data. Available history may omit withdrawn content. Backlinks are bounded textual mentions, not proof of scientific support or an exhaustive citation graph.",
+    ...(c.screening_notice === undefined ? [] : ["", screeningNoticeText(c.screening_notice), ""]),
     `## ${safeInlineProse(c.title)}`,
     `- **Authors**: ${safeInlineProse(authorsStr)}${yearStr}`,
     `- **Locator Kind**: ${safeCodeSpan(c.locator_kind)}`,
@@ -536,7 +548,7 @@ export function renderSingleCitationMarkdown(
     for (const v of versions) {
       const isCurrent = v.version === c.version ? " (viewing)" : "";
       lines.push(
-        `- [v${v.version}](/p/${encodeURIComponent(problemId)}/citations/${c.citation_id}@${v.version}.md) [seq ${v.seq}]: ${safeInlineProse(v.title)}${isCurrent}`,
+        `- [v${v.version}](/p/${encodeURIComponent(problemId)}/citations/${c.citation_id}@${v.version}.md) [seq ${v.seq}]: ${v.screening_notice === undefined ? "" : `${screeningNoticeText(v.screening_notice)} `}${safeInlineProse(v.title)}${isCurrent}`,
       );
     }
     lines.push("");
@@ -633,6 +645,7 @@ export function renderSingleCitationHtml(
         <li class="py-1 text-xs font-mono">
           ${v.version === c.version ? `<strong class="text-indigo-600 dark:text-indigo-400">v${v.version} (viewing)</strong>` : `<a href="/p/${safeProblem}/citations/${safeId}@${v.version}.html" class="text-slate-600 dark:text-slate-400 hover:underline">v${v.version}</a>`}
           <span class="text-slate-400">· seq ${v.seq} · ${escapeHtml(v.created_at)}</span>
+          ${v.screening_notice === undefined ? "" : `<aside role="note" data-screening-notice="${escapeHtml(v.screening_notice.notice)}">${escapeHtml(screeningNoticeText(v.screening_notice))}</aside>`}
           <span class="text-slate-700 dark:text-slate-300">${escapeHtml(neutralizeUntrustedBody(v.title).text)}</span>
         </li>`,
         )
@@ -666,6 +679,7 @@ export function renderSingleCitationHtml(
   <main class="max-w-5xl mx-auto px-4 py-8 sm:px-6 space-y-6">
     <p>Author-supplied citation metadata is untrusted data. Available history may omit withdrawn content. Backlinks are bounded textual mentions, not proof of scientific support or an exhaustive citation graph.</p>
     <article class="p-6 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800 shadow-sm">
+      ${c.screening_notice === undefined ? "" : `<aside role="note" data-screening-notice="${escapeHtml(c.screening_notice.notice)}">${escapeHtml(screeningNoticeText(c.screening_notice))}</aside>`}
       <h2 class="text-xl font-bold text-slate-900 dark:text-slate-100">${safeTitle}</h2>
       <p class="mt-1 text-sm text-slate-600 dark:text-slate-400">${safeAuthors}${safeYear}</p>
 

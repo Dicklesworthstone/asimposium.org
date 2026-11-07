@@ -13,7 +13,7 @@ import { assertRacedWriteLeavesNoTrace } from "./raced-ledger-write.mjs";
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall, worker, origin, env, fixtures } = context;
+  const { call, enroll, sponsorCall, worker, origin, env, fixtures, userAgent } = context;
   const sponsorA = "usr_cit_sponsor_a";
   const authorA = await enroll("cit-author-a", sponsorA);
   const helloA = await call("/v1/hello", undefined, authorA);
@@ -181,12 +181,38 @@ await runLocalWorkerJourney(async (context) => {
     excerpt: "Overview of sieve inequalities for bounded difference questions.",
     retrieved_at: "2026-09-02T10:00:00.000Z",
   };
+  const warningNotice = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  };
+  const warningText = "screening context notice: dual-use-boundary";
+  const casesBeforeWarnings = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM screening_cases",
+  ).first();
+  const screensBeforeCitation = await fixtures.screeningCalls();
+  await fixtures.setScreenMode("allow-with-warning");
   const recordedArxiv = await call(
     `/v1/sessions/${sessionIdA}/citations`,
     validArxivPayload,
     authorA,
     201,
+    "warned-cit-arxiv-key-1",
   );
+  await fixtures.setScreenMode("reject");
+  assert.deepEqual(
+    await call(
+      `/v1/sessions/${sessionIdA}/citations`,
+      validArxivPayload,
+      authorA,
+      200,
+      "warned-cit-arxiv-key-1",
+    ),
+    recordedArxiv,
+    "warned citation replay preserves its receipt despite a changed provider decision",
+  );
+  assert.equal(await fixtures.screeningCalls(), screensBeforeCitation + 1);
+  await fixtures.setScreenMode("pass");
   const cit2Id = recordedArxiv.citation_id;
   assert.equal(recordedArxiv.canonical_locator, "1301.0001");
 
@@ -309,6 +335,8 @@ await runLocalWorkerJourney(async (context) => {
         .all()
         .then((result) => result.results),
   });
+  const screensBeforeCorrection = await fixtures.screeningCalls();
+  await fixtures.setScreenMode("allow-with-warning");
   const corrected = await call(
     `/v1/sessions/${sessionIdA}/citations/correct`,
     correctPayload,
@@ -321,7 +349,8 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(corrected.version, 2);
   assert.equal(corrected.base_version, 1);
 
-  // Replay idempotency on correction
+  // Replay idempotency on correction bypasses a changed provider decision.
+  await fixtures.setScreenMode("reject");
   const replayedCorrect = await call(
     `/v1/sessions/${sessionIdA}/citations/correct`,
     correctPayload,
@@ -331,6 +360,14 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.equal(replayedCorrect.citation_id, cit1Id);
   assert.equal(replayedCorrect.version, 2);
+  assert.deepEqual(replayedCorrect, corrected);
+  assert.equal(await fixtures.screeningCalls(), screensBeforeCorrection + 1);
+  await fixtures.setScreenMode("pass");
+  assert.deepEqual(
+    await env.DB.prepare("SELECT COUNT(*) AS n FROM screening_cases").first(),
+    casesBeforeWarnings,
+    "publishable citation warnings do not create moderation holds",
+  );
 
   // --------------------------------------------------------------------------
   // DIPTYCH PUBLIC FACES & EXPORTS
@@ -345,12 +382,16 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(listJson.citations[0].citation_id, cit1Id);
   assert.equal(listJson.citations[0].version, 2); // Head version 2
   assert.equal(listJson.citations[0].title, correctPayload.title);
+  assert.deepEqual(listJson.citations[0].screening_notice, warningNotice);
+  assert.deepEqual(listJson.citations[1].screening_notice, warningNotice);
+  assert.equal(listJson.citations[2].screening_notice, undefined);
 
   // Literature alias: .json
   const litAliasRes = await worker.fetch(`${origin}/p/${problemId}/literature.json`);
   assert.equal(litAliasRes.status, 200);
   const litAliasJson = CitationsListResponseSchema.parse(await litAliasRes.json());
   assert.equal(litAliasJson.citations.length, 3);
+  assert.deepEqual(litAliasJson.citations[0].screening_notice, warningNotice);
 
   // List face: .md
   const listMdRes = await worker.fetch(`${origin}/p/${problemId}/citations.md`);
@@ -360,6 +401,7 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(listMd.includes(cit1Id));
   assert.ok(listMd.includes(cit2Id));
   assert.ok(listMd.includes(cit3Id));
+  assert.ok(listMd.includes(warningText));
   assert.ok(listMd.includes(correctPayload.title.replace(/\(/g, "\\(").replace(/\)/g, "\\)")));
 
   // List face: .html
@@ -369,6 +411,7 @@ await runLocalWorkerJourney(async (context) => {
   const listHtml = await listHtmlRes.text();
   assert.ok(listHtml.includes(cit1Id));
   assert.ok(listHtml.includes(correctPayload.title));
+  assert.ok(listHtml.includes(warningText));
 
   // Single citation face: .json (head)
   const singleJsonRes = await worker.fetch(`${origin}/p/${problemId}/citations/${cit1Id}.json`);
@@ -379,6 +422,9 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(singleJson.versions.length, 2);
   assert.equal(singleJson.versions[0].version, 1);
   assert.equal(singleJson.versions[1].version, 2);
+  assert.deepEqual(singleJson.citation.screening_notice, warningNotice);
+  assert.equal(singleJson.versions[0].screening_notice, undefined);
+  assert.deepEqual(singleJson.versions[1].screening_notice, warningNotice);
 
   // Pinned version 1: .json
   const v1JsonRes = await worker.fetch(`${origin}/p/${problemId}/citations/${cit1Id}@1.json`);
@@ -386,6 +432,11 @@ await runLocalWorkerJourney(async (context) => {
   const v1Json = SingleCitationResponseSchema.parse(await v1JsonRes.json());
   assert.equal(v1Json.citation.version, 1);
   assert.equal(v1Json.citation.title, validDoiPayload.title);
+  assert.equal(
+    v1Json.citation.screening_notice,
+    undefined,
+    "a later correction's warning never relabels the original citation",
+  );
 
   // BibTeX export: .bib
   const bibRes = await worker.fetch(`${origin}/p/${problemId}/citations/${cit1Id}.bib`);
@@ -394,6 +445,13 @@ await runLocalWorkerJourney(async (context) => {
   const bibText = await bibRes.text();
   assert.ok(bibText.includes(`@article{${cit1Id},`));
   assert.ok(bibText.includes("10.1007/s00222-020-00980-8"));
+  assert.ok(bibText.includes(warningText));
+  assert.ok(bibText.includes("Retrieved:"));
+  const originalBib = await worker.fetch(`${origin}/p/${problemId}/citations/${cit1Id}@1.bib`, {
+    headers: { "User-Agent": userAgent },
+  });
+  assert.equal(originalBib.status, 200);
+  assert.ok(!(await originalBib.text()).includes(warningText));
 
   // CSL JSON export: .csl.json
   const cslRes = await worker.fetch(`${origin}/p/${problemId}/citations/${cit1Id}.csl.json`);
@@ -406,6 +464,16 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(cslJson.id, cit1Id);
   assert.equal(cslJson.type, "article-journal");
   assert.equal(cslJson.DOI, "10.1007/s00222-020-00980-8");
+  assert.ok(cslJson.note.includes(warningText));
+  for (const text of [bibText, JSON.stringify(cslJson), JSON.stringify(singleJson)]) {
+    for (const privateField of [
+      "input_digest",
+      "configuration_digest",
+      "model_version",
+      "provenance_json",
+    ])
+      assert.ok(!text.includes(privateField), "private screening provenance is never exported");
+  }
 
   // Single citation face: .md & .html
   const singleMdRes = await worker.fetch(`${origin}/p/${problemId}/citations/${cit1Id}.md`);
@@ -413,11 +481,13 @@ await runLocalWorkerJourney(async (context) => {
   const singleMd = await singleMdRes.text();
   assert.ok(singleMd.includes(`Citation [${cit1Id}@v2]`));
   assert.ok(singleMd.includes("Version History"));
+  assert.ok(singleMd.includes(warningText));
 
   const singleHtmlRes = await worker.fetch(`${origin}/p/${problemId}/citations/${cit1Id}.html`);
   assert.equal(singleHtmlRes.status, 200);
   const singleHtml = await singleHtmlRes.text();
   assert.ok(singleHtml.includes(cit1Id));
+  assert.ok(singleHtml.includes(warningText));
 
   // --------------------------------------------------------------------------
   // LEDGER PACK LITERATURE PROFILE
@@ -435,6 +505,13 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(litItems.some((c) => c.id.startsWith(cit1Id)));
   assert.ok(litItems.some((c) => c.id.startsWith(cit2Id)));
   assert.ok(litItems.some((c) => c.id.startsWith(cit3Id)));
+  for (const id of [cit1Id, cit2Id]) {
+    assert.deepEqual(
+      litItems.find((item) => item.id.startsWith(id)).screening_notice,
+      warningNotice,
+    );
+  }
+  assert.equal(litItems.find((item) => item.id.startsWith(cit3Id)).screening_notice, undefined);
 
   // --------------------------------------------------------------------------
   // DATABASE IMMUTABILITY TRIGGERS
@@ -571,7 +648,24 @@ await runLocalWorkerJourney(async (context) => {
   )
     .bind(problemId, lone.seq)
     .first();
+  const beforeRedaction = await worker.fetch(
+    `${origin}/p/${problemId}/citations/${lone.citation_id}.json`,
+    { headers: { "User-Agent": userAgent } },
+  );
+  assert.equal(beforeRedaction.status, 200);
+  const beforeRedactionEtag = beforeRedaction.headers.get("etag");
+  assert.ok(beforeRedactionEtag);
+  await beforeRedaction.body?.cancel();
   await fixtures.redactPublicContent(loneEvent.id);
+  const hiddenCitation = await worker.fetch(
+    `${origin}/p/${problemId}/citations/${lone.citation_id}.json`,
+    { headers: { "User-Agent": userAgent, "if-none-match": beforeRedactionEtag } },
+  );
+  assert.equal(
+    hiddenCitation.status,
+    404,
+    "current visibility wins over a previously cached citation",
+  );
   const citationColumns = (
     await context.env.DB.prepare("PRAGMA table_info(citation_versions)").all()
   ).results.map((column) => column.name);

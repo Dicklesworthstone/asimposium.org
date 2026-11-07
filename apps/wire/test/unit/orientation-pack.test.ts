@@ -92,7 +92,13 @@ async function fixture() {
     },
   } as unknown as D1Database;
   let cursor = 0;
-  async function append(type: string, kind: string, payload: unknown = {}, version = 1) {
+  async function append(
+    type: string,
+    kind: string,
+    payload: unknown = {},
+    version = 1,
+    objectId?: string,
+  ) {
     cursor += 1;
     const body = JSON.stringify(payload);
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
@@ -109,7 +115,7 @@ async function fixture() {
         cursor,
         type,
         kind,
-        kind === "problem" ? "P-DEMO" : `C-${cursor}`,
+        objectId ?? (kind === "problem" ? "P-DEMO" : `C-${cursor}`),
         version,
         AT,
         hash,
@@ -253,6 +259,62 @@ describe("cursor-aware orientation context", () => {
       ]) {
         expect(JSON.stringify(pack)).not.toContain(canary);
       }
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test("orientation warnings remain platform metadata while citation events stay outside the material summary", async () => {
+    const f = await fixture();
+    try {
+      await f.append(
+        "evidence.created",
+        "evidence",
+        { body_md: "WARNED-EVIDENCE-NARRATIVE-CANARY" },
+        1,
+        "E-WARNED",
+      );
+      await f.append(
+        "citation.recorded",
+        "citation",
+        { title: "CITATION-NARRATIVE-CANARY" },
+        1,
+        "L-1",
+      );
+      const receipt = await Bun.file(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+          import.meta.url,
+        ),
+      ).json();
+      for (const id of ["E-2", "E-3"])
+        f.sql
+          .prepare("INSERT INTO screening_publications VALUES (?, ?)")
+          .run(id, JSON.stringify(receipt));
+      const pack = await readOrientationPack(f.db, "P-DEMO", 3, 1);
+      expect(sequences(pack)).toEqual([2]);
+      const evidence = pack.candidates.find((item) => item.id === "DELTA-2");
+      expect(evidence?.screening_notice).toEqual(receipt.public_action);
+      expect(JSON.parse(evidence?.body ?? "{}").event.screening_notice).toEqual(
+        receipt.public_action,
+      );
+      expect(pack.omitted.some((entry) => entry.reason === "profile_summary")).toBe(true);
+      for (const hidden of [
+        "WARNED-EVIDENCE-NARRATIVE-CANARY",
+        "CITATION-NARRATIVE-CANARY",
+        "configuration_digest",
+        "input_digest",
+      ])
+        expect(JSON.stringify(pack)).not.toContain(hidden);
+      f.sql
+        .prepare("UPDATE screening_publications SET provenance_json = ? WHERE event_id = 'E-2'")
+        .run(JSON.stringify({ private_detail: "PRIVATE_SCREENING_CANARY" }));
+      const unavailable = await readOrientationPack(f.db, "P-DEMO", 3, 1);
+      expect(sequences(unavailable)).toEqual([]);
+      expect(
+        unavailable.omitted.some((entry) => entry.reason === "orientation_events_unavailable"),
+      ).toBe(true);
+      expect(JSON.stringify(unavailable)).not.toContain("PRIVATE_SCREENING_CANARY");
     } finally {
       f.sql.close();
     }

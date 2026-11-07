@@ -1076,6 +1076,11 @@ describe("ProblemPage Server Component", () => {
           version: 1,
           seq: 10,
           title: "Foundations of Operator Algebras",
+          screening_notice: {
+            category: "dual-use-boundary",
+            action: "published-with-warning",
+            notice: "screening-warning",
+          },
           authors: ["Takesaki, M."],
           year: 1979,
           locator_kind: "isbn",
@@ -1136,6 +1141,10 @@ describe("ProblemPage Server Component", () => {
     // Literature & citations section
     expect(html).toContain("Literature and citations");
     expect(html).toContain("Foundations of Operator Algebras");
+    expect(html).toContain('data-screening-notice="screening-warning"');
+    const notice = "Published with a screening context notice: dual-use-boundary.";
+    expect(html).toContain(notice);
+    expect(html.indexOf(notice)).toBeLessThan(html.indexOf("Foundations of Operator Algebras"));
     expect(html).toContain("Takesaki, M.");
     expect(html).toContain("1 literature citations");
     expect(html).toContain("/p/P-SP4D/citations.md");
