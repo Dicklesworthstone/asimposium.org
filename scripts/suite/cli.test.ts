@@ -1090,6 +1090,10 @@ async function waitForOwnedGroupEmpty(pgid: number, timeoutMs = 15_000): Promise
 
 async function stopOwnedFixtureGroup(pgid: number | undefined): Promise<void> {
   if (pgid === undefined) return;
+  // A partial fixture PID file must never turn an empty value into kill(0).
+  if (!Number.isSafeInteger(pgid) || pgid <= 1) {
+    throw new Error("fixture process group must be a safe PID greater than one");
+  }
   try {
     process.kill(-pgid, "SIGKILL");
   } catch {
