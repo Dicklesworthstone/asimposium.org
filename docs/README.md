@@ -19,8 +19,9 @@ delivered the public instrument promised by Fable. The main obstacle is now
 finishing and deploying a qualified candidate, then earning the external
 collaboration, safety and operational evidence. Rebuilding the existing source
 subsystems would miss that obstacle. The initial lint and Worker contract
-failures are repaired below. Primary and independent local typecheck, lint,
-unit and contract gates pass; deployed acceptance remains separate.**
+failures are repaired below. Primary local typecheck, lint, unit and contract
+gates pass, with independent acceptance of the source repairs and Fellow
+history. Deployed acceptance remains separate.**
 
 ### Implementation follow-through at `ad6d3c7c`
 
@@ -48,7 +49,7 @@ seconds, with the same Worker/Agora totals. Independent typecheck/lint/contract
 and full contracts/render reruns also pass. The standalone Worker security
 suite passes 33 tests and 288 expectations. These runs use unchanged
 application, test, gate, configuration and lockfile bytes at `ad6d3c7c`.
-Later revisions change documentation and tracker records only.
+Revisions through `a565a572` change documentation and tracker records only.
 
 The production browser build passes. The primary attempt initially stalls
 during detector self-tests, resumes without intervention, then times out on
@@ -78,6 +79,84 @@ test/fault strings or browser URL/status comparisons, reviewed without
 suppressing analyzer rules. Evidence is retained under
 `e2e/artifacts/implementation-20261107-coppertiger/`. The original assessment
 and failures below remain dated evidence for the earlier source.
+
+### Fellow negative knowledge at `316bf7b1`
+
+`81c4da18` connects existing public dead-end publications to Fellow cards
+(`dn6.2`). JSON, Markdown, HTML and Agora expose the attempted approach,
+failure, retry condition and event-time attribution, with an independent
+eight-entry reading window and continuation. It reuses the immutable-content
+reader, excludes private/unlisted/hidden work, and discloses unverifiable or
+incompletely attributed records. Dead ends remain neutral history without a
+calibration total or rank. `97297527` applies the existing formatter to the
+extended native journey; its assertions and application bytes are unchanged.
+`316bf7b1` finishes the generated discovery references for all eight Fellow
+faces and fixes independently observed narrow-screen overflow. The generated
+data comparison changes only the eight parameter arrays and discovery schema
+size (39,398 → 46,328 bytes). The original generation gate has 15 passes and
+two failures before correction, then 17 passes with 1,419 expectations.
+
+Primary typecheck and lint pass all eight groups; contract passes all five
+required groups with its original two policy skips. Full contracts pass 954
+tests and render passes 587. The complete original ordinary unit dispatcher
+passes all eight groups in 1,540.63 seconds, terminal zero: Worker 6,759 tests /
+31,826 expectations and Agora 900 tests / 5,988 expectations. Its toolchain
+retains the original 54 individual skips; no whole group is skipped or blocked.
+The corrected production browser passes 254 checks and exits zero, independently
+repeated with its unchanged 300-second owner, including JavaScript and
+no-JavaScript Fellow history.
+At 390px, the document remains 390px wide and every history preformatted block
+has matching 332px client/scroll widths. The earlier 252-check run missed this
+overflow: independent observation at `97297527` measured a 2,042px document
+before the fix and the two new width assertions. Native HTTP publication/readback
+covers two pages, six conditional faces, private workshop stability, historical
+attribution after bilateral transfer, operator hide/restore, private/unlisted
+exclusion and redaction invalidating each exact cached representation.
+These are local Workerd/D1/R2 and production Next.js results. Initial fixture
+guard failures, missing receiving sponsor and the formatter failure remain
+in the retained logs. The known-stale first full unit run was interrupted with
+SIGINT, exit 130; it is partial evidence. Later unit and typecheck controllers
+unexpectedly end with SIGTERM, exit 143, before completion (`sbuk`). Tracing every
+descendant then prevents the unchanged PID-namespace prerequisite: paired
+probes pass untraced and with main-controller-only observation, but fail under
+all-descendant tracing. That diagnostic unit attempt records 376 passes,
+89 skips and one prerequisite failure before deliberate interruption; it is
+not source qualification. The final ordinary unit run observes only its two
+existing main controllers, with no descendant tracing, source change or
+deadline relaxation. It completes with no unexpected controller signal;
+the tracer and observer exit zero. This is a null reproduction, not a diagnosis
+or repair of `sbuk`, which stays open. The first independent focused run has
+99 passes and one unchanged Now-case five-second timeout, including all new
+Fellow history tests passing. This repeats an unresolved `pjuf` observation;
+no cause is inferred. Another first filtered default-five-second run has two
+passes and one timeout; unchanged complete and package-prescribed-120-second
+controls pass all 100 focused cases. Matched empty-history fault tests fail
+all three cases against an unmutated three-case pass. No source deadline is
+changed. An initial independent outside-root dependency setup fails before
+browser assertions; a contained pinned-dependency setup fixes that prerequisite.
+Its first full browser controller also ends 143 before completion. A first
+corrected-source browser owner times out at its unchanged 300-second limit;
+an auxiliary observer produces no measurement. All remain recorded; the
+complete subsequent 254-check control does not explain them. The independent
+real-HTTP supersession journey also preserves original body and publication
+attribution across all three faces, with one replay-consistent problem and no
+seed exclusion; primary reexecution passes. UBS scans finish with four reviewed
+critical flags: the shared escaped HTML sink, two existing browser URL/status
+comparisons and the existing unit test secret. No analyzer rule is suppressed
+and no clean security-scan claim is made. Evidence is under
+`e2e/artifacts/dn6-2-20261107-coppertiger/` and
+`e2e/artifacts/independent-20261107-dn6-2-81c4da18/`.
+Independent review closes `dn6.2` at `316bf7b1` after checking the complete
+ordinary root-unit terminal and the original unchanged acceptance. Later
+changes are documentation and tracker records only.
+
+The broad `dn6` calibration/honors task, `rs5n` deployment reconciliation and
+G0/launch gates remain open. This source addition supplies no deployed,
+Google OAuth or fresh-harness acceptance.
+Fresh read-only production/staging `/capabilities` requests at 08:55 UTC both
+return `0.1.0-draft`, byte-identical to the earlier retained bodies. This does
+not establish provider revision or deployment history. No deployment or
+resource provisioning was performed.
 
 ### Initial assessment and evidence boundaries
 
@@ -259,7 +338,7 @@ not a claim that its whole subsystem is absent.
 | 7 | Scientific standing is earned; independence is pinned (§6.4–6.6) | Scientific history fold, adverse immutable metadata and sponsor/family/method provenance are implemented. | PARTIAL: every transition, replay and adversarial condition plus real multi-sponsor use; `3b9`, `wnd`, `8ku`. Preserve independently closed repairs. |
 | 8 | Premises and weakest-link assessments remain honest (§6.5, P9/P10) | Immutable dependency pins, transitive closure, current/frozen cuts and conservative unavailable states exist. | PARTIAL: full scientific/epistemic acceptance, withdrawal propagation and live reconstruction; W5, `wnd`, `8ku`. |
 | 9 | Exact formulations, governance and honest resolution (§6.2/6.8) | Publication, statement review/context, admission, lifecycle and ordinary anchored resolution exist. Unsupported expert authority is refused. | PARTIAL: full guardrail, accepted external-expert authority and seeded staged outcomes; W5, `a5j`, `4kz`, W12. |
-| 10 | Negative knowledge and proof friction save later work (§6.1/6.7) | Dead-end retry triggers, hypothesis lifecycle, friction witnesses and private impact-echo producers exist. | PARTIAL: actual cross-sponsor reuse and resulting scientific response on the dogfood board; `8ku`, `1e7`, `z8y`. |
+| 10 | Negative knowledge and proof friction save later work (§6.1/6.7) | Dead-end retry triggers, bounded neutral Fellow history with publication attribution, hypothesis lifecycle, friction witnesses and private impact-echo producers exist. | PARTIAL: actual cross-sponsor reuse and resulting scientific response on the dogfood board; `8ku`, `1e7`, `z8y`. Broad calibration/honors `dn6` remains open. |
 | 11 | Synthesis follows a frozen ledger cut (P13) | `ledger/synthesis-read.ts` reads anchored event content with captured cursor and current visibility controls. | PARTIAL: full selection/minority disclosure, approval, closing-boundary and dogfood outcomes; W5, `wnd`, `8ku`. |
 | 12 | All twelve packs provide bounded, useful context (§7.3) | Profile composers, exact-version review/dependency reads, budget omissions, full pagination and move adapters exist. | PARTIAL: complete populated-profile/isolation/determinism acceptance and real harness usefulness within token budget; W4/W6, `zai`. |
 | 13 | Every public resource has truthful canonical faces (A1/§7.9) | Shared rendering, generic/specialized human routes, feeds, TOON, exports and revalidation exist. Render tests pass. | PARTIAL: complete registry/corpus and deployed parity; `92x`, `0et`, `uir`, `9lqv`. |
@@ -290,8 +369,11 @@ Tier 2 and expressly refused features are not extra launch requirements.
 1. **Preserve the tested source candidate.** `bwal`, `9o8v` and the area-need
    wiring `80s3` are independently accepted at `ad6d3c7c`. Keep its exact
    receipts, fault controls and original failures; rerun the relevant original
-   gates after further changes. The unresolved runtime investigation `pjuf`
-   stays open, and these local passes do not qualify deployment or launch.
+   gates after further changes. The neutral Fellow history `dn6.2` is now
+   independently accepted at `316bf7b1`, including its corrected narrow-screen
+   rendering and complete primary unit gate. The unresolved runtime
+   investigations `pjuf` and `sbuk` stay open; these local passes do not qualify
+   deployment or launch.
 2. **Reconcile the existing staging deployment.** The operator clears `rs5n`;
    OPS confirms D1 lineage, actual R2/DO/AI/key roles and Worker-before-Agora
    ordering. Bind receipts to the same application candidate. Do not infer
