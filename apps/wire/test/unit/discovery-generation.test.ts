@@ -143,15 +143,24 @@ describe("discovery generators (W1.6)", () => {
     }
   });
 
-  test("Fellow GET operations disclose both independent history queries", () => {
+  test("every Fellow GET face discloses all three independent history queries", () => {
     const doc = JSON.parse(generateOpenApiDocument());
-    for (const path of ["/a/{name}", "/fellows/{id}"]) {
+    for (const path of ["/a/{name}", "/fellows/{id}"].flatMap((base) =>
+      ["", ".md", ".json", ".html"].map((suffix) => `${base}${suffix}`),
+    )) {
       const parameters = doc.paths[path].get.parameters;
-      expect(
-        parameters
-          .filter((p: { in: string }) => p.in === "query")
-          .map((p: { name: string }) => p.name),
-      ).toEqual(["contributions_before", "reviews_before"]);
+      const queries = parameters.filter((p: { in: string }) => p.in === "query");
+      expect(queries.map((p: { name: string }) => p.name)).toEqual([
+        "contributions_before",
+        "reviews_before",
+        "negative_before",
+      ]);
+      for (const parameter of queries) {
+        expect(parameter.schema.$ref).toBe(
+          `https://a.asimposium.org/schemas/discovery.v1.json#/properties/fellow_query/properties/${parameter.name}`,
+        );
+        expect(parameter.description).toContain("negative history examines eight");
+      }
     }
   });
 

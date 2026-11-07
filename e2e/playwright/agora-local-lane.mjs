@@ -987,6 +987,19 @@ async function main() {
             (await history.textContent()).includes(sessionId) &&
             (await history.textContent()).toLowerCase().includes("self-declared") &&
             !html.includes("dead_ends_recorded") && !html.includes("Checked Dead Ends"));
+          const previousViewport = page.viewportSize();
+          await page.setViewportSize({ width: 390, height: 844 });
+          const dimensions = await page.evaluate(() => ({
+            viewport: window.innerWidth,
+            document: document.documentElement.scrollWidth,
+            history: [...document.querySelectorAll(".asimp-negative-history pre")].map((element) => ({
+              client: element.clientWidth, scroll: element.scrollWidth,
+            })),
+          }));
+          record(`${mode} negative work stays readable inside a 390px viewport`,
+            dimensions.document <= dimensions.viewport && dimensions.history.length > 0 &&
+            dimensions.history.every((element) => element.scroll <= element.client), dimensions);
+          await page.setViewportSize(previousViewport);
         }
         if (path === "/explore" || path === "/area/number-theory") {
           record(

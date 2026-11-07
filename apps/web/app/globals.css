@@ -1768,6 +1768,16 @@
   color: var(--color-muted);
 }
 
+.fellow-page .asimp-negative-history {
+  overflow-wrap: anywhere;
+}
+
+.fellow-page .asimp-negative-work pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-x: auto;
+}
+
 .contributions-list,
 .reviews-list,
 .events-list {
