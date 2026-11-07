@@ -578,6 +578,214 @@ await runLocalWorkerJourney(
       assert.ok(!experimentLogs.includes(text), "experiment prose never reaches Worker logs");
     }
 
+    // Evidence warnings must remain visible wherever the same scientific work
+    // is read: claim and hypothesis faces, citation backlinks, formal records,
+    // packs and event tails. Exercise real public writers, not inserted notices.
+    const evidenceAuthor = await enroll("warning-evidence-author", "usr_warning_evidence");
+    const evidenceSession = (
+      await call("/v1/sessions", { problem_id: problem, intent: "prove" }, evidenceAuthor, 201)
+    ).session_id;
+    const citation = await call(
+      `/v1/sessions/${evidenceSession}/citations`,
+      {
+        title: "Parity definitions for a bounded check",
+        locator_kind: "url",
+        locator: "https://example.invalid/parity-warning",
+        excerpt: "An even integer is divisible by two.",
+        retrieved_at: new Date().toISOString(),
+      },
+      evidenceAuthor,
+      201,
+    );
+    const beforeEvidenceWarnings = await publicSeq();
+    const evidenceWarningCases = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM screening_cases",
+    ).first();
+    const warnedEvidence = new Map();
+    const warnedWrite = async (path, body, token, key) => {
+      const beforeSeq = await publicSeq();
+      const beforeCalls = await fixtures.screeningCalls();
+      await fixtures.setScreenMode("allow-with-warning");
+      const receipt = await call(path, body, token, 201, key);
+      assert.equal(await publicSeq(), beforeSeq + 1, `${key}: exactly one public event`);
+      assert.equal(await fixtures.screeningCalls(), beforeCalls + 1, `${key}: one screen`);
+      await fixtures.setScreenMode("reject");
+      assert.deepEqual(await call(path, body, token, 200, key), receipt, `${key}: exact replay`);
+      assert.equal(await fixtures.screeningCalls(), beforeCalls + 1, `${key}: no replay screen`);
+      assert.equal(await publicSeq(), beforeSeq + 1, `${key}: no replay event`);
+      await fixtures.setScreenMode("pass");
+      return receipt;
+    };
+    const citedBody = {
+      ...evidenceBody,
+      source: { kind: "locator", locator: citation.citation_id, excerpt: "Divisibility by two." },
+      body_md: "The cited definition establishes that zero is even; scope remains one integer.",
+    };
+    const citedEvidence = await warnedWrite(
+      `/v1/p/${problem}/evidence`,
+      citedBody,
+      evidenceAuthor,
+      "warned-cited-evidence",
+    );
+    warnedEvidence.set(citedEvidence.evidence_id, "claim");
+    const hypothesisEvidence = await warnedWrite(
+      `/v1/p/${problem}/evidence`,
+      {
+        bears_on_kind: "hypothesis",
+        bears_on_id: firstHypothesis.hypothesis_id,
+        direction: "informs",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "exploratory",
+        body_md:
+          "This bounded parity observation informs the route without independently confirming it.",
+      },
+      evidenceAuthor,
+      "warned-hypothesis-evidence",
+    );
+    warnedEvidence.set(hypothesisEvidence.evidence_id, "hypothesis");
+    const warnedFriction = await warnedWrite(
+      `/v1/sessions/${evidenceSession}/friction`,
+      frictionBody,
+      evidenceAuthor,
+      "warned-friction",
+    );
+    warnedEvidence.set(warnedFriction.evidence_id, "formalization-friction");
+    const warnedArtifact = await warnedWrite(
+      `/v1/sessions/${evidenceSession}/evidence`,
+      {
+        ...evidenceBody,
+        kind: "certificate",
+        source: { kind: "locator", locator: "local/parity.lean", excerpt: "Submitted source." },
+        body_md: "Submitted source only; no platform compilation or certification is asserted.",
+        formal_artifact: {
+          language: "lean",
+          declaration: "zero_square",
+          source: "theorem zero_square : (0 : Nat) * 0 = 0 := rfl",
+          toolchain: "Lean fixture",
+          axiom_report: "zero_square: no additional axioms reported.",
+        },
+      },
+      evidenceAuthor,
+      "warned-formal-artifact",
+    );
+    warnedEvidence.set(warnedArtifact.evidence_id, "formal-artifact");
+    const warnedClaimFace = await call(`/p/${problem}/claims/${passed.claim_id}@1.json`);
+    const claimedDigest = JSON.parse(
+      warnedClaimFace.items.find((item) => item.kind === "claim-detail").body,
+    ).content_digest;
+    const proofRef = {
+      evidence_id: citedEvidence.evidence_id,
+      digest: JSON.parse(
+        warnedClaimFace.items.find((item) => item.id === citedEvidence.evidence_id).body,
+      ).content_digest,
+    };
+    const verification = await warnedWrite(
+      `/v1/p/${problem}/reviews`,
+      {
+        ...reviewBody,
+        verdict: "confirm",
+        verification: {
+          kind: "full-write-up",
+          target_digest: claimedDigest,
+          evidence: proofRef,
+          coverage: ["The zero boundary and cited definition of evenness."],
+          result: "verified",
+        },
+        scientific_provenance: {
+          model_family_self_declared: "claude",
+          method: {
+            category: "deductive",
+            procedure: "Check the zero boundary.",
+            evidence: [proofRef],
+          },
+        },
+      },
+      secondReviewer,
+      "warned-verification-record",
+    );
+    assert.deepEqual(
+      await env.DB.prepare("SELECT COUNT(*) AS n FROM screening_cases").first(),
+      evidenceWarningCases,
+      "publishable evidence and verification warnings do not open review holds",
+    );
+    for (const [id, kind] of warnedEvidence) {
+      const path = `/p/${problem}/evidence/${id}`;
+      const face = await call(`${path}.json`);
+      assert.deepEqual(
+        kind === "hypothesis"
+          ? face.screening_notice
+          : face.items.find((item) => item.id === id).screening_notice,
+        warningNotice,
+        `${id}: exact evidence notice`,
+      );
+      const response = await worker.fetch(`${origin}${path}.md`, {
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(response.status, 200);
+      assert.ok((await response.text()).includes("screening context notice: dual-use-boundary"));
+    }
+    const hypothesisIndex = await call(
+      `/p/${problem}/hypotheses/${firstHypothesis.hypothesis_id}/evidence.json`,
+    );
+    assert.deepEqual(
+      hypothesisIndex.evidence.find((item) => item.evidence_id === hypothesisEvidence.evidence_id)
+        .screening_notice,
+      warningNotice,
+    );
+    const citationFace = await call(`/p/${problem}/citations/${citation.citation_id}.json`);
+    assert.deepEqual(
+      citationFace.associated_evidence.find(
+        (item) => item.evidence_id === citedEvidence.evidence_id,
+      ).screening_notice,
+      warningNotice,
+    );
+    for (const id of [
+      warnedFriction.evidence_id,
+      warnedArtifact.evidence_id,
+      verification.review_id,
+    ]) {
+      const formalPath = `/p/${problem}/formal`;
+      const formal = await call(`${formalPath}.json?target=${id}`);
+      assert.deepEqual(formal.records[0].screening_notice, warningNotice, `${id}: formal record`);
+      for (const format of ["md", "html"]) {
+        const response = await worker.fetch(`${origin}${formalPath}.${format}?target=${id}`, {
+          headers: { "User-Agent": userAgent },
+        });
+        assert.equal(response.status, 200);
+        assert.ok((await response.text()).includes("screening context notice: dual-use-boundary"));
+      }
+    }
+    const formalPack = await call(
+      `/v1/sessions/${evidenceSession}/pack?profile=formal&max_tokens=8000`,
+      undefined,
+      evidenceAuthor,
+    );
+    const graveyardPack = await call(
+      `/v1/sessions/${evidenceSession}/pack?profile=graveyard&max_tokens=8000`,
+      undefined,
+      evidenceAuthor,
+    );
+    for (const pack of [formalPack, graveyardPack]) {
+      const item = pack.items.find((row) => row.id === warnedFriction.evidence_id);
+      assert.ok(item, "bounded formal work is present in the requested pack");
+      assert.deepEqual(item.screening_notice, warningNotice, "pack metadata preserves the warning");
+    }
+    const warnedTail = await call(`/p/${problem}/events.json?since=${beforeEvidenceWarnings}`);
+    for (const id of [...warnedEvidence.keys(), verification.review_id]) {
+      assert.deepEqual(
+        warnedTail.events.find((row) => row.event?.object_id === id).event.screening_notice,
+        warningNotice,
+      );
+    }
+    assert.ok(
+      !workerLogs()
+        .map((log) => log.message)
+        .join("\n")
+        .includes(citedBody.body_md),
+      "evidence text stays out of diagnostics",
+    );
+
     console.log(
       JSON.stringify({
         stage: "direct-append-screening-journey-passed",

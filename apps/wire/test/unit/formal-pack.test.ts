@@ -114,6 +114,64 @@ function deps(overrides: Partial<FormalPackDependencies> = {}): FormalPackDepend
     ...overrides,
   };
 }
+const warning = {
+  category: "dual-use-boundary",
+  action: "published-with-warning",
+  notice: "screening-warning",
+} as const;
+
+test("formal and graveyard packs preserve evidence and review warnings outside untrusted bodies", async () => {
+  const records = [item(2), item(3, "formalization-friction"), item(4, "verification-report")].map(
+    (record) => ({ ...record, screening_notice: warning }),
+  );
+  for (const section of [
+    await readFormalPack(db, "P-DEMO", 100, deps({ records: async () => recordPage(records) })),
+    await readFormalRecordSection(
+      db,
+      "P-DEMO",
+      100,
+      deps({ records: async () => recordPage(records) }),
+    ),
+  ]) {
+    for (const record of section.candidates.filter(
+      (candidate) => candidate.scope === "ledger" && candidate.kind !== "proof-gap",
+    )) {
+      assert.deepEqual(record.screening_notice, warning);
+      assert.equal(JSON.parse(record.body).screening_notice, undefined);
+      assert.equal(record.untrusted, true);
+    }
+  }
+  const graveyard = await readGraveyardFrictionSection(
+    db,
+    "P-DEMO",
+    100,
+    deps({ records: async () => recordPage(records) }),
+  );
+  assert.deepEqual(
+    graveyard.candidates.find((candidate) => candidate.kind === "formalization-friction")
+      ?.screening_notice,
+    warning,
+  );
+});
+
+test("malformed formal screening notices cannot become unqualified pack content", async () => {
+  const malformed = {
+    ...item(),
+    screening_notice: { ...warning, private_detail: "PRIVATE_DETECTOR_CANARY" },
+  };
+  const section = await readFormalPack(
+    db,
+    "P-DEMO",
+    100,
+    deps({ records: async () => recordPage([malformed]) }),
+  );
+  assert.equal(
+    section.candidates.some((candidate) => candidate.kind === "formal-artifact"),
+    false,
+  );
+  assert.ok(section.omitted.some((omission) => omission.reason === "formal_records_unavailable"));
+  assert.equal(JSON.stringify(section).includes("PRIVATE_DETECTOR_CANARY"), false);
+});
 
 test("formal pack contains whole artifacts and gaps with exact source and claim links", async () => {
   const section = await readFormalPack(db, "P-DEMO", 100, deps());
@@ -163,6 +221,7 @@ test("verification failure and friction reports remain readable without certifyi
 });
 test("a large artifact becomes a whole-record reference, never a truncated proof", async () => {
   const large = item();
+  large.screening_notice = warning;
   large.content.body_md = "PRIVATE-SENTINEL-START" + "x".repeat(19000) + "PRIVATE-SENTINEL-END";
   const section = await readFormalPack(
     db,
@@ -170,7 +229,10 @@ test("a large artifact becomes a whole-record reference, never a truncated proof
     100,
     deps({ records: async () => recordPage([large]) }),
   );
-  const record = JSON.parse(section.candidates.find((i) => i.kind === "formal-artifact")!.body);
+  const candidate = section.candidates.find((i) => i.kind === "formal-artifact");
+  assert.ok(candidate);
+  const record = JSON.parse(candidate.body);
+  assert.deepEqual(candidate.screening_notice, warning);
   assert.equal(record.content, null);
   assert.equal(record.content_omitted, "whole-record-size-limit");
   assert.equal(record.publication.payload_sha256, "a".repeat(64));

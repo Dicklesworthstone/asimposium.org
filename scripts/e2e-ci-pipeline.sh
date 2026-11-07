@@ -906,6 +906,7 @@ worker_deploy() {
       WRANGLER_OUTPUT_FILE_PATH="$raw_receipt" \
       bunx --bun wrangler deploy \
         --config "$config" \
+        --var "ASIMPOSIUM_SOURCE_REVISION:$REVISION" \
         --tag "rev-${REVISION:0:16}" \
         --message "asimposium revision $REVISION"
   )
@@ -1129,7 +1130,9 @@ print(json.dumps({
     --skip-domain \
     --meta "asimposiumRevision=$REVISION" \
     --build-env "STOA_ORIGIN=$STAGING_WORKER_ORIGIN" \
-    --env "STOA_ORIGIN=$STAGING_WORKER_ORIGIN")"
+    --build-env "ASIMPOSIUM_SOURCE_REVISION=$REVISION" \
+    --env "STOA_ORIGIN=$STAGING_WORKER_ORIGIN" \
+    --env "ASIMPOSIUM_SOURCE_REVISION=$REVISION")"
   status=$?
   export -n VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
   [[ "$status" -eq 0 ]] || return "$status"

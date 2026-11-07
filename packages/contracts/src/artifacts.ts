@@ -147,6 +147,7 @@ import {
   PublicProblemMovesSchema,
 } from "./public-moves.ts";
 import { QUESTIONS_SCHEMA_ID, QuestionsListResponseSchema } from "./questions.ts";
+import { generateReadinessSchema } from "./readiness.ts";
 import { RETRACTIONS_SCHEMA_ID, RetractionsListResponseSchema } from "./retractions.ts";
 import { generatedReviewQueueArtifact } from "./review-queue-artifact.ts";
 import {
@@ -1083,6 +1084,12 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
       content: generatedInternalHealthJsonSchema(),
     },
     { relativePath: INTERNAL_HEALTH_TYPES_ARTIFACT, content: generatedInternalHealthTypes() },
+    { relativePath: "generated/readiness.schema.json", content: generateReadinessSchema() },
+    {
+      relativePath: "generated/readiness.types.ts",
+      content:
+        '// Generated from src/readiness.ts by `bun run generate`. Do not edit.\nexport type { ReadinessReceipt, ReadinessStatus, ReadinessUnavailableReason, ReadinessEnvironment } from "../src/readiness.ts";\n',
+    },
     {
       relativePath: ENROLLMENT_CAPSULE_JSON_SCHEMA_ARTIFACT,
       content: generatedEnrollmentCapsuleJsonSchema(),

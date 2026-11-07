@@ -59,6 +59,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "problems",
   "proof-gaps",
   "questions",
+  "readiness",
   "reports",
   "retractions",
   "review-queue",

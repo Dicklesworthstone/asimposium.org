@@ -820,6 +820,88 @@ describe("OPS.2b review pipeline orchestration", () => {
     }
   });
 
+  test("deployment commands bind both runtimes to the verified revision without activating readiness", () => {
+    const verifiedRevision = "a".repeat(40);
+    const staleRevision = "b".repeat(40);
+    const inheritedReceipt = "c".repeat(64);
+    const argumentsByStage: Record<string, string[]> = {};
+    for (const [name, nextName] of [
+      ["worker_deploy", "worker_readiness"],
+      ["web_deploy", "safe_receipt_field"],
+    ] as const) {
+      const paths = fixture(`revision-${name}`);
+      // Exercise the real shell argument construction with local command doubles.
+      // No provider executable or resolver runs: the deploy double records argv
+      // and returns a sentinel failure before any deployment receipt is read.
+      const script = `
+set -u -o pipefail
+repository_root="$1"
+REVISION="$2"
+ARTIFACT_DIRECTORY="$3"
+trace="$4"
+STAGING_WORKER_ORIGIN="https://a-staging.asimposium.org"
+VERCEL_CLI_VERSION="59.5.0"
+USER_AGENT="asimposium-ci-command-fixture"
+CLOUDFLARE_API_TOKEN="fixture-token"
+CLOUDFLARE_ACCOUNT_ID="fixture-account"
+VERCEL_TOKEN="fixture-token"
+VERCEL_ORG_ID="team_fixture"
+VERCEL_PROJECT_ID="prj_fixture"
+ci_artifact_capability_is_current() { return 0; }
+require_bearer_token() { return 0; }
+require_live_variable() { return 0; }
+bun() { return 0; }
+curl_with_bearer() { return 0; }
+python3() { return 0; }
+bunx() { printf '%s\\0' "$@" > "$trace"; return 93; }
+${pipelineFunctionSource(name, nextName)}
+${name}
+`;
+      const result = spawnSync(
+        "bash",
+        [
+          "-c",
+          script,
+          "ci-revision-command-fixture",
+          REPO_ROOT,
+          verifiedRevision,
+          paths.artifactDirectory,
+          paths.tracePath,
+        ],
+        {
+          env: {
+            ...HELPER_ENV,
+            ASIMPOSIUM_SOURCE_REVISION: staleRevision,
+            ASIMPOSIUM_READINESS_RECEIPT_SHA256: inheritedReceipt,
+          },
+          encoding: "utf8",
+          timeout: 10_000,
+        },
+      );
+      expect(result.signal).toBeNull();
+      expect(result.status, result.stderr).toBe(93);
+      const args = readFileSync(paths.tracePath, "utf8").split("\0").filter(Boolean);
+      argumentsByStage[name] = args;
+      expect(args.join("\n")).not.toContain(staleRevision);
+      expect(args.join("\n")).not.toContain(inheritedReceipt);
+      expect(args.join("\n")).not.toContain("ASIMPOSIUM_READINESS_RECEIPT_SHA256");
+    }
+    const values = (stage: string, flag: string) => {
+      const args = argumentsByStage[stage];
+      if (args === undefined) throw new Error("missing deployment command fixture");
+      return args.flatMap((argument, index) => (argument === flag ? [args[index + 1]] : []));
+    };
+    expect(values("worker_deploy", "--var")).toEqual([
+      `ASIMPOSIUM_SOURCE_REVISION:${verifiedRevision}`,
+    ]);
+    for (const flag of ["--build-env", "--env"]) {
+      expect(values("web_deploy", flag)).toEqual([
+        "STOA_ORIGIN=https://a-staging.asimposium.org",
+        `ASIMPOSIUM_SOURCE_REVISION=${verifiedRevision}`,
+      ]);
+    }
+  });
+
   test("provider parsers require explicit safe Vercel states", () => {
     const source = readFileSync(PIPELINE, "utf8");
 

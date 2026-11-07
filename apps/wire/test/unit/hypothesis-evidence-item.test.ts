@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { HypothesisEvidenceItemResponseSchema } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import type { Env } from "../../src/env.ts";
@@ -29,6 +30,7 @@ function fixture(options: { body?: string; mode?: "exploratory" | "confirmatory"
       object_id TEXT,object_version INTEGER,created_at TEXT,payload_sha256 TEXT,actor_fellow_id TEXT,
       actor_sponsor_id TEXT,actor_session_id TEXT,model_string_self_declared TEXT,harness TEXT);
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
+    CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY,provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,version INTEGER,visibility TEXT);
     CREATE TABLE scientific_withdrawals(event_id TEXT,problem_id TEXT,seq INTEGER,event_sha256 TEXT,
       retraction_id TEXT,target_kind TEXT,target_object TEXT,source_event_id TEXT,source_sha256 TEXT);
@@ -168,6 +170,62 @@ function fixture(options: { body?: string; mode?: "exploratory" | "confirmatory"
   }
   return { sql, request, requestIndex, payload, sourceDigest, replacePayload, withdraw, event };
 }
+
+test("hypothesis evidence and its index retain only the exact publication's coarse warning", async () => {
+  const f = fixture();
+  const receipt = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  try {
+    const clean = await f.request();
+    const cleanEtag = clean.headers.get("etag");
+    if (cleanEtag === null) throw new Error("missing evidence ETag");
+    f.sql
+      .query("INSERT INTO screening_publications VALUES(?,?)")
+      .run(SOURCE, JSON.stringify(receipt));
+    const warned = await f.request("json", { headers: { "if-none-match": cleanEtag } });
+    expect(warned.status).toBe(200);
+    expect(warned.headers.get("etag")).not.toBe(cleanEtag);
+    const face = HypothesisEvidenceItemResponseSchema.parse(await warned.json());
+    expect(face.screening_notice).toEqual(receipt.public_action);
+    expect(JSON.stringify(face)).not.toContain(receipt.input_digest);
+    expect(JSON.stringify(face)).not.toContain(receipt.model_version);
+    expect(await (await f.request("md")).text()).toContain(
+      "screening context notice: dual-use-boundary",
+    );
+    const index = (await (await f.requestIndex("json")).json()) as {
+      evidence: { screening_notice?: unknown }[];
+    };
+    expect(index.evidence[0]?.screening_notice).toEqual(receipt.public_action);
+    for (const format of ["md", "html"] as const) {
+      const body = await (await f.requestIndex(format)).text();
+      expect(body).toContain("screening context notice: dual-use-boundary");
+      expect(body).not.toContain(receipt.model_version);
+    }
+    f.sql
+      .query("UPDATE screening_publications SET provenance_json=? WHERE event_id=?")
+      .run(JSON.stringify({ ...receipt, private_detail: "PRIVATE_DETECTOR_CANARY" }), SOURCE);
+    for (const response of [await f.request(), await f.requestIndex("json")]) {
+      expect(response.status).toBeGreaterThanOrEqual(500);
+      expect(await response.text()).not.toContain("PRIVATE_DETECTOR_CANARY");
+    }
+    f.sql.query("INSERT INTO content_controls VALUES(?,?,1,'hidden')").run(PROBLEM, EVIDENCE);
+    expect((await f.request()).status).toBe(404);
+    const hiddenIndex = await f.requestIndex("json");
+    expect(hiddenIndex.status).toBe(200);
+    const hiddenBody = await hiddenIndex.text();
+    expect(JSON.parse(hiddenBody).evidence).toEqual([]);
+    expect(hiddenBody).not.toContain("screening-warning");
+  } finally {
+    f.sql.close();
+  }
+});
 
 test("hypothesis evidence has a full canonical JSON/Markdown item with original attribution and computed shape", async () => {
   const body =

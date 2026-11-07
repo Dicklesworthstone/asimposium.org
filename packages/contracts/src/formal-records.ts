@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 import { EvidenceRequestSchema, ProblemIdSchema, ReviewRequestSchema } from "./sessions.ts";
 
 export const FORMAL_RECORDS_SCHEMA_ID = "https://a.asimposium.org/schemas/formal-records.v1.json";
@@ -60,6 +61,7 @@ export const FormalRecordSchema = z
         publication,
         target,
         content: EvidenceRequestSchema,
+        screening_notice: ScreeningPublicationNoticeSchema.optional(),
       })
       .strict(),
     z
@@ -68,6 +70,7 @@ export const FormalRecordSchema = z
         publication,
         target,
         content: EvidenceRequestSchema,
+        screening_notice: ScreeningPublicationNoticeSchema.optional(),
       })
       .strict(),
     z
@@ -76,6 +79,7 @@ export const FormalRecordSchema = z
         publication,
         target,
         content: ReviewRequestSchema,
+        screening_notice: ScreeningPublicationNoticeSchema.optional(),
       })
       .strict(),
   ])

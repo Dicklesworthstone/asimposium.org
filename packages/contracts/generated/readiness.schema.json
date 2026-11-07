@@ -1,0 +1,1414 @@
+{
+  "$id": "https://a.asimposium.org/schemas/readiness.v1.json",
+  "title": "ASImposium revision-bound research readiness evidence",
+  "description": "Complete mock-free journey proofs, or the readiness result embedded in /capabilities. The receipt must also match the serving revision, origin, environment, and current time; reachability alone is never readiness.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "https://a.asimposium.org/schemas/readiness.v1.json"
+        },
+        "record": {
+          "type": "string",
+          "const": "readiness_receipt"
+        },
+        "mode": {
+          "type": "string",
+          "const": "mock_free"
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 40,
+          "maxLength": 40,
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "environment": {
+          "type": "string",
+          "enum": [
+            "production",
+            "staging"
+          ]
+        },
+        "origin": {
+          "type": "string",
+          "enum": [
+            "https://a.asimposium.org",
+            "https://a-staging.asimposium.org"
+          ]
+        },
+        "run_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+        },
+        "observed_at": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+        },
+        "expires_at": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+        },
+        "proofs": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "object",
+              "properties": {
+                "capability": {
+                  "type": "string",
+                  "const": "enrollment"
+                },
+                "proof_id": {
+                  "type": "string",
+                  "const": "sponsor_approved_fellow"
+                },
+                "result": {
+                  "type": "string",
+                  "const": "pass"
+                },
+                "revision": {
+                  "type": "string",
+                  "minLength": 40,
+                  "maxLength": 40,
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "environment": {
+                  "type": "string",
+                  "enum": [
+                    "production",
+                    "staging"
+                  ]
+                },
+                "origin": {
+                  "type": "string",
+                  "enum": [
+                    "https://a.asimposium.org",
+                    "https://a-staging.asimposium.org"
+                  ]
+                },
+                "run_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+                },
+                "observed_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "expires_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "evidence_sha256": {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64,
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "capability",
+                "proof_id",
+                "result",
+                "revision",
+                "environment",
+                "origin",
+                "run_id",
+                "observed_at",
+                "expires_at",
+                "evidence_sha256"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "capability": {
+                  "type": "string",
+                  "const": "sessions"
+                },
+                "proof_id": {
+                  "type": "string",
+                  "const": "session_opened"
+                },
+                "result": {
+                  "type": "string",
+                  "const": "pass"
+                },
+                "revision": {
+                  "type": "string",
+                  "minLength": 40,
+                  "maxLength": 40,
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "environment": {
+                  "type": "string",
+                  "enum": [
+                    "production",
+                    "staging"
+                  ]
+                },
+                "origin": {
+                  "type": "string",
+                  "enum": [
+                    "https://a.asimposium.org",
+                    "https://a-staging.asimposium.org"
+                  ]
+                },
+                "run_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+                },
+                "observed_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "expires_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "evidence_sha256": {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64,
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "capability",
+                "proof_id",
+                "result",
+                "revision",
+                "environment",
+                "origin",
+                "run_id",
+                "observed_at",
+                "expires_at",
+                "evidence_sha256"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "capability": {
+                  "type": "string",
+                  "const": "packs"
+                },
+                "proof_id": {
+                  "type": "string",
+                  "const": "session_pack_read"
+                },
+                "result": {
+                  "type": "string",
+                  "const": "pass"
+                },
+                "revision": {
+                  "type": "string",
+                  "minLength": 40,
+                  "maxLength": 40,
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "environment": {
+                  "type": "string",
+                  "enum": [
+                    "production",
+                    "staging"
+                  ]
+                },
+                "origin": {
+                  "type": "string",
+                  "enum": [
+                    "https://a.asimposium.org",
+                    "https://a-staging.asimposium.org"
+                  ]
+                },
+                "run_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+                },
+                "observed_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "expires_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "evidence_sha256": {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64,
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "capability",
+                "proof_id",
+                "result",
+                "revision",
+                "environment",
+                "origin",
+                "run_id",
+                "observed_at",
+                "expires_at",
+                "evidence_sha256"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "capability": {
+                  "type": "string",
+                  "const": "workshop"
+                },
+                "proof_id": {
+                  "type": "string",
+                  "const": "workshop_pushed"
+                },
+                "result": {
+                  "type": "string",
+                  "const": "pass"
+                },
+                "revision": {
+                  "type": "string",
+                  "minLength": 40,
+                  "maxLength": 40,
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "environment": {
+                  "type": "string",
+                  "enum": [
+                    "production",
+                    "staging"
+                  ]
+                },
+                "origin": {
+                  "type": "string",
+                  "enum": [
+                    "https://a.asimposium.org",
+                    "https://a-staging.asimposium.org"
+                  ]
+                },
+                "run_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+                },
+                "observed_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "expires_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "evidence_sha256": {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64,
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "capability",
+                "proof_id",
+                "result",
+                "revision",
+                "environment",
+                "origin",
+                "run_id",
+                "observed_at",
+                "expires_at",
+                "evidence_sha256"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "capability": {
+                  "type": "string",
+                  "const": "promotion"
+                },
+                "proof_id": {
+                  "type": "string",
+                  "const": "claim_promoted"
+                },
+                "result": {
+                  "type": "string",
+                  "const": "pass"
+                },
+                "revision": {
+                  "type": "string",
+                  "minLength": 40,
+                  "maxLength": 40,
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "environment": {
+                  "type": "string",
+                  "enum": [
+                    "production",
+                    "staging"
+                  ]
+                },
+                "origin": {
+                  "type": "string",
+                  "enum": [
+                    "https://a.asimposium.org",
+                    "https://a-staging.asimposium.org"
+                  ]
+                },
+                "run_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+                },
+                "observed_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "expires_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "evidence_sha256": {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64,
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "capability",
+                "proof_id",
+                "result",
+                "revision",
+                "environment",
+                "origin",
+                "run_id",
+                "observed_at",
+                "expires_at",
+                "evidence_sha256"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "capability": {
+                  "type": "string",
+                  "const": "public_ledger_delta"
+                },
+                "proof_id": {
+                  "type": "string",
+                  "const": "diptych_delta_visible"
+                },
+                "result": {
+                  "type": "string",
+                  "const": "pass"
+                },
+                "revision": {
+                  "type": "string",
+                  "minLength": 40,
+                  "maxLength": 40,
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "environment": {
+                  "type": "string",
+                  "enum": [
+                    "production",
+                    "staging"
+                  ]
+                },
+                "origin": {
+                  "type": "string",
+                  "enum": [
+                    "https://a.asimposium.org",
+                    "https://a-staging.asimposium.org"
+                  ]
+                },
+                "run_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+                },
+                "observed_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "expires_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "evidence_sha256": {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64,
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "capability",
+                "proof_id",
+                "result",
+                "revision",
+                "environment",
+                "origin",
+                "run_id",
+                "observed_at",
+                "expires_at",
+                "evidence_sha256"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "capability": {
+                  "type": "string",
+                  "const": "cursor"
+                },
+                "proof_id": {
+                  "type": "string",
+                  "const": "cursor_advanced"
+                },
+                "result": {
+                  "type": "string",
+                  "const": "pass"
+                },
+                "revision": {
+                  "type": "string",
+                  "minLength": 40,
+                  "maxLength": 40,
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "environment": {
+                  "type": "string",
+                  "enum": [
+                    "production",
+                    "staging"
+                  ]
+                },
+                "origin": {
+                  "type": "string",
+                  "enum": [
+                    "https://a.asimposium.org",
+                    "https://a-staging.asimposium.org"
+                  ]
+                },
+                "run_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+                },
+                "observed_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "expires_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "evidence_sha256": {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64,
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "capability",
+                "proof_id",
+                "result",
+                "revision",
+                "environment",
+                "origin",
+                "run_id",
+                "observed_at",
+                "expires_at",
+                "evidence_sha256"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "capability": {
+                  "type": "string",
+                  "const": "visible_budgets"
+                },
+                "proof_id": {
+                  "type": "string",
+                  "const": "write_budgets_visible"
+                },
+                "result": {
+                  "type": "string",
+                  "const": "pass"
+                },
+                "revision": {
+                  "type": "string",
+                  "minLength": 40,
+                  "maxLength": 40,
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "environment": {
+                  "type": "string",
+                  "enum": [
+                    "production",
+                    "staging"
+                  ]
+                },
+                "origin": {
+                  "type": "string",
+                  "enum": [
+                    "https://a.asimposium.org",
+                    "https://a-staging.asimposium.org"
+                  ]
+                },
+                "run_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+                },
+                "observed_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "expires_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "evidence_sha256": {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64,
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "capability",
+                "proof_id",
+                "result",
+                "revision",
+                "environment",
+                "origin",
+                "run_id",
+                "observed_at",
+                "expires_at",
+                "evidence_sha256"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "items": false,
+          "minItems": 8,
+          "maxItems": 8
+        }
+      },
+      "required": [
+        "schema",
+        "record",
+        "mode",
+        "revision",
+        "environment",
+        "origin",
+        "run_id",
+        "observed_at",
+        "expires_at",
+        "proofs"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "type": "string",
+              "const": "https://a.asimposium.org/schemas/readiness.v1.json"
+            },
+            "status": {
+              "type": "string",
+              "const": "unavailable"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "origin_unavailable",
+                "revision_unavailable",
+                "build_revision_mismatch",
+                "receipt_unconfigured",
+                "receipt_configuration_invalid",
+                "receipt_unavailable",
+                "receipt_oversize",
+                "receipt_digest_mismatch",
+                "invalid_evidence",
+                "mixed_evidence",
+                "origin_mismatch",
+                "environment_mismatch",
+                "revision_mismatch",
+                "future_evidence",
+                "expired_evidence",
+                "capabilities_unavailable"
+              ]
+            }
+          },
+          "required": [
+            "schema",
+            "status",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "type": "string",
+              "const": "https://a.asimposium.org/schemas/readiness.v1.json"
+            },
+            "status": {
+              "type": "string",
+              "const": "ready"
+            },
+            "receipt_sha256": {
+              "type": "string",
+              "minLength": 64,
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "receipt": {
+              "type": "object",
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "https://a.asimposium.org/schemas/readiness.v1.json"
+                },
+                "record": {
+                  "type": "string",
+                  "const": "readiness_receipt"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "mock_free"
+                },
+                "revision": {
+                  "type": "string",
+                  "minLength": 40,
+                  "maxLength": 40,
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "environment": {
+                  "type": "string",
+                  "enum": [
+                    "production",
+                    "staging"
+                  ]
+                },
+                "origin": {
+                  "type": "string",
+                  "enum": [
+                    "https://a.asimposium.org",
+                    "https://a-staging.asimposium.org"
+                  ]
+                },
+                "run_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+                },
+                "observed_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "expires_at": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                "proofs": {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "capability": {
+                          "type": "string",
+                          "const": "enrollment"
+                        },
+                        "proof_id": {
+                          "type": "string",
+                          "const": "sponsor_approved_fellow"
+                        },
+                        "result": {
+                          "type": "string",
+                          "const": "pass"
+                        },
+                        "revision": {
+                          "type": "string",
+                          "minLength": 40,
+                          "maxLength": 40,
+                          "pattern": "^[0-9a-f]{40}$"
+                        },
+                        "environment": {
+                          "type": "string",
+                          "enum": [
+                            "production",
+                            "staging"
+                          ]
+                        },
+                        "origin": {
+                          "type": "string",
+                          "enum": [
+                            "https://a.asimposium.org",
+                            "https://a-staging.asimposium.org"
+                          ]
+                        },
+                        "run_id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+                        },
+                        "observed_at": {
+                          "type": "string",
+                          "minLength": 24,
+                          "maxLength": 24,
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        "expires_at": {
+                          "type": "string",
+                          "minLength": 24,
+                          "maxLength": 24,
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        "evidence_sha256": {
+                          "type": "string",
+                          "minLength": 64,
+                          "maxLength": 64,
+                          "pattern": "^[0-9a-f]{64}$"
+                        }
+                      },
+                      "required": [
+                        "capability",
+                        "proof_id",
+                        "result",
+                        "revision",
+                        "environment",
+                        "origin",
+                        "run_id",
+                        "observed_at",
+                        "expires_at",
+                        "evidence_sha256"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "capability": {
+                          "type": "string",
+                          "const": "sessions"
+                        },
+                        "proof_id": {
+                          "type": "string",
+                          "const": "session_opened"
+                        },
+                        "result": {
+                          "type": "string",
+                          "const": "pass"
+                        },
+                        "revision": {
+                          "type": "string",
+                          "minLength": 40,
+                          "maxLength": 40,
+                          "pattern": "^[0-9a-f]{40}$"
+                        },
+                        "environment": {
+                          "type": "string",
+                          "enum": [
+                            "production",
+                            "staging"
+                          ]
+                        },
+                        "origin": {
+                          "type": "string",
+                          "enum": [
+                            "https://a.asimposium.org",
+                            "https://a-staging.asimposium.org"
+                          ]
+                        },
+                        "run_id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+                        },
+                        "observed_at": {
+                          "type": "string",
+                          "minLength": 24,
+                          "maxLength": 24,
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        "expires_at": {
+                          "type": "string",
+                          "minLength": 24,
+                          "maxLength": 24,
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        "evidence_sha256": {
+                          "type": "string",
+                          "minLength": 64,
+                          "maxLength": 64,
+                          "pattern": "^[0-9a-f]{64}$"
+                        }
+                      },
+                      "required": [
+                        "capability",
+                        "proof_id",
+                        "result",
+                        "revision",
+                        "environment",
+                        "origin",
+                        "run_id",
+                        "observed_at",
+                        "expires_at",
+                        "evidence_sha256"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "capability": {
+                          "type": "string",
+                          "const": "packs"
+                        },
+                        "proof_id": {
+                          "type": "string",
+                          "const": "session_pack_read"
+                        },
+                        "result": {
+                          "type": "string",
+                          "const": "pass"
+                        },
+                        "revision": {
+                          "type": "string",
+                          "minLength": 40,
+                          "maxLength": 40,
+                          "pattern": "^[0-9a-f]{40}$"
+                        },
+                        "environment": {
+                          "type": "string",
+                          "enum": [
+                            "production",
+                            "staging"
+                          ]
+                        },
+                        "origin": {
+                          "type": "string",
+                          "enum": [
+                            "https://a.asimposium.org",
+                            "https://a-staging.asimposium.org"
+                          ]
+                        },
+                        "run_id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+                        },
+                        "observed_at": {
+                          "type": "string",
+                          "minLength": 24,
+                          "maxLength": 24,
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        "expires_at": {
+                          "type": "string",
+                          "minLength": 24,
+                          "maxLength": 24,
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        "evidence_sha256": {
+                          "type": "string",
+                          "minLength": 64,
+                          "maxLength": 64,
+                          "pattern": "^[0-9a-f]{64}$"
+                        }
+                      },
+                      "required": [
+                        "capability",
+                        "proof_id",
+                        "result",
+                        "revision",
+                        "environment",
+                        "origin",
+                        "run_id",
+                        "observed_at",
+                        "expires_at",
+                        "evidence_sha256"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "capability": {
+                          "type": "string",
+                          "const": "workshop"
+                        },
+                        "proof_id": {
+                          "type": "string",
+                          "const": "workshop_pushed"
+                        },
+                        "result": {
+                          "type": "string",
+                          "const": "pass"
+                        },
+                        "revision": {
+                          "type": "string",
+                          "minLength": 40,
+                          "maxLength": 40,
+                          "pattern": "^[0-9a-f]{40}$"
+                        },
+                        "environment": {
+                          "type": "string",
+                          "enum": [
+                            "production",
+                            "staging"
+                          ]
+                        },
+                        "origin": {
+                          "type": "string",
+                          "enum": [
+                            "https://a.asimposium.org",
+                            "https://a-staging.asimposium.org"
+                          ]
+                        },
+                        "run_id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+                        },
+                        "observed_at": {
+                          "type": "string",
+                          "minLength": 24,
+                          "maxLength": 24,
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        "expires_at": {
+                          "type": "string",
+                          "minLength": 24,
+                          "maxLength": 24,
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        "evidence_sha256": {
+                          "type": "string",
+                          "minLength": 64,
+                          "maxLength": 64,
+                          "pattern": "^[0-9a-f]{64}$"
+                        }
+                      },
+                      "required": [
+                        "capability",
+                        "proof_id",
+                        "result",
+                        "revision",
+                        "environment",
+                        "origin",
+                        "run_id",
+                        "observed_at",
+                        "expires_at",
+                        "evidence_sha256"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "capability": {
+                          "type": "string",
+                          "const": "promotion"
+                        },
+                        "proof_id": {
+                          "type": "string",
+                          "const": "claim_promoted"
+                        },
+                        "result": {
+                          "type": "string",
+                          "const": "pass"
+                        },
+                        "revision": {
+                          "type": "string",
+                          "minLength": 40,
+                          "maxLength": 40,
+                          "pattern": "^[0-9a-f]{40}$"
+                        },
+                        "environment": {
+                          "type": "string",
+                          "enum": [
+                            "production",
+                            "staging"
+                          ]
+                        },
+                        "origin": {
+                          "type": "string",
+                          "enum": [
+                            "https://a.asimposium.org",
+                            "https://a-staging.asimposium.org"
+                          ]
+                        },
+                        "run_id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+                        },
+                        "observed_at": {
+                          "type": "string",
+                          "minLength": 24,
+                          "maxLength": 24,
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        "expires_at": {
+                          "type": "string",
+                          "minLength": 24,
+                          "maxLength": 24,
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        "evidence_sha256": {
+                          "type": "string",
+                          "minLength": 64,
+                          "maxLength": 64,
+                          "pattern": "^[0-9a-f]{64}$"
+                        }
+                      },
+                      "required": [
+                        "capability",
+                        "proof_id",
+                        "result",
+                        "revision",
+                        "environment",
+                        "origin",
+                        "run_id",
+                        "observed_at",
+                        "expires_at",
+                        "evidence_sha256"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "capability": {
+                          "type": "string",
+                          "const": "public_ledger_delta"
+                        },
+                        "proof_id": {
+                          "type": "string",
+                          "const": "diptych_delta_visible"
+                        },
+                        "result": {
+                          "type": "string",
+                          "const": "pass"
+                        },
+                        "revision": {
+                          "type": "string",
+                          "minLength": 40,
+                          "maxLength": 40,
+                          "pattern": "^[0-9a-f]{40}$"
+                        },
+                        "environment": {
+                          "type": "string",
+                          "enum": [
+                            "production",
+                            "staging"
+                          ]
+                        },
+                        "origin": {
+                          "type": "string",
+                          "enum": [
+                            "https://a.asimposium.org",
+                            "https://a-staging.asimposium.org"
+                          ]
+                        },
+                        "run_id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+                        },
+                        "observed_at": {
+                          "type": "string",
+                          "minLength": 24,
+                          "maxLength": 24,
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        "expires_at": {
+                          "type": "string",
+                          "minLength": 24,
+                          "maxLength": 24,
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        "evidence_sha256": {
+                          "type": "string",
+                          "minLength": 64,
+                          "maxLength": 64,
+                          "pattern": "^[0-9a-f]{64}$"
+                        }
+                      },
+                      "required": [
+                        "capability",
+                        "proof_id",
+                        "result",
+                        "revision",
+                        "environment",
+                        "origin",
+                        "run_id",
+                        "observed_at",
+                        "expires_at",
+                        "evidence_sha256"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "capability": {
+                          "type": "string",
+                          "const": "cursor"
+                        },
+                        "proof_id": {
+                          "type": "string",
+                          "const": "cursor_advanced"
+                        },
+                        "result": {
+                          "type": "string",
+                          "const": "pass"
+                        },
+                        "revision": {
+                          "type": "string",
+                          "minLength": 40,
+                          "maxLength": 40,
+                          "pattern": "^[0-9a-f]{40}$"
+                        },
+                        "environment": {
+                          "type": "string",
+                          "enum": [
+                            "production",
+                            "staging"
+                          ]
+                        },
+                        "origin": {
+                          "type": "string",
+                          "enum": [
+                            "https://a.asimposium.org",
+                            "https://a-staging.asimposium.org"
+                          ]
+                        },
+                        "run_id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+                        },
+                        "observed_at": {
+                          "type": "string",
+                          "minLength": 24,
+                          "maxLength": 24,
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        "expires_at": {
+                          "type": "string",
+                          "minLength": 24,
+                          "maxLength": 24,
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        "evidence_sha256": {
+                          "type": "string",
+                          "minLength": 64,
+                          "maxLength": 64,
+                          "pattern": "^[0-9a-f]{64}$"
+                        }
+                      },
+                      "required": [
+                        "capability",
+                        "proof_id",
+                        "result",
+                        "revision",
+                        "environment",
+                        "origin",
+                        "run_id",
+                        "observed_at",
+                        "expires_at",
+                        "evidence_sha256"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "capability": {
+                          "type": "string",
+                          "const": "visible_budgets"
+                        },
+                        "proof_id": {
+                          "type": "string",
+                          "const": "write_budgets_visible"
+                        },
+                        "result": {
+                          "type": "string",
+                          "const": "pass"
+                        },
+                        "revision": {
+                          "type": "string",
+                          "minLength": 40,
+                          "maxLength": 40,
+                          "pattern": "^[0-9a-f]{40}$"
+                        },
+                        "environment": {
+                          "type": "string",
+                          "enum": [
+                            "production",
+                            "staging"
+                          ]
+                        },
+                        "origin": {
+                          "type": "string",
+                          "enum": [
+                            "https://a.asimposium.org",
+                            "https://a-staging.asimposium.org"
+                          ]
+                        },
+                        "run_id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(?![\\s\\S])"
+                        },
+                        "observed_at": {
+                          "type": "string",
+                          "minLength": 24,
+                          "maxLength": 24,
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        "expires_at": {
+                          "type": "string",
+                          "minLength": 24,
+                          "maxLength": 24,
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        "evidence_sha256": {
+                          "type": "string",
+                          "minLength": 64,
+                          "maxLength": 64,
+                          "pattern": "^[0-9a-f]{64}$"
+                        }
+                      },
+                      "required": [
+                        "capability",
+                        "proof_id",
+                        "result",
+                        "revision",
+                        "environment",
+                        "origin",
+                        "run_id",
+                        "observed_at",
+                        "expires_at",
+                        "evidence_sha256"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ],
+                  "items": false,
+                  "minItems": 8,
+                  "maxItems": 8
+                }
+              },
+              "required": [
+                "schema",
+                "record",
+                "mode",
+                "revision",
+                "environment",
+                "origin",
+                "run_id",
+                "observed_at",
+                "expires_at",
+                "proofs"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "schema",
+            "status",
+            "receipt_sha256",
+            "receipt"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  ]
+}

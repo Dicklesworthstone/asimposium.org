@@ -30,6 +30,7 @@ import movesSchemaModule from "../generated/moves.schema.json" with { type: "jso
 import problemSchemaModule from "../generated/problem.schema.json" with { type: "json" };
 import problemsSchemaModule from "../generated/problems.schema.json" with { type: "json" };
 import questionsSchemaModule from "../generated/questions.schema.json" with { type: "json" };
+import readinessSchemaModule from "../generated/readiness.schema.json" with { type: "json" };
 import retractionsSchemaModule from "../generated/retractions.schema.json" with { type: "json" };
 import reviewQueueSchemaModule from "../generated/review-queue.schema.json" with { type: "json" };
 import rubricsSchemaModule from "../generated/rubrics.schema.json" with { type: "json" };
@@ -101,6 +102,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "problems",
   "proof-gaps",
   "questions",
+  "readiness",
   "reports",
   "retractions",
   "review-queue",
@@ -320,6 +322,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/questions.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: canonicalSchemaText(questionsSchemaModule, "generated/questions.schema.json"),
+  }),
+  Object.freeze({
+    id: "readiness",
+    served_at: "/schemas/readiness.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: canonicalSchemaText(readinessSchemaModule, "generated/readiness.schema.json"),
   }),
   Object.freeze({
     id: "reports",

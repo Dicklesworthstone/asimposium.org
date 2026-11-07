@@ -4,7 +4,7 @@ import type {
   CitationItem,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
-import { hiddenByContentControlSql } from "../krater/public-content.ts";
+import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 import {
   CITATION_EVENT_MAX_BYTES,
@@ -61,8 +61,7 @@ const CONTENT_JOIN_SQL = `LEFT JOIN screening_publications screening ON screenin
   LEFT JOIN event_content ec
   ON ec.event_id = e.id AND ec.payload_sha256 = e.payload_sha256
   AND ec.redacted_at IS NULL
-  AND NOT (e.object_kind = 'claim'
-    AND ${hiddenByContentControlSql("e.problem_id", "e.object_id")})`;
+  AND NOT ${eventContentHiddenSql("e")}`;
 
 /** Select the head before testing availability: never revive an older version. */
 export const PUBLIC_CITATION_HEADS_SQL = `${SCOPE_SQL}
@@ -319,11 +318,13 @@ export async function loadCommittedCitation(
       typeof payload.bears_on_id === "string" &&
       typeof payload.computed_class === "string"
     ) {
+      const screeningNotice = publicationScreeningNotice(row.screening_provenance_json);
       associated_evidence.push({
         evidence_id: row.object_id,
         direction: payload.direction,
         bears_on_id: payload.bears_on_id,
         computed_class: payload.computed_class,
+        ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
       });
     }
   }

@@ -1,6 +1,11 @@
-import type { EvidenceRequest, ReviewRequest } from "@asimposium/contracts";
+import type {
+  EvidenceRequest,
+  ReviewRequest,
+  ScreeningPublicationNotice,
+} from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { hiddenByContentControlSql } from "../krater/public-content.ts";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 
 export const FORMAL_RECORD_PAGE_SIZE = 8;
 export const FORMAL_RECORD_MAX_BYTES = 262144;
@@ -22,6 +27,7 @@ export interface FormalRecord {
   target: { claim_id: string; version: number };
   /** Declared work, not a server compilation, evidence class or scientific verdict. */
   content: EvidenceRequest | ReviewRequest;
+  screening_notice?: ScreeningPublicationNotice;
 }
 export interface FormalRecordPage {
   problem_id: string;
@@ -39,6 +45,7 @@ interface Row extends FormalRecordEvent {
   event_type: string;
   object_version: number;
   payload_json: string | null;
+  screening_provenance_json?: string | null;
 }
 export interface FormalRecordRead extends FormalRecordPage {
   target: string | null;
@@ -69,6 +76,7 @@ export const FORMAL_RECORD_PAGE_SQL = `SELECT e.id AS event_id, e.object_id, e.s
   e.type AS event_type, e.object_version, e.payload_sha256,
   e.actor_fellow_id AS fellow_id, e.actor_sponsor_id AS sponsor_id,
   e.actor_session_id AS session_id, e.model_string_self_declared, e.harness, e.created_at,
+  screening.provenance_json AS screening_provenance_json,
   CASE WHEN c.redacted_at IS NULL AND length(CAST(c.payload_json AS BLOB)) <= ${FORMAL_RECORD_MAX_BYTES}
     AND NOT ${hiddenByContentControlSql("e.problem_id", "e.object_id")}
     AND NOT ${hiddenByContentControlSql("e.problem_id", "e.object_id || '@' || e.object_version")}
@@ -76,6 +84,7 @@ export const FORMAL_RECORD_PAGE_SQL = `SELECT e.id AS event_id, e.object_id, e.s
     THEN c.payload_json END AS payload_json
   FROM problems p JOIN events e ON e.problem_id = p.id
   LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+  LEFT JOIN screening_publications screening ON screening.event_id = e.id
   WHERE p.id = ? AND p.status <> 'private-draft' AND p.public_seq >= ?
     AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
     AND e.seq > ? AND e.seq <= ?
@@ -245,9 +254,17 @@ export async function readFormalRecords(
       event_type: _type,
       object_version: _version,
       payload_json: _bytes,
+      screening_provenance_json: screeningProvenance,
       ...publication
     } = row;
-    records.push({ kind, publication, target, content });
+    const screeningNotice = publicationScreeningNotice(screeningProvenance);
+    records.push({
+      kind,
+      publication,
+      target,
+      content,
+      ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
+    });
   }
   const next = rows.length > FORMAL_RECORD_PAGE_SIZE ? previous : null;
   if (next !== null) omitted.add("page_limit");

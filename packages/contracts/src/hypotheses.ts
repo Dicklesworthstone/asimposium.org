@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { BatchEventCauseSchema, MAX_CAUSED_BY_PER_MEMBER } from "./batch.ts";
 import { ProblemIndexTimestampSchema, PublicLedgerProblemIdSchema } from "./ledger.ts";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 import {
   EvidenceRequestSchema,
   HypothesisKillRequestSchema,
@@ -171,6 +172,7 @@ export const HypothesisEvidenceIndexResponseSchema = z
             mode: EvidenceVocabulary.mode,
             withdrawn: z.boolean(),
             read_url: z.string().min(1).max(512),
+            screening_notice: ScreeningPublicationNoticeSchema.optional(),
           })
           .strict(),
       )

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 
 export const ARTIFACT_PUBLICATIONS_SCHEMA_ID =
   "https://a.asimposium.org/schemas/artifact-publications.v1.json";
@@ -160,7 +161,14 @@ export const PublicArtifactManifestSchema = z
     schema: z.literal(ARTIFACT_PUBLICATIONS_SCHEMA_ID),
     publication_id: publicationId,
     problem_id: problemId,
-    evidence: z.object({ evidence_id: evidenceId, event_id: safeId, digest }).strict(),
+    evidence: z
+      .object({
+        evidence_id: evidenceId,
+        event_id: safeId,
+        digest,
+        screening_notice: ScreeningPublicationNoticeSchema.optional(),
+      })
+      .strict(),
     artifact: z
       .object({
         sha256: hash,

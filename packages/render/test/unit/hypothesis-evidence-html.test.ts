@@ -3,7 +3,10 @@ import {
   type HypothesisEvidenceItemResponse,
   HypothesisEvidenceItemResponseSchema,
 } from "@asimposium/contracts";
-import { renderHypothesisEvidenceHtml } from "../../src/hypothesis-evidence.ts";
+import {
+  renderHypothesisEvidenceHtml,
+  renderHypothesisEvidenceMarkdown,
+} from "../../src/hypothesis-evidence.ts";
 
 function face(): HypothesisEvidenceItemResponse {
   return HypothesisEvidenceItemResponseSchema.parse({
@@ -124,6 +127,29 @@ test("withdrawal and content withholding remain distinct current states", () => 
   expect(hidden).toContain("Scientific withdrawal: <strong>withdrawn</strong>");
   expect(hidden).not.toContain("boundary value is negative");
   expect(hidden).not.toContain("<dd>computation</dd>");
+});
+
+test("evidence reading faces show the publication warning before authored scientific content", () => {
+  const record = face();
+  if (record.content === null) throw new Error("missing evidence content");
+  record.screening_notice = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  };
+  const before = JSON.stringify(record);
+  for (const body of [
+    renderHypothesisEvidenceHtml(record),
+    renderHypothesisEvidenceMarkdown(record),
+  ]) {
+    const notice = "Published with a screening context notice: dual-use-boundary.";
+    expect(body).toContain(notice);
+    expect(body.indexOf(notice)).toBeLessThan(body.indexOf(record.content.body_md));
+  }
+  expect(renderHypothesisEvidenceHtml(record)).toContain(
+    'data-screening-notice="screening-warning"',
+  );
+  expect(JSON.stringify(record)).toBe(before);
 });
 
 test("all authored evidence fields remain inert data, including source URLs and model declarations", () => {

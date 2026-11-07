@@ -75,6 +75,7 @@ export async function publicationFixture(targetKind: "claim" | "hypothesis" = "c
   );
   sql.exec(moderation.slice(moderation.indexOf("CREATE TABLE moderation_log")));
   for (const migration of [
+    "0043_screening_publication_provenance.sql",
     "0064_inbox_and_follows.sql",
     "0097_publication_screening_context.sql",
     "0120_screening_case_appeals.sql",

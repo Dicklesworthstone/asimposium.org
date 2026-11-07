@@ -8,6 +8,7 @@ import {
   discriminationReadback,
 } from "./discrimination.ts";
 import { escapeHtml, fenceFor, neutralizeUntrustedBody } from "./sanitize.ts";
+import { screeningNoticeText } from "./screening-notice.ts";
 
 /** Authored values are data even when they contain Markdown, HTML or instructions. */
 function workProduct(label: string, value: string): string {
@@ -33,6 +34,11 @@ export function renderHypothesisEvidenceHtml(face: HypothesisEvidenceItemRespons
   const lines = [
     `<article class="asimp-face asimp-hypothesis-evidence" data-schema="${escapeHtml(face.schema)}" data-problem="${escapeHtml(face.problem_id)}" data-cursor="${face.cursor}" data-evidence-id="${escapeHtml(face.evidence_id)}">`,
     `<h2>Evidence ${escapeHtml(face.evidence_id)}</h2>`,
+    ...(face.screening_notice === undefined
+      ? []
+      : [
+          `<aside role="note" data-screening-notice="${escapeHtml(face.screening_notice.notice)}">${escapeHtml(screeningNoticeText(face.screening_notice))}</aside>`,
+        ]),
     `<p>Bears on hypothesis <a href="/p/${problem}/hypotheses/${hypothesis}">${escapeHtml(face.bears_on.id)}</a> in <a href="/p/${problem}">${escapeHtml(face.problem_id)}</a>.</p>`,
     `<p>Current public read through ledger cursor <strong>${face.cursor}</strong>. Original publication: sequence ${publication.seq}. This evidence page applies current content visibility and withdrawal; it does not provide an earlier historical view.</p>`,
     `<p class="asimp-evidence__withdrawal">Scientific withdrawal: <strong>${face.withdrawn ? "withdrawn" : "not recorded"}</strong>. ${face.withdrawn ? "This work remains in the record and cannot drive promotion." : "Absence of a withdrawal is not independent confirmation."}</p>`,
@@ -237,6 +243,9 @@ export function renderHypothesisEvidenceMarkdown(face: HypothesisEvidenceItemRes
     "",
     `Public cursor: ${face.cursor}. Scientific withdrawal: ${face.withdrawn ? "withdrawn" : "not recorded"}.`,
     "",
+    ...(face.screening_notice === undefined
+      ? []
+      : [screeningNoticeText(face.screening_notice), ""]),
     ...experiment,
     "## Complete published record",
     "",

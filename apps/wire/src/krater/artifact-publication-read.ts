@@ -1,4 +1,6 @@
+import type { ScreeningPublicationNotice } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 import {
   livePublicationPin,
   PUBLICATION_LIVE_PIN_SQL,
@@ -21,7 +23,7 @@ export const ARTIFACT_PUBLICATION_PAGE_SIZE = 20;
 const notFound = (): never => {
   throw new ArtifactPublicationError("NOT_FOUND");
 };
-function manifest(row: PublicationJob) {
+function manifest(row: PublicationJob, evidenceNotice?: ScreeningPublicationNotice) {
   return {
     schema: ARTIFACT_PUBLICATION_SCHEMA,
     publication_id: row.publication_id,
@@ -30,6 +32,7 @@ function manifest(row: PublicationJob) {
       evidence_id: row.evidence_id,
       event_id: row.evidence_event_id,
       digest: `sha256:${row.evidence_sha256}`,
+      ...(evidenceNotice === undefined ? {} : { screening_notice: evidenceNotice }),
     },
     artifact: {
       sha256: row.sha256,
@@ -69,12 +72,18 @@ async function resolvePublicArtifactManifest(
   // Recheck visibility after asynchronous hashing. Only exact, still-available
   // public bytes can support this face; no private upload identifier is served.
   const current = await db
-    .prepare(`SELECT p.unlisted FROM problems p WHERE p.id = ?
+    .prepare(`SELECT p.unlisted,
+      (SELECT s.provenance_json FROM screening_publications s WHERE s.event_id = ?)
+        AS evidence_screening_provenance
+      FROM problems p WHERE p.id = ?
       AND ${PUBLICATION_LIVE_PIN_SQL}`)
-    .bind(problem, ...publicationPinBindings(row, pin))
-    .first<{ unlisted: number }>();
+    .bind(row.evidence_event_id, problem, ...publicationPinBindings(row, pin))
+    .first<{ unlisted: number; evidence_screening_provenance: string | null }>();
   if (!current || ![0, 1].includes(current.unlisted)) return notFound();
-  return { face: manifest(row), unlisted: current.unlisted === 1, pin };
+  // This notice belongs to the pinned evidence publication, not the separately
+  // screened artifact bytes. Never expose the private screening receipt.
+  const evidenceNotice = publicationScreeningNotice(current.evidence_screening_provenance);
+  return { face: manifest(row, evidenceNotice), unlisted: current.unlisted === 1, pin };
 }
 export async function readPublicArtifactManifest(
   db: D1Database,

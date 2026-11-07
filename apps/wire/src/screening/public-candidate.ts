@@ -103,6 +103,10 @@ function supportsPublishedWarning(
     kind === "revise" ||
     kind === "problem-proposal" ||
     kind === "problem-statement-revision" ||
+    // The common evidence executor also owns friction, implicit writes and
+    // atomic batches. Its canonical claim/hypothesis, citation and formal-work
+    // readers preserve the notice bound to this exact publication.
+    (kind === "evidence" && holdContext?.route === "evidence") ||
     // Claim and statement reviews share a classifier kind. Only the server's
     // claim-review writer has complete public notice propagation.
     (kind === "review" && holdContext?.route === "review")

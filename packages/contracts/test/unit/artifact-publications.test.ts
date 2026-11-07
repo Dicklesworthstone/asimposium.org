@@ -1,5 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   ARTIFACT_PUBLICATIONS_SCHEMA_ID,
   ArtifactPublicationReceiptSchema,
@@ -293,6 +294,51 @@ test("public provenance rejects private operational fields at every level", () =
     { verification: "proved" },
   ])
     assert.equal(PublicArtifactManifestSchema.safeParse({ ...manifest, ...change }).success, false);
+});
+test("artifact provenance carries only the source evidence's coarse publication notice", () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/valid/artifact-publication-evidence-warning.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.deepEqual(PublicArtifactManifestSchema.parse(fixture), fixture);
+  const offScope = {
+    ...fixture,
+    evidence: {
+      ...fixture.evidence,
+      screening_notice: {
+        category: "off-topic",
+        action: "published-with-warning",
+        notice: "off-scope",
+      },
+    },
+  };
+  assert.deepEqual(PublicArtifactManifestSchema.parse(offScope), offScope);
+  const invalid = JSON.parse(
+    readFileSync(
+      new URL(
+        "../fixtures/invalid/artifact-publication-evidence-warning-private.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  assert.equal(PublicArtifactManifestSchema.safeParse(invalid).success, false);
+  assert.equal(
+    PublicArtifactManifestSchema.safeParse({
+      ...manifest,
+      screening_notice: fixture.evidence.screening_notice,
+    }).success,
+    false,
+  );
+  assert.equal(
+    PublicArtifactManifestSchema.safeParse({
+      ...manifest,
+      artifact: { ...manifest.artifact, screening_notice: fixture.evidence.screening_notice },
+    }).success,
+    false,
+  );
 });
 test("bounded evidence pages carry delivery cutoffs and canonical continuation paths", () => {
   const path = "/p/P-DEMO/evidence/E-1/artifacts.json";

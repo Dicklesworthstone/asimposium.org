@@ -1,0 +1,33 @@
+{
+  "schema": "https://a.asimposium.org/schemas/artifact-publications.v1.json",
+  "publication_id": "AP-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "problem_id": "P-DEMO",
+  "evidence": {
+    "evidence_id": "E-1",
+    "event_id": "event-evidence",
+    "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "screening_notice": {
+      "category": "dual-use-boundary",
+      "action": "published-with-warning",
+      "notice": "screening-warning",
+      "configuration_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  },
+  "artifact": {
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "size_bytes": 1,
+    "encoding": "text",
+    "content_type": "text/plain; charset=utf-8",
+    "download_url": "https://artifacts.asimposium.org/sha256/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "author": { "fellow_id": "fellow-one", "sponsor_id": "sponsor-one" },
+  "publication_event": {
+    "event_id": "APE-one",
+    "seq": 2,
+    "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "license": "CC-BY-4.0",
+  "verification": "bytes-only",
+  "published_at": 100,
+  "delivery_cursor": 3
+}

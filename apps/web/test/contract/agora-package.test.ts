@@ -9,6 +9,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { READINESS_SCHEMA_ID } from "@asimposium/contracts";
 import ts from "typescript";
 import nextConfig, { configuredRedirectStoaOrigin } from "../../next.config";
 
@@ -218,7 +219,9 @@ describe("sponsor console trust boundary", () => {
   test("the client join handoff uses the runtime-tested validated-origin renderer", () => {
     const cards = readPackageFile("app/console/cards.tsx");
     const joinPaste = readPackageFile("app/console/join-paste.ts");
-    expect(cards).toMatch(/import\s*\{[^}]*\bbuildJoinPasteBlock\b[^}]*\}\s*from\s*["']\.\/join-paste["']/);
+    expect(cards).toMatch(
+      /import\s*\{[^}]*\bbuildJoinPasteBlock\b[^}]*\}\s*from\s*["']\.\/join-paste["']/,
+    );
     expect(cards).toContain("const pasteBlock = buildJoinPasteBlock(joinUrl)");
     expect(cards).not.toContain("https://a.asimposium.org/v1/hello");
     expect(joinPaste).toContain("parseStoaJoinUrl");
@@ -443,7 +446,9 @@ describe("sponsor console trust boundary", () => {
     expect(consolePage).toContain("stoaFellows(sponsorId, fellowCursor)");
     expect(consolePage).toContain("nextFellowCursor = fellowResult.data.next_cursor");
     expect(consolePage).toMatch(/href=\{consolePageHref\(\{[^}]*fellowCursor:\s*nextFellowCursor/);
-    expect(consolePage).toMatch(/href=\{consolePageHref\(\{[^}]*onboardingProblem[^}]*reviewContext/);
+    expect(consolePage).toMatch(
+      /href=\{consolePageHref\(\{[^}]*onboardingProblem[^}]*reviewContext/,
+    );
     expect(consolePage).toContain("<LifecycleManager");
     expect(consolePage).not.toContain("prepareAndDispatch(");
   });
@@ -880,7 +885,9 @@ describe("apex markdown redirect origin", () => {
       // canonical machine faces cross to Stoa (§13.2).
       expect(redirects.some(({ source }) => source === "/protocol")).toBe(false);
       expect(redirects.find(({ source }) => source === "/protocol.md")).toEqual({
-        source: "/protocol.md", destination: "https://a-staging.asimposium.org/protocol.md", permanent: true,
+        source: "/protocol.md",
+        destination: "https://a-staging.asimposium.org/protocol.md",
+        permanent: true,
       });
       for (const source of ["/now.md", "/now.json", "/results.md", "/results.json"]) {
         expect(redirects.find((redirect) => redirect.source === source)).toEqual({
@@ -961,8 +968,13 @@ describe("the health face states availability, never implies it", () => {
       ledger: {
         public_index: "not_probed",
         public_index_entries: null,
-        research_writes: "not_implemented",
+        research_writes: "not_ready",
         product_readiness: "not_ready",
+        readiness: {
+          schema: READINESS_SCHEMA_ID,
+          status: "unavailable",
+          reason: "origin_unavailable",
+        },
       },
     });
   });
@@ -977,7 +989,7 @@ describe("the health face states availability, never implies it", () => {
       ledger: { research_writes: string; product_readiness: string; public_index: string };
     };
     expect(body.stoa.sponsor_enrollment_write_configuration).toBe("not_configured");
-    expect(body.ledger.research_writes).toBe("not_implemented");
+    expect(body.ledger.research_writes).toBe("not_ready");
     expect(body.ledger.product_readiness).toBe("not_ready");
     expect(body.ledger.public_index).toBe("not_probed");
     expect(body.freshness).toEqual({
@@ -994,11 +1006,15 @@ describe("the health face states availability, never implies it", () => {
       ENROLLMENT_RECOVERY_HMAC_KEY_HEX: "d".repeat(64),
       ARTIFACT_CANARY_VERSION: "v1",
     } as const;
-    const body = JSON.stringify(
-      await resolvePlaneStatus({
-        environment,
-        fetchImpl: async () => new Response(null, { status: 503 }),
-      }),
+    const status = await resolvePlaneStatus({
+      environment,
+      fetchImpl: async () => new Response(null, { status: 503 }),
+    });
+    expect(status.ledger.readiness.schema).toBe(READINESS_SCHEMA_ID);
+    // Only the declared public schema identifier may share the canary's "v1".
+    const body = JSON.stringify(status).replaceAll(
+      READINESS_SCHEMA_ID,
+      "[public readiness schema]",
     );
 
     for (const value of Object.values(environment)) {

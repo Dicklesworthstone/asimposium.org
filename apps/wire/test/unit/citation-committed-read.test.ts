@@ -600,3 +600,61 @@ test("citation backlinks preserve exact-version screening notices and refuse mal
     sqlite.close();
   }
 });
+
+test("evidence backlinks carry notices and respect object, version and event content controls", async () => {
+  const { sqlite, db, event } = fixture();
+  const receipt = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  try {
+    await event(1, "L-1", 1, citation());
+    await event(
+      2,
+      "E-2",
+      1,
+      {
+        source: { kind: "locator", locator: "L-1@1", excerpt: "A bounded source excerpt." },
+        direction: "supports",
+        bears_on_id: "C-1",
+        computed_class: "citation",
+      },
+      "evidence",
+    );
+    sqlite
+      .query("INSERT INTO screening_publications VALUES(?,?)")
+      .run("P-TEST-2", JSON.stringify(receipt));
+    const read = () => loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture);
+    assert.deepEqual(
+      (await read())?.associated_evidence[0]?.screening_notice,
+      receipt.public_action,
+    );
+    assert.ok(!JSON.stringify(await read()).includes(receipt.input_digest));
+    for (const target of ["E-2", "E-2@1", "#2"]) {
+      sqlite.query("INSERT INTO content_controls VALUES('P-TEST',?,'hidden',1)").run(target);
+      assert.deepEqual((await read())?.associated_evidence, []);
+      sqlite.query("INSERT INTO content_controls VALUES('P-TEST',?,'visible',2)").run(target);
+      assert.deepEqual(
+        (await read())?.associated_evidence[0]?.screening_notice,
+        receipt.public_action,
+      );
+    }
+    sqlite
+      .query("UPDATE screening_publications SET provenance_json=? WHERE event_id=?")
+      .run(
+        JSON.stringify({
+          ...receipt,
+          public_action: { ...receipt.public_action, private_detail: "PRIVATE_DETECTOR_CANARY" },
+        }),
+        "P-TEST-2",
+      );
+    await assert.rejects(read(), /PUBLIC_SCREENING_RECEIPT_UNAVAILABLE/);
+  } finally {
+    sqlite.close();
+  }
+});

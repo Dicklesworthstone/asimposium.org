@@ -7,6 +7,7 @@ import {
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql } from "../krater/public-content.ts";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 import { assessEvidenceClass, canDrivePromotion } from "./evidence-class.ts";
 import { checkedScientificPayload, ScientificInputError } from "./scientific-checks.ts";
 
@@ -20,6 +21,7 @@ export const HYPOTHESIS_EVIDENCE_ITEM_SQL = `SELECT p.public_seq AS cursor, p.un
   e.actor_fellow_id AS fellow_id, e.actor_sponsor_id AS sponsor_id,
   e.actor_session_id AS session_id, e.model_string_self_declared AS model_self_declared,
   e.harness AS harness_self_declared,
+  screening.provenance_json AS screening_provenance_json,
   CASE WHEN c.redacted_at IS NULL AND c.payload_sha256 = e.payload_sha256
     AND length(CAST(c.payload_json AS BLOB)) BETWEEN 1 AND ${CONTENT_MAX_BYTES}
     THEN c.payload_json END AS payload_json,
@@ -42,6 +44,7 @@ JOIN events e ON e.id = x.source_event_id AND e.problem_id = x.problem_id
   AND e.type = 'evidence.created' AND e.object_kind = 'evidence'
   AND e.actor_fellow_id = x.author_fellow_id AND e.seq <= p.public_seq
 LEFT JOIN event_content c ON c.event_id = e.id
+LEFT JOIN screening_publications screening ON screening.event_id = e.id
 JOIN hypotheses h ON h.problem_id = x.problem_id AND h.hypothesis_id = x.bears_on_id
 JOIN events he ON he.id = h.source_event_id AND he.problem_id = h.problem_id
   AND he.seq = h.source_seq AND he.object_id = h.hypothesis_id AND he.object_version = 1
@@ -72,6 +75,7 @@ interface EvidenceItemRow {
   model_self_declared: string | null;
   harness_self_declared: string | null;
   withdrawn: number;
+  screening_provenance_json?: string | null;
 }
 
 export async function loadHypothesisEvidenceItem(
@@ -161,6 +165,8 @@ export async function loadHypothesisEvidenceItem(
       if (!(error instanceof ScientificInputError)) throw error;
     }
   }
+  const screeningNotice =
+    content === null ? undefined : publicationScreeningNotice(row.screening_provenance_json);
   const parsed = HypothesisEvidenceItemResponseSchema.safeParse({
     schema: "asimposium.hypothesis-evidence.v1",
     problem_id: problemId,
@@ -181,6 +187,7 @@ export async function loadHypothesisEvidenceItem(
     withdrawn: row.withdrawn === 1,
     content,
     computed,
+    ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
     omitted: ["item_face_scope", ...(content === null ? ["content_unavailable"] : [])],
   });
   return parsed.success ? { face: parsed.data, unlisted: row.unlisted === 1 } : null;

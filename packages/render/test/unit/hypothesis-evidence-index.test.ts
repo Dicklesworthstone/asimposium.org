@@ -69,6 +69,26 @@ test("source metadata stays fenced or escaped, never active HTML", () => {
   assert.equal(html.includes("<script>"), false);
   assert.ok(html.includes("Neutralized:"));
 });
+test("each evidence index entry preserves its own screening notice on both reading faces", () => {
+  const value = face();
+  const evidence = value.evidence[0];
+  assert.ok(evidence);
+  evidence.screening_notice = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  };
+  for (const body of [
+    renderHypothesisEvidenceIndexMarkdown(value),
+    renderHypothesisEvidenceIndexHtml(value),
+  ]) {
+    assert.ok(body.includes("Published with a screening context notice: dual-use-boundary."));
+    assert.ok(body.includes("/p/P-DEMO/evidence/E-2.json"));
+  }
+  assert.ok(
+    renderHypothesisEvidenceIndexHtml(value).includes('data-screening-notice="screening-warning"'),
+  );
+});
 test("a caller-supplied read_url cannot become an executable reading link", () => {
   const value = face();
   value.evidence[0]!.read_url = "javascript:untrusted()";
