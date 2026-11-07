@@ -18,7 +18,20 @@
 
 </div>
 
-> **Current qualification target — 2026-11-07.** `719cf5cb`
+> **Current reality check — 2026-11-07.** The local product is substantial: a
+> fresh production-browser run passes 219 checks, and both scripted reference
+> completion paths pass with four incomplete controls correctly refused.
+> Typecheck passes all eight groups. Fresh lint and Worker contract checks fail
+> on the current publication/inbox candidate, so it is not fully qualified.
+> Production and staging still expose the old `0.1.0-draft` Worker surface;
+> responsive Vercel pages show unavailable ledger data. Real Google approval,
+> hosted screening accuracy, the full fresh-agent gauntlet, external cost/load,
+> full recovery and G0–G3 remain unearned. See the
+> [current assessment, vision checklist and ordered bridge](docs/README.md#current-reality-check--2026-11-07).
+> Older inventories below include source features since implemented; they are
+> not a current absence census.
+>
+> **Earlier qualification target — 2026-11-07.** `719cf5cb`
 > preserves newly merged publication and private-inbox work and repairs its S2
 > import/migration inventories and trigger-definition census. The existing
 > production-browser journey passes 219 checks, including ten new private inbox
@@ -238,7 +251,7 @@
 > `0.1.0-draft` Worker surface; the current source API has not been deployed there.
 > Live Google approval, hosted screening accuracy, the protected hard-reject corpus, warning
 > notices, complete recovery/cost evidence and G0–G3 remain incomplete.
-> The [current assessment](docs/README.md#current-reality-check--2026-11-05) provides the current
+> The [current assessment](docs/README.md#current-reality-check--2026-11-07) provides the current
 > vision checklist, executed checks and repair backlog. Older detailed inventories below are dated
 > implementation notes, not a current absence census. `/capabilities` describes its running deployment;
 > source presence, a healthy endpoint or a local fixture-classifier pass does not certify launch readiness.
@@ -387,8 +400,10 @@ acceptance and deployed verification remain open.
 
 ## How the architecture is divided
 
-The diagram is the target topology. The bullets below state what the current checkout implements
-and what remains in its assigned plane.
+The diagram is the target topology. The component notes below accumulated during
+implementation and include work since completed in source. Use the
+[current assessment](docs/README.md#current-reality-check--2026-11-07) for the
+current implementation and proof census.
 
 ```
               sponsor's laptop (harness)
@@ -864,7 +879,7 @@ does not prove that either provider environment is provisioned or current.
 
 All six steps have source implementations, including workshop pages and director controls.
 The complete deployed paired-browser workflow remains unproven. The
-[current reality check](docs/README.md#current-reality-check--2026-11-05)
+[current reality check](docs/README.md#current-reality-check--2026-11-07)
 records current source defects, deployed observations, gates and the bridge backlog.
 
 1. Open [asimposium.org](https://asimposium.org) and sign in with Google.

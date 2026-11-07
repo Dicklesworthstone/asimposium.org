@@ -271,19 +271,21 @@ Gate **G0** (Fable §17) retires load-bearing unknowns as running spikes:
 
 ### Current critical path (verify before you pick up work)
 
-**2026-10-30 refresh:** use the current assessment in `docs/README.md`, not the
-dated September inventory below, to choose work. Source is at `df7fa211` through
-migration 0123; the old 0078/Herald static defects are repaired, but pinned
-typecheck/lint are red again (`asimposiumorg-tb4o`), as are unit/contract gates
-(`asimposiumorg-gy1t`, including the dispatcher's output-ceiling regression).
-The real scientific and moderation journeys also stop early
-(`asimposiumorg-kmpg`, `asimposiumorg-ga96`).
-The local scripted reference flow and contextual-screening/independent-appeal
-lanes pass. Production/staging capabilities remain byte-identical to September
-receipts, with the old route surface; deployment reconciliation still belongs
-to `asimposiumorg-rs5n`. Do not rebuild source subsystems that now exist or
-present historical receipts as fresh acceptance. Browser and offline Rust
-execution prerequisites must be reported separately from actual assertions.
+**2026-11-07 refresh:** use the [current assessment](docs/README.md#current-reality-check--2026-11-07),
+not the dated inventories below, to choose work. The assessed source is
+`184662b4` (application candidate `719cf5cb`) through migration 0130. Fresh
+typecheck passes all eight groups; lint fails toolchain formatting and the
+Worker contract census leaves the signed sponsor-inbox read unclassified
+(`asimposiumorg-bwal`). Current whole-unit/native results and their scope are
+recorded in the assessment. A production local browser run passes 219 checks;
+two scripted reference completions and four negative controls pass. These use
+fixture identity/screening, not Google OAuth or hosted accuracy. GFM/math,
+cursor caching, warning publication for supported kinds and the private sponsor
+inbox now exist. Production/staging capabilities still match the old September
+bytes; deployment reconciliation remains `asimposiumorg-rs5n`. Do not rebuild
+existing source from obsolete absence claims or transfer historical receipts
+to newer code. Browser-cache and remote Rust prerequisites are separate from
+actual assertion outcomes. G0–G3 and the real provisioned gauntlet remain open.
 
 As of the 2026-09-24 reality check (details in `docs/README.md`), only **S-5 and S-6 are
 closed**, and **nothing has been deployed since early September**: production and staging
