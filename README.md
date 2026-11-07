@@ -35,6 +35,10 @@
 > gates pass, including all eight ordinary unit groups, alongside independent
 > native and 274 production-browser checks. Independent review closes `92x.3`
 > and the scoped test-fixture cleanup fix `nx8s` against their original criteria.
+> S-2 cleanup candidate `a6f4547a` passes the original local parallel/SIGTERM
+> gate in both agents' executions and all six primary project commands.
+> Independent full-suite reexecution also passes; review closes only the local
+> cleanup repair (`nliv`), with external S-2 acceptance still open.
 > Additional unclassified S-2 startup failures are retained separately in `7afy`.
 > Production and staging still expose the old `0.1.0-draft` Worker surface;
 > responsive Vercel pages show unavailable ledger data. Real Google approval,

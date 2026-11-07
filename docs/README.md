@@ -260,6 +260,114 @@ bodies. This confirms the public response, not provider revision, migration
 lineage or deployment history. No deployment or resource provisioning was
 performed; `rs5n`, broader parents and external G0–G3 acceptance remain open.
 
+### S-2 startup diagnostics at `84a112ae`
+
+`84a112ae` repairs two diagnostic gaps exposed by the retained `f566a267`
+failures: a failed source-walker command now emits its existing stage refusal,
+and the owner-loss launch retains its wrapper's fixed, private stage metadata.
+Unmeasured group/watchdog survival is `null`, rather than an unsupported
+`false`. New diagnostic writers preserve the original failure exits even when
+their output readers disappear. Ownership, source attestation, census limits,
+deadlines and cleanup assertions are unchanged. This is diagnostic/enabler
+work; it adds no scientific workflow capability and does not identify the
+historical ten-second delay or raw-child125 trigger. `7afy` remains unfinished.
+
+Primary focused controls pass 16 tests and 92 expectations. Independently,
+five one-dimension mutations fail their intended assertions; the actual old
+closure path with closed stdout passes its original exit1 control. Exact
+restoration returns all 16 controls to green. The primary's 18:42 Beads note
+incorrectly called the full-harness closed-stdout failure 141: its actual
+record is 125; 141 belongs to a separate literal pipe control. The 18:50 correction
+and all original raw failures remain retained. That difference does not
+establish a historical cause.
+
+All six prescribed commands pass at this exact revision, executed sequentially
+from a clean preserved checkout: root typecheck/lint 8/8; contract 5 required
+groups with its original two policy skips; full contracts 958/0/7174 expectations;
+full render592/0/6047. The ordinary unit dispatcher passes all eight groups in
+1,502.12 seconds, with a normally exited zero-status owner: Worker 6798/0/32232
+and Agora 906/0/6111. No whole group fails, blocks, goes missing or skips; the
+original 54 individual toolchain skips remain. The two changed inputs have
+identical hashes before and after every command.
+
+The full native Krater harness completes its local D1/DO checks, including
+restart, mounted outbox, legacy upgrades, current journals, alarm and source
+provenance, in 120.54 seconds. Its owner exits normally with 78: deployed DO and
+edge-load evidence are absent. That is a blocked aggregate, not an S-2 pass.
+The registered native lifecycle gate fails in224.414seconds:
+`S2_PARALLEL_SECOND_NOT_READY`. Its retained second-child log identifies the
+source-walker command's actual10-second deadline, capture124 and proven cleanup,
+followed by the new named closure refusal. The first child finishes its local
+checks with blocked78. This directly reproduces the source-walker deadline
+class in real parallel startup; it still does not establish why the walker
+took too long. SIGTERM was unexecuted and the queue stopped before cost ran.
+Evidence is retained in `e2e/artifacts/7afy-20261107-coppertiger/` and
+`e2e/artifacts/independent-20261107-7afy/`.
+Fresh public reads at 22:57 UTC still return the byte-identical `0.1.0-draft`
+production and staging capabilities bodies. No provider resources changed.
+
+A bounded scheduler observation finds the current native owner's source walker
+spending 1.55 seconds on CPU and 7.88 seconds waiting for CPU0. Allocating CPUs0–1
+only to a verification process lets the original parallel assertions pass,
+then exposes an actual SIGTERM cleanup failure. This does not establish the
+historical `f566a267` delay or raw125 trigger; `7afy` remains open. The first
+cleanup candidate `bfe43e9b` is independently rejected by the native gate.
+
+Follow-through `b0d994f3` protects watchdog inspection from group TERM, records
+startup ownership before gates, restores the EXIT parser's field separator,
+and preserves the first signal across fork/enrollment. A normal supervisor
+ignores TERM only after starting its payload, then waits once for the actual
+child status. The rejected repeat-wait design produced 127 in a complete
+preparation run; its earlier narrow passes did not establish correctness.
+The new actual pre-arm regression also detects the old manifest sealing45-byte
+startup evidence before its untracked writer grows it to68bytes. Pre-setsid
+uncertainty remains a refusal, without a PID-only signal or unbounded wait.
+All original identity, group census, ALRM and deadline checks remain intact.
+
+Independent baseline and exact-restored controls each pass 13 tests / 237 assertions;
+all seven isolated faults fail their intended checks. The missing-enrollment
+flag fault proves structural wiring only; helper and subprocess controls do
+not certify Workerd. Both default UBS scans complete the two changed inputs
+with 0 critical / 14 reviewed warnings / 313 info and no failed module. The native gate
+still fails at this revision in 163.77 seconds: parallel passes, then SIGTERM's
+child 125 refuses cleanup/publication. Both agents stop acceptance. The missing
+release-descriptor cleanup is now reproduced while the controller remains
+alive: its exact FIFO is still open and PID-scoped lsof observes a state holder.
+Closing only the descriptor with that exact FIFO identity passes, while an
+unrelated caller descriptor stays open. No holder is exempted from inspection.
+The descriptor repair is committed at `a6f4547a`. Independent baseline and exact
+restoration each pass 15 tests / 243 assertions, and all nine isolated faults fail.
+The original native gate now passes both modes, 1 test / 8 assertions in 164.31 seconds,
+with a normally exited zero-status owner and stable source hashes. Only that
+verification process receives CPUs0–1; original limits are unchanged.
+Primary native reexecution also passes 1 test / 8 assertions in 158.51 seconds with a
+normally exited zero-status owner and stable source. All six prescribed primary
+commands pass: typecheck/lint 8/8, contract 5 required groups with its original two
+policy skips, full contracts 958/0/7174 and full render 592/0/6047. The ordinary
+unit dispatcher passes all eight groups in 1,404.38 seconds, owner 0 / stable source:
+Worker 6806/0/32281, Agora 906/0/6111, toolchain 422 passes and its original 54 individual
+skips. The original unfiltered Worker invocation includes the entire S-2 unit
+file; dot-reporter fragments are not used as a per-file test count. Independent
+reexecution of all six originals also passes, each with a normally exited
+zero-status owner and stable source. Its ordinary unit dispatcher passes all
+eight groups in 1,401.90 seconds with the same Worker/Agora totals and original
+individual skips. Independent review closes only `nliv` against its original
+criteria, with the complete source/test/gate acceptance map recorded in Beads.
+`7afy` and the broader S-2/deployment/launch owners remain open.
+The default cost command separately blocks 78, `S2_COST_MEASUREMENT_UNAVAILABLE`.
+Supplying the actual native parallel child's four-file receipt chain yields
+S-2 `accepted-local` for 232 selected settled-write receipts, while the aggregate
+still blocks 78, `COST_MODEL_EXTERNAL_MEASUREMENTS_UNAVAILABLE`. Incomplete row
+totals, provider traffic/CPU/cache/R2/pricing and deployed performance remain
+unknown; local subtotals are not an affordability or G0 verdict.
+The descriptor increment's diff UBS completes both inputs with
+0 critical / 14 reviewed warnings / 327 info. Its original
+single-CPU staged scan hits the installed scheduler's `FREE_SLOTS` crash before
+producing a report; unchanged staged arguments with only the scanner process
+on CPUs0–1 complete both original modules with the same totals. No analyzer
+rule, input, limit or suppression changes. `g4b4` retains the broader scanner
+gap. This is enabler work, with no new scientific capability or deployed/G0/launch claim.
+
 ### Initial assessment and evidence boundaries
 
 This assessment is `asimposiumorg-sewo`, at `main`
@@ -473,8 +581,11 @@ Tier 2 and expressly refused features are not extra launch requirements.
    receipts, fault controls and original failures; rerun the relevant original
    gates after further changes. The neutral Fellow history `dn6.2` is now
    independently accepted at `316bf7b1`, including its corrected narrow-screen
-   rendering and complete primary unit gate. The unresolved runtime
-   investigations `pjuf` and `sbuk` stay open; these local passes do not qualify
+   rendering and complete primary unit gate.
+   Exact review/evidence readers and Fellow links are independently accepted
+   at `cb994ce3`; S-2 cleanup is accepted at `a6f4547a` after both agents execute
+   all six original commands and the original local parallel/SIGTERM gate.
+   The unresolved runtime investigations `pjuf` and `sbuk` stay open; these local passes do not qualify
    deployment or launch.
 2. **Reconcile the existing staging deployment.** The operator clears `rs5n`;
    OPS confirms D1 lineage, actual R2/DO/AI/key roles and Worker-before-Agora

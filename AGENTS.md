@@ -290,6 +290,9 @@ Accepted `cb994ce3` fixes exact review/evidence readers and Fellow source links:
 all six prescribed gates pass, including all eight ordinary unit groups, plus
 independent native/274-browser checks. Independent review closed
 `asimposiumorg-92x.3` and `asimposiumorg-nx8s` against their original criteria.
+S-2 cleanup candidate `a6f4547a` passes the original local parallel/SIGTERM gate
+in both agents' executions and all six prescribed commands in both clean checkouts.
+Independent review closes only `asimposiumorg-nliv`; external S-2 acceptance remains open.
 `asimposiumorg-7afy` separately retains two
 unclassified S-2 startup failures; feature acceptance cannot close that diagnosis.
 Preserve these outcomes, not only earlier green runs. A production
