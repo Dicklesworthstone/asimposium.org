@@ -1102,11 +1102,29 @@ async function stopOwnedFixtureGroup(pgid: number | undefined): Promise<void> {
   await waitForOwnedGroupEmpty(pgid);
 }
 
+function readFixtureGroupId(pidPath: string): number {
+  const record = readFileSync(pidPath, "utf8");
+  const pid = Number(record);
+  if (!Number.isSafeInteger(pid) || pid <= 1 || record !== `${pid}\n`) {
+    throw new Error("fixture process group record must contain a complete canonical PID line");
+  }
+  return pid;
+}
+
 function aggregateOutputCommand(totalCapturedBytes: number): string {
   return `my $payload = ${totalCapturedBytes}; my $stdout = 48 * 1024; die if $payload <= $stdout; syswrite(STDOUT, "x" x $stdout); syswrite(STDERR, ("y" x ($payload - $stdout - 1)) . "\\n");`;
 }
 
 describe("owned session launcher", () => {
+  test.each(["", "12", "0\n", "1\n", "-12\n", "12e2\n", "12\n\n", "9007199254740992\n"])(
+    "fixture cleanup refuses an incomplete or unsafe PID record %j",
+    (record) => {
+      const pidPath = capturePath(`invalid-pid-${crypto.randomUUID()}.pid`);
+      writeFileSync(pidPath, record);
+      expect(() => readFixtureGroupId(pidPath)).toThrow("complete canonical PID line");
+    },
+  );
+
   test("the production 65536-byte per-stream limit completes with exact output", async () => {
     const result = await runOwnedCommand({
       command: [
@@ -1717,7 +1735,6 @@ describe("owned session launcher", () => {
 
   test("PLANTED: an early inspection failure retires stubborn fixture descendants", async () => {
     const pidPath = capturePath(`early-inspection-${crypto.randomUUID()}.pid`);
-    let supervisorPid: number | undefined;
     try {
       const result = await runOwnedCommand({
         command: [
@@ -1734,9 +1751,6 @@ describe("owned session launcher", () => {
         retainedStreamBytes: 128,
         retainedOutputBytes: 128,
         supervisorScript: stubbornReleaseSupervisor(pidPath, true),
-        onLifecycleCheckpoint: (phase, pid) => {
-          if (phase === "ready") supervisorPid = pid;
-        },
         inspectionCommand: [
           "perl",
           "-e",
@@ -1750,7 +1764,9 @@ describe("owned session launcher", () => {
       expect(result.retainedStdoutBytes).toBe(128);
       expect(ownedGroupPids(Number(readFileSync(pidPath, "utf8").trim()))).toEqual([]);
     } finally {
-      await stopOwnedFixtureGroup(supervisorPid);
+      if (existsSync(pidPath)) {
+        await stopOwnedFixtureGroup(readFixtureGroupId(pidPath));
+      }
     }
   });
 
