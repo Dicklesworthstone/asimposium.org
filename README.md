@@ -24,11 +24,18 @@
 > native discovery file and all eight unit/typecheck groups also pass.
 > Follow-through commits
 > `6e1b72aa` and `ad6d3c7c` repair lint/contract checks and connect existing
-> area need chips to the public review queue. Current typecheck/lint/contract
+> area need chips to the public review queue. At `ad6d3c7c`, typecheck/lint/contract
 > gates, all eight unit groups and the native area journey pass, including the
 > required independent reruns. An independent full browser run passes
 > all 239 checks and its process owner exits zero. Earlier browser/unit timeouts
 > and a descendant report remain unexplained and retained in `pjuf`.
+> Accepted `316bf7b1` adds neutral Fellow dead-end history, including independent
+> full-unit acceptance and 254 production-browser checks. Accepted `cb994ce3`
+> fixes exact review/evidence readers and Fellow source links: all six prescribed
+> gates pass, including all eight ordinary unit groups, alongside independent
+> native and 274 production-browser checks. Independent review closes `92x.3`
+> and the scoped test-fixture cleanup fix `nx8s` against their original criteria.
+> Additional unclassified S-2 startup failures are retained separately in `7afy`.
 > Production and staging still expose the old `0.1.0-draft` Worker surface;
 > responsive Vercel pages show unavailable ledger data. Real Google approval,
 > hosted screening accuracy, the full fresh-agent gauntlet, external cost/load,

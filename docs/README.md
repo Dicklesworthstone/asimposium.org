@@ -20,8 +20,9 @@ finishing and deploying a qualified candidate, then earning the external
 collaboration, safety and operational evidence. Rebuilding the existing source
 subsystems would miss that obstacle. The initial lint and Worker contract
 failures are repaired below. Primary local typecheck, lint, unit and contract
-gates pass, with independent acceptance of the source repairs and Fellow
-history. Deployed acceptance remains separate.**
+gates pass at the accepted revisions below, with independent acceptance of the
+source repairs, Fellow history and exact-record readers. Deployed acceptance
+remains separate.**
 
 ### Implementation follow-through at `ad6d3c7c`
 
@@ -157,6 +158,107 @@ Fresh read-only production/staging `/capabilities` requests at 08:55 UTC both
 return `0.1.0-draft`, byte-identical to the earlier retained bodies. This does
 not establish provider revision or deployment history. No deployment or
 resource provisioning was performed.
+
+### Exact public records at `cb994ce3`
+
+`0909bde1` fixes known published review and claim-evidence records becoming
+unavailable after the ordinary claim face's first 20 candidates (`92x.3`). The
+existing canonical snapshot selects the requested item before its bounded SQL
+window, while retaining the same captured cursor, scientific fold, immutable
+body verification, visibility and size limits. Ordinary faces keep their stable
+prefixes and explicit omissions. Shared Fellow Markdown/HTML and Agora now link
+to the existing exact review reader, with its target version, publication-time
+attribution and eligible work product. No route, table, query parameter or
+authority is added.
+
+Incoming citation-screening and readiness changes exposed qualification drift.
+`bcc837ec` reconciles the strict optional citation-notice schema, narrows unit
+notice assertions to ledger items, and checks the actual expiry-aware
+capabilities cache and readiness response. `356b149d` installs the existing
+screening-publication migration in two minimal unit fixtures, adds three actual
+readiness dependencies to S-2's strict source attestation, and updates discovery
+goldens from their canonical producers. Structural review finds five existing
+schema byte counters plus the existing readiness schema and OpenAPI path; no
+old discovery field or assertion is removed.
+
+The first complete `311f38e9` ordinary unit run is red: six groups pass and two
+fail, including 55 Worker failures and one contracts registry failure. Its
+typecheck, contract and full-contract failures also remain retained. The
+subsequent `bcc837ec` unit run finds a separate live child left by a custom test
+supervisor. The journal excludes the intended final-census error branch, but
+does not identify the exact earlier inspection failure. A deterministic
+early-inspector-error regression reproduces the orphan. `6cda7a7c` adds a private
+EOF guard only to the relevant stubborn supervisor fixtures; the deliberately
+unguarded failed-leader-reap case retains its original behavior. Independent
+review then catches a partial PID file becoming zero in fixture cleanup;
+`f566a267` rejects unsafe process group IDs before signalling. A subsequent
+`0f08cafd` callback-based test cleanup attempt fails before spawning: the local
+serialized helper explicitly rejects lifecycle callbacks. Both primary and
+independent controls record four passes and one failure; its attempted guard
+plant never reaches the subject and earns no fault-detection credit.
+`cb994ce3` instead validates a complete canonical PID line before fixture
+cleanup. Eight real-file malformed-record cases plus all five affected cleanup
+controls pass 13 tests and 53 expectations. Production process control,
+deadlines, census budgets and cleanup assertions remain unchanged.
+
+Fresh qualification runs serially from a clean preserved checkout at the exact
+`cb994ce341158b2460a91e0db1235f3cca7c93db` revision, without competing typecheck
+and lint jobs from the implementer. Root typecheck and lint each pass all eight
+groups; root contract passes five required groups with its original two policy
+skips. Full contracts pass 958 tests and render passes 592. The complete ordinary
+unit dispatcher passes all eight groups in 1,514.25 seconds, with its owner
+normally exiting zero: Worker 6,786 tests / 32,165 expectations and Agora 906
+tests / 6,111 expectations. The toolchain retains its original 54 individual
+skips; no whole group fails, blocks, goes missing or skips. Earlier superseded
+unit controllers were
+intentionally stopped only after exact ownership checks; their partial output
+does not qualify this source. Independent review closes `92x.3` and the scoped
+fixture bug `nx8s` against their original criteria at this exact revision.
+
+Independent final feature controls pass 164 tests. Removing item focus gives
+the original three false-404 failures; disabling the EOF guard fails the actual
+empty-group assertion, with successful fixture cleanup. Both byte-exact restores
+pass, including all 13 cleanup/parser cases. The final actual Workerd/D1/R2
+journey passes publication/readback of 21 reviews and 21 evidence records,
+ordinary stable prefixes and omissions, exact items, current visibility and
+cache controls. Its post-redaction unreplayable count of one is not replay-parity
+credit. The final production browser passes all 274 JavaScript and no-JavaScript
+checks, with a normally exited zero-status owner in 195.889 seconds under its
+unchanged 300-second limit. It uses the default pinned browser without an
+executable or cache-path override. The original
+default-browser prerequisite failure, `bcc837ec` browser timeout and all earlier
+assertions remain separate records.
+Pinned Playwright revision 1254 was downloaded with the project User-Agent,
+CRC-validated and installed only in an absent cache directory. Its actual
+Chrome 158 launch/close probe passes; that is a prerequisite result, not a
+diagnosis of the older timeout. The independent verifier reads the complete
+final primary gate terminals before accepting either scoped fix.
+
+An independent `f566a267` broad fixture run records 252 passes and two S-2
+startup failures. Source-closure/manifest repair assertions pass, but the
+Wrangler refusal test has no expected typed code and an owner-loss child exits
+125 without its expected record. Sequence-correlated retained logs show a
+10-second bounded-capture deadline; they are not a named-subcommand receipt or
+proof of why it timed out. Ambient mount warnings do not establish a cause.
+`7afy` retains both observations and requires causal diagnosis before a fix
+claim. Neither feature acceptance nor a later passing control closes that
+investigation. All evidence is retained under
+`e2e/artifacts/92x-3-20261107-coppertiger/` and
+`e2e/artifacts/independent-20261107-92x-3-311f38e9/`.
+
+Changed-code UBS scans complete with findings retained and reviewed, including
+test-secret fixtures, public URL/status comparisons and the existing escaped
+HTML/header producers. No analyzer rule, coverage requirement or limit is
+relaxed. An initial staged ShellCheck timeout remains a partial result; the
+subsequent unchanged scan completes. Final documentation/tracker-only diff and
+staged invocations report no supported code inputs, exit 3; that is no scan,
+not a security pass. The broader `g4b4` investigation remains open.
+
+Final read-only production and staging `/capabilities` requests at 17:56 UTC
+both return HTTP 200 and `0.1.0-draft`, byte-identical to the retained 08:55
+bodies. This confirms the public response, not provider revision, migration
+lineage or deployment history. No deployment or resource provisioning was
+performed; `rs5n`, broader parents and external G0–G3 acceptance remain open.
 
 ### Initial assessment and evidence boundaries
 

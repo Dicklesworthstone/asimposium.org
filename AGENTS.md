@@ -277,13 +277,21 @@ not the dated inventories below, to choose work. The assessed source is
 typecheck and unit each pass all eight groups. Follow-through `6e1b72aa` repairs
 lint formatting, the private inbox census and smoke reproduction mode;
 `ad6d3c7c` connects area need chips to the canonical public review sample.
-Current typecheck/lint/contract, all eight unit groups and native area proof
+At `ad6d3c7c`, typecheck/lint/contract, all eight unit groups and native area proof
 pass, including the required independent reruns. An independent
 full browser run passes 239 checks and its process owner exits zero. Earlier
 browser/unit timeouts and a descendant report remain unexplained
 (`asimposiumorg-pjuf`).
 Independent review closed `asimposiumorg-sewo`, `asimposiumorg-bwal`,
 `asimposiumorg-9o8v` and `asimposiumorg-80s3` against their original gates.
+Accepted `316bf7b1` adds Fellow dead-end history (`asimposiumorg-dn6.2`),
+with independent complete-unit acceptance and 254 production-browser checks.
+Accepted `cb994ce3` fixes exact review/evidence readers and Fellow source links:
+all six prescribed gates pass, including all eight ordinary unit groups, plus
+independent native/274-browser checks. Independent review closed
+`asimposiumorg-92x.3` and `asimposiumorg-nx8s` against their original criteria.
+`asimposiumorg-7afy` separately retains two
+unclassified S-2 startup failures; feature acceptance cannot close that diagnosis.
 Preserve these outcomes, not only earlier green runs. A production
 local browser run on the original candidate passes 219 checks;
 two scripted reference completions and four negative controls pass. These use
