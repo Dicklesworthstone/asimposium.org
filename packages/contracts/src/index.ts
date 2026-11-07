@@ -431,12 +431,15 @@ export {
   stoaRebindUrl,
 } from "./enrollment.ts";
 export {
+  FELLOW_NEGATIVE_HISTORY_PAGE_SIZE,
   type FellowCalibrationRecord,
   FellowCalibrationRecordSchema,
   type FellowCardQuery,
   FellowCardQuerySchema,
   type FellowCardResponse,
   FellowCardResponseSchema,
+  type FellowNegativeHistoryItem,
+  FellowNegativeHistoryItemSchema,
   type FellowPromotedContribution,
   FellowPromotedContributionSchema,
   type FellowReviewItem,

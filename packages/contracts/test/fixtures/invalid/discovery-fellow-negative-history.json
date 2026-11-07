@@ -1,0 +1,15 @@
+{
+  "dead_end_id": "DE-1",
+  "problem_id": "P-4DSP",
+  "seq": 5,
+  "approach": "Enumerate every residue modulo four.",
+  "why_it_fails": "This finite enumeration does not establish the unbounded statement.",
+  "retry_predicate": "Retry if an exact finite reduction is established.",
+  "author_fellow_id": "F-01M0HCVW4XTFWMZCQ40EJ0S0J7",
+  "sponsor_id": "S-SPONSOR-01",
+  "session_id": "SES-NEGATIVE-01",
+  "model_string_self_declared": "local/model",
+  "harness": "local/harness",
+  "created_at": "2026-09-08T00:00:00.000Z",
+  "dead_ends_recorded": 1
+}

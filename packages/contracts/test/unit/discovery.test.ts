@@ -8,6 +8,7 @@ import {
   FellowCalibrationRecordSchema,
   FellowCardQuerySchema,
   FellowCardResponseSchema,
+  FellowNegativeHistoryItemSchema,
   FellowReviewItemSchema,
   HonorsItemSchema,
   HonorsQuerySchema,
@@ -30,6 +31,7 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
       for (const [name, schema] of [
         ["discovery-now-query", NowStripQuerySchema],
         ["discovery-fellow-query", FellowCardQuerySchema],
+        ["discovery-fellow-negative-history", FellowNegativeHistoryItemSchema],
         ["discovery-honors-query", HonorsQuerySchema],
         ["discovery-fellow-query-error", ContractProblemSchema],
         ["discovery-now-query-error", ContractProblemSchema],
@@ -51,7 +53,7 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
       event_id: "EV-12",
     });
     expect(FellowCardQuerySchema.parse({})).toEqual({});
-    for (const field of ["contributions_before", "reviews_before"] as const) {
+    for (const field of ["contributions_before", "reviews_before", "negative_before"] as const) {
       expect(FellowCardQuerySchema.parse({ [field]: cursor })).toEqual({ [field]: cursor });
       for (const invalid of ["", "[]", ` ${cursor}`, [cursor, cursor], "x".repeat(1025)]) {
         expect(FellowCardQuerySchema.safeParse({ [field]: invalid }).success).toBe(false);
@@ -394,6 +396,7 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
             sponsor_at_event: "S-SPONSOR-01",
           },
         ],
+        negative_history: [],
         calibration: {
           conjectures_promoted: 1,
           theorems_attempted: 0,
@@ -406,6 +409,30 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
 
       const parsed = FellowCardResponseSchema.safeParse(validFellow);
       expect(parsed.success).toBe(true);
+      const { negative_history: _history, ...incomplete } = validFellow;
+      expect(FellowCardResponseSchema.safeParse(incomplete).success).toBe(false);
+    });
+
+    test("negative history has complete publication attribution and a reading-window bound", async () => {
+      const item = FellowNegativeHistoryItemSchema.parse(
+        await Bun.file(
+          new URL("../fixtures/valid/discovery-fellow-negative-history.json", import.meta.url),
+        ).json(),
+      );
+      expect(
+        FellowCardResponseSchema.shape.negative_history.safeParse(Array(8).fill(item)).success,
+      ).toBe(true);
+      expect(
+        FellowCardResponseSchema.shape.negative_history.safeParse(Array(9).fill(item)).success,
+      ).toBe(false);
+      for (const field of ["sponsor_id", "session_id", "model_string_self_declared", "harness"]) {
+        expect(
+          FellowNegativeHistoryItemSchema.safeParse({ ...item, [field]: undefined }).success,
+        ).toBe(false);
+      }
+      expect(
+        FellowNegativeHistoryItemSchema.safeParse({ ...item, dead_ends_recorded: 1 }).success,
+      ).toBe(false);
     });
 
     test("strictly rejects forbidden scoreboard fields (Rule A10 / ADR-19)", () => {
@@ -422,6 +449,7 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
         sessions_count: 12,
         promoted_contributions: [],
         reviews: [],
+        negative_history: [],
         calibration: {
           conjectures_promoted: 0,
           theorems_attempted: 0,

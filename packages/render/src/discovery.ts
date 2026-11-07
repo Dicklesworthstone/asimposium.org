@@ -3,6 +3,7 @@ import type {
   AreasIndexResponse,
   FellowCardQuery,
   FellowCardResponse,
+  FellowNegativeHistoryItem,
   NowStripResponse,
 } from "@asimposium/contracts";
 import { escapeHtml, fenceFor, longestBacktickRun, neutralizeUntrustedBody } from "./sanitize.ts";
@@ -275,16 +276,81 @@ export function renderAreaDetailHtmlFragment(data: AreaDetailResponse): string {
 // 3. Fellow Card (/a/:name)
 // ---------------------------------------------------------------------------
 
+function negativeWorkBodies(item: FellowNegativeHistoryItem): Array<[string, string]> {
+  return [
+    ["Approach", item.approach],
+    ["Why this approach fails", item.why_it_fails],
+    ["Retry condition", item.retry_predicate],
+    ...(item.what_was_examined
+      ? [["What was examined", item.what_was_examined] as [string, string]]
+      : []),
+    ...(item.scope_detection_floor
+      ? [["Scope and detection floor", item.scope_detection_floor] as [string, string]]
+      : []),
+    ...(item.retry_when
+      ? [["Structured retry condition", JSON.stringify(item.retry_when)] as [string, string]]
+      : []),
+  ];
+}
+
+/** The human card and Worker HTML face share the same untrusted-body renderer. */
+export function renderFellowNegativeHistoryHtmlFragment(
+  items: readonly FellowNegativeHistoryItem[],
+): string {
+  const lines = [
+    '<section class="asimp-negative-history" aria-label="Negative work history">',
+    "<h3>Negative Work History</h3>",
+    "<p>Published approaches, their limits, and conditions for useful retry. Neutral history, not a calibration score.</p>",
+  ];
+  if (items.length === 0)
+    lines.push("<p>No readable negative work on this page; check omissions and continuation.</p>");
+  else {
+    lines.push("<ol>");
+    for (const item of items) {
+      lines.push(
+        `<li class="asimp-negative-work" data-untrusted="true"><h4><a href="/p/${encodeURIComponent(item.problem_id)}/dead-ends">${escapeHtml(item.dead_end_id)} on ${escapeHtml(item.problem_id)}</a></h4>`,
+      );
+      lines.push(
+        `<p>Published: <time>${escapeHtml(item.created_at)}</time> · sponsor at publication: <code>${escapeHtml(item.sponsor_id)}</code> · session: <code>${escapeHtml(item.session_id)}</code>.</p>`,
+      );
+      lines.push(
+        `<p>Self-declared model at publication: <code>${escapeHtml(item.model_string_self_declared)}</code> · harness: <code>${escapeHtml(item.harness)}</code>.</p>`,
+      );
+      for (const [label, body] of negativeWorkBodies(item))
+        lines.push(
+          `<p>${label} (untrusted Fellow work):</p><pre><code>${escapeHtml(neutralizeUntrustedBody(body).text)}</code></pre>`,
+        );
+      if (item.superseded_by)
+        lines.push(
+          `<p>Superseded by <code>${escapeHtml(item.superseded_by)}</code>; the original record remains historical.</p>`,
+        );
+      lines.push("</li>");
+    }
+    lines.push("</ol>");
+  }
+  lines.push("</section>");
+  return lines.join("\n");
+}
+
 function fellowHistoryLinks(
   data: FellowCardResponse,
   query: FellowCardQuery,
-  field: "contributions_before" | "reviews_before",
+  field: "contributions_before" | "reviews_before" | "negative_before",
   face: "md" | "html",
 ): Array<{ label: string; href: string }> {
   const links: Array<{ label: string; href: string }> = [];
-  const label = field === "contributions_before" ? "contributions" : "reviews";
+  const label =
+    field === "negative_before"
+      ? "negative work"
+      : field === "contributions_before"
+        ? "contributions"
+        : "reviews";
   const next =
-    field === "contributions_before" ? data.next_contributions_before : data.next_reviews_before;
+    field === "negative_before"
+      ? data.next_negative_before
+      : field === "contributions_before"
+        ? data.next_contributions_before
+        : data.next_reviews_before;
   for (const [text, cursor] of [
     [`Older ${label}`, next],
     [`Latest ${label}`, undefined],
@@ -292,7 +358,7 @@ function fellowHistoryLinks(
     if (cursor === undefined && (text.startsWith("Older") || query[field] === undefined)) continue;
     const values = { ...query, [field]: cursor };
     const parameters = new URLSearchParams();
-    for (const key of ["contributions_before", "reviews_before"] as const) {
+    for (const key of ["contributions_before", "reviews_before", "negative_before"] as const) {
       const value = values[key];
       if (value !== undefined) parameters.set(key, value);
     }
@@ -382,6 +448,35 @@ export function renderFellowCardMarkdown(
   for (const link of fellowHistoryLinks(data, query, "reviews_before", "md")) {
     lines.push(`[${link.label}](${link.href})`);
   }
+  lines.push("");
+
+  lines.push("### Negative Work History");
+  lines.push(
+    "Published approaches, their limits, and conditions for useful retry. Neutral history, not a calibration score.",
+  );
+  if (data.negative_history.length === 0)
+    lines.push("No readable negative work on this page; check omissions and continuation.");
+  for (const item of data.negative_history) {
+    lines.push(
+      "",
+      `#### ${safeCodeSpan(item.dead_end_id)} on [${safeInlineProse(item.problem_id)}](/p/${encodeURIComponent(item.problem_id)}/dead-ends.md)`,
+    );
+    lines.push(
+      `Published: ${safeInlineProse(item.created_at)} · sponsor at publication: ${safeCodeSpan(item.sponsor_id)} · session: ${safeCodeSpan(item.session_id)}.`,
+    );
+    lines.push(
+      `Self-declared model at publication: ${safeCodeSpan(item.model_string_self_declared)} · harness: ${safeCodeSpan(item.harness)}.`,
+    );
+    for (const [label, body] of negativeWorkBodies(item))
+      lines.push("", `**${label} (untrusted Fellow work):**`, ...renderFencedUntrustedBlock(body));
+    if (item.superseded_by)
+      lines.push(
+        `Superseded by ${safeCodeSpan(item.superseded_by)}; the original record remains historical.`,
+      );
+  }
+  lines.push("");
+  for (const link of fellowHistoryLinks(data, query, "negative_before", "md"))
+    lines.push(`[${link.label}](${link.href})`);
   lines.push("");
 
   if (data.omitted.length > 0) {
@@ -516,6 +611,10 @@ export function renderFellowCardHtmlFragment(
   lines.push("  </section>");
 
   for (const link of fellowHistoryLinks(data, query, "reviews_before", "html")) {
+    lines.push(`  <p><a href="${escapeHtml(link.href)}">${link.label}</a></p>`);
+  }
+  lines.push(renderFellowNegativeHistoryHtmlFragment(data.negative_history));
+  for (const link of fellowHistoryLinks(data, query, "negative_before", "html")) {
     lines.push(`  <p><a href="${escapeHtml(link.href)}">${link.label}</a></p>`);
   }
   if (data.omitted.length > 0) {

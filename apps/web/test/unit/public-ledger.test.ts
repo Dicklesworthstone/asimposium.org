@@ -1717,6 +1717,7 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
       },
     ],
     reviews: [],
+    negative_history: [],
     calibration: {
       conjectures_promoted: 1,
       theorems_attempted: 0,
@@ -1812,7 +1813,11 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
         seq,
         event_id: `E-${seq}`,
       });
-    const query = { contributions_before: cursor(80), reviews_before: cursor(70) };
+    const query = {
+      contributions_before: cursor(80),
+      reviews_before: cursor(70),
+      negative_before: cursor(60),
+    };
     let status = 200;
     let calls = 0;
     globalThis.fetch = (async (input) => {
@@ -1824,6 +1829,7 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
             promoted_contributions: [],
             next_contributions_before: cursor(30),
             next_reviews_before: cursor(20),
+            next_negative_before: cursor(10),
             omitted: ["History content verification unavailable on this page."],
           })
         : new Response(null, { status });
@@ -1838,8 +1844,10 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
     for (const [label, expected] of [
       ["Older contributions", { ...query, contributions_before: cursor(30) }],
       ["Older reviews", { ...query, reviews_before: cursor(20) }],
-      ["Latest contributions", { reviews_before: cursor(70) }],
-      ["Latest reviews", { contributions_before: cursor(80) }],
+      ["Older negative work", { ...query, negative_before: cursor(10) }],
+      ["Latest contributions", { reviews_before: cursor(70), negative_before: cursor(60) }],
+      ["Latest reviews", { contributions_before: cursor(80), negative_before: cursor(60) }],
+      ["Latest negative work", { contributions_before: cursor(80), reviews_before: cursor(70) }],
     ] as const) {
       const match = [...html.matchAll(/href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].find(
         (m) => m[2] === label,

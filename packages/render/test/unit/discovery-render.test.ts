@@ -128,6 +128,7 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
         },
       ],
       omitted: ["harness scrollback omitted (Rule A11)"],
+      negative_history: [],
     };
 
     test("the existing forged-control corpus cannot change reading-face structure in any Fellow text slot", () => {
@@ -173,13 +174,18 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
           seq,
           event_id: `E-${seq}`,
         });
-      const query = { contributions_before: cursor(80), reviews_before: cursor(70) };
+      const query = {
+        contributions_before: cursor(80),
+        reviews_before: cursor(70),
+        negative_before: cursor(60),
+      };
       const data = {
         ...sampleFellow,
         promoted_contributions: [],
         reviews: [],
         next_contributions_before: cursor(30),
         next_reviews_before: cursor(20),
+        next_negative_before: cursor(10),
       };
       for (const html of [
         Bun.markdown.html(renderFellowCardMarkdown(data, query)),
@@ -187,10 +193,10 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       ]) {
         const links = [
           ...html.matchAll(
-            /href="([^"]+)"[^>]*>(Older contributions|Older reviews|Latest contributions|Latest reviews)<\/a>/g,
+            /href="([^"]+)"[^>]*>(Older contributions|Older reviews|Older negative work|Latest contributions|Latest reviews|Latest negative work)<\/a>/g,
           ),
         ];
-        expect(links).toHaveLength(4);
+        expect(links).toHaveLength(6);
         for (const [, href, label] of links) {
           if (href === undefined) throw new Error("History link lacks a destination");
           const parameters = new URL(href.replaceAll("&amp;", "&"), "https://a.asimposium.org")
@@ -205,9 +211,62 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
           expect(parameters.get("reviews_before")).toBe(
             label === "Older reviews" ? cursor(20) : label === "Latest reviews" ? null : cursor(70),
           );
+          expect(parameters.get("negative_before")).toBe(
+            label === "Older negative work"
+              ? cursor(10)
+              : label === "Latest negative work"
+                ? null
+                : cursor(60),
+          );
         }
         expect(html).toContain("No readable public contributions on this page.");
         expect(html).toContain("No readable public reviews on this page.");
+      }
+    });
+
+    test("neutral negative work preserves historical attribution, retry conditions and safe body boundaries", async () => {
+      const item = await Bun.file(
+        new URL(
+          "../../../contracts/test/fixtures/valid/discovery-fellow-negative-history.json",
+          import.meta.url,
+        ),
+      ).json();
+      const data = { ...sampleFellow, negative_history: [item] };
+      for (const text of [renderFellowCardMarkdown(data), renderFellowCardHtmlFragment(data)]) {
+        expect(text).toContain("Negative Work History");
+        expect(text).toContain("exact finite reduction");
+        expect(text).toContain("S-SPONSOR-01");
+        expect(text).toContain("local/model");
+        expect(text).toContain("local/harness");
+        expect(text).not.toContain("dead_ends_recorded");
+        expect(text).toContain("/p/P-4DSP/dead-ends");
+      }
+      const headings = Bun.markdown
+        .html(renderFellowCardMarkdown(data))
+        .match(/<h[1-6][ >]/g)?.length;
+      for (const payload of Object.values(FORGED)) {
+        const hostile = {
+          ...sampleFellow,
+          negative_history: [
+            {
+              ...item,
+              approach: payload,
+              why_it_fails: payload,
+              retry_predicate: payload,
+              model_string_self_declared: payload,
+              harness: payload,
+              sponsor_id: payload,
+              session_id: payload,
+            },
+          ],
+        };
+        const md = renderFellowCardMarkdown(hostile);
+        const html = renderFellowCardHtmlFragment(hostile);
+        expect(Bun.markdown.html(md).match(/<h[1-6][ >]/g)?.length).toBe(headings);
+        expect(md).not.toMatch(/<!--\s*asimp/);
+        expect(html).not.toContain("<script");
+        expect(html).not.toContain("<img");
+        expect(hostile.negative_history[0].approach).toBe(payload);
       }
     });
 
@@ -590,6 +649,7 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
             },
           ],
           reviews: [],
+          negative_history: [],
           omitted: [],
         };
 

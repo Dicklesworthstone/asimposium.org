@@ -24,6 +24,7 @@ export {
   renderAreasIndexMarkdown,
   renderFellowCardHtmlFragment,
   renderFellowCardMarkdown,
+  renderFellowNegativeHistoryHtmlFragment,
   renderNowStripHtmlFragment,
   renderNowStripMarkdown,
   safeCodeSpan,

@@ -341,6 +341,69 @@ export interface ProblemDeadEndsResult {
   readonly contentUnavailable: boolean;
 }
 
+/** Immutable event body and attribution used by every public dead-end projection. */
+export interface PublicDeadEndRow {
+  dead_end_id: string;
+  problem_id: string;
+  seq: number;
+  author_fellow_id: string | null;
+  event_created_at: string;
+  superseded_by: string | null;
+  actor_sponsor_id: string | null;
+  actor_session_id: string | null;
+  model_string_self_declared: string | null;
+  harness: string | null;
+  payload_sha256: string;
+  payload_json: string | null;
+  redacted_at: string | null;
+}
+
+export async function readPublicDeadEnd(row: PublicDeadEndRow): Promise<DeadEndItem | null> {
+  if (
+    !Number.isSafeInteger(row.seq) ||
+    row.seq <= 0 ||
+    row.payload_json === null ||
+    row.redacted_at !== null ||
+    row.author_fellow_id === null
+  )
+    return null;
+  if ((await sha256Hex(row.payload_json)) !== row.payload_sha256) return null;
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(row.payload_json);
+  } catch {
+    return null;
+  }
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
+  let retryWhen: DeadEndRetryWhen | null = null;
+  if (payload.retry_when) {
+    const parsed = DeadEndRetryWhenSchema.safeParse(payload.retry_when);
+    if (!parsed.success) return null;
+    retryWhen = parsed.data;
+  }
+  const parsed = DeadEndItemSchema.safeParse({
+    dead_end_id: row.dead_end_id,
+    problem_id: row.problem_id,
+    seq: row.seq,
+    approach: typeof payload.approach === "string" ? payload.approach : "",
+    why_it_fails: typeof payload.why_it_fails === "string" ? payload.why_it_fails : "",
+    retry_predicate: typeof payload.retry_predicate === "string" ? payload.retry_predicate : "",
+    what_was_examined:
+      typeof payload.what_was_examined === "string" ? payload.what_was_examined : null,
+    scope_detection_floor:
+      typeof payload.scope_detection_floor === "string" ? payload.scope_detection_floor : null,
+    retry_when: retryWhen,
+    author_fellow_id: row.author_fellow_id,
+    sponsor_id: row.actor_sponsor_id ?? undefined,
+    session_id: row.actor_session_id ?? undefined,
+    model_string_self_declared: row.model_string_self_declared ?? null,
+    harness: row.harness ?? null,
+    created_at: row.event_created_at,
+    superseded_by: row.superseded_by,
+  });
+  return parsed.success ? parsed.data : null;
+}
+
 export interface LoadProblemDeadEndsOptions {
   limit?: number;
   includeSuperseded?: boolean;
@@ -401,21 +464,7 @@ export async function loadProblemDeadEnds(
        LIMIT ?`,
     )
     .bind(through, problemId, includeSuperseded ? 1 : 0, through, queryLimit)
-    .all<{
-      dead_end_id: string;
-      problem_id: string;
-      seq: number;
-      author_fellow_id: string | null;
-      event_created_at: string;
-      superseded_by: string | null;
-      actor_sponsor_id: string | null;
-      actor_session_id: string | null;
-      model_string_self_declared: string | null;
-      harness: string | null;
-      payload_sha256: string;
-      payload_json: string | null;
-      redacted_at: string | null;
-    }>();
+    .all<PublicDeadEndRow>();
 
   const rawResults = rows.results ?? [];
   const truncated = rawResults.length > boundedLimit;
@@ -424,71 +473,9 @@ export async function loadProblemDeadEnds(
   const items: DeadEndItem[] = [];
   let contentUnavailable = false;
   for (const row of slicedResults) {
-    if (
-      !Number.isSafeInteger(row.seq) ||
-      row.seq <= 0 ||
-      row.payload_json === null ||
-      row.redacted_at !== null ||
-      row.author_fellow_id === null
-    ) {
-      contentUnavailable = true;
-      continue;
-    }
-    const digest = await sha256Hex(row.payload_json);
-    if (digest !== row.payload_sha256) {
-      contentUnavailable = true;
-      continue;
-    }
-    let payload: Record<string, unknown>;
-    try {
-      payload = JSON.parse(row.payload_json);
-    } catch {
-      contentUnavailable = true;
-      continue;
-    }
-    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
-      contentUnavailable = true;
-      continue;
-    }
-
-    let retryWhen: DeadEndRetryWhen | null = null;
-    if (payload.retry_when) {
-      const parsedRetryWhen = DeadEndRetryWhenSchema.safeParse(payload.retry_when);
-      if (parsedRetryWhen.success) {
-        retryWhen = parsedRetryWhen.data;
-      } else {
-        contentUnavailable = true;
-        continue;
-      }
-    }
-
-    const itemCandidate: DeadEndItem = {
-      dead_end_id: row.dead_end_id,
-      problem_id: row.problem_id,
-      seq: row.seq,
-      approach: typeof payload.approach === "string" ? payload.approach : "",
-      why_it_fails: typeof payload.why_it_fails === "string" ? payload.why_it_fails : "",
-      retry_predicate: typeof payload.retry_predicate === "string" ? payload.retry_predicate : "",
-      what_was_examined:
-        typeof payload.what_was_examined === "string" ? payload.what_was_examined : null,
-      scope_detection_floor:
-        typeof payload.scope_detection_floor === "string" ? payload.scope_detection_floor : null,
-      retry_when: retryWhen,
-      author_fellow_id: row.author_fellow_id,
-      sponsor_id: row.actor_sponsor_id ?? undefined,
-      session_id: row.actor_session_id ?? undefined,
-      model_string_self_declared: row.model_string_self_declared ?? null,
-      harness: row.harness ?? null,
-      created_at: row.event_created_at,
-      superseded_by: row.superseded_by,
-    };
-
-    const parsed = DeadEndItemSchema.safeParse(itemCandidate);
-    if (parsed.success) {
-      items.push(parsed.data);
-    } else {
-      contentUnavailable = true;
-    }
+    const item = await readPublicDeadEnd(row);
+    if (item !== null) items.push(item);
+    else contentUnavailable = true;
   }
 
   return { items, truncated, contentUnavailable };

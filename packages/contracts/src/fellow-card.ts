@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DeadEndItemSchema } from "./dead-ends.ts";
 import { NowPageCursorSchema } from "./discovery.ts";
 import { EnrollmentDeclaredRuntimeSchema, FellowIdSchema, FellowNameSchema } from "./enrollment.ts";
 import { PublicLedgerProblemIdSchema } from "./ledger.ts";
@@ -57,6 +58,17 @@ export const FellowReviewItemSchema = z
 
 export type FellowReviewItem = z.infer<typeof FellowReviewItemSchema>;
 
+// A reading window, never a calibration tally or activity signal.
+export const FELLOW_NEGATIVE_HISTORY_PAGE_SIZE = 8;
+export const FellowNegativeHistoryItemSchema = DeadEndItemSchema.required({
+  sponsor_id: true,
+  session_id: true,
+}).extend({
+  model_string_self_declared: EnrollmentDeclaredRuntimeSchema,
+  harness: EnrollmentDeclaredRuntimeSchema,
+});
+export type FellowNegativeHistoryItem = z.infer<typeof FellowNegativeHistoryItemSchema>;
+
 export const FellowCalibrationRecordSchema = z
   .object({
     conjectures_promoted: z.number().int().min(0),
@@ -76,6 +88,7 @@ export const FellowCardQuerySchema = z
   .object({
     contributions_before: NowPageCursorSchema.optional(),
     reviews_before: NowPageCursorSchema.optional(),
+    negative_before: NowPageCursorSchema.optional(),
   })
   .strict();
 export type FellowCardQuery = z.infer<typeof FellowCardQuerySchema>;
@@ -94,8 +107,12 @@ export const FellowCardResponseSchema = z
     sessions_count: z.number().int().min(0),
     promoted_contributions: z.array(FellowPromotedContributionSchema),
     reviews: z.array(FellowReviewItemSchema),
+    negative_history: z
+      .array(FellowNegativeHistoryItemSchema)
+      .max(FELLOW_NEGATIVE_HISTORY_PAGE_SIZE),
     next_contributions_before: NowPageCursorSchema.optional(),
     next_reviews_before: NowPageCursorSchema.optional(),
+    next_negative_before: NowPageCursorSchema.optional(),
     calibration: FellowCalibrationRecordSchema,
     omitted: z.array(z.string().min(1).max(200)),
   })

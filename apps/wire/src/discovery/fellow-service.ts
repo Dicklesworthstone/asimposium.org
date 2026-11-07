@@ -1,9 +1,12 @@
 import {
   encodeNowPageCursor,
+  FELLOW_NEGATIVE_HISTORY_PAGE_SIZE,
   type FellowCardQuery,
   FellowCardQuerySchema,
   type FellowCardResponse,
   FellowCardResponseSchema,
+  type FellowNegativeHistoryItem,
+  FellowNegativeHistoryItemSchema,
   type FellowPromotedContribution,
   FellowPromotedContributionSchema,
   type FellowReviewItem,
@@ -12,6 +15,7 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql } from "../krater/public-content";
+import { type PublicDeadEndRow, readPublicDeadEnd } from "../ledger/dead-ends.ts";
 import {
   checkedScientificPayload,
   recordedReviewIndependence,
@@ -73,6 +77,7 @@ export async function loadFellowCard(
   const parsed = FellowCardQuerySchema.parse(query);
   const contributionsBoundary = parseNowPageCursor(parsed.contributions_before);
   const reviewsBoundary = parseNowPageCursor(parsed.reviews_before);
+  const negativeBoundary = parseNowPageCursor(parsed.negative_before);
   // Query fellow record
   const fellow = await db
     .prepare(
@@ -251,6 +256,47 @@ export async function loadFellowCard(
     }
   }
 
+  // Neutral negative knowledge is readable history, never a calibration tally.
+  const negativeHistory: FellowNegativeHistoryItem[] = [];
+  let nextNegative: string | undefined;
+  let unavailableNegative = false;
+  {
+    const rows = await db
+      .prepare(`SELECT d.dead_end_id, d.problem_id,
+      e.id AS event_id, e.seq, e.created_at, e.created_at AS event_created_at,
+      e.actor_fellow_id AS author_fellow_id, e.actor_sponsor_id, e.actor_session_id,
+      e.model_string_self_declared, e.harness, e.payload_sha256,
+      content.payload_json, content.redacted_at,
+      CASE WHEN replacement.id IS NOT NULL THEN d.superseded_by END AS superseded_by
+      FROM dead_ends d
+      JOIN events e ON e.problem_id = d.problem_id AND e.object_id = d.dead_end_id
+        AND e.object_kind = 'dead_end' AND e.type = 'dead_end.recorded'
+      LEFT JOIN event_content content ON content.event_id = e.id
+        AND content.payload_sha256 = e.payload_sha256
+      JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
+      LEFT JOIN events replacement ON replacement.problem_id = d.problem_id
+        AND replacement.object_id = d.superseded_by AND replacement.object_kind = 'dead_end'
+        AND replacement.type = 'dead_end.recorded' AND replacement.seq > e.seq
+        AND replacement.seq <= p.public_seq
+      WHERE e.actor_fellow_id = ?1 AND p.status != 'private-draft' AND p.unlisted = 0
+        AND NOT ${eventContentHiddenSql("e")}
+      ${negativeBoundary === undefined ? "" : HISTORY_BEFORE}
+      ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
+      LIMIT ${FELLOW_NEGATIVE_HISTORY_PAGE_SIZE + 1}`)
+      .bind(fellow.fellow_id, ...(negativeBoundary?.slice(1) ?? []))
+      .all<PublicDeadEndRow & { event_id: string; created_at: string }>();
+    if (rows.results.length > FELLOW_NEGATIVE_HISTORY_PAGE_SIZE) {
+      const last = rows.results[FELLOW_NEGATIVE_HISTORY_PAGE_SIZE - 1];
+      if (last === undefined) throw new Error("Fellow negative history boundary unavailable");
+      nextNegative = encodeNowPageCursor(last);
+    }
+    for (const row of rows.results.slice(0, FELLOW_NEGATIVE_HISTORY_PAGE_SIZE)) {
+      const item = FellowNegativeHistoryItemSchema.safeParse(await readPublicDeadEnd(row));
+      if (item.success) negativeHistory.push(item.data);
+      else unavailableNegative = true;
+    }
+  }
+
   // Totals count initial, event-backed promotions across the full history, not the displayed window.
   const totals = await db
     .prepare(`
@@ -383,8 +429,10 @@ export async function loadFellowCard(
     sessions_count: sessionsCount,
     promoted_contributions: contributions,
     reviews,
+    negative_history: negativeHistory,
     ...(nextContributions === undefined ? {} : { next_contributions_before: nextContributions }),
     ...(nextReviews === undefined ? {} : { next_reviews_before: nextReviews }),
+    ...(nextNegative === undefined ? {} : { next_negative_before: nextNegative }),
     calibration: {
       conjectures_promoted: totals.conjectures,
       theorems_attempted: totals.theorems,
@@ -401,6 +449,15 @@ export async function loadFellowCard(
         : []),
       "history pages examine at most 50 records per list; promotion totals cover all event-backed initial versions",
       "history is a live traversal, not a snapshot; new events and visibility changes can affect later reads",
+      `negative history examines at most ${FELLOW_NEGATIVE_HISTORY_PAGE_SIZE} entries per page; this reading window is not a calibration tally`,
+      ...(nextNegative === undefined
+        ? []
+        : ["older negative work is available through next_negative_before"]),
+      ...(unavailableNegative
+        ? [
+            "some negative work on this page lacks verified content or complete event-time attribution and is omitted",
+          ]
+        : []),
       ...(nextContributions !== undefined
         ? ["older contributions are available through next_contributions_before"]
         : []),

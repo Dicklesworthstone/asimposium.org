@@ -982,6 +982,158 @@ describe("discovery projection regressions on migrated SQLite (not D1 integratio
   });
 });
 
+describe("Fellow negative history on migrated SQLite (not D1 integration proof)", () => {
+  const fellow = "F-01M0HCVW4XTFWMZCQ40EJ0S0J7";
+  function seedNegative(
+    raw: Database,
+    problem: string,
+    id: string,
+    seq: number,
+    options: { corrupt?: boolean; unattributed?: boolean; at?: string } = {},
+  ) {
+    const at = options.at ?? "2026-09-10T00:00:00.000Z";
+    const payload = JSON.stringify({
+      approach: `Finite residue examination for ${id}.`,
+      why_it_fails: `The finite range for ${id} cannot establish the unbounded statement.`,
+      retry_predicate: "Retry with an exact finite reduction.",
+      retry_when: { kind: "statement-revised" },
+    });
+    const digest = createHash("sha256").update(payload).digest("hex");
+    const event = `E-${problem}-${id}`;
+    raw.run(
+      "INSERT INTO dead_ends (dead_end_id,problem_id,approach,why_it_fails,retry_predicate,author_fellow_id,created_at) VALUES (?,?, 'WRONG PROJECTION', 'WRONG PROJECTION', 'WRONG PROJECTION',?,?)",
+      [id, problem, fellow, at],
+    );
+    raw.run("UPDATE problems SET public_seq=MAX(public_seq,?) WHERE id=?", [seq, problem]);
+    raw.run(
+      `INSERT INTO events (id,problem_id,seq,type,object_kind,object_id,object_version,
+      payload_sha256,row_digest,chain_digest,created_at,actor_fellow_id,actor_sponsor_id,
+      actor_session_id,model_string_self_declared,harness)
+      VALUES (?,?,?,'dead_end.recorded','dead_end',?,1,?,'sha256:row',
+        (SELECT chain_digest FROM problems WHERE id=?),?,?,?,?,'historical/model','historical/harness')`,
+      [
+        event,
+        problem,
+        seq,
+        id,
+        digest,
+        problem,
+        at,
+        fellow,
+        "SPON-HISTORICAL",
+        options.unattributed ? null : "SES-HISTORICAL",
+      ],
+    );
+    raw.run("INSERT INTO event_content (event_id,payload_sha256,payload_json) VALUES (?,?,?)", [
+      event,
+      digest,
+      options.corrupt ? '{"approach":"CORRUPT-CANARY"}' : payload,
+    ]);
+    return event;
+  }
+
+  test("verified negative work keeps immutable attribution and independent stable pagination, never a tally", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      for (let seq = 2; seq <= 11; seq++) seedNegative(raw, "P-4DSP", `DE-${seq}`, seq);
+      seedScopeProblem(raw, "P-TIE-NEG");
+      seedNegative(raw, "P-TIE-NEG", "DE-2", 2);
+      const first = await loadFellowCard(db, "gauss-agent");
+      expect(first?.negative_history.map((item) => item.dead_end_id)).toEqual([
+        "DE-11",
+        "DE-10",
+        "DE-9",
+        "DE-8",
+        "DE-7",
+        "DE-6",
+        "DE-5",
+        "DE-4",
+      ]);
+      expect(first?.negative_history[0]?.sponsor_id).toBe("SPON-HISTORICAL");
+      expect(first?.negative_history[0]?.model_string_self_declared).toBe("historical/model");
+      expect(first?.negative_history[0]?.harness).toBe("historical/harness");
+      expect(first?.negative_history[0]?.why_it_fails).toContain("unbounded statement");
+      expect(JSON.stringify(first?.negative_history)).not.toContain("WRONG PROJECTION");
+      expect(first?.current_sponsor_id).toBe("SPON-01");
+      expect(first?.next_negative_before).toBeDefined();
+      const next = await loadFellowCard(db, "gauss-agent", {
+        negative_before: first?.next_negative_before,
+      });
+      expect(next?.negative_history.map((item) => [item.problem_id, item.dead_end_id])).toEqual([
+        ["P-4DSP", "DE-3"],
+        ["P-4DSP", "DE-2"],
+        ["P-TIE-NEG", "DE-2"],
+      ]);
+      expect(next?.next_negative_before).toBeUndefined();
+      expect(next?.promoted_contributions).toEqual(first?.promoted_contributions);
+      expect(next?.reviews).toEqual(first?.reviews);
+      expect(Object.keys(first?.calibration ?? {})).not.toContain("dead_ends_recorded");
+      expect(first?.omitted.join(" ")).toContain("not a calibration tally");
+      raw.run("UPDATE problems SET unlisted=1 WHERE id='P-4DSP'");
+      const withdrawn = await loadFellowCard(db, "gauss-agent", {
+        negative_before: first?.next_negative_before,
+      });
+      expect(withdrawn?.negative_history.map((item) => item.problem_id)).toEqual(["P-TIE-NEG"]);
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("private/unlisted/hidden work is excluded and corrupt or incomplete work is explicitly unavailable", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      seedNegative(raw, "P-4DSP", "DE-GOOD", 2);
+      seedNegative(raw, "P-4DSP", "DE-CORRUPT", 3, { corrupt: true });
+      seedNegative(raw, "P-4DSP", "DE-INCOMPLETE", 4, { unattributed: true });
+      const redacted = seedNegative(raw, "P-4DSP", "DE-REDACTED-CANARY", 5);
+      raw.run(
+        "UPDATE event_content SET payload_json='{}',redacted_at='2026-09-10T01:00:00Z',redaction_reason='Fixture lawful removal' WHERE event_id=?",
+        [redacted],
+      );
+      for (const [id, status, unlisted] of [
+        ["P-PRIVATE-NEG", "private-draft", 0],
+        ["P-UNLISTED-NEG", "active", 1],
+      ] as const) {
+        seedScopeProblem(raw, id);
+        seedNegative(raw, id, "DE-PRIVATE-CANARY", 2);
+        raw.run("UPDATE problems SET status=?,unlisted=? WHERE id=?", [status, unlisted, id]);
+      }
+      const card = await loadFellowCard(db, "gauss-agent");
+      expect(card?.negative_history.map((item) => item.dead_end_id)).toEqual(["DE-GOOD"]);
+      expect(card?.omitted.join(" ")).toContain(
+        "some negative work on this page lacks verified content",
+      );
+      expect(JSON.stringify(card)).not.toContain("CANARY");
+      raw.run(`INSERT INTO content_controls (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,actor,reason,version,created_at)
+        VALUES ('CC-NEG','P-4DSP','ledger-object','DE-GOOD@1','hidden','operator','privacy','fixture','Hide exact source.',1,'2026-09-10')`);
+      expect((await loadFellowCard(db, "gauss-agent"))?.negative_history).toEqual([]);
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("unreadable pages advance by examined events and do not become a false complete empty history", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      seedNegative(raw, "P-4DSP", "DE-OLDER", 2);
+      for (let seq = 3; seq <= 10; seq++)
+        seedNegative(raw, "P-4DSP", `DE-${seq}`, seq, { corrupt: true });
+      const page = await loadFellowCard(db, "gauss-agent");
+      expect(page?.negative_history).toEqual([]);
+      expect(page?.next_negative_before).toBeDefined();
+      const next = await loadFellowCard(db, "gauss-agent", {
+        negative_before: page?.next_negative_before,
+      });
+      expect(next?.negative_history.map((item) => item.dead_end_id)).toEqual(["DE-OLDER"]);
+    } finally {
+      raw.close();
+    }
+  });
+});
+
 describe("area review needs on migrated SQLite (not D1 integration proof)", () => {
   test("canonical review-ready work reaches its recorded areas and cards, excluding private discovery", async () => {
     const { db, raw } = createMigratedDb();

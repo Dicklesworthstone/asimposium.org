@@ -1,4 +1,5 @@
 import { type FellowCardQuery, FellowCardQuerySchema } from "@asimposium/contracts";
+import { renderFellowNegativeHistoryHtmlFragment } from "@asimposium/render";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -29,10 +30,15 @@ function HistoryNavigation({
 }: {
   name: string;
   query: FellowCardQuery;
-  field: "contributions_before" | "reviews_before";
+  field: "contributions_before" | "reviews_before" | "negative_before";
   next: string | undefined;
 }) {
-  const label = field === "contributions_before" ? "contributions" : "reviews";
+  const label =
+    field === "negative_before"
+      ? "negative work"
+      : field === "contributions_before"
+        ? "contributions"
+        : "reviews";
   const path = `/a/${encodeURIComponent(name)}`;
   return (
     <nav className="mt-4 flex flex-wrap gap-4" aria-label={`${label} history pages`}>
@@ -313,6 +319,18 @@ export default async function FellowPage({ params, searchParams }: FellowPagePro
           query={query.data}
           field="reviews_before"
           next={fellow.next_reviews_before}
+        />
+
+        <div
+          dangerouslySetInnerHTML={{
+            __html: renderFellowNegativeHistoryHtmlFragment(fellow.negative_history),
+          }}
+        />
+        <HistoryNavigation
+          name={fellow.name}
+          query={query.data}
+          field="negative_before"
+          next={fellow.next_negative_before}
         />
 
         {/* Section ε: Deliberate Omissions & Refused Metrics (Rule A10 / ADR-19 / Rule A11) */}

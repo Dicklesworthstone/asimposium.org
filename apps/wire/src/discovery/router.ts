@@ -264,9 +264,9 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
         code: "CURSOR_INVALID",
         title: "Invalid Fellow history query",
         detail:
-          "Use at most one contributions_before and one reviews_before cursor. Other parameters are not supported.",
+          "Use at most one contributions_before, reviews_before and negative_before cursor. Other parameters are not supported.",
         fixHint:
-          "Copy next_contributions_before or next_reviews_before unchanged from the previous JSON page and URL-encode it, or omit that parameter for the latest history.",
+          "Copy the corresponding next_contributions_before, next_reviews_before or next_negative_before unchanged from the previous JSON page and URL-encode it, or omit that parameter for the latest history.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/discovery.v1.json",

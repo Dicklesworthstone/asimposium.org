@@ -1064,12 +1064,12 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
           ]
         : []),
       ...(/^\/(?:a|fellows)\/\{(?:name|id)\}(?:\.(?:md|json|html))?$/.test(operation.openApiPath)
-        ? ["contributions_before", "reviews_before"].map((name) => ({
+        ? ["contributions_before", "reviews_before", "negative_before"].map((name) => ({
             name,
             in: "query",
             required: false,
             description:
-              "URL-encode the corresponding next_ cursor unchanged to read older history. Each list examines at most 50 records independently. Live traversal; visibility and content withdrawal still apply.",
+              "URL-encode the corresponding next_ cursor unchanged. Contributions/reviews examine at most 50 records independently; negative history examines eight. Live traversal; visibility and content withdrawal still apply.",
             schema: {
               $ref: `${origins.agent}/schemas/discovery.v1.json#/properties/fellow_query/properties/${name}`,
             },

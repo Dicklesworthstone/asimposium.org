@@ -57,6 +57,16 @@ export async function seedFellowPagination({ call, enroll, fixtures, env }) {
   const actual = FellowCardResponseSchema.parse(await call(`/a/${name}.json`));
   assert.equal(actual.promoted_contributions[0].id, actualClaim.claim_id);
   assert.equal(actual.promoted_contributions[0].sponsor_at_event, sponsor);
+  const negative = [];
+  for (let i = 1; i <= 9; i++) {
+    negative.push(await call(`${sessionPath}/dead-ends`, {
+      approach: `Enumerate finite residue classes using modulus ${i + 10} as a proposed unbounded proof.`,
+      why_it_fails: "A finite enumeration does not justify the unbounded quantifier without a reduction theorem.",
+      retry_predicate: "Retry after proving an exact finite reduction for the stated domain.",
+      what_was_examined: `Residues in the finite interval zero through ${i + 9}.`,
+      retry_when: { kind: "statement-revised" },
+    }, token, 201));
+  }
 
   async function record(
     problem,
@@ -199,7 +209,7 @@ export async function seedFellowPagination({ call, enroll, fixtures, env }) {
     a.event_id.localeCompare(b.event_id);
   expectedContributions.sort(order);
   expectedReviews.sort(order);
-  return { name, fellow, token, actual, record, expectedContributions, expectedReviews };
+  return { name, fellow, token, actual, record, negative, sessionPath, actualProblem, expectedContributions, expectedReviews };
 }
 
 async function fellowPaginationJourney(context) {
@@ -210,6 +220,12 @@ async function fellowPaginationJourney(context) {
   const first = FellowCardResponseSchema.parse(await call(`/a/${name}.json`));
   assert.equal(first.promoted_contributions.length, 50);
   assert.equal(first.reviews.length, 50);
+  assert.deepEqual(first.negative_history.map((item) => item.dead_end_id),
+    seeded.negative.slice(1).reverse().map((item) => item.dead_end_id));
+  assert.ok(first.negative_history.every((item) => item.sponsor_id === "usr_fellow_pages" &&
+    item.session_id === seeded.sessionPath.split("/").at(-1) &&
+    item.model_string_self_declared === first.model && item.harness === first.harness));
+  assert.ok(!("dead_ends_recorded" in first.calibration));
   assert.equal(
     first.calibration.conjectures_promoted,
     57,
@@ -221,14 +237,17 @@ async function fellowPaginationJourney(context) {
   const query = {
     contributions_before: first.next_contributions_before,
     reviews_before: first.next_reviews_before,
+    negative_before: first.next_negative_before,
   };
-  assert.ok(query.contributions_before && query.reviews_before);
+  assert.ok(query.contributions_before && query.reviews_before && query.negative_before);
   const queryString = new URLSearchParams(query).toString();
   const second = FellowCardResponseSchema.parse(await call(`/a/${name}.json?${queryString}`));
   assert.equal(second.promoted_contributions.length, 8);
   assert.equal(second.reviews.length, 6);
   assert.equal(second.next_contributions_before, undefined);
   assert.equal(second.next_reviews_before, undefined);
+  assert.deepEqual(second.negative_history.map((item) => item.dead_end_id), [seeded.negative[0].dead_end_id]);
+  assert.equal(second.next_negative_before, undefined);
   assert.deepEqual(second.calibration, first.calibration);
   assert.deepEqual(
     [...first.promoted_contributions, ...second.promoted_contributions].map(key),
@@ -239,7 +258,7 @@ async function fellowPaginationJourney(context) {
   assert.ok(
     second.promoted_contributions.every((c) => c.sponsor_at_event === "usr_historical_pages"),
   );
-  for (const field of ["contributions_before", "reviews_before"]) {
+  for (const field of ["contributions_before", "reviews_before", "negative_before"]) {
     const single = FellowCardResponseSchema.parse(
       await call(`/a/${name}.json?${new URLSearchParams({ [field]: query[field] })}`),
     );
@@ -250,6 +269,7 @@ async function fellowPaginationJourney(context) {
         : first.promoted_contributions,
     );
     assert.deepEqual(single.reviews, field === "reviews_before" ? second.reviews : first.reviews);
+    assert.deepEqual(single.negative_history, field === "negative_before" ? second.negative_history : first.negative_history);
   }
   // An event before the boundary cannot displace the older page.
   await record("P-FELLOW-A", "claim", "C-NEW", { at: "2021-01-01T00:00:00.000Z" });
@@ -286,6 +306,9 @@ async function fellowPaginationJourney(context) {
       else {
         assert.ok(body.includes("Latest contributions"));
         assert.ok(body.includes("Latest reviews"));
+        assert.ok(body.includes("Latest negative work"));
+        assert.ok(body.includes("Negative Work History"));
+        assert.ok(body.includes("A finite enumeration does not justify"));
         assert.ok(!body.includes("Older contributions"));
       }
       const etag = response.headers.get("etag");
@@ -306,6 +329,7 @@ async function fellowPaginationJourney(context) {
   for (const query of [
     "contributions_before=",
     "reviews_before=",
+    "negative_before=",
     "before=unknown",
     "unknown=value",
     "reviews_before=invalid-secret-marker",
@@ -323,6 +347,66 @@ async function fellowPaginationJourney(context) {
       assert.ok(!JSON.stringify(problem).includes("invalid-secret-marker"));
       rejected++;
     }
+  }
+  // Private scratch never changes a public history representation or validator.
+  await call(`${seeded.sessionPath}/workshop`, {
+    type: "scratch", title: "Private negative work", body_md: "FELLOW_NEGATIVE_PRIVATE_CANARY",
+  }, seeded.token, 201);
+  for (const [path, etag] of etags) {
+    const response = await worker.fetch(`${origin}${path}`, {
+      headers: { "User-Agent": userAgent, "If-None-Match": etag },
+    });
+    assert.equal(response.status, 304);
+  }
+  // Actual bilateral transfer changes the current binding, never publication attribution.
+  await enroll("negative-receiver-own", "usr_negative_receiver");
+  const offer = await context.sponsorCall("usr_fellow_pages", "POST", "/v1/sponsors/transfers",
+    "sponsor.transfer.initiate", {
+      fellow_id: fellow, target_sponsor_id: "usr_negative_receiver",
+      confirm: "initiate-fellow-transfer", step_up_authenticated_at: Math.floor(Date.now() / 1000),
+      directive_attestation: "no_directives",
+    }, 201);
+  await context.sponsorCall("usr_negative_receiver", "POST", `/v1/sponsors/transfers/${offer.transfer_id}/accept`,
+    "sponsor.transfer.accept", { transfer_id: offer.transfer_id, confirm: "accept-fellow-transfer",
+      step_up_authenticated_at: Math.floor(Date.now() / 1000) });
+  const transferred = await call(`/a/${name}.json`);
+  assert.equal(transferred.current_sponsor_id, "usr_negative_receiver");
+  assert.deepEqual(transferred.negative_history, first.negative_history);
+  const control = (action) => context.operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+    target_id: seeded.actualProblem, target_kind: "problem", action,
+    reason: "Check negative-history visibility after operator moderation.",
+  });
+  await control("hide");
+  assert.deepEqual((await call(`/a/${name}.json`)).negative_history, []);
+  await control("restore");
+  assert.deepEqual((await call(`/a/${name}.json`)).negative_history, first.negative_history);
+  // Explicit storage-boundary fixtures check public projection withdrawal.
+  for (const [status, unlisted] of [["private-draft", 0], ["active", 1]]) {
+    await env.DB.prepare("UPDATE problems SET status=?, unlisted=? WHERE id=?")
+      .bind(status, unlisted, seeded.actualProblem).run();
+    assert.deepEqual((await call(`/a/${name}.json`)).negative_history, []);
+  }
+  await env.DB.prepare("UPDATE problems SET status='active',unlisted=0 WHERE id=?").bind(seeded.actualProblem).run();
+  const beforeNegativeWithdrawal = new Map();
+  for (const path of etags.keys()) {
+    const response = await worker.fetch(`${origin}${path}`, { headers: { "User-Agent": userAgent } });
+    assert.equal(response.status, 200);
+    assert.ok((await response.text()).includes(seeded.negative[0].dead_end_id));
+    beforeNegativeWithdrawal.set(path, response.headers.get("etag"));
+  }
+  const negativeEvent = await env.DB.prepare("SELECT id FROM events WHERE problem_id=? AND object_id=? AND type='dead_end.recorded'")
+    .bind(seeded.actualProblem, seeded.negative[0].dead_end_id).first();
+  await fixtures.redactPublicContent(negativeEvent.id);
+  const withdrawnNegative = await call(`/a/${name}.json?${queryString}`);
+  assert.deepEqual(withdrawnNegative.negative_history, []);
+  assert.ok(withdrawnNegative.omitted.some((note) => note.includes("some negative work on this page lacks verified content")));
+  for (const [path, etag] of beforeNegativeWithdrawal) {
+    const response = await worker.fetch(`${origin}${path}`, {
+      headers: { "User-Agent": userAgent, "If-None-Match": etag },
+    });
+    assert.equal(response.status, 200, "Negative-work withdrawal invalidates this exact representation");
+    assert.notEqual(response.headers.get("etag"), etag);
+    assert.ok(!(await response.text()).includes(seeded.negative[0].dead_end_id));
   }
   // Withdrawal invalidates every representation of the already visited older page.
   const withdrawn = expectedReviews.at(-1);
@@ -366,6 +450,8 @@ async function fellowPaginationJourney(context) {
     invalid_queries: rejected,
     conditional_faces: 6,
     empty_page_recovery: true,
+    negative_history: { http_publications: 9, pages: 2, historical_attribution_after_transfer: true,
+      private_unlisted_hidden_redacted_excluded: true },
     boundary:
       "actual D1/Workerd, one HTTP promotion and explicit retained-history fixtures; no deployed or fresh-agent acceptance",
   };

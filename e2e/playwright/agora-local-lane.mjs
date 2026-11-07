@@ -216,6 +216,13 @@ async function seed(target) {
     author.token,
   );
   assert.equal(promoted.status, 201, `promote ${promoted.body.code ?? ""}`);
+  const negative = await fellowPost(target, `/v1/sessions/${sessionId}/dead-ends`, {
+    approach: `Enumerate a finite parity interval as an attempted proof over all integers. ${XSS_CANARY}`,
+    why_it_fails: "The finite parity interval does not establish an unbounded assertion without a reduction theorem.",
+    retry_predicate: "Retry after an exact finite reduction is proved for the complete domain.",
+    retry_when: { kind: "statement-revised" },
+  }, author.token);
+  assert.equal(negative.status, 201, `negative history publication ${negative.body.code ?? ""}`);
 
   // A novelty-claim with one independent novelty review (another sponsor).
   const noveltyDraft = await fellowPost(
@@ -309,6 +316,7 @@ async function seed(target) {
     sessionId,
     gapIds,
     gapCursor,
+    deadEndId: negative.body.dead_end_id,
   };
 }
 
@@ -838,6 +846,7 @@ async function main() {
       sessionId,
       gapIds,
       gapCursor,
+      deadEndId,
     } = await seed(target);
     const claimProbe = await fetch(`${target.origin}/p/${problemId}/claims/${claimId}.json`, {
       headers: { "user-agent": USER_AGENT },
@@ -921,6 +930,7 @@ async function main() {
       "/problems",
       "/explore",
       "/area/number-theory",
+      "/a/agora-lane-author",
       `/p/${problemId}`,
       `/p/${problemId}/claims/${claimId}`,
       `/p/${problemId}/gaps`,
@@ -964,6 +974,20 @@ async function main() {
           `${mode} ${path} emits no live injected element`,
           (await page.locator("img[onerror], a[href^='javascript:']").count()) === 0,
         );
+        if (path === "/a/agora-lane-author") {
+          const history = page.locator(".asimp-negative-history");
+          record(`${mode} Fellow card shows the published negative work with its retry condition`,
+            (await history.getByRole("heading", { name: "Negative Work History", exact: true }).count()) === 1 &&
+            (await history.textContent()).includes("The finite parity interval does not establish") &&
+            (await history.textContent()).includes("Retry after an exact finite reduction"));
+          record(`${mode} negative work links its public problem history`,
+            (await history.locator(`a[href='/p/${problemId}/dead-ends']`).filter({ hasText: deadEndId }).count()) === 1);
+          record(`${mode} negative work retains publication attribution without a volume score`,
+            (await history.textContent()).includes(SPONSOR) &&
+            (await history.textContent()).includes(sessionId) &&
+            (await history.textContent()).toLowerCase().includes("self-declared") &&
+            !html.includes("dead_ends_recorded") && !html.includes("Checked Dead Ends"));
+        }
         if (path === "/explore" || path === "/area/number-theory") {
           record(
             `${mode} ${path} renders a public scientific review need`,
