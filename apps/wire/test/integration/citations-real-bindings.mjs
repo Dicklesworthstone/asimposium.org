@@ -683,6 +683,133 @@ await runLocalWorkerJourney(async (context) => {
     "a forged later version copying a redacted version's seq is not excused",
   );
 
+  // Hold a real request inside screening while another authenticated writer
+  // changes its admission conditions. These races use production routes and
+  // real D1; only the classifier scheduling is controlled by the fixture.
+  const raceSponsor = "usr_cit_admission_a";
+  const raceAuthor = await enroll("cit-admission-author", raceSponsor);
+  const raceReviewer = await enroll("cit-admission-reviewer", "usr_cit_admission_b");
+  const raceProblem = (
+    await call(
+      "/v1/problems",
+      {
+        title: "Citation admission for finite paths",
+        statement: "Every finite simple path with n edges has n plus one vertices.",
+        falsifier: "A finite simple path whose vertex count differs from its edge count plus one.",
+        motivation: "Check publication admission while bibliographic work is screened.",
+        areas: ["combinatorics"],
+      },
+      raceAuthor,
+      201,
+    )
+  ).problem.id;
+  await sponsorCall(
+    raceSponsor,
+    "POST",
+    `/v1/sponsors/problems/${raceProblem}/lifecycle`,
+    "problem-lifecycle",
+    { action: "publish" },
+  );
+  const raceAuthorSession = (
+    await call("/v1/sessions", { problem_id: raceProblem, intent: "explore" }, raceAuthor, 201)
+  ).session_id;
+  const raceReviewerSession = (
+    await call("/v1/sessions", { problem_id: raceProblem, intent: "explore" }, raceReviewer, 201)
+  ).session_id;
+  const racePath = `/v1/sessions/${raceAuthorSession}/citations`;
+  const admissionSnapshot = async () => ({
+    head: await env.DB.prepare("SELECT public_seq, chain_digest FROM problems WHERE id = ?")
+      .bind(raceProblem)
+      .first(),
+    events: (
+      await env.DB.prepare("SELECT id, seq, type FROM events WHERE problem_id = ? ORDER BY seq")
+        .bind(raceProblem)
+        .all()
+    ).results,
+    citations: (
+      await env.DB.prepare("SELECT * FROM citations WHERE problem_id = ? ORDER BY citation_id")
+        .bind(raceProblem)
+        .all()
+    ).results,
+    versions: (
+      await env.DB.prepare(
+        "SELECT * FROM citation_versions WHERE problem_id = ? ORDER BY citation_id, version",
+      )
+        .bind(raceProblem)
+        .all()
+    ).results,
+    warnings: (
+      await env.DB.prepare(`SELECT s.event_id FROM screening_publications s
+      JOIN events e ON e.id = s.event_id WHERE e.problem_id = ? ORDER BY e.seq`)
+        .bind(raceProblem)
+        .all()
+    ).results,
+    replays: await env.DB.prepare("SELECT COUNT(*) AS n FROM session_write_replays").first(),
+  });
+  const waitForScreen = async (target) => {
+    const deadline = Date.now() + 15_000;
+    while ((await fixtures.screeningCalls()) < target && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(
+      await fixtures.screeningCalls(),
+      target,
+      "citation reached the held screening call",
+    );
+  };
+  for (const change of ["duplicate", "retirement"]) {
+    const body = {
+      ...validDoiPayload,
+      title: `Finite path citation for the ${change} admission check`,
+      locator: `10.1234/finite-path-${change}`,
+    };
+    const target = (await fixtures.screeningCalls()) + 1;
+    await fixtures.holdScreeningCall(target);
+    let pending;
+    try {
+      pending = call(racePath, body, raceAuthor, null, `citation-admission-native-${change}`);
+      await waitForScreen(target);
+      if (change === "duplicate") {
+        await call(
+          `/v1/sessions/${raceReviewerSession}/citations`,
+          body,
+          raceReviewer,
+          201,
+          "citation-admission-native-winner",
+        );
+      } else {
+        await sponsorCall(
+          raceSponsor,
+          "POST",
+          `/v1/sponsors/problems/${raceProblem}/lifecycle`,
+          "problem-lifecycle",
+          { action: "retire", reason: "The finite path admission investigation is complete." },
+        );
+      }
+      const afterConcurrentWrite = await admissionSnapshot();
+      await fixtures.releaseScreeningCall();
+      const refusal = await pending;
+      if (change === "duplicate") {
+        assert.equal(refusal.status, 409);
+        assert.equal(refusal.code, "DUPLICATE_CITATION");
+      } else {
+        // A lifecycle change may also revoke publication authority. Either
+        // typed refusal must leave the competing lifecycle event as the head.
+        assert.ok(
+          (refusal.status === 422 && refusal.code === "CLAIMS_BOARD_LOCKED") ||
+            (refusal.status === 403 && refusal.code === "WRITE_REFUSED"),
+        );
+      }
+      assert.deepEqual(
+        await admissionSnapshot(),
+        afterConcurrentWrite,
+        `${change}: no citation, warning or replay commits after admission is lost`,
+      );
+    } finally {
+      await fixtures.releaseScreeningCall();
+      await pending;
+    }
+  }
+
   console.log(
     JSON.stringify({
       kind: "citations-real-bindings",

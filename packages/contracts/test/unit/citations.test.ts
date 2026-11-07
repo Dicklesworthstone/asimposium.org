@@ -355,7 +355,7 @@ describe("W5.8c Citations contracts", () => {
               category: "dual-use-boundary",
               action: "published-with-warning",
               notice: "screening-warning",
-            },
+            } as const,
           },
         ],
         omitted: [],

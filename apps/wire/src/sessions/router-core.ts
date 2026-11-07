@@ -15011,6 +15011,77 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     cleanupOnFailure?: () => Promise<void>;
   }
 
+  function citationClosedProblem(
+    problemId: string,
+    status: string,
+    operation: "record" | "correct",
+  ): Response {
+    return validatedProblem({
+      status: 422,
+      code: "CLAIMS_BOARD_LOCKED",
+      title: `Cannot ${operation} citation on closed problem`,
+      detail: `Problem '${problemId}' is '${status}'. Citations cannot be ${operation === "record" ? "recorded" : "corrected"} on resolved or retired problems.`,
+      fixHint: "Explore an active problem or fork an alternate formulation.",
+      rule: "P3",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/citations.v1.json",
+        example: { method: "GET", path: "/problems.json" },
+      },
+    });
+  }
+
+  function duplicateCitationProblem(
+    problemId: string,
+    citationId: string,
+    operation: "record" | "correct",
+  ): Response {
+    return validatedProblem({
+      status: 409,
+      code: "DUPLICATE_CITATION",
+      title:
+        operation === "record"
+          ? "Duplicate citation already recorded"
+          : "Correction conflicts with existing citation",
+      detail:
+        operation === "record"
+          ? `A citation with matching locator or normalized title already exists as '${citationId}' on problem '${problemId}'.`
+          : `Corrected citation details match existing citation '${citationId}' on problem '${problemId}'.`,
+      fixHint:
+        operation === "record"
+          ? `Cite '${citationId}' directly instead of recording a duplicate.`
+          : `Cite '${citationId}' directly instead.`,
+      rule: "P8",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/citations.v1.json",
+        example: { citation_id: citationId },
+      },
+    });
+  }
+
+  /** Describe a lost admission fence without exposing storage failures. */
+  async function citationAdmissionProblem(
+    db: Env["DB"],
+    problemId: string,
+    normHash: string,
+    correctedCitationId?: string,
+  ): Promise<Response | undefined> {
+    const current = await db
+      .prepare(`SELECT p.status, (
+        SELECT c.citation_id FROM citations c
+        WHERE c.problem_id = p.id AND c.norm_hash = ?
+          AND (? IS NULL OR c.citation_id <> ?) LIMIT 1
+      ) AS duplicate_citation_id FROM problems p WHERE p.id = ?`)
+      .bind(normHash, correctedCitationId ?? null, correctedCitationId ?? null, problemId)
+      .first<{ status: string; duplicate_citation_id: string | null }>();
+    if (!current || current.status === "private-draft") return writeRefusedProblem();
+    const operation = correctedCitationId === undefined ? "record" : "correct";
+    if (current.status === "resolved" || current.status === "retired")
+      return citationClosedProblem(problemId, current.status, operation);
+    if (current.duplicate_citation_id !== null)
+      return duplicateCitationProblem(problemId, current.duplicate_citation_id, operation);
+    return undefined;
+  }
+
   async function executeCitationRecord(input: CitationRecordExecutionInput): Promise<Response> {
     const { c, auth, db, key, digest, session, data } = input;
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
@@ -15055,14 +15126,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     if (problemRow.status === "resolved" || problemRow.status === "retired") {
       await cleanupOnFailure();
-      return validatedProblem({
-        status: 422,
-        code: "CLAIMS_BOARD_LOCKED",
-        title: "Cannot record citation on closed problem",
-        detail: `Problem '${session.problem_id}' is '${problemRow.status}'. Citations cannot be recorded on resolved or retired problems.`,
-        fixHint: "Explore an active problem or fork an alternate formulation.",
-        rule: "P3",
-      });
+      return citationClosedProblem(session.problem_id, problemRow.status, "record");
     }
 
     const { canonical_locator, norm_hash, coercion_flags } = computeCitationCanonicalAndHash({
@@ -15080,20 +15144,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     if (duplicate) {
       await cleanupOnFailure();
-      return validatedProblem({
-        status: 409,
-        code: "DUPLICATE_CITATION",
-        title: "Duplicate citation already recorded",
-        detail: `A citation with matching locator or normalized title already exists as '${duplicate.citation_id}' on problem '${session.problem_id}'.`,
-        fixHint: `Cite '${duplicate.citation_id}' directly instead of recording a duplicate.`,
-        rule: "P8",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/citations.v1.json",
-          example: {
-            citation_id: duplicate.citation_id,
-          },
-        },
-      });
+      return duplicateCitationProblem(session.problem_id, duplicate.citation_id, "record");
     }
 
     const screened = await screenWithQuota(
@@ -15178,6 +15229,21 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
+          // Screening and ID allocation can outlive another citation or lifecycle change.
+          // Fence both cursor allocation and event insertion in the same transaction.
+          preconditionSql: ` AND EXISTS (SELECT 1 FROM problems current_problem
+            WHERE current_problem.id = ?
+              AND current_problem.status IN ('sharpening', 'active', 'dormant', 'under-result-review'))
+            AND NOT EXISTS (SELECT 1 FROM citations c WHERE c.problem_id = ? AND c.norm_hash = ?)
+            AND NOT EXISTS (SELECT 1 FROM citations allocated
+              WHERE allocated.problem_id = ? AND allocated.citation_id = ?)`,
+          preconditionBindings: [
+            session.problem_id,
+            session.problem_id,
+            norm_hash,
+            session.problem_id,
+            citationId,
+          ],
           statementsAfterEvent: ({ sequence }) => [
             db
               .prepare(
@@ -15312,6 +15378,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
         return writeRefusedProblem();
+      if (error instanceof KraterLedgerPreconditionError)
+        return (
+          (await citationAdmissionProblem(db, session.problem_id, norm_hash)) ??
+          objectStateChangedProblem("citation", citationId)
+        );
       throw error;
     }
   }
@@ -15372,14 +15443,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     if (problemRow.status === "resolved" || problemRow.status === "retired") {
       await cleanupOnFailure();
-      return validatedProblem({
-        status: 422,
-        code: "CLAIMS_BOARD_LOCKED",
-        title: "Cannot correct citation on closed problem",
-        detail: `Problem '${session.problem_id}' is '${problemRow.status}'. Citations cannot be corrected on resolved or retired problems.`,
-        fixHint: "Explore an active problem or fork an alternate formulation.",
-        rule: "P3",
-      });
+      return citationClosedProblem(session.problem_id, problemRow.status, "correct");
     }
 
     const existing = await db
@@ -15470,20 +15534,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
       if (duplicate) {
         await cleanupOnFailure();
-        return validatedProblem({
-          status: 409,
-          code: "DUPLICATE_CITATION",
-          title: "Correction conflicts with existing citation",
-          detail: `Corrected citation details match existing citation '${duplicate.citation_id}' on problem '${session.problem_id}'.`,
-          fixHint: `Cite '${duplicate.citation_id}' directly instead.`,
-          rule: "P8",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/citations.v1.json",
-            example: {
-              citation_id: duplicate.citation_id,
-            },
-          },
-        });
+        return duplicateCitationProblem(session.problem_id, duplicate.citation_id, "correct");
       }
     }
 
@@ -15564,10 +15615,24 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
-          // rg73: the route's state check, repeated inside the ledger transaction.
-          preconditionSql:
-            " AND EXISTS (SELECT 1 FROM citations c WHERE c.problem_id = ? AND c.citation_id = ? AND c.version = ?)",
-          preconditionBindings: [session.problem_id, citationId, existing.version],
+          // Preserve the version CAS while rechecking lifecycle and uniqueness
+          // after external screening, atomically with the new citation version.
+          preconditionSql: ` AND EXISTS (SELECT 1 FROM problems current_problem
+            WHERE current_problem.id = ?
+              AND current_problem.status IN ('sharpening', 'active', 'dormant', 'under-result-review'))
+            AND EXISTS (SELECT 1 FROM citations c
+              WHERE c.problem_id = ? AND c.citation_id = ? AND c.version = ?)
+            AND NOT EXISTS (SELECT 1 FROM citations duplicate
+              WHERE duplicate.problem_id = ? AND duplicate.norm_hash = ? AND duplicate.citation_id <> ?)`,
+          preconditionBindings: [
+            session.problem_id,
+            session.problem_id,
+            citationId,
+            existing.version,
+            session.problem_id,
+            norm_hash,
+            citationId,
+          ],
           statementsAfterEvent: ({ sequence }) => [
             db
               .prepare(
@@ -15714,12 +15779,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (error instanceof KraterLedgerPreconditionError)
-        return objectStateChangedProblem("citation", citationId);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
         return writeRefusedProblem();
+      if (error instanceof KraterLedgerPreconditionError)
+        return (
+          (await citationAdmissionProblem(db, session.problem_id, norm_hash, citationId)) ??
+          objectStateChangedProblem("citation", citationId)
+        );
       throw error;
     }
   }
