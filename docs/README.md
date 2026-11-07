@@ -14,9 +14,140 @@ observed.
 
 ## Current reality check — 2026-11-06
 
+### Current publication and inbox candidate — 2026-11-06
+
+The qualification target is `719cf5cb5d81bde4de7a1776cf3fc559b25b3be3`.
+Concurrent upstream commits add novelty history, atomic statement-context
+checks, immutable session opening cursors and a private sponsor inbox after
+the earlier `b31d54e8` verification. The earlier results remain bound to that
+revision; a primary-HEAD check correctly rejects their transfer to newer code.
+
+Current integration repair `bwal` pins the two new Worker imports and migration
+0130 in S2's existing source inventory, appends the migration to its ordered
+journal, and adds its reviewed trigger SQL hash to the definition census.
+The original closure, journal and trigger-census checks fail before repair.
+Fourteen focused closure/journal/provenance/omission controls then pass in
+31.657 seconds. The four-test trigger census and specific legacy cursor-rewrite
+test pass in 3.261 seconds. The hash is definition accounting, not a new generic
+native trigger probe; no old pin, classifier, assertion or deadline changes.
+
+The existing production-browser lane now follows its actual UI-issued directive
+into the sponsor inbox. Ten new checks cover owner HTML, private cache headers,
+no implicit acknowledgment, actual Fellow acknowledgment, the unacknowledged
+filter, and anonymous/foreign-sponsor isolation. All original 209 checks remain;
+the primary whole lane passes 219/219 in 134.074 seconds. Workerd, D1, R2 and
+Chromium are real, while the sponsor cookie is locally minted with Auth.js;
+this is not Google OAuth or hosted proof. Parent `1e7` retains its full unmet
+taxonomy, outbox/DO and operational acceptance.
+
+Independent read review also suggested a trailing-newline link defect. Actual
+before-edit Bun and Node controls disprove it: the existing no-multiline regexes
+reject all four line terminators. The production parser remains unchanged;
+the temporary passing controls and correction are retained in comment 2865.
+This is not a source fix or vulnerability finding.
+
+Stock UBS diff/staged finish in 63.351/59.284 seconds, both with finding exit 1:
+three supported code files, 530 matching locations, two critical matches on
+browser test pathname/status comparisons, 26 reviewed warnings and 502 info.
+All modules finish, with no suppressions. The JSON census is reviewed separately.
+This scoped review supplies no missing broad `g4b4` coverage or clean-security claim.
+
+A fresh standalone main checkout verifies all 2,491 tracked blobs/modes and
+nineteen selected dependency identities with no shared primary source inodes.
+The first original unfiltered root run at `26e49526` starts at 22:55:57 UTC and exposes four toolchain
+failures: two stale mutation snippets in one registry test, plus three orchestration
+controls stopped by the token harness's missing migration pin. The primary
+15-case control reproduces all four failures, then passes after the targeted
+token-list and mutation-producer corrections. Registry applicability is not
+runtime fault detection: both changed native mutants still require passing
+controls, intended failures and restored positives. The original full root owner
+finishes normally with six passing groups and two failing groups in 1,340.736
+seconds. Wire reports 6,726 passes and 25 failures: 23 token-harness source-pin
+refusals, the migration README head and the schema-index golden. Its raw failure
+and exact source/dependency/process audits remain retained; downstream gates
+are not run on that revision.
+
+Corrected commits `b7faefff` and `719cf5cb` retain the original native fault
+detectors and update their actual producers. Novelty's same-sponsor plant must
+defeat both the source selection and the independent T0 exclusion; the stale
+statement plant targets the query shared by preflight and the in-batch fence.
+Actual native controls/faults/restored positives pass: novelty 0/1/0 in
+9.971/24.913/10.376 seconds, and stale context 0/1/0 in 12.277/9.111/25.530 seconds.
+The faults fail the intended domain assertions, and source/dependency restoration
+audits complete before the next command. The existing registry CLI is not used
+as evidence because it discards child streams; direct raw streams are retained.
+
+The route census now enumerates the lazy inbox router and explicitly classifies
+three signed-sponsor operations and three existing aliases, while asserting that
+all canonical Fellow follow methods stay disclosed. The stronger constructor
+census fails on those six routes before classification. Of the three generated
+discovery outputs, OpenAPI and well-known bytes remain identical; only four real
+schema-index fields change. All 26 discovery/schema-census tests pass, with 1,754
+expectations. Migration documentation now names 0130 and its nullable historical
+cursor. Stock diff/staged scans finish for both subsequent scopes: 56 matching
+locations for the token/mutation files and 95 for the discovery files. Every
+critical/warning context is reviewed; no suppression or clean-security claim is
+introduced.
+
+The fresh exact-`719cf5cb` full run finishes normally at 00:04:46 UTC on November
+7 after 1,645.468 seconds: all eight groups pass, with no failed, blocked or
+missing group. Wire passes all 6,751 cases across 287 files; Agora passes 900
+cases and 5,983 expectations. Toolchain passes 412 cases, with its 54 existing
+individual skips retained. Postchecks match all 2,491 source blobs/modes and
+nineteen selected dependencies. All 42 recorded process births retire; 482
+unreadable cwd records limit observation. Two inner S1 post-exit drain notices
+remain, so this is not a warning-free or every-inner-byte claim.
+
+The matching clean-source
+[Vercel Preview](https://asimposium-bwwqd9qma-dicklesworthstones-projects.vercel.app)
+(`dpl_SkoM8A3her4HzDr9Fkm2y9EyNqWy`) is READY at exact `719cf5cb`, created
+00:08:03.887 and ready 00:08:25.279 UTC. Its nine-second build uses frozen Bun
+1.4.4 and Next 16.4.5. Both pre/post-upload audits match all 2,491 files; the
+actual provider archive contains 2,447 matching regular source files, 44 expected
+Git/Beads exclusions and no extra or unsafe entries. Archive SHA256 is
+`c84f3053c5c01e3acafe994a2276dd358b6340f50f9ba96663332affccaa8a26`.
+An earlier same-source candidate's archive check correctly fails on one empty
+untracked file named `=`, timestamped during Wire testing; its precise writer
+is unconfirmed. That candidate, failed audit and successful primary QA are
+preserved. The replacement uses a fresh deployment-only checkout; no file is
+deleted and the strict extras check is unchanged.
+
+Primary live QA passes the original 26 HTTP, three exact static-byte and four
+Chromium-view checks in 16.827 seconds, with no browser errors or prefetch
+cancellations. All four screenshots and three actual 1200-by-630 PNGs are
+inspected. The new anonymous inbox route returns its sign-in surface and
+`private, no-cache, no-store` headers. This is only its hosted anonymous guard,
+not authenticated inbox or Google OAuth proof. Ledger views and share images
+honestly show the old Worker's unavailable-data fallback. Independent native,
+browser, static and live qualification, final provider logs and `bwal` closure
+remain pending. The first 34-mode native run's command session ends 143 at
+00:12:11 UTC after two passing modes, without the aggregate terminal receipt.
+That incomplete attempt is retained under `sbuk`; its signal source is unknown,
+downstream execution stops, and no full native pass or cause/fix is inferred.
+Bounded detached-terminal controls then retain normal success with both streams
+and correctly preserve an intentional own-process interruption without a success
+receipt. The unchanged full native command, original case limits and owner cap
+pass 34/34 in a separate run: normal exit 0 after 495.156 seconds,
+00:20:07.230–00:28:22.386 UTC. This qualifies that native run, not the cause of
+the original 143; `sbuk` remains open. The separate registered sponsor-inbox
+native consumer also passes normally in 8.420 seconds, including signed reads,
+pagination, authorization, acknowledgment, filtering and bilateral transfer.
+Its source/dependency postcheck matches. These runs do not certify the excluded
+transition-trigger census or the broader `1e7` operational acceptance.
+Production browser, separate static gates, independent live QA and final provider
+logs remain pending.
+
+A fresh public read at 23:56 UTC still finds the same old `0.1.0-draft`
+capability bytes on both Workers and 404 `ROUTE_NOT_FOUND` for `/protocol.json`.
+The four required authority/configuration variables remain absent in Node's
+environment; this is a presence check, not a credential-store audit. Remote-only
+Rust admission at 23:35 UTC selects no worker: nine disk-headroom denials and one
+missing pinned compiler remain. Actual cargo transfer, compilation and tests are
+NOTRUN. No local fallback, worker reconfiguration or Cloudflare rollout occurs.
+
 ### Scientific standing and HEAD repair — 2026-11-06
 
-The current source is `b31d54e8e98c963e598463404e23a8be73ed9f1b`.
+The earlier qualified source is `b31d54e8e98c963e598463404e23a8be73ed9f1b`.
 The new scientific fix (`t5cf`, functional commit `1c662be8`) preserves a
 recorded statement defect when its review text is withheld. Before repair,
 redacting only the review body changes a malformed claim to open/stale. The
@@ -52,11 +183,14 @@ no dispatcher group is skipped or blocked. Before/after audits match all 2,471
 tracked blobs/modes and nineteen selected dependency identities. All 24 recorded
 process births retire and eight known groups have no hits; 488 unreadable cwd
 records remain a visibility limit. Two inner S1 fixtures print post-exit drain
-expiry notices, so this does not claim every inner byte was retained. Native,
-production-browser and separate static qualification are still pending for
-`t5cf`. StormyGorge independently closes `iajo` against its original acceptance
-criteria in comment 2860, citing the exact source and full registered gates.
-Its criteria, dependencies and earlier comments remain unchanged.
+expiry notices, so this does not claim every inner byte was retained. The
+uninterrupted native discovery passes 33/33 in 427.378 seconds and production
+browser passes all 209 checks in 112.823 seconds. Separate gates pass: typecheck
+eight groups, lint eight groups, contracts 950, schema drift, render 586, Worker
+contracts 178 and security 33. Final recorded process births all retire; 483
+unreadable cwd records limit that observation. StormyGorge independently closes
+`iajo` in comment 2860 (scanner exit correction 2861) and `t5cf` in 2862, against
+their original criteria. Criteria, dependencies and prior history are preserved.
 
 The new [Vercel Preview](https://asimposium-dfr2p9skt-dicklesworthstones-projects.vercel.app)
 (`dpl_Z9fs88X9sxeghNpHriVZ9m8sPCks`) is READY at exact `1c662be8`.
@@ -68,17 +202,18 @@ sources, are identical. This is disclosed runtime-source equivalence, not an
 exact-`b31d54e8` deployment or a rebuilt-binary claim. Three actual share images
 pass 1200-by-630 PNG checks and show the unavailable-ledger fallback. Primary
 live QA passes the unchanged 26 HTTP, three exact static-byte and four Chromium
-view checks in 22.335 seconds, with no observed browser errors. All four
-screenshots are inspected. Independent live QA and the final provider log window
-remain pending. The complete first window, 17:06:43–17:58:22 UTC, reports zero
-runtime error/fatal and HTTP 5xx records, with no further pages or excluded
-intervals. A separate HTTP 200 record confirms visibility. Earlier local CLI
-project-context rejections queried no provider logs; explicit team scope fixes
-that invocation. No whole-window or permanent no-error claim is made.
+view checks in 22.335 seconds; independent live QA passes the same checks in
+19.972 seconds. Neither records browser errors. All eight screenshots are
+inspected. Two overlapping provider windows cover 17:06:43–18:32:35 UTC with
+zero runtime error/fatal and HTTP 5xx records, exhausted pagination and no
+excluded intervals. An HTTP 200 record from independent QA confirms visibility.
+Earlier local CLI project-context rejections queried no provider logs; explicit
+team scope fixes that invocation. This finite observation is not a permanent
+no-error claim, a working deployed ledger or proof for later application changes.
 
-At 17:05 UTC, both Cloudflare Workers still advertise the retained
+At 18:26 UTC, both Cloudflare Workers still advertise the retained
 `0.1.0-draft` capability bytes and return 404 for `/protocol.json`. Four required
-authority/configuration variables are absent in a Bun presence-only check.
+authority/configuration variables are absent in Node/Bun presence-only checks.
 No Worker deploy, duplicate provisioning, DNS change or production promotion
 occurs. A fresh read-only Rust admission query finds no eligible worker with the
 pinned compiler and required disk headroom; cargo execution is NOTRUN. Neither

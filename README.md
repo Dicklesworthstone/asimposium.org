@@ -18,22 +18,29 @@
 
 </div>
 
-> **Current-state boundary — 2026-11-06, later review.** Source `b31d54e8`
-> preserves malformed standing when statement-defect review text is withheld,
-> keeps withheld bytes private, and repairs a missed unit fixture and S2 source
-> inventory entry. Focused tests and the complete local science journey pass.
-> The first independent full root fails; the corrected exact-revision run passes
-> all eight groups, including 6,716 Worker and 886 Agora tests. The independent
-> verifier closes `iajo`; native, browser and separate static qualification for
-> `t5cf` remain pending. A new
-> [Vercel Preview](https://asimposium-dfr2p9skt-dicklesworthstones-projects.vercel.app)
-> is READY at `1c662be8`, whose application/dependency sources are unchanged by
-> the test/inventory-only correction. Primary live QA passes 26 HTTP, three static
-> byte and four browser-view checks without observed browser errors. Independent
-> live QA and the final provider log window are pending.
-> The Cloudflare Worker still serves the old draft; operator deployment authority,
-> remote Rust capacity and the original deployed launch gates remain outstanding.
-> See [the current repair evidence](docs/README.md#scientific-standing-and-head-repair--2026-11-06).
+> **Current qualification target — 2026-11-07.** `719cf5cb`
+> preserves newly merged publication and private-inbox work and repairs its S2
+> import/migration inventories and trigger-definition census. The existing
+> production-browser journey passes 219 checks, including ten new private inbox
+> checks with actual UI-issued notices, acknowledgment and privacy controls.
+> The earlier full run exposes stale fault anchors, migration pins/documentation
+> and schema-index drift. Those corrections pass their original focused checks;
+> both repaired mutants reach the intended native assertions under passing and
+> restored controls. The independent full run passes all eight groups, including
+> 6,751 Worker and 900 Agora tests. The matching clean-source
+> [Vercel Preview](https://asimposium-bwwqd9qma-dicklesworthstones-projects.vercel.app)
+> is READY and passes primary live HTTP, static-byte, browser, anonymous-inbox
+> guard and share-image checks. Independent native discovery passes all 34 modes
+> and the separate sponsor-inbox lane passes. Production-browser, static and live
+> qualification, final provider logs and `bwal` closure remain pending.
+> Earlier exact `b31d54e8` qualification is complete: root eight groups, native
+> discovery 33, browser 209 and separate static gates pass; `iajo` and `t5cf`
+> are independently closed. Its
+> [Preview](https://asimposium-dfr2p9skt-dicklesworthstones-projects.vercel.app)
+> passes primary and independent live QA and bounded provider log checks.
+> Those results do not qualify the later application changes. The Cloudflare
+> rollout, remote Rust capacity and original hosted launch gates remain open.
+> See [the current repair evidence](docs/README.md#current-publication-and-inbox-candidate--2026-11-06).
 >
 > **Earlier qualification — 2026-11-06.** Fresh review fixes nested batch-source
 > validation, missing immutable versions in the pack benchmark, and a reproduced
