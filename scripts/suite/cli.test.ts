@@ -583,7 +583,7 @@ publish_control("\036ASIMPOSIUM_SUITE_CONTROL $nonce exited $exit $signal $$ -1\
 while (1) { sleep 1; }
 `;
 
-function stubbornReleaseSupervisor(supervisorPidPath: string): string {
+function stubbornReleaseSupervisor(supervisorPidPath: string, guardLeaderDeath = false): string {
   return String.raw`
 use strict;
 use warnings;
@@ -598,13 +598,32 @@ open(my $supervisor_pid, ">", $supervisor_pid_path) or exit 125;
 print {$supervisor_pid} "$$\n" or exit 125;
 close($supervisor_pid) or exit 125;
 sub publish_control { my ($record) = @_; my $written = syswrite($control, $record); exit 125 if !defined $written || $written != length($record); }
-publish_control("\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\n");
 $SIG{TERM} = sub {};
 $SIG{HUP} = sub {};
 $SIG{USR1} = sub {};
+# This deliberately stubborn fixture has no production parent lease. Keep a
+# private death pipe so an early inspector failure that kills only this leader
+# cannot strand the target. The guard signals its own group, never a guessed PID.
+my ($death_read, $death_write);
+if (${guardLeaderDeath ? 1 : 0}) {
+  pipe($death_read, $death_write) or exit 125;
+  my $guard = fork();
+  exit 125 if !defined $guard;
+  if ($guard == 0) {
+    close($death_write);
+    close($control);
+    close(STDIN); close(STDOUT); close(STDERR);
+    $SIG{TERM} = 'IGNORE'; $SIG{HUP} = 'IGNORE'; $SIG{USR1} = 'IGNORE';
+    sysread($death_read, my $body, 1);
+    kill 'KILL', -getpgrp();
+    exit 125;
+  }
+  close($death_read);
+}
+publish_control("\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\n");
 my $target = fork();
 exit 125 if !defined $target;
-if ($target == 0) { close($control) or exit 127; exec @ARGV or exit 127; }
+if ($target == 0) { if (defined $death_write) { close($death_write) or exit 127; } close($control) or exit 127; exec @ARGV or exit 127; }
 waitpid($target, 0);
 my $raw = $?;
 my $signal = $raw & 127;
@@ -1675,7 +1694,7 @@ describe("owned session launcher", () => {
         pipeDrainMs: 200,
         retainedStreamBytes: 128,
         retainedOutputBytes: 128,
-        supervisorScript: stubbornReleaseSupervisor(pidPath),
+        supervisorScript: stubbornReleaseSupervisor(pidPath, true),
         inspectionCommand: ["perl", "-e", POST_KILL_CENSUS_OBSERVER, pidPath, statePath, mode],
       });
 
@@ -1691,6 +1710,43 @@ describe("owned session launcher", () => {
       if (mode !== "once") expect(result.ownershipFailurePhase).toBe("final-census");
     },
   );
+
+  test("PLANTED: an early inspection failure retires stubborn fixture descendants", async () => {
+    const pidPath = capturePath(`early-inspection-${crypto.randomUUID()}.pid`);
+    try {
+      const result = await runOwnedCommand({
+        command: [
+          "perl",
+          "-e",
+          '$SIG{TERM} = sub {}; $SIG{HUP} = sub {}; syswrite(STDOUT, "x" x 129); while (1) { sleep 1; }',
+        ],
+        cwd: process.cwd(),
+        env: childEnvironment(),
+        timeoutMs: 2_000,
+        termGraceMs: 40,
+        killReapMs: 300,
+        pipeDrainMs: 200,
+        retainedStreamBytes: 128,
+        retainedOutputBytes: 128,
+        supervisorScript: stubbornReleaseSupervisor(pidPath, true),
+        inspectionCommand: [
+          "perl",
+          "-e",
+          'print STDERR "planted early inspection failure\\n"; exit 2;',
+        ],
+      });
+
+      expect(result.outcome).toBe("inspection-unproven");
+      expect(result.cleanupProven).toBe(false);
+      expect(result.ownershipFailurePhase).toBe("initial-census");
+      expect(result.retainedStdoutBytes).toBe(128);
+      expect(ownedGroupPids(Number(readFileSync(pidPath, "utf8").trim()))).toEqual([]);
+    } finally {
+      if (existsSync(pidPath)) {
+        await stopOwnedFixtureGroup(Number(readFileSync(pidPath, "utf8").trim()));
+      }
+    }
+  });
 
   test("a stalled inspector retires a live target through the parent lease", async () => {
     const marker = `suite-stalled-inspector-${crypto.randomUUID()}`;
