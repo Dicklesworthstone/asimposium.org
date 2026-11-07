@@ -300,6 +300,24 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       expect(html).toContain("<code>Checked topological invariants across known genera.</code>");
     });
 
+    test("Fellow reviews link the exact work product and preserve its version and publication sponsor", () => {
+      const review = sampleFellow.reviews[0];
+      if (!review) throw new Error("Missing published review fixture");
+      const fellow = {
+        ...sampleFellow,
+        current_sponsor_id: "SPON-CURRENT",
+        reviews: [{ ...review, target_version: 3, sponsor_at_event: "SPON-PUBLISHED" }],
+      };
+      for (const html of [
+        Bun.markdown.html(renderFellowCardMarkdown(fellow)),
+        renderFellowCardHtmlFragment(fellow),
+      ]) {
+        expect(html).toContain('href="/p/P-4DSP/reviews/R-1.md"');
+        expect(html).toContain('href="/p/P-4DSP/claims/C-1@3.md"');
+        expect(html).toContain("SPON-PUBLISHED");
+      }
+    });
+
     test("Fellow warning notices are trusted reading context outside the scientific statement", () => {
       const warned = {
         ...sampleFellow,

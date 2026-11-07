@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
-import { getMoveTemplate, PackResponseSchema, ReviewRequestSchema } from "@asimposium/contracts";
+import {
+  ClaimFaceResponseSchema,
+  getMoveTemplate,
+  PackResponseSchema,
+  ReviewRequestSchema,
+} from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Real Workerd HTTP, D1, R2, enrollment and signed sponsor publication.
 // The shared local harness supplies a synthetic screening decision and sponsor
 // enrollment approval; this does not establish Google, AI or deployed readiness.
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, env, fixtures, worker, origin, userAgent }) => {
+  async ({ call, enroll, sponsorCall, operatorCall, env, fixtures, worker, origin, userAgent }) => {
     const authorSponsor = "usr_working_review_author";
     const reviewerSponsor = "usr_working_review_reviewer";
     const author = await enroll("working-review-author", authorSponsor);
@@ -284,6 +289,181 @@ await runLocalWorkerJourney(
     assert.ok(
       !(await at(cut)).targets.includes(`${records[2].claim_id}@1`),
       "present-day withdrawal also wins on historical reads",
+    );
+    // Publish through HTTP, rather than inserting archived review fixtures:
+    // twenty-one different Fellows each contribute one review and one evidence
+    // record to the same current claim version. Default faces stay bounded;
+    // known exact item URLs must still reach the twenty-first work product.
+    const exactRecords = [];
+    for (let index = 0; index < 21; index++) {
+      const token = await enroll(`exact-item-reader-${index}`, `usr_exact_item_reader_${index}`);
+      const session = await call(
+        "/v1/sessions",
+        { problem_id: problem, intent: "review" },
+        token,
+        201,
+      );
+      const path = `/v1/sessions/${session.session_id}`;
+      const review = await call(
+        `${path}/review`,
+        {
+          target_claim_id: records[0].claim_id,
+          target_version: revised.version,
+          verdict: "inform",
+          basis: `Exact reader ${index} checked the two named integers.`,
+          capable_of_failure: "A nonzero remainder for either integer would invalidate this check.",
+          body_md: `EXACT_REVIEW_WORK_PRODUCT_${index}: zero and two have remainder zero modulo two.`,
+        },
+        token,
+        201,
+      );
+      const evidence = await call(
+        `${path}/evidence`,
+        {
+          bears_on_kind: "claim",
+          bears_on_id: records[0].claim_id,
+          bears_on_version: revised.version,
+          direction: "informs",
+          kind: "argument",
+          source: { kind: "model_memory" },
+          mode: "exploratory",
+          body_md: `EXACT_EVIDENCE_WORK_PRODUCT_${index}: this is an arithmetic observation, not a proof certificate.`,
+        },
+        token,
+        201,
+      );
+      exactRecords.push({ review, evidence });
+      console.log(JSON.stringify({ stage: "exact-item-http-publication", fellow: index + 1 }));
+    }
+    const last = exactRecords.at(-1);
+    assert.ok(last);
+    const ordinary = ClaimFaceResponseSchema.parse(
+      await call(`/p/${problem}/claims/${records[0].claim_id}@${revised.version}.json`),
+    );
+    for (const [kind, field, idField] of [
+      ["claim-review", "review", "review_id"],
+      ["claim-evidence", "evidence", "evidence_id"],
+    ]) {
+      const ids = ordinary.items.filter((item) => item.kind === kind).map((item) => item.id);
+      assert.ok(ids.length > 0 && ids.length <= 20);
+      assert.deepEqual(
+        ids,
+        exactRecords.slice(0, ids.length).map((record) => record[field][idField]),
+      );
+      if (ids.length < 20)
+        assert.ok(ordinary.omitted.some((item) => item.reason === "budget_exceeded"));
+    }
+    console.log(
+      JSON.stringify({
+        stage: "exact-item-ordinary-window",
+        counts: {
+          reviews: ordinary.items.filter((item) => item.kind === "claim-review").length,
+          evidence: ordinary.items.filter((item) => item.kind === "claim-evidence").length,
+        },
+        omitted: ordinary.omitted,
+      }),
+    );
+    assert.ok(ordinary.omitted.some((item) => item.reason === "candidate_limit"));
+    const rawPublic = (path, init = {}) =>
+      worker.fetch(`${origin}${path}`, {
+        ...init,
+        headers: { "User-Agent": userAgent, ...init.headers },
+      });
+    for (const [segment, id, canary] of [
+      ["reviews", last.review.review_id, "EXACT_REVIEW_WORK_PRODUCT_20"],
+      ["evidence", last.evidence.evidence_id, "EXACT_EVIDENCE_WORK_PRODUCT_20"],
+    ]) {
+      assert.equal(typeof id, "string");
+      assert.ok(!ordinary.items.some((item) => item.id === id));
+      const path = `/p/${problem}/${segment}/${id}.json`;
+      const response = await rawPublic(path);
+      assert.equal(response.status, 200);
+      const face = ClaimFaceResponseSchema.parse(await response.json());
+      assert.deepEqual(face.claim_state, ordinary.claim_state);
+      assert.deepEqual(
+        face.items.map((item) => item.id),
+        [`${records[0].claim_id}@${revised.version}`, id],
+      );
+      assert.ok(face.items.find((item) => item.id === id).body.includes(canary));
+      assert.ok(!JSON.stringify(face).includes(privateCanary));
+      const etag = response.headers.get("etag");
+      assert.ok(etag);
+      const head = await rawPublic(path, { method: "HEAD" });
+      assert.equal(head.status, 200);
+      assert.equal(await head.text(), "");
+      assert.equal(head.headers.get("etag"), etag);
+      assert.equal((await rawPublic(path, { headers: { "If-None-Match": etag } })).status, 304);
+      const markdown = await rawPublic(`/p/${problem}/${segment}/${id}.md`);
+      assert.equal(markdown.status, 200);
+      assert.ok((await markdown.text()).includes(canary));
+      for (const action of ["hide", "restore"]) {
+        await operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+          target_id: `${problem}/${records[0].claim_id}`,
+          target_kind: "claim",
+          action,
+          reason: "Exact item read regression: present-day visibility control.",
+        });
+        assert.equal(
+          (await rawPublic(path, { headers: { "If-None-Match": etag } })).status,
+          action === "hide" ? 404 : 304,
+        );
+        if (action === "restore") {
+          const restored = await rawPublic(path);
+          assert.equal(restored.status, 200);
+          assert.ok((await restored.text()).includes(canary));
+        }
+      }
+    }
+    const fellow = await rawPublic("/a/exact-item-reader-20.md");
+    assert.equal(fellow.status, 200);
+    const fellowBody = await fellow.text();
+    assert.ok(fellowBody.includes(`/p/${problem}/reviews/${last.review.review_id}.md`));
+    assert.ok(fellowBody.includes("usr_exact_item_reader_20"));
+    assert.ok(!fellowBody.includes(privateCanary));
+    const exactPaths = [
+      `/p/${problem}/reviews/${last.review.review_id}.json`,
+      `/p/${problem}/evidence/${last.evidence.evidence_id}.json`,
+    ];
+    // Adverse retained-state fixtures use real D1, not a second HTTP mutation
+    // protocol: publication policy is not being certified by these setups.
+    await env.DB.prepare("UPDATE problems SET unlisted = 1 WHERE id = ?").bind(problem).run();
+    for (const path of exactPaths) {
+      const response = await rawPublic(path);
+      assert.equal(response.status, 200);
+      assert.ok(response.headers.get("x-robots-tag").includes("noindex"));
+      assert.match(await response.text(), /unlisted/i);
+    }
+    await env.DB.prepare("UPDATE problems SET status = 'private-draft' WHERE id = ?")
+      .bind(problem)
+      .run();
+    for (const path of exactPaths) assert.equal((await rawPublic(path)).status, 404);
+    await env.DB.prepare("UPDATE problems SET status = 'active', unlisted = 0 WHERE id = ?")
+      .bind(problem)
+      .run();
+    for (const [table, column, id, path] of [
+      ["reviews", "review_id", last.review.review_id, exactPaths[0]],
+      ["evidence", "evidence_id", last.evidence.evidence_id, exactPaths[1]],
+    ]) {
+      const oldEtag = (await rawPublic(path)).headers.get("etag");
+      const event = await env.DB.prepare(
+        `SELECT source_event_id AS id FROM ${table} WHERE problem_id = ? AND ${column} = ?`,
+      )
+        .bind(problem, id)
+        .first();
+      assert.ok(event);
+      await fixtures.redactPublicContent(event.id);
+      assert.equal((await rawPublic(path, { headers: { "If-None-Match": oldEtag } })).status, 404);
+      const head = await rawPublic(path, { method: "HEAD" });
+      assert.equal(head.status, 404);
+      assert.equal(await head.text(), "");
+    }
+    console.log(
+      JSON.stringify({
+        stage: "exact-item-window-regression-passed",
+        status: "pass",
+        http_review_publications: 21,
+        http_evidence_publications: 21,
+      }),
     );
     console.log(
       JSON.stringify({

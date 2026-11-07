@@ -303,6 +303,13 @@ export default async function FellowPage({ params, searchParams }: FellowPagePro
                       (Problem <code>{r.problem_id}</code>)
                     </span>
                   </header>
+                  <p>
+                    <Link
+                      href={`/r/p/${encodeURIComponent(r.problem_id)}/reviews/${encodeURIComponent(r.review_id)}`}
+                    >
+                      Read review <code>{r.review_id}</code>
+                    </Link>
+                  </p>
                   <ScreeningNotice notice={r.screening_notice} />
                   <p className="quiet">
                     Tier: <code>{r.tier}</code> · Basis: {r.basis} · Sponsor:{" "}

@@ -297,9 +297,10 @@ export async function readPublicClaimSnapshot(
   cursor: number,
   claimId: string,
   version: number,
+  focus?: string,
 ): Promise<{ section: LedgerPackSection; fold: ScientificDisposition }> {
   const target = `${claimId}@${version}`;
-  const targetStatements = targetClaimStatements(db, problemId, cursor, target);
+  const targetStatements = targetClaimStatements(db, problemId, cursor, target, focus);
   const results = await db.batch([
     ...targetStatements,
     prepareScientificDispositions(db, problemId, cursor, 1, { claimId, version }),
@@ -325,6 +326,7 @@ function targetClaimStatements(
   problemId: string,
   cursor: number,
   target: string,
+  focus?: string,
 ): D1PreparedStatement[] {
   const [claimId, versionText] = target.split("@");
   const version = Number(versionText);
@@ -375,9 +377,18 @@ function targetClaimStatements(
         AND c.redacted_at IS NULL AND NOT ${eventContentHiddenSql("e")}
       WHERE x.problem_id = ? AND x.bears_on_kind = 'claim' AND x.bears_on_id = ?
         AND x.bears_on_version = ? AND e.seq <= ?
+        AND (? IS NULL OR x.evidence_id = ?)
       ORDER BY e.seq ASC, e.id ASC LIMIT ?
     `)
-      .bind(problemId, claimId, version, cursor, LEDGER_PACK_CANDIDATE_LIMIT + 1),
+      .bind(
+        problemId,
+        claimId,
+        version,
+        cursor,
+        focus ?? null,
+        focus ?? null,
+        LEDGER_PACK_CANDIDATE_LIMIT + 1,
+      ),
     db
       .prepare(`
       SELECT x.review_id AS id, e.payload_sha256, c.payload_json,
@@ -399,9 +410,18 @@ function targetClaimStatements(
       LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
         AND c.redacted_at IS NULL AND NOT ${eventContentHiddenSql("e")}
       WHERE x.problem_id = ? AND x.target_claim_id = ? AND x.target_version = ? AND e.seq <= ?
+        AND (? IS NULL OR x.review_id = ?)
       ORDER BY e.seq ASC, e.id ASC LIMIT ?
     `)
-      .bind(problemId, claimId, version, cursor, LEDGER_PACK_CANDIDATE_LIMIT + 1),
+      .bind(
+        problemId,
+        claimId,
+        version,
+        cursor,
+        focus ?? null,
+        focus ?? null,
+        LEDGER_PACK_CANDIDATE_LIMIT + 1,
+      ),
     prepareDependencyClosure(db, problemId, cursor, target),
     prepareDependencyAssessment(db, problemId, cursor, target),
     ...prepareProofGapSnapshot(db, problemId, { through: cursor }),

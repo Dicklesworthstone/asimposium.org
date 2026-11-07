@@ -460,9 +460,9 @@ async function scientificEvidence(
   claim: string,
   grade = "computation",
   overrides: Record<string, unknown> = {},
+  id = `E-SCI-${seq}`,
 ) {
-  const event = `EV-SCI-${seq}`,
-    id = `E-SCI-${seq}`;
+  const event = `EV-SCI-${seq}`;
   const payload = JSON.stringify({
     kind: "computation",
     direction: "supports",
@@ -545,6 +545,156 @@ async function scientificReview(
     .run(id, event, seq, claim, verdict);
   return { event, id };
 }
+
+async function focusedClaimHistory() {
+  const f = fixture();
+  await f.add(1);
+  let review = { event: "", id: "" };
+  let evidence = { event: "", id: "" };
+  for (let index = 0; index < 21; index++) {
+    review = await scientificReview(f, 2 + index * 2, "C-1");
+    const sequence = 3 + index * 2;
+    evidence = await scientificEvidence(f, sequence, "C-1", "computation", {}, `E-${sequence}`);
+  }
+  const app = createLedgerFaceRoutes();
+  const read = (path: string, init: RequestInit = {}) =>
+    app.request(`https://a.asimposium.org/p/P-PACK/${path}`, init, { DB: f.d1 } as Env);
+  return { ...f, app, read, review, evidence };
+}
+
+test("exact public item URLs read the twenty-first record without narrowing standing or ordinary windows", async () => {
+  const f = await focusedClaimHistory();
+  const ordinaryResponse = await f.read("claims/C-1@1.json");
+  expect(ordinaryResponse.status).toBe(200);
+  const ordinary = ClaimFaceResponseSchema.parse(await ordinaryResponse.json());
+  expect(ordinary.items.filter((item) => item.kind === "claim-review")).toHaveLength(20);
+  expect(ordinary.items.filter((item) => item.kind === "claim-evidence")).toHaveLength(20);
+  expect(ordinary.claim_state.legacy_reviews).toBe(21);
+  for (const kind of ["claim-review", "claim-evidence"])
+    expect(ordinary.omitted).toContainEqual({ reason: "candidate_limit", detail: `C-1@1:${kind}` });
+  for (const [segment, record, canary, sponsor] of [
+    ["reviews", f.review, "CONTROLLED_REVIEW_BODY_CANARY", "usr-reviewer"],
+    ["evidence", f.evidence, "Reproducible finite computation.", "usr-fixture"],
+  ] as const) {
+    expect(ordinary.items.some((item) => item.id === record.id)).toBe(false);
+    const path = `${segment}/${record.id}.json`;
+    const response = await f.read(path);
+    expect(response.status).toBe(200);
+    const face = ClaimFaceResponseSchema.parse(await response.json());
+    expect(face.claim_state).toEqual(ordinary.claim_state);
+    expect(face.items.map((item) => item.id)).toEqual(["C-1@1", record.id]);
+    const item = face.items.find((candidate) => candidate.id === record.id);
+    expect(item).toBeDefined();
+    expect(JSON.parse(item?.body ?? "null")).toMatchObject({
+      event: record.event,
+      target: "C-1@1",
+      sponsor,
+    });
+    expect(item?.body).toContain(canary);
+    expect(face.omitted).toContainEqual(expect.objectContaining({ reason: "item_face_scope" }));
+    const etag = response.headers.get("etag");
+    expect(etag).not.toBeNull();
+    const head = await f.read(path, { method: "HEAD" });
+    expect(head.status).toBe(200);
+    expect(await head.text()).toBe("");
+    expect(head.headers.get("etag")).toBe(etag);
+    const cached = await f.read(path, { headers: { "If-None-Match": etag ?? "" } });
+    expect(cached.status).toBe(304);
+    expect(await cached.text()).toBe("");
+    const markdown = await f.read(`${segment}/${record.id}.md`);
+    expect(markdown.status).toBe(200);
+    expect(await markdown.text()).toContain(canary);
+    expect((await f.read(`${segment}/${record.id}.json?through=43`)).status).toBe(404);
+  }
+});
+
+test("focused public records retain current controls, immutable bodies, privacy and unavailable-content guards", async () => {
+  const f = await focusedClaimHistory();
+  for (const [segment, record, canary, table, column] of [
+    ["reviews", f.review, "CONTROLLED_REVIEW_BODY_CANARY", "reviews", "review_id"],
+    ["evidence", f.evidence, "Reproducible finite computation.", "evidence", "evidence_id"],
+  ] as const) {
+    const path = `${segment}/${record.id}.json`;
+    const original = await f.read(path);
+    expect(original.status).toBe(200);
+    const etag = original.headers.get("etag") ?? "";
+    f.db
+      .prepare(`UPDATE ${table} SET body_md = 'MUTABLE_PROJECTION_CANARY' WHERE ${column} = ?`)
+      .run(record.id);
+    const immutable = await f.read(path);
+    expect(immutable.status).toBe(200);
+    const body = await immutable.text();
+    expect(body).toContain(canary);
+    expect(body).not.toContain("MUTABLE_PROJECTION_CANARY");
+    for (const target of [record.id, `${record.id}@1`, `#${record === f.review ? 42 : 43}`]) {
+      control(f, target);
+      expect((await f.read(path, { headers: { "If-None-Match": etag } })).status).toBe(404);
+      const head = await f.read(path, { method: "HEAD" });
+      expect(head.status).toBe(404);
+      expect(await head.text()).toBe("");
+      control(f, target, "visible");
+      expect((await f.read(path)).status).toBe(200);
+    }
+  }
+  control(f, "C-1@1");
+  expect((await f.read(`reviews/${f.review.id}.json`)).status).toBe(404);
+  expect((await f.read(`evidence/${f.evidence.id}.json`)).status).toBe(404);
+  control(f, "C-1@1", "visible");
+  f.db.exec("UPDATE problems SET unlisted = 1 WHERE id = 'P-PACK'");
+  for (const path of [`reviews/${f.review.id}.json`, `evidence/${f.evidence.id}.json`]) {
+    const response = await f.read(path);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-robots-tag")).toContain("noindex");
+    expect(await response.text()).toMatch(/unlisted/i);
+  }
+  f.db.exec("UPDATE problems SET status = 'private-draft' WHERE id = 'P-PACK'");
+  expect((await f.read(`reviews/${f.review.id}.json`)).status).toBe(404);
+  expect((await f.read(`evidence/${f.evidence.id}.json`)).status).toBe(404);
+  f.db.exec("UPDATE problems SET status = 'active', unlisted = 0 WHERE id = 'P-PACK'");
+  f.db
+    .prepare("UPDATE event_content SET redacted_at = '2026-11-07T00:00:00Z' WHERE event_id = ?")
+    .run(f.review.event);
+  f.db
+    .prepare("UPDATE event_content SET payload_sha256 = ? WHERE event_id = ?")
+    .run("f".repeat(64), f.evidence.event);
+  for (const path of [`reviews/${f.review.id}.json`, `evidence/${f.evidence.id}.json`]) {
+    const response = await f.read(path);
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("CANARY");
+  }
+});
+
+test("focused records keep the item byte ceiling and exact problem scope", async () => {
+  const f = await focusedClaimHistory();
+  expect((await f.read(`reviews/${f.review.id}.json`)).status).toBe(200);
+  expect((await f.read(`evidence/${f.evidence.id}.json`)).status).toBe(200);
+  const otherProblem = await f.app.request(
+    `https://a.asimposium.org/p/P-OTHER/evidence/${f.evidence.id}.json`,
+    {},
+    { DB: f.d1 } as Env,
+  );
+  expect(otherProblem.status).toBe(404);
+  for (const [segment, record] of [
+    ["reviews", f.review],
+    ["evidence", f.evidence],
+  ] as const) {
+    const row = f.db
+      .prepare("SELECT payload_json FROM event_content WHERE event_id = ?")
+      .get(record.event) as { payload_json: string };
+    const payload = JSON.stringify({
+      ...JSON.parse(row.payload_json),
+      body_md: `OVERSIZED_BODY_CANARY${"x".repeat(18000)}`,
+    });
+    const hash = await digest(payload);
+    f.db
+      .prepare("UPDATE event_content SET payload_json = ?, payload_sha256 = ? WHERE event_id = ?")
+      .run(payload, hash, record.event);
+    f.db.prepare("UPDATE events SET payload_sha256 = ? WHERE id = ?").run(hash, record.event);
+    const response = await f.read(`${segment}/${record.id}.json`);
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("OVERSIZED_BODY_CANARY");
+  }
+});
 
 test("public novelty faces retain the twenty-first adverse review beyond display bounds", async () => {
   const f = fixture();

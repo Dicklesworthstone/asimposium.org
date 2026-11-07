@@ -226,7 +226,12 @@ describe("published screening warnings", () => {
         { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
       ] as const) {
         const receipt = published(
-          await screen(f, candidate(f, "evidence"), { coarse_category: notice.category }, "evidence"),
+          await screen(
+            f,
+            candidate(f, "evidence"),
+            { coarse_category: notice.category },
+            "evidence",
+          ),
         );
         expect(receipt.provenance.public_action).toEqual(notice);
       }

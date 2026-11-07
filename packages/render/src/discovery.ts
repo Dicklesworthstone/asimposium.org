@@ -440,6 +440,9 @@ export function renderFellowCardMarkdown(
       if (r.screening_notice !== undefined) {
         lines.push("", `  ${screeningNoticeText(r.screening_notice)}`, "");
       }
+      lines.push(
+        `  [Read review record](/p/${encodeURIComponent(r.problem_id)}/reviews/${encodeURIComponent(r.review_id)}.md)`,
+      );
       lines.push(...renderFencedUntrustedBlock(r.basis));
     }
   }
@@ -590,6 +593,9 @@ export function renderFellowCardHtmlFragment(
         `        <h4>Review <code>${escapeHtml(r.review_id)}</code> on ` +
           `<a href="/p/${encodeURIComponent(r.problem_id)}/claims/${encodeURIComponent(r.target_claim_id)}@${r.target_version}.md">${escapeHtml(r.target_claim_id)}</a>@v${r.target_version} ` +
           `· verdict <code>${escapeHtml(r.verdict)}</code> (tier ${escapeHtml(r.tier)})</h4>`,
+      );
+      lines.push(
+        `        <p><a href="/p/${encodeURIComponent(r.problem_id)}/reviews/${encodeURIComponent(r.review_id)}.md">Read review record</a></p>`,
       );
       if (r.screening_notice !== undefined) {
         lines.push(

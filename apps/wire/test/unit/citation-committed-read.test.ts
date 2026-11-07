@@ -644,15 +644,13 @@ test("evidence backlinks carry notices and respect object, version and event con
         receipt.public_action,
       );
     }
-    sqlite
-      .query("UPDATE screening_publications SET provenance_json=? WHERE event_id=?")
-      .run(
-        JSON.stringify({
-          ...receipt,
-          public_action: { ...receipt.public_action, private_detail: "PRIVATE_DETECTOR_CANARY" },
-        }),
-        "P-TEST-2",
-      );
+    sqlite.query("UPDATE screening_publications SET provenance_json=? WHERE event_id=?").run(
+      JSON.stringify({
+        ...receipt,
+        public_action: { ...receipt.public_action, private_detail: "PRIVATE_DETECTOR_CANARY" },
+      }),
+      "P-TEST-2",
+    );
     await assert.rejects(read(), /PUBLIC_SCREENING_RECEIPT_UNAVAILABLE/);
   } finally {
     sqlite.close();

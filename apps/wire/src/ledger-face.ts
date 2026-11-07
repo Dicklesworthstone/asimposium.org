@@ -1433,6 +1433,7 @@ async function loadClaimFace(
     head.cursor,
     claimId as string,
     head.version,
+    focus,
   );
   if (fold.currentVersion !== head.version)
     throw new Error("Claim scientific timeline unavailable");

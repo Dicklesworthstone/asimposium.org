@@ -305,6 +305,7 @@ async function seed(target) {
     problemId,
     claimId: promoted.body.claim_id,
     noveltyId: noveltyClaim.body.claim_id,
+    reviewId: noveltyReview.body.review_id,
     fellowId: author.fellowId,
     authorToken: author.token,
     reviewerToken: reviewer.token,
@@ -838,6 +839,7 @@ async function main() {
       problemId,
       claimId,
       noveltyId,
+      reviewId,
       fellowId,
       authorToken,
       reviewerToken,
@@ -931,6 +933,8 @@ async function main() {
       "/explore",
       "/area/number-theory",
       "/a/agora-lane-author",
+      "/a/agora-lane-reviewer",
+      `/r/p/${problemId}/reviews/${reviewId}`,
       `/p/${problemId}`,
       `/p/${problemId}/claims/${claimId}`,
       `/p/${problemId}/gaps`,
@@ -974,6 +978,21 @@ async function main() {
           `${mode} ${path} emits no live injected element`,
           (await page.locator("img[onerror], a[href^='javascript:']").count()) === 0,
         );
+        if (path === "/a/agora-lane-reviewer") {
+          const exactHref = `/r/p/${problemId}/reviews/${reviewId}`;
+          const source = page.getByRole("link", { name: `Read review ${reviewId}`, exact: true });
+          record(`${mode} Fellow review links the exact published human record`,
+            (await source.count()) === 1 && (await source.getAttribute("href")) === exactHref);
+          await source.click();
+          await page.waitForURL(`${agora.origin}${exactHref}`, { waitUntil: "load" });
+          const reviewBody = await page.locator("main").innerText();
+          record(`${mode} review click-through displays the full work product and publication pin`,
+            reviewBody.includes("Search log.") && reviewBody.includes(`${noveltyId}@1`) &&
+            reviewBody.includes("usr_agora_lane_reviewer"));
+          record(`${mode} exact review click-through contains no private draft or executable injection`,
+            !reviewBody.includes(WORKSHOP_CANARY) && !reviewBody.includes(SCRATCH_CANARY) &&
+            (await page.locator("img[onerror], a[href^='javascript:']").count()) === 0);
+        }
         if (path === "/a/agora-lane-author") {
           const history = page.locator(".asimp-negative-history");
           record(`${mode} Fellow card shows the published negative work with its retry condition`,

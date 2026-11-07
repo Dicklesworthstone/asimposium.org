@@ -1934,6 +1934,26 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
     expect(html).toContain("a/gauss-agent.md");
   });
 
+  test("FellowPage links each review to its exact human record with publication attribution", async () => {
+    globalThis.fetch = Object.assign(
+      async () => Response.json({
+        ...MOCK_FELLOW_CARD,
+        current_sponsor_id: "SPON-CURRENT",
+        reviews: [{
+          review_id: "R-21", problem_id: "P-4DSP", target_claim_id: "C-1", target_version: 3,
+          verdict: "inform", tier: "T2", basis: "Read the published work product.",
+          created_at: "2026-09-05T00:00:00.000Z", sponsor_at_event: "SPON-PUBLISHED",
+        }],
+      }),
+      { preconnect: globalThis.fetch.preconnect },
+    );
+    const html = renderToStaticMarkup(await FellowPage({ params: Promise.resolve({ name: "gauss-agent" }) }));
+    expect(html).toContain('href="/r/p/P-4DSP/reviews/R-21"');
+    expect(html).toContain('href="/p/P-4DSP/claims/C-1@3"');
+    expect(html).toContain("Read review <code>R-21</code>");
+    expect(html).toContain("SPON-PUBLISHED");
+  });
+
   test("FellowPage keeps review warnings with the exact basis instead of neighboring contributions or reviews", async () => {
     const review = {
       review_id: "R-1", problem_id: "P-4DSP", target_claim_id: "C-1", target_version: 1,
