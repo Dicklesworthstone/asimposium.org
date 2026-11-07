@@ -369,7 +369,7 @@ function fixture() {
     const records = face.items
       .filter((item) => item.kind === "full-event")
       .map((item) => JSON.parse(item.body));
-    return { body, face, control, records };
+    return { body, face, control, records, pack };
   }
   function control(target: string, visibility: "hidden" | "visible") {
     sql
@@ -444,6 +444,87 @@ describe("full public ledger packs", () => {
       },
     } as unknown as D1Database;
     await expect(readFullPack(db, input)).rejects.toBe(failure);
+  });
+
+  test("citation warnings follow exact publications through full-pack size fallback and rendered faces", async () => {
+    const f = fixture();
+    try {
+      const citation = {
+        citation_id: "L-1",
+        title: "Parity definitions for a bounded experiment",
+        locator_kind: "url",
+        locator: "https://example.org/parity",
+        excerpt: "An even integer is divisible by two.",
+        retrieved_at: AT,
+        source_provenance: "retrieved",
+        authors: ["Public citation author"],
+      };
+      await f.append("citation.recorded", "citation", "L-1", citation);
+      await f.append(
+        "citation.corrected",
+        "citation",
+        "L-1",
+        {
+          ...citation,
+          base_version: 1,
+          authors: Array.from({ length: 64 }, () => '"'.repeat(200)),
+          correction_rationale: "Record the complete author list.",
+        },
+        2,
+      );
+      const receipt = await Bun.file(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+          import.meta.url,
+        ),
+      ).json();
+      const correctedReceipt = {
+        ...receipt,
+        public_action: {
+          category: "off-topic",
+          action: "published-with-warning",
+          notice: "off-scope",
+        },
+      };
+      f.sql
+        .prepare("INSERT INTO screening_publications VALUES (?, ?)")
+        .run("EVENT-1", JSON.stringify(receipt));
+      f.sql
+        .prepare("INSERT INTO screening_publications VALUES (?, ?)")
+        .run("EVENT-2", JSON.stringify(correctedReceipt));
+      const result = await f.read();
+      expect(result.records.map((record) => record.seq)).toEqual([1, 2]);
+      expect(result.records[0].content.title).toBe(citation.title);
+      expect(result.records[0].content_omitted).toBe(null);
+      expect(result.records[0].publication.screening_notice).toEqual(receipt.public_action);
+      expect(result.records[1].content).toBe(null);
+      expect(result.records[1].content_omitted).toBe("item_size_limit");
+      expect(result.face.items.find((item) => item.id === "FULL-1")?.screening_notice).toEqual(
+        receipt.public_action,
+      );
+      expect(result.face.items.find((item) => item.id === "FULL-2")?.screening_notice).toEqual(
+        correctedReceipt.public_action,
+      );
+      expect(result.face.tokens_estimate).toBeLessThanOrEqual(8000);
+      for (const format of ["md", "html-fragment"] as const) {
+        const rendered = renderProjection(composedPackToProjection(result.pack), format).body;
+        expect(rendered).toContain("screening context notice: dual-use-boundary");
+        expect(rendered).toContain("Off-scope science:");
+        expect(rendered).not.toContain("configuration_digest");
+        expect(rendered).not.toContain("input_digest");
+      }
+      const historical = await f.read({ through: 1 });
+      expect(historical.records).toHaveLength(1);
+      expect(historical.face.items.find((item) => item.id === "FULL-1")?.screening_notice).toEqual(
+        receipt.public_action,
+      );
+      f.sql
+        .prepare("UPDATE screening_publications SET provenance_json = ? WHERE event_id = 'EVENT-1'")
+        .run(JSON.stringify({ private_detail: "PRIVATE_SCREENING_CANARY" }));
+      await expect(f.read()).rejects.toThrow("PUBLIC_SCREENING_RECEIPT_UNAVAILABLE");
+    } finally {
+      f.sql.close();
+    }
   });
 
   test("dormancy receipts retain the platform decision and its exact quiet interval", async () => {

@@ -147,7 +147,7 @@ async function citationFromEvent(
   if (payload === undefined || payload.citation_id !== row.object_id) return undefined;
   // Named fields only: attribution comes from the event, never from body text
   // or a mutable head projection. Unknown payload properties cannot escape.
-  return decode({
+  const item = decode({
     citation_id: row.object_id,
     problem_id: row.problem_id,
     version: row.object_version,
@@ -170,6 +170,9 @@ async function citationFromEvent(
     harness: row.harness ?? undefined,
     created_at: row.created_at,
   });
+  if (item === undefined) return undefined;
+  const screeningNotice = publicationScreeningNotice(row.screening_provenance_json);
+  return screeningNotice === undefined ? item : { ...item, screening_notice: screeningNotice };
 }
 
 export async function loadCommittedCitations(

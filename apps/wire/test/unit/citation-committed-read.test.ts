@@ -601,6 +601,110 @@ test("citation backlinks preserve exact-version screening notices and refuse mal
   }
 });
 
+test("citation notices bind each recorded and corrected version without trusting authored notice fields", async () => {
+  const { sqlite, db, event } = fixture();
+  const receipt = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  try {
+    await event(1, "L-1", 1, citation("L-1", "Warned original"));
+    await event(2, "L-1", 2, {
+      ...citation("L-1", "Clean correction"),
+      screening_notice: receipt.public_action,
+    });
+    await event(3, "L-1", 3, citation("L-1", "Warned correction"));
+    for (const seq of [1, 3])
+      sqlite
+        .query("INSERT INTO screening_publications VALUES(?,?)")
+        .run(`P-TEST-${seq}`, JSON.stringify(receipt));
+    for (const [through, warned] of [
+      [1, true],
+      [2, false],
+      [3, true],
+    ] as const) {
+      const list = await loadCommittedCitations(db, "P-TEST", { through }, decodeFixture);
+      assert.equal(list.citations.length, 1);
+      assert.equal(list.citations[0]?.version, through);
+      assert.deepEqual(
+        list.citations[0]?.screening_notice,
+        warned ? receipt.public_action : undefined,
+      );
+      const exact = await loadCommittedCitation(db, "P-TEST", `L-1@${through}`, {}, decodeFixture);
+      assert.deepEqual(
+        exact?.citation.screening_notice,
+        warned ? receipt.public_action : undefined,
+      );
+      assert.deepEqual(
+        exact?.versions.map((version) => version.screening_notice),
+        [receipt.public_action, undefined, receipt.public_action],
+      );
+      assert.equal(JSON.stringify(exact).includes(receipt.input_digest), false);
+      assert.equal(JSON.stringify(exact).includes(receipt.model_version), false);
+    }
+    for (const target of ["L-1", "L-1@3", "#3"]) {
+      sqlite.query("INSERT INTO content_controls VALUES('P-TEST',?,'hidden',1)").run(target);
+      assert.deepEqual(
+        (await loadCommittedCitations(db, "P-TEST", {}, decodeFixture)).citations,
+        [],
+      );
+      assert.equal(await loadCommittedCitation(db, "P-TEST", "L-1@3", {}, decodeFixture), null);
+      sqlite.query("INSERT INTO content_controls VALUES('P-TEST',?,'visible',2)").run(target);
+      assert.deepEqual(
+        (await loadCommittedCitation(db, "P-TEST", "L-1@3", {}, decodeFixture))?.citation
+          .screening_notice,
+        receipt.public_action,
+      );
+    }
+  } finally {
+    sqlite.close();
+  }
+});
+
+test("malformed citation receipts fail closed unless their source content is unavailable", async () => {
+  const { sqlite, db, event } = fixture();
+  try {
+    await event(1, "L-1", 1, citation());
+    await event(2, "L-1", 2, citation("L-1", "Clean correction"));
+    sqlite
+      .query("INSERT INTO screening_publications VALUES('P-TEST-1',?)")
+      .run(JSON.stringify({ private_detail: "PRIVATE-DETECTOR-CANARY" }));
+    await assert.rejects(
+      loadCommittedCitations(db, "P-TEST", { through: 1 }, decodeFixture),
+      /PUBLIC_SCREENING_RECEIPT_UNAVAILABLE/,
+    );
+    // The clean head still presents its readable history, so it cannot silently
+    // omit the warning on an earlier version whose provenance is unavailable.
+    await assert.rejects(
+      loadCommittedCitation(db, "P-TEST", "L-1", {}, decodeFixture),
+      /PUBLIC_SCREENING_RECEIPT_UNAVAILABLE/,
+    );
+    sqlite.query("INSERT INTO content_controls VALUES('P-TEST','L-1@1','hidden',1)").run();
+    const hidden = await loadCommittedCitation(db, "P-TEST", "L-1", {}, decodeFixture);
+    assert.deepEqual(
+      hidden?.versions.map((version) => version.version),
+      [2],
+    );
+    assert.equal(hidden?.citation.screening_notice, undefined);
+    assert.equal(JSON.stringify(hidden).includes("PRIVATE-DETECTOR-CANARY"), false);
+    sqlite.query("INSERT INTO content_controls VALUES('P-TEST','L-1@1','visible',2)").run();
+    sqlite.query("UPDATE event_content SET payload_json='{}' WHERE event_id='P-TEST-1'").run();
+    assert.deepEqual(
+      (await loadCommittedCitation(db, "P-TEST", "L-1", {}, decodeFixture))?.versions.map(
+        (version) => version.version,
+      ),
+      [2],
+    );
+  } finally {
+    sqlite.close();
+  }
+});
+
 test("evidence backlinks carry notices and respect object, version and event content controls", async () => {
   const { sqlite, db, event } = fixture();
   const receipt = JSON.parse(
@@ -644,15 +748,13 @@ test("evidence backlinks carry notices and respect object, version and event con
         receipt.public_action,
       );
     }
-    sqlite
-      .query("UPDATE screening_publications SET provenance_json=? WHERE event_id=?")
-      .run(
-        JSON.stringify({
-          ...receipt,
-          public_action: { ...receipt.public_action, private_detail: "PRIVATE_DETECTOR_CANARY" },
-        }),
-        "P-TEST-2",
-      );
+    sqlite.query("UPDATE screening_publications SET provenance_json=? WHERE event_id=?").run(
+      JSON.stringify({
+        ...receipt,
+        public_action: { ...receipt.public_action, private_detail: "PRIVATE_DETECTOR_CANARY" },
+      }),
+      "P-TEST-2",
+    );
     await assert.rejects(read(), /PUBLIC_SCREENING_RECEIPT_UNAVAILABLE/);
   } finally {
     sqlite.close();

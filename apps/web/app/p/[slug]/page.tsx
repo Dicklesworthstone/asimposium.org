@@ -435,6 +435,7 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
             <ul className="citations-list">
               {citationsResult.data.citations.map((cite) => (
                 <li key={cite.citation_id} className="citation-item">
+                  <ScreeningNotice notice={cite.screening_notice} />
                   <strong>{cite.title}</strong>
                   {cite.authors && cite.authors.length > 0 && (
                     <span> — {cite.authors.join(", ")}</span>

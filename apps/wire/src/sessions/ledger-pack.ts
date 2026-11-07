@@ -794,8 +794,9 @@ export async function readLedgerPackSection(
     const candidates: PackCandidate[] = [];
     for (const [index, item] of result.citations.entries()) {
       const target = `${item.citation_id}@${item.version}`;
+      const { screening_notice: screeningNotice, ...citation } = item;
       const body = JSON.stringify({
-        ...item,
+        ...citation,
         source: `/p/${problemId}/citations/${target}.md?through=${cursor}`,
       });
       if (body.length > 18000 || neutralizeUntrustedBody(body).text.length > 18000) {
@@ -809,6 +810,7 @@ export async function readLedgerPackSection(
         untrusted: true,
         tokens: 1,
         body,
+        ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
         why_included:
           "committed public citation version at the pack cursor; source provenance and model declarations are not verification",
         stable_prefix: 20 + index,

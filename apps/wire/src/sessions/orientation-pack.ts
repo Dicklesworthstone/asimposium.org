@@ -267,6 +267,9 @@ async function readEventDelta(
         tokens: 1,
         stable_prefix: 421 + index,
         body: JSON.stringify(envelope),
+        ...(envelope.event?.screening_notice === undefined
+          ? {}
+          : { screening_notice: envelope.event.screening_notice }),
         why_included:
           "a material public ledger change in the selected cursor window; full content remains on its canonical object face",
       });
