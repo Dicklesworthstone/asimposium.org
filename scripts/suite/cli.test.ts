@@ -1717,6 +1717,7 @@ describe("owned session launcher", () => {
 
   test("PLANTED: an early inspection failure retires stubborn fixture descendants", async () => {
     const pidPath = capturePath(`early-inspection-${crypto.randomUUID()}.pid`);
+    let supervisorPid: number | undefined;
     try {
       const result = await runOwnedCommand({
         command: [
@@ -1733,6 +1734,9 @@ describe("owned session launcher", () => {
         retainedStreamBytes: 128,
         retainedOutputBytes: 128,
         supervisorScript: stubbornReleaseSupervisor(pidPath, true),
+        onLifecycleCheckpoint: (phase, pid) => {
+          if (phase === "ready") supervisorPid = pid;
+        },
         inspectionCommand: [
           "perl",
           "-e",
@@ -1746,9 +1750,7 @@ describe("owned session launcher", () => {
       expect(result.retainedStdoutBytes).toBe(128);
       expect(ownedGroupPids(Number(readFileSync(pidPath, "utf8").trim()))).toEqual([]);
     } finally {
-      if (existsSync(pidPath)) {
-        await stopOwnedFixtureGroup(Number(readFileSync(pidPath, "utf8").trim()));
-      }
+      await stopOwnedFixtureGroup(supervisorPid);
     }
   });
 
