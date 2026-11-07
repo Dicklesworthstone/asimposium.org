@@ -19,8 +19,8 @@ delivered the public instrument promised by Fable. The main obstacle is now
 finishing and deploying a qualified candidate, then earning the external
 collaboration, safety and operational evidence. Rebuilding the existing source
 subsystems would miss that obstacle. The initial lint and Worker contract
-failures are repaired below. Primary local gates pass; the independent full
-unit rerun remains required before closure.**
+failures are repaired below. Primary and independent local typecheck, lint,
+unit and contract gates pass; deployed acceptance remains separate.**
 
 ### Implementation follow-through at `ad6d3c7c`
 
@@ -43,8 +43,12 @@ groups; contract passes all five required groups. The full original unit
 dispatcher passes all eight groups in 2,264.61 seconds: Worker 6,756 tests and
 31,750 expectations, Agora 900 tests. No group is failed, blocked, missing or
 skipped; the toolchain still contains its original 54 individual skips.
-Independent typecheck/lint/contract and full contracts/render reruns also pass;
-the independent original full-unit run is in progress at the fixed revision.
+The independent original full-unit rerun passes all eight groups in 1,511.37
+seconds, with the same Worker/Agora totals. Independent typecheck/lint/contract
+and full contracts/render reruns also pass. The standalone Worker security
+suite passes 33 tests and 288 expectations. These runs use unchanged
+application, test, gate, configuration and lockfile bytes at `ad6d3c7c`.
+Later revisions change documentation and tracker records only.
 
 The production browser build passes. The primary attempt initially stalls
 during detector self-tests, resumes without intervention, then times out on
@@ -60,8 +64,14 @@ owner result or the primary navigation timeout.
 The independent discovery run records 39 passes and one existing Now-case
 timeout at its unchanged five-second limit, including all new area checks
 passing. The earlier focused run's 40 passes do not erase that failure.
-Independent acceptance is in progress; neither implementation bead is closed.
-The distinct unresolved runtime observations are `pjuf`, currently linked to `80s3`;
+Independent review closes `sewo`, `bwal`, `9o8v` and `80s3` against their
+original acceptance. The P0 `bwal` decision includes the complete registered
+S-2 source/journal unit file in the unfiltered run and fresh focused
+statement-context and sponsor-inbox native journeys. It does not claim the
+separate opt-in provider/lifecycle integration or transfer the earlier
+34-mode discovery receipt to newer code. Generic trigger exclusions and the
+reviewer's initial wrong test path remain recorded.
+The distinct unresolved runtime observations remain in `pjuf`;
 no common cause or diagnosis is inferred from later passing controls.
 UBS completes all nine changed code files; its four critical flags are existing
 test/fault strings or browser URL/status comparisons, reviewed without
@@ -240,7 +250,7 @@ not a claim that its whole subsystem is absent.
 
 | # | Testable Fable promise | Current code and bounded evidence | Remaining outcome / existing owner |
 | --- | --- | --- | --- |
-| 1 | One Worker writer; canonical strict contracts (§3/§14.1) | Signed sponsor envelope and bearer ingress use Worker validators; Zod generation exists. Typecheck and repaired disclosure census pass. | PARTIAL: complete every-kind/error and CLI agreement remain W1, `bwal`, `uir`, `psl`. |
+| 1 | One Worker writer; canonical strict contracts (§3/§14.1) | Signed sponsor envelope and bearer ingress use Worker validators; Zod generation exists. Typecheck and repaired disclosure census pass. | PARTIAL: complete every-kind/error and CLI agreement remain W1, `uir`, `psl`. |
 | 2 | Fresh fragment enrollment followed by explicit approval (§5, S-1) | Real local join/proposal/approval/token/session flow and rejection controls pass. | UNPROVEN for three unaided named harnesses on the actual environment; `mn7`, `pcsn`, `nvo`, `krn`. |
 | 3 | Google human identity and principal separation (§5, S-6) | Auth.js and signed envelope paths exist; current browser uses a real locally minted cookie. S-6 retains its historical bounded closure. | PARTIAL: real Google exchange, verification, step-up and current hosted/browser acceptance; `4y3`, `ggv`, `qnh`, `3zn`. |
 | 4 | Work survives close, interruption and resume (§5.5/§7) | Persisted session metadata, immutable opening cursor, private draft revisions/full reads, heartbeat and idle recovery exist. | PARTIAL: original full lifecycle/race/recovery and deployed proof; W3/W4, `9p4`, `mtx`, `ana`. |
@@ -252,8 +262,8 @@ not a claim that its whole subsystem is absent.
 | 10 | Negative knowledge and proof friction save later work (§6.1/6.7) | Dead-end retry triggers, hypothesis lifecycle, friction witnesses and private impact-echo producers exist. | PARTIAL: actual cross-sponsor reuse and resulting scientific response on the dogfood board; `8ku`, `1e7`, `z8y`. |
 | 11 | Synthesis follows a frozen ledger cut (P13) | `ledger/synthesis-read.ts` reads anchored event content with captured cursor and current visibility controls. | PARTIAL: full selection/minority disclosure, approval, closing-boundary and dogfood outcomes; W5, `wnd`, `8ku`. |
 | 12 | All twelve packs provide bounded, useful context (§7.3) | Profile composers, exact-version review/dependency reads, budget omissions, full pagination and move adapters exist. | PARTIAL: complete populated-profile/isolation/determinism acceptance and real harness usefulness within token budget; W4/W6, `zai`. |
-| 13 | Every public resource has truthful canonical faces (A1/§7.9) | Shared rendering, generic/specialized human routes, feeds, TOON, exports and revalidation exist. Render tests pass. | PARTIAL: complete registry/corpus and deployed parity; `92x`, `0et`, `uir`, `9lqv`, `bwal`. |
-| 14 | Moves direct effort at scientific needs (§9.4/9.6) | Canonical live selection, materiality, retries, gaps, formalization, working-pack consumers and dynamic global public moves exist. Area need chips now consume a bounded canonical review sample. | PARTIAL: original replay/consumer/fault controls and complete discovery acceptance; `z8y`, `codz`, `mip`, `80s3`. |
+| 13 | Every public resource has truthful canonical faces (A1/§7.9) | Shared rendering, generic/specialized human routes, feeds, TOON, exports and revalidation exist. Render tests pass. | PARTIAL: complete registry/corpus and deployed parity; `92x`, `0et`, `uir`, `9lqv`. |
+| 14 | Moves direct effort at scientific needs (§9.4/9.6) | Canonical live selection, materiality, retries, gaps, formalization, working-pack consumers and dynamic global public moves exist. Area need chips now consume a bounded canonical review sample. | PARTIAL: original replay/consumer/fault controls and complete discovery acceptance; `z8y`, `codz`, `mip`, `fr9`. |
 | 15 | Slots, leases, review requests and private inbox coordinate work (§7/§9.3) | Mounted stores/routers, sponsor inbox and browser delivery/acknowledgment/foreign-principal checks exist. | PARTIAL: full notice taxonomy, outbox/DO replay, fairness/races and operational delivery; `1ar`, `mip`, `1e7`, W7. |
 | 16 | Contextual screening and independent human decisions precede release (§9.1) | Fresh real-binding moderation/context/appeal lanes pass; source binds decisions to candidate/context. | PARTIAL: all ingress fields/sinks, production provider and complete independent operator acceptance; `b9y9`, `axq`, `drv`, `cm5`, `bum`. |
 | 17 | Warnings and off-scope decisions preserve legitimate science (§9.1) | Supported publication kinds carry warnings; unsupported kinds remain held by `supportsPublishedWarning`. | PARTIAL: full kind/face/export parity and original policy lattice; `axq`, `drv`. Do not turn unsupported warning holds into silent allows. |
@@ -263,7 +273,7 @@ not a claim that its whole subsystem is absent.
 | 21 | Liveness is real and viral polling stays cheap (§11/§15) | Herald rooms/outbox and bounded cursor cache are mounted; topology validates. Matching cached ETags deliberately revalidate D1. | UNPROVEN at provider scale: actual poll mix, multi-isolate purge/freshness, row reads and p95; `c52`, `mfw`, `kzq`, `doa`, `0fs`. |
 | 22 | Sponsor/Fellow limits bound overload and screening spend (§7.10/§15) | Durable quota reservation, visible budgets, artifact limits and slow-mode code exist. Missing sponsor-window configuration remains unconstrained. | PARTIAL: accepted sponsor policy, complete limiter classes, fail-closed deployed settings and retained cost measurements; `irg`, `doa`, `0fs`. |
 | 23 | Human pages render science safely, accessibly and without JS (§8) | Shared GFM/math is consumed by real pages; the extended production-browser lane passes all 239 checks and its bounded process owner exits zero. Earlier runtime failures remain retained. | PARTIAL: complete W8 accessibility/design/route scope, runtime reliability and hosted Google/cache behavior; `mbp`, `fjp`, `n9n`, `3zn`, `vv5`, `pjuf`. |
-| 24 | One qualified revision reaches both deployed planes (§13) | Migration/deploy tooling and Preview exist; public reads show the old Worker. Readiness still conservatively hardcodes not-ready values. | UNPROVEN: candidate qualification, lineage/bindings, Worker-before-web rollout and revision-bound readiness; `bwal`, `rs5n`, `8n5`, `p1g`, `sox`, `tgu`. |
+| 24 | One qualified revision reaches both deployed planes (§13) | Original local candidate-repair gates now pass independently. Migration/deploy tooling and Preview exist; public reads show the old Worker. Readiness still conservatively hardcodes not-ready values. | UNPROVEN: complete pipeline qualification, lineage/bindings, Worker-before-web rollout and revision-bound readiness; `rs5n`, `8n5`, `p1g`, `sox`, `tgu`. |
 | 25 | Optional CLI remains curl-complete and safe (§12) | Public/authenticated reads and explicit session/scientific writes exist. Rust execution is unavailable before compilation. | PARTIAL: login/connect/keychain, validate/scrub parity, spool/watch/pull/doctor and signed release; W11, `psl`, `85s`. |
 | 26 | G0–G3 follow real collaboration and sustained operation (§16/§17) | Local journeys, seed dossiers and numerous regression controls exist. | UNPROVEN: provisioned G-C runner, multi-sponsor dogfood, seeds, legal/IP/naming/OAuth, red team, load/restore and +30-day cost/moderation receipts; W10/W12/OPS. |
 
@@ -277,10 +287,11 @@ Tier 2 and expressly refused features are not extra launch requirements.
 
 ### The bridge, in order of usable outcomes
 
-1. **Finish one qualified source candidate.** `bwal` owns the observed lint and
-   contract failures and the remaining exact-candidate acceptance. Preserve
-   historical failed runs, current fault plants and independent verification.
-   A passing unit run does not erase a failing static or contract gate.
+1. **Preserve the tested source candidate.** `bwal`, `9o8v` and the area-need
+   wiring `80s3` are independently accepted at `ad6d3c7c`. Keep its exact
+   receipts, fault controls and original failures; rerun the relevant original
+   gates after further changes. The unresolved runtime investigation `pjuf`
+   stays open, and these local passes do not qualify deployment or launch.
 2. **Reconcile the existing staging deployment.** The operator clears `rs5n`;
    OPS confirms D1 lineage, actual R2/DO/AI/key roles and Worker-before-Agora
    ordering. Bind receipts to the same application candidate. Do not infer

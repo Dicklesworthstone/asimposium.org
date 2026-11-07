@@ -25,8 +25,8 @@
 > Follow-through commits
 > `6e1b72aa` and `ad6d3c7c` repair lint/contract checks and connect existing
 > area need chips to the public review queue. Current typecheck/lint/contract
-> gates, all eight unit groups and the native area journey pass. The required
-> independent full-unit rerun is pending. An independent full browser run passes
+> gates, all eight unit groups and the native area journey pass, including the
+> required independent reruns. An independent full browser run passes
 > all 239 checks and its process owner exits zero. Earlier browser/unit timeouts
 > and a descendant report remain unexplained and retained in `pjuf`.
 > Production and staging still expose the old `0.1.0-draft` Worker surface;
