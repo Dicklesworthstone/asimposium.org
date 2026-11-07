@@ -1606,7 +1606,13 @@ s2_verify_source_closure() {
       process.exit(0);
     }
     process.stdout.write(`missing\t${missing.sort().join(",")}`);
-  ')" || return 1
+  ')" || {
+    (
+      trap "" PIPE
+      printf '%s\n' '{"tool":"bun","package":"apps/wire","suite":"s2-krater-source-closure","status":"fail","code":"S2_SOURCE_CLOSURE_WALK_FAILED","reason":"walker-command-failed","reproduce":"scripts/e2e-s2-krater.sh"}' || :
+    ) || :
+    return 1
+  }
   IFS=$'\t' read -r kind detail <<<"${outcome}"
   # This gate runs before `emit` is defined, so it prints directly.
   if [[ "${kind}" == "walk-error" ]]; then
@@ -2268,15 +2274,15 @@ emit_release_race_failure() {
 }
 
 emit_owner_loss_uncertain_failure() {
-  local code="$1" group_survives=false watchdog_survives=false
+  local code="$1" group_survives=unknown watchdog_survives=unknown
   local record_available=false health_file_available=false
-  if is_decimal "${supervisor_pgid:-}" && \
-    kill -0 -- "-${supervisor_pgid}" 2>/dev/null; then
-    group_survives=true
+  if is_decimal "${supervisor_pgid:-}"; then
+    group_survives=false
+    if kill -0 -- "-${supervisor_pgid}" 2>/dev/null; then group_survives=true; fi
   fi
-  if is_decimal "${supervisor_watchdog_pid:-}" && \
-    kill -0 "${supervisor_watchdog_pid}" 2>/dev/null; then
-    watchdog_survives=true
+  if is_decimal "${supervisor_watchdog_pid:-}"; then
+    watchdog_survives=false
+    if kill -0 "${supervisor_watchdog_pid}" 2>/dev/null; then watchdog_survives=true; fi
   fi
   if [[ -n "${parent_loss_record:-}" && -f "${parent_loss_record}" && \
     ! -L "${parent_loss_record}" ]]; then
@@ -2286,7 +2292,7 @@ emit_owner_loss_uncertain_failure() {
     ! -L "${supervisor_watchdog_health}" ]]; then
     health_file_available=true
   fi
-  emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"terminal\":true,\"scenario\":\"owner-loss-uncertain\",\"code\":\"${code}\",\"child_exit_code\":$(json_decimal_or_null "${parent_loss_status:-}"),\"record_available\":$(json_bool "${record_available}"),\"health_file_available\":$(json_bool "${health_file_available}"),\"exact_group_survives\":$(json_bool "${group_survives}"),\"watchdog_survives\":$(json_bool "${watchdog_survives}"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=owner-loss-uncertain scripts/e2e-s2-krater.sh\"}"
+  emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"terminal\":true,\"scenario\":\"owner-loss-uncertain\",\"code\":\"${code}\",\"child_exit_code\":$(json_decimal_or_null "${parent_loss_status:-}"),\"record_available\":$(json_bool "${record_available}"),\"health_file_available\":$(json_bool "${health_file_available}"),\"exact_group_survives\":$(json_bool_or_null "${group_survives}"),\"watchdog_survives\":$(json_bool_or_null "${watchdog_survives}"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=owner-loss-uncertain scripts/e2e-s2-krater.sh\"}"
 }
 
 emit_persistent_pre_release_helper_failure() {
@@ -4962,29 +4968,40 @@ parent_pid="$1"
 gate="$2"
 marker="$3"
 script_path="$4"
+# A closed observer must not turn refusal125 into SIGPIPE141. Keep this
+# best-effort PIPE disposition separate from the wrapper and payload.
+raw_child_failure() (
+  trap "" PIPE
+  printf "{\"suite\":\"s2-raw-inherited-child\",\"record_type\":\"diagnostic\",\"stage\":\"%s\",\"exit_code\":125}\n" "$1" >&2 || :
+)
+raw_child_refuse() { raw_child_failure "$1"; exit 125; }
 trap "" TERM HUP INT
 while [[ ! -f "${gate}" || -L "${gate}" ]]; do
-  [[ "${PPID}" == "${parent_pid}" ]] || exit 125
+  [[ "${PPID}" == "${parent_pid}" ]] || raw_child_refuse parent-before-gate
   sleep 0.01
 done
-[[ "${PPID}" == "${parent_pid}" ]] || exit 125
-[[ "$(<"${gate}")" == "${marker}" ]] || exit 125
+[[ "${PPID}" == "${parent_pid}" ]] || raw_child_refuse parent-after-gate
+# Refusal-only plant: keep the registered argv identity intact and exercise
+# the real gate comparison only after the parent has opened its owned gate.
+if [[ "${S2_PLANT_RAW_CHILD_MARKER_MISMATCH:-0}" == 1 ]]; then marker=wrong-marker; fi
+[[ "$(<"${gate}")" == "${marker}" ]] || raw_child_refuse gate-marker
 (
   trap - TERM HUP INT
   exec -a "${marker}-payload" bash "${script_path}" "${marker}"
 ) &
 payload_pid=$!
 if wait "${payload_pid}"; then payload_status=0; else payload_status=$?; fi
+if [[ "${payload_status}" == 125 ]]; then raw_child_failure payload; fi
 # Stay as the exact, still-identifiable session leader until the payload and
 # every non-zombie member of its private group have settled. The scanner first
 # leaves the group, so it cannot keep its own observation alive.
 while :; do
   rows="$(LC_ALL=C perl -MPOSIX=setsid -e '\''setsid() or exit 125; exec @ARGV'\'' -- \
-    ps -o pid=,pgid=,stat= -g "$$")" || exit 125
+    ps -o pid=,pgid=,stat= -g "$$")" || raw_child_refuse group-census
   group_busy=0
   while read -r seen_pid seen_pgid seen_stat; do
     [[ -n "${seen_pid}" ]] || continue
-    [[ "${seen_pid}" =~ ^[0-9]+$ && "${seen_pgid}" =~ ^[0-9]+$ ]] || exit 125
+    [[ "${seen_pid}" =~ ^[0-9]+$ && "${seen_pgid}" =~ ^[0-9]+$ ]] || raw_child_refuse group-census-row
     if [[ "${seen_pid}" != "$$" && "${seen_pgid}" == "$$" && "${seen_stat}" != Z* ]]; then
       group_busy=1
     fi
@@ -7254,7 +7271,7 @@ run_s2_shell_regression_test() {
       perl -MPOSIX=setsid -e 'setsid() or exit 125; exec @ARGV' -- \
       bash -c "${S2_RAW_INHERITED_CHILD_WRAPPER}" s2-raw-wrapper \
         "${S2_PARENT_PID}" "${S2_RAW_INHERITED_CHILD_GATE}" \
-        "${S2_RAW_INHERITED_CHILD_MARKER}" "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
+        "${S2_RAW_INHERITED_CHILD_MARKER}" "${S2_SCRIPT_PATH}" >/dev/null &
     parent_loss_child=$!
     s2_register_raw_inherited_child "${parent_loss_child}" || return 1
     if wait "${parent_loss_child}" 2>/dev/null; then

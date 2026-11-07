@@ -2602,6 +2602,221 @@ describe("registered S2 shell and lifecycle regressions", () => {
     expect(typedDiagnosticCodes(explicitProduct)).toContain("WRANGLER_VERSION_UNAVAILABLE");
   }, 60_000);
 
+  test.each(["nonzero", "deadline", "broken-output"] as const)(
+    "PLANTED: a failed source-walker process has a stage-specific refusal (%s)",
+    (mode) => {
+      const runtimeRoot = mkdtempSync(join(tmpdir(), "asimposium-s2-walker-runtime-"));
+      const runtime = join(runtimeRoot, "bun");
+      const actualBun = `'${process.execPath.replaceAll("'", "'\\''")}'`;
+      writeFileSync(
+        runtime,
+        `#!/usr/bin/env bash
+if [[ "\${1:-}" == --eval && "\${2:-}" == *"const KNOWN_REASONS = new Set("* ]]; then
+  printf '%s\\n' 'source-walker-private-stderr-canary' >&2
+  ${mode === "deadline" ? 'trap "" TERM HUP; while :; do sleep 1; done' : "exit 17"}
+fi
+exec ${actualBun} "$@"
+`,
+        { mode: 0o700, flag: "wx" },
+      );
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const environment = {
+        S2_RUN_ID: runId,
+        PATH: `${runtimeRoot}:${process.env.PATH ?? ""}`,
+        S2_PLANT_WRANGLER_VERSION_UNAVAILABLE: "1",
+      };
+      const run =
+        mode === "broken-output"
+          ? runCaptured(
+              "perl",
+              [
+                "-e",
+                'pipe(my $read, my $write) or die; close $read; open STDOUT, ">&", $write or die; close $write; exec @ARGV;',
+                "--",
+                "bash",
+                SCRIPT,
+              ],
+              environment,
+              S2_SHELL_REGRESSION_WATCHDOG_MS,
+            )
+          : runHarnessSync(environment, S2_SHELL_REGRESSION_WATCHDOG_MS);
+      expect(run.stderr).toContain("source-walker-private-stderr-canary");
+      expect(run.exitCode, run.retainedLogs).toBe(1);
+      expect(run.stdout).not.toContain("source-walker-private-stderr-canary");
+      if (mode !== "broken-output") {
+        expect(ndjsonRecords(run), run.retainedLogs).toContainEqual(
+          expect.objectContaining({
+            suite: "s2-krater-source-closure",
+            status: "fail",
+            code: "S2_SOURCE_CLOSURE_WALK_FAILED",
+            reason: "walker-command-failed",
+          }),
+        );
+      } else {
+        expect(run.stdout).toBe("");
+      }
+      expect(typedDiagnosticCodes(run)).not.toContain("WRANGLER_VERSION_UNAVAILABLE");
+      expect(run.stdout).not.toContain('"suite":"s2-krater-source-closure","status":"pass"');
+      expect(
+        existsSync(resolve(REPOSITORY_ROOT, "e2e/artifacts/s2-krater", runId, "manifest.json")),
+      ).toBe(false);
+      if (mode === "deadline") {
+        expect(run.stderr).toContain('"outcome":"deadline","cleanup_proven":true');
+        expect(run.stderr).toContain('"owned_program_status":124,"chosen_timeout_seconds":10');
+      }
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test.each([
+    "parent-before-gate",
+    "parent-after-gate",
+    "gate-marker",
+    "group-census",
+    "group-census-row",
+    "payload",
+    "broken-diagnostic-pipe",
+    "success",
+  ] as const)("raw inherited child retains its actual refusal stage (%s)", (mode) => {
+    const source = readFileSync(resolve(REPOSITORY_ROOT, SCRIPT), "utf8");
+    const assignment = source.slice(
+      source.indexOf("readonly S2_RAW_INHERITED_CHILD_WRAPPER="),
+      source.indexOf("s2_begin_raw_inherited_child_owner()"),
+    );
+    const fixture = mkdtempSync(join(tmpdir(), "asimposium-s2-raw-stage-"));
+    const gate = join(fixture, "gate");
+    const payload = join(fixture, "payload.sh");
+    const started = join(fixture, "payload-started");
+    const marker = `s2-raw-private-marker-${randomUUID()}`;
+    if (mode !== "parent-before-gate") {
+      writeFileSync(
+        gate,
+        mode === "gate-marker" || mode === "broken-diagnostic-pipe" ? "wrong-marker" : marker,
+        { flag: "wx" },
+      );
+    }
+    writeFileSync(
+      payload,
+      `#!/usr/bin/env bash
+printf '%s\\n' started >"$S2_TEST_STARTED_FILE"
+exit ${mode === "payload" ? 125 : 0}
+`,
+      { flag: "wx" },
+    );
+    if (mode === "group-census" || mode === "group-census-row") {
+      writeFileSync(
+        join(fixture, "ps"),
+        mode === "group-census"
+          ? "#!/usr/bin/env bash\nexit 17\n"
+          : "#!/usr/bin/env bash\nprintf '%s\\n' 'not-a-pid not-a-group S'\n",
+        { mode: 0o700, flag: "wx" },
+      );
+    }
+    const run = runCaptured(
+      "bash",
+      [
+        "-c",
+        `${assignment}
+expected_parent="$BASHPID"
+if [[ "$S2_TEST_INVALID_PARENT" == 1 ]]; then expected_parent=1; fi
+if perl -MPOSIX=setsid -e '
+  setsid() or exit 125;
+  if ($ENV{S2_TEST_BROKEN_DIAGNOSTIC_PIPE}) {
+    pipe(my $read, my $write) or exit 125;
+    close $read;
+    open STDERR, ">&", $write or exit 125;
+    close $write;
+  }
+  exec @ARGV;
+' -- \\
+  bash -c "$S2_RAW_INHERITED_CHILD_WRAPPER" s2-raw-stage \\
+  "$expected_parent" "$S2_TEST_GATE" "$S2_TEST_MARKER" "$S2_TEST_PAYLOAD"; then
+  exit 0
+else
+  exit "$?"
+fi
+`,
+      ],
+      {
+        PATH: `${fixture}:${process.env.PATH ?? ""}`,
+        S2_TEST_GATE: gate,
+        S2_TEST_MARKER: marker,
+        S2_TEST_PAYLOAD: payload,
+        S2_TEST_STARTED_FILE: started,
+        S2_TEST_INVALID_PARENT: mode.startsWith("parent-") ? "1" : "0",
+        S2_TEST_BROKEN_DIAGNOSTIC_PIPE: mode === "broken-diagnostic-pipe" ? "1" : "",
+      },
+      10_000,
+    );
+    expect(run.exitCode, run.retainedLogs).toBe(mode === "success" ? 0 : 125);
+    const observations = run.stderr
+      .split("\n")
+      .filter((line) => line.startsWith("{"))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(observations, run.retainedLogs).toEqual(
+      mode === "success" || mode === "broken-diagnostic-pipe"
+        ? []
+        : [
+            {
+              suite: "s2-raw-inherited-child",
+              record_type: "diagnostic",
+              stage: mode,
+              exit_code: 125,
+            },
+          ],
+    );
+    expect(existsSync(started)).toBe(
+      mode === "success" || mode === "payload" || mode.startsWith("group-"),
+    );
+    expect(`${run.stdout}\n${run.stderr}`).not.toContain(marker);
+    expect(`${run.stdout}\n${run.stderr}`).not.toContain(payload);
+  });
+
+  test(
+    "PLANTED: the owner-loss parent retains a raw child's actual refusal diagnosis",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "owner-loss-uncertain",
+          S2_PLANT_RAW_CHILD_MARKER_MISMATCH: "1",
+        },
+        S2_SHELL_REGRESSION_WATCHDOG_MS,
+      );
+      assertS2RunThenScanForSurvivors(
+        "owner-loss-child-refusal-observation",
+        () => {
+          expect(run.exitCode, run.retainedLogs).toBe(1);
+          expect(ndjsonRecords(run)).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-krater-shell",
+              scenario: "owner-loss-uncertain",
+              code: "S2_OWNER_LOSS_UNCERTAIN_CHILD_EXIT_INVALID",
+              child_exit_code: 125,
+              record_available: false,
+              exact_group_survives: null,
+              watchdog_survives: null,
+            }),
+          );
+          const diagnostics = run.stderr
+            .split("\n")
+            .filter((line) => line.startsWith("{"))
+            .map((line) => JSON.parse(line) as Record<string, unknown>);
+          expect(diagnostics, run.retainedLogs).toContainEqual({
+            suite: "s2-raw-inherited-child",
+            record_type: "diagnostic",
+            stage: "gate-marker",
+            exit_code: 125,
+          });
+          expect(run.stdout).not.toContain('"suite":"s2-raw-inherited-child"');
+        },
+        () => liveS2LifecycleProcesses(runId),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
   test(
     "PLANTED: a deadline before setsid kills only the exact gated fork child",
     async () => {
