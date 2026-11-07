@@ -1,5 +1,12 @@
 import { describe, expect, mock, test } from "bun:test";
-import { PRODUCTION_STOA_ORIGIN, STAGING_STOA_ORIGIN } from "@asimposium/contracts";
+import {
+  canonicalReadinessReceipt,
+  PRODUCTION_STOA_ORIGIN,
+  READINESS_SCHEMA_ID,
+  ReadinessStatusSchema,
+  STAGING_STOA_ORIGIN,
+} from "@asimposium/contracts";
+import { readinessFixture } from "../../../../packages/contracts/test/fixtures/readiness.ts";
 
 import type { PlaneStatusFetch } from "../../lib/plane-status.ts";
 import { sha256Hex } from "../../lib/service-envelope.ts";
@@ -16,6 +23,8 @@ const {
   consolePlaneStatusRows,
   createPlaneStatusCache,
   planeStatusFreshnessCopy,
+  planeStatusAtTime,
+  planeStatusCacheControl,
   probeArtifactCanary,
   resolvePlaneStatus,
 } = await import("../../lib/plane-status.ts");
@@ -50,6 +59,200 @@ function chunkedBody(...chunks: readonly Uint8Array[]): ReadableStream<Uint8Arra
     },
   });
 }
+
+const readinessNow = Date.parse("2026-11-07T00:00:00.000Z");
+
+async function readyCapabilities(receipt: unknown = readinessFixture(readinessNow)) {
+  return {
+    origin: STAGING_STOA_ORIGIN,
+    readiness: {
+      schema: "https://a.asimposium.org/schemas/readiness.v1.json",
+      status: "ready",
+      receipt_sha256: await sha256Hex(new TextEncoder().encode(`${JSON.stringify(receipt)}\n`)),
+      receipt,
+    },
+  };
+}
+
+function readinessFetch(capabilities: unknown): PlaneStatusFetch {
+  const healthy = healthyStoaFetch([]);
+  return (input, init) =>
+    input.endsWith("/capabilities")
+      ? Promise.resolve(Response.json(capabilities))
+      : healthy(input, init);
+}
+
+const readinessEnvironment = {
+  STOA_ORIGIN: STAGING_STOA_ORIGIN,
+  ASIMPOSIUM_SOURCE_REVISION: "a".repeat(40),
+};
+
+describe("evidence-bound research readiness", () => {
+  test("accepts only the complete same-revision proof set and preserves canonical receipt bytes", async () => {
+    const receipt = readinessFixture(readinessNow);
+    const capabilities = await readyCapabilities(receipt);
+    const status = await resolvePlaneStatus({
+      environment: { ...readinessEnvironment, VERCEL_GIT_COMMIT_SHA: receipt.revision },
+      fetchImpl: readinessFetch(capabilities),
+      now: () => readinessNow,
+    });
+    expect(status.ledger).toMatchObject({ research_writes: "ready", product_readiness: "ready" });
+    expect(status.ledger.readiness).toEqual(ReadinessStatusSchema.parse(capabilities.readiness));
+    if (status.ledger.readiness.status !== "ready") throw new Error("expected fixture evidence");
+    expect(canonicalReadinessReceipt(status.ledger.readiness.receipt)).toBe(
+      canonicalReadinessReceipt(receipt),
+    );
+  });
+
+  test("missing or mismatched application/build revision stays unavailable despite complete evidence", async () => {
+    const capabilities = await readyCapabilities();
+    for (const [environment, reason] of [
+      [{ STOA_ORIGIN: STAGING_STOA_ORIGIN }, "revision_unavailable"],
+      [
+        { ...readinessEnvironment, ASIMPOSIUM_SOURCE_REVISION: "b".repeat(40) },
+        "revision_mismatch",
+      ],
+      [
+        { ...readinessEnvironment, ASIMPOSIUM_SOURCE_REVISION: `${"a".repeat(40)}\n` },
+        "revision_unavailable",
+      ],
+      [
+        { ...readinessEnvironment, VERCEL_GIT_COMMIT_SHA: "b".repeat(40) },
+        "build_revision_mismatch",
+      ],
+    ] as const) {
+      const status = await resolvePlaneStatus({
+        environment,
+        fetchImpl: readinessFetch(capabilities),
+        now: () => readinessNow,
+      });
+      expect(status.ledger).toMatchObject({
+        research_writes: "not_ready",
+        product_readiness: "not_ready",
+      });
+      expect(status.ledger.readiness).toMatchObject({ status: "unavailable", reason });
+    }
+  });
+
+  test("PLANTED: stale, future, mixed, partial, duplicate, canary-only, and endpoint-only evidence fails closed", async () => {
+    const receipt = readinessFixture(readinessNow);
+    const mixed = structuredClone(receipt);
+    mixed.proofs[4].revision = "b".repeat(40);
+    const cases = [
+      [readinessFixture(readinessNow - 60_000), "expired_evidence"],
+      [readinessFixture(readinessNow + 2_000), "future_evidence"],
+      [mixed, "mixed_evidence"],
+      [{ ...receipt, environment: "production" }, "environment_mismatch"],
+      [{ ...receipt, origin: PRODUCTION_STOA_ORIGIN }, "origin_mismatch"],
+      [{ ...receipt, proofs: [] }, "invalid_evidence"],
+      [{ ...receipt, proofs: [receipt.proofs[0]] }, "invalid_evidence"],
+      [
+        { ...receipt, proofs: [...receipt.proofs.slice(0, 7), receipt.proofs[0]] },
+        "invalid_evidence",
+      ],
+      [
+        { ...receipt, proofs: [{ capability: "canary", proof_id: "verified" }] },
+        "invalid_evidence",
+      ],
+      [
+        { ...receipt, proofs: [{ capability: "endpoint", proof_id: "reachable" }] },
+        "invalid_evidence",
+      ],
+      [{ ...receipt, private_body: "must-not-be-disclosed" }, "invalid_evidence"],
+    ] as const;
+    for (const [evidence, reason] of cases) {
+      const status = await resolvePlaneStatus({
+        environment: readinessEnvironment,
+        fetchImpl: readinessFetch(await readyCapabilities(evidence)),
+        now: () => readinessNow,
+      });
+      expect(status.stoa.capabilities_reachability).toBe("reachable");
+      expect(status.ledger).toMatchObject({
+        research_writes: "not_ready",
+        product_readiness: "not_ready",
+      });
+      expect(status.ledger.readiness).toMatchObject({ status: "unavailable", reason });
+      expect(JSON.stringify(status)).not.toContain("must-not-be-disclosed");
+    }
+    const corrupt = await readyCapabilities();
+    corrupt.readiness.receipt_sha256 = "f".repeat(64);
+    const status = await resolvePlaneStatus({
+      environment: readinessEnvironment,
+      fetchImpl: readinessFetch(corrupt),
+      now: () => readinessNow,
+    });
+    expect(status.ledger.readiness).toMatchObject({
+      status: "unavailable",
+      reason: "receipt_digest_mismatch",
+    });
+  });
+
+  test("malformed and oversized capabilities remain reachable but cannot supply readiness", async () => {
+    for (const body of ["{}", "not JSON", "x".repeat(128 * 1024 + 1)]) {
+      const healthy = healthyStoaFetch([]);
+      const status = await resolvePlaneStatus({
+        environment: readinessEnvironment,
+        fetchImpl: (input, init) =>
+          input.endsWith("/capabilities")
+            ? Promise.resolve(new Response(body))
+            : healthy(input, init),
+        now: () => readinessNow,
+      });
+      expect(status.stoa.capabilities_reachability).toBe("reachable");
+      expect(status.ledger.research_writes).toBe("not_ready");
+    }
+  });
+
+  test("snapshot, console, and public caches cannot extend readiness beyond evidence expiry", async () => {
+    const receipt = readinessFixture(readinessNow);
+    receipt.expires_at = new Date(readinessNow + 5_000).toISOString();
+    for (const proof of receipt.proofs) proof.expires_at = receipt.expires_at;
+    const capabilities = await readyCapabilities(receipt);
+    let wallNow = readinessNow;
+    let monotonicNow = 0;
+    let refreshes = 0;
+    const cache = createPlaneStatusCache({
+      now: () => monotonicNow,
+      wallNow: () => wallNow,
+      refresh: () => {
+        refreshes += 1;
+        return resolvePlaneStatus({
+          environment: readinessEnvironment,
+          fetchImpl: readinessFetch(capabilities),
+          now: () => wallNow,
+        });
+      },
+    });
+    const first = await cache.get();
+    expect(first.ledger.product_readiness).toBe("ready");
+    expect(planeStatusCacheControl(first, wallNow)).toBe(
+      "public, max-age=0, s-maxage=5, must-revalidate",
+    );
+    wallNow += 4_500;
+    monotonicNow += 4_500;
+    expect((await cache.get()).ledger.product_readiness).toBe("ready");
+    expect(refreshes).toBe(1);
+    expect(planeStatusCacheControl(first, wallNow)).toBe(
+      "public, max-age=0, s-maxage=0, must-revalidate",
+    );
+    wallNow += 500;
+    monotonicNow += 500;
+    expect((await cache.get()).ledger.readiness).toMatchObject({
+      status: "unavailable",
+      reason: "expired_evidence",
+    });
+    expect(refreshes).toBe(2);
+    expect(planeStatusAtTime(first, wallNow).ledger.product_readiness).toBe("not_ready");
+    expect(
+      consolePlaneStatusRows(planeStatusAtTime(first, wallNow)).find(
+        (row) => row.key === "ledger-product-readiness",
+      ),
+    ).toMatchObject({
+      healthy: false,
+      value: "Unavailable: the qualification evidence has expired.",
+    });
+  });
+});
 
 describe("environment-bound plane status", () => {
   test("selects only the artifact origin paired with production, staging, or local Stoa", () => {
@@ -333,7 +536,13 @@ describe("environment-bound plane status", () => {
       environment,
       fetchImpl: async () => new Response(null, { status: 503 }),
     });
-    const publicText = JSON.stringify({ status, rows: consolePlaneStatusRows(status) });
+    expect(status.ledger.readiness.schema).toBe(READINESS_SCHEMA_ID);
+    // The allowlisted public schema identifier contains "v1", also the canary
+    // marker. Exclude that exact constant; every other public byte is inspected.
+    const publicText = JSON.stringify({ status, rows: consolePlaneStatusRows(status) }).replaceAll(
+      READINESS_SCHEMA_ID,
+      "[public readiness schema]",
+    );
 
     for (const value of Object.values(environment)) {
       expect(publicText).not.toContain(value);
@@ -370,7 +579,7 @@ describe("environment-bound plane status", () => {
     expect(status.ledger).toMatchObject({
       public_index: "reachable_empty",
       public_index_entries: 0,
-      research_writes: "not_implemented",
+      research_writes: "not_ready",
       product_readiness: "not_ready",
     });
 
@@ -401,7 +610,7 @@ describe("environment-bound plane status", () => {
 
     expect(status.stoa.sponsor_enrollment_write_configuration).toBe("configured");
     expect(status.ledger.public_index).toBe("reachable_empty");
-    expect(status.ledger.research_writes).toBe("not_implemented");
+    expect(status.ledger.research_writes).toBe("not_ready");
     expect(status.ledger.product_readiness).toBe("not_ready");
   });
 

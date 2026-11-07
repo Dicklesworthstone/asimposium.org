@@ -217,15 +217,18 @@ describe("published screening warnings", () => {
 
   test("evidence warnings publish only through the evidence writer with exact candidate and context binding", () =>
     withFixture(async (f) => {
-      for (const category of ["dual-use-boundary", "off-topic"] as const) {
-        const receipt = published(
-          await screen(f, candidate(f, "evidence"), { coarse_category: category }, "evidence"),
-        );
-        expect(receipt.provenance.public_action).toEqual({
-          category,
+      for (const notice of [
+        {
+          category: "dual-use-boundary",
           action: "published-with-warning",
-          notice: category === "off-topic" ? "off-scope" : "screening-warning",
-        });
+          notice: "screening-warning",
+        },
+        { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
+      ] as const) {
+        const receipt = published(
+          await screen(f, candidate(f, "evidence"), { coarse_category: notice.category }, "evidence"),
+        );
+        expect(receipt.provenance.public_action).toEqual(notice);
       }
       expect(count(f, "screening_cases")).toBe(0);
       expect(count(f, "screening_refusals")).toBe(0);

@@ -65,6 +65,10 @@ export interface Env {
    * disables enrollment with a typed 503 rather than falling back.
    */
   STOA_ORIGIN?: string;
+  /** Exact application Git SHA, supplied by the sanctioned deployment pipeline. */
+  ASIMPOSIUM_SOURCE_REVISION?: string;
+  /** SHA-256 of a retained, canonical mock-free readiness receipt in private ARTIFACTS. */
+  ASIMPOSIUM_READINESS_RECEIPT_SHA256?: string;
   /**
    * The Agora origin the device flow's verification URL names. Validated at
    * stack build; absent or untrusted disables enrollment with a typed 503.

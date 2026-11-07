@@ -293,6 +293,91 @@ also does not prove the Workers Builds trigger is installed or passing. Closing
 OPS.2b requires a provider build record bound to the same revision and the
 deployment receipts emitted by that run.
 
+## Revision-bound research readiness (OPS.4a)
+
+`/capabilities` now carries a closed `readiness` result governed by
+`/schemas/readiness.v1.json`. Agora's existing plane-status row consumes that
+result independently. Healthy bindings, a successful canary, a public index,
+source implementation, and local fixture runs do not establish research-write
+readiness. Missing configuration or evidence keeps the result `unavailable` and
+both Agora readiness flags `not_ready`; it does not prevent running the actual
+qualification journey.
+
+The activation path uses the existing **private `ARTIFACTS` bucket**. It adds no
+service, database table, public upload endpoint, or public evidence-body URL.
+The deployment operator's explicit receipt digest is the trust anchor: the
+application verifies authorized evidence, but cannot itself establish that an
+operator-supplied proof was genuinely run. Only completed mock-free qualification
+may authorize that digest. Test fixtures are never operational receipts.
+
+1. Fix the exact clean application Git revision and retain the sanctioned
+   same-revision deployment receipts for Stoa and Agora. The ordered deployment
+   pipeline supplies `ASIMPOSIUM_SOURCE_REVISION` automatically from its verified
+   clean checkout: a Worker variable and both Vercel build and runtime variables.
+   It never fabricates a readiness receipt or its digest. Other sanctioned
+   deployment paths must explicitly configure the full lowercase 40-character
+   revision they actually deploy. Agora also requires equality with
+   `VERCEL_GIT_COMMIT_SHA` whenever the provider supplies it; do not overwrite
+   provider build identity to force a match. An absent application revision
+   stays unavailable, with no fallback to the latest repository commit or a
+   healthy endpoint.
+2. Complete the staging journey and retain its original evidence privately.
+   Reduce it to a `ReadinessReceiptSchema` receipt containing the eight exact
+   capability/proof pairs below, in this order. Every proof must say
+   `result: "pass"` and carry the same `revision`, `environment`, trusted Stoa
+   `origin`, and `run_id`, plus its actual `observed_at`, explicit `expires_at`,
+   and `evidence_sha256`. Times are UTC with exactly three fractional digits.
+   The first six observations follow journey order. Cursor movement and visible
+   budgets have their own proof digests. The receipt's observation is the latest
+   proof observation; its expiry is the earliest proof expiry. Choose expiry
+   under the qualification owner's policy; the application never invents an
+   extension. No raw bodies, arbitrary URLs, credentials, or extra fields are
+   accepted in this public metadata.
+
+   | Capability | Required proof ID |
+   | --- | --- |
+   | `enrollment` | `sponsor_approved_fellow` |
+   | `sessions` | `session_opened` |
+   | `packs` | `session_pack_read` |
+   | `workshop` | `workshop_pushed` |
+   | `promotion` | `claim_promoted` |
+   | `public_ledger_delta` | `diptych_delta_visible` |
+   | `cursor` | `cursor_advanced` |
+   | `visible_budgets` | `write_budgets_visible` |
+
+3. Validate with the shared `ReadinessReceiptSchema` and
+   `readinessReceiptProblem(receipt, { origin, revision, now: Date.now() })`.
+   Serialize using `canonicalReadinessReceipt`: compact JSON in schema field
+   order followed by exactly one newline. Retain these exact bytes and their
+   SHA-256 digest. The maximum receipt is 16 KiB. Pretty-printed bytes, duplicate
+   JSON keys, incomplete or reordered proofs, and unknown fields are refused.
+4. Through the existing authorized operational upload workflow, upload those
+   exact bytes to the environment's private bucket at
+   `readiness/sha256/<receipt-sha256>.json`, then read them back and verify the
+   digest. The concrete Wrangler operation is
+   `bunx wrangler r2 object put '<private-bucket>/readiness/sha256/<receipt-sha256>.json' --file '<canonical-receipt-path>' --remote`;
+   resolve the bucket from the reconciled environment inventory before running
+   it. Set the Worker's non-secret
+   `ASIMPOSIUM_READINESS_RECEIPT_SHA256` to that verified digest via the sanctioned
+   deployment path. Neither command nor configuration is performed by a status
+   read. A changed application revision requires newly matching evidence.
+5. Observe `/capabilities` and Agora `/api/health` for the same deployed revision.
+   Stoa verifies the private object's size, canonical bytes, authorized digest,
+   proof coherence, environment, origin, revision, and expiry. Agora repeats
+   those public-contract checks, recomputes the receipt digest, and additionally
+   matches its own build. Both HTTP caches are bounded by proof expiry; cached
+   Agora snapshots recheck expiry before they can show ready. Missing, malformed,
+   mixed, future-dated, or expired evidence fails closed with a machine-readable
+   reason and explanatory console copy.
+
+Staging evidence is valid only for `https://a-staging.asimposium.org` and
+`environment: "staging"`; it cannot make production ready. Production requires
+its own authorized evidence for `https://a.asimposium.org` and
+`environment: "production"`. Loopback/local fixtures cannot activate either.
+Implementing this consumer does not close OPS.4a: the real staging completion,
+retained exact-revision receipts, and independent rerun remain its acceptance
+requirements.
+
 ## What OPS.3 does NOT yet do
 
 Stated plainly so this tooling is not mistaken for a working environment. **OPS.3

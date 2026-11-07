@@ -5,7 +5,9 @@ import {
   LateProducerDegradedFaceSchema,
   PUBLIC_RESOURCE_REGISTRY,
   PublicMovesQuerySchema,
+  type ReadinessStatus,
   SponsorIdSchema,
+  unavailableReadiness,
 } from "@asimposium/contracts";
 import {
   findPublicSchemaSliceOwners,
@@ -73,6 +75,7 @@ import { createScreeningAppealsApp } from "./moderation/appeals-http";
 import { createModerationLogRoutes, createModerationRouter } from "./moderation/router";
 import { sponsorMutationRefusal } from "./moderation/sponsor-suspension";
 import { createProblemRouter } from "./problems/router";
+import { loadReadiness } from "./readiness";
 import { handleScreeningRequest, SCREENING_ROUTE_PATH } from "./screening/route";
 import { createSearchRoutes } from "./search/router";
 import {
@@ -296,7 +299,7 @@ const PUBLIC_SCHEMA_ROUTES: readonly {
  * so an AGENT-facing route added without updating this list is a face the
  * handbook cannot see.
  */
-const capabilitiesBody = (origin: string): string =>
+const capabilitiesBody = (origin: string, readiness: ReadinessStatus): string =>
   `${JSON.stringify(
     {
       version: DISCOVERY_VERSION,
@@ -306,6 +309,7 @@ const capabilitiesBody = (origin: string): string =>
       // and error-document ids below stay canonical: they are stable
       // identifiers, not destinations.
       origin,
+      readiness,
       // One list: every disclosed operation with its auth and, for writes, its
       // request slice. (Separate reads/agent_writes/fellow_reads lists repeated
       // it and made this the largest cold-agent read; asimposiumorg-buqd.)
@@ -1282,13 +1286,31 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   app.on(["GET", "HEAD"], "/capabilities", async (c) => {
     const origin = c.env.STOA_ORIGIN;
     if (!isTrustedStoaOrigin(origin)) return stoaOriginUnavailable();
-    const body = capabilitiesBody(origin);
+    let readiness = await loadReadiness(c.env);
+    let body = capabilitiesBody(origin, readiness);
+    let digest = await sha256Hex(body);
+    if (readiness.status === "ready" && Date.parse(readiness.receipt.expires_at) <= Date.now()) {
+      readiness = unavailableReadiness("expired_evidence");
+      body = capabilitiesBody(origin, readiness);
+      digest = await sha256Hex(body);
+    }
+    const maxAge =
+      readiness.status === "ready"
+        ? Math.max(
+            0,
+            Math.min(
+              15,
+              Math.floor((Date.parse(readiness.receipt.expires_at) - Date.now()) / 1000),
+            ),
+          )
+        : 15;
     return servePublicRepresentation(c.req.raw, {
       body,
       contentType: "application/json; charset=utf-8",
-      digest: await sha256Hex(body),
+      digest,
       servedAt: "/capabilities",
       format: "json",
+      cacheControl: `public, max-age=0, s-maxage=${maxAge}, must-revalidate`,
     });
   });
 
