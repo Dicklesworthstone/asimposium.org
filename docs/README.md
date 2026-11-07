@@ -19,7 +19,8 @@ delivered the public instrument promised by Fable. The main obstacle is now
 finishing and deploying a qualified candidate, then earning the external
 collaboration, safety and operational evidence. Rebuilding the existing source
 subsystems would miss that obstacle. The initial lint and Worker contract
-failures are repaired below; current candidate qualification is still running.**
+failures are repaired below. Primary local gates pass; the independent full
+unit rerun remains required before closure.**
 
 ### Implementation follow-through at `ad6d3c7c`
 
@@ -38,7 +39,12 @@ The native Workerd/D1/R2 lane passes actual claim publication, all faces/ETags,
 private workshop stability, operator hide/restore, withdrawal, pagination,
 projection replay, search and credential-log checks. Shared contracts pass
 953 tests and render passes 586. Root typecheck and lint each pass all eight
-groups; contract passes all five required groups. The full unit run is pending.
+groups; contract passes all five required groups. The full original unit
+dispatcher passes all eight groups in 2,264.61 seconds: Worker 6,756 tests and
+31,750 expectations, Agora 900 tests. No group is failed, blocked, missing or
+skipped; the toolchain still contains its original 54 individual skips.
+Independent typecheck/lint/contract and full contracts/render reruns also pass;
+the independent original full-unit run is in progress at the fixed revision.
 
 The production browser build passes. The primary attempt initially stalls
 during detector self-tests, resumes without intervention, then times out on
@@ -46,11 +52,16 @@ the first no-JavaScript root navigation after 77 passing checks. Independently,
 the complete browser subject passes all 239 checks and exits zero, including
 both JavaScript and no-JavaScript area assertions, but its existing process
 owner reports `descendant-leaked`. Its aggregate lifecycle result is red.
+One further unchanged complete control passes all 239 checks and its owner
+returns `exited`, exit zero. Its completion callback sees only the pinned
+supervisor; sampling adds about 34 ms at completion. This bounded null
+reproduction supplies current positive proof, not a diagnosis of the first
+owner result or the primary navigation timeout.
 The independent discovery run records 39 passes and one existing Now-case
 timeout at its unchanged five-second limit, including all new area checks
 passing. The earlier focused run's 40 passes do not erase that failure.
 Independent acceptance is in progress; neither implementation bead is closed.
-The distinct unresolved runtime observations are `pjuf`, which blocks `80s3`;
+The distinct unresolved runtime observations are `pjuf`, currently linked to `80s3`;
 no common cause or diagnosis is inferred from later passing controls.
 UBS completes all nine changed code files; its four critical flags are existing
 test/fault strings or browser URL/status comparisons, reviewed without
@@ -251,7 +262,7 @@ not a claim that its whole subsystem is absent.
 | 20 | Recovery preserves the log, privacy and revoked rights (§10.2/10.5) | Projection replay, signed checkpoints/exports, segmented ledger backups, deletion journal and restore fences exist. | PARTIAL: full SQL/global/private/account recovery and provider scratch drills; `p4b`, `zr9`, `79n`, `24q`. Public-ledger archives are not whole-system backups. |
 | 21 | Liveness is real and viral polling stays cheap (§11/§15) | Herald rooms/outbox and bounded cursor cache are mounted; topology validates. Matching cached ETags deliberately revalidate D1. | UNPROVEN at provider scale: actual poll mix, multi-isolate purge/freshness, row reads and p95; `c52`, `mfw`, `kzq`, `doa`, `0fs`. |
 | 22 | Sponsor/Fellow limits bound overload and screening spend (§7.10/§15) | Durable quota reservation, visible budgets, artifact limits and slow-mode code exist. Missing sponsor-window configuration remains unconstrained. | PARTIAL: accepted sponsor policy, complete limiter classes, fail-closed deployed settings and retained cost measurements; `irg`, `doa`, `0fs`. |
-| 23 | Human pages render science safely, accessibly and without JS (§8) | Shared GFM/math is now consumed by real pages; current production-browser lane passes all 219 checks. | PARTIAL: complete W8 accessibility/design/route scope and hosted Google/cache behavior; `mbp`, `fjp`, `n9n`, `3zn`, `vv5`. |
+| 23 | Human pages render science safely, accessibly and without JS (§8) | Shared GFM/math is consumed by real pages; the extended production-browser lane passes all 239 checks and its bounded process owner exits zero. Earlier runtime failures remain retained. | PARTIAL: complete W8 accessibility/design/route scope, runtime reliability and hosted Google/cache behavior; `mbp`, `fjp`, `n9n`, `3zn`, `vv5`, `pjuf`. |
 | 24 | One qualified revision reaches both deployed planes (§13) | Migration/deploy tooling and Preview exist; public reads show the old Worker. Readiness still conservatively hardcodes not-ready values. | UNPROVEN: candidate qualification, lineage/bindings, Worker-before-web rollout and revision-bound readiness; `bwal`, `rs5n`, `8n5`, `p1g`, `sox`, `tgu`. |
 | 25 | Optional CLI remains curl-complete and safe (§12) | Public/authenticated reads and explicit session/scientific writes exist. Rust execution is unavailable before compilation. | PARTIAL: login/connect/keychain, validate/scrub parity, spool/watch/pull/doctor and signed release; W11, `psl`, `85s`. |
 | 26 | G0–G3 follow real collaboration and sustained operation (§16/§17) | Local journeys, seed dossiers and numerous regression controls exist. | UNPROVEN: provisioned G-C runner, multi-sponsor dogfood, seeds, legal/IP/naming/OAuth, red team, load/restore and +30-day cost/moderation receipts; W10/W12/OPS. |

@@ -277,10 +277,11 @@ not the dated inventories below, to choose work. The assessed source is
 typecheck and unit each pass all eight groups. Follow-through `6e1b72aa` repairs
 lint formatting, the private inbox census and smoke reproduction mode;
 `ad6d3c7c` connects area need chips to the canonical public review sample.
-Current typecheck/lint/contract and native area proof pass; full-unit and
-independent browser acceptance are pending. The browser subject passes239
-checks but its process owner reports a leaked descendant; the primary browser
-and an independent existing Now test also time out (`asimposiumorg-pjuf`).
+Current typecheck/lint/contract, all eight unit groups and native area proof
+pass; the independent full-unit rerun and disposition are pending. An independent
+full browser run passes 239 checks and its process owner exits zero. Earlier
+browser/unit timeouts and a descendant report remain unexplained
+(`asimposiumorg-pjuf`).
 Preserve these outcomes, not only earlier green runs. A production
 local browser run on the original candidate passes 219 checks;
 two scripted reference completions and four negative controls pass. These use
