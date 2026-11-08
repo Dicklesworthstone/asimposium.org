@@ -16,6 +16,8 @@
  * topology deliberately has no Workers AI binding. Nothing here proves hosted
  * screening, Google OAuth, deployment, or cost.
  */
+
+import { once } from "node:events";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -23,6 +25,7 @@ import {
   mintServiceEnvelope,
   serviceEnvelopeHeaders,
 } from "../../apps/web/lib/service-envelope.ts";
+import { retainWranglerBuilder } from "../../apps/wire/test/integration/wrangler-builder-lifecycle.mjs";
 import { PromoteRequestSchema } from "../../packages/contracts/src/sessions.ts";
 
 export const USER_AGENT =
@@ -93,152 +96,175 @@ export async function startLocalTarget({
       },
     ],
   });
-  await harness.listen();
-  const worker = harness.getWorker();
-  await worker.applyD1Migrations("DB");
-  const env = await worker.getEnv();
-
-  /** Server-side observations: what the Worker answered, never what was sent. */
-  const observations = [];
-  /**
-   * Fable §16.1 "recover from an injected 422": the first promotion of each
-   * session removes workshop_id from a contract-valid promotion, so the Worker
-   * itself returns a genuine teaching refusal. Both full-content and saved
-   * publication references require that field. A reference carries no top-level
-   * statement; deleting one did not exercise recovery in the Codex rehearsal.
-   * Natural body-shape errors do not consume this planned injection.
-   */
-  const injectedSessions = new Set();
-  function injectRefusal(path, body) {
-    const match = /^\/v1\/sessions\/([^/]+)\/promote$/.exec(path);
-    if (!injectPromoteRefusal || match === null || injectedSessions.has(match[1])) return body;
-    let parsed;
-    try {
-      parsed = JSON.parse(body.toString("utf8"));
-    } catch {
-      return body;
-    }
-    if (!PromoteRequestSchema.safeParse(parsed).success) return body;
-    injectedSessions.add(match[1]);
-    delete parsed.workshop_id;
-    return Buffer.from(JSON.stringify(parsed));
-  }
-  const proxy = createServer(async (req, res) => {
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const url0 = new URL(req.url ?? "/", origin);
-    let body = chunks.length === 0 ? undefined : Buffer.concat(chunks);
-    const injected =
-      body !== undefined && req.method === "POST" ? injectRefusal(url0.pathname, body) : body;
-    const wasInjected = injected !== body;
-    body = injected;
-    const headers = new Headers();
-    for (const [name, value] of Object.entries(req.headers)) {
-      if (
-        typeof value === "string" &&
-        name !== "host" &&
-        name !== "connection" &&
-        name !== "content-length"
-      )
-        headers.set(name, value);
-    }
-    const url = new URL(req.url ?? "/", origin);
-    let response;
-    try {
-      response = await worker.fetch(url.href, {
-        method: req.method,
-        headers,
-        ...(body && req.method !== "GET" && req.method !== "HEAD" ? { body } : {}),
-      });
-    } catch {
-      res.writeHead(502, { "content-type": "text/plain" });
-      res.end("local target transport failure");
-      observations.push({ method: req.method, path: url.pathname, status: 502, code: null });
-      return;
-    }
-    const bytes = Buffer.from(await response.arrayBuffer());
-    let code = null;
-    if ((response.headers.get("content-type") ?? "").includes("json") && response.status >= 400) {
+  const releaseWranglerBuilder = retainWranglerBuilder();
+  let proxy;
+  let closing;
+  function close() {
+    closing ??= (async () => {
       try {
-        code = JSON.parse(bytes.toString("utf8")).code ?? null;
-      } catch {
-        code = null;
+        if (proxy?.listening) await new Promise((resolve) => proxy.close(resolve));
+      } finally {
+        try {
+          await harness.close();
+        } finally {
+          await releaseWranglerBuilder();
+        }
       }
-    }
-    observations.push({
-      at: Date.now(),
-      method: req.method,
-      path: url.pathname,
-      status: response.status,
-      code,
-      // Bytes the site served for this request: the site's share of an
-      // agent's context budget (Fable §16.1), independent of harness accounting.
-      bytes: bytes.length,
-      authenticated: typeof req.headers.authorization === "string",
-      // Sponsor traffic (the harness approving cards) is not the agent's work.
-      sponsor: typeof req.headers["asimp-service-envelope"] === "string",
-      injected: wasInjected,
-    });
-    const outHeaders = {};
-    response.headers.forEach((value, name) => {
-      if (name !== "content-length" && name !== "transfer-encoding") outHeaders[name] = value;
-    });
-    res.writeHead(response.status, outHeaders);
-    res.end(bytes);
-  });
-  await new Promise((resolve) => proxy.listen(port, "127.0.0.1", resolve));
+    })();
+    return closing;
+  }
+  try {
+    await harness.listen();
+    const worker = harness.getWorker();
+    await worker.applyD1Migrations("DB");
+    const env = await worker.getEnv();
 
-  let sponsorKey = 0;
-  /** One real signed sponsor write/read through the proxy (sponsor traffic is observed too). */
-  async function sponsor(sponsorId, method, path, action, body, route = path) {
-    const raw = method === "GET" ? "" : JSON.stringify(body ?? {});
-    const envelope = await mintServiceEnvelope({
-      privateKey: signingKeys.privateKey,
-      kid: keyId,
-      now: Math.floor(Date.now() / 1000),
-      method,
-      route,
-      action,
-      principalId: sponsorId,
-      body: raw,
+    /** Server-side observations: what the Worker answered, never what was sent. */
+    const observations = [];
+    /**
+     * Fable §16.1 "recover from an injected 422": the first promotion of each
+     * session removes workshop_id from a contract-valid promotion, so the Worker
+     * itself returns a genuine teaching refusal. Both full-content and saved
+     * publication references require that field. A reference carries no top-level
+     * statement; deleting one did not exercise recovery in the Codex rehearsal.
+     * Natural body-shape errors do not consume this planned injection.
+     */
+    const injectedSessions = new Set();
+    function injectRefusal(path, body) {
+      const match = /^\/v1\/sessions\/([^/]+)\/promote$/.exec(path);
+      if (!injectPromoteRefusal || match === null || injectedSessions.has(match[1])) return body;
+      let parsed;
+      try {
+        parsed = JSON.parse(body.toString("utf8"));
+      } catch {
+        return body;
+      }
+      if (!PromoteRequestSchema.safeParse(parsed).success) return body;
+      injectedSessions.add(match[1]);
+      delete parsed.workshop_id;
+      return Buffer.from(JSON.stringify(parsed));
+    }
+    proxy = createServer(async (req, res) => {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const url0 = new URL(req.url ?? "/", origin);
+      let body = chunks.length === 0 ? undefined : Buffer.concat(chunks);
+      const injected =
+        body !== undefined && req.method === "POST" ? injectRefusal(url0.pathname, body) : body;
+      const wasInjected = injected !== body;
+      body = injected;
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(req.headers)) {
+        if (
+          typeof value === "string" &&
+          name !== "host" &&
+          name !== "connection" &&
+          name !== "content-length"
+        )
+          headers.set(name, value);
+      }
+      const url = new URL(req.url ?? "/", origin);
+      let response;
+      try {
+        response = await worker.fetch(url.href, {
+          method: req.method,
+          headers,
+          ...(body && req.method !== "GET" && req.method !== "HEAD" ? { body } : {}),
+        });
+      } catch {
+        res.writeHead(502, { "content-type": "text/plain" });
+        res.end("local target transport failure");
+        observations.push({ method: req.method, path: url.pathname, status: 502, code: null });
+        return;
+      }
+      const bytes = Buffer.from(await response.arrayBuffer());
+      let code = null;
+      if ((response.headers.get("content-type") ?? "").includes("json") && response.status >= 400) {
+        try {
+          code = JSON.parse(bytes.toString("utf8")).code ?? null;
+        } catch {
+          code = null;
+        }
+      }
+      observations.push({
+        at: Date.now(),
+        method: req.method,
+        path: url.pathname,
+        status: response.status,
+        code,
+        // Bytes the site served for this request: the site's share of an
+        // agent's context budget (Fable §16.1), independent of harness accounting.
+        bytes: bytes.length,
+        authenticated: typeof req.headers.authorization === "string",
+        // Sponsor traffic (the harness approving cards) is not the agent's work.
+        sponsor: typeof req.headers["asimp-service-envelope"] === "string",
+        injected: wasInjected,
+      });
+      const outHeaders = {};
+      response.headers.forEach((value, name) => {
+        if (name !== "content-length" && name !== "transfer-encoding") outHeaders[name] = value;
+      });
+      res.writeHead(response.status, outHeaders);
+      res.end(bytes);
     });
-    const response = await fetch(`${origin}${path}`, {
-      method,
-      headers: {
-        ...serviceEnvelopeHeaders(envelope),
-        "user-agent": USER_AGENT,
-        "idempotency-key": `gauntlet-sponsor-${++sponsorKey}-${crypto.randomUUID()}`,
-      },
-      ...(method === "GET" ? {} : { body: raw }),
-    });
-    const text = await response.text();
-    let json;
+    const listening = once(proxy, "listening");
+    proxy.listen(port, "127.0.0.1");
+    await listening;
+
+    let sponsorKey = 0;
+    /** One real signed sponsor write/read through the proxy (sponsor traffic is observed too). */
+    async function sponsor(sponsorId, method, path, action, body, route = path) {
+      const raw = method === "GET" ? "" : JSON.stringify(body ?? {});
+      const envelope = await mintServiceEnvelope({
+        privateKey: signingKeys.privateKey,
+        kid: keyId,
+        now: Math.floor(Date.now() / 1000),
+        method,
+        route,
+        action,
+        principalId: sponsorId,
+        body: raw,
+      });
+      const response = await fetch(`${origin}${path}`, {
+        method,
+        headers: {
+          ...serviceEnvelopeHeaders(envelope),
+          "user-agent": USER_AGENT,
+          "idempotency-key": `gauntlet-sponsor-${++sponsorKey}-${crypto.randomUUID()}`,
+        },
+        ...(method === "GET" ? {} : { body: raw }),
+      });
+      const text = await response.text();
+      let json;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = { raw_bytes: text.length };
+      }
+      return { status: response.status, body: json };
+    }
+
+    /**
+     * The same key for a local Agora (`next start`) so its server-side sponsor
+     * reads and actions sign real envelopes this Worker accepts. The Ed25519
+     * seed is the last 32 bytes of the PKCS#8 export, the form
+     * SERVICE_ENVELOPE_PRIVATE_KEY_HEX takes. Local and ephemeral only.
+     */
+    async function agoraSigningEnv() {
+      const pkcs8 = new Uint8Array(await crypto.subtle.exportKey("pkcs8", signingKeys.privateKey));
+      return {
+        SERVICE_ENVELOPE_KID: keyId,
+        SERVICE_ENVELOPE_PRIVATE_KEY_HEX: Buffer.from(pkcs8.slice(-32)).toString("hex"),
+      };
+    }
+
+    return { origin, env, worker, observations, injectedSessions, sponsor, agoraSigningEnv, close };
+  } catch (error) {
     try {
-      json = JSON.parse(text);
-    } catch {
-      json = { raw_bytes: text.length };
+      await close();
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "Local target setup and cleanup failed");
     }
-    return { status: response.status, body: json };
+    throw error;
   }
-
-  async function close() {
-    await new Promise((resolve) => proxy.close(resolve));
-    await harness.close();
-  }
-
-  /**
-   * The same key for a local Agora (`next start`) so its server-side sponsor
-   * reads and actions sign real envelopes this Worker accepts. The Ed25519
-   * seed is the last 32 bytes of the PKCS#8 export, the form
-   * SERVICE_ENVELOPE_PRIVATE_KEY_HEX takes. Local and ephemeral only.
-   */
-  async function agoraSigningEnv() {
-    const pkcs8 = new Uint8Array(await crypto.subtle.exportKey("pkcs8", signingKeys.privateKey));
-    return {
-      SERVICE_ENVELOPE_KID: keyId,
-      SERVICE_ENVELOPE_PRIVATE_KEY_HEX: Buffer.from(pkcs8.slice(-32)).toString("hex"),
-    };
-  }
-
-  return { origin, env, worker, observations, injectedSessions, sponsor, agoraSigningEnv, close };
 }

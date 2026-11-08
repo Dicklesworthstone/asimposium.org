@@ -2073,9 +2073,9 @@ export const PLANTS = [
   {
     id: "journey-stops-active-sibling-builder",
     bead: "9tb8",
-    file: "apps/wire/test/integration/problem-lifecycle-real-bindings.mjs",
-    find: "  if (--activeJourneys !== 0) return;",
-    replace: "  activeJourneys--;",
+    file: "apps/wire/test/integration/wrangler-builder-lifecycle.mjs",
+    find: "    if (--activeOwners !== 0) return;",
+    replace: "    activeOwners--;",
     command: LANE("journey-cleanup"),
   },
   {
