@@ -1451,6 +1451,22 @@ async function loadClaimFace(
     certified_artifact: fold.context.has_certified_artifact,
     legacy_reviews: fold.legacyReviews,
     directive_disclosure: fold.directiveDisclosure,
+    status_basis: fold.stale
+      ? { kind: "unavailable" }
+      : fold.lastTransition?.to === "strongly-supported" &&
+          fold.disposition === "corroborated" &&
+          fold.directiveDisclosure !== "satisfied"
+        ? { kind: "directive-disclosure", status: fold.directiveDisclosure }
+        : fold.lastTransition?.eventId && fold.lastTransition.to === fold.disposition
+          ? {
+              kind: "transition",
+              event_id: fold.lastTransition.eventId,
+              seq: fold.lastTransition.sequence,
+              from: fold.lastTransition.from,
+              to: fold.lastTransition.to,
+              cause: fold.lastTransition.cause,
+            }
+          : { kind: "unavailable" },
     ...(fold.novelty === undefined ? {} : { novelty: fold.novelty }),
   });
   if (focus !== undefined && !section.candidates.some((item) => item.id === focus)) return null;

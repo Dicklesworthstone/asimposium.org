@@ -27,6 +27,8 @@ function makeClaimFace(overrides: Partial<ClaimFaceResponse> = {}): ClaimFaceRes
       recorded_refutation_attempts: 0,
       certified_artifact: false,
       legacy_reviews: 0,
+      status_basis: { kind: "transition", event_id: "EVT-PUBLICATION", seq: 1,
+        from: "draft", to: "open", cause: "claim-created" },
     },
     items: [
       {
@@ -72,6 +74,49 @@ function makeClaimFace(overrides: Partial<ClaimFaceResponse> = {}): ClaimFaceRes
 }
 
 describe("Claim Page View-Model & Diptych Honesty Panels", () => {
+  test("author concession readback uses the canonical event, not displayed confirmation prose", () => {
+    const face = makeClaimFace();
+    face.claim_state = { ...face.claim_state, disposition: "refuted", unchallenged: false,
+      status_basis: { kind: "transition", event_id: "EVT-CONCESSION", seq: 5,
+        from: "disputed", to: "refuted", cause: "author-concession" } };
+    const vm = buildClaimPageViewModel(face, ORIGIN);
+    expect(vm.whyThisStatus.reasons.join(" ")).toContain("author conceded");
+    expect(vm.whyThisStatus.reasons.join(" ")).not.toContain("survived adversarial review");
+    expect(vm.whyThisStatus.triggeringItems).toEqual([{
+      id: "EVT-CONCESSION", kind: "author-concession", seq: 5,
+      label: "Recorded status step", verdictOrDirection: "disputed → refuted",
+      href: "/p/P-MATH-1/events?since=4&through=5&limit=1",
+    }]);
+  });
+
+  test("absent, stale or inconsistent causal metadata never becomes a verified-refutation story", () => {
+    const face = makeClaimFace();
+    for (const status_basis of [undefined, { kind: "unavailable" },
+      { kind: "transition", event_id: "EVT-FUTURE", seq: 11, from: "open", to: "refuted", cause: "review-created" },
+      { kind: "transition", event_id: "EVT-WRONG", seq: 5, from: "draft", to: "open", cause: "claim-created" },
+    ] as const) {
+      face.claim_state = { ...face.claim_state, disposition: "refuted", unchallenged: false, status_basis };
+      const vm = buildClaimPageViewModel(face, ORIGIN);
+      expect(vm.whyThisStatus.triggeringItems).toHaveLength(0);
+      expect(vm.whyThisStatus.reasons.join(" ")).toContain("cause is unavailable");
+      expect(vm.whyThisStatus.summary).not.toContain("verified");
+    }
+    face.claim_state = { ...face.claim_state, stale: true,
+      status_basis: { kind: "transition", event_id: "EVT-OLD", seq: 5,
+        from: "open", to: "refuted", cause: "review-created" } };
+    expect(buildClaimPageViewModel(face, ORIGIN).whyThisStatus.triggeringItems).toHaveLength(0);
+  });
+
+  test("a canonical disclosure cap is explained without inferring a missing scientific review", () => {
+    const face = makeClaimFace();
+    face.claim_state = { ...face.claim_state, disposition: "corroborated", unchallenged: false,
+      status_basis: { kind: "directive-disclosure", status: "missing" } };
+    const why = buildClaimPageViewModel(face, ORIGIN).whyThisStatus;
+    expect(why.reasons.join(" ")).toContain("incomplete coverage limits");
+    expect(why.triggeringItems).toHaveLength(0);
+    expect(why.reasons.join(" ")).not.toContain("Insufficient cross-family");
+  });
+
   test("review tiers retain all four pinned values without treating unknown metadata as T1", () => {
     const face = makeClaimFace();
     const reviews = ["T0", "T1", "T2", "T3", "T4", undefined].map((tier, index) => ({
@@ -146,7 +191,7 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
 
     // Why this status
     expect(vm.whyThisStatus.summary).toContain("unchallenged");
-    expect(vm.whyThisStatus.reasons.some((r) => r.includes("Zero refutation attempts"))).toBe(true);
+    expect(vm.whyThisStatus.reasons.some((r) => r.includes("0 recorded refutation attempts") || r.includes("0 recorded refutation attempt(s)"))).toBe(true);
 
     // What remains unverified
     expect(vm.whatRemainsUnverified.gaps.some((g) => g.code === "NO_REFUTATIONS")).toBe(true);
@@ -200,6 +245,8 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         recorded_refutation_attempts: 4,
         certified_artifact: true,
         legacy_reviews: 0,
+        status_basis: { kind: "transition", event_id: "EVT-REVIEW-2", seq: 4,
+          from: "corroborated", to: "strongly-supported", cause: "review-created" },
       },
       items: [
         makeClaimFace().items[0]!,
@@ -276,9 +323,8 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
     expect(vm.tierExplainer.isSingleTeam).toBe(false);
 
     // Why this status has triggering links to R-1, R-2, E-1
-    expect(vm.whyThisStatus.triggeringItems.some((i) => i.id === "R-1")).toBe(true);
-    expect(vm.whyThisStatus.triggeringItems.some((i) => i.id === "R-2")).toBe(true);
-    expect(vm.whyThisStatus.triggeringItems.some((i) => i.id === "E-1")).toBe(true);
+    expect(vm.whyThisStatus.triggeringItems.map((item) => item.id)).toEqual(["EVT-REVIEW-2"]);
+    for (const id of ["R-1", "R-2", "E-1"]) expect(vm.timeline.some((item) => item.itemId === id)).toBe(true);
 
     // Verified: no NO_REFUTATIONS gap and no NO_TIER2 gap
     expect(vm.whatRemainsUnverified.gaps.some((g) => g.code === "NO_REFUTATIONS")).toBe(false);
@@ -299,6 +345,8 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         recorded_refutation_attempts: 1,
         certified_artifact: false,
         legacy_reviews: 0,
+        status_basis: { kind: "transition", event_id: "EVT-DISPUTE", seq: 2,
+          from: "open", to: "disputed", cause: "refuting-evidence" },
       },
       items: [
         makeClaimFace().items[0]!,
@@ -326,10 +374,10 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
     const vm = buildClaimPageViewModel(face, ORIGIN);
 
     expect(vm.badges.disposition).toBe("disputed");
-    expect(vm.whyThisStatus.summary).toContain("Disputed");
+    expect(vm.whyThisStatus.summary).toContain("disputed");
     expect(
       vm.whyThisStatus.triggeringItems.some(
-        (i) => i.id === "E-DISPUTE-1" && i.verdictOrDirection === "refutes",
+        (i) => i.id === "EVT-DISPUTE" && i.verdictOrDirection === "open → disputed",
       ),
     ).toBe(true);
   });
@@ -348,6 +396,8 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         recorded_refutation_attempts: 1,
         certified_artifact: false,
         legacy_reviews: 0,
+        status_basis: { kind: "transition", event_id: "EVT-REFUTATION-REVIEW", seq: 3,
+          from: "disputed", to: "refuted", cause: "review-created" },
       },
       items: [
         makeClaimFace().items[0]!,
@@ -374,8 +424,9 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
     const vm = buildClaimPageViewModel(face, ORIGIN);
 
     expect(vm.badges.disposition).toBe("refuted");
-    expect(vm.whyThisStatus.summary).toContain("refutation");
-    expect(vm.whyThisStatus.triggeringItems.some((i) => i.id === "E-KILL-1")).toBe(true);
+    expect(vm.whyThisStatus.summary).toContain("refuted");
+    expect(vm.whyThisStatus.triggeringItems.some((i) => i.id === "EVT-REFUTATION-REVIEW")).toBe(true);
+    expect(vm.timeline.some((item) => item.itemId === "E-KILL-1")).toBe(true);
   });
 
   test("withdrawn claim explains author action and preserves immutable record", () => {
@@ -392,6 +443,8 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         recorded_refutation_attempts: 0,
         certified_artifact: false,
         legacy_reviews: 0,
+        status_basis: { kind: "transition", event_id: "EVT-WITHDRAWN", seq: 2,
+          from: "open", to: "withdrawn", cause: "claim-retracted" },
       },
     });
 
@@ -399,7 +452,7 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
 
     expect(vm.badges.disposition).toBe("withdrawn");
     expect(vm.whyThisStatus.summary).toContain("withdrawn");
-    expect(vm.whyThisStatus.reasons.some((r) => r.includes("Author fellow or sponsor"))).toBe(true);
+    expect(vm.whyThisStatus.reasons.some((r) => r.includes("author withdrew"))).toBe(true);
   });
 
   test("malformed claim explains validation failure", () => {
@@ -416,13 +469,17 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         recorded_refutation_attempts: 0,
         certified_artifact: false,
         legacy_reviews: 0,
+        status_basis: { kind: "transition", event_id: "EVT-STATEMENT-REVIEW", seq: 2,
+          from: "open", to: "malformed", cause: "review-created" },
       },
     });
 
     const vm = buildClaimPageViewModel(face, ORIGIN);
 
     expect(vm.badges.disposition).toBe("malformed");
-    expect(vm.whyThisStatus.summary).toContain("failed structural ledger validation");
+    expect(vm.whyThisStatus.summary).toContain("malformed");
+    expect(vm.whyThisStatus.reasons.some((r) => r.includes("recorded review changed"))).toBe(true);
+    expect(vm.whyThisStatus.reasons.join(" ")).not.toContain("schema inconsistency");
   });
 
   test("premise dependencies are extracted into graph table with disputed-edge detection", () => {
@@ -584,7 +641,8 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
       },
       ORIGIN,
     );
-    expect(corroborated.whyThisStatus.reasons).toContain("Supported by 0 corroborating review(s).");
+    expect(corroborated.whyThisStatus.triggeringItems).toHaveLength(0);
+    expect(corroborated.whyThisStatus.reasons.join(" ")).toContain("cause is unavailable");
   });
 
   test("novelty searches behind the standing are displayed, from counted reviews only", () => {

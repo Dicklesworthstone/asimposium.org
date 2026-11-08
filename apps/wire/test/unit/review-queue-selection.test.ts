@@ -7,6 +7,7 @@ function state(overrides: Partial<ScientificDisposition> = {}): ScientificDispos
   return {
     disposition: "open",
     currentVersion: 1,
+    lastTransition: null,
     stale: false,
     legacyReviews: 0,
     directiveDisclosure: "missing",

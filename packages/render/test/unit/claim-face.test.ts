@@ -166,7 +166,10 @@ test("exact-version scientific state agrees across all faces and changes their f
     expect(face.body).toContain("G-3");
     expect(face.body).toContain("This obligation is open.");
   }
-  const revised = renderAllFaces({ ...source, claim_state: { ...json.claim_state, stale: true } });
+  const revised = renderAllFaces({
+    ...source,
+    claim_state: { ...json.claim_state, stale: true, status_basis: { kind: "unavailable" } },
+  });
   expect(revised.json.fingerprint).not.toBe(faces.json.fingerprint);
   expect(revised.md.fingerprint).toBe(revised.json.fingerprint);
   expect(revised["html-fragment"].fingerprint).toBe(revised.json.fingerprint);
@@ -175,6 +178,11 @@ test("exact-version scientific state agrees across all faces and changes their f
 test("claim state cannot escape its canonical contract or be added to an unrelated projection", () => {
   const source = projection();
   for (const state of [
+    { ...source.claim_state, stale: true },
+    {
+      ...source.claim_state,
+      status_basis: { ...source.claim_state.status_basis, seq: source.cursor + 1 },
+    },
     { ...source.claim_state, disposition: "<script>proved</script>" },
     { ...source.claim_state, version: 0 },
     { ...source.claim_state, stale: "false" },

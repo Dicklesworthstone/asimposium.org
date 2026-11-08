@@ -68,16 +68,16 @@ export function WhyThisStatusPanel({
 
       {whyThisStatus.triggeringItems.length > 0 && (
         <div className="triggering-events-subpanel">
-          <h3>Triggering ledger transitions</h3>
-          <p className="quiet">Click any event to inspect its published public record below:</p>
+          <h3>Recorded status step</h3>
+          <p className="quiet">Inspect the exact public event in its captured ledger window:</p>
           <ul className="triggering-items-list">
             {whyThisStatus.triggeringItems.map((item) => (
               <li key={item.id}>
-                <a href={`#${item.id}`}>
+                <Link href={item.href} prefetch={false}>
                   <strong>{item.label}</strong>
                   {item.verdictOrDirection ? ` (${item.verdictOrDirection})` : ""}
                   {item.seq !== undefined ? ` · seq ${item.seq}` : ""}
-                </a>
+                </Link>
               </li>
             ))}
           </ul>

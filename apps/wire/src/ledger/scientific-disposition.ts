@@ -790,6 +790,14 @@ export async function foldScientificRows(
     });
   }
   const folded = computeCurrentClaimDisposition(timeline);
+  const transition = folded.lastTransition;
+  const transitionSource = transition && rows.find((row) => row.seq === transition.sequence);
+  // Current withholding wins over a historical cursor. Never attach an event
+  // identity from an envelope whose scientific body was not verified above.
+  const verifiedTransition =
+    transition && transitionSource && contents.has(transitionSource.event_id)
+      ? { ...transition, eventId: transitionSource.event_id }
+      : transition;
   const publication = rows
     .filter(
       (row) =>
@@ -823,6 +831,7 @@ export async function foldScientificRows(
               : "unreviewed";
   return {
     ...folded,
+    lastTransition: verifiedTransition,
     disposition:
       folded.disposition === "strongly-supported" && directiveDisclosure !== "satisfied"
         ? "corroborated"

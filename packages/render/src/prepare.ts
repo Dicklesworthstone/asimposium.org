@@ -431,6 +431,9 @@ function snapshotProjection(value: Projection): Projection {
   const promotionBudgetValue = readProjectionMember(source, "promotion_budget", "promotion_budget");
   const promotionBudget = snapshotPromotionBudget(promotionBudgetValue);
   const claimState = snapshotClaimState(readProjectionMember(source, "claim_state", "claim_state"));
+  if (claimState?.status_basis?.kind === "transition" && claimState.status_basis.seq > cursor) {
+    refuseUnreadableProjection("status basis exceeds the captured ledger cursor");
+  }
   const problemStatusValue = readProjectionMember(source, "problem_status", "problem_status");
   const isProblemFace = kind === "problem-face" && schema === "asimposium.problem-face.v1";
   const problemStatus = isProblemFace
@@ -494,6 +497,26 @@ function snapshotClaimState(value: unknown): PublicClaimState | undefined {
   // Optional: only novelty-claims carry a novelty standing.
   if (Object.hasOwn(source, "novelty")) {
     snapshot.novelty = readProjectionMember(source, "novelty", "claim_state.novelty");
+  }
+  if (Object.hasOwn(source, "status_basis")) {
+    const basis = runtimeRecord(
+      readProjectionMember(source, "status_basis", "claim_state.status_basis"),
+      "status basis",
+    );
+    const kind = readProjectionMember(basis, "kind", "status basis.kind");
+    const fields =
+      kind === "transition"
+        ? ["event_id", "seq", "from", "to", "cause"]
+        : kind === "directive-disclosure"
+          ? ["status"]
+          : [];
+    snapshot.status_basis = Object.fromEntries([
+      ["kind", kind],
+      ...fields.map((field) => [
+        field,
+        readProjectionMember(basis, field, `status basis.${field}`),
+      ]),
+    ]);
   }
   const parsed = PublicClaimStateSchema.safeParse(snapshot);
   if (!parsed.success) refuseUnreadableProjection("claim_state");

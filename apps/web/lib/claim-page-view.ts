@@ -1,4 +1,5 @@
 import type { ClaimFaceResponse, PublicClaimState, ScreeningPublicationNotice } from "@asimposium/contracts";
+import { ClaimStatusBasisSchema } from "@asimposium/contracts";
 
 type FaceItem = ClaimFaceResponse["items"][number];
 
@@ -119,6 +120,7 @@ export interface TriggeringItem {
   readonly kind: string;
   readonly seq?: number;
   readonly verdictOrDirection?: string;
+  readonly href: string;
 }
 
 export interface WhyThisStatusViewModel {
@@ -584,162 +586,40 @@ export function buildClaimPageViewModel(
       : undefined,
   };
 
-  // 6. WHY-THIS-STATUS Panel
+  // 6. Only the canonical fold supplies a cause. Display candidates cannot
+  // establish verification weight or reconstruct a hidden/omitted transition.
   const triggeringItems: TriggeringItem[] = [];
-  const reasons: string[] = [];
-  let whySummary = "";
-
-  switch (state.disposition) {
-    case "open":
-      if (state.unchallenged) {
-        whySummary = "Claim is open and unchallenged; no refutation attempts have been logged.";
-        reasons.push(
-          "Zero refutation attempts recorded on the public ledger.",
-          "No independent cross-family (Tier 2/3) corroborating reviews recorded.",
-          "Under ASImposium Rule A4 and doctrine, new claims start as open and require adversarial scrutiny to advance.",
-        );
-      } else {
-        whySummary =
-          "Claim remains open despite refutation attempts; corroboration threshold not yet met.";
-        reasons.push(
-          `${state.recorded_refutation_attempts} refutation attempt(s) survived.`,
-          "Insufficient cross-family independent reviews to reach corroborated status.",
-        );
-      }
-      break;
-
-    case "corroborated":
-      whySummary = "Corroborated by supporting peer review and surviving refutation pressure.";
-      reasons.push(
-        `Supported by ${parsedReviews.filter((r) => r.data.verdict === "confirm").length} corroborating review(s).`,
-        `Survived ${state.recorded_refutation_attempts} recorded refutation attempt(s).`,
-        state.certified_artifact
-          ? "Formal artifact recorded, awaiting additional multi-family confirmation for strongly-supported."
-          : "Lacks independently certified formal artifact or full multi-family consensus required for strongly-supported.",
-      );
-      for (const { item, data } of parsedReviews.filter((r) => r.data.verdict === "confirm")) {
-        triggeringItems.push({
-          id: item.id,
-          label: `Corroborating review ${item.id}`,
-          kind: "claim-review",
-          seq: data.seq,
-          verdictOrDirection: data.verdict,
-        });
-      }
-      break;
-
-    case "strongly-supported":
-      whySummary =
-        "Strongly supported by multi-tier independent reviews and verified refutation survival.";
-      reasons.push(
-        `Confirmed by independent cross-family (Tier 2/3) peer reviews without unaddressed refutations.`,
-        `Demonstrated resilience against ${state.recorded_refutation_attempts} recorded refutation attempt(s).`,
-        state.certified_artifact
-          ? "Independently reviewed machine-checked formal artifact certified on ledger."
-          : "Corroborated across multiple independent model families and sponsors.",
-      );
-      for (const { item, data } of parsedReviews.filter((r) => r.data.verdict === "confirm")) {
-        triggeringItems.push({
-          id: item.id,
-          label: `Independent confirmation ${item.id} (${data.tier ?? "tier unknown"})`,
-          kind: "claim-review",
-          seq: data.seq,
-          verdictOrDirection: data.verdict,
-        });
-      }
-      for (const { item, data } of parsedEvidence.filter(
-        (e) => e.data.falsification_check?.result === "survived",
-      )) {
-        triggeringItems.push({
-          id: item.id,
-          label: `Survived falsification check ${item.id}`,
-          kind: "claim-evidence",
-          seq: data.seq,
-          verdictOrDirection: "survived",
-        });
-      }
-      break;
-
-    case "disputed": {
-      whySummary = "Disputed by one or more active refutation attempts or conflicting reviews.";
-      const disputingEvidence = parsedEvidence.filter((e) => e.data.direction === "refutes");
-      const disputingReviews = parsedReviews.filter((r) => r.data.verdict === "refutes");
-      reasons.push(
-        `${disputingEvidence.length} refuting evidence record(s) filed on the ledger.`,
-        `${disputingReviews.length} disputing review(s) recorded.`,
-        "Disputes remain open until addressed by statement revision, formal rebuttal, or author retraction.",
-      );
-      for (const { item, data } of disputingEvidence) {
-        triggeringItems.push({
-          id: item.id,
-          label: `Refuting evidence ${item.id}`,
-          kind: "claim-evidence",
-          seq: data.seq,
-          verdictOrDirection: "refutes",
-        });
-      }
-      for (const { item, data } of disputingReviews) {
-        triggeringItems.push({
-          id: item.id,
-          label: `Refuting review ${item.id}`,
-          kind: "claim-review",
-          seq: data.seq,
-          verdictOrDirection: "refutes",
-        });
-      }
-      break;
-    }
-
-    case "refuted": {
-      whySummary = "Grounded refutation recorded and verified on the public ledger.";
-      reasons.push(
-        "A counterexample or formal contradiction was recorded and survived adversarial review.",
-        "Under ledger rules, refuted status is terminal for this exact statement version; revision requires minting a new version.",
-      );
-      for (const { item, data } of parsedEvidence.filter((e) => e.data.direction === "refutes")) {
-        triggeringItems.push({
-          id: item.id,
-          label: `Decisive refutation evidence ${item.id}`,
-          kind: "claim-evidence",
-          seq: data.seq,
-          verdictOrDirection: "refutes",
-        });
-      }
-      break;
-    }
-
-    case "withdrawn":
-      whySummary = "Statement was withdrawn by its authoring team.";
-      reasons.push(
-        "Author fellow or sponsor published a deliberate withdrawal event.",
-        "Historical record and timeline are permanently preserved on the append-only ledger.",
-      );
-      break;
-
-    case "reduced-to":
-      whySummary = "Claim was formally reduced to a narrower statement.";
-      reasons.push(
-        "A formal reduction event was logged.",
-        "Epistemic reliance should target the reduced formulation.",
-      );
-      break;
-
-    case "superseded":
-      whySummary = "Statement was superseded by a later revision.";
-      reasons.push(
-        `Author published version ${state.latest_version} of this claim.`,
-        "This version snapshot is preserved for immutable citation.",
-      );
-      break;
-
-    case "malformed":
-      whySummary = "Statement or attached formal artifact failed structural ledger validation.";
-      reasons.push(
-        "Syntactic, mathematical, or formal schema inconsistency detected in payload.",
-        "Malformed objects cannot advance to scientific review.",
-      );
-      break;
+  const whySummary = `Canonical standing: ${state.disposition}${state.unchallenged ? " · unchallenged" : ""}.`;
+  const reasons: string[] = [
+    `${state.recorded_refutation_attempts} recorded refutation attempt(s). This count does not mean every attempt survived.`,
+    `Recorded review state: ${state.review_state}.`,
+  ];
+  const parsedBasis = ClaimStatusBasisSchema.safeParse(state.status_basis);
+  const basis = parsedBasis.success ? parsedBasis.data : undefined;
+  if (basis?.kind === "transition" && !state.stale && basis.to === state.disposition &&
+    basis.seq <= face.cursor) {
+    const causeText: Record<typeof basis.cause, string> = {
+      "claim-created": "The claim publication established this standing.",
+      "claim-revised": "A new statement version reestablished its standing; earlier reviews do not certify it.",
+      "claim-retracted": "The author withdrew this statement through a recorded retraction.",
+      "claim-reduced": "A recorded reduction changed the bookkeeping status; this is not proof of the reduction.",
+      "author-concession": "The author conceded this exact statement against recorded counterevidence; an independent verification is not inferred.",
+      "review-created": "A recorded review changed the computed standing under the existing ledger rules.",
+      "refuting-evidence": "Recorded counterevidence triggered this status step; evidence submission alone does not certify a refutation.",
+      "falsification-attempt": "A grounded surviving check triggered reevaluation of the recorded support.",
+      "certified-artifact": "A recorded artifact triggered reevaluation under the existing ledger rules.",
+    };
+    reasons.unshift(causeText[basis.cause]);
+    triggeringItems.push({ id: basis.event_id, kind: basis.cause, seq: basis.seq,
+      label: "Recorded status step", verdictOrDirection: `${basis.from} → ${basis.to}`,
+      href: `/p/${encodeURIComponent(face.problem)}/events?since=${basis.seq - 1}&through=${basis.seq}&limit=1` });
+  } else if (basis?.kind === "directive-disclosure" && !state.stale &&
+    state.disposition === "corroborated" && basis.status === state.directive_disclosure) {
+    reasons.unshift(`Current sponsor directive disclosure is ${basis.status}; incomplete coverage limits the strongest public standing.`);
+  } else {
+    reasons.unshift("The exact disposition cause is unavailable at this snapshot; no cause is inferred from displayed prose or review counts.");
   }
+  reasons.push("The evidence and review timeline below contains bounded related records, not an inferred list of causal transitions.");
 
   const whyThisStatus: WhyThisStatusViewModel = {
     summary: whySummary,

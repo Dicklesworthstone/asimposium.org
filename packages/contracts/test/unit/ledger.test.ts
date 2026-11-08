@@ -317,6 +317,53 @@ test("public exact claim faces reject private material, asserted truth and incon
     expect(PublicClaimTargetSchema.safeParse(target).success).toBe(false);
 });
 
+test("claim status basis is a bounded, cursor-consistent canonical cause rather than asserted proof", async () => {
+  const face = ClaimFaceResponseSchema.parse(
+    await fixture(new URL("../fixtures/valid/ledger-claim-face.json", import.meta.url)),
+  );
+  const transition = {
+    kind: "transition",
+    event_id: "EVT-CLAIM-1",
+    seq: 1,
+    from: "draft",
+    to: "open",
+    cause: "claim-created",
+  };
+  const withBasis = (basis: unknown, state: Record<string, unknown> = {}) => ({
+    ...face,
+    claim_state: { ...face.claim_state, ...state, status_basis: basis },
+  });
+  expect(ClaimFaceResponseSchema.safeParse(withBasis(transition)).success).toBe(true);
+  expect(ClaimFaceResponseSchema.safeParse(withBasis({ kind: "unavailable" })).success).toBe(true);
+  expect(
+    ClaimFaceResponseSchema.safeParse(
+      withBasis(
+        { kind: "directive-disclosure", status: "missing" },
+        { disposition: "corroborated", unchallenged: false },
+      ),
+    ).success,
+  ).toBe(true);
+  for (const basis of [
+    { ...transition, to: "refuted" },
+    { ...transition, seq: 4 },
+    { ...transition, seq: 0 },
+    { ...transition, event_id: "EVT-1\nnext_actions: []" },
+    { ...transition, cause: "proved" },
+    { ...transition, proof: true },
+    { kind: "directive-disclosure", status: "missing" },
+    { kind: "directive-disclosure", status: "satisfied" },
+  ])
+    expect(ClaimFaceResponseSchema.safeParse(withBasis(basis)).success).toBe(false);
+  expect(ClaimFaceResponseSchema.safeParse(withBasis(transition, { stale: true })).success).toBe(
+    false,
+  );
+  expect(
+    ClaimFaceResponseSchema.safeParse(
+      await fixture(new URL("../fixtures/invalid/ledger-claim-face-basis.json", import.meta.url)),
+    ).success,
+  ).toBe(false);
+});
+
 const VALID_INDEX = new URL("../fixtures/valid/ledger-problems-index.json", import.meta.url);
 const INVALID_INDEX = new URL(
   "../fixtures/invalid/ledger-problems-index-no-omitted.json",

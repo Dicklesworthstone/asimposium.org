@@ -113,6 +113,14 @@ export interface CurrentClaimDispositionFold {
   readonly disposition: ClaimDisposition;
   readonly currentVersion: number | null;
   readonly context: ClaimTransitionContext;
+  readonly lastTransition: {
+    readonly sequence: number;
+    readonly from: ClaimDisposition;
+    readonly to: ClaimDisposition;
+    readonly cause: VersionedClaimTimelineEvent["kind"];
+    /** Attached only after the scientific reader verifies the public source. */
+    readonly eventId?: string;
+  } | null;
 }
 
 function reviewFinding(
@@ -149,6 +157,8 @@ export function computeCurrentClaimDisposition(
   let currentVersion: number | null = null;
   let identityWithdrawn = false;
   let disposition: ClaimDisposition = "draft";
+  let activeSource: VersionedClaimTimelineEvent | undefined;
+  let lastTransition: CurrentClaimDispositionFold["lastTransition"] = null;
   let recordedRefutationAttempts = 0;
   let verifiedReviews: VerifiedReview[] = [];
   let hasCertifiedArtifact = false;
@@ -160,9 +170,20 @@ export function computeCurrentClaimDisposition(
     verified_reviews: verifiedReviews,
     has_certified_artifact: hasCertifiedArtifact,
   });
+  const recordDisposition = (next: ClaimDisposition, reestablish = false): void => {
+    if (activeSource && (next !== disposition || reestablish)) {
+      lastTransition = {
+        sequence: activeSource.sequence,
+        from: disposition,
+        to: next,
+        cause: activeSource.kind,
+      };
+    }
+    disposition = next;
+  };
   const apply = (event: ClaimEvent): void => {
     const result = evaluateClaimTransition(disposition, event, context());
-    if (result.allowed) disposition = result.next;
+    if (result.allowed) recordDisposition(result.next, event.kind === "new-version");
   };
   // Transitions mutate this closed-over state; read its declared full type
   // rather than TypeScript's narrower view of direct assignments in the loop.
@@ -185,6 +206,7 @@ export function computeCurrentClaimDisposition(
       throw new TypeError("claim disposition timeline is not a strict safe-integer sequence");
     }
     priorSequence = event.sequence;
+    activeSource = event;
 
     if (event.kind === "claim-created") {
       if (currentVersion !== null || event.version !== 1) {
@@ -210,9 +232,10 @@ export function computeCurrentClaimDisposition(
       // the identity. P9 gives a genuinely new statement fresh standing.
       // Whole-claim withdrawal remains terminal until an explicit repair.
       const priorDisposition = currentDisposition();
-      if (identityWithdrawn) disposition = "withdrawn";
+      lastTransition = null;
+      if (identityWithdrawn) recordDisposition("withdrawn", true);
       else if (priorDisposition === "refuted" || priorDisposition === "withdrawn")
-        disposition = "open";
+        recordDisposition("open", true);
       else apply({ kind: "new-version", new_version: event.version });
       if (event.targetClaimId) {
         apply({ kind: "reduced-to", target_claim_id: event.targetClaimId });
@@ -313,5 +336,5 @@ export function computeCurrentClaimDisposition(
     }
   }
 
-  return { disposition, currentVersion, context: context() };
+  return { disposition, currentVersion, context: context(), lastTransition };
 }

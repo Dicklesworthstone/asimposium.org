@@ -19,7 +19,15 @@
     "stale": false,
     "recorded_refutation_attempts": 0,
     "certified_artifact": false,
-    "legacy_reviews": 0
+    "legacy_reviews": 0,
+    "status_basis": {
+      "kind": "transition",
+      "event_id": "EVT-CLAIM-1",
+      "seq": 1,
+      "from": "draft",
+      "to": "open",
+      "cause": "claim-created"
+    }
   },
   "items": [
     {

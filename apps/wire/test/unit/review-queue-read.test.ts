@@ -124,6 +124,7 @@ function fixture() {
     fold: async (rows) => ({
       disposition: "open",
       currentVersion: rows[0]?.target_version ?? null,
+      lastTransition: null,
       stale: false,
       legacyReviews: 0,
       directiveDisclosure: "missing",

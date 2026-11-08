@@ -550,6 +550,8 @@ export {
   ClaimFaceResponseSchema,
   type ClaimReviewState,
   ClaimReviewStateSchema,
+  type ClaimStatusBasis,
+  ClaimStatusBasisSchema,
   checkpointSignatureMessage,
   type ExportCheckpointBundle,
   ExportCheckpointBundleSchema,

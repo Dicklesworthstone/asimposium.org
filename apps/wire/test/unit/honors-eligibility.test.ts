@@ -14,6 +14,7 @@ function fold(patch: Partial<ScientificDisposition> = {}): ScientificDisposition
   return {
     disposition: "strongly-supported",
     currentVersion: 1,
+    lastTransition: null,
     stale: false,
     legacyReviews: 0,
     directiveDisclosure: "satisfied",

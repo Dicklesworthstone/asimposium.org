@@ -152,6 +152,15 @@ await runLocalWorkerJourney(async (context) => {
     const jsonText = await jsonRes.text();
     const claimFace = ClaimFaceResponseSchema.parse(safeJsonParse(jsonText));
     const state = claimFace.claim_state;
+    assert.ok(state.status_basis, "the actual claim producer supplies an explicit status basis");
+    if (state.stale) assert.deepEqual(state.status_basis, { kind: "unavailable" });
+    if (state.status_basis.kind === "transition") {
+      const basis = state.status_basis;
+      assert.equal(basis.to, state.disposition);
+      const window = await call(`/p/${problemId}/events.json?since=${basis.seq - 1}&through=${basis.seq}&limit=1`);
+      assert.ok(window.events.some((entry) => entry.seq === basis.seq && entry.event?.id === basis.event_id),
+        "the status source resolves through the independent public event window");
+    }
     const computedDisplay =
       state.disposition +
       (state.unchallenged ? " · unchallenged" : "") +
@@ -181,6 +190,8 @@ await runLocalWorkerJourney(async (context) => {
       const faceRes = await worker.fetch(faceUrl, { headers: { "user-agent": userAgent } });
       assert.equal(faceRes.status, 200, `Anonymous .${suffix} claim face must return 200`);
       const faceBody = await faceRes.text();
+      assert.ok(faceBody.includes("status_basis"), `.${suffix} carries canonical status basis`);
+      if (state.status_basis.kind === "transition") assert.ok(faceBody.includes(state.status_basis.event_id));
       assert.ok(
         faceBody.includes(state.disposition),
         `Expected .${suffix} face to include disposition "${state.disposition}"`,
@@ -194,6 +205,7 @@ await runLocalWorkerJourney(async (context) => {
         `Expected .${suffix} face to share canonical projection fingerprint`,
       );
     }
+    return state;
   }
 
   // -------------------------------------------------------------------------
@@ -367,7 +379,9 @@ await runLocalWorkerJourney(async (context) => {
     reviewerB,
     201,
   );
-  await assertStanding(c1Id, "corroborated", "independently-checked");
+  const afterLateCheck = await assertStanding(c1Id, "corroborated", "independently-checked");
+  assert.equal(afterLateCheck.status_basis.cause, "falsification-attempt",
+    "the arriving check triggers reevaluation of the earlier supporting review");
 
   // Reviewer B submits full write-up verification
   const fullReviewB = await call(
@@ -429,6 +443,10 @@ await runLocalWorkerJourney(async (context) => {
     reviewerC,
     201,
   );
+  const beforeDisclosure = await call(`/p/${problemId}/claims/${c1Id}.json`);
+  assert.deepEqual(beforeDisclosure.claim_state.status_basis,
+    { kind: "directive-disclosure", status: "missing" },
+    "current disclosure limits are explicit rather than an invented missing-review cause");
   // Strong scientific evidence still needs the sponsor's exact-lineage
   // disclosure before the strongest public standing is earned.
   const firstDisclosurePath = `/v1/sponsors/disclosures/${problemId}/${c1Id}/1`;
@@ -999,6 +1017,8 @@ await runLocalWorkerJourney(async (context) => {
     );
     const face = await call(`/p/${problemId}/claims/${claimId}.json`);
     assert.equal(face.claim_state.stale, true);
+    assert.deepEqual(face.claim_state.status_basis, { kind: "unavailable" },
+      "withdrawn scientific inputs cannot leave an authoritative causal explanation");
     assert.equal(
       face.claim_state.disposition,
       kind === "review" ? "reduced-to" : "disputed",
@@ -1131,11 +1151,16 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(afterConcession.events, beforeConcession.events + 1);
   assert.equal(afterConcession.public_seq, beforeConcession.public_seq + 1);
   assert.equal(afterConcession.concessions, 1, "a real immutable concession row was committed");
-  await assertStanding(concessionClaimId, "refuted", "unreviewed");
+  const concededStanding = await assertStanding(concessionClaimId, "refuted", "unreviewed");
+  assert.equal(concededStanding.status_basis.kind, "transition");
+  assert.equal(concededStanding.status_basis.cause, "author-concession");
+  assert.equal(concededStanding.status_basis.seq, concession.seq);
   const historicalConcessionFace = ClaimFaceResponseSchema.parse(
     await call(`/p/${problemId}/claims/${concessionClaimId}@1.json?through=${counterSource.seq}`),
   );
   assert.equal(historicalConcessionFace.claim_state.disposition, "disputed");
+  assert.equal(historicalConcessionFace.claim_state.status_basis.cause, "refuting-evidence");
+  assert.equal(historicalConcessionFace.claim_state.status_basis.seq, counterSource.seq);
 
   const retractions = RetractionsListResponseSchema.parse(
     await call(`/p/${problemId}/retractions.json`),

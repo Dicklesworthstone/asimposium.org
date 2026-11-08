@@ -101,6 +101,25 @@ async function changedPayload(source: Row, change: Record<string, unknown>): Pro
   return { ...source, payload_json: payload, payload_sha256: await sha256Hex(payload) };
 }
 
+test("status step identity comes from its verified envelope, never payload-supplied explanation", async () => {
+  const rows = await refutationCorpus(72);
+  rows[2] = await changedPayload(rows[2], {
+    status_basis: { event_id: "EVT-FORGED", cause: "claim-created" },
+  });
+  const fold = await foldScientificRows(rows);
+  expect(fold.disposition).toBe("refuted");
+  expect(fold.lastTransition).toEqual({
+    sequence: 3,
+    from: "disputed",
+    to: "refuted",
+    cause: "review-created",
+    eventId: "EVENT-3",
+  });
+  const missing = await foldScientificRows([rows[0], { ...rows[2], payload_json: null }]);
+  expect(missing.stale).toBe(true);
+  expect(missing.lastTransition?.eventId).toBeUndefined();
+});
+
 async function noveltyClaim(version = 1, sequence = 1): Promise<Row> {
   return row(
     sequence,

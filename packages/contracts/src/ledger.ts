@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { EVENT_TAIL_ID_PATTERN } from "./event-tail-model.ts";
 import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 import {
   PUBLIC_CLAIM_TARGET_PATTERN,
@@ -124,6 +125,39 @@ export const CLAIM_DISPOSITIONS = [
 export const ClaimDispositionSchema = z.enum(CLAIM_DISPOSITIONS);
 export type ClaimDisposition = z.infer<typeof ClaimDispositionSchema>;
 
+/** Public, mechanical provenance for the last fold step, never a proof or a
+ * reconstruction from the bounded display records. Missing sources stay unknown. */
+export const ClaimStatusBasisSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("transition"),
+      event_id: z.string().regex(EVENT_TAIL_ID_PATTERN),
+      seq: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+      from: ClaimDispositionSchema,
+      to: ClaimDispositionSchema.exclude(["draft"]),
+      cause: z.enum([
+        "claim-created",
+        "claim-revised",
+        "claim-retracted",
+        "claim-reduced",
+        "author-concession",
+        "review-created",
+        "refuting-evidence",
+        "falsification-attempt",
+        "certified-artifact",
+      ]),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("directive-disclosure"),
+      status: z.enum(["missing", "unresolved", "unavailable"]),
+    })
+    .strict(),
+  z.object({ kind: z.literal("unavailable") }).strict(),
+]);
+export type ClaimStatusBasis = z.infer<typeof ClaimStatusBasisSchema>;
+
 /**
  * Fable §6.6: the review-state facet, computed and never author-writable,
  * displayed orthogonally to disposition (a claim can be well-evidenced yet
@@ -196,6 +230,8 @@ export const PublicClaimStateSchema = z
     recorded_refutation_attempts: z.number().int().min(0),
     certified_artifact: z.boolean(),
     legacy_reviews: z.number().int().min(0),
+    /** Read-derived only. Absence cannot be replaced by an inferred cause. */
+    status_basis: ClaimStatusBasisSchema.optional(),
     /**
      * Present only on novelty-claims (Fable §6.6(c)): computed from novelty
      * reviews that carry weight. "new" needs at least one such `new` verdict and
@@ -206,6 +242,18 @@ export const PublicClaimStateSchema = z
   })
   .strict()
   .superRefine((state, context) => {
+    const basis = state.status_basis;
+    if (
+      (basis?.kind === "transition" && (basis.to !== state.disposition || state.stale)) ||
+      (basis?.kind === "directive-disclosure" &&
+        (state.disposition !== "corroborated" || basis.status !== state.directive_disclosure))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["status_basis"],
+        message: "status basis does not match canonical standing",
+      });
+    }
     if (
       state.latest_version < state.version ||
       (state.disposition === "strongly-supported" && state.directive_disclosure !== "satisfied") ||
@@ -401,6 +449,16 @@ export const ClaimFaceResponseSchema = z
   })
   .strict()
   .superRefine((face, context) => {
+    if (
+      face.claim_state.status_basis?.kind === "transition" &&
+      face.claim_state.status_basis.seq > face.cursor
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["claim_state", "status_basis", "seq"],
+        message: "status basis cannot follow the captured ledger cursor",
+      });
+    }
     const ids = new Set(face.items.map((item) => item.id));
     const claim = face.items.filter((item) => item.kind === "claim-detail");
     for (const item of face.items.filter((item) => item.kind === "claim-dependency")) {

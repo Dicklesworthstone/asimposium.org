@@ -50,6 +50,103 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
     },
   });
 
+  test("the recorded cause distinguishes an author concession from an independent refutation", () => {
+    const folded = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      { kind: "refuting-evidence", sequence: 2, targetVersion: 1, evidenceId: "E-1" },
+      { kind: "author-concession", sequence: 3, targetVersion: 1 },
+    ]);
+    expect(folded.disposition).toBe("refuted");
+    expect(folded.lastTransition).toEqual({
+      sequence: 3,
+      from: "disputed",
+      to: "refuted",
+      cause: "author-concession",
+    });
+  });
+
+  test("T0 and weightless confirmations cannot replace the actual independent transition", () => {
+    const check: VersionedClaimTimelineEvent = {
+      kind: "falsification-attempt",
+      sequence: 2,
+      targetVersion: 1,
+      attemptId: "E-1",
+      attemptedFalsifier: "Find an opposite-parity value.",
+      capableOfFailure: "An opposite-parity value fails the check.",
+      result: "survived",
+      evidenceReferences: ["E-0"],
+    };
+    const same = {
+      ...review(3, 1, "confirm"),
+      review: {
+        review_id: "R-3",
+        reviewer_id: "fellow-3",
+        tier: "T0" as const,
+        cross_family: false,
+        full_write_up: false,
+      },
+    };
+    const inputs: VersionedClaimTimelineEvent[] = [
+      { kind: "claim-created", sequence: 1, version: 1 },
+      check,
+      same,
+      review(4, 1, "confirm", false),
+    ];
+    expect(computeCurrentClaimDisposition(inputs).lastTransition?.sequence).toBe(1);
+    const independent = review(5, 1, "confirm");
+    const folded = computeCurrentClaimDisposition([
+      ...inputs,
+      independent,
+      { ...same, sequence: 6 },
+    ]);
+    expect(folded.disposition).toBe("corroborated");
+    expect(folded.lastTransition).toEqual({
+      sequence: 5,
+      from: "open",
+      to: "corroborated",
+      cause: "review-created",
+    });
+  });
+
+  test("a late surviving check, rather than the earlier review, is the actual transition source", () => {
+    const folded = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      review(2, 1, "confirm"),
+      {
+        kind: "falsification-attempt",
+        sequence: 3,
+        targetVersion: 1,
+        attemptId: "E-3",
+        attemptedFalsifier: "Opposite parity.",
+        capableOfFailure: "An opposite-parity square.",
+        result: "survived",
+        evidenceReferences: ["E-0"],
+      },
+    ]);
+    expect(folded.lastTransition).toEqual({
+      sequence: 3,
+      from: "open",
+      to: "corroborated",
+      cause: "falsification-attempt",
+    });
+  });
+
+  test("revision reestablishes the new version and old-pin reviews never become its cause", () => {
+    const folded = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      { kind: "author-concession", sequence: 2, targetVersion: 1 },
+      { kind: "claim-revised", sequence: 3, version: 2 },
+      review(4, 1, "refute"),
+    ]);
+    expect(folded.disposition).toBe("open");
+    expect(folded.lastTransition).toEqual({
+      sequence: 3,
+      from: "refuted",
+      to: "open",
+      cause: "claim-revised",
+    });
+  });
+
   test("the current-head fold preserves chronology and never carries an old pin across revision", () => {
     const folded = computeCurrentClaimDisposition([
       { kind: "claim-created", sequence: 1, version: 1 },
