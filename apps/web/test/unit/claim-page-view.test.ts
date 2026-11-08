@@ -74,6 +74,46 @@ function makeClaimFace(overrides: Partial<ClaimFaceResponse> = {}): ClaimFaceRes
 }
 
 describe("Claim Page View-Model & Diptych Honesty Panels", () => {
+  test("a displayed T3 review supplies cross-family coverage without certifying the statement", () => {
+    const face = makeClaimFace();
+    const vm = buildClaimPageViewModel({ ...face, items: [...face.items, {
+      kind: "claim-review", id: "R-T3", scope: "ledger", untrusted: true,
+      why_included: "recorded review", neutralized: [],
+      body: JSON.stringify({ tier: "T3", verdict: "inform", seq: 2 }),
+    }] }, ORIGIN);
+    expect(vm.tierExplainer.tier3Count).toBe(1);
+    expect(vm.whatRemainsUnverified.gaps.some(g => g.code === "NO_TIER2_REVIEWS")).toBe(false);
+    expect(vm.badges.disposition).toBe("open");
+    expect(vm.badges.machineChecked.earned).toBe(false);
+  });
+
+  test("bounded empty review coverage and zero qualifying counts do not establish globally absent work", () => {
+    const face = makeClaimFace({ omitted: [{ reason: "item_budget", detail: "Additional reviews omitted." }] });
+    const gaps = buildClaimPageViewModel(face, ORIGIN).whatRemainsUnverified.gaps;
+    expect(gaps.find(g => g.code === "NO_TIER2_REVIEWS")?.title).toContain("displayed");
+    expect(gaps.find(g => g.code === "NO_TIER2_REVIEWS")?.detail).toContain("bounded face");
+    expect(gaps.find(g => g.code === "NO_REFUTATIONS")?.detail).toContain("qualifying");
+    expect(gaps.find(g => g.code === "NO_REFUTATIONS")?.detail).not.toContain("No adversarial tests");
+    expect(gaps.find(g => g.code === "NO_FORMAL_ARTIFACT")?.detail).toContain("does not execute proof checkers");
+    expect(gaps.map(g=>g.detail).join(" ")).not.toContain("All reviews stem");
+    const positive = buildClaimPageViewModel({ ...face, claim_state: {
+      ...face.claim_state, recorded_refutation_attempts: 3, unchallenged: false, certified_artifact: true,
+    } }, ORIGIN);
+    expect(positive.whatRemainsUnverified.gaps.some(g=>g.code === "NO_REFUTATIONS")).toBe(false);
+    expect(positive.whatRemainsUnverified.gaps.some(g=>g.code === "NO_FORMAL_ARTIFACT")).toBe(false);
+  });
+
+  test("legacy and stale gaps cannot invent cryptographic provenance or a cache diagnosis", () => {
+    const face = makeClaimFace();
+    const gaps = buildClaimPageViewModel({ ...face, claim_state: {
+      ...face.claim_state, legacy_reviews: 2, stale: true, status_basis: { kind: "unavailable" },
+    } }, ORIGIN).whatRemainsUnverified.gaps;
+    expect(gaps.find(g=>g.code === "LEGACY_UNVERIFIED_REVIEWS")?.detail).toContain("review-time");
+    expect(gaps.find(g=>g.code === "LEGACY_UNVERIFIED_REVIEWS")?.detail).not.toContain("cryptographically");
+    expect(gaps.find(g=>g.code === "STALE_RECORD")?.detail).toContain("unavailable");
+    expect(gaps.find(g=>g.code === "STALE_RECORD")?.detail).not.toContain("cached projections have shifted");
+  });
+
   test("author concession readback uses the canonical event, not displayed confirmation prose", () => {
     const face = makeClaimFace();
     face.claim_state = { ...face.claim_state, disposition: "refuted", unchallenged: false,

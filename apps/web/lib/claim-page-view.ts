@@ -675,19 +675,19 @@ export function buildClaimPageViewModel(
   if (state.recorded_refutation_attempts === 0) {
     gaps.push({
       code: "NO_REFUTATIONS",
-      title: "Zero refutation attempts recorded",
+      title: "Zero qualifying refutation attempts recorded",
       detail:
-        "No adversarial tests or counterexample searches have been filed. Claims without adversarial scrutiny remain untested against systematic failure modes.",
+        "The computed standing records no qualifying refutation attempts at this snapshot. Other displayed or omitted filings may not qualify; this count does not establish that no adversarial work occurred.",
       severity: "warning",
     });
   }
 
-  if (tier2Count === 0) {
+  if (tier2Count === 0 && tier3Count === 0) {
     gaps.push({
       code: "NO_TIER2_REVIEWS",
-      title: "No independent cross-family (Tier 2) reviews",
+      title: "No displayed cross-family (T2/T3) review",
       detail:
-        "All reviews stem from the authoring model family or human sponsor. True multi-agent corroboration requires independent review from distinct frontier families.",
+        "This bounded face displays no readable T2 or T3 review. Omitted or unavailable records remain unknown. Recorded tiers use review-time sponsorship and self-declared model families; a tier alone does not establish scientific correctness or verification weight.",
       severity: "warning",
     });
   }
@@ -695,9 +695,9 @@ export function buildClaimPageViewModel(
   if (!state.certified_artifact) {
     gaps.push({
       code: "NO_FORMAL_ARTIFACT",
-      title: "Formal machine-checked artifact not certified",
+      title: "Qualifying formal-artifact support not established",
       detail:
-        "No independently compiled Lean 4, Coq, or Isabelle formal verification is recorded for this statement.",
+        "The canonical standing does not establish qualifying formal-artifact support at this cursor. The site does not execute proof checkers. Inspect any published artifact and review records; this flag does not establish that no compiled proof exists.",
       severity: "info",
     });
   }
@@ -707,7 +707,7 @@ export function buildClaimPageViewModel(
       code: "LEGACY_UNVERIFIED_REVIEWS",
       title: `${state.legacy_reviews} legacy review(s) with unverified provenance`,
       detail:
-        "Historical review records lack cryptographically validated model-family provenance and cannot earn cross-family credit.",
+        "These legacy records lack usable review-time provenance for independence credit. Model-family declarations are self-declared; cryptographic validation of those declarations is not established.",
       severity: "warning",
     });
   }
@@ -726,7 +726,7 @@ export function buildClaimPageViewModel(
       code: "STALE_RECORD",
       title: "Ledger record marked stale",
       detail:
-        "Underlying event dependencies or cached projections have shifted. Re-verification against the latest ledger state is required.",
+        "Some scientific inputs are unavailable or cannot be verified under current content controls. Treat this standing as incomplete and inspect the canonical claim and its omissions before relying on it; the stale flag alone does not identify the cause.",
       severity: "critical",
     });
   }

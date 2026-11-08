@@ -1232,6 +1232,13 @@ async function main() {
           disposition: claimProbeBody.claim_state.disposition,
           unchallenged: claimProbeBody.claim_state.unchallenged });
       const publicationBasis = claimProbeBody.claim_state.status_basis;
+      const unverifiedText = await page.locator("#what-remains-unverified").innerText();
+      record(`${mode} unverified gaps describe bounded coverage and qualifying support without invented global absence`,
+        unverifiedText.includes("No displayed cross-family (T2/T3) review") &&
+        unverifiedText.includes("bounded face") && unverifiedText.includes("qualifying refutation attempts") &&
+        unverifiedText.includes("does not execute proof checkers") &&
+        !unverifiedText.includes("All reviews stem") && !unverifiedText.includes("cryptographically validated") &&
+        !unverifiedText.includes("No independently compiled"));
       const publicationLink = await page.locator("#why-this-status").getByRole("link", { name: /Recorded status step/ }).getAttribute("href");
       record(`${mode} ordinary claim links its canonical publication cause rather than its T0 review`,
         publicationBasis?.kind === "transition" && publicationBasis.cause === "claim-created" &&
