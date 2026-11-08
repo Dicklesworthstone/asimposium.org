@@ -88,6 +88,9 @@ test("the private review server-renders all formulation fields, rights and actua
     "PRIVATE_STATEMENT",
     "PRIVATE_FALSIFIER",
     "PRIVATE_MOTIVATION",
+    "PRIVATE_SCOPE",
+    "PRIVATE_OUT_OF_SCOPE",
+    "PRIVATE_SUCCESS_CRITERIA",
     "PRIVATE_CANONICAL",
     "PRIVATE_VARIANT",
     "PRIVATE_REFERENCE",
@@ -97,6 +100,12 @@ test("the private review server-renders all formulation fields, rights and actua
   }
   expect(html).toContain("&lt;script&gt;");
   expect(html).not.toContain("<script>alert");
+  expect(html).toContain("&lt;img src=x onerror=unsafe()&gt;");
+  expect(html).not.toContain("<img src=x");
+  expect(html).toContain("<h2>Scope</h2>");
+  expect(html).toContain("<h2>Out of scope</h2>");
+  expect(html).toContain("<h2>Success criteria</h2>");
+  expect(html).toContain("<h2>Exact statement</h2>");
   expect(html).toContain("fixture/model");
   expect(html).toContain("fixture-harness");
   expect(html).toContain("self-declared");
@@ -117,12 +126,37 @@ test("the private review server-renders all formulation fields, rights and actua
   expect(JSON.stringify(page.metadata)).not.toContain("Private finite paths");
 });
 
+test("a legacy publication preview does not invent research boundaries", async () => {
+  readResult = {
+    ok: true,
+    data: {
+      ...publicationPreview,
+      problem: {
+        ...publicationPreview.problem,
+        scope: undefined,
+        out_of_scope: undefined,
+        success_criteria: undefined,
+      },
+    },
+  };
+  const html = await render();
+  expect(html).toContain("PRIVATE_STATEMENT");
+  expect(html).toContain("Publish reviewed statement");
+  expect(html).not.toContain("<h2>Scope</h2>");
+  expect(html).not.toContain("<h2>Out of scope</h2>");
+  expect(html).not.toContain("<h2>Success criteria</h2>");
+  expect(html).not.toContain("PRIVATE_SCOPE");
+});
+
 test("signed-out and noncanonical identities never load or render private formulations", async () => {
   for (const principal of [null, "someone@example.invalid"]) {
     identity = principal;
     const html = await render();
     expect(html).toContain("Sign in to review the private formulation");
     expect(html).not.toContain("PRIVATE_STATEMENT");
+    expect(html).not.toContain("PRIVATE_SCOPE");
+    expect(html).not.toContain("PRIVATE_OUT_OF_SCOPE");
+    expect(html).not.toContain("PRIVATE_SUCCESS_CRITERIA");
     expect(html).not.toContain("private-reviewer");
     expect(html).not.toContain("Publish reviewed statement");
   }
@@ -186,6 +220,11 @@ test("the console leads to inspection instead of asking for blind publication co
   expect(html).toContain("Review the complete formulation");
   expect(html).not.toContain("I have read the exact formulation");
   expect(html).not.toContain("PRIVATE_STATEMENT");
+  for (const field of ["scope", "out_of_scope", "success_criteria"]) {
+    expect(html).toContain(`name="${field}"`);
+  }
+  expect(html.match(/maxLength="4096"/g)).toHaveLength(3);
+  expect(html).toContain("Optional: complete all three fields");
 });
 
 function publicGovernance(

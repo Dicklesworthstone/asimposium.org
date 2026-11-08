@@ -126,6 +126,63 @@ describe("sponsor problem actions", () => {
     ).toBeNull();
   });
 
+  test("brief boundaries preserve authored bytes through the form and sponsor transport", async () => {
+    const boundaries = {
+      scope: "  Finite integer inputs $0 \\leq n \\leq 1000$.\n",
+      out_of_scope: "  Infinite domains and approximate arithmetic.  ",
+      success_criteria: "An exact proof over the stated range,\nor a specific counterexample.\n",
+    };
+    const request = await actions.briefRequestFromForm({
+      title: BRIEF.title,
+      statement: BRIEF.statement,
+      falsifier: BRIEF.falsifier,
+      motivation: BRIEF.motivation,
+      scope: boundaries.scope,
+      outOfScope: boundaries.out_of_scope,
+      successCriteria: boundaries.success_criteria,
+      areas: "number-theory",
+      assignedFellowId: "",
+    });
+    expect(request).not.toBeNull();
+    if (request === null) throw new Error("Expected a complete bounded brief");
+    expect(request).toMatchObject(boundaries);
+    saveResult = { ok: true, data: { ...BRIEF, ...boundaries } };
+    expect((await actions.saveProblemBrief(request, "console-brief-boundaries")).ok).toBe(true);
+    expect(calls).toEqual([{ kind: "save", args: [SPONSOR, request, "console-brief-boundaries"] }]);
+    expect(calls[0]?.args[1]).toMatchObject(boundaries);
+  });
+
+  test("brief forms omit an empty boundary bundle and refuse incomplete or invalid boundaries", async () => {
+    const form = {
+      title: BRIEF.title,
+      statement: BRIEF.statement,
+      falsifier: BRIEF.falsifier,
+      motivation: BRIEF.motivation,
+      areas: "number-theory",
+      assignedFellowId: "",
+    };
+    const legacy = await actions.briefRequestFromForm({
+      ...form, scope: "", outOfScope: "", successCriteria: "",
+    });
+    expect(legacy).not.toBeNull();
+    if (legacy === null) throw new Error("Expected an unchanged legacy brief");
+    expect(legacy).not.toHaveProperty("scope");
+    expect(legacy).not.toHaveProperty("out_of_scope");
+    expect(legacy).not.toHaveProperty("success_criteria");
+    for (const boundaries of [
+      { scope: "Finite integers" },
+      { scope: "Finite integers", outOfScope: "Other inputs" },
+      { scope: "  \n", outOfScope: "Other inputs", successCriteria: "Proof or counterexample" },
+      { scope: "Finite integers", outOfScope: "", successCriteria: "Proof or counterexample" },
+      { scope: "x".repeat(4097), outOfScope: "Other inputs", successCriteria: "Proof or counterexample" },
+    ]) {
+      expect(await actions.briefRequestFromForm({ ...form, ...boundaries })).toBeNull();
+    }
+    const invalid = { ...legacy, scope: "Finite integers" };
+    expect((await actions.saveProblemBrief(invalid, "console-brief-partial")).ok).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
   test("saving requires a signed-in canonical sponsor", async () => {
     sponsor = null;
     calls.length = 0;

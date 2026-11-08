@@ -1041,6 +1041,51 @@ describe("ProblemPage Server Component", () => {
     expect(empty).toContain("A simple path with n edges has n + 1 vertices.");
   });
 
+  test("ProblemPage renders the canonical versioned research boundaries without treating them as claims or resolution", async () => {
+    const legacy = JSON.parse(readFileSync(new URL(
+      "../../../../packages/contracts/test/fixtures/valid/ledger-problem-formulation.json",
+      import.meta.url,
+    ), "utf8"));
+    const boundaryItems = [
+      { kind: "problem-scope", id: "S@2-scope", body: "SCOPE_V2 Finite simple paths with $n \\geq 0$ edges." },
+      { kind: "problem-out-of-scope", id: "S@2-out-of-scope", body: "EXCLUSIONS_V2 Infinite paths. <script>boundaryAttack()</script>" },
+      { kind: "problem-success-criteria", id: "S@2-success-criteria", body: "CRITERIA_V2 Establish the count for every path in scope, or give a counterexample. <img src=x onerror=boundaryAttack()>" },
+    ].map((item) => ({
+      ...item, scope: "ledger", untrusted: true,
+      why_included: "current problem formulation at statement version S@2", neutralized: [],
+    }));
+    let face = { ...legacy, items: [...legacy.items, ...boundaryItems, ...MOCK_PROBLEM_FACE.items] };
+    setMockFetch(async () => Response.json(face));
+    expect(dataOf(await stoaFetchProblemFace(face.problem)).items)
+      .toEqual(face.items);
+    const props = { params: Promise.resolve({ slug: face.problem }) };
+    const html = renderToStaticMarkup(await ProblemPage(props));
+    for (const [label, id, marker] of [
+      ["Scope", "S@2-scope", "SCOPE_V2"],
+      ["Out of scope", "S@2-out-of-scope", "EXCLUSIONS_V2"],
+      ["Success criteria", "S@2-success-criteria", "CRITERIA_V2"],
+    ] as const) {
+      expect(html).toContain(`aria-label="${label}"`);
+      expect(html).toContain(id);
+      expect(html).toContain(marker);
+      expect(html).not.toContain(`/claims/${id}`);
+    }
+    expect(html).toContain('class="katex"');
+    expect(html).toContain("&lt;script&gt;boundaryAttack()&lt;/script&gt;");
+    expect(html).toContain("&lt;img src=x onerror=boundaryAttack()&gt;");
+    expect(html).not.toContain("<script>boundaryAttack()");
+    expect(html).not.toContain("<img src=x");
+    expect(html).toContain("Author-supplied formulation · untrusted data");
+    expect(html).toContain("2 public claims promoted");
+    expect(html).not.toContain("Recorded resolution");
+    face = { ...legacy, items: [...legacy.items, ...MOCK_PROBLEM_FACE.items] };
+    const historical = renderToStaticMarkup(await ProblemPage(props));
+    expect(historical).not.toContain('aria-label="Scope"');
+    expect(historical).not.toContain('aria-label="Out of scope"');
+    expect(historical).not.toContain('aria-label="Success criteria"');
+    expect(historical).not.toContain("CRITERIA_V2");
+  });
+
   test("ProblemPage renders commentary lane, citations, and single-team banner", async () => {
     const mockCommentary = {
       schema: COMMENTARY_SCHEMA_ID,

@@ -185,12 +185,21 @@ export default async function ProblemPublicationPage({
               <dd>{preview.problem.stewards.join(", ")}</dd>
             </dl>
           </section>
-          <PrivateText heading="Exact statement and scope" text={preview.problem.statement} />
+          <PrivateText heading="Exact statement" text={preview.problem.statement} />
           <PrivateText
             heading="Falsifier: what would refute this formulation?"
             text={preview.problem.falsifier}
           />
           <PrivateText heading="Motivation" text={preview.problem.motivation} />
+          {preview.problem.scope !== undefined &&
+            preview.problem.out_of_scope !== undefined &&
+            preview.problem.success_criteria !== undefined && (
+              <>
+                <PrivateText heading="Scope" text={preview.problem.scope} />
+                <PrivateText heading="Out of scope" text={preview.problem.out_of_scope} />
+                <PrivateText heading="Success criteria" text={preview.problem.success_criteria} />
+              </>
+            )}
           {preview.problem.famous_guardrail === null ? null : (
             <section className="card" aria-labelledby="famous-problem-boundary">
               <h2 id="famous-problem-boundary">Famous-problem scope and standing boundary</h2>

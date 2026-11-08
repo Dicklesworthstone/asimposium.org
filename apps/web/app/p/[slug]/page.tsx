@@ -35,6 +35,9 @@ const FORMULATION_LABELS = {
   "problem-statement": "Statement",
   "problem-falsifier": "Falsifier",
   "problem-motivation": "Motivation",
+  "problem-scope": "Scope",
+  "problem-out-of-scope": "Out of scope",
+  "problem-success-criteria": "Success criteria",
 } as const;
 const RESOLUTION_LIMIT_LABELS = {
   verified: "Verified scope",

@@ -27,6 +27,9 @@ export async function briefRequestFromForm(input: {
   readonly statement: string;
   readonly falsifier: string;
   readonly motivation: string;
+  readonly scope?: string;
+  readonly outOfScope?: string;
+  readonly successCriteria?: string;
   readonly areas: string;
   readonly assignedFellowId: string;
 }): Promise<SaveProblemBriefRequest | null> {
@@ -34,11 +37,20 @@ export async function briefRequestFromForm(input: {
     .split(",")
     .map((area) => area.trim().toLowerCase())
     .filter((area) => area.length > 0);
+  const boundaries = {
+    scope: input.scope,
+    out_of_scope: input.outOfScope,
+    success_criteria: input.successCriteria,
+  };
+  const hasBoundaries = Object.values(boundaries).some(
+    (value) => value !== undefined && value !== "",
+  );
   const parsed = SaveProblemBriefRequestSchema.safeParse({
     title: input.title.trim(),
     statement: input.statement.trim(),
     falsifier: input.falsifier.trim(),
     motivation: input.motivation.trim(),
+    ...(hasBoundaries ? boundaries : {}),
     areas,
     ...(input.assignedFellowId === "" ? {} : { assigned_fellow_id: input.assignedFellowId }),
   });
@@ -62,7 +74,7 @@ export async function saveProblemBrief(
     return {
       ok: false,
       message:
-        "The brief is incomplete. Give a title, statement, falsifier, motivation and at least one area.",
+        "Give a title, statement, falsifier, motivation and at least one area. If you describe boundaries, supply scope, out-of-scope work and success criteria together, with at most 4,096 characters each.",
     };
   }
   const result = await stoaSaveProblemBrief(principal, parsed.data, idempotencyKey);

@@ -37,6 +37,9 @@ export function ProblemManager({
   const [statement, setStatement] = useState("");
   const [falsifier, setFalsifier] = useState("");
   const [motivation, setMotivation] = useState("");
+  const [scope, setScope] = useState("");
+  const [outOfScope, setOutOfScope] = useState("");
+  const [successCriteria, setSuccessCriteria] = useState("");
   const [areas, setAreas] = useState("");
   const [assignee, setAssignee] = useState(active[0]?.fellow_id ?? "");
   const [message, setMessage] = useState<string | null>(null);
@@ -69,12 +72,15 @@ export function ProblemManager({
               statement,
               falsifier,
               motivation,
+              scope,
+              outOfScope,
+              successCriteria,
               areas,
               assignedFellowId: assignee,
             });
             if (request === null) {
               setMessage(
-                "The brief is incomplete. Give a title, statement, falsifier, motivation and at least one area slug.",
+                "Give a title, statement, falsifier, motivation and at least one area slug. If you describe boundaries, complete scope, out-of-scope work and success criteria together.",
               );
               return;
             }
@@ -115,6 +121,43 @@ export function ProblemManager({
             onChange={(event) => setMotivation(event.target.value)}
           />
         </label>
+        <fieldset aria-describedby="problem-boundary-help">
+          <legend>Research boundaries</legend>
+          <p className="quiet" id="problem-boundary-help">
+            Optional: complete all three fields to specify what belongs in this problem and what
+            would count as a successful result.
+          </p>
+          <label>
+            Scope
+            <textarea
+              name="scope"
+              value={scope}
+              rows={2}
+              maxLength={4096}
+              onChange={(event) => setScope(event.target.value)}
+            />
+          </label>
+          <label>
+            Out of scope
+            <textarea
+              name="out_of_scope"
+              value={outOfScope}
+              rows={2}
+              maxLength={4096}
+              onChange={(event) => setOutOfScope(event.target.value)}
+            />
+          </label>
+          <label>
+            Success criteria
+            <textarea
+              name="success_criteria"
+              value={successCriteria}
+              rows={2}
+              maxLength={4096}
+              onChange={(event) => setSuccessCriteria(event.target.value)}
+            />
+          </label>
+        </fieldset>
         <label>
           Areas (comma-separated slugs, e.g. number-theory)
           <input value={areas} onChange={(event) => setAreas(event.target.value)} />
