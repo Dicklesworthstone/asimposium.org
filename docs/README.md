@@ -24,6 +24,61 @@ gates pass at the accepted revisions below, with independent acceptance of the
 source repairs, Fellow history and exact-record readers. Deployed acceptance
 remains separate.**
 
+### Replay observer publication — 2026-11-08, `10bbe002`
+
+The S1 gate contained a ready-file race: its producer opened the final observer
+path before writing its PID, while the reader rejected an empty visible file.
+An unchanged positive passes; adding only a 250 ms scheduling pause between
+open and write reproduces `REPLAY_DERIVATION_OBSERVER_UNTRUSTED`. The correction
+prepares an exclusive, no-follow private file, writes and closes it, then
+publishes with a no-overwrite hard link. The same pause passes; restoring early
+publication fails again. The original live argv/key/secret checks remain strict.
+Normal key derivation has no observer and incurs no pause. Diagnostics now
+expose only coarse codes, phases and the owned coprocess PID/birth identity.
+
+This is a local gate repair, not a new research feature or proof of the cause
+of the primary-only `5bf3404b` failure. A bounded search of retained captures
+did not recover that failing record; `pjuf.2` remains unclassified and open.
+Independent review also caught a misleading comment about cached FD numbers;
+that change was removed before final qualification. The first attempt's shell
+comment quoting error and superseded `2df8b8cf` partial checks remain retained.
+
+At `10bbe002`, primary literal observer and local D1 enrollment, root typecheck
+and lint pass. The primary unfiltered project unit run passes all eight groups
+in 1,408.24 seconds: 6,924 Worker tests / 32,658 assertions, 918 Agora tests and
+398 render unit tests. Its owner exits normally at 23:01:24.702 UTC, with all
+2,473 source hashes unchanged. The original 54 individual toolchain skips remain;
+no whole group skips, blocks, fails or goes missing.
+Independent literal observer/local D1, all eight typecheck/lint groups and the
+complete unfiltered S1 file pass: 125 tests, 1,169 assertions, 380.64 seconds,
+normal owners and 2,473 unchanged source inputs. This is not an independent
+eight-group unit result. A planned duplicate aggregate was deliberately retired
+at its exact owned dispatcher after the scope changed to S1; its owner exits 130,
+and its recorded group is empty. That partial run is not acceptance.
+
+The independent early-publication mutation reaches the exact coarse refusal
+and fails the original exit-zero assertion, with no entropy or key bytes in its
+logs. Both adverse owners also report `descendant-leaked` with subject exit one;
+`cleanupProven` is absent. Those results are not normal exited-one owners or a
+diagnosis of the historical failure. Exact restoration passes, and primary
+literal observer/local-D1 reruns after raw-evidence review pass with stable
+source. No cleanup assertion was relaxed.
+
+UBS completes both changed inputs but exits one: four reviewed
+preexisting critical flags, 365 warnings and 438 information items. The critical
+contexts are a constant shell-version eval, numeric-guarded descriptor closure
+and duplicate dynamic-descriptor ShellCheck flags. All 356 Bash warnings classify
+the fixed-set Bash bootstrap as POSIX; nine JS warnings concern existing test
+paths. No finding is suppressed, and this is not a clean-scanner claim.
+
+Evidence and the requested granular TODO are under
+`e2e/artifacts/s1-observer-20261108-coppertiger/`. The original S1, hosted
+gauntlet, deployment, screening, cost and launch acceptance remain separate.
+Fresh 22:50 UTC project-identified public capability reads return the same old
+production/staging `0.1.0-draft` bodies. These bytes identify the observed
+interface, not provider revision or deployment history. The four required
+Cloudflare/staging variables remain absent from this command environment.
+
 ### Hypothesis and formulation test repairs — 2026-11-08, `2c84aaf5`
 
 **Both agents pass all eight scoped qualification commands at this exact
