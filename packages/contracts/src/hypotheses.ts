@@ -81,11 +81,22 @@ export const PublicHypothesisSchema = z
     status: z.enum(["active", "killed", "narrowed", "deferred", "superseded", "unavailable"]),
     publication: Envelope,
     content: HypothesisPublicationSchema.nullable(),
+    /** Coarse context for this exact creation publication, never a later
+     * lifecycle decision or a scientific assessment of the route. */
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
     last_event: Envelope,
     kill: HypothesisKillRequestSchema.nullable(),
     lifecycle: HypothesisLifecyclePublicationSchema.nullable().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((item, context) => {
+    if (item.content === null && item.screening_notice !== undefined)
+      context.addIssue({
+        code: "custom",
+        path: ["screening_notice"],
+        message: "Unavailable hypothesis content cannot carry a publication notice.",
+      });
+  });
 export type PublicHypothesis = z.infer<typeof PublicHypothesisSchema>;
 export const HypothesesResponseSchema = z
   .object({

@@ -31,12 +31,13 @@ import { selectFormalizeMove } from "./formalize-moves.ts";
 import { loadFormalizationFrictionMove } from "./friction-moves-service.ts";
 import { loadProofGapMove } from "./gap-moves-service.ts";
 import { selectThirdAlternative } from "./hypothesis-moves.ts";
+import { selectKillOrStandMove } from "./kill-moves.ts";
 import { firstClaimMove, loadLedgerMoveQueue, selectPublicLedgerMoves } from "./ledger-moves.ts";
 import { compareMovePriority, selectTriageMove, uniqueMoves } from "./move-selection.ts";
 import { selectSharpenStatementMove } from "./sharpen-moves.ts";
 
 export const PUBLIC_MOVES_BOUNDARY =
-  "public-needs-v1: canonical statement-sharpening, review, refutation, formalization-friction, proof-gap, load-bearing formalization, third-alternative, discrimination-draft and first-claim selectors. At most two review pages and the selectors' own bounded inputs per problem. Identity-specific work, private sessions and workshop contents are not examined. Read the pinned public inputs, then use authenticated /v1/p/:id/next to check your eligibility. Discovery grants no write permission, assignment, reservation or scientific standing.";
+  "public-needs-v1: canonical statement-sharpening, review, refutation, hypothesis counterevidence (kill-or-stand), formalization-friction, proof-gap, load-bearing formalization, third-alternative, discrimination-draft and first-claim selectors. At most two review pages and the selectors' own bounded inputs per problem. Identity-specific work, private sessions and workshop contents are not examined. Read the pinned public inputs, then use authenticated /v1/p/:id/next to check your eligibility. Discovery grants no write permission, assignment, reservation or scientific standing.";
 export const GLOBAL_MOVES_BOUNDARY = `${PUBLIC_MOVES_BOUNDARY} Each live page examines at most ${PUBLIC_MOVES_PAGE_SIZE} listed working problems in ASCII ID order. Off-scope formulations and scientific inputs are excluded from global recommendations; known public problem reads remain available. Canonical move priority and review consequence rank the examined needs, not popularity. Each problem has its own captured cursor; next_after continues the admission order, not a global optimum or frozen global snapshot.`;
 
 const READ_ONLY_VIEWER = {
@@ -160,6 +161,7 @@ export interface PublicMoveSelectors {
   frictions: typeof loadFormalizationFrictionMove;
   formalize: typeof selectFormalizeMove;
   hypotheses: typeof loadLiveHypotheses;
+  killOrStand: typeof selectKillOrStandMove;
   formulation: typeof readPublishedProblemFormulation;
   sharpen: typeof selectSharpenStatementMove;
 }
@@ -169,6 +171,7 @@ const production: PublicMoveSelectors = {
   frictions: loadFormalizationFrictionMove,
   formalize: selectFormalizeMove,
   hypotheses: loadLiveHypotheses,
+  killOrStand: selectKillOrStandMove,
   formulation: readPublishedProblemFormulation,
   sharpen: selectSharpenStatementMove,
 };
@@ -337,6 +340,11 @@ async function selectProblem(
       );
     }
 
+  if (head.status !== "sharpening")
+    await attempt("Hypothesis counterevidence", () =>
+      selectors.killOrStand(db, head.id, head.cursor),
+    );
+
   const safe = candidates.filter((move) => {
     const preparation = move.contract.preparation as Record<string, unknown> | undefined;
     return (
@@ -368,6 +376,8 @@ async function selectProblem(
       ["target_pin", "claim", "claim_id"],
       ["gap_pin", "gap", "gap_id"],
       ["friction_pin", "evidence", "evidence_id"],
+      ["hypothesis_pin", "hypothesis", "hypothesis_id"],
+      ["evidence_pin", "evidence", "evidence_id"],
     ] as const) {
       const pin = preparation[key] as Record<string, unknown> | undefined;
       if (!pin) continue;

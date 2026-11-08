@@ -166,6 +166,7 @@ export async function readKilledHypothesisPack(
         untrusted: true,
         tokens: 1,
         body,
+        ...(item.screening_notice === undefined ? {} : { screening_notice: item.screening_notice }),
         stable_prefix: 20 + index,
         why_included:
           "recorded elimination with original and killing-event provenance; read its actual evidence before retrying",

@@ -350,6 +350,62 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(!JSON.stringify(killMove).includes(routeCanary));
   const triage = await call("/v1/triage", undefined, author);
   assert.deepEqual(triage.move, killMove, "triage points to the same exact source and contract");
+  // Anonymous discovery must expose the same scientific need without borrowing
+  // the authenticated viewer's authority. Check real HTTP faces and cache
+  // revalidation, not just the internal selector's fixture contract.
+  const publicMovePath = `/p/${problem}/moves.json`;
+  const publicMovesResponse = await worker.fetch(`${origin}${publicMovePath}`, {
+    headers: { "User-Agent": userAgent },
+  });
+  assert.equal(publicMovesResponse.status, 200);
+  const publicMoves = await publicMovesResponse.json();
+  assert.deepEqual(publicMoves.primary_move, killMove);
+  assert.equal(publicMoves.viewer.role, "none");
+  assert.equal(publicMoves.viewer.effective_permissions.promote, false);
+  assert.equal(publicMoves.viewer.effective_permissions.review, false);
+  assert.ok(!JSON.stringify(publicMoves).includes(routeCanary));
+  const publicMoveEtag = publicMovesResponse.headers.get("etag");
+  assert.ok(publicMoveEtag);
+  const unchangedMoves = await worker.fetch(`${origin}${publicMovePath}`, {
+    headers: { "User-Agent": userAgent, "If-None-Match": publicMoveEtag },
+  });
+  assert.equal(unchangedMoves.status, 304);
+  assert.equal(await unchangedMoves.text(), "");
+  for (const [suffix, accept] of [
+    [".md", "text/markdown"],
+    ["", "text/html"],
+  ]) {
+    const response = await worker.fetch(`${origin}/p/${problem}/moves${suffix}`, {
+      headers: { "User-Agent": userAgent, Accept: accept },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.ok(body.includes("kill-or-stand"));
+    assert.ok(body.includes(redactedEvidence.evidence_id));
+    assert.ok(!body.includes(routeCanary));
+  }
+  let globalProblem;
+  let after = null;
+  do {
+    const response = await worker.fetch(
+      `${origin}/moves.json${after === null ? "" : `?after=${encodeURIComponent(after)}`}`,
+      { headers: { "User-Agent": userAgent } },
+    );
+    assert.equal(response.status, 200);
+    const page = await response.json();
+    globalProblem = page.discovery.problems.find((item) => item.problem_id === problem);
+    const nextAfter = page.discovery.next_after;
+    assert.ok(
+      nextAfter === null || after === null || nextAfter > after,
+      "global discovery continuation advances in problem admission order",
+    );
+    after = nextAfter;
+  } while (!globalProblem && after !== null);
+  assert.deepEqual(
+    globalProblem?.primary_move,
+    killMove,
+    "global discovery prioritizes the same exact counterevidence",
+  );
   for (const read of [
     killMove.contract.preparation.read_first,
     ...killMove.contract.preparation.additional_reads,
@@ -378,6 +434,13 @@ await runLocalWorkerJourney(async (context) => {
   await fixtures.redactPublicContent(pin.event_id);
   assert.ok(!moveNames(await next(author)).includes("kill-or-stand"));
   assert.equal((await working(author, session)).selected.primary_move.move, "discriminate");
+  const redactedMoves = await worker.fetch(`${origin}${publicMovePath}`, {
+    headers: { "User-Agent": userAgent, "If-None-Match": publicMoveEtag },
+  });
+  assert.equal(redactedMoves.status, 200, "current source removal invalidates the old public ETag");
+  const afterRedaction = await redactedMoves.json();
+  assert.ok(!moveNames(afterRedaction).includes("kill-or-stand"));
+  assert.ok(!JSON.stringify(afterRedaction).includes(redactedEvidence.evidence_id));
 
   const currentEvidence = await counterevidence(
     "A fresh report describes the residual for this exact route and records its limitations.",
@@ -404,6 +467,14 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(
     !moveNames(await next(author)).includes("kill-or-stand"),
     "an eliminated route is no longer suggested even though refuting evidence remains recorded",
+  );
+  const afterKillResponse = await worker.fetch(`${origin}${publicMovePath}`, {
+    headers: { "User-Agent": userAgent },
+  });
+  assert.equal(afterKillResponse.status, 200);
+  assert.ok(
+    !moveNames(await afterKillResponse.json()).includes("kill-or-stand"),
+    "public discovery also stops recommending investigation of an eliminated route",
   );
   await working(author, session);
 

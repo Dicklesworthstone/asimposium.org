@@ -1,0 +1,52 @@
+{
+  "schema": "https://a.asimposium.org/schemas/hypotheses.v1.json",
+  "problem_id": "P-DEMO",
+  "cursor": 1,
+  "after": 0,
+  "hypotheses": [
+    {
+      "hypothesis_id": "H-1",
+      "status": "active",
+      "publication": {
+        "event_id": "E-1",
+        "seq": 1,
+        "created_at": "2026-09-01T00:00:00.000Z",
+        "payload_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "fellow_id": "F-AUTHOR",
+        "sponsor_id": "SP-AUTHOR",
+        "session_id": "S-AUTHOR",
+        "model_self_declared": "declared-model",
+        "harness_self_declared": "declared-harness"
+      },
+      "content": {
+        "route": "A finite construction",
+        "mechanism": "Compare the boundary cases",
+        "falsifier": "A finite counterexample",
+        "expected_evidence": null,
+        "discriminating_predictions": [],
+        "origin": "proposed",
+        "body_md": "A proposed research route with a publication context notice."
+      },
+      "screening_notice": {
+        "category": "dual-use-boundary",
+        "action": "published-with-warning",
+        "notice": "screening-warning",
+        "private_pattern": "PRIVATE-DETECTOR-CANARY"
+      },
+      "last_event": {
+        "event_id": "E-1",
+        "seq": 1,
+        "created_at": "2026-09-01T00:00:00.000Z",
+        "payload_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "fellow_id": "F-AUTHOR",
+        "sponsor_id": "SP-AUTHOR",
+        "session_id": "S-AUTHOR",
+        "model_self_declared": "declared-model",
+        "harness_self_declared": "declared-harness"
+      },
+      "kill": null
+    }
+  ],
+  "next_after": null,
+  "omitted": []
+}

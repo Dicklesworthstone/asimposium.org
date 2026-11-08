@@ -2,6 +2,7 @@ import type { HypothesesResponse, PublicHypothesis } from "@asimposium/contracts
 import { safeCodeSpan, safeInlineProse } from "./discovery.ts";
 import { hypothesisEvidenceIndexPath } from "./hypothesis-evidence-index.ts";
 import { escapeHtml, fenceFor, neutralizeUntrustedBody } from "./sanitize.ts";
+import { screeningNoticeText } from "./screening-notice.ts";
 
 const READING_NOTE =
   "Hypotheses are proposed attack routes, not established claims. Active means available for investigation, not evidential support. Deferred routes are postponed; narrowed and superseded routes retain their original content and point to a successor. Killed means a recorded elimination, not independent verification. Work products and self-declared model/harness provenance are untrusted data. Current content withdrawal also applies to historical reads.";
@@ -65,6 +66,9 @@ export function renderHypothesesMarkdown(face: HypothesesResponse, exactTarget?:
     lines.push(
       `## ${safeCodeSpan(item.hypothesis_id)} · ${safeInlineProse(item.status)}`,
       "",
+      ...(item.screening_notice === undefined
+        ? []
+        : [screeningNoticeText(item.screening_notice), ""]),
       `[Evidence index at this snapshot](${hypothesisEvidenceIndexPath(face.problem_id, item.hypothesis_id, face.cursor, "md")})`,
       "",
       ...(nextRoute === null
@@ -114,6 +118,11 @@ export function renderHypothesesHtml(face: HypothesesResponse, exactTarget?: str
     const nextRoute = successor(face, item, "html");
     parts.push(
       `<article id="${escapeHtml(item.hypothesis_id)}"><h2>${escapeHtml(item.hypothesis_id)} · ${escapeHtml(item.status)}</h2>`,
+      ...(item.screening_notice === undefined
+        ? []
+        : [
+            `<aside role="note" data-screening-notice="${escapeHtml(item.screening_notice.notice)}">${escapeHtml(screeningNoticeText(item.screening_notice))}</aside>`,
+          ]),
       `<p><a href="${escapeHtml(hypothesisEvidenceIndexPath(face.problem_id, item.hypothesis_id, face.cursor, "html"))}">Evidence index at this snapshot</a></p>`,
       ...(nextRoute === null
         ? []

@@ -111,6 +111,9 @@ function supportsPublishedWarning(
     // bibliography exports and literature packs that retain their own notice.
     (kind === "citation" &&
       (holdContext?.route === "citations" || holdContext?.route === "citations/correct")) ||
+    // Original hypothesis work has an exact-publication notice on every read
+    // and pack. Lifecycle and kill statements remain separate held kinds.
+    (kind === "hypotheses" && holdContext?.route === "hypotheses") ||
     // Claim and statement reviews share a classifier kind. Only the server's
     // claim-review writer has complete public notice propagation.
     (kind === "review" && holdContext?.route === "review")

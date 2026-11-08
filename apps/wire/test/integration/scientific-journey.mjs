@@ -696,6 +696,41 @@ export async function scientificJourney({
   assert.equal(proofDetail.excerpt, "The complete deliberate proof is in this evidence body.");
   const proofReference = { evidence_id: proof.evidence_id, digest: proofDetail.content_digest };
   assert.match(proofReference.digest, /^sha256:[0-9a-f]{64}$/);
+  // The exact work being reviewed need not claim an external citation. Its
+  // original proof remains assertion-class; only independent reviews can
+  // establish its standing. Its scientific premise must still be available.
+  const originalProof = await call(
+    `${author.path}/evidence`,
+    {
+      bears_on_kind: "claim",
+      bears_on_id: claim.claim_id,
+      bears_on_version: 1,
+      direction: "supports",
+      kind: "argument",
+      mode: "confirmatory",
+      source: { kind: "model_memory" },
+      falsification_check: {
+        target_digest: detail.content_digest,
+        attempted_falsifier: "The prime divisor needed by the argument does not exist.",
+        capable_of_failure: "An integer greater than one without a prime divisor.",
+        result: "survived",
+        evidence: [{ evidence_id: premise.evidence_id, digest: premiseDetail.content_digest }],
+      },
+      body_md: reviewBody.body_md,
+    },
+    author.token,
+    201,
+  );
+  assert.equal(originalProof.computed_class, "assertion");
+  const originalProofPack = await pack(reviewer, "review", `${claim.claim_id}@1`);
+  const originalProofDetail = JSON.parse(
+    originalProofPack.items.find((item) => item.id === originalProof.evidence_id).body,
+  );
+  assert.equal(originalProofDetail.source_kind, "model_memory");
+  const originalProofReference = {
+    evidence_id: originalProof.evidence_id,
+    digest: originalProofDetail.content_digest,
+  };
   const borrowedMethod = await call(
     `${reviewer.path}/review`,
     {
@@ -722,6 +757,18 @@ export async function scientificJourney({
     body_md:
       "Attempted to force the prime divisor q of n!+1 below n. The published proof shows this forces q to divide 1. The attempt fails for every n≥2; n=0,1 are checked separately.",
   };
+  await call(
+    `${reviewer.path}/evidence`,
+    {
+      ...groundedCheck,
+      falsification_check: {
+        ...groundedCheck.falsification_check,
+        evidence: [originalProofReference],
+      },
+    },
+    reviewer.token,
+    422,
+  ); // An assertion can be checked as a full proof, never laundered as grounding.
   await call(
     `${reviewer.path}/evidence`,
     {
@@ -793,7 +840,7 @@ export async function scientificJourney({
   const verification = {
     kind: "full-write-up",
     target_digest: detail.content_digest,
-    evidence: proofReference,
+    evidence: originalProofReference,
     coverage: [
       "n≤1 boundary",
       "prime divisor existence",
@@ -803,6 +850,12 @@ export async function scientificJourney({
     result: "verified",
   };
   const writeUpReview = { ...reviewBody, verification, scientific_provenance: reviewer.provenance };
+  await call(
+    `${actors.sameSponsor.path}/review`,
+    { ...writeUpReview, scientific_provenance: actors.sameSponsor.provenance },
+    actors.sameSponsor.token,
+    422,
+  ); // A sibling Fellow cannot independently verify the author's work product.
   await call(
     `${reviewer.path}/review`,
     { ...writeUpReview, full_write_up: true },
@@ -847,6 +900,12 @@ export async function scientificJourney({
   await standing("corroborated");
   await disclose(claim.claim_id, 1);
   await standing("strongly-supported");
+  const recordedProof = await env.DB.prepare(
+    "SELECT computed_class FROM evidence WHERE problem_id = ? AND evidence_id = ?",
+  )
+    .bind(problem, originalProof.evidence_id)
+    .first();
+  assert.equal(recordedProof.computed_class, "assertion", "Reviews never rewrite evidence class");
 
   const supportedSnapshot = await retainSnapshot();
   assert.equal(supportedSnapshot.live.claim_state.disposition, "strongly-supported");
@@ -1047,6 +1106,7 @@ export async function scientificJourney({
   await unchangedSnapshot(supportedSnapshot, {
     directive_disclosure: "unresolved",
     disposition: "corroborated",
+    status_basis: { kind: "directive-disclosure", status: "unresolved" },
   });
   assert.equal(
     (await snapshotRead(`${claimPath}@2.json?through=${supportedSnapshot.cursor}`)).status,

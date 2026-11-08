@@ -10,6 +10,26 @@ const REFERENCE_LIMIT = 16;
 const EVIDENCE_ID = /^E-[A-Za-z0-9]{1,78}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 
+export type ScientificEvidenceUse = "grounding" | "full-write-up";
+
+/** An original proof is the subject of a full-write-up review, not an already
+ * established premise. Fable §6.5 leaves its class at assertion while reviews
+ * confer standing. This exception never lets an assertion ground another
+ * check or method; unknown classes and heuristic observations remain refused. */
+export function scientificEvidenceClassEligible(
+  payload: Record<string, unknown>,
+  use: ScientificEvidenceUse = "grounding",
+): boolean {
+  return (
+    payload.computed_class === "citation" ||
+    payload.computed_class === "computation" ||
+    payload.computed_class === "certified" ||
+    (use === "full-write-up" &&
+      payload.computed_class === "assertion" &&
+      (payload.kind === "argument" || payload.kind === "construction"))
+  );
+}
+
 export class EvidenceGroundingError extends Error {
   readonly reason: "unavailable" | "invalid" | "limit";
   constructor(reason: "unavailable" | "invalid" | "limit") {
@@ -148,8 +168,10 @@ export async function readEvidenceGrounding(
   problemId: string,
   claim: { readonly claimId: string; readonly version: number },
   requested: readonly EvidenceReference[],
+  use: ScientificEvidenceUse = "grounding",
 ): Promise<{ roots: GroundedEvidence[]; witnesses: readonly GroundingWitness[] }> {
   const roots = references(requested);
+  if (use === "full-write-up" && roots.length !== 1) throw new EvidenceGroundingError("invalid");
   if (roots.length === 0) return { roots: [], witnesses: [] };
   if (!Number.isSafeInteger(claim.version) || claim.version < 1)
     throw new EvidenceGroundingError("invalid");
@@ -190,8 +212,10 @@ export async function readEvidenceGrounding(
       payload.bears_on_version !== claim.version ||
       payload.mode !== "confirmatory" ||
       payload.selected_hypothesis_id != null ||
-      payload.computed_class === "assertion" ||
-      payload.computed_class === "heuristic" ||
+      !scientificEvidenceClassEligible(
+        payload,
+        row.evidence_id === roots[0]?.evidence_id ? use : "grounding",
+      ) ||
       typeof payload.kind !== "string" ||
       typeof payload.direction !== "string" ||
       typeof payload.body_md !== "string" ||
@@ -220,7 +244,8 @@ export async function readEvidenceGrounding(
       if (
         !dependency ||
         pin.digest !== `sha256:${dependency.payloadDigest}` ||
-        dependency.sequence >= source.sequence
+        dependency.sequence >= source.sequence ||
+        !scientificEvidenceClassEligible(dependency.payload)
       )
         throw new EvidenceGroundingError("invalid");
     }

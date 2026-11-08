@@ -5,6 +5,7 @@ import {
 } from "@asimposium/contracts/hypotheses";
 import type { D1Database } from "@cloudflare/workers-types";
 import { hiddenByContentControlSql } from "../krater/public-content";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 
 export const HYPOTHESIS_PAGE_SIZE = 8;
 // The strict request admits 83,536 scientific UTF-16 code units. JSON escaping
@@ -100,6 +101,7 @@ SELECT p.object_id AS hypothesis_id, p.creations,
   c.actor_fellow_id AS fellow_id, c.actor_sponsor_id AS sponsor_id,
   c.actor_session_id AS session_id, c.model_string_self_declared AS model_self_declared,
   c.harness AS harness_self_declared,
+  screen.provenance_json AS screening_provenance_json,
   CASE WHEN cc.redacted_at IS NULL
     AND ${visibleContentSql("c")}
     AND length(CAST(cc.payload_json AS BLOB)) <= ? THEN cc.payload_json END AS payload_json,
@@ -128,6 +130,7 @@ FROM page p JOIN events c ON c.id = p.creation_id JOIN events h ON h.id = p.head
 JOIN history state ON state.id = h.id
 LEFT JOIN event_content cc ON cc.event_id = c.id AND cc.payload_sha256 = c.payload_sha256
 LEFT JOIN event_content hc ON hc.event_id = h.id AND hc.payload_sha256 = h.payload_sha256
+LEFT JOIN screening_publications screen ON screen.event_id = c.id
 ORDER BY c.seq`;
 }
 export const HYPOTHESIS_ROWS_SQL = hypothesisRowsSql(false);
@@ -317,6 +320,13 @@ export async function readHypotheses(
     const content = decoders.publication(
       await verifiedContent(row.payload_json, publication.payload_sha256),
     );
+    // Creation and lifecycle have distinct immutable screening receipts. Bind
+    // this context only to the visible, verified original work product. A
+    // malformed receipt fails the read instead of laundering a warning away.
+    const screeningNotice =
+      content === null
+        ? undefined
+        : publicationScreeningNotice(row.screening_provenance_json as string | null | undefined);
     let kill =
       status === "killed"
         ? decoders.kill(await verifiedContent(row.last_payload_json, last.payload_sha256))
@@ -357,6 +367,7 @@ export async function readHypotheses(
       status,
       publication,
       content,
+      ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
       last_event: last,
       kill,
       ...(lifecycleType === null ? {} : { lifecycle }),

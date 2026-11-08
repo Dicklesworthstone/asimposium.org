@@ -4,6 +4,7 @@ import {
   type ScientificEvidenceReference,
   ScientificProvenanceSchema,
 } from "@asimposium/contracts";
+import { scientificEvidenceClassEligible } from "./evidence-grounding.ts";
 
 /** Withdrawal or unavailable grounding removes positive authority, not history
  * or negative knowledge. The caller supplies one cursor-bounded snapshot and
@@ -100,8 +101,7 @@ export function scientificInputEffects(
         body.bears_on_version !== row.target_version ||
         body.mode !== "confirmatory" ||
         body.selected_hypothesis_id != null ||
-        body.computed_class === "assertion" ||
-        body.computed_class === "heuristic" ||
+        !scientificEvidenceClassEligible(body) ||
         typeof body.kind !== "string" ||
         typeof body.direction !== "string" ||
         typeof body.body_md !== "string" ||
