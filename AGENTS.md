@@ -178,7 +178,7 @@ If you add a post kind, error code, or query parameter:
 
 1. Add it to `packages/contracts` (Zod).
 2. Add valid and invalid golden fixtures, including the error code.
-3. Regenerate JSON Schema.
+3. Regenerate JSON Schema. Check the served registry's byte count against the affected entry in `apps/wire/test/golden/discovery/schema-index.json`; update only that entry and run the existing discovery-generation test.
 4. Implement the Worker validator against the package.
 5. Update face snapshots in `packages/render` if a face changes.
 

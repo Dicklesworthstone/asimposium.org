@@ -24,6 +24,66 @@ gates pass at the accepted revisions below, with independent acceptance of the
 source repairs, Fellow history and exact-record readers. Deployed acceptance
 remains separate.**
 
+### Claim disposition causes — 2026-11-08, `e78cf6c3`
+
+`e78cf6c3` wires the existing scientific fold into canonical `status_basis`
+metadata and Agora's Why-this-status panel. Readers can distinguish an author
+concession from a review or counterevidence, inspect the exact existing public
+event-history window, and see disclosure limits or an unavailable cause when
+the source is withheld, stale or missing. Displayed reviews remain related
+records, rather than an invented causal explanation. The scientific eligibility
+rules, write paths, tables and public URLs are unchanged. WhiteRaven independently
+closes only `n9n.2` at this exact revision; Beads comment 2963 maps every original
+acceptance item to source lines and retained execution evidence. Parent `n9n`
+remains open for its original breadth.
+
+Both agents execute all six prescribed commands: typecheck and lint pass all
+eight groups; root contract passes five required groups with its original two
+policy skips; full contracts pass 959 tests / 7,208 expectations and render
+passes 592 / 6,050. Complete root unit runs pass all eight groups in 1,470.91
+seconds primary and 1,472.42 seconds independently. Worker has 6,827 tests /
+32,485 expectations across 290 files; Agora has 911 / 6,154 across 66 files.
+No whole unit group fails, blocks, goes missing or skips; the toolchain retains
+its original 54 individual skips. The actual Workerd/D1/R2 dispositions journey
+and genuine production Next/Chromium browser lane pass for both agents; each
+browser passes all 288 checks, including JS and no-JS concession/history
+readback. Original owners exit zero with all 22 source/test/schema/golden hashes
+unchanged and equal across agents, using only their own CPUs 0–1 and 2–3.
+
+Five independent faults are caught and restored at `e78cf6c3`: wrong event
+sequence, missing verified-source guard, bypassed causal-metadata validation,
+accepted extra renderer fields and impossible transition tuples. Restored
+feature tests pass 107 / 0 / 957 expectations, and the original discovery file
+passes 17 / 0 / 1,427; the primary reexecutes the exact package-local commands.
+Earlier boundary defects, formatter failure, unavailable browser, erroneous
+concession request, navigation/pagination assumptions and publication-quota
+failure remain in the evidence. The verifier also caught the stale discovery
+byte-count golden: `e78cf6c3` changes only the ledger entry from 91,588 to 95,142
+bytes, after checking that every other generated index field is identical.
+Superseded `a665b877` unit runs were intentionally retired after that original
+16-pass/1-fail discovery result; they do not count as complete qualification.
+No assertion, deadline or quota policy was weakened. The existing contract-editing
+instructions now remind editors to check this discovery dependency early.
+
+UBS completes all 18 changed code inputs, with six reviewed critical flags,
+156 warnings and 1,596 information items, and no failed scanner modules or
+suppressions. The critical flags concern existing fixed projection/header/table
+composition, browser pathname/status comparisons and public checkpoint-key
+ordering; this is not a clean security-scan claim. JSON-only golden and final
+documentation/Beads scans have no supported inputs, rather than a scanner pass.
+Detailed TODO and raw evidence are under
+`e2e/artifacts/status-basis-20261108-coppertiger/` and
+`e2e/artifacts/independent-20261108-n9n-2-74289a46/` (the final receipts use
+the `e78cf6c3-` prefix).
+
+Fresh honest-UA public capability reads at 05:28:47 UTC on November 8 return
+HTTP 200 and the same `0.1.0-draft` bodies: production `1844555d…bbc0`, staging
+`8e79852b…aa70`. They do not identify provider revision or deployment history.
+No deployment or provisioning was performed in this work. Local screening and
+sponsor bootstrap are synthetic; the browser uses a locally minted Auth.js
+session, not a Google OAuth exchange. Operator deployment and D1-lineage decision
+`rs5n`, staging gauntlet `zai`, parent `n9n` and G0/launch acceptance remain open.
+
 ### Claim independence readback — 2026-11-08, `eac14502`
 
 `eac14502` repairs Agora's independence explainer (`n9n.1`). Same-sponsor T0
