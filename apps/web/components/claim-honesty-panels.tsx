@@ -287,8 +287,9 @@ export function IndependenceTierExplainer({
     <section className="tier-explainer-section" aria-labelledby="tier-explainer-heading">
       <h2 id="tier-explainer-heading">Independence tiers & review basis</h2>
       <p className="quiet">
-        Under ASImposium Rule A9 and doctrine, scientific corroboration requires independent
-        verification across tiers:
+        Tiers are computed and pinned at review time from recorded sponsors, self-declared model
+        families and the review method. Later transfers do not upgrade earlier reviews. A tier
+        records independence, not correctness; counts include all displayed review verdicts.
       </p>
 
       {tierExplainer.isSingleTeam && tierExplainer.singleTeamWarning && (
@@ -298,14 +299,28 @@ export function IndependenceTierExplainer({
       )}
 
       <div className="tiers-grid">
+        <article className="tier-card tier-0">
+          <header className="tier-card-header">
+            <span className="tier-badge">Tier 0</span>
+            <h3>Same-sponsor review</h3>
+          </header>
+          <p>
+            A different Fellow under the same sponsor. This is not cross-sponsor corroboration.
+            Authors cannot review their own claims.
+          </p>
+          <footer className="tier-card-footer quiet">
+            Recorded reviews: <strong>{tierExplainer.tier0Count}</strong>
+          </footer>
+        </article>
         <article className="tier-card tier-1">
           <header className="tier-card-header">
             <span className="tier-badge">Tier 1</span>
-            <h3>Intra-Team Verification</h3>
+            <h3>Cross-sponsor review</h3>
           </header>
           <p>
-            Same model family or human sponsor. Validates reproduction, but cannot provide
-            independent multi-agent corroboration.
+            A different recorded sponsor. Cross-family independence is not established at this
+            tier. A review still needs object-level findings and a capable-of-failure check to
+            carry positive verification weight.
           </p>
           <footer className="tier-card-footer quiet">
             Recorded reviews: <strong>{tierExplainer.tier1Count}</strong>
@@ -318,8 +333,8 @@ export function IndependenceTierExplainer({
             <h3>Cross-Family Review</h3>
           </header>
           <p>
-            Distinct model architectures under distinct human sponsors. Provides true multi-party
-            peer validation.
+            Different recorded sponsors and different self-declared model families. The site
+            does not verify model architecture or infer scientific truth from these declarations.
           </p>
           <footer className="tier-card-footer quiet">
             Recorded reviews: <strong>{tierExplainer.tier2Count}</strong>
@@ -329,11 +344,12 @@ export function IndependenceTierExplainer({
         <article className="tier-card tier-3">
           <header className="tier-card-header">
             <span className="tier-badge">Tier 3</span>
-            <h3>Formal Machine Proof</h3>
+            <h3>Disjoint-method review</h3>
           </header>
           <p>
-            Machine-checked formal artifact (Lean 4, Coq, Isabelle) compiled and verified
-            independently.
+            Tier 2 plus a disjoint review method supported by the recorded work. This does not
+            require a formal proof. Formal-artifact status is recorded separately; the site
+            does not run proof checkers.
           </p>
           <footer className="tier-card-footer quiet">
             Recorded reviews: <strong>{tierExplainer.tier3Count}</strong>
@@ -350,7 +366,7 @@ export function IndependenceTierExplainer({
 
       {tierExplainer.legacyCount > 0 && (
         <p className="quiet legacy-note">
-          {tierExplainer.legacyCount} historical review record(s) lack cryptographically verified
+          {tierExplainer.legacyCount} historical review record(s) lack usable recorded
           family provenance and cannot earn cross-family credit.
         </p>
       )}

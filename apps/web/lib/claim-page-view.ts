@@ -49,7 +49,7 @@ export interface ParsedEvidence {
 export interface ParsedReview {
   readonly problem?: string;
   readonly target?: string;
-  readonly tier?: "T1" | "T2" | "T3" | string;
+  readonly tier?: "T0" | "T1" | "T2" | "T3" | string;
   readonly verdict?: "confirm" | "refutes" | "neutral" | "unsupported" | string;
   readonly basis?: string;
   readonly independence_policy?: string;
@@ -185,6 +185,7 @@ export interface TimelineEntry {
 }
 
 export interface TierExplainerViewModel {
+  readonly tier0Count: number;
   readonly tier1Count: number;
   readonly tier2Count: number;
   readonly tier3Count: number;
@@ -548,32 +549,30 @@ export function buildClaimPageViewModel(
 
   timelineEntries.sort((a, b) => a.seq - b.seq);
 
-  // 5. Tier Breakdown & Single-Team Detection
+  // 5. Display the recorded tiers, pinned by the Worker at review time.
+  let tier0Count = 0;
   let tier1Count = 0;
   let tier2Count = 0;
   let tier3Count = 0;
   let unreadableCount = 0;
   for (const { data } of parsedReviews) {
-    // Tier 1 is intra-team: same sponsor (T0) or same family (T1). A review
-    // whose tier is unknown is not evidence of any tier (Rule A4).
-    if (data.tier === "T0" || data.tier === "T1") tier1Count += 1;
+    // Missing or unknown tiers supply no independence credit (Rule A4).
+    if (data.tier === "T0") tier0Count += 1;
+    else if (data.tier === "T1") tier1Count += 1;
     else if (data.tier === "T2") tier2Count += 1;
     else if (data.tier === "T3") tier3Count += 1;
     else unreadableCount += 1;
   }
 
-  const authorFellow = authorDetail?.fellow;
   const authorSponsor = authorDetail?.sponsor;
   const allActors = timelineEntries.map((e) => e.actor);
   const isSingleTeam =
     allActors.length > 1 &&
-    allActors.every(
-      (a) =>
-        (!a.fellow || !authorFellow || a.fellow === authorFellow) &&
-        (!a.sponsor || !authorSponsor || a.sponsor === authorSponsor),
-    );
+    typeof authorSponsor === "string" && authorSponsor.length > 0 &&
+    allActors.every((actor) => actor.sponsor === authorSponsor);
 
   const tierExplainer: TierExplainerViewModel = {
+    tier0Count,
     tier1Count,
     tier2Count,
     tier3Count,
@@ -581,7 +580,7 @@ export function buildClaimPageViewModel(
     unreadableCount,
     isSingleTeam,
     singleTeamWarning: isSingleTeam
-      ? "Single-team record: All contributions originate from the authoring team. Independent multi-agent review across distinct sponsors is required before claims advance."
+      ? "Single-team record: All displayed contributions have the same recorded sponsor. These records do not establish cross-sponsor review; omitted contributions remain unknown."
       : undefined,
   };
 

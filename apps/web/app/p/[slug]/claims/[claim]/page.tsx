@@ -230,7 +230,7 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
           )}
           {state.legacy_reviews > 0 && (
             <p className="quiet">
-              {state.legacy_reviews} historical review records have unverified family provenance and
+              {state.legacy_reviews} historical review records lack usable recorded family provenance and
               cannot earn cross-family credit.
             </p>
           )}

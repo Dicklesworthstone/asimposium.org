@@ -72,6 +72,51 @@ function makeClaimFace(overrides: Partial<ClaimFaceResponse> = {}): ClaimFaceRes
 }
 
 describe("Claim Page View-Model & Diptych Honesty Panels", () => {
+  test("review tiers retain all four pinned values without treating unknown metadata as T1", () => {
+    const face = makeClaimFace();
+    const reviews = ["T0", "T1", "T2", "T3", "T4", undefined].map((tier, index) => ({
+      kind: "claim-review" as const,
+      id: `R-TIER-${index}`,
+      scope: "ledger" as const,
+      untrusted: true as const,
+      why_included: "recorded review",
+      body: JSON.stringify({ tier, verdict: "inform", sponsor: "S-OTHER", seq: index + 2 }),
+      neutralized: [],
+    }));
+    const vm = buildClaimPageViewModel({ ...face, items: [...face.items, ...reviews] }, ORIGIN);
+    expect(vm.tierExplainer.tier0Count).toBe(1);
+    expect(vm.tierExplainer.tier1Count).toBe(1);
+    expect(vm.tierExplainer.tier2Count).toBe(1);
+    expect(vm.tierExplainer.tier3Count).toBe(1);
+    expect(vm.tierExplainer.unreadableCount).toBe(2);
+    expect(vm.badges.disposition).toBe("open");
+    expect(vm.badges.machineChecked.earned).toBe(false);
+  });
+
+  test("single-team inference needs recorded sponsors, never missing provenance", () => {
+    for (const sponsor of [undefined, "", "S-OTHER"]) {
+      const face = makeClaimFace();
+      const review = {
+        kind: "claim-review" as const,
+        id: "R-UNKNOWN-SPONSOR",
+        scope: "ledger" as const,
+        untrusted: true as const,
+        why_included: "review with incomplete or different sponsor",
+        body: JSON.stringify({ tier: "T0", sponsor, seq: 2 }),
+        neutralized: [],
+      };
+      const vm = buildClaimPageViewModel({ ...face, items: [...face.items, review] }, ORIGIN);
+      expect(vm.tierExplainer.isSingleTeam).toBe(false);
+      expect(vm.tierExplainer.singleTeamWarning).toBeUndefined();
+      const unknownAuthor = {
+        ...face.items[0]!,
+        body: JSON.stringify({ fellow: "F-GOLDBACH", claim_id: "C-1", version: 1, seq: 1 }),
+      };
+      expect(buildClaimPageViewModel({ ...face, items: [unknownAuthor, review] }, ORIGIN)
+        .tierExplainer.isSingleTeam).toBe(false);
+    }
+  });
+
   test("disclosure gaps follow the canonical field and never infer a declaration from evidence", () => {
     for (const status of ["missing", "unresolved", "unavailable"] as const) {
       const face = makeClaimFace();
@@ -460,10 +505,10 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
           why_included: "same team review",
           body: JSON.stringify({
             target: "C-1@1",
-            tier: "T1",
+            tier: "T0",
             verdict: "confirm",
             seq: 2,
-            fellow: "F-GOLDBACH",
+            fellow: "F-OTHER-EULER",
             sponsor: "S-EULER",
           }),
           neutralized: [],

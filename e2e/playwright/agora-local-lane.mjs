@@ -281,6 +281,19 @@ async function seed(target) {
     reviewer.token,
   );
   assert.equal(noveltyReview.status, 201, `novelty review ${noveltyReview.body.code ?? ""}`);
+  const spare = await enrollSetupFellow(target, SPONSOR, "agora-lane-spare", ["review"]);
+  const sameSponsorSession = await fellowPost(target, "/v1/sessions", {
+    problem_id: problemId, intent: "review",
+  }, spare.token);
+  assert.equal(sameSponsorSession.status, 201, "same-sponsor review session");
+  const sameSponsorReview = await fellowPost(target,
+    `/v1/sessions/${sameSponsorSession.body.session_id}/review`, {
+      target_claim_id: promoted.body.claim_id, target_version: 1, verdict: "inform",
+      basis: "Checked the parity statement against its bounded falsifier.",
+      capable_of_failure: "An opposite-parity square in the declared range would refute it.",
+      body_md: "This review is by another Fellow of the author’s sponsor, not independent sponsorship.",
+    }, spare.token);
+  assert.equal(sameSponsorReview.status, 201, "same-sponsor review publication");
   // Nine real filings exceed the canonical eight-item page budget. The ninth
   // must remain reachable through continuation and the registered exact URL.
   const gapIds = [];
@@ -310,7 +323,7 @@ async function seed(target) {
     authorToken: author.token,
     reviewerToken: reviewer.token,
     // A second Fellow of the same sponsor, for an individual revocation.
-    spareToken: (await enrollSetupFellow(target, SPONSOR, "agora-lane-spare", ["review"])).token,
+    spareToken: spare.token,
     // A third, offered to the reviewer's sponsor through the transfer card.
     transferToken: (await enrollSetupFellow(target, SPONSOR, "agora-lane-transfer", ["review"]))
       .token,
@@ -1139,6 +1152,24 @@ async function main() {
           ? null
           : (claimText ?? "").replace(/\s+/g, " ").slice(0, 600),
       );
+      const tierCounts = await page.locator(".tier-card .tier-card-footer strong").allTextContents();
+      record(`${mode} review tiers match the Worker's pinned T0 rather than upgrading it to T1`,
+        claimProbeBody.items.some((item) => item.kind === "claim-review" &&
+          JSON.parse(item.body).tier === "T0") &&
+        JSON.stringify(tierCounts) === JSON.stringify(["1", "0", "0", "0"]));
+      const tiersText = await page.locator(".tier-explainer-section").innerText();
+      record(`${mode} independence copy distinguishes sponsorship, self-declaration and disjoint method`,
+        tiersText.includes("Same-sponsor review") && tiersText.includes("Cross-sponsor review") &&
+        tiersText.includes("self-declared model families") &&
+        tiersText.includes("Disjoint-method review") && tiersText.includes("does not run proof checkers") &&
+        tiersText.includes("Later transfers do not upgrade earlier reviews") &&
+        !tiersText.includes("Formal Machine Proof") && !tiersText.includes("cryptographically verified"));
+      record(`${mode} different Fellows with one recorded sponsor retain single-team caution`,
+        tiersText.includes("All displayed contributions have the same recorded sponsor") &&
+        await page.locator(`[data-disposition="${claimProbeBody.claim_state.disposition}"]`).count() > 0,
+        { singleTeam: tiersText.includes("All displayed contributions have the same recorded sponsor"),
+          disposition: claimProbeBody.claim_state.disposition,
+          unchallenged: claimProbeBody.claim_state.unchallenged });
       await proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCursor, mode });
       await context.close();
     }
