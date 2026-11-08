@@ -499,13 +499,12 @@ describe("full public ledger packs", () => {
       expect(result.records[0].publication.screening_notice).toEqual(receipt.public_action);
       expect(result.records[1].content).toBe(null);
       expect(result.records[1].content_omitted).toBe("item_size_limit");
-      const publicItems = result.face.items.filter((item) => item.scope === "ledger");
-      expect(publicItems.find((item) => item.id === "FULL-1")?.screening_notice).toEqual(
-        receipt.public_action,
-      );
-      expect(publicItems.find((item) => item.id === "FULL-2")?.screening_notice).toEqual(
-        correctedReceipt.public_action,
-      );
+      const originalItem = result.face.items.find((item) => item.id === "FULL-1");
+      const correctedItem = result.face.items.find((item) => item.id === "FULL-2");
+      if (originalItem?.scope !== "ledger" || correctedItem?.scope !== "ledger")
+        throw new Error("Expected both citation publications as public ledger items");
+      expect(originalItem.screening_notice).toEqual(receipt.public_action);
+      expect(correctedItem.screening_notice).toEqual(correctedReceipt.public_action);
       expect(result.face.tokens_estimate).toBeLessThanOrEqual(8000);
       for (const format of ["md", "html-fragment"] as const) {
         const rendered = renderProjection(composedPackToProjection(result.pack), format).body;
@@ -516,10 +515,10 @@ describe("full public ledger packs", () => {
       }
       const historical = await f.read({ through: 1 });
       expect(historical.records).toHaveLength(1);
-      const historicalItems = historical.face.items.filter((item) => item.scope === "ledger");
-      expect(historicalItems.find((item) => item.id === "FULL-1")?.screening_notice).toEqual(
-        receipt.public_action,
-      );
+      const historicalItem = historical.face.items.find((item) => item.id === "FULL-1");
+      if (historicalItem?.scope !== "ledger")
+        throw new Error("Expected the original citation as a historical public ledger item");
+      expect(historicalItem.screening_notice).toEqual(receipt.public_action);
       f.sql
         .prepare("UPDATE screening_publications SET provenance_json = ? WHERE event_id = 'EVENT-1'")
         .run(JSON.stringify({ private_detail: "PRIVATE_SCREENING_CANARY" }));
