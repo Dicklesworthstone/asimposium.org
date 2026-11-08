@@ -157,9 +157,15 @@ await runLocalWorkerJourney(async (context) => {
     if (state.status_basis.kind === "transition") {
       const basis = state.status_basis;
       assert.equal(basis.to, state.disposition);
-      const window = await call(`/p/${problemId}/events.json?since=${basis.seq - 1}&through=${basis.seq}&limit=1`);
-      assert.ok(window.events.some((entry) => entry.seq === basis.seq && entry.event?.id === basis.event_id),
-        "the status source resolves through the independent public event window");
+      const window = await call(
+        `/p/${problemId}/events.json?since=${basis.seq - 1}&through=${basis.seq}&limit=1`,
+      );
+      assert.ok(
+        window.events.some(
+          (entry) => entry.seq === basis.seq && entry.event?.id === basis.event_id,
+        ),
+        "the status source resolves through the independent public event window",
+      );
     }
     const computedDisplay =
       state.disposition +
@@ -191,7 +197,8 @@ await runLocalWorkerJourney(async (context) => {
       assert.equal(faceRes.status, 200, `Anonymous .${suffix} claim face must return 200`);
       const faceBody = await faceRes.text();
       assert.ok(faceBody.includes("status_basis"), `.${suffix} carries canonical status basis`);
-      if (state.status_basis.kind === "transition") assert.ok(faceBody.includes(state.status_basis.event_id));
+      if (state.status_basis.kind === "transition")
+        assert.ok(faceBody.includes(state.status_basis.event_id));
       assert.ok(
         faceBody.includes(state.disposition),
         `Expected .${suffix} face to include disposition "${state.disposition}"`,
@@ -380,8 +387,11 @@ await runLocalWorkerJourney(async (context) => {
     201,
   );
   const afterLateCheck = await assertStanding(c1Id, "corroborated", "independently-checked");
-  assert.equal(afterLateCheck.status_basis.cause, "falsification-attempt",
-    "the arriving check triggers reevaluation of the earlier supporting review");
+  assert.equal(
+    afterLateCheck.status_basis.cause,
+    "falsification-attempt",
+    "the arriving check triggers reevaluation of the earlier supporting review",
+  );
 
   // Reviewer B submits full write-up verification
   const fullReviewB = await call(
@@ -444,9 +454,11 @@ await runLocalWorkerJourney(async (context) => {
     201,
   );
   const beforeDisclosure = await call(`/p/${problemId}/claims/${c1Id}.json`);
-  assert.deepEqual(beforeDisclosure.claim_state.status_basis,
+  assert.deepEqual(
+    beforeDisclosure.claim_state.status_basis,
     { kind: "directive-disclosure", status: "missing" },
-    "current disclosure limits are explicit rather than an invented missing-review cause");
+    "current disclosure limits are explicit rather than an invented missing-review cause",
+  );
   // Strong scientific evidence still needs the sponsor's exact-lineage
   // disclosure before the strongest public standing is earned.
   const firstDisclosurePath = `/v1/sponsors/disclosures/${problemId}/${c1Id}/1`;
@@ -1017,8 +1029,11 @@ await runLocalWorkerJourney(async (context) => {
     );
     const face = await call(`/p/${problemId}/claims/${claimId}.json`);
     assert.equal(face.claim_state.stale, true);
-    assert.deepEqual(face.claim_state.status_basis, { kind: "unavailable" },
-      "withdrawn scientific inputs cannot leave an authoritative causal explanation");
+    assert.deepEqual(
+      face.claim_state.status_basis,
+      { kind: "unavailable" },
+      "withdrawn scientific inputs cannot leave an authoritative causal explanation",
+    );
     assert.equal(
       face.claim_state.disposition,
       kind === "review" ? "reduced-to" : "disputed",
