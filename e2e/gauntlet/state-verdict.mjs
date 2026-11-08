@@ -11,6 +11,7 @@ export const GAUNTLET_STAGES = [
   "approved",
   "hello",
   "session_opened",
+  "pack_read",
   "workshop",
   "refusal_recovered",
   "promoted_public",
@@ -18,13 +19,14 @@ export const GAUNTLET_STAGES = [
 ];
 
 const PROMOTE_PATH = /^\/v1\/sessions\/([^/]+)\/promote$/;
+const PACK_PATH = /^\/v1\/sessions\/([^/]+)\/pack$/;
 
 /**
  * @param {{
  *   fellow: { fellow_id: string, sponsor_id: string } | null,
  *   sponsorId: string,
  *   problemId: string,
- *   sessions: { session_id: string, problem_id: string, closed_at: string | null }[],
+ *   sessions: { session_id: string, problem_id: string, closed_at: string | null, has_handback: boolean }[],
  *   workshopObjects: number,
  *   publicClaims: { author_fellow_id: string | null, has_falsifier: boolean, conjecture_class: boolean }[],
  *   observations: { method: string, path: string, status: number, code: string | null, injected?: boolean }[],
@@ -48,7 +50,22 @@ export function gauntletVerdict(facts) {
   );
   if (approved && helloOk) reached.push("hello");
   const sessions = facts.sessions.filter((s) => s.problem_id === facts.problemId);
+  const sessionIds = new Set(sessions.map((session) => session.session_id));
   if (sessions.length > 0) reached.push("session_opened");
+  // Record a successful owned pack response for this problem. This does not
+  // establish that the agent understood or followed its offered move.
+  if (
+    facts.observations.some((observation) => {
+      const match = PACK_PATH.exec(observation.path);
+      return (
+        observation.method === "GET" &&
+        observation.status === 200 &&
+        match !== null &&
+        sessionIds.has(match[1])
+      );
+    })
+  )
+    reached.push("pack_read");
   if (facts.workshopObjects > 0) reached.push("workshop");
 
   // Recovery: the actual injected contract 422 followed by success on that
@@ -58,7 +75,6 @@ export function gauntletVerdict(facts) {
   // write. The proxy injects the refusal by altering the agent's first request,
   // so server state cannot distinguish reading fix_hint from resending the
   // original body; no stronger claim is made.
-  const sessionIds = new Set(sessions.map((session) => session.session_id));
   const promotes = facts.observations.filter((o) => {
     const match = PROMOTE_PATH.exec(o.path);
     return o.method === "POST" && match !== null && sessionIds.has(match[1]);
@@ -81,9 +97,9 @@ export function gauntletVerdict(facts) {
   const own = facts.fellow
     ? facts.publicClaims.filter((c) => c.author_fellow_id === facts.fellow.fellow_id)
     : [];
-  const falsifiable = own.filter((c) => !c.conjecture_class || c.has_falsifier);
+  const falsifiable = own.filter((c) => c.conjecture_class && c.has_falsifier);
   if (falsifiable.length > 0) reached.push("promoted_public");
-  if (sessions.some((s) => s.closed_at !== null)) reached.push("closed");
+  if (sessions.some((s) => s.closed_at !== null && s.has_handback === true)) reached.push("closed");
   if (facts.secretSeenInPaths) failures.push("the enrollment secret appeared in a request path");
 
   const completed =

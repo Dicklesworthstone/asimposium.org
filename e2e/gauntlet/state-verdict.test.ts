@@ -8,6 +8,7 @@ const closedSession = {
   session_id: "S-1",
   problem_id: problemId,
   closed_at: "2026-09-24T00:00:00Z",
+  has_handback: true,
 };
 const obs = (
   method: string,
@@ -25,6 +26,7 @@ const obs = (
 const fullObservations = [
   obs("POST", "/v1/fellows", 202),
   obs("GET", "/v1/hello", 200),
+  obs("GET", "/v1/sessions/S-1/pack", 200),
   obs("POST", "/v1/sessions/S-1/promote", 422, "PROMOTE_BODY_INVALID", true),
   obs("POST", "/v1/sessions/S-1/promote", 201),
 ];
@@ -49,7 +51,7 @@ describe("state-derived gauntlet verdict", () => {
   test("an unclosed session fails", () => {
     const verdict = gauntletVerdict({
       ...complete,
-      sessions: [{ session_id: "S-1", problem_id: problemId, closed_at: null }],
+      sessions: [{ ...closedSession, closed_at: null }],
     });
     expect(verdict.completed).toBe(false);
     expect(verdict.missing).toEqual(["closed"]);
@@ -71,7 +73,7 @@ describe("state-derived gauntlet verdict", () => {
   test("a refusal never followed by success is not recovery", () => {
     const verdict = gauntletVerdict({
       ...complete,
-      observations: fullObservations.slice(0, 3),
+      observations: fullObservations.slice(0, 4),
     });
     expect(verdict.missing).toContain("refusal_recovered");
   });
@@ -79,7 +81,7 @@ describe("state-derived gauntlet verdict", () => {
     const verdict = gauntletVerdict({
       ...complete,
       observations: [
-        ...fullObservations.slice(0, 2),
+        ...fullObservations.slice(0, 3),
         obs("POST", "/v1/sessions/S-1/promote", 201, null, true),
         obs("POST", "/v1/sessions/S-1/promote", 422, "PROMOTE_BODY_INVALID"),
         obs("POST", "/v1/sessions/S-1/promote", 201),
@@ -100,7 +102,7 @@ describe("state-derived gauntlet verdict", () => {
     const verdict = gauntletVerdict({
       ...complete,
       sessions: [...complete.sessions, { ...closedSession, session_id: "S-2" }],
-      observations: [...fullObservations.slice(0, 3), obs("POST", "/v1/sessions/S-2/promote", 201)],
+      observations: [...fullObservations.slice(0, 4), obs("POST", "/v1/sessions/S-2/promote", 201)],
     });
     expect(verdict.missing).toContain("refusal_recovered");
   });
@@ -109,7 +111,7 @@ describe("state-derived gauntlet verdict", () => {
       ...complete,
       sessions: [...complete.sessions, { ...closedSession, session_id: "S-2" }],
       observations: [
-        ...fullObservations.slice(0, 3),
+        ...fullObservations.slice(0, 4),
         obs("POST", "/v1/sessions/S-2/promote", 422, "PROMOTE_BODY_INVALID", true),
         obs("POST", "/v1/sessions/S-2/promote", 201),
       ],
@@ -120,7 +122,7 @@ describe("state-derived gauntlet verdict", () => {
     const verdict = gauntletVerdict({
       ...complete,
       observations: [
-        ...fullObservations.slice(0, 2),
+        ...fullObservations.slice(0, 3),
         obs("POST", "/v1/sessions/S-OTHER/promote", 422, "PROMOTE_BODY_INVALID", true),
         obs("POST", "/v1/sessions/S-1/promote", 201),
       ],
@@ -142,5 +144,63 @@ describe("state-derived gauntlet verdict", () => {
     // A transcript claiming success is not a field the verdict reads.
     const withClaim = { ...complete, workshopObjects: 0, agentSaysSucceeded: true };
     expect(gauntletVerdict(withClaim).completed).toBe(false);
+  });
+  test("a journey without a pack read is incomplete", () => {
+    const verdict = gauntletVerdict({
+      ...complete,
+      observations: fullObservations.filter((observation) => !observation.path.endsWith("/pack")),
+    });
+    expect(verdict.completed).toBe(false);
+    expect(verdict.missing).toContain("pack_read");
+  });
+  test.each([
+    ["GET", "/v1/sessions/S-OTHER/pack", 200],
+    ["GET", "/v1/sessions/S-1/pack", 403],
+    ["POST", "/v1/sessions/S-1/pack", 200],
+    ["GET", "/v1/sessions/S-1/pack-extra", 200],
+  ] as const)("only a successful owned pack GET counts: %s %s %s", (method, path, status) => {
+    const verdict = gauntletVerdict({
+      ...complete,
+      observations: [
+        ...fullObservations.filter((observation) => !observation.path.endsWith("/pack")),
+        obs(method, path, status),
+      ],
+    });
+    expect(verdict.completed).toBe(false);
+    expect(verdict.missing).toContain("pack_read");
+  });
+  test.each([false, true])(
+    "a definition does not substitute for a falsifiable claim: %s",
+    (has_falsifier) => {
+      const verdict = gauntletVerdict({
+        ...complete,
+        publicClaims: [{ author_fellow_id: "F-1", has_falsifier, conjecture_class: false }],
+      });
+      expect(verdict.completed).toBe(false);
+      expect(verdict.missing).toContain("promoted_public");
+    },
+  );
+  test("an owned pack from another problem does not satisfy this attempt", () => {
+    const verdict = gauntletVerdict({
+      ...complete,
+      sessions: [
+        ...complete.sessions,
+        { ...closedSession, session_id: "S-2", problem_id: "P-OTHER" },
+      ],
+      observations: [
+        ...fullObservations.filter((observation) => !observation.path.endsWith("/pack")),
+        obs("GET", "/v1/sessions/S-2/pack", 200),
+      ],
+    });
+    expect(verdict.completed).toBe(false);
+    expect(verdict.missing).toContain("pack_read");
+  });
+  test("idle closure without an authored handback is incomplete", () => {
+    const verdict = gauntletVerdict({
+      ...complete,
+      sessions: [{ ...closedSession, has_handback: false }],
+    });
+    expect(verdict.completed).toBe(false);
+    expect(verdict.missing).toContain("closed");
   });
 });

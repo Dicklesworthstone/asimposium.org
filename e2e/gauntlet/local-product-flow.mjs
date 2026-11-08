@@ -381,7 +381,7 @@ function readClaimFace(claimFace) {
   }
   return {
     author_fellow_id: typeof claim.fellow === "string" ? claim.fellow : null,
-    has_falsifier: typeof claim.falsifier === "string" && claim.falsifier.length > 0,
+    has_falsifier: typeof claim.falsifier === "string" && claim.falsifier.trim().length > 0,
     conjecture_class: CONJECTURE_CLASS.has(claim.kind),
   };
 }
@@ -438,14 +438,24 @@ async function gatherFacts(
         .bind(proposal.fellow_id)
         .first()
     : null;
-  const sessions = fellow
+  const sessionRows = fellow
     ? (
         await db
-          .prepare("SELECT session_id, problem_id, closed_at FROM sessions WHERE fellow_id = ?")
+          .prepare(
+            "SELECT session_id, problem_id, closed_at, handback FROM sessions WHERE fellow_id = ?",
+          )
           .bind(fellow.fellow_id)
           .all()
       ).results
     : [];
+  // Only a presence bit reaches the scorer/retained record; private handback
+  // text is never emitted or included in the facts object.
+  const sessions = sessionRows.map((session) => ({
+    session_id: session.session_id,
+    problem_id: session.problem_id,
+    closed_at: session.closed_at,
+    has_handback: typeof session.handback === "string" && session.handback.trim().length > 0,
+  }));
   const workshop = fellow
     ? await db
         .prepare("SELECT COUNT(*) AS n FROM workshop_objects WHERE fellow_id = ?")
@@ -499,15 +509,15 @@ async function main() {
       problem_id: problemId,
       boundary: "local Workerd/D1/R2; fixture screening",
     });
-    let harnessProblems = 0;
+    let nextIsolatedProblem = 1;
     for (const [index, mode] of agents.entries()) {
       const isHarness = mode.startsWith("harness:");
-      // Each real harness meets a fresh, empty board; reference modes keep the
-      // shared problem their expectations are written against.
+      // Real harnesses and the new targeted adversaries need an empty board:
+      // a populated working pack can properly steer later arrivals to review.
+      // Preserve the original six reference modes' shared-board expectations.
+      const isolated = isHarness || ["no-pack", "definition-only", "idle-closed"].includes(mode);
       const attemptProblem =
-        isHarness && harnessProblems++ > 0
-          ? await setUpProblem(target, harnessProblems - 1)
-          : problemId;
+        isolated && index > 0 ? await setUpProblem(target, nextIsolatedProblem++) : problemId;
       // Each attempt has its own sponsor. Sharing setup and reference Fellows
       // hit FELLOW_CAP_REACHED and prevented the later negative modes from
       // reaching the behavior they are meant to test.
@@ -554,6 +564,44 @@ async function main() {
           }));
       agentDone = true;
       await approval;
+      if (mode === "idle-closed") {
+        const idleRows = await target.env.DB.prepare(
+          `SELECT s.fellow_id, s.idle_close_at FROM sessions s
+           JOIN enrollment_proposals p ON p.fellow_id = s.fellow_id
+           WHERE p.enrollment_id = ? AND s.problem_id = ? AND s.closed_at IS NULL`,
+        )
+          .bind(minted.enrollment_id, attemptProblem)
+          .all();
+        assert.equal(
+          idleRows.results.length,
+          1,
+          "idle control reaches exactly one owned open session after promotion",
+        );
+        const idle = idleRows.results[0];
+        assert.ok(
+          !target.observations
+            .slice(observationsFrom)
+            .some(
+              (observation) =>
+                observation.sponsor !== true &&
+                observation.method === "POST" &&
+                /\/close$/.test(observation.path) &&
+                observation.status >= 200 &&
+                observation.status < 300,
+            ),
+          "the idle control never submits a successful agent close",
+        );
+        const runtime = await target.worker.getExport();
+        const swept = await runtime.expireIdleTick(
+          Date.parse(idle.idle_close_at) + 1,
+          idle.fellow_id,
+        );
+        assert.equal(
+          swept.closed,
+          1,
+          "the production idle sweep actually closes the control session",
+        );
+      }
       const { facts, faceClaimKeys, faceSample } = await gatherFacts(target, {
         enrollmentId: minted.enrollment_id,
         problemId: attemptProblem,
@@ -562,6 +610,34 @@ async function main() {
         sponsorId: attemptSponsor,
       });
       const verdict = gauntletVerdict(facts);
+      if (mode === "no-pack") {
+        assert.ok(
+          !facts.observations.some((o) => /\/pack$/.test(o.path)),
+          "no-pack control never requests a pack",
+        );
+      } else if (mode === "definition-only") {
+        assert.ok(
+          facts.publicClaims.some(
+            (claim) =>
+              claim.author_fellow_id === facts.fellow?.fellow_id &&
+              !claim.conjecture_class &&
+              !claim.has_falsifier,
+          ),
+          `definition-only control actually publishes its non-falsifiable definition: ${JSON.stringify(
+            {
+              stage: agentOutcome.stage,
+              promotion: facts.observations
+                .filter((observation) => /\/promote$/.test(observation.path))
+                .map((observation) => ({ status: observation.status, code: observation.code })),
+            },
+          )}`,
+        );
+      } else if (mode === "idle-closed") {
+        assert.ok(
+          facts.sessions.some((session) => session.closed_at !== null && !session.has_handback),
+          "idle control is closed without an authored handback",
+        );
+      }
       // Real harnesses have no expected outcome: their result is the measurement.
       const expectedPass = isHarness ? null : mode === "complete" || mode === "complete-typed";
       if (expectedPass === true) {
@@ -575,9 +651,13 @@ async function main() {
       const expectedMissing =
         mode === "no-falsifier" || mode === "workshop-only"
           ? ["refusal_recovered", "promoted_public"]
-          : mode === "skip-close"
-            ? ["closed"]
-            : GAUNTLET_STAGES.filter((stage) => stage !== "registered");
+          : mode === "no-pack"
+            ? ["pack_read"]
+            : mode === "definition-only"
+              ? ["promoted_public"]
+              : mode === "skip-close" || mode === "idle-closed"
+                ? ["closed"]
+                : GAUNTLET_STAGES.filter((stage) => stage !== "registered");
       const expectedNoInjection = mode === "workshop-only" || mode === "abandon";
       const negativeAsExpected =
         !verdict.completed &&

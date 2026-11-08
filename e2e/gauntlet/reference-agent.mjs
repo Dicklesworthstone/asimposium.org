@@ -6,8 +6,9 @@
  * harnesses run (asimposiumorg-pcsn). It is given only a join URL and uses only
  * what the server teaches: the capsule, hello's `next_actions`, the pack's
  * `next_actions`, and teaching refusals (`fix_hint`, `example`). It never reads
- * D1 and never learns routes that the server did not hand it, except the two
- * registration routes the capsule itself documents.
+ * D1. Complete references use server-provided routes apart from the capsule's
+ * two registration routes. The deliberate no-pack adversary uses the documented
+ * promotion route to exercise completion without reading a pack.
  *
  * Modes exist so the verdict can be shown to fail:
  *   complete          full loop
@@ -16,6 +17,9 @@
  *   workshop-only     pushes a draft and closes without promoting
  *   skip-close        promotes but never closes the session
  *   abandon           registers, then stops (never polls for approval)
+ *   no-pack           deliberately skips the pack using documented session routes
+ *   definition-only   publishes a definition instead of a falsifiable claim
+ *   idle-closed       leaves the session for the production idle sweep, no handback
  */
 export const REFERENCE_AGENT_MODES = [
   "complete",
@@ -24,6 +28,9 @@ export const REFERENCE_AGENT_MODES = [
   "workshop-only",
   "skip-close",
   "abandon",
+  "no-pack",
+  "definition-only",
+  "idle-closed",
 ];
 
 const USER_AGENT = "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
@@ -128,23 +135,37 @@ export async function runReferenceAgent(
   if (!packUrl) return { stage: "session", ok: false };
 
   // 5. Working pack; its next_actions name the workshop, promote and close routes.
-  const pack = await request("GET", packUrl);
-  const packActions = pack.body.next_actions ?? [];
-  const workshopUrl = served(packActions, "/workshop");
-  const promoteUrl = served(packActions, "/promote");
-  const closeUrl = served(packActions, "/close") ?? served(sessionActions, "/close");
+  let workshopUrl;
+  let promoteUrl;
+  let closeUrl;
+  if (mode === "no-pack") {
+    // Deliberately incomplete control: use the documented promotion route,
+    // without fabricating a pack response or making a pack request.
+    workshopUrl = served(sessionActions, "/workshop");
+    promoteUrl = `/v1/sessions/${session.body.session_id}/promote`;
+    closeUrl = served(sessionActions, "/close");
+  } else {
+    const pack = await request("GET", packUrl);
+    const packActions = pack.body.next_actions ?? [];
+    workshopUrl = served(packActions, "/workshop");
+    promoteUrl = served(packActions, "/promote");
+    closeUrl = served(packActions, "/close") ?? served(sessionActions, "/close");
+  }
   if (!workshopUrl || !promoteUrl || !closeUrl) return { stage: "pack", ok: false };
 
   // 6. Private draft, learning the body shape from the teaching refusal.
   const probe = await request("POST", workshopUrl, {});
   const example = probe.body.example ?? {};
   // Distinct per attempt so near-duplicate refusal (P11) never masks the mode under test.
-  const statement = `Every integer n with 0 <= n <= ${bound} has a square with the same parity as n.`;
+  const statement =
+    mode === "definition-only"
+      ? `The bounded parity sample at limit ${bound} means the integers n with 0 <= n <= ${bound}.`
+      : `Every integer n with 0 <= n <= ${bound} has a square with the same parity as n.`;
   const falsifier = `An integer n in 0..${bound} whose square has the opposite parity to n.`;
   const publication = {
-    kind: "conjecture",
+    kind: mode === "definition-only" ? "definition" : "conjecture",
     statement,
-    ...(mode === "no-falsifier" ? {} : { falsifier }),
+    ...(mode === "no-falsifier" || mode === "definition-only" ? {} : { falsifier }),
     relates_to: [],
   };
   const draft = await request("POST", workshopUrl, {
@@ -186,7 +207,7 @@ export async function runReferenceAgent(
       return { stage: "promote-replay", ok: false };
   }
 
-  if (mode === "skip-close") return { stage: "promote", ok: true };
+  if (mode === "skip-close" || mode === "idle-closed") return { stage: "promote", ok: true };
   const closed = await request("POST", closeUrl, {
     handback: "Promoted a bounded parity conjecture; an independent check of the range is next.",
   });

@@ -17,6 +17,7 @@ export interface GauntletFacts {
     readonly session_id: string;
     readonly problem_id: string;
     readonly closed_at: string | null;
+    readonly has_handback: boolean;
   }[];
   readonly workshopObjects: number;
   readonly publicClaims: readonly {
