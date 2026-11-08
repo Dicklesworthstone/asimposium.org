@@ -365,14 +365,39 @@ test("claim status basis is a bounded, cursor-consistent canonical cause rather 
   for (const [cause, from, to] of [
     ["claim-created", "open", "reduced-to"],
     ["claim-revised", "withdrawn", "withdrawn"],
+    ["claim-revised", "refuted", "withdrawn"],
+    ["claim-revised", "malformed", "withdrawn"],
     ["claim-revised", "refuted", "open"],
     ["claim-revised", "open", "reduced-to"],
+    ["review-created", "disputed", "refuted"],
+    ["review-created", "strongly-supported", "malformed"],
+    ["review-created", "corroborated", "strongly-supported"],
+    ["falsification-attempt", "corroborated", "strongly-supported"],
   ])
     expect(
       ClaimFaceResponseSchema.safeParse(
-        withBasis({ ...transition, cause, from, to }, { disposition: to, unchallenged: false }),
+        withBasis(
+          { ...transition, cause, from, to },
+          { disposition: to, unchallenged: false, directive_disclosure: "satisfied" },
+        ),
       ).success,
     ).toBe(true);
+  for (const [cause, from, to] of [
+    ["review-created", "strongly-supported", "corroborated"],
+    ["review-created", "disputed", "corroborated"],
+    ["review-created", "open", "strongly-supported"],
+    ["review-created", "open", "refuted"],
+    ["claim-reduced", "disputed", "reduced-to"],
+    ["falsification-attempt", "open", "strongly-supported"],
+  ])
+    expect(
+      ClaimFaceResponseSchema.safeParse(
+        withBasis(
+          { ...transition, cause, from, to },
+          { disposition: to, unchallenged: false, directive_disclosure: "satisfied" },
+        ),
+      ).success,
+    ).toBe(false);
   expect(
     ClaimFaceResponseSchema.safeParse(
       await fixture(new URL("../fixtures/invalid/ledger-claim-face-basis.json", import.meta.url)),

@@ -162,6 +162,9 @@ export const ClaimStatusBasisSchema = z
     // eligibility or whether a transition occurred. The Worker fold owns those.
     const live = ["open", "disputed", "corroborated", "strongly-supported", "reduced-to"];
     const changesLiveState = live.includes(basis.from) && basis.from !== basis.to;
+    const supportStep =
+      (basis.from === "open" && basis.to === "corroborated") ||
+      (basis.from === "corroborated" && basis.to === "strongly-supported");
     let coherent: boolean;
     switch (basis.cause) {
       case "claim-created":
@@ -173,32 +176,28 @@ export const ClaimStatusBasisSchema = z
         coherent =
           (basis.from !== "draft" && basis.from !== "superseded" && basis.to === "open") ||
           (basis.from === "open" && basis.to === "reduced-to") ||
-          (basis.from === "withdrawn" && basis.to === "withdrawn");
+          (["withdrawn", "refuted", "malformed"].includes(basis.from) && basis.to === "withdrawn");
         break;
       case "claim-retracted":
         coherent = changesLiveState && basis.to === "withdrawn";
         break;
       case "claim-reduced":
-        coherent = changesLiveState && basis.to === "reduced-to";
+        coherent = changesLiveState && basis.from !== "disputed" && basis.to === "reduced-to";
         break;
       case "author-concession":
         coherent = changesLiveState && basis.to === "refuted";
         break;
       case "review-created":
         coherent =
-          changesLiveState &&
-          ["malformed", "disputed", "corroborated", "strongly-supported", "refuted"].includes(
-            basis.to,
-          );
+          (changesLiveState && ["malformed", "disputed"].includes(basis.to)) ||
+          supportStep ||
+          (basis.from === "disputed" && basis.to === "refuted");
         break;
       case "refuting-evidence":
         coherent = changesLiveState && ["disputed", "refuted"].includes(basis.to);
         break;
       case "falsification-attempt":
-        coherent =
-          changesLiveState &&
-          ["open", "corroborated"].includes(basis.from) &&
-          ["corroborated", "strongly-supported"].includes(basis.to);
+        coherent = supportStep;
         break;
     }
     if (!coherent)

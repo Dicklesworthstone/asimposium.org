@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { ClaimStatusBasisSchema } from "@asimposium/contracts";
 
 import {
   computeClaimDisposition,
@@ -683,12 +684,27 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
       },
     ] as const;
     expect(computeCurrentClaimDisposition(history).disposition).toBe("refuted");
+    const revised = computeCurrentClaimDisposition([
+      ...history,
+      { kind: "claim-revised", sequence: 4, version: 2 },
+    ]);
+    expect(revised.disposition).toBe("withdrawn");
+    expect(revised.lastTransition).toEqual({
+      sequence: 4,
+      from: "refuted",
+      to: "withdrawn",
+      cause: "claim-revised",
+    });
     expect(
-      computeCurrentClaimDisposition([
-        ...history,
-        { kind: "claim-revised", sequence: 4, version: 2 },
-      ]).disposition,
-    ).toBe("withdrawn");
+      ClaimStatusBasisSchema.safeParse({
+        kind: "transition",
+        event_id: "EVT-REVISION",
+        seq: revised.lastTransition?.sequence,
+        from: revised.lastTransition?.from,
+        to: revised.lastTransition?.to,
+        cause: revised.lastTransition?.cause,
+      }).success,
+    ).toBe(true);
   });
 
   test("a version-pinned withdrawal does not retire future statements", () => {
