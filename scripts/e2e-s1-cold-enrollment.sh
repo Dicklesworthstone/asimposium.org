@@ -3749,17 +3749,16 @@ self_test_replay_derivation_argv_observer() {
   local entropy="0000000000000000000000000000000000000000000000000000000000000000"
   local expected_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
   local observer_file="" observed_pid="" argv="" key=""
-  local derivation_pid="" derivation_fd="" derivation_identity=""
+  local derivation_pid="" derivation_identity=""
   local deadline=0 derivation_status=0 bytes=""
   lifecycle_state_dir "replay-derivation-argv"
   [[ "${#entropy}" -eq 64 && "${#expected_key}" -eq 43 ]] || failed "REPLAY_DERIVATION_CANARY_INVALID"
   observer_file="$STATE_DIR/.replay-derivation-observer"
   coproc REPLAY_DERIVATION { derive_local_replay_key_from_entropy "$entropy" "$observer_file"; }
-  # Bash may unset the named coprocess variables as soon as it finishes. Keep
-  # the child handle used by wait/read, plus its nonsecret birth identity for
-  # diagnosing a refusal before the ready file becomes visible.
+  # Bash may unset the named coprocess PID as soon as it finishes. Preserve
+  # that wait target and its nonsecret birth identity for failure diagnostics.
+  # The pipe is still read live below; this does not extend its lifetime.
   derivation_pid="$REPLAY_DERIVATION_PID"
-  derivation_fd="${REPLAY_DERIVATION[0]}"
   derivation_identity="$(process_identity "$derivation_pid")" || failed "REPLAY_DERIVATION_CHILD_UNPROVEN"
   log_phase "replay-derivation-started" "pid=$derivation_pid identity=$derivation_identity"
   deadline=$((SECONDS + SUPERVISOR_STOP_DEADLINE_SECONDS))
@@ -3776,7 +3775,7 @@ self_test_replay_derivation_argv_observer() {
   [[ "$observed_pid" =~ ^[1-9][0-9]*$ ]] || failed "REPLAY_DERIVATION_OBSERVER_TIMEOUT"
   argv="$("$PS_BIN" -ww -p "$observed_pid" -o args= 2>/dev/null)" || failed "REPLAY_DERIVATION_ARGV_UNPROVEN"
   [[ -n "$argv" && "$argv" != *"$entropy"* && "$argv" != *"$expected_key"* ]] || failed "REPLAY_DERIVATION_ARGV_SECRET_RETAINED"
-  if ! IFS= read -r key <&"$derivation_fd"; then
+  if ! IFS= read -r key <&"${REPLAY_DERIVATION[0]}"; then
     [[ -n "$key" ]] || failed "REPLAY_DERIVATION_UNAVAILABLE"
   fi
   wait "$derivation_pid" || derivation_status=$?

@@ -2379,6 +2379,7 @@ describe("a pinned port is validated before anything is started", () => {
     expect(run.exitCode, failureEvidence(run)).toBe(0);
     expect(record(run).code).toBe("REPLAY_DERIVATION_ARGV_OBSERVER_SELF_TEST_PASSED");
     expect(phaseValue(run.stderr, "replay-derivation-started", "pid")).toMatch(/^[1-9][0-9]*$/);
+    expect(failureEvidence(run)).not.toContain("derivation_child=unavailable");
     expect(phaseValue(run.stderr, "replay-derivation-argv-observed", "result")).toBe("absent");
     expect(`${run.stdout}\n${run.stderr}`).not.toContain(entropy);
     expect(`${run.stdout}\n${run.stderr}`).not.toContain(derivedKey);
