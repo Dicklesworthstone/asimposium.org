@@ -252,7 +252,7 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
       sqlite.close();
     });
 
-    test("collapse-duplicate detects matching norm_hash across distinct claims", async () => {
+    test("collapse-duplicate refuses projection-only matches without publication authority", async () => {
       const sqlite = new Database(":memory:");
       sqlite.exec(`
         CREATE TABLE claim_versions (claim_id TEXT, version INTEGER, problem_id TEXT, norm_hash TEXT);
@@ -265,9 +265,8 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
 
       const db = createMockDb(sqlite);
       const res = await selectCollapseDuplicateMove(db, "P-1", 10);
-      expect(res.move).not.toBeNull();
-      expect(res.move?.move).toBe("collapse-duplicate");
-      expect(res.move?.refs).toEqual(["P-1", "C-1@1", "C-2@1"]);
+      expect(res.move).toBeNull();
+      expect(res.degraded).toBe(true);
       sqlite.close();
     });
 
