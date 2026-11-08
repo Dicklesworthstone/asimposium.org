@@ -1,11 +1,16 @@
 import { expect, test } from "bun:test";
+import { EvidenceRequestSchema, ScientificVerificationSchema } from "@asimposium/contracts";
 import type { ScientificProvenance } from "../../../../packages/contracts/src/scientific-provenance.ts";
+import { assessEvidenceClass } from "../../src/ledger/evidence-class.ts";
 import { scientificIndependence } from "../../src/ledger/review-independence.ts";
 import {
   inspectFormalArtifact,
   readScientificProvenance,
+  type ScientificClaim,
   type ScientificEvidence,
+  validateScientificVerification,
 } from "../../src/ledger/scientific-checks.ts";
+import { withGroundingFixture } from "./evidence-grounding-fixture.ts";
 
 const digest = `sha256:${"a".repeat(64)}`;
 const evidence: ScientificEvidence = {
@@ -32,6 +37,55 @@ const provenance = (
   },
 });
 const author = { sponsorId: "S-author", provenance: provenance("gpt", "deductive") };
+
+for (const kind of ["argument", "construction"] as const) {
+  test(`an independent full-write-up review can check an original ${kind} without a citation`, () =>
+    withGroundingFixture(async (f) => {
+      const request = EvidenceRequestSchema.parse({
+        bears_on_kind: "claim",
+        bears_on_id: "C-1",
+        bears_on_version: 1,
+        direction: "supports",
+        kind,
+        source: { kind: "model_memory" },
+        mode: "confirmatory",
+        body_md: "For every natural n, n + 0 = n by the defining recursion for addition.",
+      });
+      const assessment = assessEvidenceClass({ source: request.source, mode: request.mode });
+      expect(assessment.class).toBe("assertion");
+      const reference = f.add("E-proof", { ...request, computed_class: assessment.class });
+      const claim: ScientificClaim = {
+        eventId: "event-C-1",
+        payloadDigest: "c".repeat(64),
+        claimId: "C-1",
+        version: 1,
+        contentDigest: digest,
+        statement: "For every natural n, n + 0 = n.",
+        fellowId: "fellow-a",
+        sponsorId: "sponsor-a",
+        provenance: provenance("gpt", "deductive"),
+      };
+      const verification = ScientificVerificationSchema.parse({
+        kind: "full-write-up",
+        target_digest: digest,
+        evidence: reference,
+        coverage: ["The recursion fixes the right zero argument for every natural number."],
+        result: "verified",
+      });
+      const checked = await validateScientificVerification(
+        f.db,
+        "P-DEMO",
+        claim,
+        verification,
+        "fellow-reviewer",
+        "sponsor-reviewer",
+      );
+      expect(checked.fullWriteUp).toBe(true);
+      expect(checked.certifiedArtifact).toBe(false);
+      expect(checked.evidence.payload.computed_class).toBe("assertion");
+      expect(checked.evidence.groundingWitnesses).toHaveLength(1);
+    }));
+}
 
 test("independence requires explicit declarations and grounded disjoint methods", () => {
   expect(

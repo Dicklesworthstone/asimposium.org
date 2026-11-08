@@ -82,12 +82,85 @@ for (const extra of [
   { selected_hypothesis_id: "H-1" },
   { computed_class: "assertion" },
   { computed_class: "heuristic" },
+  { computed_class: undefined },
+  { computed_class: null },
+  { computed_class: "invented" },
 ])
   test(`rejects a non-grounding ancestor ${JSON.stringify(extra)}`, () =>
     withGroundingFixture(async (f) => {
       const base = f.add("E-1", extra),
         root = f.derived("E-2", [base]);
       await assert.rejects(readEvidenceGrounding(f.db, "P-DEMO", claim, [root]), check("invalid"));
+    }));
+
+test("an original write-up is reviewable without becoming a grounding premise", () =>
+  withGroundingFixture(async (f) => {
+    const original = f.add("E-proof", { computed_class: "assertion" });
+    await assert.rejects(
+      readEvidenceGrounding(f.db, "P-DEMO", claim, [original]),
+      check("invalid"),
+    );
+    assert.equal(
+      (await readEvidenceGrounding(f.db, "P-DEMO", claim, [original], "full-write-up")).roots[0]
+        ?.payload.computed_class,
+      "assertion",
+    );
+    const derived = f.derived("E-derived", [original]);
+    await assert.rejects(
+      readEvidenceGrounding(f.db, "P-DEMO", claim, [derived], "full-write-up"),
+      check("invalid"),
+    );
+    await assert.rejects(
+      readEvidenceGrounding(f.db, "P-DEMO", claim, [original, derived], "full-write-up"),
+      check("invalid"),
+    );
+  }));
+
+for (const extra of [
+  { kind: "citation" },
+  { kind: "computation" },
+  { kind: "certificate" },
+  { computed_class: "heuristic" },
+  { computed_class: undefined },
+  { computed_class: "invented" },
+  { mode: "exploratory" },
+  { selected_hypothesis_id: "H-1" },
+  { bears_on_version: 2 },
+  { body_md: "   " },
+])
+  test(`reviewing an original write-up cannot bypass eligibility ${JSON.stringify(extra)}`, () =>
+    withGroundingFixture(async (f) => {
+      const original = f.add("E-proof", { computed_class: "assertion", ...extra });
+      await assert.rejects(
+        readEvidenceGrounding(f.db, "P-DEMO", claim, [original], "full-write-up"),
+        check("invalid"),
+      );
+    }));
+
+for (const remove of ["withdraw", "redact", "hide", "corrupt"] as const)
+  test(`an original write-up cannot launder a ${remove} ancestor`, () =>
+    withGroundingFixture(async (f) => {
+      const premise = f.add("E-premise");
+      const original = f.add("E-proof", {
+        computed_class: "assertion",
+        falsification_check: { evidence: [premise] },
+      });
+      assert.equal(
+        (await readEvidenceGrounding(f.db, "P-DEMO", claim, [original], "full-write-up")).witnesses
+          .length,
+        2,
+      );
+      if (remove === "withdraw") f.withdraw("E-premise");
+      if (remove === "redact")
+        f.sql.exec("UPDATE event_content SET redacted_at='now' WHERE event_id='event-E-premise'");
+      if (remove === "hide")
+        f.sql.exec("INSERT INTO content_controls VALUES('P-DEMO','E-premise','hidden',1)");
+      if (remove === "corrupt")
+        f.sql.exec("UPDATE event_content SET payload_json='{}' WHERE event_id='event-E-premise'");
+      await assert.rejects(
+        readEvidenceGrounding(f.db, "P-DEMO", claim, [original], "full-write-up"),
+        check("unavailable"),
+      );
     }));
 
 test("cannot resolve another problem's evidence even with its exact digest", () =>

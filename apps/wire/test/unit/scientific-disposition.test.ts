@@ -674,6 +674,178 @@ async function corpus(legacy = false): Promise<Row[]> {
   return [claim, proof, check, ...reviews];
 }
 
+async function originalWriteUpCorpus(kind = "argument"): Promise<[Row, Row, Row, Row, ...Row[]]> {
+  const [claim, material, attempt, ...reviews] = await corpus();
+  if (!claim || !material || !attempt) throw new Error("Expected the complete scientific corpus");
+  const computation = await changedPayload(material, {
+    kind: "computation",
+    computed_class: "computation",
+    body_md: "The exact integer comparison returns equality; an unequal value would refute it.",
+  });
+  const check = await changedPayload(attempt, {
+    falsification_check: {
+      target_digest: targetDigest,
+      attempted_falsifier: "Compare two with itself.",
+      capable_of_failure: "An unequal result.",
+      result: "survived",
+      evidence: [{ evidence_id: "E-1", digest: `sha256:${computation.payload_sha256}` }],
+    },
+  });
+  const proof = await row(
+    4,
+    "evidence.created",
+    {
+      bears_on_kind: "claim",
+      bears_on_id: "C-1",
+      bears_on_version: 1,
+      kind,
+      direction: "supports",
+      mode: "confirmatory",
+      source: { kind: "model_memory" },
+      computed_class: "assertion",
+      body_md: "The relation is reflexive, so two equals two.",
+    },
+    { object_id: "E-original", direction: "supports" },
+  );
+  const checked = await Promise.all(
+    reviews.map((review) =>
+      changedPayload(
+        { ...review, seq: review.seq + 1, event_id: `EVENT-${review.seq + 1}` },
+        {
+          verification: {
+            kind: "full-write-up",
+            target_digest: targetDigest,
+            evidence: { evidence_id: "E-original", digest: `sha256:${proof.payload_sha256}` },
+            coverage: ["The exact reflexive target and the complete deliberate argument."],
+            result: "verified",
+          },
+        },
+      ),
+    ),
+  );
+  return [claim, computation, check, proof, ...checked];
+}
+
+test("original arguments and constructions gain standing through review, not a higher class", async () => {
+  for (const kind of ["argument", "construction"]) {
+    const rows = await originalWriteUpCorpus(kind);
+    const before = rows[3].payload_json;
+    if (before === null) throw new Error("Expected the original proof payload");
+    expect((await foldScientificRows(rows.slice(0, 4))).disposition).toBe("open");
+    expect((await foldScientificRows(rows.slice(0, 5))).disposition).toBe("corroborated");
+    const fold = await foldScientificRows(rows);
+    expect(fold.disposition).toBe("strongly-supported");
+    expect(fold.stale).toBe(false);
+    expect(fold.context.has_certified_artifact).toBe(false);
+    expect(rows[3].payload_json).toBe(before);
+    expect(JSON.parse(before).computed_class).toBe("assertion");
+    expect((await foldScientificRows(rows.filter((source) => source.seq !== 3))).disposition).toBe(
+      "open",
+    );
+  }
+});
+
+test("original write-up reviews retain weight, independence and exact-content requirements", async () => {
+  const rows = await originalWriteUpCorpus();
+  const reviews = rows.slice(4);
+  for (const change of [
+    { capable_of_failure: undefined },
+    { tier: "T0" },
+    {
+      verification: {
+        kind: "full-write-up",
+        target_digest: targetDigest,
+        evidence: { evidence_id: "E-original", digest: `sha256:${"0".repeat(64)}` },
+        coverage: ["Complete write-up."],
+        result: "verified",
+      },
+    },
+  ]) {
+    const changed = await Promise.all(reviews.map((review) => changedPayload(review, change)));
+    expect((await foldScientificRows([...rows.slice(0, 4), ...changed])).disposition).toBe("open");
+  }
+  const hidden = rows.map((source) =>
+    source.object_id === "E-original" ? { ...source, payload_json: null } : source,
+  );
+  const fold = await foldScientificRows(hidden);
+  expect(fold.disposition).toBe("open");
+  expect(fold.stale).toBe(true);
+  const proof = rows[3];
+  const withdrawal = await row(
+    7,
+    "object.retracted",
+    {
+      target_object: proof.object_id,
+      target_event_id: proof.event_id,
+      target_kind: "evidence",
+      target_digest: `sha256:${proof.payload_sha256}`,
+      claim_id: "C-1",
+      claim_version: 1,
+    },
+    {
+      object_id: "RT-7",
+      withdrawn_event_id: proof.event_id,
+      withdrawn_kind: "evidence",
+      withdrawn_sha256: proof.payload_sha256,
+    },
+  );
+  expect((await foldScientificRows([...rows, withdrawal])).disposition).toBe("open");
+});
+
+test("a reviewed original proof cannot rely on assertion or unknown-class ancestors", async () => {
+  for (const computed_class of ["assertion", "heuristic", undefined, null, "invented"]) {
+    const rows = await originalWriteUpCorpus();
+    const ancestor = await row(
+      4,
+      "evidence.created",
+      {
+        bears_on_kind: "claim",
+        bears_on_id: "C-1",
+        bears_on_version: 1,
+        kind: "argument",
+        direction: "supports",
+        mode: "confirmatory",
+        computed_class,
+        body_md: "An unestablished premise cannot become authority through another proof.",
+      },
+      { object_id: "E-ancestor", direction: "supports" },
+    );
+    const proof = await changedPayload(
+      { ...rows[3], seq: 5, event_id: "EVENT-5" },
+      {
+        falsification_check: {
+          target_digest: targetDigest,
+          attempted_falsifier: "The asserted premise is false.",
+          capable_of_failure: "A counterexample to the premise.",
+          result: "survived",
+          evidence: [{ evidence_id: "E-ancestor", digest: `sha256:${ancestor.payload_sha256}` }],
+        },
+      },
+    );
+    const reviews = await Promise.all(
+      rows.slice(4).map((review) =>
+        changedPayload(
+          { ...review, seq: review.seq + 1, event_id: `EVENT-${review.seq + 1}` },
+          {
+            verification: {
+              kind: "full-write-up",
+              target_digest: targetDigest,
+              evidence: { evidence_id: "E-original", digest: `sha256:${proof.payload_sha256}` },
+              coverage: ["Full argument including its declared dependency."],
+              result: "verified",
+            },
+          },
+        ),
+      ),
+    );
+    const fold = await foldScientificRows([...rows.slice(0, 3), ancestor, proof, ...reviews]);
+    expect(fold.disposition).toBe("open");
+    expect(fold.context.recorded_refutation_attempts).toBe(1);
+    expect(fold.context.verified_reviews).toHaveLength(0);
+    expect(fold.stale).toBe(true);
+  }
+});
+
 test("strong support requires the exact publication's verified disclosure coverage", async () => {
   const rows = await corpus();
   expect((await foldScientificRows(rows)).disposition).toBe("strongly-supported");

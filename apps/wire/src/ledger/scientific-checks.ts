@@ -19,6 +19,7 @@ import {
   EvidenceGroundingError,
   type GroundingWitness,
   readEvidenceGrounding,
+  type ScientificEvidenceUse,
 } from "./evidence-grounding.ts";
 import { prepareScientificContentGuards } from "./scientific-content-guards.ts";
 
@@ -227,8 +228,9 @@ export async function readScientificEvidence(
   problemId: string,
   claim: ScientificClaim,
   reference: ScientificEvidenceReference,
+  use: ScientificEvidenceUse = "grounding",
 ): Promise<ScientificEvidence> {
-  const [evidence] = await resolveScientificReferences(db, problemId, claim, [reference]);
+  const [evidence] = await resolveScientificReferences(db, problemId, claim, [reference], use);
   if (!evidence) throw new ScientificInputError("The exact public evidence is unavailable.");
   return evidence;
 }
@@ -238,9 +240,10 @@ export async function resolveScientificReferences(
   problemId: string,
   claim: ScientificClaim,
   references: readonly ScientificEvidenceReference[],
+  use: ScientificEvidenceUse = "grounding",
 ): Promise<ScientificEvidence[]> {
   try {
-    const resolved = await readEvidenceGrounding(db, problemId, claim, references);
+    const resolved = await readEvidenceGrounding(db, problemId, claim, references, use);
     // Every root carries the shared graph so existing method/falsification/
     // verification paths retain all ancestors when collecting commit guards.
     return resolved.roots.map((source) => ({ ...source, groundingWitnesses: resolved.witnesses }));
@@ -295,7 +298,13 @@ export async function validateScientificVerification(
   reviewerFellowId: string,
   reviewerSponsorId: string,
 ): Promise<ScientificVerificationAssessment> {
-  const evidence = await readScientificEvidence(db, problemId, claim, verification.evidence);
+  const evidence = await readScientificEvidence(
+    db,
+    problemId,
+    claim,
+    verification.evidence,
+    verification.kind === "full-write-up" ? "full-write-up" : "grounding",
+  );
   return assessScientificVerification(
     claim,
     evidence,

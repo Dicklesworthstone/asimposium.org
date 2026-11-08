@@ -20,6 +20,10 @@ import {
 } from "./disposition-read.ts";
 import type { IndependenceTier } from "./dispositions.ts";
 import {
+  type ScientificEvidenceUse,
+  scientificEvidenceClassEligible,
+} from "./evidence-grounding.ts";
+import {
   assessScientificVerification,
   inspectFormalArtifact,
   readScientificProvenance,
@@ -328,7 +332,11 @@ export async function foldScientificRows(
   const noveltyVerdicts = new Set<NoveltyVerdict>();
   let noveltyUnavailable = false;
   for (const id of withdrawn.invalidatedEvidence) evidence.delete(id);
-  const resolve = (reference: { evidence_id: string; digest: string }, row: ScientificRow) => {
+  const resolve = (
+    reference: { evidence_id: string; digest: string },
+    row: ScientificRow,
+    use: ScientificEvidenceUse = "grounding",
+  ) => {
     const item = evidence.get(reference.evidence_id);
     return item &&
       item.sequence < row.seq &&
@@ -337,8 +345,7 @@ export async function foldScientificRows(
       item.payload.bears_on_kind === "claim" &&
       item.payload.bears_on_version === row.target_version &&
       item.payload.mode === "confirmatory" &&
-      item.payload.computed_class !== "assertion" &&
-      item.payload.computed_class !== "heuristic" &&
+      scientificEvidenceClassEligible(item.payload, use) &&
       (item.payload.selected_hypothesis_id === null ||
         item.payload.selected_hypothesis_id === undefined)
       ? item
@@ -656,8 +663,7 @@ export async function foldScientificRows(
       if (
         payload.mode !== "confirmatory" ||
         (payload.selected_hypothesis_id !== undefined && payload.selected_hypothesis_id !== null) ||
-        payload.computed_class === "assertion" ||
-        payload.computed_class === "heuristic"
+        !scientificEvidenceClassEligible(payload)
       )
         continue;
       const check = GroundedFalsificationCheckSchema.safeParse(payload.falsification_check);
@@ -720,7 +726,13 @@ export async function foldScientificRows(
     let settledRefutation: { evidenceId: string; unansweredHours: number } | undefined;
     if (payload.verification !== undefined && payload.verification !== null) {
       const verification = ScientificVerificationSchema.safeParse(payload.verification);
-      const material = verification.success ? resolve(verification.data.evidence, row) : undefined;
+      const material = verification.success
+        ? resolve(
+            verification.data.evidence,
+            row,
+            verification.data.kind === "full-write-up" ? "full-write-up" : "grounding",
+          )
+        : undefined;
       try {
         if (!verification.success || !material)
           throw new ScientificInputError("Verification material is unavailable.");
