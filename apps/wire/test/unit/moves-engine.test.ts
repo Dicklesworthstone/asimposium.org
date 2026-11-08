@@ -125,7 +125,7 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
   });
 
   describe("Individual Move Selectors", () => {
-    test("sharpen-statement triggers when status is sharpening", async () => {
+    test("raw problem projections cannot manufacture a sharpening recommendation", async () => {
       const sqlite = new Database(":memory:");
       sqlite.exec(`
         CREATE TABLE problems (id TEXT PRIMARY KEY, status TEXT, current_statement_version INTEGER);
@@ -136,15 +136,10 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
 
       const db = createMockDb(sqlite);
       const res = await selectSharpenStatementMove(db, "P-1", 5);
-      expect(res.move).not.toBeNull();
-      expect(res.move?.move).toBe("sharpen-statement");
-      expect(res.move?.refs).toEqual(["P-1", "S@1"]);
-      expect(res.move?.why).toContain("sharpening status");
-      expect(JSON.stringify(res.move)).not.toContain("Statement here");
-      expect(res.move?.contract.preparation).toMatchObject({
-        statement_version: 1,
-        read_first: { method: "GET", path: "/p/P-1.md?through=5" },
-      });
+      expect(res.move).toBeNull();
+      expect(res.degraded).toBe(true);
+      // Positive cases and source integrity are covered by statement-moves.test.ts
+      // with actual published formulations.
       sqlite.close();
     });
 
@@ -270,7 +265,7 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
       sqlite.close();
     });
 
-    test("re-anchor detects statement drift on fellow's claim", async () => {
+    test("raw claim drift projections cannot manufacture a re-anchor recommendation", async () => {
       const sqlite = new Database(":memory:");
       sqlite.exec(`
         CREATE TABLE problems (id TEXT PRIMARY KEY, current_statement_version INTEGER);
@@ -294,13 +289,8 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
 
       const db = createMockDb(sqlite);
       const res = await selectReanchorMove(db, "P-1", "F-AUTHOR", 10);
-      expect(res.move).not.toBeNull();
-      expect(res.move?.move).toBe("re-anchor");
-      expect(res.move?.refs).toEqual(["P-1", "C-1@1", "S@2"]);
-      expect(res.move?.contract.prefilled_hints).toEqual({
-        claim_id: "C-1",
-        base_version: 1,
-      });
+      expect(res.move).toBeNull();
+      expect(res.degraded).toBe(true);
 
       // Different fellow does not get reanchor for someone else's claim
       const resOther = await selectReanchorMove(db, "P-1", "F-OTHER", 10);

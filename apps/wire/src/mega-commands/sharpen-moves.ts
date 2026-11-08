@@ -1,8 +1,12 @@
 import { getMoveTemplate, type NextMoveCandidate } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import {
+  formulationMoveContextStillCurrent,
+  readFormulationMoveContext,
+} from "./formulation-move-context.ts";
 
 export const SHARPEN_MOVES_BOUNDARY =
-  "Sharpen-statement triggers when a problem statement lacks an explicit falsifier, has loose quantifiers, or is in active sharpening status. Statement sharpening blocks other promotion until S publishes.";
+  "Sharpen-statement uses the current verified formulation when the problem is in sharpening status or its published falsifier is blank. Missing projection content is not a scientific defect. The recommendation does not assess quantifier correctness or publish a replacement statement.";
 
 export interface SharpenMoveResult {
   readonly move: NextMoveCandidate | null;
@@ -15,38 +19,20 @@ export async function selectSharpenStatementMove(
   cursor: number,
 ): Promise<SharpenMoveResult> {
   try {
-    const problemRow = await db
-      .prepare(
-        `SELECT p.status, p.current_statement_version,
-                psv.statement, psv.falsifier
-         FROM problems p
-         LEFT JOIN problem_statement_versions psv
-           ON psv.problem_id = p.id AND psv.version = p.current_statement_version
-         WHERE p.id = ?`,
-      )
-      .bind(problemId)
-      .first<{
-        status: string;
-        current_statement_version: number;
-        statement: string | null;
-        falsifier: string | null;
-      }>();
-
-    if (!problemRow) {
-      return { move: null, degraded: false };
-    }
-
-    const isSharpening = problemRow.status === "sharpening";
-    const lacksFalsifier =
-      problemRow.statement !== null &&
-      (!problemRow.falsifier || problemRow.falsifier.trim().length === 0);
+    const read = await readFormulationMoveContext(db, problemId, cursor);
+    if (read.kind !== "ready") return { move: null, degraded: read.kind === "unavailable" };
+    const context = read.context;
+    const isSharpening = context.head.status === "sharpening";
+    const lacksFalsifier = context.source.problem.falsifier.trim().length === 0;
 
     if (!isSharpening && !lacksFalsifier) {
       return { move: null, degraded: false };
     }
 
+    if (!(await formulationMoveContextStillCurrent(db, problemId, cursor, context)))
+      return { move: null, degraded: true };
     const template = getMoveTemplate("sharpen-statement");
-    const statementVer = `S@${problemRow.current_statement_version || 1}`;
+    const statementVer = `S@${context.head.current_statement_version}`;
 
     return {
       move: {
@@ -60,10 +46,11 @@ export async function selectSharpenStatementMove(
           preparation: {
             problem_id: problemId,
             captured_cursor: cursor,
-            statement_version: problemRow.current_statement_version || 1,
+            statement_version: context.head.current_statement_version,
+            statement_pin: context.source.publication,
             read_first: {
               method: "GET",
-              path: `/p/${encodeURIComponent(problemId)}.md?through=${cursor}`,
+              path: `/p/${encodeURIComponent(problemId)}.md`,
             },
             open_session: {
               method: "POST",
