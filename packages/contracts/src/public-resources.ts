@@ -170,7 +170,8 @@ export const PUBLIC_RESOURCE_REGISTRY: readonly PublicResourceEntry[] = Object.f
   {
     kind: "claims-list",
     title: "Problem Claims List",
-    description: "List of all public claims recorded on a problem.",
+    description:
+      "Paginated exact-version public claim statements at one ledger cursor; current content controls still apply to historical reads.",
     agent_markdown_url: "/p/:id/claims.md",
     json_url: "/p/:id/claims.json",
     html_url: "/p/:id/claims.html",

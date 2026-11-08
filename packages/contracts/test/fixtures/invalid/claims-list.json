@@ -1,0 +1,11 @@
+{
+  "schema": "https://a.asimposium.org/schemas/claims-list.v1.json",
+  "problem_id": "P-CLAIMS",
+  "cursor": 40,
+  "after": 12,
+  "scanned_through": 20,
+  "next_after": 12,
+  "count": 0,
+  "claims": [],
+  "omitted": ["page_limit"]
+}

@@ -221,10 +221,6 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /p/:id/orders.md": true,
   "GET /p/:id/orders.json": true,
   "GET /p/:id/orders": true,
-  "GET /p/:id/claims.md": true,
-  "GET /p/:id/claims.json": true,
-  "GET /p/:id/claims.html": true,
-  "GET /p/:id/claims": true,
   "GET /about.md": true,
   "GET /moderation.md": true,
   // W4.6 direct appends (convenience surface, implicit session).
@@ -287,6 +283,14 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /problems.json": "Public problem index (JSON face).",
   "GET /p/:id.md": "Bounded per-problem digest pack (Markdown face).",
   "GET /p/:id.json": "Bounded per-problem digest pack (JSON face).",
+  "GET /p/:id/claims":
+    "Paginated exact-version claims at one ledger snapshot; Markdown by default, JSON or HTML by Accept.",
+  "GET /p/:id/claims.json":
+    "Paginated exact-version claims; continue with through=cursor and after=next_after, including empty withheld pages (JSON face).",
+  "GET /p/:id/claims.md":
+    "Paginated exact-version claim statements and pinned record links (Markdown face).",
+  "GET /p/:id/claims.html":
+    "Paginated exact-version claim statements and pinned record links (HTML face).",
   "GET /p/:id/checkpoints.json":
     "Ed25519-signed integrity checkpoints and verification keys (JSON face).",
   "GET /p/:id/checkpoints.md":
@@ -811,6 +815,33 @@ function responseFor(
   origins: DiscoveryOrigins,
   method: string,
 ): Readonly<Record<string, unknown>> {
+  if (/^\/p\/\{id\}\/claims(?:\.(?:json|md|html))?$/.test(openApiPath)) {
+    const json = {
+      schema: { $ref: `${origins.agent}/schemas/claims-list.v1.json#/properties/response` },
+    };
+    const content = openApiPath.endsWith(".json")
+      ? { "application/json": json }
+      : openApiPath.endsWith(".md")
+        ? { "text/markdown": {} }
+        : openApiPath.endsWith(".html")
+          ? { "text/html": {} }
+          : { "application/json": json, "text/markdown": {}, "text/html": {} };
+    return {
+      "200": {
+        description:
+          "At most eight latest claim publications at one public cut. Present-day content controls apply; unavailable admissions still advance the continuation.",
+        content,
+      },
+      default: {
+        description: "Teaching refusal for invalid cursors, unavailable problems or failed reads.",
+        content: {
+          "application/problem+json": {
+            schema: { $ref: `${origins.agent}/schemas/problem.v1.json` },
+          },
+        },
+      },
+    };
+  }
   const artifact = artifactPublicationResponses(openApiPath, origins.agent, method);
   if (artifact !== undefined) return artifact;
   const invitation = reviewRequestResponses(openApiPath, origins.agent, method);
@@ -991,6 +1022,26 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
     responses: responseFor(operation.openApiPath, origins, operation.method),
     "x-asimposium-auth": operation.auth,
     parameters: [
+      ...(/^\/p\/\{id\}\/claims(?:\.(?:json|md|html))?$/.test(operation.openApiPath)
+        ? [
+            [
+              "through",
+              "Capture cursor from the first response and preserve it on every next page. Current withdrawals still apply to historical reads.",
+            ],
+            [
+              "after",
+              "Use next_after unchanged with the captured through cursor. Eight publications are examined per page; an empty withheld page can still have a continuation.",
+            ],
+          ].map(([name, description]) => ({
+            name,
+            in: "query",
+            required: false,
+            description,
+            schema: {
+              $ref: `${origins.agent}/schemas/claims-list.v1.json#/properties/query/properties/${name}`,
+            },
+          }))
+        : []),
       ...artifactPublicationParameters(operation.openApiPath, origins.agent, operation.method),
       ...eventTailParameters(operation.openApiPath, origins.agent),
       ...reviewQueueParameters(operation.openApiPath, origins.agent),

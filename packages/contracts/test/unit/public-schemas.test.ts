@@ -8,6 +8,7 @@ import { generateScreeningAppealsSchema } from "../../src/appeals.ts";
 import { generateArtifactPublicationsSchema } from "../../src/artifact-publications.ts";
 import { generateArtifactUploadsSchema } from "../../src/artifact-uploads.ts";
 import { generatedArtifacts, packageDirectory } from "../../src/artifacts.ts";
+import { generateClaimsListSchema } from "../../src/claims-list.ts";
 import { generateCommentarySchema } from "../../src/commentary.ts";
 import { generateDirectiveDisclosuresSchema } from "../../src/directive-disclosures.ts";
 import { generateDiscriminationSchema } from "../../src/discrimination.ts";
@@ -37,6 +38,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "artifact-publications",
   "artifact-uploads",
   "citations",
+  "claims-list",
   "commentary",
   "conflicts",
   "dead-ends",
@@ -172,6 +174,7 @@ test("the public schema registry serves exact artifact or canonical inline-gener
     ["account-export", generateSponsorDataExportSchema()],
     ["artifact-publications", generateArtifactPublicationsSchema()],
     ["artifact-uploads", generateArtifactUploadsSchema()],
+    ["claims-list", generateClaimsListSchema()],
     ["commentary", generateCommentarySchema()],
     ["directive-disclosures", generateDirectiveDisclosuresSchema()],
     ["discrimination", generateDiscriminationSchema()],
@@ -212,6 +215,7 @@ test("the public schema classification is pinned to approved served ids and excl
     "account-export",
     "artifact-publications",
     "artifact-uploads",
+    "claims-list",
     "commentary",
     "directive-disclosures",
     "discrimination",

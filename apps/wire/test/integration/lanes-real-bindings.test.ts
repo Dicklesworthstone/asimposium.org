@@ -20,6 +20,7 @@ const LANES = [
   "batch-replay",
   "citations",
   "claims",
+  "claims-list",
   "commentary",
   "conflict-moves",
   "conflicts",

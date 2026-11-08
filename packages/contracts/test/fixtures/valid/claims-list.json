@@ -1,0 +1,21 @@
+{
+  "schema": "https://a.asimposium.org/schemas/claims-list.v1.json",
+  "problem_id": "P-CLAIMS",
+  "cursor": 40,
+  "after": 0,
+  "scanned_through": 12,
+  "next_after": 12,
+  "count": 1,
+  "claims": [
+    {
+      "id": "C-3",
+      "version": 2,
+      "kind": "definition",
+      "statement": "Let a path mean a sequence of distinct adjacent vertices.",
+      "source_seq": 9,
+      "created_at": "2026-10-27T12:00:00.000Z",
+      "stale": false
+    }
+  ],
+  "omitted": ["content_unavailable", "page_limit"]
+}

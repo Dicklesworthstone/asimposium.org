@@ -23,21 +23,19 @@ import {
   QuestionsListResponseSchema,
   RETRACTIONS_SCHEMA_ID,
   RetractionsListResponseSchema,
-  type ScreeningPublicationNotice,
   SingleCitationResponseSchema,
   SYNTHESES_SCHEMA_ID,
 } from "@asimposium/contracts";
+import {
+  CLAIMS_LIST_SCHEMA_ID,
+  ClaimsListQuerySchema,
+  claimsListPath,
+} from "@asimposium/contracts/claims-list";
 import { FormalRecordsQuerySchema } from "@asimposium/contracts/formal-records";
 import {
   type ComposedPack,
   composePack,
-  escapeHtml,
-  type Fence,
-  fenceFor,
   neutralizeUntrustedBody,
-  type PackActionCandidate,
-  type PackCandidate,
-  type PreparedProjection,
   type Projection,
   type RenderedFace,
   renderAllFaces,
@@ -46,9 +44,8 @@ import {
   renderPublicProblemMovesHtml,
   renderPublicProblemMovesMarkdown,
   safeCodeSpan,
-  safeInlineProse,
-  screeningNoticeText,
 } from "@asimposium/render";
+import { renderClaimsListHtml, renderClaimsListMarkdown } from "@asimposium/render/claims-list";
 import {
   renderFormalRecordsHtml,
   renderFormalRecordsMarkdown,
@@ -74,6 +71,7 @@ import {
   renderSingleCitationHtml,
   renderSingleCitationMarkdown,
 } from "./ledger/citations";
+import { ClaimsListReadError, loadClaimsList } from "./ledger/claims-list-read";
 import {
   loadProblemConflicts,
   renderConflictsHtml,
@@ -103,7 +101,6 @@ import {
   renderRetractionsMarkdown,
 } from "./ledger/retractions";
 import { checkedScientificPayload, ScientificInputError } from "./ledger/scientific-checks";
-import { readScientificDispositions } from "./ledger/scientific-disposition.ts";
 import {
   loadProblemSyntheses,
   loadSingleSynthesis,
@@ -1125,165 +1122,6 @@ async function loadProblemFullFace(
   );
   const rendered = renderProjection(projection, "md");
   return { body: rendered.body, unlisted, formulationUnavailable: formulation === null };
-}
-
-interface ProblemClaimRow {
-  readonly id: string;
-  readonly statement: string;
-  readonly source_seq: number;
-  readonly created_at: string;
-}
-
-interface ProblemClaimSummary {
-  readonly screening_notice?: ScreeningPublicationNotice;
-  readonly id: string;
-  readonly statement: string;
-  readonly source_seq: number;
-  readonly created_at: string;
-  readonly stale: boolean;
-}
-
-async function loadProblemClaims(
-  db: Env["DB"],
-  problemId: string,
-): Promise<{
-  claims: ProblemClaimSummary[];
-  /** Claims in range whose content is unavailable (withdrawn, redacted, hidden). */
-  unavailable: number;
-  cursor: number;
-  unlisted: boolean;
-} | null> {
-  if (!PublicLedgerProblemIdSchema.safeParse(problemId).success) return null;
-  const problem = await db
-    .prepare(
-      "SELECT id, public_seq, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-    .bind(problemId)
-    .first<{ id: string; public_seq: number; unlisted: number }>();
-  if (!problem) return null;
-
-  // The board obeys the same read-side law as every claim face: a withdrawn,
-  // redacted or content-controlled (hidden) claim is unavailable, so it is
-  // counted, never served.
-  const rows = await db
-    .prepare(`
-      SELECT claims.id, claims.statement, claims.source_seq, claims.created_at,
-        CASE WHEN ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} THEN 1 ELSE 0 END AS available
-      FROM claims
-      WHERE claims.problem_id = ? AND claims.source_seq <= ?
-      ORDER BY claims.source_seq ASC, claims.id ASC
-      LIMIT 200
-    `)
-    .bind(problemId, problem.public_seq)
-    .all<ProblemClaimRow & { available: number }>();
-
-  let unavailable = (rows.results ?? []).filter((row) => row.available !== 1).length;
-  // Match the bounded source-sequence selection at the same public cut. The
-  // scientific reader assesses immutable premise pins, while cp.stale can
-  // lag a premise revision or a current content control indefinitely.
-  const dispositions = await readScientificDispositions(db, problemId, problem.public_seq, 200);
-  const screeningNotices = await readPublicationNotices(
-    db,
-    problemId,
-    rows.results.filter((row) => row.available === 1).map((row) => row.source_seq),
-  );
-  const claims: ProblemClaimSummary[] = (rows.results ?? [])
-    .filter((row) => row.available === 1)
-    .flatMap((row) => {
-      const standing = dispositions.get(row.id);
-      // A mutable head can advance beyond the captured cut between reads.
-      // Missing scientific authority must not become a fresh-looking card.
-      if (standing === undefined) {
-        unavailable++;
-        return [];
-      }
-      return [
-        {
-          id: row.id,
-          statement: row.statement,
-          source_seq: row.source_seq,
-          created_at: canonicalizeIndexTimestamp(row.created_at),
-          stale: standing.stale,
-          ...(screeningNotices.has(row.source_seq)
-            ? { screening_notice: screeningNotices.get(row.source_seq)! }
-            : {}),
-        },
-      ];
-    });
-
-  return {
-    claims,
-    unavailable,
-    cursor: problem.public_seq,
-    unlisted: problem.unlisted === 1,
-  };
-}
-
-function renderProblemClaimsMarkdown(
-  problemId: string,
-  claims: readonly ProblemClaimSummary[],
-  omitted: readonly string[],
-  cursor: number,
-): string {
-  const lines: string[] = [
-    `<!-- asimp face=md schema=asimposium.claims-list.v1 problem=${problemId} cursor=${cursor} -->`,
-    "",
-    `# Claims — ${problemId}`,
-    "",
-    "> Public claims on this problem in ledger sequence order.",
-    "",
-  ];
-  if (claims.length === 0) {
-    lines.push("No public claims recorded on this problem yet.", "");
-  } else {
-    for (const c of claims) {
-      lines.push(`## ${c.id} (seq ${c.source_seq})${c.stale ? " [stale]" : ""}`);
-      lines.push(`- **Statement**: ${safeInlineProse(c.statement)}`);
-      lines.push(`- **Created**: ${c.created_at}`);
-      if (c.screening_notice !== undefined)
-        lines.push(`- **Screening notice**: ${screeningNoticeText(c.screening_notice)}`);
-      lines.push(
-        `- [View claim](/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(c.id)}.md) · [JSON](/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(c.id)}.json)`,
-      );
-      lines.push("");
-    }
-  }
-  if (omitted.length > 0) {
-    lines.push(`omitted: ${omitted.join("; ")}`, "");
-  }
-  return lines.join("\n");
-}
-
-function renderProblemClaimsHtmlFragment(
-  problemId: string,
-  claims: readonly ProblemClaimSummary[],
-  omitted: readonly string[],
-): string {
-  const lines: string[] = [
-    `<section class="claims-list" data-problem="${escapeHtml(problemId)}">`,
-    `<h2>Claims — ${escapeHtml(problemId)}</h2>`,
-    `<p class="description">Public claims on this problem in ledger sequence order.</p>`,
-  ];
-  if (claims.length === 0) {
-    lines.push("<p>No public claims recorded on this problem yet.</p>");
-  } else {
-    for (const c of claims) {
-      lines.push(
-        `<article class="claim-item" data-id="${escapeHtml(c.id)}">` +
-          `<h3><a href="/p/${escapeHtml(problemId)}/claims/${escapeHtml(c.id)}">${escapeHtml(c.id)}</a> (seq ${c.source_seq})${c.stale ? ' <span class="badge-stale">stale</span>' : ""}</h3>` +
-          `<p>${escapeHtml(c.statement)}</p>` +
-          (c.screening_notice === undefined
-            ? ""
-            : `<aside role="note">${escapeHtml(screeningNoticeText(c.screening_notice))}</aside>`) +
-          `</article>`,
-      );
-    }
-  }
-  if (omitted.length > 0) {
-    lines.push(`<p class="omitted">Omitted: ${escapeHtml(omitted.join("; "))}</p>`);
-  }
-  lines.push("</section>");
-  return lines.join("\n");
 }
 
 function escapeToonField(val: string): string {
@@ -3147,67 +2985,73 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   ) {
     const problemId = c.req.param("id");
     if (!problemId) return problemNotFound(c.req.method);
-    const result = await loadProblemClaims(c.env.DB, problemId);
-    if (!result) return problemNotFound(c.req.method);
-
+    const params = new URL(c.req.url).searchParams;
+    const query = ClaimsListQuerySchema.safeParse(Object.fromEntries(params));
+    const invalid = () => {
+      const response = problemDocument({
+        status: 400,
+        code: "CURSOR_INVALID",
+        title: "Invalid claims collection cursor",
+        detail:
+          "Use one canonical non-negative through cursor and one after cursor; after cannot exceed through or the public cursor. Other query keys are not supported.",
+        fixHint:
+          "Start with /p/<problem-id>/claims.json, then follow next_after while preserving the returned cursor as through.",
+        rule: "A5",
+        extensions: {
+          schema: CLAIMS_LIST_SCHEMA_ID,
+          example: { path: "/p/P-EXAMPLE/claims.json?through=20&after=8" },
+        },
+      });
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: response.status, headers: response.headers })
+        : response;
+    };
+    if (!query.success || [...params.keys()].some((key) => params.getAll(key).length !== 1))
+      return invalid();
+    let result: Awaited<ReturnType<typeof loadClaimsList>>;
+    try {
+      result = await loadClaimsList(c.env.DB, problemId, query.data);
+    } catch (error) {
+      if (error instanceof ClaimsListReadError) {
+        if (error.code === "not-found") return problemNotFound(c.req.method);
+        if (error.code === "query") return invalid();
+      }
+      throw error;
+    }
     const accept = c.req.header("accept") ?? "";
     const format =
       forceFormat ??
       (accept.includes("application/json") ? "json" : accept.includes("text/html") ? "html" : "md");
-
-    const omitted: string[] = ["only published claims are included in this ledger view"];
-    if (result.unavailable > 0) {
-      omitted.push(
-        `${result.unavailable} claim(s) whose content is unavailable (withdrawn, redacted or hidden) are not shown`,
-      );
-    }
-
-    if (format === "json") {
-      const body = JSON.stringify(
-        {
-          schema: "https://a.asimposium.org/schemas/claims-list.v1.json",
-          problem_id: problemId,
-          count: result.claims.length,
-          claims: result.claims,
-          omitted,
-        },
-        null,
-        2,
-      );
-      const etag = await strongEtag("json", body);
-      const headers = {
-        "content-type": "application/json; charset=utf-8",
-        "cache-control": "public, max-age=0, must-revalidate",
-        vary: "Accept, Accept-Encoding",
-        ...indexingHeaders(result.unlisted),
-        etag,
-      };
-      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
-        return c.body(null, 304, headers);
-      return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-    }
-
-    if (format === "html") {
-      const body = renderProblemClaimsHtmlFragment(problemId, result.claims, omitted);
-      const etag = await strongEtag("html", body);
-      const headers = {
-        "content-type": "text/html; charset=utf-8",
-        "cache-control": "public, max-age=0, must-revalidate",
-        vary: "Accept, Accept-Encoding",
-        ...indexingHeaders(result.unlisted),
-        etag,
-      };
-      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
-        return c.body(null, 304, headers);
-      return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-    }
-
-    const body = renderProblemClaimsMarkdown(problemId, result.claims, omitted, result.cursor);
-    const etag = await strongEtag("markdown", body);
+    const face = result.face;
+    const body =
+      format === "json"
+        ? JSON.stringify(face, null, 2)
+        : format === "html"
+          ? renderClaimsListHtml(face)
+          : renderClaimsListMarkdown(face);
+    if (new TextEncoder().encode(body).length > 1024 * 1024)
+      throw new ClaimsListReadError("unavailable");
+    const etag = await strongEtag(format, body);
+    const path = (after = face.after) =>
+      claimsListPath(problemId, format, { through: face.cursor, after });
     const headers = {
-      "content-type": "text/markdown; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
+      "content-type":
+        format === "json"
+          ? "application/json; charset=utf-8"
+          : format === "html"
+            ? "text/html; charset=utf-8"
+            : "text/markdown; charset=utf-8",
+      "cache-control": result.unlisted ? "private, no-store" : "public, max-age=0, must-revalidate",
       vary: "Accept, Accept-Encoding",
+      "x-content-type-options": "nosniff",
+      "content-location": path(),
+      link: `</schemas/claims-list.v1.json>; rel="describedby"; type="application/schema+json", <${path()}>; rel="canonical"${face.next_after === null ? "" : `, <${path(face.next_after)}>; rel="next"`}`,
+      ...(format === "html"
+        ? {
+            "content-security-policy":
+              "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+          }
+        : {}),
       ...indexingHeaders(result.unlisted),
       etag,
     };

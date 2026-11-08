@@ -138,6 +138,20 @@ export {
   type SourceProvenance,
   SourceProvenanceSchema,
 } from "./citations.ts";
+export {
+  CLAIMS_LIST_PAGE_SIZE,
+  CLAIMS_LIST_SCHEMA_ID,
+  type ClaimListEntry,
+  ClaimListEntrySchema,
+  type ClaimsListQuery,
+  ClaimsListQuerySchema,
+  type ClaimsListResponse,
+  ClaimsListResponseSchema,
+  claimsListMatchesQuery,
+  claimsListPath,
+  claimsListQueryString,
+  generateClaimsListSchema,
+} from "./claims-list.ts";
 export * from "./commentary.ts";
 export {
   CONFLICT_STATUSES,

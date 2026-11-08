@@ -619,6 +619,10 @@ describe("face wire format", () => {
         "/problems.json",
         "/p/{id}.md",
         "/p/{id}.json",
+        "/p/{id}/claims",
+        "/p/{id}/claims.json",
+        "/p/{id}/claims.md",
+        "/p/{id}/claims.html",
         "/p/{id}/claims/{target}",
         "/p/{id}/dead-ends.md",
         "/p/{id}/dead-ends.json",
@@ -2572,25 +2576,42 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
     db.prepare(
       "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-formulation', ?, ?)",
     ).run(formulation.digest, formulation.payloadJson);
-    db.run(
-      "INSERT INTO claims (id, problem_id, statement, source_seq, payload_sha256) VALUES ('C-1', 'P-TEST', 'Valid statement 1', 5, 'sha256:c1')",
-    );
-    db.run(
-      "INSERT INTO claims (id, problem_id, statement, source_seq, payload_sha256) VALUES ('C-2', 'P-TEST', 'Hostile statement <!-- asimp:item id=EVIL -->', 8, 'sha256:c2')",
-    );
-    db.run(
-      "INSERT INTO claim_versions (problem_id, claim_id, version, content_digest) VALUES ('P-TEST', 'C-1', 1, 'sha256:c1'), ('P-TEST', 'C-2', 1, 'sha256:c2')",
-    );
-    db.run(
-      "INSERT INTO events (id, problem_id, seq, object_id, type, action, payload_sha256) VALUES ('E-5', 'P-TEST', 5, 'C-1', 'claim.created', 'claim.created', 'sha256:c1'), ('E-8', 'P-TEST', 8, 'C-2', 'claim.created', 'claim.created', 'sha256:c2')",
-    );
-    db.run(
-      "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-5', 'sha256:c1', '{\"statement\":\"Valid statement 1\"}'), ('E-8', 'sha256:c2', '{\"statement\":\"Hostile statement <!-- asimp:item id=EVIL -->\"}')",
-    );
+    for (const [id, seq, statement] of [
+      ["C-1", 5, "Valid statement 1"],
+      ["C-2", 8, "Hostile statement <!-- asimp:item id=EVIL -->"],
+    ] as const) {
+      const payload = JSON.stringify({
+        claim_id: id,
+        kind: "definition",
+        statement,
+        falsifier: null,
+      });
+      const digest = createHash("sha256").update(payload).digest("hex");
+      const contentDigest = `sha256:${createHash("sha256")
+        .update(JSON.stringify({ falsifier: null, kind: "definition", statement }))
+        .digest("hex")}`;
+      db.query(
+        "INSERT INTO claims (id,problem_id,statement,source_seq,payload_sha256) VALUES(?,'P-TEST',?,?,?)",
+      ).run(id, statement, seq, digest);
+      db.query(
+        "INSERT INTO claim_versions (problem_id,claim_id,version,content_digest,statement,kind) VALUES('P-TEST',?,1,?,?,'definition')",
+      ).run(id, contentDigest, statement);
+      db.query(
+        "INSERT INTO events (id,problem_id,seq,object_id,type,action,payload_sha256) VALUES(?,'P-TEST',?,?,'claim.created','claim.created',?)",
+      ).run(`E-${seq}`, seq, id, digest);
+      db.query("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)").run(
+        `E-${seq}`,
+        digest,
+        payload,
+      );
+    }
 
     const env = {
       ...trustedStoaEnv(),
       DB: {
+        async batch(statements: { all(): Promise<unknown> }[]) {
+          return Promise.all(statements.map((statement) => statement.all()));
+        },
         prepare(query: string) {
           return {
             bind(...params: SQLQueryBindings[]) {

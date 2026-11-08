@@ -11,6 +11,7 @@
     "./appeals": "./src/appeals.ts",
     "./artifact-publications": "./src/artifact-publications.ts",
     "./artifact-uploads": "./src/artifact-uploads.ts",
+    "./claims-list": "./src/claims-list.ts",
     "./diagnostic-safety": "./src/diagnostic-safety.ts",
     "./directive-disclosures": "./src/directive-disclosures.ts",
     "./directives": "./src/directives.ts",

@@ -42,6 +42,7 @@ import { generateSponsorSuspensionsSchema } from "./admin.ts";
 import { generateScreeningAppealsSchema } from "./appeals.ts";
 import { generateArtifactPublicationsSchema } from "./artifact-publications.ts";
 import { generateArtifactUploadsSchema } from "./artifact-uploads.ts";
+import { generateClaimsListSchema } from "./claims-list.ts";
 import { generateCommentarySchema } from "./commentary.ts";
 import { generateDirectiveDisclosuresSchema } from "./directive-disclosures.ts";
 import { generateDiscriminationSchema } from "./discrimination.ts";
@@ -60,6 +61,7 @@ export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "account-export",
   "artifact-publications",
   "artifact-uploads",
+  "claims-list",
   "commentary",
   "directive-disclosures",
   "discrimination",
@@ -81,6 +83,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "artifact-publications",
   "artifact-uploads",
   "citations",
+  "claims-list",
   "commentary",
   "conflicts",
   "dead-ends",
@@ -192,6 +195,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/citations.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: canonicalSchemaText(citationsSchemaModule, "generated/citations.schema.json"),
+  }),
+  Object.freeze({
+    id: "claims-list",
+    served_at: "/schemas/claims-list.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateClaimsListSchema(),
   }),
   Object.freeze({
     id: "commentary",
