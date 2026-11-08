@@ -2,6 +2,7 @@
   "name": "@asimposium/gauntlet",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit -p ../tsconfig.json && bash -n run.sh",
     "lint": "command -v shellcheck >/dev/null 2>&1 || { printf 'blocked: shellcheck is unavailable\\n' >&2; exit 78; }; cd ../.. && biome check e2e/gauntlet/*.ts e2e/gauntlet/*.mjs e2e/gauntlet/package.json && shellcheck -x e2e/gauntlet/run.sh",

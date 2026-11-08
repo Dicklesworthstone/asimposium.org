@@ -28,7 +28,7 @@ import {
   SponsorProblemBriefSchema,
   SponsorProblemListResponseSchema,
 } from "../../packages/contracts/src/problems.ts";
-import { HARNESSES, runHarnessAgent } from "./harness-agent.mjs";
+import { HARNESSES, retainedRouteTemplate, runHarnessAgent } from "./harness-agent.mjs";
 import { startLocalTarget, USER_AGENT } from "./local-target.mjs";
 import { REFERENCE_AGENT_MODES, runReferenceAgent } from "./reference-agent.mjs";
 import { GAUNTLET_STAGES, gauntletVerdict } from "./state-verdict.mjs";
@@ -392,7 +392,7 @@ function readClaimFace(claimFace) {
  * promotion"). A proxy for the site's share of the token budget, not the
  * harness's own token accounting.
  */
-function servedBudget(observations) {
+function servedBudget(observations, realHarness = false) {
   const firstPromotion = observations.findIndex(
     (o) => o.method === "POST" && /\/promote$/.test(o.path) && o.status >= 200 && o.status < 300,
   );
@@ -400,9 +400,13 @@ function servedBudget(observations) {
   // Heaviest routes first (route shape only), so a budget overrun names its cause.
   const byRoute = {};
   for (const o of observations) {
-    const route = `${o.method} ${o.path
-      .replace(/\/(S|W|P|F|C|R|H|G|E|L)-[A-Z0-9@-]+/g, "/$1-…")
-      .replace(/ASIMP-EN-[A-Z0-9]+/, "ASIMP-EN-…")}`;
+    const route = `${o.method} ${
+      realHarness
+        ? retainedRouteTemplate(o.path)
+        : o.path
+            .replace(/\/(S|W|P|F|C|R|H|G|E|L)-[A-Z0-9@-]+/g, "/$1-…")
+            .replace(/ASIMP-EN-[A-Z0-9]+/, "ASIMP-EN-…")
+    }`;
     byRoute[route] = (byRoute[route] ?? 0) + (o.bytes ?? 0);
   }
   return {
@@ -549,9 +553,13 @@ async function main() {
             stage: run.timedOut ? "timeout" : `exit-${run.exitCode}`,
             ok: run.exitCode === 0,
             tokens: run.tokens,
+            token_usage: run.tokenUsage,
+            stdin_write_failed: run.stdinWriteFailed,
             duration_ms: run.durationMs,
             transcript_sha256: run.transcriptSha256,
-            stderr_tail: run.exitCode === 0 ? undefined : run.stderrTail,
+            stderr_sha256: run.stderrSha256,
+            stderr_bytes: run.stderrBytes,
+            transcript_truncated: run.transcriptTruncated,
             unavailable: run.unavailable,
           }))
         : await runReferenceAgent(minted.join_url, {
@@ -699,9 +707,13 @@ async function main() {
         ...(isHarness
           ? {
               tokens: agentOutcome.tokens,
+              token_usage: agentOutcome.token_usage,
+              stdin_write_failed: agentOutcome.stdin_write_failed,
               duration_ms: agentOutcome.duration_ms,
               transcript_sha256: agentOutcome.transcript_sha256,
-              stderr_tail: agentOutcome.stderr_tail,
+              stderr_sha256: agentOutcome.stderr_sha256,
+              stderr_bytes: agentOutcome.stderr_bytes,
+              transcript_truncated: agentOutcome.transcript_truncated,
               harness_unavailable: agentOutcome.unavailable ?? null,
             }
           : {}),
@@ -715,13 +727,17 @@ async function main() {
         agent_reported_stage: agentOutcome.stage,
         approval: approvalTrace,
         requests: facts.observations.length,
-        ...servedBudget(facts.observations),
+        ...servedBudget(facts.observations, isHarness),
         // Where the agent's requests went (route shape and status class only).
         request_histogram: Object.entries(
           facts.observations.reduce((counts, o) => {
-            const key = `${o.method} ${o.path
-              .replace(/\/(S|W|P|F|C)-[A-Z0-9@-]+/g, "/$1-…")
-              .replace(/ASIMP-EN-[A-Z0-9]+/, "ASIMP-EN-…")} ${Math.floor(o.status / 100)}xx`;
+            const key = `${o.method} ${
+              isHarness
+                ? retainedRouteTemplate(o.path)
+                : o.path
+                    .replace(/\/(S|W|P|F|C)-[A-Z0-9@-]+/g, "/$1-…")
+                    .replace(/ASIMP-EN-[A-Z0-9]+/, "ASIMP-EN-…")
+            } ${Math.floor(o.status / 100)}xx`;
             counts[key] = (counts[key] ?? 0) + 1;
             return counts;
           }, {}),
@@ -731,15 +747,17 @@ async function main() {
           .filter((o) => o.status >= 400)
           .map((o) => ({
             method: o.method,
-            route: o.path
-              .replace(/\/(S|W|P|F|C)-[A-Z0-9-]+/g, "/$1-…")
-              .replace(/ASIMP-EN-[A-Z0-9]+/, "ASIMP-EN-…"),
+            route: isHarness
+              ? retainedRouteTemplate(o.path)
+              : o.path
+                  .replace(/\/(S|W|P|F|C)-[A-Z0-9-]+/g, "/$1-…")
+                  .replace(/ASIMP-EN-[A-Z0-9]+/, "ASIMP-EN-…"),
             status: o.status,
             code: o.code,
             injected: o.injected === true,
           })),
         face_claim_keys: faceClaimKeys,
-        ...(faceSample ? { face_sample: faceSample } : {}),
+        ...(faceSample && !isHarness ? { face_sample: faceSample } : {}),
       };
       results.push(record);
       emit(record);
