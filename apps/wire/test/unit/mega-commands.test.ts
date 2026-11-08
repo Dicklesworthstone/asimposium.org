@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import {
   EnrollmentHelloResponseSchema,
   type NextMoveCandidate,
+  ProblemGovernanceEventSchema,
   ProblemNextResponseSchema,
   ProtocolAckResponseSchema,
   TriageResponseSchema,
@@ -18,10 +19,12 @@ import {
   EnrollmentService,
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
+import { genesisChainDigest, writeLedgerEvent } from "../../src/krater/krater.ts";
 import {
   ContractFixtureMovesProvider,
   PROMOTION_MOVE_KINDS,
 } from "../../src/mega-commands/provider.ts";
+import { normHash } from "../../src/split/policy.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 
@@ -203,6 +206,81 @@ async function createTestHarness(options: { movesProvider?: any } = {}) {
       .run();
   }
 
+  // The two production-selector scenarios start with an active empty board.
+  // Its routing row alone is not evidence of a published scientific problem:
+  // construct the version and record its admission through the real writer.
+  // This remains unit setup, not proof of publication or statement-review admission.
+  async function seedPublishedProblem(problemId: string, title: string, author: FixtureFellow) {
+    await seedProblem(problemId, title);
+    const now = new Date().toISOString();
+    const formulation = {
+      statement: "Every finite tree has one fewer edge than vertices.",
+      falsifier: "A finite tree whose number of edges is not one less than its vertex count.",
+      motivation: "Establish the finite counting invariant before generalizing it.",
+    };
+    await db
+      .prepare("UPDATE problems SET chain_version=2,chain_digest=? WHERE id=?")
+      .bind(await genesisChainDigest(problemId), problemId)
+      .run();
+    await db
+      .prepare(`INSERT INTO krater_integrity_backfill
+      (problem_id,state,legacy_event_count,completed_at,chain_version) VALUES(?,'complete',0,?,2)`)
+      .bind(problemId, now)
+      .run();
+    await db
+      .prepare(`INSERT INTO problem_statement_versions
+      (problem_id,version,statement,norm_hash,falsifier,motivation,created_at)
+      VALUES(?,1,?,?,?,?,?)`)
+      .bind(
+        problemId,
+        formulation.statement,
+        `sha256:${await normHash(formulation.statement)}`,
+        formulation.falsifier,
+        formulation.motivation,
+        now,
+      )
+      .run();
+    const publication = ProblemGovernanceEventSchema.parse({
+      action: "publish",
+      previous_status: "private-draft",
+      previous_statement_version: 1,
+      source_fellow_id: author.fellowId,
+      acting_principal: { type: "sponsor", id: author.sponsorId },
+      problem: {
+        id: problemId,
+        title,
+        status: "sharpening",
+        current_statement_version: 1,
+        ...formulation,
+        updated_at: now,
+      },
+    });
+    await writeLedgerEvent(
+      db,
+      {
+        problemId,
+        eventId: `PG-${problemId}`,
+        idempotencyKey: `fixture-admission-${problemId}`,
+        requestDigest: sha256Hex(JSON.stringify(publication)),
+        eventType: "problem.admitted",
+        objectKind: "problem",
+        objectId: problemId,
+        objectVersion: 1,
+        payloadJson: JSON.stringify(publication),
+        createdAt: now,
+        attribution: {
+          principalType: "sponsor",
+          sponsorId: author.sponsorId,
+          fellowId: null,
+          sessionId: null,
+          modelSelfDeclared: null,
+          harness: null,
+        },
+      },
+      { statementsAfterEvent: () => [] },
+    );
+  }
+
   // Helper to add problem membership
   async function seedMembership(problemId: string, fellowId: string, role: string) {
     await db
@@ -220,6 +298,7 @@ async function createTestHarness(options: { movesProvider?: any } = {}) {
     service,
     enrollFellow,
     seedProblem,
+    seedPublishedProblem,
     seedMembership,
   };
 }
@@ -464,9 +543,10 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
   });
 
   test("GET /v1/triage returns hello and a real first-claim move for an empty board", async () => {
-    const { app, env, enrollFellow, seedProblem, seedMembership } = await createTestHarness();
+    const { app, env, enrollFellow, seedPublishedProblem, seedMembership } =
+      await createTestHarness();
     const fellow = await enrollFellow();
-    await seedProblem("P-TRIAGE1", "Triage Problem");
+    await seedPublishedProblem("P-TRIAGE1", "Triage Problem", fellow);
     await seedMembership("P-TRIAGE1", fellow.fellowId, "contributor");
 
     const res = await app.fetch(
@@ -576,9 +656,10 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
   });
 
   test("GET /v1/p/:id/next production default returns a workshop-first claim contract", async () => {
-    const { app, env, enrollFellow, seedProblem, seedMembership } = await createTestHarness();
+    const { app, env, enrollFellow, seedPublishedProblem, seedMembership } =
+      await createTestHarness();
     const fellow = await enrollFellow();
-    await seedProblem("P-PROD1", "Production Moves Problem");
+    await seedPublishedProblem("P-PROD1", "Production Moves Problem", fellow);
     await seedMembership("P-PROD1", fellow.fellowId, "contributor");
 
     const res = await app.fetch(

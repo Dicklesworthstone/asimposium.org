@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { AreaSlugSchema } from "./discovery.ts";
 import { FellowLifecycleStatusSchema, SponsorIdSchema } from "./enrollment.ts";
+import { completeProblemBoundaries, OptionalProblemBoundaryFields } from "./problem-boundaries.ts";
 import {
   ProblemNoClaimBoundarySchema,
   ProblemResolutionDirectionSchema,
@@ -8,6 +9,11 @@ import {
 import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 import { SynthesisIdSchema } from "./syntheses.ts";
 
+export {
+  PROBLEM_STATEMENT_BOUNDARY_MAX_LENGTH,
+  type ProblemStatementBoundaries,
+  ProblemStatementBoundariesSchema,
+} from "./problem-boundaries.ts";
 export {
   PROBLEM_RESOLUTION_DIRECTIONS,
   type ProblemNoClaimBoundary,
@@ -111,18 +117,21 @@ export const ProblemResolutionRecordSchema = z
 export type ProblemResolutionRecord = z.infer<typeof ProblemResolutionRecordSchema>;
 
 /** Problem statement versions S@1 -> S@n+1 (Fable §6.2, Rule P9). */
-export const ProblemStatementVersionSchema = z
-  .object({
-    problem_id: PublicLedgerProblemIdSchema,
-    version: z.number().int().positive(),
-    statement: z.string().min(1).max(8192),
-    norm_hash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-    falsifier: z.string().min(1).max(8192),
-    motivation: z.string().min(1).max(8192),
-    steward_accepted_by: z.string().min(1).max(128).optional(),
-    created_at: ProblemIndexTimestampSchema,
-  })
-  .strict();
+export const ProblemStatementVersionSchema = completeProblemBoundaries(
+  z
+    .object({
+      problem_id: PublicLedgerProblemIdSchema,
+      version: z.number().int().positive(),
+      statement: z.string().min(1).max(8192),
+      norm_hash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+      falsifier: z.string().min(1).max(8192),
+      motivation: z.string().min(1).max(8192),
+      ...OptionalProblemBoundaryFields,
+      steward_accepted_by: z.string().min(1).max(128).optional(),
+      created_at: ProblemIndexTimestampSchema,
+    })
+    .strict(),
+);
 
 export type ProblemStatementVersion = z.infer<typeof ProblemStatementVersionSchema>;
 
@@ -134,22 +143,25 @@ export type SponsorProblemBriefStatus = z.infer<typeof SponsorProblemBriefStatus
  * Sponsor problem-intent / governance brief (Fable §6.2, A2/A3/ADR-7).
  * Private to the sponsor and assigned fellow; never enters public packs or search.
  */
-export const SponsorProblemBriefSchema = z
-  .object({
-    id: z.string().min(1).max(128),
-    sponsor_id: SponsorIdSchema,
-    assigned_fellow_id: z.string().min(1).max(128).optional(),
-    title: z.string().min(1).max(120),
-    statement: z.string().min(1).max(8192),
-    falsifier: z.string().min(1).max(8192),
-    motivation: z.string().min(1).max(8192),
-    areas: z.array(AreaSlugSchema).min(1).max(32),
-    famous_guardrail: ProblemFamousGuardrailSchema.optional(),
-    status: SponsorProblemBriefStatusSchema,
-    created_at: ProblemIndexTimestampSchema,
-    updated_at: ProblemIndexTimestampSchema,
-  })
-  .strict();
+export const SponsorProblemBriefSchema = completeProblemBoundaries(
+  z
+    .object({
+      id: z.string().min(1).max(128),
+      sponsor_id: SponsorIdSchema,
+      assigned_fellow_id: z.string().min(1).max(128).optional(),
+      title: z.string().min(1).max(120),
+      statement: z.string().min(1).max(8192),
+      falsifier: z.string().min(1).max(8192),
+      motivation: z.string().min(1).max(8192),
+      ...OptionalProblemBoundaryFields,
+      areas: z.array(AreaSlugSchema).min(1).max(32),
+      famous_guardrail: ProblemFamousGuardrailSchema.optional(),
+      status: SponsorProblemBriefStatusSchema,
+      created_at: ProblemIndexTimestampSchema,
+      updated_at: ProblemIndexTimestampSchema,
+    })
+    .strict(),
+);
 
 export type SponsorProblemBrief = z.infer<typeof SponsorProblemBriefSchema>;
 
@@ -318,24 +330,27 @@ export type ProblemAccessActionReceipt = z.infer<typeof ProblemAccessActionRecei
 /** Private, signed sponsor read of the exact draft proposed for publication. */
 export const ProblemPublicationPreviewSchema = z
   .object({
-    problem: z
-      .object({
-        id: PublicLedgerProblemIdSchema,
-        title: z.string().min(1).max(120),
-        status: z.literal("private-draft"),
-        unlisted: z.boolean(),
-        current_statement_version: z.number().int().positive(),
-        statement: z.string().min(1).max(8192),
-        falsifier: z.string().min(1).max(8192),
-        motivation: z.string().min(1).max(8192),
-        areas: z.array(AreaSlugSchema).max(32),
-        famous_guardrail: ProblemFamousGuardrailSchema.nullable(),
-        admission_mode: ProblemAdmissionModeSchema,
-        publication_admission_mode: ProblemAdmissionModeSchema,
-        writer_cap: z.number().int().positive().nullable(),
-        stewards: z.array(SponsorIdSchema),
-      })
-      .strict(),
+    problem: completeProblemBoundaries(
+      z
+        .object({
+          id: PublicLedgerProblemIdSchema,
+          title: z.string().min(1).max(120),
+          status: z.literal("private-draft"),
+          unlisted: z.boolean(),
+          current_statement_version: z.number().int().positive(),
+          statement: z.string().min(1).max(8192),
+          falsifier: z.string().min(1).max(8192),
+          motivation: z.string().min(1).max(8192),
+          ...OptionalProblemBoundaryFields,
+          areas: z.array(AreaSlugSchema).max(32),
+          famous_guardrail: ProblemFamousGuardrailSchema.nullable(),
+          admission_mode: ProblemAdmissionModeSchema,
+          publication_admission_mode: ProblemAdmissionModeSchema,
+          writer_cap: z.number().int().positive().nullable(),
+          stewards: z.array(SponsorIdSchema),
+        })
+        .strict(),
+    ),
     author: z
       .object({
         fellow_id: z.string().min(1).max(128),
@@ -358,52 +373,61 @@ export type ProblemPublicationPreview = z.infer<typeof ProblemPublicationPreview
  */
 export const ProblemPublicationResponseSchema = z
   .object({
-    problem: z
-      .object({
-        id: PublicLedgerProblemIdSchema,
-        title: z.string().min(1).max(120),
-        status: ProblemStatusSchema,
-        current_statement_version: z.number().int().positive(),
-        statement: z.string().min(1).max(8192).optional(),
-        falsifier: z.string().min(1).max(8192).optional(),
-        motivation: z.string().min(1).max(8192).optional(),
-        updated_at: ProblemIndexTimestampSchema,
-      })
-      .strict(),
+    problem: completeProblemBoundaries(
+      z
+        .object({
+          id: PublicLedgerProblemIdSchema,
+          title: z.string().min(1).max(120),
+          status: ProblemStatusSchema,
+          current_statement_version: z.number().int().positive(),
+          statement: z.string().min(1).max(8192).optional(),
+          falsifier: z.string().min(1).max(8192).optional(),
+          motivation: z.string().min(1).max(8192).optional(),
+          ...OptionalProblemBoundaryFields,
+          updated_at: ProblemIndexTimestampSchema,
+        })
+        .strict(),
+    ),
   })
   .strict();
 export type ProblemPublicationResponse = z.infer<typeof ProblemPublicationResponseSchema>;
 
 /** Fellow problem proposal: POST /v1/problems (propose-problems scope). */
-export const ProposeProblemRequestSchema = z
-  .object({
-    brief_id: z.string().min(1).max(128).optional(),
-    title: z.string().min(1).max(120),
-    statement: z.string().min(1).max(8192),
-    falsifier: z.string().min(1).max(8192),
-    motivation: z.string().min(1).max(8192),
-    areas: z.array(AreaSlugSchema).min(1).max(32),
-    famous_guardrail: ProblemFamousGuardrailSchema.optional(),
-    distinct_because: z.string().min(1).max(2048).optional(),
-    unlisted: z.boolean().optional(),
-  })
-  .strict();
+export const ProposeProblemRequestSchema = completeProblemBoundaries(
+  z
+    .object({
+      brief_id: z.string().min(1).max(128).optional(),
+      title: z.string().min(1).max(120),
+      statement: z.string().min(1).max(8192),
+      falsifier: z.string().min(1).max(8192),
+      motivation: z.string().min(1).max(8192),
+      ...OptionalProblemBoundaryFields,
+      areas: z.array(AreaSlugSchema).min(1).max(32),
+      famous_guardrail: ProblemFamousGuardrailSchema.optional(),
+      distinct_because: z.string().min(1).max(2048).optional(),
+      unlisted: z.boolean().optional(),
+    })
+    .strict(),
+);
 
 export type ProposeProblemRequest = z.infer<typeof ProposeProblemRequestSchema>;
 
 /** Sponsor problem brief save/update: POST /v1/sponsors/problem-briefs. */
-export const SaveProblemBriefRequestSchema = z
-  .object({
-    id: z.string().min(1).max(128).optional(),
-    assigned_fellow_id: z.string().min(1).max(128).optional(),
-    title: z.string().min(1).max(120),
-    statement: z.string().min(1).max(8192),
-    falsifier: z.string().min(1).max(8192),
-    motivation: z.string().min(1).max(8192),
-    areas: z.array(AreaSlugSchema).min(1).max(32),
-    famous_guardrail: ProblemFamousGuardrailSchema.optional(),
-  })
-  .strict();
+export const SaveProblemBriefRequestSchema = completeProblemBoundaries(
+  z
+    .object({
+      id: z.string().min(1).max(128).optional(),
+      assigned_fellow_id: z.string().min(1).max(128).optional(),
+      title: z.string().min(1).max(120),
+      statement: z.string().min(1).max(8192),
+      falsifier: z.string().min(1).max(8192),
+      motivation: z.string().min(1).max(8192),
+      ...OptionalProblemBoundaryFields,
+      areas: z.array(AreaSlugSchema).min(1).max(32),
+      famous_guardrail: ProblemFamousGuardrailSchema.optional(),
+    })
+    .strict(),
+);
 
 export type SaveProblemBriefRequest = z.infer<typeof SaveProblemBriefRequestSchema>;
 
@@ -416,14 +440,17 @@ export const ProblemLifecycleActionRequestSchema = z.discriminatedUnion("action"
       reviewed_digest: z.string().regex(/^[a-f0-9]{64}$/),
     })
     .strict(),
-  z
-    .object({
-      action: z.literal("revise-statement"),
-      statement: z.string().min(1).max(8192),
-      falsifier: z.string().min(1).max(8192),
-      motivation: z.string().min(1).max(8192),
-    })
-    .strict(),
+  completeProblemBoundaries(
+    z
+      .object({
+        action: z.literal("revise-statement"),
+        statement: z.string().min(1).max(8192),
+        falsifier: z.string().min(1).max(8192),
+        motivation: z.string().min(1).max(8192),
+        ...OptionalProblemBoundaryFields,
+      })
+      .strict(),
+  ),
   z
     .object({
       action: z.literal("enter-result-review"),
@@ -478,15 +505,18 @@ export const ProblemLifecycleActionRequestSchema = z.discriminatedUnion("action"
       claim_mapping: z.record(z.string(), z.string()).optional(),
     })
     .strict(),
-  z
-    .object({
-      action: z.literal("fork"),
-      title: z.string().min(1).max(120),
-      statement: z.string().min(1).max(8192).optional(),
-      falsifier: z.string().min(1).max(8192).optional(),
-      motivation: z.string().min(1).max(8192).optional(),
-    })
-    .strict(),
+  completeProblemBoundaries(
+    z
+      .object({
+        action: z.literal("fork"),
+        title: z.string().min(1).max(120),
+        statement: z.string().min(1).max(8192).optional(),
+        falsifier: z.string().min(1).max(8192).optional(),
+        motivation: z.string().min(1).max(8192).optional(),
+        ...OptionalProblemBoundaryFields,
+      })
+      .strict(),
+  ),
 ]);
 
 export type ProblemLifecycleActionRequest = z.infer<typeof ProblemLifecycleActionRequestSchema>;
@@ -500,7 +530,7 @@ export {
 };
 
 /** Canonical problem representation. */
-export const ProblemDetailSchema = z
+const ProblemDetailObjectSchema = z
   .object({
     id: PublicLedgerProblemIdSchema,
     title: z.string().min(1).max(120),
@@ -514,6 +544,7 @@ export const ProblemDetailSchema = z
     statement: z.string().min(1).max(8192),
     falsifier: z.string().min(1).max(8192),
     motivation: z.string().min(1).max(8192),
+    ...OptionalProblemBoundaryFields,
     areas: z.array(AreaSlugSchema).max(32),
     famous_guardrail: ProblemFamousGuardrailSchema.optional(),
     resolution: ProblemResolutionRecordSchema.optional(),
@@ -527,6 +558,7 @@ export const ProblemDetailSchema = z
     updated_at: ProblemIndexTimestampSchema,
   })
   .strict();
+export const ProblemDetailSchema = completeProblemBoundaries(ProblemDetailObjectSchema);
 
 export type ProblemDetail = z.infer<typeof ProblemDetailSchema>;
 
@@ -536,15 +568,21 @@ const PublicGovernanceStatusSchema = z.enum([
   "dormant",
   "under-result-review",
 ]);
-const GovernanceFormulationSchema = ProblemDetailSchema.pick({
+const GovernanceFormulationSchema = ProblemDetailObjectSchema.pick({
   id: true,
   title: true,
   current_statement_version: true,
   statement: true,
   falsifier: true,
   motivation: true,
+  scope: true,
+  out_of_scope: true,
+  success_criteria: true,
   updated_at: true,
 });
+function governanceFormulation<T extends z.ZodRawShape>(shape: T) {
+  return completeProblemBoundaries(GovernanceFormulationSchema.extend(shape));
+}
 const GovernanceRecordSchema = z
   .object({
     acting_principal: z.object({ type: z.literal("sponsor"), id: SponsorIdSchema }).strict(),
@@ -555,7 +593,7 @@ const GovernanceRecordSchema = z
 
 export const ProblemResultReviewResponseSchema = z
   .object({
-    problem: GovernanceFormulationSchema.extend({
+    problem: governanceFormulation({
       status: z.literal("under-result-review"),
       result_claim: ClaimDependencyPinSchema,
     }),
@@ -563,7 +601,7 @@ export const ProblemResultReviewResponseSchema = z
   .strict();
 export type ProblemResultReviewResponse = z.infer<typeof ProblemResultReviewResponseSchema>;
 
-const ResolvedProblemSchema = GovernanceFormulationSchema.extend({
+const ResolvedProblemSchema = governanceFormulation({
   status: z.literal("resolved"),
   result_claim: ClaimDependencyPinSchema,
   resolution_direction: ProblemResolutionDirectionSchema,
@@ -583,7 +621,7 @@ export const ProblemGovernanceEventSchema = z
     GovernanceRecordSchema.extend({
       action: z.literal("publish"),
       previous_status: z.literal("private-draft"),
-      problem: GovernanceFormulationSchema.extend({
+      problem: governanceFormulation({
         status: z.literal("sharpening"),
         // Rule A6 (48js): facts set before publication that the log otherwise
         // lacks, so a restore can rebuild the public problem. Optional: events
@@ -640,12 +678,12 @@ export const ProblemGovernanceEventSchema = z
     GovernanceRecordSchema.extend({
       action: z.literal("revise-statement"),
       previous_status: PublicGovernanceStatusSchema,
-      problem: GovernanceFormulationSchema.extend({ status: PublicGovernanceStatusSchema }),
+      problem: governanceFormulation({ status: PublicGovernanceStatusSchema }),
     }),
     GovernanceRecordSchema.extend({
       action: z.literal("enter-result-review"),
       previous_status: z.enum(["active", "dormant"]),
-      problem: GovernanceFormulationSchema.extend({
+      problem: governanceFormulation({
         status: z.literal("under-result-review"),
         // Retained pre-binding events remain readable but confer no result identity.
         result_claim: ClaimDependencyPinSchema.optional(),
@@ -659,7 +697,7 @@ export const ProblemGovernanceEventSchema = z
     GovernanceRecordSchema.extend({
       action: z.literal("retire"),
       previous_status: PublicGovernanceStatusSchema,
-      problem: GovernanceFormulationSchema.extend({
+      problem: governanceFormulation({
         status: z.literal("retired"),
         resolution_summary: z.string().min(1).max(2048),
       }),
@@ -667,7 +705,7 @@ export const ProblemGovernanceEventSchema = z
     GovernanceRecordSchema.extend({
       action: z.literal("set-admission-mode"),
       previous_status: ProblemStatusSchema,
-      problem: GovernanceFormulationSchema.extend({
+      problem: governanceFormulation({
         status: ProblemStatusSchema,
         admission_mode: ProblemAdmissionModeSchema,
       }),
@@ -677,7 +715,7 @@ export const ProblemGovernanceEventSchema = z
       operation: z.enum(["add", "transfer", "remove"]),
       target_sponsor_id: SponsorIdSchema,
       previous_status: ProblemStatusSchema,
-      problem: GovernanceFormulationSchema.extend({ status: ProblemStatusSchema }),
+      problem: governanceFormulation({ status: ProblemStatusSchema }),
     }),
     GovernanceRecordSchema.extend({
       action: z.literal("manage-member"),
@@ -685,12 +723,12 @@ export const ProblemGovernanceEventSchema = z
       target_fellow_id: z.string().min(1).max(128),
       role: z.enum(["observer", "contributor"]).optional(),
       previous_status: ProblemStatusSchema,
-      problem: GovernanceFormulationSchema.extend({ status: ProblemStatusSchema }),
+      problem: governanceFormulation({ status: ProblemStatusSchema }),
     }),
     GovernanceRecordSchema.extend({
       action: z.literal("set-writer-cap"),
       previous_status: ProblemStatusSchema,
-      problem: GovernanceFormulationSchema.extend({
+      problem: governanceFormulation({
         status: ProblemStatusSchema,
         writer_cap: z.number().int().positive().nullable().optional(),
       }),
@@ -700,7 +738,7 @@ export const ProblemGovernanceEventSchema = z
       canonical_problem_id: PublicLedgerProblemIdSchema,
       claim_mapping: z.record(z.string(), z.string()).optional(),
       previous_status: ProblemStatusSchema,
-      problem: GovernanceFormulationSchema.extend({
+      problem: governanceFormulation({
         status: z.literal("retired"),
         canonical_problem_id: PublicLedgerProblemIdSchema.optional(),
         resolution_summary: z.string().min(1).max(2048).optional(),
@@ -712,7 +750,7 @@ export const ProblemGovernanceEventSchema = z
       parent_problem_id: PublicLedgerProblemIdSchema,
       parent_cursor: z.number().int().min(0),
       previous_status: ProblemStatusSchema,
-      problem: GovernanceFormulationSchema.extend({
+      problem: governanceFormulation({
         status: ProblemStatusSchema,
       }),
     }),

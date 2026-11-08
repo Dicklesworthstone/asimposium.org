@@ -59,6 +59,7 @@ import {
   type ProblemAccessAction,
   problemAccessActionReceipt,
 } from "./access-actions.ts";
+import { problemBoundariesRequired, problemBoundaryFields } from "./boundaries.ts";
 import {
   loadProblemPublicationSnapshot,
   type ProblemPublicationSnapshot,
@@ -538,6 +539,14 @@ export async function applyPublicProblemGovernance(
     // global public-change counter. The transaction below freezes this head.
     parentCursor = problem.public_seq;
     lineageGuard = lineageFormulationGuard(forkSource, false);
+    if (
+      forkSource.problem.scope !== undefined &&
+      action.scope === undefined &&
+      (["statement", "falsifier", "motivation"] as const).some(
+        (field) => action[field] !== undefined && action[field] !== forkSource?.problem[field],
+      )
+    )
+      return problemBoundariesRequired();
     forkedProblemId = `P-${crypto.randomUUID().replaceAll("-", "").slice(0, 26).toUpperCase()}`;
   }
 
@@ -619,6 +628,36 @@ export async function applyPublicProblemGovernance(
     resultDisclosureLineage = disclosure.lineage_digest;
   }
 
+  if (revising && action.scope === undefined) {
+    const previousBoundaries = await db
+      .prepare("SELECT scope FROM problem_statement_versions WHERE problem_id = ? AND version = ?")
+      .bind(problem.id, problem.current_statement_version)
+      .first<{ scope: string | null }>();
+    if (previousBoundaries?.scope != null) return problemBoundariesRequired();
+  }
+
+  // Ordinary governance records carry the whole current formulation. Read its
+  // verified publication, never retained projections that may contain lawfully
+  // withdrawn bytes. Replay above remains the exact already committed outcome.
+  const copiesCurrentFormulation = !revising && !publishing && !resolution && !forkSource;
+  const currentFormulation = copiesCurrentFormulation
+    ? await readPublishedProblemFormulation(db, problem.id, problem.public_seq)
+    : undefined;
+  if (
+    copiesCurrentFormulation &&
+    (currentFormulation === undefined ||
+      currentFormulation.problem.current_statement_version !== problem.current_statement_version)
+  )
+    return refusal(
+      "OBJECT_VERSION_CONFLICT",
+      409,
+      "This governance action cannot copy an unavailable current problem formulation.",
+      "Read the current public problem. Restore availability through the appropriate content-control process, or deliberately author a complete new statement version before retrying.",
+    );
+  const currentFormulationGuard = currentFormulation
+    ? lineageFormulationGuard(currentFormulation, false)
+    : undefined;
+
   const formulation = revising
     ? action
     : resolution
@@ -630,23 +669,11 @@ export async function applyPublicProblemGovernance(
               statement: reviewedPublication.row.statement,
               falsifier: reviewedPublication.row.falsifier,
               motivation: reviewedPublication.row.motivation,
+              ...problemBoundaryFields(reviewedPublication.row),
               created_at: reviewedPublication.row.statement_created_at,
               steward_accepted_by: reviewedPublication.row.statement_steward,
             }
-          : await db
-              .prepare(`
-    SELECT statement, falsifier, motivation, created_at, steward_accepted_by
-    FROM problem_statement_versions
-    WHERE problem_id = ? AND version = ?
-  `)
-              .bind(problem.id, problem.current_statement_version)
-              .first<{
-                statement: string;
-                falsifier: string;
-                motivation: string;
-                created_at: string;
-                steward_accepted_by: string | null;
-              }>();
+          : currentFormulation?.problem;
 
   // 5oyj: the governance state publication leaves behind (the writes below:
   // the publishing sponsor joins the stewards if absent, and a listed
@@ -706,7 +733,11 @@ export async function applyPublicProblemGovernance(
     previous_statement_version: problem.current_statement_version,
     problem: {
       id: problem.id,
-      title: resolution?.formulation.title ?? problem.title,
+      title:
+        resolution?.formulation.title ??
+        forkSource?.problem.title ??
+        currentFormulation?.problem.title ??
+        problem.title,
       status: publishing
         ? "sharpening"
         : action.action === "enter-result-review"
@@ -720,6 +751,7 @@ export async function applyPublicProblemGovernance(
       statement: formulation?.statement,
       falsifier: formulation?.falsifier,
       motivation: formulation?.motivation,
+      ...problemBoundaryFields(formulation),
       ...(action.action === "retire" ? { resolution_summary: action.reason } : {}),
       ...(resolution
         ? {
@@ -884,6 +916,7 @@ export async function applyPublicProblemGovernance(
         AND EXISTS (SELECT 1 FROM public_cursor WHERE singleton = 1 AND cursor < 9007199254740991)
         ${action.action === "fork" ? "AND (SELECT MAX(seq) FROM events WHERE problem_id = ?) = ?" : ""}
         ${lineageGuard?.sql ?? ""}
+        ${currentFormulationGuard?.sql ?? ""}
         ${publishing ? "AND created_by_fellow_id = ? AND EXISTS (SELECT 1 FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active')" : ""}
         ${publicationGuard?.sql ?? ""}
         ${
@@ -937,6 +970,7 @@ export async function applyPublicProblemGovernance(
           problem.title,
           ...(action.action === "fork" ? [problem.id, parentCursor] : []),
           ...(lineageGuard?.bindings ?? []),
+          ...(currentFormulationGuard?.bindings ?? []),
           ...(publishing && problem.created_by_fellow_id
             ? [problem.created_by_fellow_id, problem.created_by_fellow_id]
             : []),
@@ -1000,8 +1034,9 @@ export async function applyPublicProblemGovernance(
               db
                 .prepare(`
                   INSERT INTO problem_statement_versions
-                    (problem_id, version, statement, norm_hash, falsifier, motivation, steward_accepted_by, created_at)
-                  SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
+                    (problem_id, version, statement, norm_hash, falsifier, motivation,
+                     scope, out_of_scope, success_criteria, steward_accepted_by, created_at)
+                  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
                 `)
                 .bind(
                   problem.id,
@@ -1010,6 +1045,9 @@ export async function applyPublicProblemGovernance(
                   statementHash,
                   next.falsifier,
                   next.motivation,
+                  next.scope ?? null,
+                  next.out_of_scope ?? null,
+                  next.success_criteria ?? null,
                   sponsorId,
                   now,
                   eventId,
@@ -1160,6 +1198,9 @@ export async function applyPublicProblemGovernance(
             const forkStatement = action.statement ?? formulation?.statement ?? "";
             const forkFalsifier = action.falsifier ?? formulation?.falsifier ?? "";
             const forkMotivation = action.motivation ?? formulation?.motivation ?? "";
+            const forkBoundaries = problemBoundaryFields(
+              action.scope === undefined ? formulation : action,
+            );
             const forkHash = `sha256:${await normHash(forkStatement)}`;
             const genesis = await genesisChainDigest(forkedProblemId);
 
@@ -1191,8 +1232,8 @@ export async function applyPublicProblemGovernance(
                 .prepare(`
                   INSERT INTO problem_statement_versions (
                     problem_id, version, statement, norm_hash, falsifier, motivation,
-                    steward_accepted_by, created_at
-                  ) SELECT ?, 1, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
+                    scope, out_of_scope, success_criteria, steward_accepted_by, created_at
+                  ) SELECT ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
                 `)
                 .bind(
                   forkedProblemId,
@@ -1200,6 +1241,9 @@ export async function applyPublicProblemGovernance(
                   forkHash,
                   forkFalsifier,
                   forkMotivation,
+                  forkBoundaries.scope ?? null,
+                  forkBoundaries.out_of_scope ?? null,
+                  forkBoundaries.success_criteria ?? null,
                   sponsorId,
                   now,
                   eventId,

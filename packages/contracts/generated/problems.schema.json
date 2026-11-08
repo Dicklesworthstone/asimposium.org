@@ -211,6 +211,24 @@
               "minLength": 1,
               "maxLength": 8192
             },
+            "scope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
+            "out_of_scope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
+            "success_criteria": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
             "updated_at": {
               "type": "string",
               "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
@@ -366,7 +384,21 @@
             "resolution_no_claim_boundary",
             "closing_synthesis"
           ],
-          "additionalProperties": false
+          "additionalProperties": false,
+          "dependentRequired": {
+            "scope": [
+              "out_of_scope",
+              "success_criteria"
+            ],
+            "out_of_scope": [
+              "scope",
+              "success_criteria"
+            ],
+            "success_criteria": [
+              "scope",
+              "out_of_scope"
+            ]
+          }
         }
       },
       "required": [
@@ -409,6 +441,24 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 8192
+            },
+            "scope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
+            "out_of_scope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
+            "success_criteria": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
             },
             "updated_at": {
               "type": "string",
@@ -465,7 +515,21 @@
             "status",
             "result_claim"
           ],
-          "additionalProperties": false
+          "additionalProperties": false,
+          "dependentRequired": {
+            "scope": [
+              "out_of_scope",
+              "success_criteria"
+            ],
+            "out_of_scope": [
+              "scope",
+              "success_criteria"
+            ],
+            "success_criteria": [
+              "scope",
+              "out_of_scope"
+            ]
+          }
         }
       },
       "required": [
@@ -505,6 +569,24 @@
           "minLength": 1,
           "maxLength": 8192
         },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "out_of_scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "success_criteria": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
         "steward_accepted_by": {
           "type": "string",
           "minLength": 1,
@@ -524,7 +606,21 @@
         "motivation",
         "created_at"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "dependentRequired": {
+        "scope": [
+          "out_of_scope",
+          "success_criteria"
+        ],
+        "out_of_scope": [
+          "scope",
+          "success_criteria"
+        ],
+        "success_criteria": [
+          "scope",
+          "out_of_scope"
+        ]
+      }
     },
     "brief": {
       "type": "object",
@@ -569,6 +665,24 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 8192
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "out_of_scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "success_criteria": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
         },
         "areas": {
           "minItems": 1,
@@ -670,7 +784,21 @@
         "created_at",
         "updated_at"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "dependentRequired": {
+        "scope": [
+          "out_of_scope",
+          "success_criteria"
+        ],
+        "out_of_scope": [
+          "scope",
+          "success_criteria"
+        ],
+        "success_criteria": [
+          "scope",
+          "out_of_scope"
+        ]
+      }
     },
     "propose_request": {
       "type": "object",
@@ -699,6 +827,24 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 8192
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "out_of_scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "success_criteria": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
         },
         "areas": {
           "minItems": 1,
@@ -787,7 +933,21 @@
         "motivation",
         "areas"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "dependentRequired": {
+        "scope": [
+          "out_of_scope",
+          "success_criteria"
+        ],
+        "out_of_scope": [
+          "scope",
+          "success_criteria"
+        ],
+        "success_criteria": [
+          "scope",
+          "out_of_scope"
+        ]
+      }
     },
     "save_brief_request": {
       "type": "object",
@@ -821,6 +981,24 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 8192
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "out_of_scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "success_criteria": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
         },
         "areas": {
           "minItems": 1,
@@ -901,7 +1079,21 @@
         "motivation",
         "areas"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "dependentRequired": {
+        "scope": [
+          "out_of_scope",
+          "success_criteria"
+        ],
+        "out_of_scope": [
+          "scope",
+          "success_criteria"
+        ],
+        "success_criteria": [
+          "scope",
+          "out_of_scope"
+        ]
+      }
     },
     "publication_preview": {
       "type": "object",
@@ -945,6 +1137,24 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 8192
+            },
+            "scope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
+            "out_of_scope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
+            "success_criteria": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
             },
             "areas": {
               "maxItems": 32,
@@ -1084,7 +1294,21 @@
             "writer_cap",
             "stewards"
           ],
-          "additionalProperties": false
+          "additionalProperties": false,
+          "dependentRequired": {
+            "scope": [
+              "out_of_scope",
+              "success_criteria"
+            ],
+            "out_of_scope": [
+              "scope",
+              "success_criteria"
+            ],
+            "success_criteria": [
+              "scope",
+              "out_of_scope"
+            ]
+          }
         },
         "author": {
           "type": "object",
@@ -1614,6 +1838,24 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 8192
+            },
+            "scope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
+            "out_of_scope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
+            "success_criteria": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
             }
           },
           "required": [
@@ -1622,7 +1864,21 @@
             "falsifier",
             "motivation"
           ],
-          "additionalProperties": false
+          "additionalProperties": false,
+          "dependentRequired": {
+            "scope": [
+              "out_of_scope",
+              "success_criteria"
+            ],
+            "out_of_scope": [
+              "scope",
+              "success_criteria"
+            ],
+            "success_criteria": [
+              "scope",
+              "out_of_scope"
+            ]
+          }
         },
         {
           "type": "object",
@@ -1943,13 +2199,45 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 8192
+            },
+            "scope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
+            "out_of_scope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
+            "success_criteria": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
             }
           },
           "required": [
             "action",
             "title"
           ],
-          "additionalProperties": false
+          "additionalProperties": false,
+          "dependentRequired": {
+            "scope": [
+              "out_of_scope",
+              "success_criteria"
+            ],
+            "out_of_scope": [
+              "scope",
+              "success_criteria"
+            ],
+            "success_criteria": [
+              "scope",
+              "out_of_scope"
+            ]
+          }
         }
       ]
     },
@@ -2324,6 +2612,24 @@
           "minLength": 1,
           "maxLength": 8192
         },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "out_of_scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "success_criteria": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
         "areas": {
           "maxItems": 32,
           "type": "array",
@@ -2611,7 +2917,21 @@
         "created_at",
         "updated_at"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "dependentRequired": {
+        "scope": [
+          "out_of_scope",
+          "success_criteria"
+        ],
+        "out_of_scope": [
+          "scope",
+          "success_criteria"
+        ],
+        "success_criteria": [
+          "scope",
+          "out_of_scope"
+        ]
+      }
     },
     "governance_event": {
       "oneOf": [
@@ -2694,6 +3014,24 @@
                   "minLength": 1,
                   "maxLength": 8192
                 },
+                "scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "out_of_scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "success_criteria": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
                 "updated_at": {
                   "type": "string",
                   "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
@@ -2716,7 +3054,21 @@
                 "updated_at",
                 "status"
               ],
-              "additionalProperties": false
+              "additionalProperties": false,
+              "dependentRequired": {
+                "scope": [
+                  "out_of_scope",
+                  "success_criteria"
+                ],
+                "out_of_scope": [
+                  "scope",
+                  "success_criteria"
+                ],
+                "success_criteria": [
+                  "scope",
+                  "out_of_scope"
+                ]
+              }
             },
             "admitted_version": {
               "type": "object",
@@ -3046,6 +3398,24 @@
                   "minLength": 1,
                   "maxLength": 8192
                 },
+                "scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "out_of_scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "success_criteria": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
                 "updated_at": {
                   "type": "string",
                   "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
@@ -3070,7 +3440,21 @@
                 "updated_at",
                 "status"
               ],
-              "additionalProperties": false
+              "additionalProperties": false,
+              "dependentRequired": {
+                "scope": [
+                  "out_of_scope",
+                  "success_criteria"
+                ],
+                "out_of_scope": [
+                  "scope",
+                  "success_criteria"
+                ],
+                "success_criteria": [
+                  "scope",
+                  "out_of_scope"
+                ]
+              }
             }
           },
           "required": [
@@ -3165,6 +3549,24 @@
                   "minLength": 1,
                   "maxLength": 8192
                 },
+                "scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "out_of_scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "success_criteria": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
                 "updated_at": {
                   "type": "string",
                   "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
@@ -3219,7 +3621,21 @@
                 "updated_at",
                 "status"
               ],
-              "additionalProperties": false
+              "additionalProperties": false,
+              "dependentRequired": {
+                "scope": [
+                  "out_of_scope",
+                  "success_criteria"
+                ],
+                "out_of_scope": [
+                  "scope",
+                  "success_criteria"
+                ],
+                "success_criteria": [
+                  "scope",
+                  "out_of_scope"
+                ]
+              }
             }
           },
           "required": [
@@ -3310,6 +3726,24 @@
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 8192
+                },
+                "scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "out_of_scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "success_criteria": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
                 },
                 "updated_at": {
                   "type": "string",
@@ -3466,7 +3900,21 @@
                 "resolution_no_claim_boundary",
                 "closing_synthesis"
               ],
-              "additionalProperties": false
+              "additionalProperties": false,
+              "dependentRequired": {
+                "scope": [
+                  "out_of_scope",
+                  "success_criteria"
+                ],
+                "out_of_scope": [
+                  "scope",
+                  "success_criteria"
+                ],
+                "success_criteria": [
+                  "scope",
+                  "out_of_scope"
+                ]
+              }
             }
           },
           "required": [
@@ -3563,6 +4011,24 @@
                   "minLength": 1,
                   "maxLength": 8192
                 },
+                "scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "out_of_scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "success_criteria": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
                 "updated_at": {
                   "type": "string",
                   "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
@@ -3588,7 +4054,21 @@
                 "status",
                 "resolution_summary"
               ],
-              "additionalProperties": false
+              "additionalProperties": false,
+              "dependentRequired": {
+                "scope": [
+                  "out_of_scope",
+                  "success_criteria"
+                ],
+                "out_of_scope": [
+                  "scope",
+                  "success_criteria"
+                ],
+                "success_criteria": [
+                  "scope",
+                  "out_of_scope"
+                ]
+              }
             }
           },
           "required": [
@@ -3688,6 +4168,24 @@
                   "minLength": 1,
                   "maxLength": 8192
                 },
+                "scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "out_of_scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "success_criteria": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
                 "updated_at": {
                   "type": "string",
                   "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
@@ -3725,7 +4223,21 @@
                 "status",
                 "admission_mode"
               ],
-              "additionalProperties": false
+              "additionalProperties": false,
+              "dependentRequired": {
+                "scope": [
+                  "out_of_scope",
+                  "success_criteria"
+                ],
+                "out_of_scope": [
+                  "scope",
+                  "success_criteria"
+                ],
+                "success_criteria": [
+                  "scope",
+                  "out_of_scope"
+                ]
+              }
             }
           },
           "required": [
@@ -3844,6 +4356,24 @@
                   "minLength": 1,
                   "maxLength": 8192
                 },
+                "scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "out_of_scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "success_criteria": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
                 "updated_at": {
                   "type": "string",
                   "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
@@ -3871,7 +4401,21 @@
                 "updated_at",
                 "status"
               ],
-              "additionalProperties": false
+              "additionalProperties": false,
+              "dependentRequired": {
+                "scope": [
+                  "out_of_scope",
+                  "success_criteria"
+                ],
+                "out_of_scope": [
+                  "scope",
+                  "success_criteria"
+                ],
+                "success_criteria": [
+                  "scope",
+                  "out_of_scope"
+                ]
+              }
             }
           },
           "required": [
@@ -3992,6 +4536,24 @@
                   "minLength": 1,
                   "maxLength": 8192
                 },
+                "scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "out_of_scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "success_criteria": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
                 "updated_at": {
                   "type": "string",
                   "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
@@ -4019,7 +4581,21 @@
                 "updated_at",
                 "status"
               ],
-              "additionalProperties": false
+              "additionalProperties": false,
+              "dependentRequired": {
+                "scope": [
+                  "out_of_scope",
+                  "success_criteria"
+                ],
+                "out_of_scope": [
+                  "scope",
+                  "success_criteria"
+                ],
+                "success_criteria": [
+                  "scope",
+                  "out_of_scope"
+                ]
+              }
             }
           },
           "required": [
@@ -4121,6 +4697,24 @@
                   "minLength": 1,
                   "maxLength": 8192
                 },
+                "scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "out_of_scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "success_criteria": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
                 "updated_at": {
                   "type": "string",
                   "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
@@ -4160,7 +4754,21 @@
                 "updated_at",
                 "status"
               ],
-              "additionalProperties": false
+              "additionalProperties": false,
+              "dependentRequired": {
+                "scope": [
+                  "out_of_scope",
+                  "success_criteria"
+                ],
+                "out_of_scope": [
+                  "scope",
+                  "success_criteria"
+                ],
+                "success_criteria": [
+                  "scope",
+                  "out_of_scope"
+                ]
+              }
             }
           },
           "required": [
@@ -4274,6 +4882,24 @@
                   "minLength": 1,
                   "maxLength": 8192
                 },
+                "scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "out_of_scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "success_criteria": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
                 "updated_at": {
                   "type": "string",
                   "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
@@ -4303,7 +4929,21 @@
                 "updated_at",
                 "status"
               ],
-              "additionalProperties": false
+              "additionalProperties": false,
+              "dependentRequired": {
+                "scope": [
+                  "out_of_scope",
+                  "success_criteria"
+                ],
+                "out_of_scope": [
+                  "scope",
+                  "success_criteria"
+                ],
+                "success_criteria": [
+                  "scope",
+                  "out_of_scope"
+                ]
+              }
             }
           },
           "required": [
@@ -4419,6 +5059,24 @@
                   "minLength": 1,
                   "maxLength": 8192
                 },
+                "scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "out_of_scope": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
+                "success_criteria": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "\\S"
+                },
                 "updated_at": {
                   "type": "string",
                   "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
@@ -4446,7 +5104,21 @@
                 "updated_at",
                 "status"
               ],
-              "additionalProperties": false
+              "additionalProperties": false,
+              "dependentRequired": {
+                "scope": [
+                  "out_of_scope",
+                  "success_criteria"
+                ],
+                "out_of_scope": [
+                  "scope",
+                  "success_criteria"
+                ],
+                "success_criteria": [
+                  "scope",
+                  "out_of_scope"
+                ]
+              }
             }
           },
           "required": [

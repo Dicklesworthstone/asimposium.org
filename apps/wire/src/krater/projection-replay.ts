@@ -251,6 +251,9 @@ async function statementVersionRow(
     norm_hash: `sha256:${await normHash(statement)}`,
     falsifier: problem.falsifier,
     motivation: problem.motivation,
+    scope: nullable(problem.scope),
+    out_of_scope: nullable(problem.out_of_scope),
+    success_criteria: nullable(problem.success_criteria),
     steward_accepted_by: nullable(stewardAcceptedBy),
     created_at: createdAt,
   });

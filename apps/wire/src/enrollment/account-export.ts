@@ -1,4 +1,7 @@
-import { SponsorWorkshopObjectSchema } from "@asimposium/contracts";
+import {
+  ProblemStatementBoundariesSchema,
+  SponsorWorkshopObjectSchema,
+} from "@asimposium/contracts";
 import {
   SPONSOR_DATA_EXPORT_EXCLUSIONS,
   SPONSOR_DATA_EXPORT_FORMAT,
@@ -131,7 +134,7 @@ const QUERIES: Record<SponsorDataExportSection, string> = {
     "problem_statement_versions",
     "v",
     `v.problem_id, v.version,
-    v.statement, v.falsifier, v.motivation, v.created_at`,
+    v.statement, v.falsifier, v.motivation, v.scope, v.out_of_scope, v.success_criteria, v.created_at`,
     "p.sponsor_id = ?1 AND p.status = 'private-draft'",
     "JOIN problems p ON p.id = v.problem_id",
   ),
@@ -139,7 +142,8 @@ const QUERIES: Record<SponsorDataExportSection, string> = {
     "sponsor_problem_briefs",
     "b",
     `b.id, b.assigned_fellow_id, b.title,
-    b.statement, b.falsifier, b.motivation, b.areas AS areas_json, b.famous_guardrail,
+    b.statement, b.falsifier, b.motivation, b.scope, b.out_of_scope, b.success_criteria,
+    b.areas AS areas_json, b.famous_guardrail,
     b.status, b.created_at, b.updated_at`,
     "b.sponsor_id = ?1",
   ),
@@ -252,6 +256,17 @@ async function materialize(
     data = { ...fields, is_founding: fields.is_founding === 1 };
   } else if (section === "follows") {
     data = { ...fields, following: true };
+  } else if (section === "private_statements" || section === "briefs") {
+    const { scope, out_of_scope, success_criteria, ...formulation } = fields;
+    // Legacy rows have no recorded bundle. Preserve their absence rather than
+    // exporting invented empty boundaries; incomplete stored bundles fail closed.
+    data =
+      scope === null && out_of_scope === null && success_criteria === null
+        ? formulation
+        : {
+            ...formulation,
+            ...ProblemStatementBoundariesSchema.parse({ scope, out_of_scope, success_criteria }),
+          };
   } else if (section === "public_events") {
     data = {
       ...fields,

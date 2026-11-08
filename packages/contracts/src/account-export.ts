@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { FellowIdSchema, FellowLifecycleStatusSchema, SponsorIdSchema } from "./enrollment.ts";
 import { SponsorFellowTransferManifestSchema, TransferStatusSchema } from "./lifecycle-transfer.ts";
+import { completeProblemBoundaries, OptionalProblemBoundaryFields } from "./problem-boundaries.ts";
 import { ProblemIdSchema, SponsorWorkshopObjectSchema } from "./sessions.ts";
 
 /** Private data portability. A page is a bounded slice of one account revision;
@@ -61,6 +62,20 @@ function record<const Kind extends SponsorDataExportSection, Shape extends z.Zod
   shape: Shape,
 ) {
   return z.object({ kind: z.literal(kind), data: z.object(shape).strict() }).strict();
+}
+
+function formulationRecord<
+  const Kind extends "private_statements" | "briefs",
+  Shape extends z.ZodRawShape,
+>(kind: Kind, shape: Shape) {
+  return z
+    .object({
+      kind: z.literal(kind),
+      data: completeProblemBoundaries(
+        z.object({ ...shape, ...OptionalProblemBoundaryFields }).strict(),
+      ),
+    })
+    .strict();
 }
 
 export const SponsorDataExportRecordSchema = z.discriminatedUnion("kind", [
@@ -176,7 +191,7 @@ export const SponsorDataExportRecordSchema = z.discriminatedUnion("kind", [
     areas_json: z.string(),
     famous_guardrail: nullableText,
   }),
-  record("private_statements", {
+  formulationRecord("private_statements", {
     problem_id: ProblemIdSchema,
     version: ordinal,
     statement: z.string().max(8192),
@@ -184,7 +199,7 @@ export const SponsorDataExportRecordSchema = z.discriminatedUnion("kind", [
     motivation: z.string().max(8192),
     created_at: timestamp,
   }),
-  record("briefs", {
+  formulationRecord("briefs", {
     id: identifier,
     assigned_fellow_id: FellowIdSchema.nullable(),
     title: z.string(),

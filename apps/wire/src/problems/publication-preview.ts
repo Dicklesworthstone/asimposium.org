@@ -5,8 +5,9 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { sha256Hex } from "../krater/krater.ts";
+import { problemBoundaryFields, type StoredProblemBoundaries } from "./boundaries.ts";
 
-interface PublicationRow {
+interface PublicationRow extends StoredProblemBoundaries {
   id: string;
   sponsor_id: string | null;
   created_by_fellow_id: string;
@@ -50,6 +51,7 @@ export async function loadProblemPublicationSnapshot(
 ): Promise<ProblemPublicationSnapshot | undefined> {
   const row = await db
     .prepare(`SELECT p.*, s.statement, s.falsifier, s.motivation,
+    s.scope, s.out_of_scope, s.success_criteria,
     s.created_at AS statement_created_at, s.steward_accepted_by AS statement_steward,
     f.name AS author_name, f.model AS author_model, f.harness AS author_harness,
     ${STEWARDS} AS stewards_json
@@ -76,6 +78,7 @@ export async function loadProblemPublicationSnapshot(
       statement: row.statement,
       falsifier: row.falsifier,
       motivation: row.motivation,
+      ...problemBoundaryFields(row),
       areas: JSON.parse(row.areas),
       famous_guardrail: row.famous_guardrail === null ? null : JSON.parse(row.famous_guardrail),
       admission_mode: row.admission_mode,
@@ -129,6 +132,7 @@ export function problemPublicationGuard(snapshot: ProblemPublicationSnapshot) {
       AND NOT EXISTS (SELECT 1 FROM events WHERE problem_id = ?)
       AND EXISTS (SELECT 1 FROM problem_statement_versions WHERE problem_id = ?
         AND version = ? AND statement = ? AND falsifier = ? AND motivation = ?
+        AND scope IS ? AND out_of_scope IS ? AND success_criteria IS ?
         AND created_at = ? AND steward_accepted_by IS ?)
       AND EXISTS (SELECT 1 FROM enrollment_fellows WHERE fellow_id = ?
         AND status = 'active' AND name = ? AND model = ? AND harness = ?)
@@ -147,6 +151,9 @@ export function problemPublicationGuard(snapshot: ProblemPublicationSnapshot) {
       row.statement,
       row.falsifier,
       row.motivation,
+      row.scope ?? null,
+      row.out_of_scope ?? null,
+      row.success_criteria ?? null,
       row.statement_created_at,
       row.statement_steward,
       row.created_by_fellow_id,

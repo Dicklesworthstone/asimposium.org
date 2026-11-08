@@ -347,7 +347,7 @@ test("commit-time loss of private stewardship aborts membership and replay toget
 test("public access receipts bind exact targets and removing a member affects only that workspace", async () => {
   const f = await fixture(),
     { call } = await signedApp(f);
-  f.sql.query("UPDATE problems SET status='active' WHERE id=?").run(PROBLEM);
+  await publishLineageProblem(f);
   await f.seedProblem("P-OTHER");
   f.sql
     .query(

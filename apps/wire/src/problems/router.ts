@@ -33,6 +33,11 @@ import {
   replayPrivateProblemAccessAction,
 } from "./access-actions.ts";
 import {
+  problemBoundariesRequired,
+  problemBoundaryFields,
+  type StoredProblemBoundaries,
+} from "./boundaries.ts";
+import {
   privateProblemGovernanceResponse,
   readSponsorProblemGovernance,
 } from "./governance-read.ts";
@@ -214,7 +219,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         title: "Invalid problem proposal request body",
         detail: "The request body did not match the problem proposal contract.",
         fixHint:
-          "Provide title, statement, falsifier, motivation, and 1–32 areas from GET /areas.json or named other-* areas.",
+          "Provide title, statement, falsifier, motivation, and 1–32 areas from GET /areas.json or named other-* areas. Supply scope, out_of_scope and success_criteria together when recording research boundaries.",
         rule: "P3",
         extensions: {
           schema: "https://a.asimposium.org/schemas/problems.v1.json",
@@ -239,6 +244,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           sponsor_id: string;
           assigned_fellow_id: string | null;
           status: string;
+          scope: string | null;
         }>();
 
       if (brief?.status !== "active") {
@@ -275,6 +281,8 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           },
         });
       }
+      if (brief.scope != null && parsed.data.scope === undefined)
+        return problemBoundariesRequired();
     }
 
     // P11 Duplicate-problem screening
@@ -358,15 +366,26 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       db
         .prepare(
           `INSERT INTO problem_statement_versions (
-             problem_id, version, statement, norm_hash, falsifier, motivation, created_at
-           ) VALUES (?, 1, ?, ?, ?, ?, ?)`,
+             problem_id, version, statement, norm_hash, falsifier, motivation,
+             scope, out_of_scope, success_criteria, created_at
+           ) VALUES (?, 1,
+             CASE WHEN ? IS NULL OR ? IS NOT NULL OR NOT EXISTS (
+               SELECT 1 FROM sponsor_problem_briefs WHERE id = ? AND scope IS NOT NULL
+             ) THEN ? ELSE NULL END,
+             ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           problemId,
+          parsed.data.brief_id ?? null,
+          parsed.data.scope ?? null,
+          parsed.data.brief_id ?? null,
           parsed.data.statement,
           fullHash,
           parsed.data.falsifier,
           parsed.data.motivation,
+          parsed.data.scope ?? null,
+          parsed.data.out_of_scope ?? null,
+          parsed.data.success_criteria ?? null,
           now,
         ),
       db
@@ -401,7 +420,21 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       );
     }
 
-    await db.batch(batchStatements);
+    try {
+      await db.batch(batchStatements);
+    } catch (error) {
+      // The brief may acquire boundaries after admission. The version insert's
+      // NOT NULL guard then rolls back the entire proposal rather than dropping
+      // context on adoption. Return the same teaching refusal as preflight.
+      if (parsed.data.brief_id && parsed.data.scope === undefined) {
+        const current = await db
+          .prepare("SELECT scope FROM sponsor_problem_briefs WHERE id = ? AND sponsor_id = ?")
+          .bind(parsed.data.brief_id, auth.binding.sponsorId)
+          .first<{ scope: string | null }>();
+        if (current?.scope != null) return problemBoundariesRequired();
+      }
+      throw error;
+    }
 
     return c.json(
       {
@@ -417,6 +450,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           statement: parsed.data.statement,
           falsifier: parsed.data.falsifier,
           motivation: parsed.data.motivation,
+          ...problemBoundaryFields(parsed.data),
           areas,
           famous_guardrail: parsed.data.famous_guardrail,
           created_at: now,
@@ -546,10 +580,12 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       problem.status === "private-draft"
         ? await db
             .prepare(
-              "SELECT statement, falsifier, motivation FROM problem_statement_versions WHERE problem_id = ? AND version = ?",
+              "SELECT statement, falsifier, motivation, scope, out_of_scope, success_criteria FROM problem_statement_versions WHERE problem_id = ? AND version = ?",
             )
             .bind(problemId, problem.current_statement_version)
-            .first<{ statement: string; falsifier: string; motivation: string }>()
+            .first<
+              StoredProblemBoundaries & { statement: string; falsifier: string; motivation: string }
+            >()
         : publicFormulation?.problem;
 
     const famousGuardrail = problem.famous_guardrail
@@ -586,6 +622,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           statement: statementRow?.statement ?? "",
           falsifier: statementRow?.falsifier ?? "",
           motivation: statementRow?.motivation ?? "",
+          ...problemBoundaryFields(statementRow),
           areas: ProblemDetailSchema.shape.areas.parse(JSON.parse(problem.areas)),
           famous_guardrail: famousGuardrail,
           resolution,
@@ -637,7 +674,8 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         code: "PROBLEM_BRIEF_BODY_INVALID",
         title: "Invalid problem brief request body",
         detail: "The request body did not match the save problem brief contract.",
-        fixHint: "Provide title, statement, falsifier, motivation, and areas.",
+        fixHint:
+          "Provide title, statement, falsifier, motivation, and areas. Supply scope, out_of_scope and success_criteria together; an existing bundle cannot be omitted on update.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/problems.v1.json",
@@ -681,25 +719,40 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       ? JSON.stringify(parsed.data.famous_guardrail)
       : null;
 
+    if (parsed.data.id && parsed.data.scope === undefined) {
+      const previous = await db
+        .prepare(
+          "SELECT scope FROM sponsor_problem_briefs WHERE id = ? AND sponsor_id = ? AND status = 'active'",
+        )
+        .bind(parsed.data.id, sponsor.sponsorId)
+        .first<{ scope: string | null }>();
+      if (previous?.scope != null) return problemBoundariesRequired();
+    }
+
     // Ownership and private state are checked by the same statement that
     // changes the brief, including concurrent requests sharing a caller ID.
     const saved = await db
       .prepare(
         `INSERT INTO sponsor_problem_briefs (
            id, sponsor_id, assigned_fellow_id, title, statement, falsifier,
-           motivation, areas, famous_guardrail, status, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+           motivation, scope, out_of_scope, success_criteria, areas, famous_guardrail,
+           status, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            assigned_fellow_id = excluded.assigned_fellow_id,
            title = excluded.title,
            statement = excluded.statement,
            falsifier = excluded.falsifier,
            motivation = excluded.motivation,
+           scope = excluded.scope,
+           out_of_scope = excluded.out_of_scope,
+           success_criteria = excluded.success_criteria,
            areas = excluded.areas,
            famous_guardrail = excluded.famous_guardrail,
            updated_at = excluded.updated_at
          WHERE sponsor_problem_briefs.sponsor_id = excluded.sponsor_id
            AND sponsor_problem_briefs.status = 'active'
+           AND (sponsor_problem_briefs.scope IS NULL OR excluded.scope IS NOT NULL)
          RETURNING *`,
       )
       .bind(
@@ -710,25 +763,30 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         parsed.data.statement,
         parsed.data.falsifier,
         parsed.data.motivation,
+        parsed.data.scope ?? null,
+        parsed.data.out_of_scope ?? null,
+        parsed.data.success_criteria ?? null,
         JSON.stringify(parsed.data.areas),
         famousJson,
         now,
         now,
       )
-      .first<{
-        id: string;
-        sponsor_id: string;
-        assigned_fellow_id: string | null;
-        title: string;
-        statement: string;
-        falsifier: string;
-        motivation: string;
-        areas: string;
-        famous_guardrail: string | null;
-        status: string;
-        created_at: string;
-        updated_at: string;
-      }>();
+      .first<
+        StoredProblemBoundaries & {
+          id: string;
+          sponsor_id: string;
+          assigned_fellow_id: string | null;
+          title: string;
+          statement: string;
+          falsifier: string;
+          motivation: string;
+          areas: string;
+          famous_guardrail: string | null;
+          status: string;
+          created_at: string;
+          updated_at: string;
+        }
+      >();
 
     if (!saved) {
       return validatedProblem({
@@ -751,6 +809,9 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       {
         brief: SponsorProblemBriefSchema.parse({
           ...saved,
+          scope: saved.scope ?? undefined,
+          out_of_scope: saved.out_of_scope ?? undefined,
+          success_criteria: saved.success_criteria ?? undefined,
           assigned_fellow_id: saved.assigned_fellow_id ?? undefined,
           areas: JSON.parse(saved.areas),
           famous_guardrail: saved.famous_guardrail ? JSON.parse(saved.famous_guardrail) : undefined,
@@ -777,20 +838,22 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         "SELECT * FROM sponsor_problem_briefs WHERE sponsor_id = ? AND status = 'active' ORDER BY updated_at DESC",
       )
       .bind(sponsor.sponsorId)
-      .all<{
-        id: string;
-        sponsor_id: string;
-        assigned_fellow_id: string | null;
-        title: string;
-        statement: string;
-        falsifier: string;
-        motivation: string;
-        areas: string;
-        famous_guardrail: string | null;
-        status: string;
-        created_at: string;
-        updated_at: string;
-      }>();
+      .all<
+        StoredProblemBoundaries & {
+          id: string;
+          sponsor_id: string;
+          assigned_fellow_id: string | null;
+          title: string;
+          statement: string;
+          falsifier: string;
+          motivation: string;
+          areas: string;
+          famous_guardrail: string | null;
+          status: string;
+          created_at: string;
+          updated_at: string;
+        }
+      >();
 
     const briefs = rows.results.map((r) => ({
       id: r.id,
@@ -800,6 +863,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       statement: r.statement,
       falsifier: r.falsifier,
       motivation: r.motivation,
+      ...problemBoundaryFields(r),
       areas: JSON.parse(r.areas),
       famous_guardrail: r.famous_guardrail ? JSON.parse(r.famous_guardrail) : undefined,
       status: r.status,
@@ -1109,17 +1173,20 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       const draftGuard = db
         .prepare("UPDATE problems SET updated_at = ? WHERE id = ? AND status = 'private-draft'")
         .bind(now, problemId);
-      const draftWrite = async (statements: D1PreparedStatement[]): Promise<Response | null> => {
-        const results = await db.batch([draftGuard, ...statements]);
+      const draftWrite = async (
+        statements: D1PreparedStatement[],
+        guard = draftGuard,
+      ): Promise<Response | null> => {
+        const results = await db.batch([guard, ...statements]);
         // >= 1: D1 can count rows a trigger writes into a statement's changes.
         if ((results[0]?.meta.changes ?? 0) >= 1) return null;
         return validatedProblem({
           status: 409,
           code: "OBJECT_VERSION_CONFLICT",
-          title: "The problem is no longer a private draft",
+          title: "The private problem draft changed",
           detail:
-            "The problem was published while this draft action was in flight; nothing changed.",
-          fixHint: "Read the problem again and use its public lifecycle actions.",
+            "The problem was published or its formulation changed while this draft action was in flight; nothing changed.",
+          fixHint: "Read the current problem again and submit the appropriate lifecycle action.",
           rule: "A5",
           extensions: {
             schema: "https://a.asimposium.org/schemas/problems.v1.json",
@@ -1128,40 +1195,67 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         });
       };
       if (action.action === "revise-statement") {
+        const prior = await db
+          .prepare(
+            "SELECT scope FROM problem_statement_versions WHERE problem_id = ? AND version = ?",
+          )
+          .bind(problemId, problem.current_statement_version)
+          .first<{ scope: string | null }>();
+        if (prior?.scope != null && action.scope === undefined) return problemBoundariesRequired();
         const nextVersion = problem.current_statement_version + 1;
         const candidateHash = await normHash(action.statement);
         const fullHash = `sha256:${candidateHash}`;
+        const sameDraft = `${DRAFT} AND EXISTS (SELECT 1 FROM problems WHERE id = ? AND current_statement_version = ?)`;
+        const revisionGuard = db
+          .prepare(
+            "UPDATE problems SET updated_at = ? WHERE id = ? AND status = 'private-draft' AND current_statement_version = ?",
+          )
+          .bind(now, problemId, problem.current_statement_version);
 
-        const refused = await draftWrite([
-          db
-            .prepare(
-              `INSERT INTO problem_statement_versions (
+        const refused = await draftWrite(
+          [
+            db
+              .prepare(
+                `INSERT INTO problem_statement_versions (
                  problem_id, version, statement, norm_hash, falsifier, motivation,
-                 steward_accepted_by, created_at
-               ) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ${DRAFT}`,
-            )
-            .bind(
-              problemId,
-              nextVersion,
-              action.statement,
-              fullHash,
-              action.falsifier,
-              action.motivation,
-              sponsor.sponsorId,
-              now,
-              problemId,
-            ),
-          db
-            .prepare(
-              "UPDATE problems SET current_statement_version = ?, updated_at = ? WHERE id = ? AND status = 'private-draft'",
-            )
-            .bind(nextVersion, now, problemId),
-          db
-            .prepare(
-              `UPDATE claims SET statement_drift = 1 WHERE problem_id = ? AND statement_version < ? AND ${DRAFT}`,
-            )
-            .bind(problemId, nextVersion, problemId),
-        ]);
+                 scope, out_of_scope, success_criteria, steward_accepted_by, created_at
+               ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${sameDraft}`,
+              )
+              .bind(
+                problemId,
+                nextVersion,
+                action.statement,
+                fullHash,
+                action.falsifier,
+                action.motivation,
+                action.scope ?? null,
+                action.out_of_scope ?? null,
+                action.success_criteria ?? null,
+                sponsor.sponsorId,
+                now,
+                problemId,
+                problemId,
+                problem.current_statement_version,
+              ),
+            db
+              .prepare(
+                `UPDATE claims SET statement_drift = 1 WHERE problem_id = ? AND statement_version < ? AND ${sameDraft}`,
+              )
+              .bind(
+                problemId,
+                nextVersion,
+                problemId,
+                problemId,
+                problem.current_statement_version,
+              ),
+            db
+              .prepare(
+                "UPDATE problems SET current_statement_version = ?, updated_at = ? WHERE id = ? AND status = 'private-draft' AND current_statement_version = ?",
+              )
+              .bind(nextVersion, now, problemId, problem.current_statement_version),
+          ],
+          revisionGuard,
+        );
         if (refused) return refused;
 
         return c.json(
@@ -1174,6 +1268,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
               statement: action.statement,
               falsifier: action.falsifier,
               motivation: action.motivation,
+              ...problemBoundaryFields(action),
               updated_at: now,
             },
           },
@@ -1313,7 +1408,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
                   },
                 );
               }
-              let candidate: {
+              let candidate: StoredProblemBoundaries & {
                 statement: string;
                 falsifier: string | null;
                 motivation: string | null;
@@ -1323,18 +1418,21 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
                   statement: action.statement,
                   falsifier: action.falsifier,
                   motivation: action.motivation,
+                  ...problemBoundaryFields(action),
                 };
               } else {
                 const current = await db
                   .prepare(
-                    "SELECT statement, falsifier, motivation FROM problem_statement_versions WHERE problem_id = ? AND version = ?",
+                    "SELECT statement, falsifier, motivation, scope, out_of_scope, success_criteria FROM problem_statement_versions WHERE problem_id = ? AND version = ?",
                   )
                   .bind(problemId, problem.current_statement_version)
-                  .first<{
-                    statement: string;
-                    falsifier: string | null;
-                    motivation: string | null;
-                  }>();
+                  .first<
+                    StoredProblemBoundaries & {
+                      statement: string;
+                      falsifier: string | null;
+                      motivation: string | null;
+                    }
+                  >();
                 if (!current) return problemGovernanceRefused();
                 candidate = current;
               }
@@ -1353,6 +1451,9 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
                     problem.title,
                     candidate.statement,
                     candidate.motivation ?? "",
+                    candidate.scope ?? "",
+                    candidate.out_of_scope ?? "",
+                    candidate.success_criteria ?? "",
                     action.action === "publish" ? (problem.famous_guardrail ?? "") : "",
                     action.action === "publish" ? problem.areas : "",
                   ]

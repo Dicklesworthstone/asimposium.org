@@ -376,6 +376,8 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0128_artifact_publication_reviews.sql
   db/migrations/0129_author_concessions.sql
   db/migrations/0130_session_opened_public_cursor.sql
+  db/migrations/0131_problem_statement_boundaries.sql
+  db/migrations/0132_private_fork_erasure.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -943,6 +945,8 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0128_artifact_publication_reviews.sql
   0129_author_concessions.sql
   0130_session_opened_public_cursor.sql
+  0131_problem_statement_boundaries.sql
+  0132_private_fork_erasure.sql
 )
 
 

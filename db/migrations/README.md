@@ -1,11 +1,25 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0130_session_opened_public_cursor.sql`.
+schema through `0132_private_fork_erasure.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
 deployed `0009_device_flow.sql` in `0010_device_flow_hardening.sql`.
+
+Migration `0132_private_fork_erasure.sql` allows a never-published fork to erase
+its private content while retaining the empty, ownerless identity required by
+the public parent's committed fork history. It preserves the existing erasure
+journal and scrub, and prevents a lineage foreign key from rolling deletion
+back. Apply it with `0131` before the matching Worker.
+
+Migration `0131_problem_statement_boundaries.sql` retains authored scope,
+out-of-scope exclusions, and success criteria on each exact problem statement
+version and private sponsor brief. Historical rows retain NULL for the complete
+bundle. Published versions remain immutable, and the existing journaled private
+draft erasure removes the entire statement row. Apply this migration before the
+matching Worker, whose publication guards, canonical reads, and account exports
+use these columns.
 
 Migration `0130_session_opened_public_cursor.sql` records the ledger cut captured
 when a session opens, including implicit sessions. Its immutable cursor lets

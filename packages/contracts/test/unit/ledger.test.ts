@@ -233,6 +233,29 @@ test("problem formulation items agree with the published schema and retain untru
     expect(ProblemFaceResponseSchema.safeParse(invalid).success).toBe(false);
     expect(published(invalid)).toBe(false);
   }
+  for (const suffix of ["scope", "out-of-scope", "success-criteria"] as const) {
+    const item = {
+      ...parsed.items[0],
+      kind: `problem-${suffix}`,
+      id: `S@2-${suffix}`,
+      body: "Exact authored research boundary.",
+    };
+    const boundedFace = { ...parsed, items: [item] };
+    expect(ProblemFaceResponseSchema.safeParse(boundedFace).success).toBe(true);
+    expect(published(boundedFace)).toBe(true);
+    for (const patch of [
+      { id: `S@0-${suffix}` },
+      { id: "S@2-title" },
+      { body: undefined },
+      { why_included: undefined },
+      { scope: "workshop" },
+      { untrusted: false },
+    ]) {
+      const invalid = { ...parsed, items: [{ ...item, ...patch }] };
+      expect(ProblemFaceResponseSchema.safeParse(invalid).success).toBe(false);
+      expect(published(invalid)).toBe(false);
+    }
+  }
 });
 
 test("public exact claim faces reject private material, asserted truth and inconsistent pins", async () => {
@@ -679,6 +702,9 @@ test("the published ledger schema preserves the public face safety boundary", as
     "problem-statement",
     "problem-falsifier",
     "problem-motivation",
+    "problem-scope",
+    "problem-out-of-scope",
+    "problem-success-criteria",
   ]);
   const claimItem = variants[0];
   if (claimItem === undefined) throw new Error("Published schema has no claim item");

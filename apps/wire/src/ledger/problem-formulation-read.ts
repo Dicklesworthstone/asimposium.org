@@ -22,6 +22,9 @@ export interface PublishedProblemFormulation {
     | "statement"
     | "falsifier"
     | "motivation"
+    | "scope"
+    | "out_of_scope"
+    | "success_criteria"
     | "updated_at"
   >;
   readonly source_fellow_id: string;
@@ -166,6 +169,13 @@ async function verifyPublishedProblemFormulation(
       statement: event.problem.statement,
       falsifier: event.problem.falsifier,
       motivation: event.problem.motivation,
+      ...(event.problem.scope === undefined
+        ? {}
+        : {
+            scope: event.problem.scope,
+            out_of_scope: event.problem.out_of_scope,
+            success_criteria: event.problem.success_criteria,
+          }),
       updated_at: event.problem.updated_at,
     },
     source_fellow_id: event.source_fellow_id,

@@ -16,18 +16,9 @@ afterEach(() => {
   for (const f of fixtures.splice(0)) f.sql.close();
 });
 async function fixture() {
-  const f = await directiveDisclosureFixture();
+  const f = await directiveDisclosureFixture({ publishProblem: true });
   fixtures.push(f);
-  f.sql
-    .query(`UPDATE problems SET status = 'active', title = 'Disclosure review',
-    sponsor_id = ?, created_by_fellow_id = ? WHERE id = ?`)
-    .run(DISCLOSURE_SPONSOR, f.binding.fellowId, DISCLOSURE_PROBLEM);
-  f.sql
-    .query(`INSERT INTO problem_statement_versions
-    (problem_id, version, statement, norm_hash, falsifier, motivation, created_at)
-    VALUES (?, 1, 'Establish the finite bound.', 'sha256:fixture',
-      'A member violating the bound.', 'An exact review target.', ?)`)
-    .run(DISCLOSURE_PROBLEM, new Date().toISOString());
+  f.sql.query("UPDATE problems SET status='active' WHERE id=?").run(DISCLOSURE_PROBLEM);
   return f;
 }
 const problem = (f: Fixture) =>
@@ -73,7 +64,7 @@ test("result review requires actual exact-lineage disclosure and replays its acc
   expect(publicState(f)).toEqual(before);
   await attest(f, "declared");
   const accepted = await govern(f, "enter-review");
-  expect(accepted.status).toBe(200);
+  expect(accepted.status, await accepted.clone().text()).toBe(200);
   const receipt = await accepted.json();
   expect(problem(f).status).toBe("under-result-review");
   await f.issueDirective("new-direction-after-review");

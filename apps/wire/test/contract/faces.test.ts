@@ -8,6 +8,7 @@ import {
   ProblemGovernanceEventSchema,
   ProblemIndexEntrySchema,
   ProblemNextResponseSchema,
+  type ProblemStatementBoundaries,
   ProblemsIndexResponseSchema,
   PublicMovesResponseSchema,
   ReadinessStatusSchema,
@@ -54,7 +55,12 @@ import { migratedSqlite } from "../support/migrated-sqlite.ts";
 function committedFormulationFixture(
   problemId: string,
   version: number,
-  fields: { title: string; statement: string; falsifier: string; motivation: string },
+  fields: {
+    title: string;
+    statement: string;
+    falsifier: string;
+    motivation: string;
+  } & Partial<ProblemStatementBoundaries>,
 ): { payloadJson: string; digest: string } {
   const payloadJson = JSON.stringify(
     ProblemGovernanceEventSchema.parse({
@@ -2761,6 +2767,100 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
         env,
       );
       expect(missing.status).toBe(404);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("public faces place exact versioned boundaries before claims and omit complete fields under budget (SQLite)", async () => {
+    const { db, env } = makeFaceDb();
+    try {
+      const routes = createLedgerFaceRoutes();
+      const read = (suffix: string) =>
+        routes.fetch(new Request(`https://a.asimposium.org/p/P-TEST${suffix}`), env);
+      const legacy = ProblemFaceResponseSchema.parse(await (await read(".json")).json());
+      expect(
+        legacy.items.filter((item) => item.kind.startsWith("problem-")).map((item) => item.kind),
+      ).toEqual(["problem-title", "problem-statement", "problem-falsifier", "problem-motivation"]);
+      const boundaries = {
+        scope: "Integer parity, including negative integers.",
+        out_of_scope: "Fractions and numerical approximations.",
+        success_criteria: "A complete proof for both residue classes.",
+      };
+      const fields = {
+        title: "Revised parity problem",
+        statement: "For every integer n, n squared and n share parity.",
+        falsifier: "An integer whose square has different parity.",
+        motivation: "Verify both residue classes.",
+        ...boundaries,
+      };
+      const revision = committedFormulationFixture("P-TEST", 2, fields);
+      db.prepare(
+        "INSERT INTO events (id, problem_id, seq, object_id, object_kind, object_version, type, action, payload_sha256) VALUES ('E-boundaries', 'P-TEST', 9, 'P-TEST', 'problem', 2, 'problem.statement-revised', 'problem.statement-revised', ?)",
+      ).run(revision.digest);
+      db.prepare(
+        "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-boundaries', ?, ?)",
+      ).run(revision.digest, revision.payloadJson);
+      db.run("UPDATE problems SET current_statement_version = 2");
+      const face = ProblemFaceResponseSchema.parse(await (await read(".json")).json());
+      expect(face.items.map((item) => item.id)).toEqual([
+        "S@2-title",
+        "S@2-statement",
+        "S@2-falsifier",
+        "S@2-motivation",
+        "S@2-scope",
+        "S@2-out-of-scope",
+        "S@2-success-criteria",
+        "C-1",
+        "C-2",
+      ]);
+      for (const [kind, field] of [
+        ["problem-scope", "scope"],
+        ["problem-out-of-scope", "out_of_scope"],
+        ["problem-success-criteria", "success_criteria"],
+      ] as const)
+        expect(face.items.find((item) => item.kind === kind)).toMatchObject({
+          body: boundaries[field],
+          untrusted: true,
+          scope: "ledger",
+        });
+      for (const suffix of [".md", "/full.md"]) {
+        const body = await (await read(suffix)).text();
+        for (const value of Object.values(boundaries)) expect(body).toContain(value);
+        expect(body.indexOf(boundaries.success_criteria)).toBeLessThan(
+          body.indexOf("Valid statement 1"),
+        );
+      }
+
+      const large = {
+        ...fields,
+        statement: "p".repeat(8192),
+        scope: "s".repeat(4096),
+        out_of_scope: "o".repeat(4096),
+        success_criteria: "c".repeat(4096),
+      };
+      const enlarged = committedFormulationFixture("P-TEST", 2, large);
+      db.prepare("UPDATE events SET payload_sha256 = ? WHERE id = 'E-boundaries'").run(
+        enlarged.digest,
+      );
+      db.prepare(
+        "UPDATE event_content SET payload_json = ?, payload_sha256 = ? WHERE event_id = 'E-boundaries'",
+      ).run(enlarged.payloadJson, enlarged.digest);
+      const bounded = ProblemFaceResponseSchema.parse(await (await read(".json")).json());
+      expect(bounded.omitted.some((entry) => entry.reason === "budget_exceeded")).toBe(true);
+      expect(bounded.next_actions.some((action) => action.url === "/v1/problems/P-TEST")).toBe(
+        true,
+      );
+      for (const [kind, field] of [
+        ["problem-statement", "statement"],
+        ["problem-scope", "scope"],
+        ["problem-out-of-scope", "out_of_scope"],
+        ["problem-success-criteria", "success_criteria"],
+      ] as const) {
+        const item = bounded.items.find((entry) => entry.kind === kind);
+        if (item !== undefined) expect(item.body).toBe(large[field]);
+      }
+      expect(bounded.items.some((item) => item.kind === "claim")).toBe(false);
     } finally {
       db.close();
     }

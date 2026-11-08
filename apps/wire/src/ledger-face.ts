@@ -36,6 +36,7 @@ import {
   type ComposedPack,
   composePack,
   neutralizeUntrustedBody,
+  type PackCandidate,
   type Projection,
   type RenderedFace,
   renderAllFaces,
@@ -290,6 +291,42 @@ async function currentPublishedFormulation(db: Env["DB"], snapshot: ProblemDiges
           : { screening_notice: publication.screening_notice }),
       }
     : null;
+}
+
+function formulationCandidates(
+  formulation: Awaited<ReturnType<typeof currentPublishedFormulation>>,
+  stablePrefix: number,
+): PackCandidate[] {
+  if (formulation === null) return [];
+  const candidates: PackCandidate[] = [];
+  for (const [field, suffix] of [
+    ["title", "title"],
+    ["statement", "statement"],
+    ["falsifier", "falsifier"],
+    ["motivation", "motivation"],
+    ["scope", "scope"],
+    ["out_of_scope", "out-of-scope"],
+    ["success_criteria", "success-criteria"],
+  ] as const) {
+    const body = formulation[field];
+    // Historical formulations without the authored bundle stay absent. All
+    // present fields are whole candidates under the same immutable version.
+    if (body === undefined) continue;
+    candidates.push({
+      kind: `problem-${suffix}`,
+      id: `S@${formulation.current_statement_version}-${suffix}`,
+      scope: "ledger",
+      tokens: 1,
+      untrusted: true,
+      body,
+      ...(formulation.screening_notice === undefined
+        ? {}
+        : { screening_notice: formulation.screening_notice }),
+      why_included: `current problem ${field} at statement version S@${formulation.current_statement_version}`,
+      stable_prefix: stablePrefix + candidates.length,
+    });
+  }
+  return candidates;
 }
 
 interface StatementReviewRow {
@@ -748,22 +785,7 @@ async function loadProblemFace(
     })),
   ];
   const driftNotice = projectionDriftNotice(first.projection_drift_cursor);
-  const formulationItems =
-    formulation === null
-      ? []
-      : (["title", "statement", "falsifier", "motivation"] as const).map((field, rank) => ({
-          kind: `problem-${field}`,
-          id: `S@${formulation.current_statement_version}-${field}`,
-          scope: "ledger" as const,
-          tokens: 1,
-          untrusted: true,
-          body: formulation[field],
-          ...(formulation.screening_notice === undefined
-            ? {}
-            : { screening_notice: formulation.screening_notice }),
-          why_included: `current problem ${field} at statement version S@${formulation.current_statement_version}`,
-          stable_prefix: rank + headerCandidates.length,
-        }));
+  const formulationItems = formulationCandidates(formulation, headerCandidates.length);
   const candidateTruncated = rows.length > PROBLEM_DIGEST_CANDIDATE_LIMIT;
   const composed = composePack({
     schema: "asimposium.problem-face.v1",
@@ -776,9 +798,9 @@ async function loadProblemFace(
     candidates: [
       ...headerCandidates,
       ...formulationItems,
-      ...reviews.candidates.map((candidate) => ({
+      ...reviews.candidates.map((candidate, index) => ({
         ...candidate,
-        stable_prefix: candidate.stable_prefix + headerCandidates.length,
+        stable_prefix: index + formulationItems.length + headerCandidates.length,
       })),
       ...claims.slice(0, PROBLEM_DIGEST_CANDIDATE_LIMIT).map((claim, index) => ({
         kind: "claim",
@@ -791,7 +813,8 @@ async function loadProblemFace(
           ? { screening_notice: screeningNotices.get(claim.seq)! }
           : {}),
         why_included: "a public claim on this problem in ledger sequence order",
-        stable_prefix: index + 4 + reviews.candidates.length + headerCandidates.length,
+        stable_prefix:
+          index + formulationItems.length + reviews.candidates.length + headerCandidates.length,
       })),
     ],
     action_candidates: [
@@ -1005,22 +1028,7 @@ async function loadProblemFullFace(
     })),
   ];
   const driftNotice = projectionDriftNotice(first.projection_drift_cursor);
-  const formulationItems =
-    formulation === null
-      ? []
-      : (["title", "statement", "falsifier", "motivation"] as const).map((field, rank) => ({
-          kind: `problem-${field}`,
-          id: `S@${formulation.current_statement_version}-${field}`,
-          scope: "ledger" as const,
-          tokens: 1,
-          untrusted: true,
-          body: formulation[field],
-          ...(formulation.screening_notice === undefined
-            ? {}
-            : { screening_notice: formulation.screening_notice }),
-          why_included: `current problem ${field} at statement version S@${formulation.current_statement_version}`,
-          stable_prefix: rank + headerCandidates.length,
-        }));
+  const formulationItems = formulationCandidates(formulation, headerCandidates.length);
 
   const composed = composePack({
     schema: "asimposium.problem-face.v1",
@@ -1033,9 +1041,9 @@ async function loadProblemFullFace(
     candidates: [
       ...headerCandidates,
       ...formulationItems,
-      ...reviews.candidates.map((candidate) => ({
+      ...reviews.candidates.map((candidate, index) => ({
         ...candidate,
-        stable_prefix: candidate.stable_prefix + headerCandidates.length,
+        stable_prefix: index + formulationItems.length + headerCandidates.length,
       })),
       ...claims.map((claim, index) => ({
         kind: "claim",
@@ -1048,7 +1056,8 @@ async function loadProblemFullFace(
           ? { screening_notice: screeningNotices.get(claim.seq)! }
           : {}),
         why_included: "a public claim on this problem in ledger sequence order",
-        stable_prefix: index + 4 + reviews.candidates.length + headerCandidates.length,
+        stable_prefix:
+          index + formulationItems.length + reviews.candidates.length + headerCandidates.length,
       })),
     ],
     action_candidates: [

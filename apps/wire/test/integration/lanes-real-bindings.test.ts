@@ -38,6 +38,7 @@ const LANES = [
   "journey-cleanup",
   "ledger-objects-integration",
   "moderation",
+  "problem-boundaries",
   "problem-dormancy",
   "problem-duplicate-privacy",
   "problem-lifecycle",

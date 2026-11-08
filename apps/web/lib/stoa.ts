@@ -1157,11 +1157,14 @@ export function stoaSetProblemWriterCap(
     body: JSON.stringify(action),
     idempotencyKey,
     parse: (value) => {
-      const problem = (value as { problem?: unknown } | null)?.problem;
-      const receipt = ProblemDetailSchema.pick({ id: true, writer_cap: true, updated_at: true })
-        .required({ writer_cap: true })
-        .strip()
-        .parse(problem);
+      const problem = (value as {
+        problem?: { id?: unknown; writer_cap?: unknown; updated_at?: unknown };
+      } | null)?.problem;
+      const receipt = {
+        id: ProblemDetailSchema.shape.id.parse(problem?.id),
+        writer_cap: ProblemDetailSchema.shape.writer_cap.unwrap().parse(problem?.writer_cap),
+        updated_at: ProblemDetailSchema.shape.updated_at.parse(problem?.updated_at),
+      };
       if (receipt.id !== command.problem_id || receipt.writer_cap !== command.limit) {
         throw new Error("The writer-cap receipt does not match this command.");
       }
