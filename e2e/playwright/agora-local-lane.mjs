@@ -53,6 +53,7 @@ import {
   setUpProblem,
 } from "../gauntlet/local-product-flow.mjs";
 import { startLocalTarget, USER_AGENT } from "../gauntlet/local-target.mjs";
+import { claimsListBrowsing, claimsListWithdrawal, seedClaimsList } from "./claims-list-browsing.mjs";
 import { hypothesisLifecycleBrowsing, hypothesisPublicationWithdrawal, seedHypothesisLifecycle } from "./hypotheses-lifecycle.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
@@ -932,6 +933,7 @@ async function main() {
       concessionBasis,
       hypothesisLifecycle,
     } = await seed(target);
+    const claimsList = await seedClaimsList(target);
     const claimProbe = await fetch(`${target.origin}/p/${problemId}/claims/${claimId}.json`, {
       headers: { "user-agent": USER_AGENT },
     });
@@ -1263,8 +1265,10 @@ async function main() {
         (await page.locator("main").innerText()).includes(concessionBasis.event_id));
       await proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCursor, mode });
       await hypothesisLifecycleBrowsing({ page, agora, target, problemId, fixture: hypothesisLifecycle, mode, record });
+      await claimsListBrowsing({ page, agora, target, fixture: claimsList, mode, record });
       await context.close();
     }
+    await claimsListWithdrawal({ target, browser, agora, fixture: claimsList, record });
     await hypothesisPublicationWithdrawal({ target, browser, agora, problemId, fixture: hypothesisLifecycle, record });
     await proofGapWithdrawal({
       target,

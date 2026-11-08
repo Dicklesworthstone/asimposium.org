@@ -200,6 +200,21 @@ const nextConfig: AgoraNextConfig = {
         permanent: true,
       },
       {
+        source: "/p/:slug/claims.md",
+        destination: `${stoaOrigin}/p/:slug/claims.md`,
+        permanent: true,
+      },
+      {
+        source: "/p/:slug/claims.json",
+        destination: `${stoaOrigin}/p/:slug/claims.json`,
+        permanent: true,
+      },
+      {
+        source: "/p/:slug/claims.html",
+        destination: `${stoaOrigin}/p/:slug/claims.html`,
+        permanent: true,
+      },
+      {
         source: "/p/:slug/claims/:claim.md",
         destination: `${stoaOrigin}/p/:slug/claims/:claim.md`,
         permanent: true,

@@ -323,7 +323,7 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
           </section>
         )}
 
-        <ProblemClaimsBoard rows={claimRows} cursor={face.cursor} />
+      <ProblemClaimsBoard rows={claimRows} cursor={face.cursor} problemId={slug} />
 
         <section aria-labelledby="history-heading">
           <h2 id="history-heading">Ledger history</h2>

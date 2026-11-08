@@ -41,6 +41,13 @@ import {
   SearchResponseSchema,
 } from "@asimposium/contracts";
 import {
+  ClaimsListQuerySchema,
+  type ClaimsListResponse,
+  ClaimsListResponseSchema,
+  claimsListMatchesQuery,
+  claimsListPath,
+} from "@asimposium/contracts/claims-list";
+import {
   HypothesesQuerySchema,
   type HypothesesResponse,
   HypothesesResponseSchema,
@@ -336,6 +343,30 @@ export async function stoaFetchClaimFace(
     return { state: "unavailable", reason: "invalid_response" };
   }
   return result;
+}
+
+/** Complete claim browsing uses bounded pages at one immutable ledger cut.
+ * Re-read current content controls even when the requested cut is historical. */
+export async function stoaFetchClaimsList(
+  problemId: string,
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
+): Promise<PublicRead<ClaimsListResponse>> {
+  const parsed = ClaimsListQuerySchema.safeParse(query);
+  if (!parsed.success || !PublicLedgerProblemIdSchema.safeParse(problemId).success) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
+  const result = await readPublic(
+    claimsListPath(problemId, "json", parsed.data),
+    stoaOrigin,
+    ClaimsListResponseSchema,
+    0,
+    "PROBLEM_NOT_FOUND",
+  );
+  if (result.state !== "ok") return result;
+  return claimsListMatchesQuery(problemId, parsed.data, result.data)
+    ? result
+    : { state: "unavailable", reason: "invalid_response" };
 }
 
 /** Public hypotheses preserve the requested ledger cut and continuation. */

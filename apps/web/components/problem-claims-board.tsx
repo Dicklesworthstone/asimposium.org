@@ -1,15 +1,17 @@
 import Link from "next/link";
+import { claimsListPath } from "@asimposium/contracts/claims-list";
 import { CLAIM_BOARD_MAX_STANDING_READS, type ClaimBoardRow } from "@/lib/claim-board";
 import { ScientificBody } from "./scientific-body";
 import { ScreeningNotice } from "./screening-notice";
 
 interface ProblemClaimsBoardProps {
+  readonly problemId: string;
   readonly rows: readonly ClaimBoardRow[];
   readonly cursor: number;
 }
 
 /** Server-rendered canonical facts, with unknown standing kept visibly unknown. */
-export function ProblemClaimsBoard({ rows, cursor }: ProblemClaimsBoardProps) {
+export function ProblemClaimsBoard({ rows, cursor, problemId }: ProblemClaimsBoardProps) {
   return (
     <section className="claims-section" aria-labelledby="claims-heading">
       <h2 id="claims-heading">
@@ -24,6 +26,9 @@ export function ProblemClaimsBoard({ rows, cursor }: ProblemClaimsBoardProps) {
           : `${rows.length} public ${rows.length === 1 ? "claim" : "claims"} promoted in ledger sequence order:`}
       </p>
       <p><Link href="/reviews" prefetch={false}>Find public work needing independent review</Link></p>
+      <p><Link href={claimsListPath(problemId, "human", { through: cursor })} prefetch={false}>
+        Browse all claim pages at this snapshot
+      </Link></p>
       {rows.length > 0 && (
         <>
           <p className="quiet">
