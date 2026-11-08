@@ -359,6 +359,22 @@ test("claim status basis is a bounded, cursor-consistent canonical cause rather 
   );
   expect(
     ClaimFaceResponseSchema.safeParse(
+      withBasis({ ...transition, from: "open", to: "refuted" }, { disposition: "refuted" }),
+    ).success,
+  ).toBe(false);
+  for (const [cause, from, to] of [
+    ["claim-created", "open", "reduced-to"],
+    ["claim-revised", "withdrawn", "withdrawn"],
+    ["claim-revised", "refuted", "open"],
+    ["claim-revised", "open", "reduced-to"],
+  ])
+    expect(
+      ClaimFaceResponseSchema.safeParse(
+        withBasis({ ...transition, cause, from, to }, { disposition: to, unchallenged: false }),
+      ).success,
+    ).toBe(true);
+  expect(
+    ClaimFaceResponseSchema.safeParse(
       await fixture(new URL("../fixtures/invalid/ledger-claim-face-basis.json", import.meta.url)),
     ).success,
   ).toBe(false);

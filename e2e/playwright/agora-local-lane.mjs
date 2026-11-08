@@ -294,6 +294,63 @@ async function seed(target) {
       body_md: "This review is by another Fellow of the author’s sponsor, not independent sponsorship.",
     }, spare.token);
   assert.equal(sameSponsorReview.status, 201, "same-sponsor review publication");
+  // A deliberate false claim is conceded through the real typed path, without
+  // an independent review. All pins come from public faces/event envelopes.
+  // Its own ordinary Fellow preserves the original author's publication quota.
+  const concessionAuthor = await enrollSetupFellow(target, "usr_agora_lane_concession",
+    "agora-lane-concession-author", ["promote"]);
+  const concessionSession = await fellowPost(target, "/v1/sessions", {
+    problem_id: problemId, intent: "prove",
+  }, concessionAuthor.token);
+  assert.equal(concessionSession.status, 201, "concession author session");
+  const concessionSessionId = concessionSession.body.session_id;
+  const falseDraft = await fellowPost(target, `/v1/sessions/${concessionSessionId}/workshop`, {
+    type: "claim-draft", title: "A false parity assertion", body_md: "Every integer square is odd.",
+  }, concessionAuthor.token);
+  assert.equal(falseDraft.status, 201);
+  const falseClaim = await fellowPost(target, `/v1/sessions/${concessionSessionId}/promote`, {
+    workshop_id: falseDraft.body.workshop_id, kind: "conjecture",
+    statement: "For every integer n, the square n times n is odd.",
+    falsifier: "An integer with an even square, such as n = 2.",
+  }, concessionAuthor.token);
+  assert.equal(falseClaim.status, 201, "false claim publication");
+  const counterexample = await fellowPost(target, `/v1/sessions/${concessionSessionId}/evidence`, {
+    bears_on_kind: "claim", bears_on_id: falseClaim.body.claim_id, bears_on_version: 1,
+    direction: "refutes", kind: "argument", mode: "confirmatory",
+    source: { kind: "locator", locator: "https://example.invalid/parity/two-squared",
+      excerpt: "The square of 2 is 4, which is even." },
+    body_md: "At n = 2 the square is 4, an even integer. The universal oddness assertion fails.",
+  }, concessionAuthor.token);
+  assert.equal(counterexample.status, 201, "counterexample publication");
+  const publicClaim = async (id) => ClaimFaceResponseSchema.parse(await (
+    await fetch(`${target.origin}/p/${problemId}/claims/${id}.json`, {
+      headers: { "user-agent": USER_AGENT },
+    })).json());
+  const disputed = await publicClaim(falseClaim.body.claim_id);
+  assert.equal(disputed.claim_state.disposition, "disputed");
+  const adverseBasis = disputed.claim_state.status_basis;
+  assert.equal(adverseBasis?.kind, "transition");
+  assert.equal(adverseBasis.cause, "refuting-evidence");
+  const eventWindow = await (await fetch(`${target.origin}/p/${problemId}/events.json?since=${adverseBasis.seq - 1}&through=${adverseBasis.seq}&limit=1`, {
+    headers: { "user-agent": USER_AGENT },
+  })).json();
+  const sourceEvent = eventWindow.events.find((entry) => entry.event?.id === adverseBasis.event_id)?.event;
+  assert.equal(sourceEvent?.object_id, counterexample.body.evidence_id);
+  const statement = JSON.parse(disputed.items.find((item) => item.kind === "claim-detail").body);
+  const concession = await fellowPost(target, `/v1/sessions/${concessionSessionId}/retract`, {
+    target_object: falseClaim.body.claim_id,
+    reason: "I concede the oddness assertion because the square of 2 is even.",
+    concession: { target_version: 1, target_digest: statement.content_digest,
+      evidence: { evidence_id: counterexample.body.evidence_id, digest: `sha256:${sourceEvent.payload_sha256}` } },
+  }, concessionAuthor.token);
+  assert.equal(concession.status, 201, `author concession ${concession.body.code ?? ""}`);
+  const conceded = await publicClaim(falseClaim.body.claim_id);
+  assert.equal(conceded.claim_state.disposition, "refuted");
+  assert.equal(conceded.claim_state.review_state, "unreviewed");
+  assert.equal(conceded.claim_state.status_basis?.cause, "author-concession");
+  assert.equal(conceded.claim_state.status_basis.seq, concession.body.seq);
+  // Keep these filings last: the original pagination assertions require the
+  // final gap cursor to equal the live problem head at the start of browsing.
   // Nine real filings exceed the canonical eight-item page budget. The ninth
   // must remain reachable through continuation and the registered exact URL.
   const gapIds = [];
@@ -314,53 +371,6 @@ async function seed(target) {
     gapIds.push(gap.body.gap_id);
     gapCursor = gap.body.seq;
   }
-  // A deliberate false claim is conceded through the real typed path, without
-  // an independent review. All pins come from public faces/event envelopes.
-  const falseDraft = await fellowPost(target, `/v1/sessions/${sessionId}/workshop`, {
-    type: "claim-draft", title: "A false parity assertion", body_md: "Every integer square is odd.",
-  }, author.token);
-  assert.equal(falseDraft.status, 201);
-  const falseClaim = await fellowPost(target, `/v1/sessions/${sessionId}/promote`, {
-    workshop_id: falseDraft.body.workshop_id, kind: "conjecture",
-    statement: "For every integer n, the square n times n is odd.",
-    falsifier: "An integer with an even square, such as n = 2.",
-  }, author.token);
-  assert.equal(falseClaim.status, 201, "false claim publication");
-  const counterexample = await fellowPost(target, `/v1/sessions/${sessionId}/evidence`, {
-    bears_on_kind: "claim", bears_on_id: falseClaim.body.claim_id, bears_on_version: 1,
-    direction: "refutes", kind: "argument", mode: "confirmatory",
-    source: { kind: "locator", locator: "https://example.invalid/parity/two-squared",
-      excerpt: "The square of 2 is 4, which is even." },
-    body_md: "At n = 2 the square is 4, an even integer. The universal oddness assertion fails.",
-  }, author.token);
-  assert.equal(counterexample.status, 201, "counterexample publication");
-  const publicClaim = async (id) => ClaimFaceResponseSchema.parse(await (
-    await fetch(`${target.origin}/p/${problemId}/claims/${id}.json`, {
-      headers: { "user-agent": USER_AGENT },
-    })).json());
-  const disputed = await publicClaim(falseClaim.body.claim_id);
-  assert.equal(disputed.claim_state.disposition, "disputed");
-  const adverseBasis = disputed.claim_state.status_basis;
-  assert.equal(adverseBasis?.kind, "transition");
-  assert.equal(adverseBasis.cause, "refuting-evidence");
-  const eventWindow = await (await fetch(`${target.origin}/p/${problemId}/events.json?since=${adverseBasis.seq - 1}&through=${adverseBasis.seq}&limit=1`, {
-    headers: { "user-agent": USER_AGENT },
-  })).json();
-  const sourceEvent = eventWindow.events.find((entry) => entry.event?.id === adverseBasis.event_id)?.event;
-  assert.equal(sourceEvent?.object_id, counterexample.body.evidence_id);
-  const statement = JSON.parse(disputed.items.find((item) => item.kind === "claim-detail").body);
-  const concession = await fellowPost(target, `/v1/sessions/${sessionId}/retract`, {
-    target_object: `${falseClaim.body.claim_id}@1`,
-    reason: "I concede the oddness assertion because the square of 2 is even.",
-    concession: { target_version: 1, target_digest: statement.content_digest,
-      evidence: { evidence_id: counterexample.body.evidence_id, digest: `sha256:${sourceEvent.payload_sha256}` } },
-  }, author.token);
-  assert.equal(concession.status, 201, "author concession");
-  const conceded = await publicClaim(falseClaim.body.claim_id);
-  assert.equal(conceded.claim_state.disposition, "refuted");
-  assert.equal(conceded.claim_state.review_state, "unreviewed");
-  assert.equal(conceded.claim_state.status_basis?.cause, "author-concession");
-  assert.equal(conceded.claim_state.status_basis.seq, concession.body.seq);
   return {
     problemId,
     claimId: promoted.body.claim_id,
@@ -1236,6 +1246,8 @@ async function main() {
       record(`${mode} concession link names the exact canonical event window`,
         await step.getAttribute("href") === `/p/${problemId}/events?since=${concessionBasis.seq - 1}&through=${concessionBasis.seq}&limit=1`);
       await step.click();
+      await page.waitForURL(`${agora.origin}/p/${problemId}/events?since=${concessionBasis.seq - 1}&through=${concessionBasis.seq}&limit=1`);
+      await page.getByText(concessionBasis.event_id, { exact: true }).waitFor();
       record(`${mode} concession click-through resolves the real public event and retraction`,
         (await page.locator("main").innerText()).includes(concessionBasis.event_id));
       await proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCursor, mode });
@@ -2119,7 +2131,7 @@ async function main() {
         record(
           "og the problem card follows the live face (changes after a public write)",
           later.status === 201 && after.status === 200 && !after.bytes.equals(before.bytes),
-          later.status,
+          { status: later.status, code: later.body.code },
         );
       }
       await context.close();

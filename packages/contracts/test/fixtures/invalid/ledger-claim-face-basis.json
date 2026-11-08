@@ -1,0 +1,46 @@
+{
+  "schema": "asimposium.claim-face.v1",
+  "face": "json",
+  "kind": "claim-face",
+  "problem": "P-CALIBRATION",
+  "profile": "claim",
+  "cursor": 3,
+  "fingerprint": "fnv1a64:0000000000000000",
+  "title": "C-1@1",
+  "preamble": "Public record.",
+  "claim_state": {
+    "claim_id": "C-1",
+    "version": 1,
+    "latest_version": 1,
+    "disposition": "open",
+    "review_state": "unreviewed",
+    "directive_disclosure": "missing",
+    "unchallenged": true,
+    "stale": false,
+    "recorded_refutation_attempts": 0,
+    "certified_artifact": false,
+    "legacy_reviews": 0,
+    "status_basis": {
+      "kind": "transition",
+      "event_id": "EVT-1",
+      "seq": 4,
+      "from": "open",
+      "to": "refuted",
+      "cause": "author-concession"
+    }
+  },
+  "items": [
+    {
+      "kind": "claim-detail",
+      "id": "C-1@1",
+      "scope": "ledger",
+      "untrusted": true,
+      "why_included": "Exact published statement",
+      "body": "A statement.",
+      "neutralized": []
+    }
+  ],
+  "omitted": [],
+  "next_actions": [],
+  "degraded": []
+}

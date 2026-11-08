@@ -94,6 +94,7 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
     for (const status_basis of [undefined, { kind: "unavailable" },
       { kind: "transition", event_id: "EVT-FUTURE", seq: 11, from: "open", to: "refuted", cause: "review-created" },
       { kind: "transition", event_id: "EVT-WRONG", seq: 5, from: "draft", to: "open", cause: "claim-created" },
+      { kind: "transition", event_id: "EVT-FORGED", seq: 1, from: "open", to: "refuted", cause: "claim-created" },
     ] as const) {
       face.claim_state = { ...face.claim_state, disposition: "refuted", unchallenged: false, status_basis };
       const vm = buildClaimPageViewModel(face, ORIGIN);

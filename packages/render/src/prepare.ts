@@ -510,6 +510,9 @@ function snapshotClaimState(value: unknown): PublicClaimState | undefined {
         : kind === "directive-disclosure"
           ? ["status"]
           : [];
+    if (Object.keys(basis).some((field) => field !== "kind" && !fields.includes(field))) {
+      refuseUnreadableProjection("claim_state.status_basis");
+    }
     snapshot.status_basis = Object.fromEntries([
       ["kind", kind],
       ...fields.map((field) => [

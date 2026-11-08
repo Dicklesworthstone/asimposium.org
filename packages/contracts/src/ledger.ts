@@ -127,35 +127,87 @@ export type ClaimDisposition = z.infer<typeof ClaimDispositionSchema>;
 
 /** Public, mechanical provenance for the last fold step, never a proof or a
  * reconstruction from the bounded display records. Missing sources stay unknown. */
-export const ClaimStatusBasisSchema = z.discriminatedUnion("kind", [
-  z
-    .object({
-      kind: z.literal("transition"),
-      event_id: z.string().regex(EVENT_TAIL_ID_PATTERN),
-      seq: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
-      from: ClaimDispositionSchema,
-      to: ClaimDispositionSchema.exclude(["draft"]),
-      cause: z.enum([
-        "claim-created",
-        "claim-revised",
-        "claim-retracted",
-        "claim-reduced",
-        "author-concession",
-        "review-created",
-        "refuting-evidence",
-        "falsification-attempt",
-        "certified-artifact",
-      ]),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("directive-disclosure"),
-      status: z.enum(["missing", "unresolved", "unavailable"]),
-    })
-    .strict(),
-  z.object({ kind: z.literal("unavailable") }).strict(),
-]);
+export const ClaimStatusBasisSchema = z
+  .discriminatedUnion("kind", [
+    z
+      .object({
+        kind: z.literal("transition"),
+        event_id: z.string().regex(EVENT_TAIL_ID_PATTERN),
+        seq: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+        from: ClaimDispositionSchema,
+        to: ClaimDispositionSchema.exclude(["draft"]),
+        cause: z.enum([
+          "claim-created",
+          "claim-revised",
+          "claim-retracted",
+          "claim-reduced",
+          "author-concession",
+          "review-created",
+          "refuting-evidence",
+          "falsification-attempt",
+        ]),
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("directive-disclosure"),
+        status: z.enum(["missing", "unresolved", "unavailable"]),
+      })
+      .strict(),
+    z.object({ kind: z.literal("unavailable") }).strict(),
+  ])
+  .superRefine((basis, ctx) => {
+    if (basis.kind !== "transition") return;
+    // Provenance grammar only: this does not decide review weight, scientific
+    // eligibility or whether a transition occurred. The Worker fold owns those.
+    const live = ["open", "disputed", "corroborated", "strongly-supported", "reduced-to"];
+    const changesLiveState = live.includes(basis.from) && basis.from !== basis.to;
+    let coherent: boolean;
+    switch (basis.cause) {
+      case "claim-created":
+        coherent =
+          (basis.from === "draft" && basis.to === "open") ||
+          (basis.from === "open" && basis.to === "reduced-to");
+        break;
+      case "claim-revised":
+        coherent =
+          (basis.from !== "draft" && basis.from !== "superseded" && basis.to === "open") ||
+          (basis.from === "open" && basis.to === "reduced-to") ||
+          (basis.from === "withdrawn" && basis.to === "withdrawn");
+        break;
+      case "claim-retracted":
+        coherent = changesLiveState && basis.to === "withdrawn";
+        break;
+      case "claim-reduced":
+        coherent = changesLiveState && basis.to === "reduced-to";
+        break;
+      case "author-concession":
+        coherent = changesLiveState && basis.to === "refuted";
+        break;
+      case "review-created":
+        coherent =
+          changesLiveState &&
+          ["malformed", "disputed", "corroborated", "strongly-supported", "refuted"].includes(
+            basis.to,
+          );
+        break;
+      case "refuting-evidence":
+        coherent = changesLiveState && ["disputed", "refuted"].includes(basis.to);
+        break;
+      case "falsification-attempt":
+        coherent =
+          changesLiveState &&
+          ["open", "corroborated"].includes(basis.from) &&
+          ["corroborated", "strongly-supported"].includes(basis.to);
+        break;
+    }
+    if (!coherent)
+      ctx.addIssue({
+        code: "custom",
+        path: ["cause"],
+        message: "cause cannot describe this status step",
+      });
+  });
 export type ClaimStatusBasis = z.infer<typeof ClaimStatusBasisSchema>;
 
 /**

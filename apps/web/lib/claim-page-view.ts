@@ -607,7 +607,6 @@ export function buildClaimPageViewModel(
       "review-created": "A recorded review changed the computed standing under the existing ledger rules.",
       "refuting-evidence": "Recorded counterevidence triggered this status step; evidence submission alone does not certify a refutation.",
       "falsification-attempt": "A grounded surviving check triggered reevaluation of the recorded support.",
-      "certified-artifact": "A recorded artifact triggered reevaluation under the existing ledger rules.",
     };
     reasons.unshift(causeText[basis.cause]);
     triggeringItems.push({ id: basis.event_id, kind: basis.cause, seq: basis.seq,

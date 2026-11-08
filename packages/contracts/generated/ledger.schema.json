@@ -1643,8 +1643,7 @@
                         "author-concession",
                         "review-created",
                         "refuting-evidence",
-                        "falsification-attempt",
-                        "certified-artifact"
+                        "falsification-attempt"
                       ]
                     }
                   },

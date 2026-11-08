@@ -117,7 +117,7 @@ export interface CurrentClaimDispositionFold {
     readonly sequence: number;
     readonly from: ClaimDisposition;
     readonly to: ClaimDisposition;
-    readonly cause: VersionedClaimTimelineEvent["kind"];
+    readonly cause: Exclude<VersionedClaimTimelineEvent["kind"], "certified-artifact">;
     /** Attached only after the scientific reader verifies the public source. */
     readonly eventId?: string;
   } | null;
@@ -171,7 +171,11 @@ export function computeCurrentClaimDisposition(
     has_certified_artifact: hasCertifiedArtifact,
   });
   const recordDisposition = (next: ClaimDisposition, reestablish = false): void => {
-    if (activeSource && (next !== disposition || reestablish)) {
+    if (
+      activeSource &&
+      activeSource.kind !== "certified-artifact" &&
+      (next !== disposition || reestablish)
+    ) {
       lastTransition = {
         sequence: activeSource.sequence,
         from: disposition,

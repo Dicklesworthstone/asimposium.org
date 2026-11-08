@@ -179,6 +179,7 @@ test("claim state cannot escape its canonical contract or be added to an unrelat
   const source = projection();
   for (const state of [
     { ...source.claim_state, stale: true },
+    { ...source.claim_state, status_basis: { ...source.claim_state.status_basis, proof: true } },
     {
       ...source.claim_state,
       status_basis: { ...source.claim_state.status_basis, seq: source.cursor + 1 },
