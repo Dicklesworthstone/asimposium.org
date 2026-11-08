@@ -2,6 +2,8 @@ import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
+  getMoveTemplate,
+  type NextMoveCandidate,
   ProblemGovernanceEventSchema,
   PublicMovesResponseSchema,
   ScreeningPublicationProvenanceSchema,
@@ -164,6 +166,9 @@ function fixture() {
         },
       };
     },
+    async killOrStand() {
+      return { move: null, degraded: false };
+    },
     formulation: readPublishedProblemFormulation,
     sharpen: selectSharpenStatementMove,
   };
@@ -213,6 +218,124 @@ function fixture() {
   };
   return { sqlite, db, problem, event, hide, items, calls, selectors, claim, offScope };
 }
+
+/** Selection is a unit fixture; the actual canonical selector is exercised in
+ * moves-real-bindings.mjs. Both publication pins go through real scope SQL. */
+function counterevidence(f: ReturnType<typeof fixture>, problem = "P-DEMO") {
+  const hypothesisEvent = f.event(problem, 3, "H-1", "hypothesis", "hypothesis.created");
+  const evidenceEvent = f.event(problem, 4, "E-1", "evidence", "evidence.created");
+  const move: NextMoveCandidate = {
+    move: "kill-or-stand",
+    why: "Inspect recorded counterevidence before deciding whether to withdraw the route.",
+    refs: [problem, "H-1", "E-1"],
+    contract: {
+      ...getMoveTemplate("kill-or-stand"),
+      preparation: {
+        problem_id: problem,
+        captured_cursor: 20,
+        hypothesis_pin: {
+          hypothesis_id: "H-1",
+          event_id: hypothesisEvent,
+          seq: 3,
+          payload_sha256: hash("{}"),
+        },
+        evidence_pin: {
+          evidence_id: "E-1",
+          event_id: evidenceEvent,
+          seq: 4,
+          payload_sha256: hash("{}"),
+        },
+      },
+    },
+  };
+  f.selectors.killOrStand = async (_db, id, cursor) => {
+    expect(id).toBe(problem);
+    expect(cursor).toBe(20);
+    return { move, degraded: false };
+  };
+  return { move, hypothesisEvent, evidenceEvent };
+}
+
+test("public discovery prioritizes canonical hypothesis counterevidence with exact source pins", async () => {
+  const f = fixture();
+  f.problem("P-DEMO", { claim: "C-1" });
+  f.items.set("P-DEMO", [f.claim("P-DEMO", "C-1")]);
+  const { move } = counterevidence(f);
+  const direct = await loadPublicProblemMoves(f.db, "P-DEMO", { selectors: f.selectors });
+  expect(direct?.primary_move).toEqual(move);
+  expect(direct?.alternatives.some((alternative) => alternative.move === "review")).toBe(true);
+  expect(direct?.degraded).toBe(false);
+  expect(direct?.viewer.effective_permissions.promote).toBe(false);
+  const global = await loadPublicMoves(f.db, {}, { selectors: f.selectors });
+  expect(global.discovery.problems[0]?.primary_move).toEqual(move);
+  expect(global.discovery.degraded).toBe(false);
+});
+
+test("counterevidence also displaces frontier expansion before any claim exists", async () => {
+  const f = fixture();
+  f.problem("P-DEMO");
+  counterevidence(f);
+  const direct = await loadPublicProblemMoves(f.db, "P-DEMO", { selectors: f.selectors });
+  expect(direct?.primary_move?.move).toBe("kill-or-stand");
+  expect(direct?.alternatives.some((alternative) => alternative.move === "state-claim")).toBe(true);
+  expect(direct?.degraded).toBe(false);
+});
+
+for (const source of ["hypothesisEvent", "evidenceEvent"] as const) {
+  test(`off-scope ${source} excludes counterevidence from global discovery but preserves direct reads`, async () => {
+    const f = fixture();
+    f.problem("P-DEMO", { claim: "C-1" });
+    f.items.set("P-DEMO", [f.claim("P-DEMO", "C-1")]);
+    const pins = counterevidence(f);
+    f.offScope(pins[source]);
+    const global = await loadPublicMoves(f.db, {}, { selectors: f.selectors });
+    expect(global.discovery.problems[0]?.primary_move?.move).toBe("review");
+    expect(JSON.stringify(global.discovery)).not.toContain('"H-1"');
+    expect(JSON.stringify(global.discovery)).not.toContain('"E-1"');
+    const direct = await loadPublicProblemMoves(f.db, "P-DEMO", { selectors: f.selectors });
+    expect(direct?.primary_move?.move).toBe("kill-or-stand");
+    expect(direct?.degraded).toBe(false);
+  });
+}
+
+for (const source of ["hypothesisEvent", "evidenceEvent"] as const) {
+  test(`a later readable event cannot replace the hidden exact ${source} publication`, async () => {
+    const f = fixture();
+    f.problem("P-DEMO", { claim: "C-1" });
+    f.items.set("P-DEMO", [f.claim("P-DEMO", "C-1")]);
+    counterevidence(f);
+    const hypothesis = source === "hypothesisEvent";
+    f.event(
+      "P-DEMO",
+      5,
+      hypothesis ? "H-1" : "E-1",
+      hypothesis ? "hypothesis" : "evidence",
+      hypothesis ? "hypothesis.resumed" : "evidence.annotated",
+    );
+    f.hide("P-DEMO", hypothesis ? "#3" : "#4");
+    const direct = await loadPublicProblemMoves(f.db, "P-DEMO", { selectors: f.selectors });
+    expect(direct?.primary_move).toBeNull();
+    expect(direct?.degraded).toBe(true);
+    expect(direct?.omitted.map((item) => item.reason)).toContain("content_unavailable");
+    const global = await loadPublicMoves(f.db, {}, { selectors: f.selectors });
+    expect(global.discovery.problems[0]?.primary_move?.move).toBe("review");
+    expect(JSON.stringify(global.discovery)).not.toContain('"H-1"');
+  });
+}
+
+test("unavailable counterevidence selection is disclosed without erasing independent review work", async () => {
+  const f = fixture();
+  f.problem("P-DEMO", { claim: "C-1" });
+  f.items.set("P-DEMO", [f.claim("P-DEMO", "C-1")]);
+  f.selectors.killOrStand = async () => {
+    throw new Error("PRIVATE_SELECTOR_DIAGNOSTIC");
+  };
+  const face = await loadPublicProblemMoves(f.db, "P-DEMO", { selectors: f.selectors });
+  expect(face?.primary_move?.move).toBe("review");
+  expect(face?.degraded).toBe(true);
+  expect(face?.omitted.map((item) => item.reason)).toContain("selector_unavailable");
+  expect(JSON.stringify(face)).not.toContain("PRIVATE_SELECTOR_DIAGNOSTIC");
+});
 
 test("off-scope formulations remain directly actionable but leave global move admissions", async () => {
   const f = fixture();
