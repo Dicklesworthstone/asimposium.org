@@ -24,6 +24,42 @@ gates pass at the accepted revisions below, with independent acceptance of the
 source repairs, Fellow history and exact-record readers. Deployed acceptance
 remains separate.**
 
+### Local target cleanup — 2026-11-08, `f061d6a0`
+
+`f061d6a0` connects gauntlet targets to the native journey's existing Wrangler
+builder ownership mechanism (`pjuf.1`). A native probe observed a live esbuild
+child after `target.close()` returned; the new native assertion fails on the
+old code. The shared helper now waits for the actual child's close event,
+preserves overlapping owners and makes repeated target closes idempotent.
+Failed setup also retires the harness and builder; proxy-listen errors reject
+into that cleanup path. This is a local verification enabler, not a new product
+surface or a diagnosis of historical failures.
+WhiteRaven independently closes only `pjuf.1`; Beads comment 2968 maps every
+original acceptance item to source lines and actual execution evidence.
+
+Both agents pass all six prescribed commands at this exact source: typecheck
+and lint eight groups, root contract five required groups with its original two
+policy skips, full contracts 959 tests and render 592. Complete unfiltered unit
+runs pass eight groups in 1,436.40 seconds primary and 1,456.69 independently;
+each has 6,827 Worker tests, 914 Agora tests and the original 54 individual
+toolchain skips. The existing native cleanup lane passes all six modes,
+including an actual failed runtime startup and mixed target/journey ownership.
+Both production Next/Chromium lanes pass all 290 checks with normal owners at
+the original 300-second bound. Three isolated builder faults reach their
+intended assertions and are restored exactly; all 227 registered fault anchors
+match. Five source hashes stay unchanged and equal across agents.
+
+Three earlier unchanged complete browser controls also pass, but those null
+observations do not identify the historical residual. Broader `pjuf` remains
+unfinished, including its navigation and unit-timeout observations. UBS completes
+all five changed inputs; three critical flags (an existing adverse logging
+string and two header-presence booleans), three warnings and 128 information
+items are reviewed without suppressions or failed modules. Evidence and the
+granular TODO are under `e2e/artifacts/pjuf-20261108-coppertiger/` and
+`e2e/artifacts/independent-20261108-pjuf-1-f061d6a0/`. Fresh 07:07 UTC public
+capabilities still have the old production/staging `0.1.0-draft` bodies. No
+deployment occurred here; Google, hosted screening, G0 and launch remain unearned.
+
 ### Unverified claim gaps — 2026-11-08, `04d0c39a`
 
 `04d0c39a` repairs the existing What-remains-unverified panel (`n9n.3`).
