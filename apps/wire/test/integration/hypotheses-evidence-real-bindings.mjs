@@ -306,15 +306,48 @@ await runLocalWorkerJourney(async (context) => {
         200,
       ),
     );
-    assert.deepEqual(
-      pack.items.find((item) => item.id === itemId)?.screening_notice,
-      hypothesisWarning,
-      `${profile}: exact creation warning outside untrusted body`,
-    );
+    const item = pack.items.find((entry) => entry.id === itemId);
+    if (profile === "orient") {
+      // Fable §§7.3/9.6 select material events for orientation. Hypothesis
+      // creation is public history; only its kill is a material increment.
+      assert.equal(item, undefined, "orient excludes nonmaterial hypothesis creation");
+      assert.ok(
+        pack.omitted.some(
+          (entry) =>
+            entry.reason === "profile_summary" && entry.detail.startsWith("orientation-events:"),
+        ),
+        "orient discloses its material-event filtering",
+      );
+    } else {
+      assert.ok(item, "full includes the exact hypothesis creation event");
+      assert.equal(item.untrusted, true);
+      const record = JSON.parse(item.body);
+      assert.equal(record.seq, warnedSource.seq);
+      assert.equal(record.publication.id, warnedSource.id);
+      assert.equal(record.publication.type, "hypothesis.created");
+      assert.equal(record.publication.object_kind, "hypothesis");
+      assert.equal(record.publication.object_id, hypId1);
+      assert.deepEqual(
+        item.screening_notice,
+        hypothesisWarning,
+        "full: exact creation warning outside untrusted body",
+      );
+    }
   }
 
   // A publishable warning never turns quarantine, rejection or provider failure
   // into permission. Rejected work does not reach any public scientific row.
+  // Give the new refusal probes their own real Fellow budget under the same
+  // sponsor; the scientific author's existing journey stays within its cap.
+  const policyProbe = await enroll("he-policy-probes", sponsorA);
+  const policyHello = await call("/v1/hello", undefined, policyProbe);
+  const policySession = await call(
+    "/v1/sessions",
+    { problem_id: problemId, intent: "prove" },
+    policyProbe,
+    201,
+  );
+  const policySessionId = policySession.session_id;
   const beforeDeniedHypotheses = await warningState();
   for (const [mode, status, code] of [
     ["quarantine", 202, "SCREENING_HOLD"],
@@ -323,13 +356,13 @@ await runLocalWorkerJourney(async (context) => {
   ]) {
     await context.fixtures.setScreenMode(mode);
     const refused = await call(
-      `/v1/sessions/${sessionIdA}/hypotheses`,
+      `/v1/sessions/${policySessionId}/hypotheses`,
       {
         ...warnedHypothesisBody,
         route: `Withheld hypothesis ${mode}`,
         body_md: `PRIVATE-HYPOTHESIS-CANARY-${mode}`,
       },
-      authorA,
+      policyProbe,
       status,
     );
     assert.equal(refused.code, code);
@@ -685,9 +718,11 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(evFriction.computed_class, "assertion");
 
   // 5l. Idempotent replay of evidence submission
+  // This replay-only claim fixture uses the auxiliary Fellow's budget; the
+  // scientific author's hypothesis evidence and self-notification stay intact.
   const replayEvKey = "idemp_ev_key_001";
   const evFirst = await call(
-    `/v1/sessions/${sessionIdA}/evidence`,
+    `/v1/sessions/${policySessionId}/evidence`,
     {
       bears_on_kind: "claim",
       bears_on_id: claimId,
@@ -698,12 +733,12 @@ await runLocalWorkerJourney(async (context) => {
       mode: "confirmatory",
       body_md: "Replay test evidence body.",
     },
-    authorA,
+    policyProbe,
     201,
     replayEvKey,
   );
   const evReplayed = await call(
-    `/v1/sessions/${sessionIdA}/evidence`,
+    `/v1/sessions/${policySessionId}/evidence`,
     {
       bears_on_kind: "claim",
       bears_on_id: claimId,
@@ -714,7 +749,7 @@ await runLocalWorkerJourney(async (context) => {
       mode: "confirmatory",
       body_md: "Replay test evidence body.",
     },
-    authorA,
+    policyProbe,
     200,
     replayEvKey,
   );
@@ -785,13 +820,13 @@ await runLocalWorkerJourney(async (context) => {
   const beforeHeldKill = await warningState();
   await context.fixtures.setScreenMode("allow-with-warning");
   const heldKill = await call(
-    `/v1/sessions/${sessionIdA}/hypotheses/${hypId1}/kill`,
+    `/v1/sessions/${policySessionId}/hypotheses/${hypId1}/kill`,
     {
       hypothesis_id: hypId1,
       killed_by_evidence_id: evKillH1.evidence_id,
       reason: "The original route's boundary observation requires a separate screening decision.",
     },
-    authorA,
+    policyProbe,
     202,
   );
   assert.equal(heldKill.code, "SCREENING_HOLD");
@@ -1661,6 +1696,13 @@ await runLocalWorkerJourney(async (context) => {
   const rebuilt = await assertProjectionsRebuild(context.env.DB, problemId);
   console.log(JSON.stringify({ stage: "projection-rebuild", ...rebuilt }));
 
+  const quotaWorkload = await context.env.DB.prepare(`SELECT
+    SUM(CASE WHEN fellow_id=?2 THEN 1 ELSE 0 END) AS scientific_author,
+    SUM(CASE WHEN fellow_id=?3 THEN 1 ELSE 0 END) AS policy_probe
+    FROM public_write_attempt_reservations WHERE problem_id=?1`)
+    .bind(problemId, fellowIdA, policyHello.fellow.fellow_id)
+    .first();
+
   console.log(
     JSON.stringify({
       kind: "hypotheses-evidence-real-bindings-complete",
@@ -1681,6 +1723,7 @@ await runLocalWorkerJourney(async (context) => {
       rules_verified: ["P3", "P5", "P6", "P8", "P9"],
       replays_verified: ["hypothesis_propose", "evidence_submit", "hypothesis_kill"],
       packs_verified: ["graveyard", "claim"],
+      quota_attempts: quotaWorkload,
     }),
   );
 });
