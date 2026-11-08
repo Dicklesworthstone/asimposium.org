@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import {
   EnrollmentHelloResponseSchema,
   type NextMoveCandidate,
+  ProblemGovernanceEventSchema,
   ProblemNextResponseSchema,
   ProtocolAckResponseSchema,
   TriageResponseSchema,
@@ -18,6 +19,7 @@ import {
   EnrollmentService,
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
+import { writeLedgerEvent } from "../../src/krater/krater.ts";
 import {
   ContractFixtureMovesProvider,
   PROMOTION_MOVE_KINDS,
@@ -193,14 +195,67 @@ async function createTestHarness(options: { movesProvider?: any } = {}) {
   }
 
   // Helper to insert a problem directly into the DB
-  async function seedProblem(problemId: string, title = "Test Problem", admissionMode = "open") {
+  async function seedProblem(
+    problemId: string,
+    title = "Test Problem",
+    admissionMode = "open",
+    publication?: FixtureFellow,
+  ) {
     const now = Math.floor(Date.now() / 1_000);
     await db
       .prepare(
-        "INSERT INTO problems (id, title, admission_mode, status, created_at, updated_at, chain_digest) VALUES (?, ?, ?, 'active', ?, ?, 'genesis')",
+        "INSERT INTO problems (id, title, admission_mode, status, created_at, updated_at, chain_digest) VALUES (?, ?, ?, 'active', ?, ?, ?)",
       )
-      .bind(problemId, title, admissionMode, now, now)
+      .bind(problemId, title, admissionMode, now, now, publication ? null : "genesis")
       .run();
+    if (publication) {
+      // Default selectors read committed formulation bytes; a mutable problem
+      // row alone is only sufficient for the explicitly injected unit provider.
+      const createdAt = new Date().toISOString();
+      const payloadJson = JSON.stringify(
+        ProblemGovernanceEventSchema.parse({
+          action: "publish",
+          previous_status: "private-draft",
+          previous_statement_version: 1,
+          source_fellow_id: publication.fellowId,
+          acting_principal: { type: "sponsor", id: publication.sponsorId },
+          problem: {
+            id: problemId,
+            title,
+            status: "sharpening",
+            current_statement_version: 1,
+            statement: "Every integer has the same parity as its square.",
+            falsifier: "An integer whose square has the opposite parity.",
+            motivation: "Exercise the default source-grounded first-claim move.",
+            updated_at: createdAt,
+          },
+        }),
+      );
+      await writeLedgerEvent(
+        db,
+        {
+          problemId,
+          eventId: `E-FORMULATION-${problemId}`,
+          idempotencyKey: `fixture-formulation-${problemId}`,
+          requestDigest: await sha256Hex(payloadJson),
+          eventType: "problem.admitted",
+          objectKind: "problem",
+          objectId: problemId,
+          objectVersion: 1,
+          payloadJson,
+          createdAt,
+          attribution: {
+            principalType: "sponsor",
+            sponsorId: publication.sponsorId,
+            fellowId: null,
+            sessionId: null,
+            modelSelfDeclared: null,
+            harness: null,
+          },
+        },
+        { statementsAfterEvent: () => [] },
+      );
+    }
   }
 
   // Helper to add problem membership
@@ -466,7 +521,7 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
   test("GET /v1/triage returns hello and a real first-claim move for an empty board", async () => {
     const { app, env, enrollFellow, seedProblem, seedMembership } = await createTestHarness();
     const fellow = await enrollFellow();
-    await seedProblem("P-TRIAGE1", "Triage Problem");
+    await seedProblem("P-TRIAGE1", "Triage Problem", "open", fellow);
     await seedMembership("P-TRIAGE1", fellow.fellowId, "contributor");
 
     const res = await app.fetch(
@@ -578,7 +633,7 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
   test("GET /v1/p/:id/next production default returns a workshop-first claim contract", async () => {
     const { app, env, enrollFellow, seedProblem, seedMembership } = await createTestHarness();
     const fellow = await enrollFellow();
-    await seedProblem("P-PROD1", "Production Moves Problem");
+    await seedProblem("P-PROD1", "Production Moves Problem", "open", fellow);
     await seedMembership("P-PROD1", fellow.fellowId, "contributor");
 
     const res = await app.fetch(

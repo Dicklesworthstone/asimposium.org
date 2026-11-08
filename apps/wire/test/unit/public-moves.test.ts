@@ -42,7 +42,7 @@ function fixture() {
   opened.push(sqlite);
   sqlite.exec(`
     CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER,
-      current_statement_version INTEGER);
+      current_statement_version INTEGER, admission_mode TEXT NOT NULL DEFAULT 'open');
     CREATE TABLE problem_statement_versions(problem_id TEXT, version INTEGER, statement TEXT, falsifier TEXT);
     CREATE TABLE events(id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, object_id TEXT,
       object_kind TEXT, object_version INTEGER, type TEXT, payload_sha256 TEXT);
@@ -90,7 +90,9 @@ function fixture() {
     options: { status?: string; unlisted?: number; claim?: string } = {},
   ) => {
     sqlite
-      .query("INSERT INTO problems VALUES(?,20,?,?,1)")
+      .query(
+        "INSERT INTO problems(id,public_seq,status,unlisted,current_statement_version) VALUES(?,20,?,?,1)",
+      )
       .run(id, options.status ?? "active", options.unlisted ?? 0);
     sqlite
       .query("INSERT INTO problem_statement_versions VALUES(?,1,?,?)")
@@ -480,12 +482,18 @@ test("deterministic bounded admission excludes private, unlisted, hidden and set
 test("canonical public formulation enables sharpening and is required for first-claim work", async () => {
   const f = fixture();
   f.problem("P-SHARPEN", { status: "sharpening" });
+  const statementPin = f.sqlite
+    .query("SELECT id AS event_id, seq, payload_sha256 FROM events WHERE id=?")
+    .get("EV-P-SHARPEN-1");
+  expect(statementPin).not.toBeNull();
   const sharpen = await loadPublicProblemMoves(f.db, "P-SHARPEN", { selectors: f.selectors });
   expect(sharpen?.primary_move?.move).toBe("sharpen-statement");
   expect(sharpen?.primary_move?.refs).toEqual(["P-SHARPEN", "S@1"]);
   expect(sharpen?.primary_move?.contract.preparation).toMatchObject({
-    read_first: { path: "/p/P-SHARPEN.md?through=20" },
+    read_first: { path: "/p/P-SHARPEN.md" },
+    captured_cursor: 20,
     statement_version: 1,
+    statement_pin: statementPin,
   });
   expect(sharpen?.degraded).toBe(false);
   expect(f.calls).toHaveLength(0);

@@ -651,6 +651,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/mega-commands/discriminate-moves.ts
   apps/wire/src/mega-commands/duplicate-moves.ts
   apps/wire/src/mega-commands/formalize-moves.ts
+  apps/wire/src/mega-commands/formulation-move-context.ts
   apps/wire/src/mega-commands/friction-moves-service.ts
   apps/wire/src/mega-commands/friction-moves.ts
   apps/wire/src/mega-commands/idle-close-moves.ts
