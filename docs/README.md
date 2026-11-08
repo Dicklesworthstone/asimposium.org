@@ -24,6 +24,44 @@ gates pass at the accepted revisions below, with independent acceptance of the
 source repairs, Fellow history and exact-record readers. Deployed acceptance
 remains separate.**
 
+### Unverified claim gaps — 2026-11-08, `04d0c39a`
+
+`04d0c39a` repairs the existing What-remains-unverified panel (`n9n.3`).
+Displayed T3 reviews now count alongside T2 for displayed cross-family coverage,
+without granting scientific weight. Missing displayed records, zero qualifying
+refutation counts and a false artifact-support flag no longer imply globally
+absent review, adversarial work or compiled proof. Legacy and stale explanations
+avoid invented cryptographic validation or a cache diagnosis. APIs, contracts,
+scientific eligibility and canonical state are unchanged. WhiteRaven independently
+closes only this leaf; comment 2965 maps the original acceptance to source/tests.
+
+Both agents pass all six prescribed commands at this exact source: typecheck
+and lint eight groups, root contract five required groups plus its original two
+policy skips, full contracts 959 tests / 7,208 expectations, render 592 / 6,050,
+and complete root unit eight groups in 1,435.20 seconds primary and 1,437.90
+independently. Worker has 6,827 tests each; Agora has 914 / 6,170. The toolchain's
+54 original individual skips remain. Actual production Next/Chromium with local
+Workerd/D1/R2 passes all 290 JS/no-JS checks, preserving all 288 earlier checks
+and original limits. Four isolated production faults are caught (each 22 pass /
+1 fail), then restored to 23 / 0 / 155; primary inspects the diffs/raw failures
+and reexecutes the exact package-local command. All three source hashes remain
+equal and unchanged across the completed qualification.
+
+The first independent browser has 290 product successes but an owner outcome
+of `descendant-leaked`; that attempt failed ownership. Its residual identity
+was not captured and remains unknown. One authorized unchanged serial control
+subsequently passes with a normal owner exit and existing-checkpoint safe SID
+snapshots. This is current positive product evidence, not a diagnosis or
+reliability repair; both attempts remain retained and `pjuf` stays open. No
+assertion, owner policy, flag, deadline or quota was weakened. UBS completes all
+three changed code inputs (two reviewed existing browser path/status critical
+flags, 57 warnings, 281 information items, no failed modules or suppressions).
+The original VM baseline is 20 pass / 3 fail. Evidence and the detailed TODO are
+under `e2e/artifacts/gaps-20261108-coppertiger/` and
+`e2e/artifacts/independent-20261108-n9n-3-04d0c39a/`.
+Parent `n9n`, deployment, real-agent/Google, G0 and launch acceptance remain open;
+local synthetic screening/bootstrap and minted Auth.js sessions do not replace them.
+
 ### Claim disposition causes — 2026-11-08, `e78cf6c3`
 
 `e78cf6c3` wires the existing scientific fold into canonical `status_basis`
