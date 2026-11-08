@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { HypothesisRequestSchema } from "@asimposium/contracts";
 import {
   HypothesesResponseSchema,
@@ -15,7 +16,12 @@ import {
   type HypothesisDecoders,
   readHypotheses,
 } from "../../src/ledger/hypotheses-read";
-import { loadLiveHypotheses, loadPublicHypotheses } from "../../src/ledger/hypotheses-service";
+import {
+  loadKilledHypotheses,
+  loadLiveHypotheses,
+  loadPublicHypotheses,
+  loadPublicHypothesisItem,
+} from "../../src/ledger/hypotheses-service";
 
 // Tests exercise the real SQL and content commitments. The production Zod
 // decoder is tested separately; this fixture decoder admits only our objects.
@@ -41,6 +47,7 @@ function fixture() {
       object_id TEXT, object_version INTEGER, created_at TEXT, payload_sha256 TEXT,
       actor_fellow_id TEXT, actor_sponsor_id TEXT, actor_session_id TEXT, model_string_self_declared TEXT, harness TEXT);
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     CREATE TABLE hypotheses(hypothesis_id TEXT, route TEXT, status TEXT);`);
   const prepare = (query: string) => ({
@@ -146,6 +153,102 @@ function fixture() {
     read: (query = {}, selection = {}) => readHypotheses(db, "P-DEMO", query, decoders, selection),
   };
 }
+
+test("hypothesis warnings follow the exact visible creation across lists, items and lifecycle history", async () => {
+  const f = fixture();
+  const receipt = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  try {
+    const creation = f.event(1, "H-1");
+    f.event(2, "H-2");
+    const kill = f.event(3, "H-1", "hypothesis.killed");
+    const clean = (await loadPublicHypotheses(f.db, "P-DEMO"))!.face;
+    const before = await hypothesisResponse(
+      new Request("https://a.asimposium.org/p/P-DEMO/hypotheses.json"),
+      JSON.stringify(clean),
+      "json",
+      clean,
+      false,
+    );
+    f.sql
+      .query("INSERT INTO screening_publications VALUES(?,?)")
+      .run(creation, JSON.stringify(receipt));
+    f.sql.query("INSERT INTO screening_publications VALUES(?,?)").run(
+      kill,
+      JSON.stringify({
+        ...receipt,
+        public_action: { ...receipt.public_action, category: "injection" },
+      }),
+    );
+    const full = (await loadPublicHypotheses(f.db, "P-DEMO"))!.face;
+    const exact = (await loadPublicHypothesisItem(f.db, "P-DEMO", "H-1"))!.face;
+    const past = (await loadLiveHypotheses(f.db, "P-DEMO", 2))!.face;
+    const negative = (await loadKilledHypotheses(f.db, "P-DEMO", 3))!.face;
+    for (const face of [full, exact, past, negative]) {
+      assert.deepEqual(face.hypotheses[0]?.screening_notice, receipt.public_action);
+      assert.ok(!JSON.stringify(face).includes(receipt.input_digest));
+      assert.ok(!JSON.stringify(face).includes(receipt.model_version));
+      assert.ok(!JSON.stringify(face).includes('"category":"injection"'));
+      assert.ok(
+        renderHypothesesMarkdown(face).includes("screening context notice: dual-use-boundary"),
+      );
+      assert.ok(renderHypothesesHtml(face).includes('data-screening-notice="screening-warning"'));
+    }
+    assert.equal(full.hypotheses[1]?.screening_notice, undefined);
+    assert.equal(full.hypotheses[0]?.status, "killed");
+    assert.equal(past.hypotheses[0]?.status, "active");
+    const after = await hypothesisResponse(
+      new Request("https://a.asimposium.org/p/P-DEMO/hypotheses.json", {
+        headers: { "if-none-match": before.headers.get("etag")! },
+      }),
+      JSON.stringify(full),
+      "json",
+      full,
+      false,
+    );
+    assert.equal(after.status, 200);
+    assert.notEqual(after.headers.get("etag"), before.headers.get("etag"));
+
+    f.sql
+      .query("UPDATE screening_publications SET provenance_json=? WHERE event_id=?")
+      .run(JSON.stringify({ ...receipt, private_detail: "PRIVATE-DETECTOR-CANARY" }), creation);
+    await assert.rejects(
+      loadPublicHypotheses(f.db, "P-DEMO"),
+      /PUBLIC_SCREENING_RECEIPT_UNAVAILABLE/,
+    );
+    f.sql.exec("INSERT INTO content_controls VALUES('P-DEMO','#1','hidden',1)");
+    const hidden = (await loadPublicHypotheses(f.db, "P-DEMO"))!.face;
+    assert.equal(hidden.hypotheses[0]?.content, null);
+    assert.equal(hidden.hypotheses[0]?.screening_notice, undefined);
+    assert.ok(!JSON.stringify(hidden).includes("PRIVATE-DETECTOR-CANARY"));
+    assert.ok(!renderHypothesesMarkdown(hidden).includes("screening context notice"));
+    assert.ok(!renderHypothesesHtml(hidden).includes("data-screening-notice"));
+
+    f.sql
+      .query("UPDATE screening_publications SET provenance_json=? WHERE event_id=?")
+      .run(JSON.stringify(receipt), creation);
+    f.sql.exec("INSERT INTO content_controls VALUES('P-DEMO','#1','visible',2)");
+    assert.deepEqual(
+      (await loadPublicHypothesisItem(f.db, "P-DEMO", "H-1"))!.face.hypotheses[0]?.screening_notice,
+      receipt.public_action,
+    );
+    f.sql
+      .query("UPDATE event_content SET redacted_at='2026-10-02T00:00:00.000Z' WHERE event_id=?")
+      .run(creation);
+    const redacted = (await loadPublicHypothesisItem(f.db, "P-DEMO", "H-1"))!.face.hypotheses[0];
+    assert.equal(redacted?.content, null);
+    assert.equal(redacted?.screening_notice, undefined);
+  } finally {
+    f.sql.close();
+  }
+});
 
 test("public reader returns committed hypotheses and full original attribution without projection authority", async () => {
   const f = fixture();

@@ -6,7 +6,9 @@ import {
   HypothesisResponseSchema,
   InboxResponseSchema,
   PackResponseSchema,
+  ScreeningPublicationProvenanceSchema,
 } from "@asimposium/contracts";
+import { HypothesesResponseSchema } from "@asimposium/contracts/hypotheses";
 import { ScientificWithdrawalReceiptSchema } from "@asimposium/contracts/scientific-withdrawals";
 import { renderHypothesisEvidenceHtml } from "@asimposium/render";
 import { parsePublicRecord, resolvePublicRecord } from "../../../web/lib/public-record.ts";
@@ -143,24 +145,220 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.equal(missingFalsifierRes.code, "HYPOTHESIS_BODY_INVALID");
 
-  // 4b. Propose H-1 (origin: proposed)
+  // 4b. Publish a legitimately warned H-1 without a review hold. The provider
+  // is synthetic; real Workerd/D1 owns publication, replay and every read.
+  const hypothesisWarning = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  };
+  const warningState = () =>
+    context.env.DB.prepare(`SELECT public_seq,
+    (SELECT COUNT(*) FROM hypotheses WHERE problem_id=?1) AS hypotheses,
+    (SELECT COUNT(*) FROM screening_publications s JOIN events e ON e.id=s.event_id
+      WHERE e.problem_id=?1) AS publications FROM problems WHERE id=?1`)
+      .bind(problemId)
+      .first();
+  const beforeWarning = await warningState();
+  const beforeWarningCalls = await context.fixtures.screeningCalls();
+  const beforeWarningCases = await context.env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM screening_cases",
+  ).first();
+  const warnedHypothesisBody = {
+    route: "modular arithmetic distribution",
+    mechanism: "distribute primes across residue classes and establish uniform density",
+    falsifier: "a residue class with zero prime representation in the cycle limit",
+    expected_evidence: "effective density estimates with explicit error bounds",
+    discriminating_predictions: ["residue count > 0 for all classes", "density variance bounded"],
+    origin: "proposed",
+    body_md: "Propose attack route H-1 based on residue distribution.",
+  };
+  await context.fixtures.setScreenMode("allow-with-warning");
   const hyp1Res = await call(
     `/v1/sessions/${sessionIdA}/hypotheses`,
-    {
-      route: "modular arithmetic distribution",
-      mechanism: "distribute primes across residue classes and establish uniform density",
-      falsifier: "a residue class with zero prime representation in the cycle limit",
-      expected_evidence: "effective density estimates with explicit error bounds",
-      discriminating_predictions: ["residue count > 0 for all classes", "density variance bounded"],
-      origin: "proposed",
-      body_md: "Propose attack route H-1 based on residue distribution.",
-    },
+    warnedHypothesisBody,
     authorA,
     201,
+    "hypothesis-warning-publication",
   );
+  await context.fixtures.setScreenMode("reject");
+  assert.deepEqual(
+    await call(
+      `/v1/sessions/${sessionIdA}/hypotheses`,
+      warnedHypothesisBody,
+      authorA,
+      200,
+      "hypothesis-warning-publication",
+    ),
+    hyp1Res,
+    "accepted warned creation replays without a new policy decision",
+  );
+  await context.fixtures.setScreenMode("pass");
   const hyp1 = HypothesisResponseSchema.parse(hyp1Res);
   assert.equal(hyp1.status, "open");
   const hypId1 = hyp1.hypothesis_id;
+  assert.deepEqual(await warningState(), {
+    public_seq: beforeWarning.public_seq + 1,
+    hypotheses: beforeWarning.hypotheses + 1,
+    publications: beforeWarning.publications + 1,
+  });
+  assert.equal(await context.fixtures.screeningCalls(), beforeWarningCalls + 1);
+  assert.deepEqual(
+    await context.env.DB.prepare("SELECT COUNT(*) AS n FROM screening_cases").first(),
+    beforeWarningCases,
+  );
+  const warnedSource = await context.env.DB.prepare(`SELECT e.id, e.seq, s.provenance_json
+    FROM events e JOIN screening_publications s ON s.event_id=e.id
+    WHERE e.problem_id=? AND e.object_id=? AND e.type='hypothesis.created'`)
+    .bind(problemId, hypId1)
+    .first();
+  assert.ok(warnedSource);
+  const warningProvenance = ScreeningPublicationProvenanceSchema.parse(
+    JSON.parse(warnedSource.provenance_json),
+  );
+  assert.deepEqual(warningProvenance.public_action, hypothesisWarning);
+  const publicWarningPath = `/p/${problemId}/hypotheses/${hypId1}`;
+  const warningText = "screening context notice: dual-use-boundary";
+  const publicWarningRead = (path, etag) =>
+    context.worker.fetch(`${context.origin}${path}`, {
+      headers: {
+        "User-Agent": context.userAgent,
+        ...(etag === undefined ? {} : { "if-none-match": etag }),
+      },
+    });
+  const assertWarningReads = async (expectedStatus) => {
+    for (const path of [publicWarningPath, `/p/${problemId}/hypotheses`]) {
+      const json = await call(`${path}.json`, undefined, undefined, 200);
+      const face = HypothesesResponseSchema.parse(json);
+      const item = face.hypotheses.find((record) => record.hypothesis_id === hypId1);
+      assert.ok(item, "warned hypothesis remains directly and collectively readable");
+      assert.deepEqual(item.screening_notice, hypothesisWarning);
+      assert.equal(item.status, expectedStatus);
+      for (const other of face.hypotheses.filter((record) => record.hypothesis_id !== hypId1))
+        assert.equal(
+          other.screening_notice,
+          undefined,
+          "warnings do not transfer to adjacent routes",
+        );
+      for (const format of ["md", "html"]) {
+        const response = await publicWarningRead(`${path}.${format}`);
+        assert.equal(response.status, 200);
+        const body = await response.text();
+        assert.ok(body.includes(warningText));
+        for (const privateValue of [
+          warningProvenance.input_digest,
+          warningProvenance.model_version,
+          warningProvenance.configuration_digest,
+        ])
+          assert.ok(!body.includes(privateValue), "only the coarse publication notice is public");
+      }
+    }
+  };
+  await assertWarningReads("active");
+  const warnedBeforeHide = await publicWarningRead(`${publicWarningPath}.json`);
+  const warnedEtag = warnedBeforeHide.headers.get("etag");
+  await warnedBeforeHide.text();
+  assert.ok(warnedEtag);
+  // Append native D1 visibility fixtures: the generic operator HTTP action
+  // currently supports problem and claim targets, not hypothesis objects.
+  const controlWarnedHypothesis = (visibility, version) =>
+    context.env.DB.prepare(`INSERT INTO content_controls
+      (control_id, problem_id, target_kind, target_ref, visibility, source, reason_category, actor, reason, version, created_at)
+      VALUES (?, ?, 'hypothesis', ?, ?, 'operator', 'privacy', 'hypothesis-lane-operator',
+        'Verify that current visibility withholds hypothesis publication notices.', ?, ?)`)
+      .bind(
+        `CC-hypothesis-warning-${version}`,
+        problemId,
+        hypId1,
+        visibility,
+        version,
+        new Date().toISOString(),
+      )
+      .run();
+  await controlWarnedHypothesis("hidden", 1);
+  for (const suffix of ["", `?through=${warnedSource.seq}`]) {
+    const direct = await publicWarningRead(`${publicWarningPath}.json${suffix}`, warnedEtag);
+    assert.equal(direct.status, 404, "a cached warning cannot make hidden work readable");
+    assert.ok(!(await direct.text()).includes("screening-warning"));
+    const hiddenPage = HypothesesResponseSchema.parse(
+      await call(`/p/${problemId}/hypotheses.json${suffix}`),
+    );
+    const hiddenRecord = hiddenPage.hypotheses.find((item) => item.hypothesis_id === hypId1);
+    assert.ok(hiddenRecord);
+    assert.equal(hiddenRecord.content, null);
+    assert.equal(hiddenRecord.screening_notice, undefined);
+  }
+  await controlWarnedHypothesis("visible", 2);
+  await assertWarningReads("active");
+  for (const [profile, window, itemId] of [
+    ["orient", `since=${warnedSource.seq - 1}`, `DELTA-${warnedSource.seq}`],
+    [
+      "full",
+      `after=${warnedSource.seq - 1}&through=${warnedSource.seq}`,
+      `FULL-${warnedSource.seq}`,
+    ],
+  ]) {
+    const pack = PackResponseSchema.parse(
+      await call(
+        `/v1/sessions/${sessionIdA}/pack?profile=${profile}&${window}&max_tokens=8000`,
+        undefined,
+        authorA,
+        200,
+      ),
+    );
+    assert.deepEqual(
+      pack.items.find((item) => item.id === itemId)?.screening_notice,
+      hypothesisWarning,
+      `${profile}: exact creation warning outside untrusted body`,
+    );
+  }
+
+  // A publishable warning never turns quarantine, rejection or provider failure
+  // into permission. Rejected work does not reach any public scientific row.
+  const beforeDeniedHypotheses = await warningState();
+  for (const [mode, status, code] of [
+    ["quarantine", 202, "SCREENING_HOLD"],
+    ["reject", 403, "POLICY_DENIED"],
+    ["unavailable", 202, "SCREENING_HOLD"],
+  ]) {
+    await context.fixtures.setScreenMode(mode);
+    const refused = await call(
+      `/v1/sessions/${sessionIdA}/hypotheses`,
+      {
+        ...warnedHypothesisBody,
+        route: `Withheld hypothesis ${mode}`,
+        body_md: `PRIVATE-HYPOTHESIS-CANARY-${mode}`,
+      },
+      authorA,
+      status,
+    );
+    assert.equal(refused.code, code);
+    assert.ok(!JSON.stringify(refused).includes("PRIVATE-HYPOTHESIS-CANARY"));
+    assert.deepEqual(
+      await warningState(),
+      beforeDeniedHypotheses,
+      `${mode}: no scientific publication`,
+    );
+  }
+  await context.fixtures.setScreenMode("pass");
+  await context.clearScreeningPosture(sponsorA);
+
+  // Lifecycle statements require their own notices; this change only admits
+  // warned creation publications and leaves lifecycle warnings in review.
+  await context.fixtures.setScreenMode("allow-with-warning");
+  const heldLifecycle = await call(
+    `/v1/sessions/${sessionIdA}/hypotheses/${hypId1}/lifecycle`,
+    {
+      action: "defer",
+      expected_last_event_id: warnedSource.id,
+      reason: "Postpone this route until an independent boundary check is available.",
+    },
+    authorA,
+    202,
+  );
+  assert.equal(heldLifecycle.code, "SCREENING_HOLD");
+  assert.deepEqual(await warningState(), beforeDeniedHypotheses);
+  await context.fixtures.setScreenMode("pass");
 
   // 4c. Idempotent replay of H-1 with same key returns 200 with identical hypothesis_id
   const replayKeyH1 = "idemp_hyp_1_key_001";
@@ -584,6 +782,22 @@ await runLocalWorkerJourney(async (context) => {
   );
   const evKillH1 = EvidenceResponseSchema.parse(evKillH1Res);
 
+  const beforeHeldKill = await warningState();
+  await context.fixtures.setScreenMode("allow-with-warning");
+  const heldKill = await call(
+    `/v1/sessions/${sessionIdA}/hypotheses/${hypId1}/kill`,
+    {
+      hypothesis_id: hypId1,
+      killed_by_evidence_id: evKillH1.evidence_id,
+      reason: "The original route's boundary observation requires a separate screening decision.",
+    },
+    authorA,
+    202,
+  );
+  assert.equal(heldKill.code, "SCREENING_HOLD");
+  assert.deepEqual(await warningState(), beforeHeldKill);
+  await context.fixtures.setScreenMode("pass");
+
   // 6d. Successfully kill H-1 with the valid refuting evidence
   const killH1Res = await call(
     `/v1/sessions/${sessionIdA}/hypotheses/${hypId1}/kill`,
@@ -599,6 +813,7 @@ await runLocalWorkerJourney(async (context) => {
   const killH1 = HypothesisKillResponseSchema.parse(killH1Res);
   assert.equal(killH1.hypothesis_id, hypId1);
   assert.equal(killH1.status, "killed");
+  await assertWarningReads("killed");
 
   // 6e. Re-killing an already killed hypothesis is refused with 422 HYPOTHESIS_ALREADY_KILLED (Rule P6)
   const reKillH1 = await call(
@@ -701,6 +916,7 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.ok(killedItem1, `Killed hypothesis ${hypId1} must appear in graveyard pack`);
   assert.equal(killedItem1.kind, "killed-hypothesis");
+  assert.deepEqual(killedItem1.screening_notice, hypothesisWarning);
   assert.ok(
     killedItem1.body.includes(evKillH1.evidence_id),
     "Graveyard item body must cite the killing evidence id",
@@ -710,6 +926,7 @@ await runLocalWorkerJourney(async (context) => {
     (it) => it.id === `KH-${hypothesisAdmissions.get(hypId2)}`,
   );
   assert.ok(killedItem2, `Killed hypothesis ${hypId2} must appear in graveyard pack`);
+  assert.equal(killedItem2.screening_notice, undefined);
 
   // Surviving hypothesis H-3 must NOT appear in the graveyard pack
   const survivingH3InGraveyard = graveyardPack.items.find(

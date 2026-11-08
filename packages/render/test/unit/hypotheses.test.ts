@@ -63,3 +63,32 @@ test("continuation links preserve the selected snapshot in both reading faces", 
   expect(renderHypothesesHtml(f)).toContain("hypotheses.html?through=10&amp;after=1");
   expect(renderHypothesesMarkdown(f)).toContain("hypotheses.json?through=10&after=0");
 });
+
+test("creation warnings remain explicit platform context beside the complete untrusted record", () => {
+  const f = face("The route still requires scientific investigation.");
+  const record = f.hypotheses[0]!;
+  record.screening_notice = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  };
+  const md = renderHypothesesMarkdown(f),
+    html = renderHypothesesHtml(f);
+  expect(md).toContain("screening context notice: dual-use-boundary");
+  expect(md.indexOf("screening context notice")).toBeLessThan(md.indexOf("```json"));
+  expect(html).toContain('<aside role="note" data-screening-notice="screening-warning">');
+  expect(html.indexOf("screening context notice")).toBeLessThan(html.indexOf("<pre>"));
+  for (const text of [md, html]) {
+    expect(text).toContain("does not determine the scientific standing");
+    expect(text).toContain("The route still requires scientific investigation.");
+  }
+  record.screening_notice = {
+    category: "off-topic",
+    action: "published-with-warning",
+    notice: "off-scope",
+  };
+  for (const text of [renderHypothesesMarkdown(f), renderHypothesesHtml(f)]) {
+    expect(text).toContain("Off-scope science");
+    expect(text).toContain("excluded from global recommendations");
+  }
+});

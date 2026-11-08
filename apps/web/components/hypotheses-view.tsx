@@ -1,9 +1,11 @@
 import type { HypothesesResponse, PublicHypothesis } from "@asimposium/contracts/hypotheses";
 import { neutralizeUntrustedBody } from "@asimposium/render";
 import Link from "next/link";
+import { eventHistoryPath, publicEventPath } from "../lib/event-history";
 import type { PublicRead } from "../lib/public-ledger";
 import { publicViewWatchTargets } from "../lib/public-watch-view";
 import { PublicLedgerLive } from "./public-ledger-live";
+import { ScreeningNotice } from "./screening-notice";
 
 function WorkProduct({ children }: { readonly children: string }) {
   const body = neutralizeUntrustedBody(children);
@@ -19,11 +21,17 @@ function WorkProduct({ children }: { readonly children: string }) {
   );
 }
 
-function Attribution({ value }: { readonly value: PublicHypothesis["publication"] }) {
+function Attribution({ value, problemId }: {
+  readonly value: PublicHypothesis["publication"];
+  readonly problemId: string;
+}) {
   return (
     <dl className="quiet">
       <dt>Recorded at</dt>
-      <dd><time dateTime={value.created_at}>{value.created_at}</time> · ledger seq {value.seq}</dd>
+      <dd>
+        <time dateTime={value.created_at}>{value.created_at}</time> · ledger seq {value.seq}
+        {" · "}<Link href={publicEventPath(problemId, value.seq)} prefetch={false}>Read source event {value.event_id}</Link>
+      </dd>
       <dt>Fellow</dt>
       <dd>
         {value.fellow_id ? (
@@ -43,6 +51,40 @@ function Attribution({ value }: { readonly value: PublicHypothesis["publication"
     </dl>
   );
 }
+
+const STATUS = {
+  active: {
+    label: "Active",
+    description: "This route is open for investigation. It does not establish support.",
+  },
+  killed: {
+    label: "Killed",
+    description: "A recorded refutation ended this route. It does not settle the whole problem.",
+  },
+  deferred: {
+    label: "Deferred",
+    description: "Investigation of this route is paused and may be resumed. Deferral is not a refutation.",
+  },
+  narrowed: {
+    label: "Narrowed",
+    description: "This route has been replaced by a separately published, narrower successor. Its original statement and evidence remain attached here.",
+  },
+  superseded: {
+    label: "Superseded",
+    description: "This route has been replaced by a separately published successor. Its original statement and evidence remain attached here.",
+  },
+  unavailable: {
+    label: "Status unavailable",
+    description: "The current lifecycle could not be confirmed. No active status is inferred.",
+  },
+} satisfies Record<PublicHypothesis["status"], { label: string; description: string }>;
+
+const LIFECYCLE_ACTION = {
+  defer: "Deferred",
+  resume: "Resumed",
+  narrow: "Narrowed",
+  supersede: "Superseded",
+} as const;
 
 const OMISSION_TEXT = {
   page_limit: "More hypotheses remain at this ledger snapshot. Use the next-page link to continue.",
@@ -81,8 +123,8 @@ export function HypothesesView({
         </header>
         <PublicLedgerLive origin={result.origin} targets={publicViewWatchTargets(result.watch)} />
         <p className="loop" role="note">
-          An active hypothesis is a proposed route with no recorded kill in this view. It does not establish support.
-          A killed hypothesis records a refutation of that route; it does not settle the whole problem.
+          Route status records whether an investigation is active, paused, replaced, or refuted.
+          It does not establish support. Narrowing and replacement preserve the original statement and its evidence.
         </p>
         <p className="quiet">
           Ledger snapshot {face.cursor}. Present-day content withdrawal still applies to historical views.
@@ -102,19 +144,25 @@ export function HypothesesView({
         <ol className="claims-list">
           {face.hypotheses.map((item) => {
             const itemPath = `${listPath}/${encodeURIComponent(item.hypothesis_id)}`;
+            const lifecycle = item.lifecycle;
+            const hasRouteDecision = lifecycle != null ||
+              item.status === "deferred" || item.status === "narrowed" || item.status === "superseded" ||
+              (item.status === "active" && item.last_event.event_id !== item.publication.event_id);
             return (
               <li className="claim-card" key={item.hypothesis_id} id={item.hypothesis_id}>
                 <h2>
                   <Link href={`${itemPath}${cut}`} prefetch={false}>{item.hypothesis_id}</Link>
                 </h2>
                 <p data-hypothesis-status={item.status}>
-                  <strong>{item.status === "unavailable" ? "Status unavailable" : item.status === "killed" ? "Killed" : "Active"}</strong>
+                  <strong>{STATUS[item.status].label}</strong>
                 </p>
+                <p className="quiet">{STATUS[item.status].description}</p>
                 <p className="quiet">Public work product · untrusted author-supplied data</p>
                 {item.content === null ? (
                   <p>The published hypothesis content is currently unavailable or withdrawn.</p>
                 ) : (
                   <>
+                    <ScreeningNotice notice={item.screening_notice} />
                     <h3>Proposed route</h3><WorkProduct>{item.content.route}</WorkProduct>
                     <h3>How it works</h3><WorkProduct>{item.content.mechanism}</WorkProduct>
                     <h3>What would falsify it</h3><WorkProduct>{item.content.falsifier}</WorkProduct>
@@ -138,8 +186,34 @@ export function HypothesesView({
                 )}
                 <details>
                   <summary>Original publication attribution</summary>
-                  <Attribution value={item.publication} />
+                  <Attribution value={item.publication} problemId={face.problem_id} />
                 </details>
+                {hasRouteDecision && (
+                  <section aria-label={`Latest route decision for ${item.hypothesis_id}`}>
+                    <h3>Latest route decision</h3>
+                    {lifecycle == null ? (
+                      <p>The recorded lifecycle explanation is currently unavailable or withdrawn.</p>
+                    ) : (
+                      <>
+                        <p data-hypothesis-lifecycle={lifecycle.action}>
+                          <strong>{LIFECYCLE_ACTION[lifecycle.action]}</strong>
+                        </p>
+                        <WorkProduct>{lifecycle.reason}</WorkProduct>
+                        {"successor_hypothesis_id" in lifecycle && (
+                          <p>
+                            <Link href={`${listPath}/${encodeURIComponent(lifecycle.successor_hypothesis_id)}${cut}`} prefetch={false}>
+                              Read {lifecycle.successor_hypothesis_id}, the {lifecycle.action === "narrow" ? "narrower" : "replacement"} successor at this snapshot
+                            </Link>
+                          </p>
+                        )}
+                      </>
+                    )}
+                    <details>
+                      <summary>Route decision attribution</summary>
+                      <Attribution value={item.last_event} problemId={face.problem_id} />
+                    </details>
+                  </section>
+                )}
                 {item.status === "killed" && (
                   <section aria-label={`Recorded refutation of ${item.hypothesis_id}`}>
                     <h3>Recorded refutation</h3>
@@ -157,7 +231,7 @@ export function HypothesesView({
                     )}
                     <details>
                       <summary>Refutation attribution</summary>
-                      <Attribution value={item.last_event} />
+                      <Attribution value={item.last_event} problemId={face.problem_id} />
                     </details>
                   </section>
                 )}
@@ -165,6 +239,12 @@ export function HypothesesView({
                   <a href={`${result.origin}${itemPath}/evidence.md${cut}&after=0`}>Read the evidence index</a>
                   {" · "}
                   <a href={`${result.origin}${itemPath}.json${cut}`}>Canonical hypothesis record</a>
+                  {" · "}
+                  <Link href={eventHistoryPath(face.problem_id, {
+                    since: item.publication.seq - 1, limit: 50, through: face.cursor,
+                  })} prefetch={false}>
+                    Problem history from this publication at this snapshot
+                  </Link>
                 </p>
               </li>
             );

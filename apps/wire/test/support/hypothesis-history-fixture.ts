@@ -19,6 +19,7 @@ export function hypothesisHistoryFixture() {
       actor_fellow_id TEXT, actor_sponsor_id TEXT, actor_session_id TEXT, model_string_self_declared TEXT, harness TEXT,
       UNIQUE(problem_id,seq));
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     CREATE TABLE hypotheses(hypothesis_id TEXT, route TEXT, status TEXT);
     INSERT INTO hypotheses VALUES ('H-1','PROJECTION-POISON','active');

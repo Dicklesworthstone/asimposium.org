@@ -34,6 +34,7 @@ export function hypothesesProjection(face: HypothesesResponse): Projection {
       scope: "ledger",
       untrusted: true,
       body: JSON.stringify(item, null, 2),
+      ...(item.screening_notice === undefined ? {} : { screening_notice: item.screening_notice }),
       why_included:
         "Recorded route and lifecycle at the captured public cursor; null content is unavailable, not an empty argument.",
     })),

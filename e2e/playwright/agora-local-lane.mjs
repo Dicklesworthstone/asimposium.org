@@ -53,6 +53,7 @@ import {
   setUpProblem,
 } from "../gauntlet/local-product-flow.mjs";
 import { startLocalTarget, USER_AGENT } from "../gauntlet/local-target.mjs";
+import { hypothesisLifecycleBrowsing, hypothesisPublicationWithdrawal, seedHypothesisLifecycle } from "./hypotheses-lifecycle.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const require = createRequire(`${root}e2e/package.json`);
@@ -349,6 +350,7 @@ async function seed(target) {
   assert.equal(conceded.claim_state.review_state, "unreviewed");
   assert.equal(conceded.claim_state.status_basis?.cause, "author-concession");
   assert.equal(conceded.claim_state.status_basis.seq, concession.body.seq);
+  const hypothesisLifecycle = await seedHypothesisLifecycle(target, problemId);
   // Keep these filings last: the original pagination assertions require the
   // final gap cursor to equal the live problem head at the start of browsing.
   // Nine real filings exceed the canonical eight-item page budget. The ninth
@@ -390,6 +392,7 @@ async function seed(target) {
     deadEndId: negative.body.dead_end_id,
     concessionClaimId: falseClaim.body.claim_id,
     concessionBasis: conceded.claim_state.status_basis,
+    hypothesisLifecycle,
   };
 }
 
@@ -927,6 +930,7 @@ async function main() {
       deadEndId,
       concessionClaimId,
       concessionBasis,
+      hypothesisLifecycle,
     } = await seed(target);
     const claimProbe = await fetch(`${target.origin}/p/${problemId}/claims/${claimId}.json`, {
       headers: { "user-agent": USER_AGENT },
@@ -1258,8 +1262,10 @@ async function main() {
       record(`${mode} concession click-through resolves the real public event and retraction`,
         (await page.locator("main").innerText()).includes(concessionBasis.event_id));
       await proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCursor, mode });
+      await hypothesisLifecycleBrowsing({ page, agora, target, problemId, fixture: hypothesisLifecycle, mode, record });
       await context.close();
     }
+    await hypothesisPublicationWithdrawal({ target, browser, agora, problemId, fixture: hypothesisLifecycle, record });
     await proofGapWithdrawal({
       target,
       browser,

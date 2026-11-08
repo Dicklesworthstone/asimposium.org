@@ -9,6 +9,7 @@ import {
   HypothesesResponseSchema,
   HypothesisPublicationSchema,
   PublicHypothesisIdSchema,
+  PublicHypothesisSchema,
 } from "../../src/hypotheses";
 import { generateHypothesesSchema } from "../../src/hypotheses-schema";
 import { HypothesisRequestSchema } from "../../src/sessions";
@@ -69,6 +70,41 @@ test("public schema is generated deterministically from Zod, with no clock or ca
   assert.equal(document.$id, "https://a.asimposium.org/schemas/hypotheses.v1.json");
   assert.ok(document.properties.query);
   assert.ok(document.properties.response);
+});
+
+test("hypothesis warning goldens are public-only context and cannot be supplied in scientific writes", async () => {
+  const face = await fixture("valid/hypotheses-screening-warning.json");
+  const schema = JSON.parse(generateHypothesesSchema());
+  const ajv = new Ajv2020({ strict: true, allErrors: true });
+  addFormats(ajv);
+  const validate = ajv.compile(schema.properties.response);
+  assert.deepEqual(HypothesesResponseSchema.parse(face), face);
+  assert.equal(validate(face), true, JSON.stringify(validate.errors));
+  const item = face.hypotheses[0];
+  assert.equal(
+    HypothesisRequestSchema.safeParse({
+      ...item.content,
+      expected_evidence: "Finite witnesses",
+      screening_notice: item.screening_notice,
+    }).success,
+    false,
+  );
+  const invalid = await fixture("invalid/hypotheses-screening-warning-private.json");
+  assert.equal(HypothesesResponseSchema.safeParse(invalid).success, false);
+  assert.equal(validate(invalid), false);
+  assert.equal(
+    PublicHypothesisSchema.safeParse({ ...item, content: null }).success,
+    false,
+    "a warning must not reveal context for unavailable content",
+  );
+  for (const warning of [
+    { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
+    { category: "injection", action: "published-with-warning", notice: "screening-warning" },
+  ]) {
+    item.screening_notice = warning;
+    assert.equal(HypothesesResponseSchema.safeParse(face).success, true);
+    assert.equal(validate(face), true, JSON.stringify(validate.errors));
+  }
 });
 
 test("hypothesis ids preserve minted Crockford and exact legacy atomic ids", () => {

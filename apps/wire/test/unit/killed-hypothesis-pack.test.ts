@@ -1,5 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import type { HypothesesResponse } from "@asimposium/contracts/hypotheses";
 import {
   type KilledHypothesisPackDependencies,
@@ -51,6 +52,40 @@ test("graveyard carries complete committed work and both attributions, not mutab
     f.sql.close();
   }
 });
+
+for (const body of ["Bounded work product", "x".repeat(64 * 1024)])
+  test(`graveyard retains the original hypothesis warning beside whole or reference-only records (${body.length})`, async () => {
+    const f = fixture();
+    const receipt = JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    try {
+      f.pair({ body_md: body });
+      f.sql
+        .query("INSERT INTO screening_publications VALUES('P-DEMO-1',?)")
+        .run(JSON.stringify(receipt));
+      const section = await f.pack();
+      const candidate = section.candidates.find((item) => item.kind === "killed-hypothesis");
+      assert.deepEqual(candidate?.screening_notice, receipt.public_action);
+      assert.equal(
+        JSON.parse(candidate!.body).representation,
+        body.length > 18_000 ? "reference-only" : "complete",
+      );
+      assert.ok(!JSON.stringify(section).includes(receipt.model_version));
+      f.control("H-1", "hidden");
+      const hidden = await f.pack();
+      assert.ok(hidden.omitted.some((item) => item.reason === "content_unavailable"));
+      assert.ok(!JSON.stringify(hidden).includes("screening-warning"));
+    } finally {
+      f.sql.close();
+    }
+  });
 
 for (const body of ["x".repeat(64 * 1024), "λ".repeat(10_000), "\u0001".repeat(4000)])
   test(`oversized complete work remains reachable without clipped prose (${body.length} code units)`, async () => {
