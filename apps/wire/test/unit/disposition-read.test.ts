@@ -723,6 +723,52 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
     ).toBe("open");
   });
 
+  test("whole-identity withdrawal while malformed remains authoritative on a new version", () => {
+    const revised = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      {
+        kind: "review-created",
+        sequence: 2,
+        targetVersion: 1,
+        carriesWeight: true,
+        verdict: "refute",
+        rubric: ["statement-defect"],
+        review: {
+          review_id: "R-DEFECT",
+          reviewer_id: "F-OTHER",
+          tier: "T2",
+          cross_family: true,
+          full_write_up: true,
+        },
+      },
+      {
+        kind: "claim-retracted",
+        sequence: 3,
+        targetVersion: 1,
+        retractionId: "R-1",
+        wholeIdentity: true,
+      },
+      { kind: "claim-revised", sequence: 4, version: 2 },
+    ]);
+    expect(revised.disposition).toBe("withdrawn");
+    expect(revised.lastTransition).toEqual({
+      sequence: 4,
+      from: "malformed",
+      to: "withdrawn",
+      cause: "claim-revised",
+    });
+    expect(
+      ClaimStatusBasisSchema.safeParse({
+        kind: "transition",
+        event_id: "EVT-REVISION",
+        seq: revised.lastTransition?.sequence,
+        from: revised.lastTransition?.from,
+        to: revised.lastTransition?.to,
+        cause: revised.lastTransition?.cause,
+      }).success,
+    ).toBe(true);
+  });
+
   test("a fresh version resets independently settled refutation without reviving the old statement", () => {
     const folded = computeCurrentClaimDisposition([
       { kind: "claim-created", sequence: 1, version: 1 },
