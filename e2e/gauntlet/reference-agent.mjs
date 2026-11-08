@@ -13,6 +13,7 @@
  * Modes exist so the verdict can be shown to fail:
  *   complete          full loop
  *   complete-typed    full loop publishing the exact saved workshop payload
+ *   complete-lemma    full loop publishing a valid lemma with a falsifier
  *   no-falsifier      promotes a conjecture without a falsifier and never corrects
  *   workshop-only     pushes a draft and closes without promoting
  *   skip-close        promotes but never closes the session
@@ -31,6 +32,7 @@ export const REFERENCE_AGENT_MODES = [
   "no-pack",
   "definition-only",
   "idle-closed",
+  "complete-lemma",
 ];
 
 const USER_AGENT = "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
@@ -163,7 +165,12 @@ export async function runReferenceAgent(
       : `Every integer n with 0 <= n <= ${bound} has a square with the same parity as n.`;
   const falsifier = `An integer n in 0..${bound} whose square has the opposite parity to n.`;
   const publication = {
-    kind: mode === "definition-only" ? "definition" : "conjecture",
+    kind:
+      mode === "definition-only"
+        ? "definition"
+        : mode === "complete-lemma"
+          ? "lemma"
+          : "conjecture",
     statement,
     ...(mode === "no-falsifier" || mode === "definition-only" ? {} : { falsifier }),
     relates_to: [],

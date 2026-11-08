@@ -512,10 +512,11 @@ async function main() {
     let nextIsolatedProblem = 1;
     for (const [index, mode] of agents.entries()) {
       const isHarness = mode.startsWith("harness:");
-      // Real harnesses and the new targeted adversaries need an empty board:
+      // Real harnesses and the targeted reference controls need an empty board:
       // a populated working pack can properly steer later arrivals to review.
       // Preserve the original six reference modes' shared-board expectations.
-      const isolated = isHarness || ["no-pack", "definition-only", "idle-closed"].includes(mode);
+      const isolated =
+        isHarness || ["no-pack", "definition-only", "idle-closed", "complete-lemma"].includes(mode);
       const attemptProblem =
         isolated && index > 0 ? await setUpProblem(target, nextIsolatedProblem++) : problemId;
       // Each attempt has its own sponsor. Sharing setup and reference Fellows
@@ -637,9 +638,21 @@ async function main() {
           facts.sessions.some((session) => session.closed_at !== null && !session.has_handback),
           "idle control is closed without an authored handback",
         );
+      } else if (mode === "complete-lemma") {
+        assert.ok(
+          facts.publicClaims.some(
+            (claim) =>
+              claim.author_fellow_id === facts.fellow?.fellow_id &&
+              !claim.conjecture_class &&
+              claim.has_falsifier,
+          ),
+          "the valid non-conjecture-class claim with its falsifier is actually public",
+        );
       }
       // Real harnesses have no expected outcome: their result is the measurement.
-      const expectedPass = isHarness ? null : mode === "complete" || mode === "complete-typed";
+      const expectedPass = isHarness
+        ? null
+        : mode === "complete" || mode === "complete-typed" || mode === "complete-lemma";
       if (expectedPass === true) {
         assert.equal(
           facts.publicClaims.filter((claim) => claim.author_fellow_id === facts.fellow?.fellow_id)

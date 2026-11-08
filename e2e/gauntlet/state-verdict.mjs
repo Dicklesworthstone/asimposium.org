@@ -97,8 +97,10 @@ export function gauntletVerdict(facts) {
   const own = facts.fellow
     ? facts.publicClaims.filter((c) => c.author_fellow_id === facts.fellow.fellow_id)
     : [];
-  const falsifiable = own.filter((c) => c.conjecture_class && c.has_falsifier);
-  if (falsifiable.length > 0) reached.push("promoted_public");
+  // Fable §16.1 requires a valid claim with a falsifier. Other admitted kinds
+  // (for example, a lemma) also qualify when they carry that field.
+  const withFalsifier = own.filter((c) => c.has_falsifier === true);
+  if (withFalsifier.length > 0) reached.push("promoted_public");
   if (sessions.some((s) => s.closed_at !== null && s.has_handback === true)) reached.push("closed");
   if (facts.secretSeenInPaths) failures.push("the enrollment secret appeared in a request path");
 

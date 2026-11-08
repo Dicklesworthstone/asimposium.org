@@ -170,14 +170,15 @@ describe("state-derived gauntlet verdict", () => {
     expect(verdict.missing).toContain("pack_read");
   });
   test.each([false, true])(
-    "a definition does not substitute for a falsifiable claim: %s",
+    "admitted non-conjecture-class claims require a falsifier: %s",
     (has_falsifier) => {
       const verdict = gauntletVerdict({
         ...complete,
         publicClaims: [{ author_fellow_id: "F-1", has_falsifier, conjecture_class: false }],
       });
-      expect(verdict.completed).toBe(false);
-      expect(verdict.missing).toContain("promoted_public");
+      expect(verdict.completed).toBe(has_falsifier);
+      if (has_falsifier) expect(verdict.missing).not.toContain("promoted_public");
+      else expect(verdict.missing).toContain("promoted_public");
     },
   );
   test("an owned pack from another problem does not satisfy this attempt", () => {
