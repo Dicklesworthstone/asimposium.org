@@ -36,7 +36,7 @@ export interface PublishedProblemFormulation {
   };
 }
 
-interface FormulationRow extends CitationContentRow {
+export interface FormulationRow extends CitationContentRow {
   screening_provenance?: string | null;
   id: string;
   type: string;
@@ -140,12 +140,19 @@ export async function readPublishedProblemFormulations(
   return formulations;
 }
 
-async function verifyPublishedProblemFormulation(
+export async function verifyPublishedProblemFormulation(
   problemId: string,
   through: number,
   row: FormulationRow,
 ): Promise<PublishedProblemFormulation | undefined> {
-  if (row.seq > through || row.object_id !== problemId) return undefined;
+  if (
+    row.seq > through ||
+    row.object_id !== problemId ||
+    !Number.isSafeInteger(row.object_version) ||
+    row.object_version < 1 ||
+    !["problem.admitted", "problem.statement-revised"].includes(row.type)
+  )
+    return undefined;
   const payload = await verifiedCitationContent(problemId, row, PUBLIC_EVENT_CONTENT_MAX_BYTES);
   const parsed = ProblemGovernanceEventSchema.safeParse(payload);
   if (

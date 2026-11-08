@@ -591,6 +591,46 @@ await runLocalWorkerJourney(
     });
     assert.equal(list304.status, 304);
 
+    // Bounded public navigation is executable in Workerd/D1, not merely a
+    // response annotation. Every continuation keeps the initial snapshot.
+    const pagedIds = [];
+    let before;
+    let pageCount = 0;
+    for (;;) {
+      const params = new URLSearchParams({ through: String(listData.cursor), limit: "1" });
+      if (before !== undefined) params.set("before", String(before));
+      const response = await worker.fetch(`${origin}/p/${problemId}/syntheses.json?${params}`, {
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(response.status, 200);
+      const page = SynthesesListResponseSchema.parse(await response.json());
+      assert.equal(page.cursor, listData.cursor);
+      assert.equal(page.before, before ?? null);
+      assert.ok(page.syntheses.length <= 1);
+      pagedIds.push(...page.syntheses.map((synthesis) => synthesis.synthesis_id));
+      pageCount++;
+      assert.ok(pageCount <= 100, "continuations must terminate");
+      if (page.next_before === null) break;
+      assert.ok(page.next_before < (before ?? listData.cursor + 1));
+      assert.ok(response.headers.get("link").includes('rel="next"'));
+      before = page.next_before;
+    }
+    const allAtCut = SynthesesListResponseSchema.parse(
+      await call(`/p/${problemId}/syntheses.json?through=${listData.cursor}&limit=200`),
+    );
+    assert.deepEqual(
+      pagedIds,
+      allAtCut.syntheses.map((synthesis) => synthesis.synthesis_id),
+    );
+    console.log(
+      JSON.stringify({
+        probe: "synthesis-snapshot-pagination",
+        pages: pageCount,
+        publications: pagedIds.length,
+        cursor: listData.cursor,
+      }),
+    );
+
     // 10b. Problem-level syntheses list: Markdown
     const listMdRes = await worker.fetch(`${origin}/p/${problemId}/syntheses.md`, {
       headers: { "User-Agent": userAgent },

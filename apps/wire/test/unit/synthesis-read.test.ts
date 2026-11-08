@@ -2,8 +2,11 @@ import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import type { SynthesisItem } from "@asimposium/contracts";
+import { SynthesesListResponseSchema, type SynthesisItem } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { Hono } from "hono";
+import type { Env } from "../../src/env.ts";
+import { handleSynthesesList } from "../../src/ledger/syntheses-list-http.ts";
 import {
   readSynthesisPage,
   SYNTHESIS_READ_BYTES,
@@ -103,7 +106,12 @@ function fixture() {
   }
   const read = (options: SynthesisReadOptions = {}) =>
     readSynthesisPage(db, "P-SYNTH", options, decode);
-  return { sql, db, queries, publish, hide, read };
+  const app = new Hono<{ Bindings: Env }>();
+  for (const format of ["json", "md", "html"] as const)
+    app.on(["GET", "HEAD"], `/p/:id/syntheses.${format}`, (c) => handleSynthesesList(c, format));
+  const http = (path = "/p/P-SYNTH/syntheses.json", init?: RequestInit) =>
+    app.fetch(new Request(`https://a.asimposium.org${path}`, init), { DB: db } as Env);
+  return { sql, db, queries, publish, hide, read, http };
 }
 async function using(run: (f: ReturnType<typeof fixture>) => Promise<void>) {
   const f = fixture();
@@ -401,7 +409,13 @@ test("a page's UTF-8 budget bounds transfer without splitting work products", ()
     assert.equal(p.items.length, 1);
     assert.equal(p.items[0]?.synthesis.body_md, body);
     assert.ok(p.omitted.includes("byte_limit"));
+    assert.equal(p.nextBefore, 3);
     assert.equal(f.queries.length, 1);
+    const next = await f.read({ through: p.cursor, before: p.nextBefore ?? undefined });
+    assert.equal(next.items.length, 1);
+    assert.equal(next.items[0]?.synthesis.synthesis_id, "SYNTH-A");
+    assert.equal(next.items[0]?.synthesis.body_md, body);
+    assert.equal(next.nextBefore, null);
   }));
 test("one oversized source never crosses the body transfer bound", () =>
   using(async (f) => {
@@ -443,6 +457,10 @@ test("invalid internal read bounds are rejected before any query", () =>
       { through: -1 },
       { through: 0.5 },
       { limit: Infinity },
+      { before: 2 },
+      { before: 0, through: 2 },
+      { before: 3, through: 2 },
+      { before: 2, through: 2, synthesisId: "SYNTH-A" },
     ])
       await assert.rejects(f.read(options), /CURSOR_INVALID/);
     assert.equal(f.queries.length, 0);
@@ -453,4 +471,152 @@ test("decoder rejection withholds a valid-hash but nonconforming work product", 
     const p = await readSynthesisPage(f.db, "P-SYNTH", {}, () => null);
     assert.deepEqual(p.items, []);
     assert.ok(p.omitted.includes("content_unavailable"));
+  }));
+
+test("bounded pages traverse more than two hundred publications at one immutable cut", () =>
+  using(async (f) => {
+    for (let i = 1; i <= 205; i++) f.publish(i + 1, `SYNTH-${i}`);
+    const seen: number[] = [];
+    let page = await f.read({ limit: 8 });
+    const through = page.cursor;
+    f.publish(207, "SYNTH-NEW");
+    for (;;) {
+      seen.push(...page.items.map((item) => item.synthesis.seq));
+      if (page.nextBefore === null) break;
+      page = await f.read({ through, before: page.nextBefore, limit: 8 });
+      assert.equal(page.cursor, through);
+    }
+    assert.deepEqual(
+      seen,
+      Array.from({ length: 205 }, (_, i) => 206 - i),
+    );
+    assert.equal(f.queries.length, 26);
+  }));
+
+test("wholly withheld pages advance without disclosing identities or retained content", () =>
+  using(async (f) => {
+    for (let seq = 2; seq <= 6; seq++) f.publish(seq, `SYNTH-${seq}`);
+    f.hide("SYNTH-6");
+    f.sql.exec("UPDATE event_content SET redacted_at='now' WHERE event_id='EV-P-SYNTH-5'");
+    const first = await f.read({ limit: 2 });
+    assert.deepEqual(first.items, []);
+    assert.equal(first.nextBefore, 5);
+    assert.deepEqual(first.omitted, ["content_unavailable", "page_limit"]);
+    const next = await f.read({
+      through: first.cursor,
+      before: first.nextBefore ?? undefined,
+      limit: 2,
+    });
+    assert.deepEqual(
+      next.items.map((item) => item.synthesis.seq),
+      [4, 3],
+    );
+    assert.equal(next.nextBefore, 3);
+    const last = await f.read({
+      through: first.cursor,
+      before: next.nextBefore ?? undefined,
+      limit: 2,
+    });
+    assert.deepEqual(
+      last.items.map((item) => item.synthesis.seq),
+      [2],
+    );
+    assert.equal(last.nextBefore, null);
+    assert.ok(!JSON.stringify(first).includes("SYNTH-6"));
+    assert.ok(!JSON.stringify(first).includes("Published scientific work"));
+  }));
+
+test("an individually oversized source advances and cannot strand a valid older synthesis", () =>
+  using(async (f) => {
+    f.publish(2, "SYNTH-A");
+    f.publish(3, "SYNTH-OVERSIZED", { body_md: "x".repeat(SYNTHESIS_READ_BYTES + 1) });
+    const first = await f.read();
+    assert.equal(first.nextBefore, 3);
+    assert.deepEqual(first.items, []);
+    assert.deepEqual(
+      (await f.read({ through: first.cursor, before: 3 })).items.map(
+        (item) => item.synthesis.synthesis_id,
+      ),
+      ["SYNTH-A"],
+    );
+  }));
+
+test("HTTP list representations share strict snapshot navigation and conditional behavior", () =>
+  using(async (f) => {
+    for (let seq = 2; seq <= 11; seq++) f.publish(seq, `SYNTH-${seq}`);
+    const first = await f.http();
+    assert.equal(first.status, 200);
+    const face = SynthesesListResponseSchema.parse(await first.json());
+    assert.equal(face.cursor, 11);
+    assert.equal(face.syntheses.length, 8);
+    assert.equal(face.next_before, 4);
+    assert.match(
+      first.headers.get("link") ?? "",
+      /syntheses\.json\?through=11&before=4&limit=8>; rel="next"/,
+    );
+    const etag = first.headers.get("etag") ?? "";
+    const head = await f.http(undefined, { method: "HEAD" });
+    assert.equal(await head.text(), "");
+    assert.equal(head.headers.get("etag"), etag);
+    assert.equal(
+      (await f.http(undefined, { headers: { "if-none-match": `W/${etag}` } })).status,
+      304,
+    );
+    for (const format of ["md", "html"]) {
+      const response = await f.http(`/p/P-SYNTH/syntheses.${format}`);
+      assert.equal(response.status, 200);
+      const body = await response.text();
+      assert.match(body, /Publication snapshot #11/);
+      assert.match(body, /Older syntheses/);
+      assert.notEqual(response.headers.get("etag"), etag);
+    }
+    f.publish(12, "SYNTH-NEW");
+    const second = await f.http("/p/P-SYNTH/syntheses.json?through=11&before=4&limit=8");
+    const older = SynthesesListResponseSchema.parse(await second.json());
+    assert.deepEqual(
+      older.syntheses.map((item) => item.seq),
+      [3, 2],
+    );
+    assert.equal(older.next_before, null);
+    f.hide("SYNTH-11");
+    const changed = await f.http("/p/P-SYNTH/syntheses.json?through=11", {
+      headers: { "if-none-match": etag },
+    });
+    assert.equal(changed.status, 200);
+    assert.notEqual(changed.headers.get("etag"), etag);
+    assert.ok(!(await changed.text()).includes('"synthesis_id":"SYNTH-11"'));
+    f.hide("problem");
+    assert.equal((await f.http(undefined, { headers: { "if-none-match": "*" } })).status, 404);
+  }));
+
+test("HTTP list rejects ambiguous pagination and applies unlisted cache policy", () =>
+  using(async (f) => {
+    f.publish();
+    for (const query of [
+      "limit=2junk",
+      "limit=0",
+      "limit=201",
+      "limit=1&limit=2",
+      "before=2",
+      "before=3&through=2",
+      "before=0&through=2",
+      "through=3",
+      "through=01",
+      "through=2&unknown=yes",
+    ]) {
+      const response = await f.http(`/p/P-SYNTH/syntheses.json?${query}`);
+      assert.equal(response.status, 400, query);
+      assert.equal(((await response.json()) as { code: string }).code, "CURSOR_INVALID");
+    }
+    const empty = await f.http("/p/P-SYNTH/syntheses.json?through=0");
+    assert.equal(empty.status, 200);
+    assert.deepEqual(SynthesesListResponseSchema.parse(await empty.json()).syntheses, []);
+    f.sql.exec("UPDATE problems SET unlisted=1 WHERE id='P-SYNTH'");
+    const unlisted = await f.http();
+    assert.equal(unlisted.headers.get("cache-control"), "private, no-store");
+    assert.equal(unlisted.headers.get("x-robots-tag"), "noindex, nofollow");
+    f.sql.exec("UPDATE problems SET status='private-draft' WHERE id='P-SYNTH'");
+    const hidden = await f.http(undefined, { method: "HEAD", headers: { "if-none-match": "*" } });
+    assert.equal(hidden.status, 404);
+    assert.equal(await hidden.text(), "");
   }));

@@ -61,6 +61,7 @@ const LANES = [
   "stale-route",
   "statement-context",
   "statement-review",
+  "statements",
   "synthesis",
   "transition-race",
   "workshop-search",

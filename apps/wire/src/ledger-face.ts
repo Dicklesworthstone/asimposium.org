@@ -102,13 +102,12 @@ import {
   renderRetractionsMarkdown,
 } from "./ledger/retractions";
 import { checkedScientificPayload, ScientificInputError } from "./ledger/scientific-checks";
+import { legacyStatementRedirect } from "./ledger/statements-router.ts";
+import { handleSynthesesList } from "./ledger/syntheses-list-http.ts";
 import {
-  loadProblemSyntheses,
   loadSingleSynthesis,
   renderSingleSynthesisHtmlFragment,
   renderSingleSynthesisMarkdown,
-  renderSynthesesHtmlFragment,
-  renderSynthesesMarkdown,
 } from "./ledger/synthesis";
 import { loadPublicProblemMoves } from "./mega-commands/public-moves";
 import {
@@ -2452,88 +2451,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
   });
 
-  app.on(["GET", "HEAD"], "/p/:id/syntheses.json", async (c) => {
-    const problemId = c.req.param("id");
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
-    if (!problem) return problemNotFound(c.req.method);
-
-    const limitParam = c.req.query("limit");
-    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const { syntheses, omitted } = await loadProblemSyntheses(c.env.DB, problemId, {
-      limit: Number.isFinite(limit) ? limit : undefined,
-    });
-    const body = JSON.stringify({
-      schema: SYNTHESES_SCHEMA_ID,
-      problem_id: problemId,
-      syntheses,
-      omitted,
-    });
-    const etag = await strongEtag("json", body);
-    const headers = {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
-
-  app.on(["GET", "HEAD"], "/p/:id/syntheses.md", async (c) => {
-    const problemId = c.req.param("id");
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
-    if (!problem) return problemNotFound(c.req.method);
-
-    const limitParam = c.req.query("limit");
-    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const { syntheses, omitted } = await loadProblemSyntheses(c.env.DB, problemId, {
-      limit: Number.isFinite(limit) ? limit : undefined,
-    });
-    const body = renderSynthesesMarkdown(problemId, syntheses, omitted);
-    const etag = await strongEtag("markdown", body);
-    const headers = {
-      "content-type": "text/markdown; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
-
-  app.on(["GET", "HEAD"], "/p/:id/syntheses.html", async (c) => {
-    const problemId = c.req.param("id");
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
-    if (!problem) return problemNotFound(c.req.method);
-
-    const limitParam = c.req.query("limit");
-    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const { syntheses, omitted } = await loadProblemSyntheses(c.env.DB, problemId, {
-      limit: Number.isFinite(limit) ? limit : undefined,
-    });
-    const body = renderSynthesesHtmlFragment(problemId, syntheses, omitted);
-    const etag = await strongEtag("html", body);
-    const headers = {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
+  for (const format of ["json", "md", "html"] as const)
+    app.on(["GET", "HEAD"], `/p/:id/syntheses.${format}`, (c) => handleSynthesesList(c, format));
 
   app.on(["GET", "HEAD"], "/p/:id/syntheses/:target", async (c) => {
     const problemId = c.req.param("id");
@@ -3076,6 +2995,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   // W6.1 public problem digest faces.
   app.on(["GET", "HEAD"], "/p/:id{[^/]+\\.json$}", async (c) => {
     const problemId = c.req.param("id").slice(0, -".json".length);
+    const statementRedirect = legacyStatementRedirect(c.req.raw, problemId, "json");
+    if (statementRedirect) return statementRedirect;
     const faces = await loadProblemFace(c.env.DB, problemId);
     if (faces === null) return problemNotFound(c.req.method);
     const etag = await strongEtag("json", faces.json.body);
@@ -3096,6 +3017,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
   app.on(["GET", "HEAD"], "/p/:id{[^/]+\\.md$}", async (c) => {
     const problemId = c.req.param("id").slice(0, -".md".length);
+    const statementRedirect = legacyStatementRedirect(c.req.raw, problemId, "md");
+    if (statementRedirect) return statementRedirect;
     const faces = await loadProblemFace(c.env.DB, problemId);
     if (faces === null) return problemNotFound(c.req.method);
     const etag = await strongEtag("markdown", faces.markdown.body);

@@ -107,9 +107,11 @@ export interface ProjectionReplay {
    */
   readonly head: ReplayedProblemHead;
   /**
-   * The lowest statement version the log carries a complete record for:
-   * earlier versions were private drafts and never entered the ledger.
-   * Infinity when the problem was never published.
+   * Lower boundary for comparing published statement rows. Earlier versions
+   * were private drafts. A known legacy admission without draft-time metadata
+   * excludes that admitted row; a withdrawn admission retains its immutable
+   * envelope's version while its missing content remains unreplayable.
+   * Infinity when no usable admission boundary was observed.
    */
   readonly statementVersionsFrom: number;
   /** Whether the publish event carried its governance state (5oyj). */
@@ -1005,6 +1007,22 @@ export async function replayProjections(
       if (context.head.status === "dormant") context.head.status = "active";
     }
     if (GOVERNANCE_EVENTS.has(event.type) && event.objectVersion !== null) {
+      if (
+        event.type === "problem.admitted" &&
+        event.payload === null &&
+        event.objectId === problemId &&
+        Number.isSafeInteger(event.objectVersion) &&
+        event.objectVersion > 0
+      ) {
+        // Redaction removes formulation bytes, not the immutable fact of which
+        // version was admitted. Keeping that boundary avoids filtering every
+        // intact later row out of the comparison and falsely calling it missing.
+        // No row, head field or governance content is reconstructed here.
+        context.statementVersionsFrom = Math.min(
+          context.statementVersionsFrom,
+          event.objectVersion,
+        );
+      }
       if (event.type === "problem.statement-revised") {
         // Claims anchored to an older statement are marked as drifted.
         for (const claim of rows.claims.values()) {
@@ -1012,8 +1030,8 @@ export async function replayProjections(
         }
       }
       context.statementVersion = event.objectVersion;
-      // A redacted governance event hides a head change (and, for a publish,
-      // where published statement versions start): the head cannot be judged.
+      // A redacted governance event hides a head change: its unavailable
+      // content cannot be judged or reconstructed from retained projections.
       if (event.payload === null && REPLAYERS[event.type] === undefined) {
         unreplayable.push(event.id);
       }

@@ -12,7 +12,37 @@
       "type": "string",
       "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
     },
+    "cursor": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "before": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "next_before": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "syntheses": {
+      "maxItems": 200,
       "type": "array",
       "items": {
         "type": "object",
@@ -27,7 +57,7 @@
           },
           "seq": {
             "type": "integer",
-            "exclusiveMinimum": 0,
+            "minimum": 1,
             "maximum": 9007199254740991
           },
           "covers_through": {
@@ -256,8 +286,295 @@
   "required": [
     "schema",
     "problem_id",
+    "cursor",
+    "before",
+    "next_before",
     "syntheses",
     "omitted"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "query": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "through": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$(?![\\s\\S])"
+        },
+        "before": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$(?![\\s\\S])"
+        },
+        "limit": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$(?![\\s\\S])"
+        }
+      },
+      "additionalProperties": false
+    },
+    "single": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "https://a.asimposium.org/schemas/syntheses.v1.json"
+        },
+        "synthesis": {
+          "type": "object",
+          "properties": {
+            "synthesis_id": {
+              "type": "string",
+              "pattern": "^(?!.*--)SYNTH-[A-Z0-9][A-Z0-9-]{0,40}$"
+            },
+            "problem_id": {
+              "type": "string",
+              "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "covers_through": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "body_md": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            },
+            "anchors": {
+              "minItems": 1,
+              "maxItems": 1000,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "target_kind": {
+                    "type": "string",
+                    "enum": [
+                      "claim",
+                      "evidence",
+                      "review",
+                      "hypothesis",
+                      "dead-end",
+                      "gap",
+                      "conflict",
+                      "citation",
+                      "statement"
+                    ]
+                  },
+                  "target_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "Object ID within the session problem; statement anchors use the problem ID."
+                  },
+                  "target_version": {
+                    "description": "When supplied, the referenced event must carry this exact object version.",
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "target_seq": {
+                    "description": "When supplied, the exact same-problem event sequence, at or before covers_through. All supplied pins must match one event. Statement events are admission or statement revision.",
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "assertion_summary": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  }
+                },
+                "required": [
+                  "target_kind",
+                  "target_id"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "omitted": {
+              "maxItems": 1000,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              }
+            },
+            "selection_policy": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "closing_resolution": {
+              "type": "object",
+              "properties": {
+                "result_claim": {
+                  "type": "object",
+                  "properties": {
+                    "claim_id": {
+                      "type": "string",
+                      "maxLength": 47,
+                      "pattern": "^C-[0-9]+$"
+                    },
+                    "version": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "claim_id",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                },
+                "direction": {
+                  "type": "string",
+                  "enum": [
+                    "affirmed",
+                    "refuted-as-stated",
+                    "closed-with-negative-result"
+                  ]
+                },
+                "no_claim_boundary": {
+                  "type": "object",
+                  "properties": {
+                    "verified": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      }
+                    },
+                    "mechanisms": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      }
+                    },
+                    "independence_tiers": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 50
+                      }
+                    },
+                    "remaining_external_validation": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      }
+                    }
+                  },
+                  "required": [
+                    "verified",
+                    "mechanisms",
+                    "independence_tiers",
+                    "remaining_external_validation"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "result_claim",
+                "direction",
+                "no_claim_boundary"
+              ],
+              "additionalProperties": false
+            },
+            "dropped_single_author_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "authoring_principal": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "declared_model": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "sponsor_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "harness": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "created_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "synthesis_id",
+            "problem_id",
+            "seq",
+            "covers_through",
+            "body_md",
+            "anchors",
+            "omitted",
+            "selection_policy",
+            "dropped_single_author_count",
+            "authoring_principal",
+            "declared_model",
+            "created_at"
+          ],
+          "additionalProperties": false
+        },
+        "staleness": {
+          "type": "object",
+          "properties": {
+            "material_events_since": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "stale": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "material_events_since",
+            "stale"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "synthesis",
+        "staleness"
+      ],
+      "additionalProperties": false
+    }
+  }
 }

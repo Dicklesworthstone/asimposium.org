@@ -25,6 +25,8 @@
     "./review-queue": "./src/review-queue.ts",
     "./review-requests": "./src/review-requests.ts",
     "./scientific-withdrawals": "./src/scientific-withdrawals.ts",
+    "./statements": "./src/statements.ts",
+    "./syntheses": "./src/syntheses.ts",
     "./search-pagination": "./src/search-pagination.ts",
     "./public-watch": "./src/public-watch.ts",
     "./public-schemas": "./src/public-schemas.ts",

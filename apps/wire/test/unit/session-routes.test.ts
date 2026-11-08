@@ -24,6 +24,7 @@ import {
   OpaqueProblemSchema,
   PackResponseSchema,
   ProblemDocumentSchema,
+  ProblemGovernanceEventSchema,
   ProblemNextResponseSchema,
   ProblemStatementReviewResponseSchema,
   PromoteResponseSchema,
@@ -15180,32 +15181,31 @@ describe("committed promotion outbox nudge", () => {
           return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
         },
       });
-      const problem = await f.db
-        .prepare("SELECT title FROM problems WHERE id = 'P-4DSP'")
-        .first<{ title: string }>();
-      if (!problem) throw new Error("Missing fixture problem");
-      // The native session fixture starts at a seeded public formulation. Give
+      const title = "Parity of every integer and its square";
+      // The SQLite session fixture starts at a seeded public formulation. Give
       // both formulations real Krater envelopes so the mounted synthesis route
       // must screen the current version while retaining an older reference.
       const appendStatement = async (version: number, statement: string) => {
         const createdAt = new Date().toISOString();
-        const payloadJson = JSON.stringify({
-          action: version === 1 ? "publish" : "revise-statement",
-          acting_principal: { type: "sponsor", id: f.binding.sponsorId },
-          source_fellow_id: f.binding.fellowId,
-          previous_statement_version: version === 1 ? 1 : version - 1,
-          previous_status: version === 1 ? "private-draft" : "active",
-          problem: {
-            id: "P-4DSP",
-            title: problem.title,
-            status: "active",
-            current_statement_version: version,
-            statement,
-            falsifier: SESSION_FIXTURE_STATEMENT.falsifier,
-            motivation: SESSION_FIXTURE_STATEMENT.motivation,
-            updated_at: createdAt,
-          },
-        });
+        const payloadJson = JSON.stringify(
+          ProblemGovernanceEventSchema.parse({
+            action: version === 1 ? "publish" : "revise-statement",
+            acting_principal: { type: "sponsor", id: f.binding.sponsorId },
+            source_fellow_id: f.binding.fellowId,
+            previous_statement_version: version === 1 ? 1 : version - 1,
+            previous_status: version === 1 ? "private-draft" : "active",
+            problem: {
+              id: "P-4DSP",
+              title,
+              status: version === 1 ? "sharpening" : "active",
+              current_statement_version: version,
+              statement,
+              falsifier: SESSION_FIXTURE_STATEMENT.falsifier,
+              motivation: SESSION_FIXTURE_STATEMENT.motivation,
+              updated_at: createdAt,
+            },
+          }),
+        );
         const hash = await normHash(statement);
         return writeLedgerEvent(
           f.db,
@@ -15232,7 +15232,13 @@ describe("committed promotion outbox nudge", () => {
           {
             statementsAfterEvent: () =>
               version === 1
-                ? []
+                ? [
+                    f.db
+                      .prepare(
+                        "UPDATE problems SET title = ?, status = 'sharpening' WHERE id = 'P-4DSP'",
+                      )
+                      .bind(title),
+                  ]
                 : [
                     f.db
                       .prepare(`INSERT INTO problem_statement_versions
@@ -15618,13 +15624,11 @@ describe("committed promotion outbox nudge", () => {
             selection_policy: "One exact retained publication.",
           }),
         });
-        // Body/redaction changes invalidate the broad screening context first.
-        // Exact version/event controls reach the narrower transaction guard.
-        const contextChanged = mutation === "redact" || mutation === "corrupt-body";
-        expect(response.status, await response.clone().text()).toBe(contextChanged ? 409 : 422);
-        expect(((await response.json()) as { code: string }).code).toBe(
-          contextChanged ? "SCREENING_CONTEXT_STALE" : "SYNTHESIS_UNANCHORED",
-        );
+        // Every mutation changes this author's screened source history. The
+        // context guard now checks exact event/version controls as well as bytes,
+        // so it refuses before the narrower synthesis-anchor commit guard.
+        expect(response.status, await response.clone().text()).toBe(409);
+        expect(((await response.json()) as { code: string }).code).toBe("SCREENING_CONTEXT_STALE");
         expect(synthesisScreens).toBe(1);
         expect(await footprint()).toEqual(before);
       });

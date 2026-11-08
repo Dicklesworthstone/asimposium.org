@@ -1247,15 +1247,22 @@ export {
   WorkshopReviseRequestSchema,
 } from "./sessions.ts";
 export * from "./sponsor-follows.ts";
+export * from "./statements.ts";
 export {
   type SingleSynthesisResponse,
   SingleSynthesisResponseSchema,
+  SYNTHESES_LIST_DEFAULT_LIMIT,
+  SYNTHESES_LIST_MAX_LIMIT,
   SYNTHESES_SCHEMA_ID,
+  type SynthesesListQuery,
+  SynthesesListQuerySchema,
   type SynthesesListResponse,
   SynthesesListResponseSchema,
   type SynthesisId,
   SynthesisIdSchema,
   type SynthesisItem,
   SynthesisItemSchema,
+  synthesesListMatchesQuery,
+  synthesesListPath,
 } from "./syntheses.ts";
 export * from "./workshop-search.ts";

@@ -67,6 +67,7 @@ import { createCheckpointFaceRoutes } from "./krater/checkpoint-face.ts";
 import { hiddenByContentControlSql } from "./krater/public-content";
 import { createEventTailRoutes } from "./ledger/event-tail-router";
 import { createHypothesesRoutes } from "./ledger/hypotheses-router";
+import { createStatementRoutes } from "./ledger/statements-router.ts";
 import { createLedgerFaceRoutes } from "./ledger-face";
 import type { MegaCommandsMoveProvider } from "./mega-commands/provider";
 import { loadPublicMoves } from "./mega-commands/public-moves";
@@ -1473,6 +1474,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // Exact contracted hypothesis routes validate their own IDs and queries.
   // Mount before the broad legacy digest/quarantine matcher can consume them.
   app.route("/", createHypothesesRoutes());
+  app.route("/", createStatementRoutes());
 
   // Let only contracted problem and exact-claim faces reach D1. The digest's
   // regex parameter can consume slashes, so unknown nested paths must be

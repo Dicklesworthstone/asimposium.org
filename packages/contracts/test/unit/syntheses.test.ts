@@ -2,9 +2,12 @@ import { describe, expect, test } from "bun:test";
 import {
   SingleSynthesisResponseSchema,
   SYNTHESES_SCHEMA_ID,
+  SynthesesListQuerySchema,
   SynthesesListResponseSchema,
   SynthesisIdSchema,
   SynthesisItemSchema,
+  synthesesListMatchesQuery,
+  synthesesListPath,
 } from "../../src/index.ts";
 
 describe("W5.8b Synthesis contracts", () => {
@@ -82,6 +85,19 @@ describe("W5.8b Synthesis contracts", () => {
         }).success,
       ).toBe(false);
     });
+
+    test("rejects impossible publication and anchor coverage", () => {
+      for (const covers_through of [validSynthesis.seq, Number.MAX_SAFE_INTEGER + 1])
+        expect(SynthesisItemSchema.safeParse({ ...validSynthesis, covers_through }).success).toBe(
+          false,
+        );
+      expect(
+        SynthesisItemSchema.safeParse({
+          ...validSynthesis,
+          anchors: [{ target_kind: "claim", target_id: "C-1", target_seq: 13 }],
+        }).success,
+      ).toBe(false);
+    });
   });
 
   describe("SynthesesListResponseSchema", () => {
@@ -89,6 +105,9 @@ describe("W5.8b Synthesis contracts", () => {
       const list = {
         schema: SYNTHESES_SCHEMA_ID,
         problem_id: "P-RIEMANN",
+        cursor: 15,
+        before: null,
+        next_before: null,
         syntheses: [
           {
             synthesis_id: "SYNTH-1",
@@ -108,7 +127,59 @@ describe("W5.8b Synthesis contracts", () => {
         omitted: [],
       };
       expect(SynthesesListResponseSchema.safeParse(list).success).toBe(true);
+      expect(
+        synthesesListMatchesQuery(
+          "P-RIEMANN",
+          { through: 15 },
+          SynthesesListResponseSchema.parse(list),
+        ),
+      ).toBe(true);
+      expect(
+        synthesesListMatchesQuery(
+          "P-RIEMANN",
+          { through: 14 },
+          SynthesesListResponseSchema.parse(list),
+        ),
+      ).toBe(false);
+      for (const change of [
+        { cursor: 14 },
+        { before: 15 },
+        { next_before: 15 },
+        { omitted: ["page_limit"] },
+        { syntheses: [list.syntheses[0], list.syntheses[0]] },
+        { syntheses: [{ ...list.syntheses[0], problem_id: "P-OTHER" }] },
+      ])
+        expect(SynthesesListResponseSchema.safeParse({ ...list, ...change }).success).toBe(false);
+      expect(
+        SynthesesListResponseSchema.safeParse({ ...list, next_before: 15, omitted: ["page_limit"] })
+          .success,
+      ).toBe(true);
     });
+  });
+
+  test("synthesis query continuations are strict and preserve their snapshot", () => {
+    expect(SynthesesListQuerySchema.parse({ through: "20", before: "12", limit: "8" })).toEqual({
+      through: 20,
+      before: 12,
+      limit: 8,
+    });
+    expect(SynthesesListQuerySchema.parse({ through: "0" })).toEqual({ through: 0 });
+    for (const query of [
+      { before: "12" },
+      { through: "10", before: "12" },
+      { through: "01" },
+      { through: "2junk" },
+      { through: "9007199254740992" },
+      { through: "2\n" },
+      { before: "0", through: "2" },
+      { limit: "0" },
+      { limit: "201" },
+      { skip: "1" },
+    ])
+      expect(SynthesesListQuerySchema.safeParse(query).success).toBe(false);
+    expect(synthesesListPath("P-RIEMANN", "json", { through: 20, before: 12, limit: 8 })).toBe(
+      "/p/P-RIEMANN/syntheses.json?through=20&before=12&limit=8",
+    );
   });
 
   describe("SingleSynthesisResponseSchema", () => {

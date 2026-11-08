@@ -75,6 +75,11 @@ import {
   reviewRequestParameters,
   reviewRequestResponses,
 } from "./review-requests-discovery";
+import {
+  SCIENTIFIC_HISTORY_PUBLIC_READS,
+  scientificHistoryParameters,
+  scientificHistoryResponses,
+} from "./scientific-history-discovery.ts";
 
 /** Version reported by both /capabilities and every generated artifact. */
 export const DISCOVERY_VERSION = "0.2.0-draft";
@@ -318,10 +323,7 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /p/:id/citations.html": "Literature and source-provenance citations ledger (HTML face).",
   "GET /p/:id/citations/:target":
     "Exact citation head or version (.json, .md, .html, .bib, .csl.json).",
-  "GET /p/:id/syntheses.json": "Problem synthesis ledger (JSON face).",
-  "GET /p/:id/syntheses.md": "Problem synthesis ledger (Markdown face).",
-  "GET /p/:id/syntheses.html": "Problem synthesis ledger (HTML face).",
-  "GET /p/:id/syntheses/:target": "Exact problem synthesis version (Markdown, JSON, or HTML face).",
+  ...SCIENTIFIC_HISTORY_PUBLIC_READS,
   "GET /p/:id/relations/:target":
     "One typed claim relation (<seq>.md/.json), cited by the seq of its relation.asserted event.",
   "GET /p/:id/evidence/:target":
@@ -815,6 +817,8 @@ function responseFor(
   origins: DiscoveryOrigins,
   method: string,
 ): Readonly<Record<string, unknown>> {
+  const history = scientificHistoryResponses(openApiPath, origins.agent);
+  if (history !== undefined) return history;
   if (/^\/p\/\{id\}\/claims(?:\.(?:json|md|html))?$/.test(openApiPath)) {
     const json = {
       schema: { $ref: `${origins.agent}/schemas/claims-list.v1.json#/properties/response` },
@@ -1045,6 +1049,7 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
       ...artifactPublicationParameters(operation.openApiPath, origins.agent, operation.method),
       ...eventTailParameters(operation.openApiPath, origins.agent),
       ...reviewQueueParameters(operation.openApiPath, origins.agent),
+      ...scientificHistoryParameters(operation.openApiPath, origins.agent),
       ...hypothesesParameters(operation.openApiPath, origins.agent),
       ...(commentaryParameters(operation.openApiPath, origins.agent) ?? []),
       ...reviewRequestParameters(operation.openApiPath, origins.agent, operation.method),

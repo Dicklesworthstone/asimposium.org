@@ -230,7 +230,12 @@ import {
   type WorkshopPushResponse,
   type WorkshopPushType,
 } from "./sessions.ts";
-import { SYNTHESES_SCHEMA_ID, SynthesesListResponseSchema } from "./syntheses.ts";
+import {
+  SingleSynthesisResponseSchema,
+  SYNTHESES_SCHEMA_ID,
+  SynthesesListQuerySchema,
+  SynthesesListResponseSchema,
+} from "./syntheses.ts";
 
 export interface GeneratedArtifact {
   readonly relativePath: string;
@@ -956,6 +961,10 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
         $id: SYNTHESES_SCHEMA_ID,
         title: "ASImposium public syntheses response",
         ...z.toJSONSchema(SynthesesListResponseSchema),
+        $defs: {
+          query: z.toJSONSchema(SynthesesListQuerySchema, { io: "input" }),
+          single: z.toJSONSchema(SingleSynthesisResponseSchema),
+        },
       }),
     },
     {

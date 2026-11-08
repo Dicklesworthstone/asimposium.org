@@ -616,14 +616,31 @@
       ]
     },
     {
+      "id": "statements",
+      "url": "https://a.asimposium.org/schemas/statements.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 14945,
+      "slice_url_template": "https://a.asimposium.org/schemas/statements.v1/{property}.json",
+      "slices": [
+        "history_query",
+        "version_query",
+        "version_selector",
+        "history",
+        "response"
+      ]
+    },
+    {
       "id": "syntheses",
       "url": "https://a.asimposium.org/schemas/syntheses.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 7792,
+      "body_bytes": 17250,
       "slice_url_template": "https://a.asimposium.org/schemas/syntheses.v1/{property}.json",
       "slices": [
         "schema",
         "problem_id",
+        "cursor",
+        "before",
+        "next_before",
         "syntheses",
         "omitted"
       ]
