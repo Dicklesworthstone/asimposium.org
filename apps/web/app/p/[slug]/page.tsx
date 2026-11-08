@@ -1,4 +1,5 @@
 import { ProblemResolutionRecordSchema } from "@asimposium/contracts";
+import { synthesesListPath } from "@asimposium/contracts/syntheses";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -24,6 +25,7 @@ import {
 } from "@/lib/public-ledger";
 import { buildProblemShareCardData } from "@/lib/share-card";
 import { SITE } from "@/lib/site";
+import { synthesisPagePath } from "@/lib/synthesis-view";
 
 interface ProblemPageProps {
   readonly params: Promise<{ readonly slug: string }>;
@@ -294,6 +296,11 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
                   published at ledger sequence {resolution.closing_synthesis.seq} and covers history
                   through sequence {resolution.closing_synthesis.covers_through}.
                 </p>
+                <p>
+                  <Link href={synthesisPagePath(face.problem, `${resolution.closing_synthesis.synthesis_id}@1`)} prefetch={false}>
+                    Read the complete closing synthesis, its sources and declared limits
+                  </Link>
+                </p>
               </>
             ) : (
               <p>The verified resolution details are unavailable in this bounded digest.</p>
@@ -335,11 +342,29 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
             retain current public visibility controls.
           </p>
           <p>
+            <Link href={`/p/${encodeURIComponent(face.problem)}/history`} prefetch={false}>
+              Read the statement history and exact formulations
+            </Link>
+          </p>
+          <p>
             <Link
               href={`/p/${encodeURIComponent(face.problem)}/events?since=0&limit=50&through=${face.cursor}`}
               prefetch={false}
             >
               Read the event history through this page’s ledger snapshot
+            </Link>
+          </p>
+        </section>
+
+        <section aria-labelledby="syntheses-heading">
+          <h2 id="syntheses-heading">Published research syntheses</h2>
+          <p>
+            Read digests of the research, their frozen ledger coverage, source anchors and declared
+            omissions. A published narrative does not establish scientific standing or resolution.
+          </p>
+          <p>
+            <Link href={synthesesListPath(face.problem, "human", { through: face.cursor })} prefetch={false}>
+              Browse syntheses at this ledger snapshot
             </Link>
           </p>
         </section>

@@ -1,6 +1,7 @@
 "use client";
 
 import { isTrustedStoaOrigin, type SponsorProblemGovernanceResponse } from "@asimposium/contracts";
+import { type SynthesesListQuery, synthesesListPath } from "@asimposium/contracts/syntheses";
 import Link from "next/link";
 import { useEffect, useRef, useState, useTransition } from "react";
 import {
@@ -26,6 +27,13 @@ import {
   problemResearchRecoveryKey,
   PROBLEM_RESEARCH_RETRY_MS,
 } from "@/lib/problem-research-recovery";
+import {
+  parseSynthesisConsoleQuery,
+  synthesisConsolePath,
+  synthesisOmissionText,
+  synthesisPagePath,
+  type SynthesisSelectionPage,
+} from "@/lib/synthesis-view";
 
 export type ProblemResearchWorkspace = Pick<
   SponsorProblemGovernanceResponse,
@@ -118,6 +126,11 @@ export function ClosingSynthesisReview({
         {source.dropped_single_author_count} single-author target(s) were dropped during
         publication.
       </p>
+      <p>
+        <Link href={synthesisPagePath(source.problem_id, `${source.synthesis_id}@1`)} prefetch={false}>
+          Read the complete closing publication, sources and current freshness
+        </Link>
+      </p>
       {sourceHref === undefined ? null : (
         <p>
           <a href={sourceHref}>Read this exact closing publication in canonical text</a>
@@ -127,22 +140,76 @@ export function ClosingSynthesisReview({
   );
 }
 
+/** These are public discovery choices, never resolution eligibility or a
+ * scientific receipt. Selecting one invokes the existing exact preview. */
+export function PublishedSynthesisChoices({
+  problemId, page, query, selected, disabled, onSelect,
+}: {
+  readonly problemId: string;
+  readonly page: SynthesisSelectionPage | null;
+  readonly query: SynthesesListQuery;
+  readonly selected: string;
+  readonly disabled: boolean;
+  readonly onSelect: (id: string) => void;
+}) {
+  const selectedId = parseSynthesisConsoleQuery({ synthesis: selected })?.selected;
+  const snapshot = page === null ? {} : {
+    through: page.cursor, ...(query.limit === undefined ? {} : { limit: query.limit }),
+  };
+  return <section aria-labelledby="published-closing-syntheses">
+    <h3 id="published-closing-syntheses">Choose a published synthesis</h3>
+    <p>A listed closing declaration is a candidate for inspection. Your authority, the exact published text and the result under review are checked again when its preview loads.</p>
+    {page === null ? <p role="status">Published synthesis choices are unavailable. Reload this page or enter a known exact identifier below; no resolution has been submitted.</p> : <>
+      <p>{page.choices.length} readable {page.choices.length === 1 ? "publication" : "publications"} on this page at ledger snapshot {page.cursor}. This is a bounded selection, not the total number of syntheses.</p>
+      {page.choices.length === 0 && <p>{page.omitted.length === 0
+        ? "No syntheses were returned in this range."
+        : "No readable publications were returned on this page. Review its omissions and continue when an older page is available."}</p>}
+      <ul>{page.choices.map((item) => <li className="claim-card" key={item.synthesis_id}>
+        <p><Link href={synthesisPagePath(problemId, `${item.synthesis_id}@1`)} prefetch={false}>{item.synthesis_id}</Link>{" · "}
+          publication sequence {item.seq} · coverage through {item.covers_through}</p>
+        <p>Author <code>{item.authoring_principal}</code> · <time dateTime={item.created_at}>{item.created_at}</time></p>
+        {item.closing === undefined ? <p>No structured closing declaration was recorded.</p> : <p>
+          Closing declaration for <code>{item.closing.result_claim.claim_id}@{item.closing.result_claim.version}</code>, direction {item.closing.direction}.
+          {!item.can_preview && " The complete summary exceeds the closing-control limit; ask the Fellow to publish a shorter closing work product."}
+        </p>}
+        {item.can_preview && <button type="button" className="btn-quiet" disabled={disabled}
+          onClick={() => { if (!disabled) onSelect(item.synthesis_id); }}>Load exact preview of {item.synthesis_id}</button>}
+      </li>)}</ul>
+      {page.omitted.length > 0 && <ul aria-label="Synthesis selection omissions">
+        {page.omitted.map((reason, index) => <li key={index}>{synthesisOmissionText(reason)}</li>)}
+      </ul>}
+      <nav aria-label="Published synthesis selection pages">
+        {page.before !== null && <Link href={synthesisConsolePath(problemId, selectedId, snapshot)} prefetch={false}>Newest syntheses at this snapshot</Link>}
+        {page.next_before !== null && <p><Link href={synthesisConsolePath(problemId, selectedId, { ...snapshot, before: page.next_before })} prefetch={false}>Older syntheses at this snapshot</Link></p>}
+        <p><Link href={synthesisConsolePath(problemId, selectedId)} prefetch={false}>Refresh published choices</Link></p>
+      </nav>
+    </>}
+    <p><Link href={synthesesListPath(problemId, "human", snapshot)} prefetch={false}>Browse the public synthesis collection</Link></p>
+  </section>;
+}
+
 /** The Worker owns admission; the console selects exact existing scientific work. */
 export function ProblemResearchControl({
   sponsorId,
   initial,
   returnPath,
   stoaOrigin,
+  synthesisChoices = null,
+  synthesisQuery = {},
+  selectedSynthesis,
 }: {
   readonly sponsorId: string;
   readonly initial: ProblemResearchWorkspace;
   readonly returnPath: string;
   readonly stoaOrigin?: string;
+  readonly synthesisChoices?: SynthesisSelectionPage | null;
+  readonly synthesisQuery?: SynthesesListQuery;
+  readonly selectedSynthesis?: string;
 }) {
   const problemId = initial.problem.id;
   const [claimId, setClaimId] = useState("");
   const [claimVersion, setClaimVersion] = useState("");
-  const [synthesisId, setSynthesisId] = useState("");
+  const [synthesisId, setSynthesisId] = useState(selectedSynthesis ?? "");
   const [confirmed, setConfirmed] = useState(false);
   const [preview, setPreview] = useState<ClosingSynthesisPreview | null>(null);
   const [previewMessage, setPreviewMessage] = useState<string | null>(null);
@@ -263,15 +330,16 @@ export function ProblemResearchControl({
     );
   }
 
-  function loadSynthesis() {
-    if (disabled || lock.current || synthesisId.length === 0) return;
+  function loadSynthesis(selectedId = synthesisId) {
+    if (disabled || lock.current || selectedId.length === 0) return;
     lock.current = true;
+    setSynthesisId(selectedId);
     setPreview(null);
     setConfirmed(false);
     setPreviewMessage(null);
     startTransition(async () => {
       try {
-        const reply = await previewProblemClosingSynthesis(sponsorId, problemId, synthesisId);
+        const reply = await previewProblemClosingSynthesis(sponsorId, problemId, selectedId);
         if (reply.ok) setPreview(reply.preview);
         else setPreviewMessage(reply.message);
       } catch {
@@ -335,7 +403,9 @@ export function ProblemResearchControl({
               <p>
                 Recorded direction: <strong>{result.receipt.problem.resolution_direction}</strong>.
                 Closing publication:{" "}
-                <code>{result.receipt.problem.closing_synthesis.synthesis_id}</code>. This records
+                <Link href={synthesisPagePath(problemId, `${result.receipt.problem.closing_synthesis.synthesis_id}@1`)} prefetch={false}>
+                  <code>{result.receipt.problem.closing_synthesis.synthesis_id}</code>
+                </Link>. This records
                 the declared boundary; it does not claim validation beyond it.
               </p>
             ) : null}
@@ -482,9 +552,11 @@ export function ProblemResearchControl({
           <h2 id="resolve-problem-heading">Review the Fellow&apos;s closing synthesis</h2>
           <p>
             Ask a Fellow to publish a synthesis with a structured closing resolution for the exact
-            result under review. Load its identifier below. The direction, summary, and no-claim
+            result under review. Choose a publication or load its identifier below. The direction, summary, and no-claim
             boundary come from that immutable publication.
           </p>
+          <PublishedSynthesisChoices problemId={problemId} page={synthesisChoices}
+            query={synthesisQuery} selected={synthesisId} disabled={disabled} onSelect={loadSynthesis} />
           <form
             onSubmit={(event) => {
               event.preventDefault();

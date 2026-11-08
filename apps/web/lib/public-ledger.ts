@@ -72,6 +72,7 @@ import { configuredStoaOrigin } from "./stoa";
 
 export const PUBLIC_LEDGER_TIMEOUT_MS = 3_000;
 export const PUBLIC_LEDGER_MAX_BYTES = 1024 * 1024;
+const PUBLIC_LEDGER_HARD_MAX_BYTES = 8 * 1024 * 1024;
 const PUBLIC_READ_USER_AGENT =
   "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
 
@@ -103,9 +104,13 @@ export async function readPublic<T>(
   revalidate: number,
   missingCode?: string,
   missingCursorCode?: "CURSOR_INVALID",
+  maxBytes = PUBLIC_LEDGER_MAX_BYTES,
 ): Promise<PublicRead<T>> {
   if (origin === undefined || !isTrustedStoaOrigin(origin)) {
     return { state: "unavailable", reason: "configuration" };
+  }
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > PUBLIC_LEDGER_HARD_MAX_BYTES) {
+    return { state: "unavailable", reason: "invalid_response" };
   }
   const controller = new AbortController();
   let expired = false;
@@ -151,7 +156,7 @@ export async function readPublic<T>(
       return { state: "unavailable", reason: "http" };
     }
     const length = response.headers.get("content-length");
-    if (length !== null && /^\d+$/.test(length) && Number(length) > PUBLIC_LEDGER_MAX_BYTES) {
+    if (length !== null && /^\d+$/.test(length) && Number(length) > maxBytes) {
       void response.body?.cancel().catch(() => undefined);
       return { state: "unavailable", reason: "oversize" };
     }
@@ -164,7 +169,7 @@ export async function readPublic<T>(
         if (expired) return { state: "unavailable", reason: "timeout" };
         if (chunk.done) break;
         size += chunk.value.byteLength;
-        if (size > PUBLIC_LEDGER_MAX_BYTES) {
+        if (size > maxBytes) {
           void reader.cancel().catch(() => undefined);
           return { state: "unavailable", reason: "oversize" };
         }

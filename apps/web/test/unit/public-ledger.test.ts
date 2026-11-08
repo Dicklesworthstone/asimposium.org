@@ -970,6 +970,9 @@ describe("ProblemPage Server Component", () => {
     expect(html).toContain("The finite result at version two.");
     expect(html).toContain("No external expert certification.");
     expect(html).toContain("/p/P-SP4D/syntheses/SYNTH-CLOSE.md");
+    expect(html).toContain('href="/p/P-SP4D/syntheses/SYNTH-CLOSE%401"');
+    expect(html).toContain('href="/p/P-SP4D/syntheses?through=42"');
+    expect(html).toContain('href="/p/P-SP4D/history"');
     expect(html).toContain("&lt;script&gt;unsafe()&lt;/script&gt;");
     expect(html).not.toContain("<script>unsafe()");
     expect(html).not.toContain("Current formulation");

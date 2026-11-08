@@ -1,4 +1,6 @@
+import { PublicLedgerProblemIdSchema } from "@asimposium/contracts";
 import { HypothesisItemQuerySchema } from "@asimposium/contracts/hypotheses";
+import { StatementVersionQuerySchema, StatementVersionSelectorSchema, statementVersionPath } from "@asimposium/contracts/statements";
 import { renderHtmlFragmentFace, renderHypothesisEvidenceHtml } from "@asimposium/render";
 import type { Metadata } from "next";
 import Link from "next/link";
@@ -9,7 +11,7 @@ import { EventHistoryEntry, EventHistoryOmissions } from "@/components/event-his
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { stoaFetchPublicRecord } from "@/lib/public-ledger";
-import { resolvePublicRecord } from "@/lib/public-record";
+import { type PublicRecordTarget, resolvePublicRecord } from "@/lib/public-record";
 import { parseProofGapQuery, proofGapPagePath } from "@/lib/proof-gap-view";
 import { eventHistoryPath } from "@/lib/event-history";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
@@ -28,8 +30,34 @@ const readRecord = cache((path: string) => {
 
 async function pageInput({ params, searchParams }: GenericDiptychPageProps) {
   const { slug } = await params;
-  const target = resolvePublicRecord(slug);
   const query = (await searchParams) ?? {};
+  // The retained registry alias names a typed exact statement, not a generic
+  // projection. Redirect before asking the generic record parser to read it.
+  if (slug.length === 4 && slug[0] === "p" && slug[2] === "statement") {
+    const problem = PublicLedgerProblemIdSchema.safeParse(slug[1]);
+    const version = StatementVersionSelectorSchema.safeParse(slug[3]);
+    const parsed = StatementVersionQuerySchema.safeParse(query);
+    if (!problem.success || !version.success)
+      return { target: null, path: slug.join("/"), validQuery: false, redirectPath: null };
+    const target: PublicRecordTarget = {
+      kind: "problem-statement",
+      title: "Problem statement version",
+      problemId: problem.data,
+      recordId: `S@${version.data}`,
+      humanPath: statementVersionPath(problem.data, version.data, "human"),
+      jsonPath: statementVersionPath(problem.data, version.data, "json"),
+      markdownPath: statementVersionPath(problem.data, version.data, "md"),
+    };
+    return {
+      target,
+      path: slug.join("/"),
+      validQuery: parsed.success,
+      redirectPath: parsed.success
+        ? statementVersionPath(problem.data, version.data, "human", parsed.data)
+        : null,
+    };
+  }
+  const target = resolvePublicRecord(slug);
   const hypothesisQuery = HypothesisItemQuerySchema.safeParse(query);
   const gapQuery = target?.kind === "proof-gap" ? parseProofGapQuery(query) : null;
   const validQuery = target?.kind === "hypothesis"
@@ -75,11 +103,12 @@ export default async function GenericDiptychFallbackPage(props: GenericDiptychPa
   if (!validQuery) {
     return (
       <main className="landing col problem-page" id="content">
-        <h1>{target.kind === "hypothesis" ? "Invalid hypothesis cursor" : target.kind === "proof-gap" ? "Invalid proof-gap view" : "Read the current public record"}</h1>
+        <h1>{target.kind === "hypothesis" ? "Invalid hypothesis cursor" : target.kind === "proof-gap" ? "Invalid proof-gap view" : target.kind === "problem-statement" ? "Invalid statement cursor" : "Read the current public record"}</h1>
         <p>
           {target.kind === "hypothesis"
             ? "An exact hypothesis accepts one non-negative through cursor."
             : target.kind === "proof-gap" ? "An exact proof gap accepts one non-negative through cursor."
+            : target.kind === "problem-statement" ? "An exact statement version accepts one non-negative through cursor."
             : "This record has a current public face. Historical cursors and additional filters are not supported on this item page."}
         </p>
         <p><Link href={target.humanPath}>Read the current record</Link></p>
