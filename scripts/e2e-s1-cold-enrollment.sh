@@ -1640,12 +1640,21 @@ derive_local_replay_key_from_entropy() {
     cd -- "$cwd" || exit 125
     exec "$@"
   ' "$BASH_BIN" "$LOCAL_RUNTIME_CWD" "$BUN_BIN" -e '
-    import { constants, openSync, closeSync, writeSync } from "node:fs";
+    import { constants, openSync, closeSync, writeSync, linkSync } from "node:fs";
     const observerPath = process.argv[1] ?? "";
     if (observerPath) {
-      const fd = openSync(observerPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      // Existence is the ready signal. Prepare privately, then publish
+      // without replacing an existing path; opening the final file first lets
+      // the reader reject an empty file between open and write. Retain both
+      // names for inspection, as with the rest of the retained harness state.
+      const pendingPath = `${observerPath}.pending`;
+      const fd = openSync(pendingPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      // Observer-only scheduling control: make the formerly racy interval
+      // longer than the polling interval. Normal derivation has no observer.
+      await Bun.sleep(250);
       writeSync(fd, `${process.pid}\n`);
       closeSync(fd);
+      linkSync(pendingPath, observerPath);
       await Bun.sleep(1_000);
     }
     const hex = (await Bun.stdin.text()).trim();
@@ -3740,11 +3749,19 @@ self_test_replay_derivation_argv_observer() {
   local entropy="0000000000000000000000000000000000000000000000000000000000000000"
   local expected_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
   local observer_file="" observed_pid="" argv="" key=""
+  local derivation_pid="" derivation_fd="" derivation_identity=""
   local deadline=0 derivation_status=0 bytes=""
   lifecycle_state_dir "replay-derivation-argv"
   [[ "${#entropy}" -eq 64 && "${#expected_key}" -eq 43 ]] || failed "REPLAY_DERIVATION_CANARY_INVALID"
   observer_file="$STATE_DIR/.replay-derivation-observer"
   coproc REPLAY_DERIVATION { derive_local_replay_key_from_entropy "$entropy" "$observer_file"; }
+  # Bash may unset the named coprocess variables as soon as it finishes. Keep
+  # the child handle used by wait/read, plus its nonsecret birth identity for
+  # diagnosing a refusal before the ready file becomes visible.
+  derivation_pid="$REPLAY_DERIVATION_PID"
+  derivation_fd="${REPLAY_DERIVATION[0]}"
+  derivation_identity="$(process_identity "$derivation_pid")" || failed "REPLAY_DERIVATION_CHILD_UNPROVEN"
+  log_phase "replay-derivation-started" "pid=$derivation_pid identity=$derivation_identity"
   deadline=$((SECONDS + SUPERVISOR_STOP_DEADLINE_SECONDS))
   while ((SECONDS < deadline)); do
     if [[ -e "$observer_file" || -L "$observer_file" ]]; then
@@ -3759,10 +3776,10 @@ self_test_replay_derivation_argv_observer() {
   [[ "$observed_pid" =~ ^[1-9][0-9]*$ ]] || failed "REPLAY_DERIVATION_OBSERVER_TIMEOUT"
   argv="$("$PS_BIN" -ww -p "$observed_pid" -o args= 2>/dev/null)" || failed "REPLAY_DERIVATION_ARGV_UNPROVEN"
   [[ -n "$argv" && "$argv" != *"$entropy"* && "$argv" != *"$expected_key"* ]] || failed "REPLAY_DERIVATION_ARGV_SECRET_RETAINED"
-  if ! IFS= read -r key <&"${REPLAY_DERIVATION[0]}"; then
+  if ! IFS= read -r key <&"$derivation_fd"; then
     [[ -n "$key" ]] || failed "REPLAY_DERIVATION_UNAVAILABLE"
   fi
-  wait "$REPLAY_DERIVATION_PID" || derivation_status=$?
+  wait "$derivation_pid" || derivation_status=$?
   [[ "$derivation_status" == "0" && "$key" == "$expected_key" ]] || failed "REPLAY_DERIVATION_UNAVAILABLE"
   log_phase "replay-derivation-argv-observed" \
     "result=absent scope=process-table channel=stdin interpreter=absolute"

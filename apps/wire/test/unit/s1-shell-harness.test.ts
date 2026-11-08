@@ -431,7 +431,12 @@ function failureEvidence(run: Run): string {
     .filter((key) => /^(?:ASIMP_S1_|BASH|BUN|CI$|NODE|S1_|SHELLOPTS)/.test(key))
     .sort()
     .join(" ");
-  return `exit=${run.exitCode}\nenv_keys=${relevantEnvironment || "none"}\nstdout=${safeCaptureSummary(run.stdout)}\nstderr=${safeCaptureSummary(run.stderr)}`;
+  // Only the nonsecret PID/PGID and ps birth time may accompany this refusal.
+  // Never echo an arbitrary stderr line, argv, or a credential-bearing value.
+  const derivationChild = run.stderr.match(
+    /^\[s1-cold-enrollment\] replay-derivation-started pid=([1-9][0-9]*) identity= ([1-9][0-9]* [A-Za-z]{3} [A-Za-z]{3} [0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4})$/m,
+  );
+  return `exit=${run.exitCode}\nenv_keys=${relevantEnvironment || "none"}\nstdout=${safeCaptureSummary(run.stdout)}\nstderr=${safeCaptureSummary(run.stderr)}\nderivation_child=${derivationChild ? `${derivationChild[1]} ${derivationChild[2]}` : "unavailable"}`;
 }
 
 async function runScript(
@@ -2371,8 +2376,9 @@ describe("a pinned port is validated before anything is started", () => {
     const entropy = "0".repeat(64);
     const derivedKey = "A".repeat(43);
     const run = await runScript(["--self-test-replay-derivation-argv-observer"]);
-    expect(run.exitCode).toBe(0);
+    expect(run.exitCode, failureEvidence(run)).toBe(0);
     expect(record(run).code).toBe("REPLAY_DERIVATION_ARGV_OBSERVER_SELF_TEST_PASSED");
+    expect(phaseValue(run.stderr, "replay-derivation-started", "pid")).toMatch(/^[1-9][0-9]*$/);
     expect(phaseValue(run.stderr, "replay-derivation-argv-observed", "result")).toBe("absent");
     expect(`${run.stdout}\n${run.stderr}`).not.toContain(entropy);
     expect(`${run.stdout}\n${run.stderr}`).not.toContain(derivedKey);
