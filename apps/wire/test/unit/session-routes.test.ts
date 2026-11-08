@@ -304,7 +304,7 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
       expect(later.sequence).toBeGreaterThan(earlier.sequence);
       expect(pack.cursor).toBe(earlier.sequence);
       expect(pack.items.find((item) => item.id === "SYS-synthesis-staleness")?.body).toContain(
-        `synthesis covers through #${earlier.covers_through} — stale by 3 material events`,
+        `synthesis covers through #${earlier.covers_through} — stale by 4 material events`,
       );
       const current = PackResponseSchema.parse(
         await (await f.call(`${f.path}/pack?profile=${profile}&max_tokens=8000`)).json(),
@@ -315,6 +315,38 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
       );
     },
   );
+
+  test("synthesis context ignores an acquired scientific-object lease and follows gap settlement", async () => {
+    const f = await ledgerPackFixture();
+    const synthesis = SynthesizeResponseSchema.parse(
+      await f.post(`${f.path}/synthesize`, {
+        covers_through: Number(f.relation.seq),
+        body_md: "The current claim, proposed relation and unclosed proof gap are recorded.",
+        anchors: [{ target_kind: "claim", target_id: "C-1", target_version: 1 }],
+        omitted: [],
+        selection_policy: "Summarize the recorded research frontier at this cut.",
+      }),
+    );
+    await f.post(`${f.path}/leases`, {
+      object: "C-1",
+      objective: "Check the parity claim against its exact statement.",
+      deliverable: "A reviewed argument or counterexample.",
+      parallel_safe: false,
+    });
+    const check = async (count: number) => {
+      for (const profile of ["orient", "working"] as const) {
+        const response = await f.call(`${f.path}/pack?profile=${profile}&max_tokens=8000`);
+        expect(response.status, await response.clone().text()).toBe(200);
+        const pack = PackResponseSchema.parse(await response.json());
+        expect(pack.items.find((item) => item.id === "SYS-synthesis-staleness")?.body).toContain(
+          `synthesis covers through #${synthesis.covers_through} — stale by ${count} material events`,
+        );
+      }
+    };
+    await check(0);
+    await f.post(`${f.path}/gaps/close`, { gap_id: f.gap.gap_id, outcome: "withdrawn" });
+    await check(1);
+  });
 
   test("synthesis context uses committed metadata and never revives a hidden latest publication", async () => {
     const f = await ledgerPackFixture();

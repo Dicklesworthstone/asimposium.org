@@ -350,6 +350,48 @@ test("staleness excludes future events and process-only publications in one read
     assert.equal(exact.items[0]?.materialEventsSince, 1);
     assert.equal(f.queries.length, 1);
   }));
+test("synthesis staleness follows formulation and scientific source changes at the captured cut", () =>
+  using(async (f) => {
+    f.publish(2, "SYNTH-A", { covers_through: 1 });
+    const events = [
+      ["problem.statement-revised", "problem"],
+      ["relation.asserted", "relation"],
+      ["relation.disputed", "relation"],
+      ["citation.corrected", "citation"],
+      ["object.retracted", "retraction"],
+      ["evidence.created", "evidence"],
+    ];
+    for (const [index, [type, kind]] of events.entries())
+      f.publish(index + 3, `SOURCE-${index}`, {}, { type, kind });
+    assert.equal(
+      (await f.read({ synthesisId: "SYNTH-A", through: 2 })).items[0]?.materialEventsSince,
+      0,
+    );
+    assert.equal(
+      (await f.read({ synthesisId: "SYNTH-A", through: 3 })).items[0]?.materialEventsSince,
+      1,
+    );
+    assert.equal(
+      (await f.read({ synthesisId: "SYNTH-A", through: 7 })).items[0]?.materialEventsSince,
+      5,
+    );
+    assert.equal((await f.read({ synthesisId: "SYNTH-A" })).items[0]?.materialEventsSince, 6);
+  }));
+test("scientific object identifiers do not turn leases or unknown producers into synthesis drift", () =>
+  using(async (f) => {
+    f.publish(2, "SYNTH-A", { covers_through: 1 });
+    const events = [
+      ["lease.acquired", "claim"],
+      ["lease.challenged", "hypothesis"],
+      ["lease.released", "gap"],
+      ["problem.writer-cap-changed", "problem"],
+      ["claim.unknown-metadata", "claim"],
+      ["claim.created", "session"],
+    ];
+    for (const [index, [type, kind]] of events.entries())
+      f.publish(index + 3, `PROCESS-${index}`, {}, { type, kind });
+    assert.equal((await f.read({ synthesisId: "SYNTH-A" })).items[0]?.materialEventsSince, 0);
+  }));
 test("a page's UTF-8 budget bounds transfer without splitting work products", () =>
   using(async (f) => {
     const body = "界".repeat(Math.floor(SYNTHESIS_READ_BYTES / 4));

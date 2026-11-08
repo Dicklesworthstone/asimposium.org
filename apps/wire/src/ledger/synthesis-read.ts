@@ -1,6 +1,7 @@
 import type { SynthesisItem } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
+import { synthesisMaterialEventSql } from "./synthesis-events.ts";
 import type { SynthesisAnchorSource } from "./synthesis-references.ts";
 
 export const SYNTHESIS_READ_LIMIT = 200;
@@ -83,7 +84,7 @@ SELECT p.id AS problem_id, p.public_seq, p.cursor,
     THEN (SELECT COUNT(*) FROM events newer
       WHERE newer.problem_id = p.id AND newer.seq <= p.cursor
         AND newer.seq > json_extract(e.payload_json, '$.covers_through')
-        AND newer.object_kind IN ('claim','hypothesis','review','evidence','dead_end','conflict','gap'))
+        AND ${synthesisMaterialEventSql("newer")})
     ELSE 0 END AS material_events_since
 FROM scope p LEFT JOIN budgeted e ON 1
 ORDER BY e.seq DESC`;

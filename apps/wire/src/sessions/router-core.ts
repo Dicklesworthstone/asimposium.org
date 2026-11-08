@@ -213,6 +213,7 @@ import {
   loadProblemSyntheses,
   validateSynthesisAnchors,
 } from "../ledger/synthesis";
+import { synthesisMaterialEventSql } from "../ledger/synthesis-events.ts";
 import {
   isSynthesisReferenceChanged,
   synthesisAnchorGuards,
@@ -4259,9 +4260,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         } else {
           const materialEvents = await db
             .prepare(
-              `SELECT COUNT(*) AS count FROM events
-               WHERE problem_id = ? AND seq > ? AND seq <= ?
-                 AND object_kind IN ('claim', 'hypothesis', 'review', 'evidence', 'dead_end', 'conflict', 'gap')`,
+              `SELECT COUNT(*) AS count FROM events e
+               WHERE e.problem_id = ? AND e.seq > ? AND e.seq <= ?
+                 AND ${synthesisMaterialEventSql("e")}`,
             )
             .bind(session.problem_id, latestSynthesis.covers_through, cursor)
             .first<{ count: number }>();
