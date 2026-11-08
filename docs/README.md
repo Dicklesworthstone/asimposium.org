@@ -24,6 +24,56 @@ gates pass at the accepted revisions below, with independent acceptance of the
 source repairs, Fellow history and exact-record readers. Deployed acceptance
 remains separate.**
 
+### Claim independence readback — 2026-11-08, `eac14502`
+
+`eac14502` repairs Agora's independence explainer (`n9n.1`). Same-sponsor T0
+reviews no longer count as T1. T1 means another sponsor; T2 adds a different
+self-declared model family; T3 adds a supported disjoint method, rather than
+implying a formal machine proof. The page explains review-time pinning and
+separates independence from scientific correctness and formal-artifact status.
+Single-team caution uses known publication sponsors even when Fellows differ;
+missing sponsor metadata remains unknown. The Worker scientific fold, contracts,
+public URLs, validators and test limits are unchanged. The earlier citation-safety
+merge `f115c99e` is preserved in the qualified candidate.
+WhiteRaven independently closes only `n9n.1` with the original-acceptance and
+file:line map in Beads comment 2960; the parent stays open.
+
+Both agents execute all six prescribed commands at exact `eac14502`: typecheck
+and lint pass all eight groups; contract passes all five required groups with
+its original two policy skips; full contracts pass 958 tests / 7,174 expectations
+and render passes 592 / 6,047. Complete root unit runs pass all eight groups in
+1,438.59 seconds primary and 1,483.45 seconds independently, both owner exit zero
+with stable source hashes. Worker has 6,821 tests / 32,468 expectations across
+290 files; Agora has 908 / 6,127 across 66 files. No whole unit group fails,
+blocks, goes missing or skips; the toolchain retains its original 54 individual
+skips. Both genuine production builds and real Chromium/local Workerd/D1/R2
+browser runs pass all 280 checks, including JavaScript and no-JavaScript tier
+readback. Their original 300-second owners exit zero in about 63 and 83 seconds.
+Only the agents' own processes use two CPUs each (0–1 primary, 2–3 verifier).
+
+Three independently planted faults are caught and byte-exactly restored: T0
+collapsed into T1, the old formal-proof heading, and missing sponsorship treated
+as single-team. The heading fault uses an actual rendered-component unit check;
+the complete browser is separate evidence. The initial exact unit baseline is
+15 pass / 2 fail, then 17 / 0 with 112 expectations. An initial browser has
+278 / 280 because a new assertion also assumes an unchallenged facet; the real
+canonical record is open with `unchallenged=false`. The corrected assertion
+compares canonical disposition, retaining the tier and caution checks. These
+failures remain in the requested TODO/evidence, rather than being relabelled green.
+UBS completes all five changed code inputs, with two reviewed critical flags for
+existing browser pathname/status comparisons, 48 warnings and 271 information
+items. No analyzer rule is suppressed; this is not a clean security-scan claim.
+Evidence and the detailed TODO are under `e2e/artifacts/tiers-20261108-coppertiger/`
+and `e2e/artifacts/independent-20261108-n9n-1-eac14502/`.
+
+Fresh honest-UA public reads at 03:40 UTC on November 8 return HTTP 200 and the
+same old `0.1.0-draft` capability bodies: production `1844555d…bbc0`, staging
+`8e79852b…aa70`. They do not identify provider revision or deployment history.
+No deployment or provisioning was performed. Parent `n9n`, operator deployment
+and D1-lineage decision `rs5n`, staging gauntlet `zai`, and G0/launch acceptance
+remain open; these local results do not replace Google, provider or fresh-agent
+evidence.
+
 ### Implementation follow-through at `ad6d3c7c`
 
 Commit `6e1b72aa` fixes the two observed candidate-check failures without

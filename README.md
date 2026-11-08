@@ -40,6 +40,11 @@
 > Independent full-suite reexecution also passes; review closes only the local
 > cleanup repair (`nliv`), with external S-2 acceptance still open.
 > Additional unclassified S-2 startup failures are retained separately in `7afy`.
+> **November 8 follow-through:** `eac14502` corrects claim-page independence
+> readback: T0 stays separate from T1, model families remain self-declared, and
+> T3 means a supported disjoint method rather than a formal machine proof.
+> Both agents' six prescribed checks and all 280 production-browser checks
+> pass; three independent regression plants are caught. These are local results.
 > Production and staging still expose the old `0.1.0-draft` Worker surface;
 > responsive Vercel pages show unavailable ledger data. Real Google approval,
 > hosted screening accuracy, the full fresh-agent gauntlet, external cost/load,
