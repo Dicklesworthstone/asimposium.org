@@ -633,6 +633,119 @@ await runLocalWorkerJourney(async (context) => {
     "an author is not sent to self-review",
   );
 
+  // P11 forbids new exact duplicates, but revision can legitimately release
+  // an old statement for another claim. Historical matching text must not
+  // become an equivalence recommendation between distinct current heads.
+  const duplicateAuthor = await enroll("moves-history-author", "usr_moves_history");
+  const historyReviewer = await enroll("moves-history-reviewer", "usr_moves_history_reviewer");
+  const historyProblem = (
+    await call(
+      "/v1/problems",
+      {
+        title: "Current statements after revision",
+        statement: "The squares of the integers zero and two are even.",
+        falsifier: "Either zero squared or two squared is odd.",
+        motivation: "Keep duplicate discovery attached to current readable publications.",
+        areas: ["number-theory"],
+      },
+      duplicateAuthor,
+      201,
+    )
+  ).problem.id;
+  await sponsorCall(
+    "usr_moves_history",
+    "POST",
+    `/v1/sponsors/problems/${historyProblem}/lifecycle`,
+    "problem-lifecycle",
+    { action: "publish" },
+  );
+  const historyReviewSession = (
+    await call(
+      "/v1/sessions",
+      { problem_id: historyProblem, intent: "review" },
+      historyReviewer,
+      201,
+    )
+  ).session_id;
+  await call(
+    `/v1/problems/${historyProblem}/statement-review`,
+    {
+      session_id: historyReviewSession,
+      statement_version: 1,
+      verdict: "statement-clear",
+      basis: "The two integers, parity predicate and counterexample are explicit.",
+    },
+    historyReviewer,
+  );
+  const historySession = (
+    await call(
+      "/v1/sessions",
+      { problem_id: historyProblem, intent: "prove" },
+      duplicateAuthor,
+      201,
+    )
+  ).session_id;
+  const historyPath = `/v1/sessions/${historySession}`;
+  const historyDraft = await call(
+    `${historyPath}/workshop`,
+    { type: "claim-draft", title: "Current parity statement", body_md: "Private preparation." },
+    duplicateAuthor,
+    201,
+  );
+  const historyBody = {
+    workshop_id: historyDraft.workshop_id,
+    kind: "conjecture",
+    statement: "Zero squared is even.",
+    falsifier: "Zero squared is odd.",
+  };
+  const firstHistory = await call(`${historyPath}/promote`, historyBody, duplicateAuthor, 201);
+  const deniedDuplicate = await call(`${historyPath}/promote`, historyBody, duplicateAuthor, 409);
+  assert.equal(deniedDuplicate.code, "DUPLICATE_CLAIM", "modern writes preserve P11 admission");
+  await call(
+    `${historyPath}/revise`,
+    {
+      claim_id: firstHistory.claim_id,
+      base_version: 1,
+      kind: "conjecture",
+      statement: "Two squared is even.",
+      falsifier: "Two squared is odd.",
+      depends_on: [],
+    },
+    duplicateAuthor,
+    201,
+  );
+  const replacementDraft = await call(
+    `${historyPath}/workshop`,
+    { type: "claim-draft", title: "Separate zero claim", body_md: "Private preparation." },
+    duplicateAuthor,
+    201,
+  );
+  const secondHistory = await call(
+    `${historyPath}/promote`,
+    { ...historyBody, workshop_id: replacementDraft.workshop_id },
+    duplicateAuthor,
+    201,
+  );
+  assert.notEqual(firstHistory.claim_id, secondHistory.claim_id);
+  const currentHeads = await call(`/v1/p/${historyProblem}/next`, undefined, duplicateAuthor);
+  assert.equal(currentHeads.degraded, false, "the current-head scan runs against real D1");
+  assert.ok(
+    !moveNames(currentHeads).includes("collapse-duplicate"),
+    "matching obsolete text cannot merge distinct current statements",
+  );
+  const revisedEvent = await env.DB.prepare(
+    "SELECT id FROM events WHERE problem_id=? AND object_id=? AND type='claim.revised' AND object_version=2",
+  )
+    .bind(historyProblem, firstHistory.claim_id)
+    .first();
+  await fixtures.redactPublicContent(revisedEvent.id);
+  const withheldHead = await call(`/v1/p/${historyProblem}/next`, undefined, duplicateAuthor);
+  assert.equal(withheldHead.degraded, true, "unavailable current content is an explicit boundary");
+  assert.ok(
+    !moveNames(withheldHead).includes("collapse-duplicate"),
+    "withholding the revision cannot revive its duplicate-looking predecessor",
+  );
+
   console.log(
     JSON.stringify({
       stage: "moves-journey-passed",
@@ -649,8 +762,31 @@ await runLocalWorkerJourney(async (context) => {
       process_only_window_focus: true,
       unavailable_withdrawn_and_superseded_claims_excluded: true,
       author_focus_uses_current_proof_gap: true,
+      p11_duplicate_admission_preserved: true,
+      duplicate_discovery_uses_current_heads: true,
+      withheld_revision_does_not_revive_old_duplicate: true,
       boundary:
         "real local Workerd/D1; production provider; replay parity shown for reviews, claim relations and conflicts",
     }),
   );
+  // The intentionally redacted revision cannot be rebuilt from its missing
+  // body. Replay retains the previous head, while the live projection still
+  // names version 2. Declare only those exact, explained differences; every
+  // other problem and every additional drift item still has to agree.
+  return {
+    projectionParityExpect: {
+      [historyProblem]: {
+        status: "unreplayable",
+        drift: [
+          ...["statement", "payload_sha256", "source_seq", "norm_hash"].map(
+            (column) => `claims:column:${firstHistory.claim_id}:${column}`,
+          ),
+          ...["source_seq", "build_digest"].map(
+            (column) => `claim_projections:column:${firstHistory.claim_id}:${column}`,
+          ),
+          `claim_versions:orphan_row:${firstHistory.claim_id}@2`,
+        ],
+      },
+    },
+  };
 });

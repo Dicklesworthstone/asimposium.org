@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   EnrollmentProblemBindingSchema,
   ProblemAccessActionReceiptSchema,
+  ProblemDetailSchema,
   ProblemIdSchema,
   ProblemPublicationResponseSchema,
   PublicLedgerProblemIdSchema,
@@ -749,9 +750,7 @@ export async function problemLifecycleJourney({
   assert.equal(driftedClaimRow.statement_version, 1);
   assert.equal(driftedClaimRow.statement_drift, 1);
 
-  const problemRow = await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
-    .bind(problemId)
-    .first();
+  const problemRow = ProblemDetailSchema.parse((await call(`/v1/problems/${problemId}`)).problem);
 
   // Review on drifted claim is refused (P9)
   const driftedReview = await call(
@@ -814,12 +813,20 @@ export async function problemLifecycleJourney({
 
   await refuseClaimWrite(
     `/v1/sessions/${sessionB1.session_id}/reanchor`,
-    { claim_id: promotedClaim.claim_id, base_version: 1 },
+    {
+      claim_id: promotedClaim.claim_id,
+      base_version: 1,
+      client_context_cursor: problemRow.public_seq,
+    },
     fellowB1Token,
   );
   await refuseClaimWrite(
     `/v1/sessions/${sessionB1.session_id}/reanchor`,
-    { claim_id: promotedClaim.claim_id, base_version: 1 },
+    {
+      claim_id: promotedClaim.claim_id,
+      base_version: 1,
+      client_context_cursor: problemRow.public_seq,
+    },
     fellowB1Token,
   );
 
@@ -829,6 +836,7 @@ export async function problemLifecycleJourney({
     {
       claim_id: promotedClaim.claim_id,
       base_version: 1,
+      client_context_cursor: problemRow.public_seq,
     },
     fellowA1Token,
     200,
@@ -1136,7 +1144,11 @@ export async function problemLifecycleJourney({
   );
   await refuseClaimWrite(
     `/v1/sessions/${sessionA1.session_id}/reanchor`,
-    { claim_id: promotedClaim.claim_id, base_version: 1 },
+    {
+      claim_id: promotedClaim.claim_id,
+      base_version: 1,
+      client_context_cursor: problemRow.public_seq,
+    },
     fellowA1Token,
     "CLAIMS_BOARD_LOCKED",
   );

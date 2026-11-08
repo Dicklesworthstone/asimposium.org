@@ -508,6 +508,16 @@ test("W5.1 Claim reanchor request validates claim_id and base_version", () => {
   ).toBe(false);
 });
 
+test("re-anchor accepts an explicit observed statement cursor without requiring it on legacy requests", () => {
+  const request = { claim_id: "C-1", base_version: 2, client_context_cursor: 41 };
+  expect(ClaimReanchorRequestSchema.parse(request)).toEqual(request);
+  for (const cursor of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "41", null]) {
+    expect(
+      ClaimReanchorRequestSchema.safeParse({ ...request, client_context_cursor: cursor }).success,
+    ).toBe(false);
+  }
+});
+
 test("W5.1 Problem statement review contracts validate verdict and basis", () => {
   const validRequest = {
     session_id: "S-01ARZ3NDEKTSV4RRFFQ69G5FAV",

@@ -7609,11 +7609,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         code: "REANCHOR_BODY_INVALID",
         title: "Invalid claim reanchor request body",
         detail: "The request body did not match the claim reanchor contract.",
-        fixHint: "Provide claim_id and base_version.",
+        fixHint:
+          "Provide claim_id and base_version; send client_context_cursor from your fresh read when the statement has revised.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: { claim_id: "C-1", base_version: 1 },
+          example: { claim_id: "C-1", base_version: 1, client_context_cursor: 41 },
         },
       });
     }
@@ -7638,6 +7639,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
+
+    const statementContext = publicationStatementContext(
+      c,
+      parsed.data,
+      session.opened_public_cursor,
+    );
+    const contextRefusal = await clientStatementContextConflict(
+      db,
+      session.problem_id,
+      statementContext,
+    );
+    if (contextRefusal) return contextRefusal;
 
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const decision = authorizeFellowWrite({
@@ -7832,6 +7845,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           kraterIdempotencyKey,
           credentialId: auth.binding.credentialId,
           session,
+          statementContext,
           responseFor: () =>
             ClaimReanchorResponseSchema.parse({
               reanchored: true,
@@ -7870,6 +7884,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       } catch (replayError) {
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
       }
+      const contextRefusal = await clientStatementContextConflict(
+        db,
+        session.problem_id,
+        statementContext,
+      );
+      if (contextRefusal) return contextRefusal;
       if (error instanceof KraterLedgerPreconditionError) {
         return validatedProblem({
           status: 409,

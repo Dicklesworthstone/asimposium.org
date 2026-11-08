@@ -768,7 +768,7 @@ await runLocalWorkerJourney(
     const reanchored = ClaimReanchorResponseSchema.parse(
       await call(
         `/v1/sessions/${sessionId}/reanchor`,
-        { claim_id: claim1Id, base_version: 2 },
+        { claim_id: claim1Id, base_version: 2, client_context_cursor: authorContext.cursor },
         author,
         200,
       ),

@@ -223,7 +223,11 @@ test("re-anchor preserves a usable exact claim/statement recommendation without 
     const move = NextMoveCandidateSchema.parse(result.move);
     assert.equal(result.degraded, false);
     assert.deepEqual(move.refs, [PROBLEM, "C-1@1", "S@2"]);
-    assert.deepEqual(move.contract.prefilled_hints, { claim_id: "C-1", base_version: 1 });
+    assert.deepEqual(move.contract.prefilled_hints, {
+      claim_id: "C-1",
+      base_version: 1,
+      client_context_cursor: f.cursor(),
+    });
     assert.deepEqual((move.contract.preparation as Record<string, unknown>).read_first, {
       method: "GET",
       path: `/p/${PROBLEM}.md`,
