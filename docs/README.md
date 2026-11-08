@@ -24,6 +24,126 @@ gates pass at the accepted revisions below, with independent acceptance of the
 source repairs, Fellow history and exact-record readers. Deployed acceptance
 remains separate.**
 
+### Hypothesis and formulation test repairs — 2026-11-08, `2c84aaf5`
+
+**Both agents pass all eight scoped qualification commands at this exact
+source. WhiteRaven independently closes `x4t.1`, then dependent `axq.1`;
+Beads comments 2975 and 2976 map their original acceptance to source and evidence.**
+These repairs address actual failures found while checking
+the incoming merge, and change no production eligibility, public contract or table.
+
+`5bf3404b` corrects a hypothesis journey that demanded a creation event in an
+`orient` pack. Fable §7.3/§9.6 selects material events there, including hypothesis
+kills. The test now requires explicit creation omission and its disclosure,
+then checks the exact creation and its warning outside the untrusted body in
+the full export. Existing graveyard, refusal, visibility, withdrawal, inbox and
+rebuild checks remain. Ordinary enrollment of an auxiliary Fellow under the
+same sponsor isolates the new policy probes and a replay-only claim-evidence
+fixture. The substantive hypothesis evidence retains its original authors.
+Actual D1 counts are 20 attempts for the scientific author and five for the
+auxiliary Fellow; the 20-per-hour ceiling and existing sponsor fixture are unchanged.
+
+That native journey passed, but both complete `5bf3404b` unit runs failed:
+seven groups passed and Worker failed. Primary Worker has 6,897 passes and
+27 failures; independently, 6,898 and 26. Most failures follow one newly reached
+formulation module missing from S-2's source list; four more expose unit
+fixtures missing the new reader's admission mode or committed formulation.
+Deliberate malformed-screening-receipt error stacks are unrelated expected
+test paths. The primary-only S1 argv-observer failure remains unexplained in
+`pjuf.2`; independent unfiltered and unchanged literal controls pass. Those
+controls supply no diagnosis, and that bead remains open.
+
+`2c84aaf5` adds the missing source pin and repairs the two existing move fixture
+files. Only two production-default unit cases seed a typed governance publication
+through the existing ledger writer with their actual Fellow and sponsor.
+The writer establishes integrity from an empty head; an earlier incorrect
+genesis setup correctly failed and is retained. The sharpening expectation uses
+the current read URL with its captured cursor and exact fixture-event digest.
+This is unit fixture proof, separate from HTTP governance admission.
+
+Both agents execute focused pack units (73 tests / 726 expectations), move units
+(35 / 319), actual local scientific/moves/hypothesis journeys, and root typecheck,
+lint and unfiltered unit. Each root gate passes all eight groups. Full unit takes
+1,442.22 seconds primary and 1,434.47 independently: each has 6,924 Worker tests /
+32,656 expectations, 918 Agora tests / 6,242 and 398 render unit tests / 4,445.
+The original 54 individual toolchain skips remain; no whole unit group skips,
+blocks, fails or goes missing. The final root includes the complete S-2 harness
+family; its pre-freeze standalone run is 151 / 0 / 1,415. All 2,473 tracked inputs
+outside Beads and this assessment remain equal across the completed commands.
+These are the eight commands actually executed, not a fresh full-contract,
+browser, hosted-provider, cold-model or optional Rust acceptance.
+
+Four isolated faults at `2c84aaf5` reach their intended assertions: remove a full
+pack warning, wrongly treat hypothesis creation as material, omit the new S-2
+source pin, or counterfeit the sharpening publication digest with valid-shaped
+hex. Each owner exits one; the counterfeit gives 34 unit passes and one intended
+failure. Exact restoration and fresh primary literal move/source/hypothesis
+commands pass. The source fault runs one named test with 150 filtered; it is not
+151 fault executions or a native S-2 cost result. The verifier initially invoked
+an exported scientific helper that executes no subject. That zero exit is kept
+as nonproof; the correct registered scientific entrypoint subsequently completes
+with real stages and a normal owner exit at the original bound. All 227
+registered anchors match; this does not mean all 227 faults were executed.
+UBS diff/staged completes all three correction inputs (two JS/TS, one Bash),
+with zero critical findings, seven reviewed warnings, 261 information items
+and no failed modules or suppressions. The earlier hypothesis-test scan covers
+one input with zero critical, 25 reviewed warnings and 191 information items.
+
+Evidence and the granular TODO are under
+`e2e/artifacts/gauntlet-completion-20261108-coppertiger/` and
+`e2e/artifacts/independent-20261108-axq-x4t-2c84aaf5/`. Earlier failed and partial
+attempts remain intact. No deployment, provisioning or push was performed;
+the original `zai`/screening/operations parents and G0/launch gates remain open.
+
+### Local completion verdict — 2026-11-08, `e684feb6`
+
+`e684feb6` repairs three false-completion paths in the existing local gauntlet
+(`zai.1`): completion now requires an observed successful pack GET for an owned
+session, an own public claim with a nonblank falsifier, and an owned closed
+session with a handback. Private handback text is reduced to a presence boolean.
+A valid lemma with a falsifier qualifies. This is a local verification enabler;
+an observed response does not establish comprehension or semantic move-following.
+WhiteRaven independently closes only this leaf; Beads comment 2971 maps the
+corrected acceptance to source lines and actual execution evidence.
+
+Both agents pass all five scoped commands at this exact source: whole gauntlet
+unit 76 tests / 199 expectations plus its original shell self-test, default
+native local run, and root typecheck, lint and unfiltered unit. Each root gate
+passes eight groups; full unit takes 1,432.09 seconds primary and 1,505.35
+independently, with 6,827 Worker and 914 Agora tests each. The original 54
+individual toolchain skips remain. The native run has ten **scripted oracle
+cases**: three positives and seven negatives, zero cold-model trials. Four
+isolated scorer faults each produce exactly one intended wrong verdict with
+the other nine correct; exact restoration and a fresh primary literal native
+run pass. All five feature hashes remain equal across both qualifications.
+
+The first implementation incorrectly required a conjecture-class claim as
+well as a falsifier; both agents initially missed that extra restriction.
+Rereading Fable caught it before closure. A real valid-lemma positive fails
+the exact old scorer and passes the correction. Comment 2970 preserves the
+original child wording and restores the original kind-independent Fable
+criterion. Superseded `3574b27a` full unit attempts were intentionally retired
+and remain partial evidence; early fixture-precondition failures remain
+nonqualifying. No parent criterion, application admission or test limit changed.
+
+Correction UBS diff/staged completes four changed code inputs: zero critical,
+eight reviewed warnings, 136 information items and no failed modules. The
+unchanged declaration hash matches its earlier five-input scan; this is not a
+current five-input or universal security-clean claim. Raw evidence and the
+granular TODO are under `e2e/artifacts/gauntlet-completion-20261108-coppertiger/`
+and `e2e/artifacts/independent-20261108-zai-1-e684feb6/`.
+
+Parent `zai` remains open. The provisioned staging runner still reports
+`GAUNTLET_PRODUCT_FLOW_NOT_IMPLEMENTED`; credentials alone cannot supply it.
+Actual fresh sessions across three harnesses, success/token criteria and
+remaining original work are unearned. Fresh 22:04 UTC honest-UA capability
+reads return the old production/staging `0.1.0-draft` bodies; they do not
+identify provider revision or deployment history. Google, hosted screening,
+G0, launch and optional Rust acceptance are separate. A later external merge
+to `9cf40cbb` at 20:17:17 UTC arrived after the primary root finished; these
+`e684feb6` results do not qualify its 39 incoming application/package files.
+Its integration is qualified separately above at `2c84aaf5`.
+
 ### Local target cleanup — 2026-11-08, `f061d6a0`
 
 `f061d6a0` connects gauntlet targets to the native journey's existing Wrangler
