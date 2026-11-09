@@ -103,6 +103,7 @@ test("only known reference grammars become public links and current-only readers
     "G-5": "/p/P-DEMO/gaps?through=80&target=G-5",
     "Q-12": "/p/P-DEMO/questions?through=80&target=Q-12",
     "CF-9": "/p/P-DEMO/conflicts?through=80&target=CF-9",
+    "L-4@2": "/p/P-DEMO/citations/L-4%402?through=80",
     "E-9@1": "/r/p/P-DEMO/evidence/E-9",
     "R-8@1": "/r/p/P-DEMO/reviews/R-8",
   };

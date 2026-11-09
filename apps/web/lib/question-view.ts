@@ -1,5 +1,6 @@
 import { PublicClaimTargetSchema, PublicLedgerProblemIdSchema } from "@asimposium/contracts";
 import { ConflictIdSchema, conflictsListPath } from "@asimposium/contracts/conflicts";
+import { citationPath, PublicCitationTargetSchema } from "@asimposium/contracts/citations";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import { ProofGapIdSchema } from "@asimposium/contracts/proof-gaps";
 import { QuestionIdSchema, questionsListPath } from "@asimposium/contracts/questions";
@@ -15,6 +16,8 @@ export function questionReferenceLink(problem: string, reference: string, cursor
   const base = `/p/${encodeURIComponent(problem)}`;
   if (PublicClaimTargetSchema.safeParse(reference).success)
     return { href: `${base}/claims/${encodeURIComponent(reference)}?through=${cursor}`, currentOnly: false };
+  if (PublicCitationTargetSchema.safeParse(reference).success)
+    return { href: citationPath(problem, reference, "human", { through: cursor }), currentOnly: false };
   const evidence = /^(E-[0-9A-HJKMNP-TV-Z]{1,78})(?:@1)?$/.exec(reference);
   if (evidence) return { href: `/r${base}/evidence/${encodeURIComponent(evidence[1] as string)}`, currentOnly: true };
   const review = /^(R-[0-9A-HJKMNP-TV-Z]{1,78})(?:@1)?$/.exec(reference);

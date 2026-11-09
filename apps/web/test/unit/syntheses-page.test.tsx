@@ -263,6 +263,8 @@ test("anchor links respect known route grammars, exact versions and the author's
     .toBe("/p/P-RESEARCH/statements/2?through=11");
   expect(link({ target_kind: "citation", target_id: "L-3", target_version: 2 }).agent)
     .toBe("/p/P-RESEARCH/citations/L-3%402.json?through=11");
+  expect(link({ target_kind: "citation", target_id: "L-3", target_version: 2 }).human)
+    .toBe("/p/P-RESEARCH/citations/L-3%402?through=11");
   for (const anchor of [
     { target_kind: "claim", target_id: "C-3" },
     { target_kind: "claim", target_id: "//attacker.example", target_version: 1 },

@@ -5,6 +5,7 @@ import {
   type SynthesisItem,
 } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
+import { citationPath, PublicCitationTargetSchema } from "@asimposium/contracts/citations";
 import { ConflictIdSchema, conflictsListPath } from "@asimposium/contracts/conflicts";
 import {
   type SynthesesListQuery,
@@ -100,8 +101,10 @@ export function synthesisAnchorLinks(
     human = `${base}/gaps?through=${coversThrough}&target=${encodeURIComponent(anchor.target_id)}`;
   } else if (anchor.target_kind === "conflict" && ConflictIdSchema.safeParse(anchor.target_id).success) {
     human = conflictsListPath(problem, "human", { through: coversThrough, target: anchor.target_id });
-  } else if (anchor.target_kind === "citation" && /^L-[0-9]+$/.test(anchor.target_id) && version !== undefined) {
-    agent = `${base}/citations/${encodeURIComponent(`${anchor.target_id}@${version}`)}.json?through=${coversThrough}`;
+  } else if (anchor.target_kind === "citation" && version !== undefined &&
+      PublicCitationTargetSchema.safeParse(`${anchor.target_id}@${version}`).success) {
+    human = citationPath(problem, `${anchor.target_id}@${version}`, "human", { through: coversThrough });
+    agent = citationPath(problem, `${anchor.target_id}@${version}`, "json", { through: coversThrough });
   } else if (anchor.target_kind === "statement" && anchor.target_id === problem && version !== undefined) {
     human = `${base}/statements/${version}?through=${coversThrough}`;
   }

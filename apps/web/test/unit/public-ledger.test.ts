@@ -1117,6 +1117,7 @@ describe("ProblemPage Server Component", () => {
     const mockCitations = {
       schema: CITATIONS_SCHEMA_ID,
       problem_id: "P-SP4D",
+      cursor: 42, after: 0, scanned_through: 10, next_after: null, unanchored: null,
       citations: [
         {
           citation_id: "L-1",
@@ -1160,10 +1161,14 @@ describe("ProblemPage Server Component", () => {
       ),
     );
 
+    const literatureReads: string[] = [];
     setMockFetch(async (input) => {
       const url = String(input);
       if (url.includes("/commentary.json")) return Response.json(mockCommentary);
-      if (url.includes("/citations.json")) return Response.json(mockCitations);
+      if (url.includes("/citations.json")) {
+        literatureReads.push(url);
+        return Response.json(mockCitations);
+      }
       if (url.includes("/claims/")) return Response.json(claim);
       return Response.json(singleTeamFace);
     });
@@ -1195,8 +1200,31 @@ describe("ProblemPage Server Component", () => {
     expect(html.indexOf(notice)).toBeLessThan(html.indexOf("Foundations of Operator Algebras"));
     expect(html).toContain("Takesaki, M.");
     expect(html).toContain("1 literature citations");
+    expect(html).toContain("in this preview");
+    expect(html).toContain('href="/p/P-SP4D/citations/L-1%401?through=42"');
+    expect(html).toContain("Retrieved (Fellow-declared)");
+    expect(literatureReads).toEqual([`${PRODUCTION_STOA_ORIGIN}/p/P-SP4D/citations.json?through=42&limit=8`]);
     expect(html).toContain("/p/P-SP4D/citations.md");
     expect(html).toContain("/p/P-SP4D/citations.json");
+  });
+
+  test("problem literature preserves unavailable-source omissions instead of inventing an empty bibliography", async () => {
+    setMockFetch(async (input) => {
+      const url = String(input);
+      if (url.includes("/citations.json")) return Response.json({
+        schema: CITATIONS_SCHEMA_ID, problem_id: "P-SP4D", cursor: 42,
+        after: 0, scanned_through: 40, next_after: 40, unanchored: null,
+        citations: [], omitted: ["content_unavailable", "page_limit"],
+      });
+      if (url.includes("/commentary.json") || url.includes("/claims/")) return missingProblem();
+      return Response.json(MOCK_PROBLEM_FACE);
+    });
+    const html = renderToStaticMarkup(await ProblemPage({ params: Promise.resolve({ slug: "P-SP4D" }) }));
+    expect(html).toContain("No readable citations were returned in this preview");
+    expect(html).toContain("An omitted source is not evidence that no citation was registered");
+    expect(html).toContain("More citation publication positions remain");
+    expect(html).toContain('href="/p/P-SP4D/citations?through=42"');
+    expect(html).not.toContain("No literature citations have been registered");
   });
 
   test("commentary pagination keeps a bounded increasing public prefix and rejects crossed problem pages", async () => {
@@ -1300,6 +1328,7 @@ describe("ProblemPage Server Component", () => {
         return Response.json({
           schema: CITATIONS_SCHEMA_ID,
           problem_id: "P-SP4D",
+          cursor: 42, after: 0, scanned_through: 0, next_after: null, unanchored: null,
           citations: [],
           omitted: [],
         });
@@ -1382,6 +1411,7 @@ describe("ProblemPage Server Component", () => {
         return Response.json({
           schema: CITATIONS_SCHEMA_ID,
           problem_id: "P-SP4D",
+          cursor: 42, after: 0, scanned_through: 0, next_after: null, unanchored: null,
           citations: [],
           omitted: [],
         });
@@ -1401,8 +1431,8 @@ describe("ProblemPage Server Component", () => {
       expect(citeRes.data.citations).toEqual([]);
     }
 
-    setMockFetch(async () =>
-      Response.json({ status: 404, code: "PROBLEM_NOT_FOUND" }, { status: 404 }),
+    setMockFetch(async (input) =>
+      Response.json({ status: 404, code: String(input).includes("/citations.json") ? "CITATION_NOT_FOUND" : "PROBLEM_NOT_FOUND" }, { status: 404 }),
     );
     expect((await stoaFetchCommentary("P-NONEXISTENT")).state).toBe("not_found");
     expect((await stoaFetchCitations("P-NONEXISTENT")).state).toBe("not_found");

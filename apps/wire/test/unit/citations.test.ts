@@ -6,6 +6,7 @@ import {
   type CitationItem,
   CitationsListResponseSchema,
   type RecordCitationRequest,
+  RecordCitationRequestSchema,
   SingleCitationResponseSchema,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
@@ -777,12 +778,21 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
     test("the source-byte limit continues before the first whole record that exceeds it", async () => {
       const fixture = citationDatabase();
       try {
-        const authors = Array.from({ length: 300 }, (_, index) => `${index}`.padEnd(195, "a"));
-        for (let index = 1; index <= 80; index++)
-          await fixture.seed(sampleCitation({ citation_id: `L-${index}`, seq: index, authors }));
+        const authors = Array.from(
+          { length: 64 },
+          (_, index) => `${String(index).padStart(2, "0")}${"文".repeat(198)}`,
+        );
+        const largeMetadata = { authors, title: "書誌".repeat(500), excerpt: "資料".repeat(500) };
+        expect(
+          RecordCitationRequestSchema.safeParse({ ...validDoiRequest, ...largeMetadata }).success,
+        ).toBe(true);
+        for (let index = 1; index <= 100; index++)
+          await fixture.seed(
+            sampleCitation({ citation_id: `L-${index}`, seq: index, ...largeMetadata }),
+          );
         const first = await loadProblemCitations(fixture.db, "P-MATH", { limit: 200 });
         expect(first.citations.length).toBeGreaterThan(1);
-        expect(first.citations.length).toBeLessThan(80);
+        expect(first.citations.length).toBeLessThan(100);
         expect(first.omitted.join(" ")).toContain("source-byte budget");
         expect(first.next_after).toBe(first.citations.at(-1)?.seq ?? -1);
         const second = await loadProblemCitations(fixture.db, "P-MATH", {
@@ -793,17 +803,17 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
         expect(second.citations[0]?.seq).toBe((first.next_after ?? 0) + 1);
         expect(second.next_after).toBeNull();
         expect([...first.citations, ...second.citations].map((item) => item.citation_id)).toEqual(
-          Array.from({ length: 80 }, (_, index) => `L-${index + 1}`),
+          Array.from({ length: 100 }, (_, index) => `L-${index + 1}`),
         );
         const exact = await loadSingleCitation(fixture.db, "P-MATH", "L-80@1");
         expect(exact?.citation.authors).toEqual(authors);
         fixture.sqlite.query("UPDATE problems SET public_seq=200 WHERE id='P-MATH'").run();
-        for (let version = 2; version <= 40; version++)
-          await fixture.seed(sampleCitation({ version, seq: version + 100, authors }));
+        for (let version = 2; version <= 50; version++)
+          await fixture.seed(sampleCitation({ version, seq: version + 100, ...largeMetadata }));
         const deep = await loadSingleCitation(fixture.db, "P-MATH", "L-1");
-        expect(deep?.citation.version).toBe(40);
+        expect(deep?.citation.version).toBe(50);
         expect(deep?.citation.authors).toEqual(authors);
-        expect(deep?.versions.length).toBeLessThan(40);
+        expect(deep?.versions.length).toBeLessThan(50);
         expect(deep?.omitted.join(" ")).toContain("history source-byte budget");
       } finally {
         fixture.sqlite.close();

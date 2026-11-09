@@ -5,8 +5,6 @@ import {
   AreaDetailResponseSchema,
   type AreasIndexResponse,
   AreasIndexResponseSchema,
-  type CitationsListResponse,
-  CitationsListResponseSchema,
   ClaimFaceQuerySchema,
   type ClaimFaceResponse,
   ClaimFaceResponseSchema,
@@ -41,6 +39,18 @@ import {
   SearchResponseSchema,
 } from "@asimposium/contracts";
 import {
+  CitationReadQuerySchema,
+  citationMatchesQuery,
+  citationPath,
+  type CitationsListResponse,
+  CitationsListResponseSchema,
+  citationsListMatchesQuery,
+  citationsListPath,
+  PublicCitationTargetSchema,
+  type SingleCitationResponse,
+  SingleCitationResponseSchema,
+} from "@asimposium/contracts/citations";
+import {
   ClaimsListQuerySchema,
   type ClaimsListResponse,
   ClaimsListResponseSchema,
@@ -63,6 +73,7 @@ import {
   ReviewQueueResponseSchema,
 } from "@asimposium/contracts/review-queue";
 import { deadEndsMatchView } from "./dead-end-view";
+import { parseCitationViewQuery } from "./citation-view";
 import { eventHistoryMatchesQuery, parseEventHistoryQuery } from "./event-history";
 import { publicReadWatch } from "./public-watch-view";
 import { parsePublicRecord, type PublicRecord, type PublicRecordTarget } from "./public-record";
@@ -724,15 +735,41 @@ export async function stoaFetchCommentary(
 export async function stoaFetchCitations(
   problemId: string,
   stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
 ): Promise<PublicRead<CitationsListResponse>> {
-  if (!PublicLedgerProblemIdSchema.safeParse(problemId).success) {
+  const parsed = parseCitationViewQuery(query);
+  if (typeof problemId !== "string" || problemId.trim() !== problemId ||
+      !PublicLedgerProblemIdSchema.safeParse(problemId).success || parsed === null) {
     return { state: "unavailable", reason: "invalid_response" };
   }
-  return readPublic(
-    `/p/${encodeURIComponent(problemId)}/citations.json`,
-    stoaOrigin,
-    CitationsListResponseSchema,
-    0,
-    "PROBLEM_NOT_FOUND",
+  const result = await readPublic(
+    citationsListPath(problemId, "json", parsed), stoaOrigin, CitationsListResponseSchema,
+    0, "CITATION_NOT_FOUND", "CURSOR_INVALID", 8 * 1024 * 1024,
   );
+  if (result.state !== "ok") return result;
+  return citationsListMatchesQuery(problemId, parsed, result.data)
+    ? result : { state: "unavailable", reason: "invalid_response" };
+}
+
+/** Exact citation/version reads never float to a different source. Current
+ * visibility is consulted even when the publication snapshot is pinned. */
+export async function stoaFetchCitation(
+  problemId: string,
+  target: string,
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
+): Promise<PublicRead<SingleCitationResponse>> {
+  const parsed = CitationReadQuerySchema.safeParse(query);
+  if (typeof problemId !== "string" || problemId.trim() !== problemId ||
+      !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
+      typeof target !== "string" || target.trim() !== target ||
+      !PublicCitationTargetSchema.safeParse(target).success || !parsed.success)
+    return { state: "unavailable", reason: "invalid_response" };
+  const result = await readPublic(
+    citationPath(problemId, target, "json", parsed.data), stoaOrigin, SingleCitationResponseSchema,
+    0, "CITATION_NOT_FOUND", "CURSOR_INVALID", 8 * 1024 * 1024,
+  );
+  if (result.state !== "ok") return result;
+  return citationMatchesQuery(problemId, target, parsed.data, result.data)
+    ? result : { state: "unavailable", reason: "invalid_response" };
 }
