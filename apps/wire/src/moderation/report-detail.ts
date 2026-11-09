@@ -12,19 +12,23 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { validatedProblem } from "../http/envelope.ts";
-import { conflictingModerationIdentitySql } from "./target.ts";
 import {
   type CitationContentRow,
   verifiedCitationContent,
 } from "../ledger/citation-read-integrity.ts";
+import { conflictingModerationIdentitySql } from "./target.ts";
 
 /** Deliberate public producers; workshop and other private events never qualify. */
 const SOURCE_TYPES: Readonly<Record<string, readonly string[]>> = {
   problem: ["problem.admitted", "problem.statement-revised"],
   claim: ["claim.created", "claim.revised"],
   hypothesis: [
-    "hypothesis.created", "hypothesis.killed", "hypothesis.deferred",
-    "hypothesis.resumed", "hypothesis.narrowed", "hypothesis.superseded",
+    "hypothesis.created",
+    "hypothesis.killed",
+    "hypothesis.deferred",
+    "hypothesis.resumed",
+    "hypothesis.narrowed",
+    "hypothesis.superseded",
   ],
   evidence: ["evidence.created"],
   review: ["review.created"],
@@ -80,7 +84,7 @@ export async function captureReportSource(
   const types = SOURCE_TYPES[targetKind];
   if (types === undefined) return undefined;
   const pin = targetKind === "claim" ? /^(C-[0-9]+)@([1-9][0-9]{0,8})$/.exec(requestedRef) : null;
-  const objectId = requestedRef === "problem" ? problemId : pin?.[1] ?? requestedRef;
+  const objectId = requestedRef === "problem" ? problemId : (pin?.[1] ?? requestedRef);
   const row = await db
     .prepare(`SELECT e.id, e.problem_id, e.seq, e.type, e.object_kind,
       e.object_id, e.object_version, e.created_at, e.payload_sha256, p.public_seq,
@@ -96,12 +100,23 @@ export async function captureReportSource(
     ) LEFT JOIN event_content c ON c.event_id = e.id
     WHERE p.id = ? AND p.status <> 'private-draft' AND p.public_seq > 0`)
     .bind(
-      ADMIN_REPORT_SOURCE_MAX_BYTES, objectId, targetKind, ...types,
-      ...(pin === null ? [] : [Number(pin[2])]), problemId,
-    ).first<SourceRow>();
-  if (row === null || await verifiedCitationContent(problemId, row, ADMIN_REPORT_SOURCE_MAX_BYTES) === undefined) return undefined;
+      ADMIN_REPORT_SOURCE_MAX_BYTES,
+      objectId,
+      targetKind,
+      ...types,
+      ...(pin === null ? [] : [Number(pin[2])]),
+      problemId,
+    )
+    .first<SourceRow>();
+  if (
+    row === null ||
+    (await verifiedCitationContent(problemId, row, ADMIN_REPORT_SOURCE_MAX_BYTES)) === undefined
+  )
+    return undefined;
   return {
-    eventId: row.id, digest: row.payload_sha256, requestedRef,
+    eventId: row.id,
+    digest: row.payload_sha256,
+    requestedRef,
     payloadJson: row.payload_json as string,
   };
 }
@@ -125,7 +140,10 @@ export function reportSourcePinBindings(input: {
   readonly source: ReportSourcePin;
 }): (string | number)[] {
   return [
-    input.source.eventId, input.source.digest, input.problemId, input.targetKind,
+    input.source.eventId,
+    input.source.digest,
+    input.problemId,
+    input.targetKind,
     input.targetRef === "problem" ? input.problemId : input.targetRef,
     input.source.payloadJson,
   ];
@@ -152,8 +170,18 @@ async function readSource(db: D1Database, report: ReportDetailRow): Promise<Admi
   const unavailable = (
     reason: Extract<AdminReportSource, { state: "unavailable" }>["reason"],
   ): AdminReportSource => ({ state: "unavailable", reason });
-  if (report.source_event_id === null && report.source_digest === null && report.source_ref === null) return unavailable("not-pinned");
-  if (report.source_event_id === null || report.source_digest === null || report.source_ref === null) return unavailable("integrity-failed");
+  if (
+    report.source_event_id === null &&
+    report.source_digest === null &&
+    report.source_ref === null
+  )
+    return unavailable("not-pinned");
+  if (
+    report.source_event_id === null ||
+    report.source_digest === null ||
+    report.source_ref === null
+  )
+    return unavailable("integrity-failed");
   const row = await db
     .prepare(`SELECT e.id, e.problem_id, e.seq, e.type, e.object_kind, e.object_id, e.object_version,
       e.created_at, e.payload_sha256, e.actor_fellow_id, e.actor_sponsor_id, e.actor_session_id,
@@ -167,19 +195,28 @@ async function readSource(db: D1Database, report: ReportDetailRow): Promise<Admi
     .bind(ADMIN_REPORT_SOURCE_MAX_BYTES, report.source_event_id)
     .first<SourceRow & { problem_status: string }>();
   if (row === null) return unavailable("missing");
-  if (row.problem_status === "private-draft" || row.seq > row.public_seq) return unavailable("not-public");
+  if (row.problem_status === "private-draft" || row.seq > row.public_seq)
+    return unavailable("not-public");
   if (row.redacted_at !== null) return unavailable("redacted");
-  if (row.payload_bytes !== null && row.payload_bytes > ADMIN_REPORT_SOURCE_MAX_BYTES) return unavailable("too-large");
+  if (row.payload_bytes !== null && row.payload_bytes > ADMIN_REPORT_SOURCE_MAX_BYTES)
+    return unavailable("too-large");
   if (row.payload_json === null) return unavailable("missing");
   const expectedObjectId = report.target_ref === "problem" ? report.problem_id : report.target_ref;
-  const validRef = report.source_ref === report.target_ref ||
-    (report.target_kind === "claim" && report.source_ref === `${expectedObjectId}@${row.object_version}`);
+  const validRef =
+    report.source_ref === report.target_ref ||
+    (report.target_kind === "claim" &&
+      report.source_ref === `${expectedObjectId}@${row.object_version}`);
   if (
-    row.problem_id !== report.problem_id || row.object_kind !== report.target_kind ||
-    row.object_id !== expectedObjectId || row.payload_sha256 !== report.source_digest ||
-    !validRef || !SOURCE_TYPES[report.target_kind]?.includes(row.type) ||
-    await verifiedCitationContent(report.problem_id, row, ADMIN_REPORT_SOURCE_MAX_BYTES) === undefined
-  ) return unavailable("integrity-failed");
+    row.problem_id !== report.problem_id ||
+    row.object_kind !== report.target_kind ||
+    row.object_id !== expectedObjectId ||
+    row.payload_sha256 !== report.source_digest ||
+    !validRef ||
+    !SOURCE_TYPES[report.target_kind]?.includes(row.type) ||
+    (await verifiedCitationContent(report.problem_id, row, ADMIN_REPORT_SOURCE_MAX_BYTES)) ===
+      undefined
+  )
+    return unavailable("integrity-failed");
   const source = AdminReportSourceSchema.safeParse({
     state: "available",
     binding: report.source_ref.includes("@") ? "requested-version" : "captured-at-filing",
@@ -203,13 +240,20 @@ async function readSource(db: D1Database, report: ReportDetailRow): Promise<Admi
   // must not disclose the retained bytes. Moderation holds alone are reviewable.
   const stillAvailable = await db
     .prepare(`SELECT 1 AS available WHERE ${REPORT_SOURCE_PIN_AVAILABLE_SQL}`)
-    .bind(...reportSourcePinBindings({
-      problemId: report.problem_id, targetKind: report.target_kind, targetRef: report.target_ref,
-      source: {
-        eventId: row.id, digest: row.payload_sha256,
-        requestedRef: report.source_ref, payloadJson: row.payload_json,
-      },
-    })).first<{ available: number }>();
+    .bind(
+      ...reportSourcePinBindings({
+        problemId: report.problem_id,
+        targetKind: report.target_kind,
+        targetRef: report.target_ref,
+        source: {
+          eventId: row.id,
+          digest: row.payload_sha256,
+          requestedRef: report.source_ref,
+          payloadJson: row.payload_json,
+        },
+      }),
+    )
+    .first<{ available: number }>();
   return stillAvailable?.available === 1 ? source.data : unavailable("missing");
 }
 
@@ -221,7 +265,9 @@ export async function readOperatorReportDetail(
   const report = await db
     .prepare(`SELECT report_id, problem_id, target_kind, target_ref, reason, note,
     reporter_class, status, created_at, resolved_at, resolution_reason, source_event_id, source_digest, source_ref
-    FROM reports WHERE report_id = ?`).bind(reportId).first<ReportDetailRow>();
+    FROM reports WHERE report_id = ?`)
+    .bind(reportId)
+    .first<ReportDetailRow>();
   if (report === null) return undefined;
   return AdminReportDetailSchema.parse({
     report: {
@@ -244,18 +290,21 @@ export async function readOperatorReportDetail(
 
 export async function operatorReportDetail(db: D1Database, reportId: string): Promise<Response> {
   const detail = await readOperatorReportDetail(db, reportId);
-  const response = detail === undefined ? validatedProblem({
-    status: 404,
-    code: "MODERATION_TARGET_NOT_FOUND",
-    title: "No such report",
-    detail: "No report matches this identifier.",
-    rule: "A5",
-    fixHint: "Open a complete RP report identifier from the private operator queue.",
-    extensions: {
-      schema: ADMIN_REPORT_DETAIL_SCHEMA_ID,
-      example: { report_id: `RP-${"0".repeat(26)}` },
-    },
-  }) : Response.json(detail);
+  const response =
+    detail === undefined
+      ? validatedProblem({
+          status: 404,
+          code: "MODERATION_TARGET_NOT_FOUND",
+          title: "No such report",
+          detail: "No report matches this identifier.",
+          rule: "A5",
+          fixHint: "Open a complete RP report identifier from the private operator queue.",
+          extensions: {
+            schema: ADMIN_REPORT_DETAIL_SCHEMA_ID,
+            example: { report_id: `RP-${"0".repeat(26)}` },
+          },
+        })
+      : Response.json(detail);
   response.headers.set("cache-control", "private, no-store");
   response.headers.set("x-robots-tag", "noindex, nofollow");
   return response;

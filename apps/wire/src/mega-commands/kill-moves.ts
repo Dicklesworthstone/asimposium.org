@@ -44,6 +44,7 @@ JOIN event_content hc ON hc.event_id = h.id AND hc.payload_sha256 = h.payload_sh
   AND hc.redacted_at IS NULL
 WHERE (SELECT latest.type FROM events latest WHERE latest.problem_id = p.id
     AND latest.object_kind = 'hypothesis' AND latest.object_id = h.object_id
+    AND latest.type NOT IN ('lease.acquired', 'lease.released', 'lease.challenged')
     AND latest.seq <= p.public_seq ORDER BY latest.seq DESC LIMIT 1)
       IN ('hypothesis.created', 'hypothesis.resumed')
   AND NOT EXISTS (SELECT 1 FROM events duplicate WHERE duplicate.problem_id = p.id

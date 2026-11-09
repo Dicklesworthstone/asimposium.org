@@ -312,6 +312,8 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "operator-plane quarantine decision write behind the signed service envelope; operator tooling is deliberately undisclosed",
     "GET /v1/operators/reports":
       "operator-plane reports read behind the signed service envelope; operator tooling is deliberately undisclosed",
+    "GET /v1/operators/reports/<reportId>":
+      "operator-plane exact-source report review behind the signed service envelope; private evidence is deliberately undisclosed",
     "POST /v1/operators/reports/resolution":
       "operator-plane report resolution write behind the signed service envelope; operator tooling is deliberately undisclosed",
     "POST /v1/operators/content-control":

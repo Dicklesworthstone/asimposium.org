@@ -96,12 +96,21 @@ describe("stale-route validation covers the entire dependency set", () => {
   });
 
   for (const status of ["killed", "refined"] as const) {
-    test(`a ${status} hypothesis after the old cutoff is refused`, async () => {
+    test(`a ${status} hypothesis retains its closing event after the old cutoff and later leases`, async () => {
       const { sql, db } = fixture();
       sql.query("INSERT INTO hypotheses VALUES ('p', 'H-route', ?)").run(status);
       sql
         .query("INSERT INTO events VALUES ('p', 'closed', 90, 'hypothesis', 'H-route', 2, ?)")
         .run(`hypothesis.${status}`);
+      for (const [index, type] of [
+        "lease.acquired",
+        "lease.released",
+        "lease.challenged",
+      ].entries()) {
+        sql
+          .query("INSERT INTO events VALUES ('p', ?, ?, 'hypothesis', 'H-route', 1, ?)")
+          .run(`lease-${index}`, 91 + index, type);
+      }
       expect(
         await findStaleRoutes(db, "p", staleRouteReferences([...openPrefix(), "H-route"])),
       ).toEqual([

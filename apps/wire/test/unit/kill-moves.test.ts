@@ -51,12 +51,15 @@ function fixture() {
     type: string,
     body: Record<string, unknown>,
     actor = "F-AUTHOR",
+    objectKind?: string,
   ) => {
-    const kind = type.startsWith("hypothesis.")
-      ? "hypothesis"
-      : type.startsWith("evidence.")
-        ? "evidence"
-        : "retraction";
+    const kind =
+      objectKind ??
+      (type.startsWith("hypothesis.")
+        ? "hypothesis"
+        : type.startsWith("evidence.")
+          ? "evidence"
+          : "retraction");
     const eventId = `event-${seq}`,
       text = JSON.stringify(body),
       digest = sha(text);
@@ -236,6 +239,21 @@ test("oldest eligible publication wins before lexicographic evidence identifiers
     assert.equal((await f.next()).move?.refs[2], "E-1");
     f.control("E-1");
     assert.equal((await f.next()).move?.refs[2], "E-0");
+  }));
+
+test("known lease coordination preserves elimination work without admitting unknown history", () =>
+  run(async (f) => {
+    let seq = 3;
+    for (const type of ["lease.acquired", "lease.released", "lease.challenged"]) {
+      f.event(seq++, "H-1", type, { object_ref: "H-1" }, "F-COORDINATOR", "hypothesis");
+      const result = await f.next();
+      assert.ok(result.move);
+      assert.equal(result.move.move, "kill-or-stand");
+      assert.deepEqual(result.move.refs, [PROBLEM, "H-1", "E-1"]);
+      assert.equal(result.degraded, false);
+    }
+    f.event(seq, "H-1", "lease.unknown", { object_ref: "H-1" }, "F-COORDINATOR", "hypothesis");
+    assert.equal((await f.next()).move, null);
   }));
 
 for (const target of ["problem", "H-1", "H-1@1", "#1", "E-1", "E-1@1", "#2"])

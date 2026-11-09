@@ -7,22 +7,36 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 
-const CREATION_EVENT_SQL = "CASE e.object_kind " + MODERATION_LEDGER_TARGETS.map(
-  ({ kind, created }) => "WHEN '" + kind + "' THEN '" + created + "'",
-).join(" ") + " END";
+const CREATION_EVENT_SQL =
+  "CASE e.object_kind " +
+  MODERATION_LEDGER_TARGETS.map(
+    ({ kind, created }) => "WHEN '" + kind + "' THEN '" + created + "'",
+  ).join(" ") +
+  " END";
 
 /** Trusted SQL aliases only. Generic gap leases use the legacy proof_gap kind;
  * their three known coordination events do not create another scientific object.
  * Every other differing kind, including unknown lease events, remains ambiguous. */
 export function conflictingModerationIdentitySql(sourceAlias: string, publicSeq: string): string {
-  return "EXISTS (SELECT 1 FROM events other_kind" +
-    " WHERE other_kind.problem_id = " + sourceAlias + ".problem_id" +
-    " AND other_kind.object_id = " + sourceAlias + ".object_id" +
-    " AND other_kind.seq <= " + publicSeq +
-    " AND other_kind.object_kind <> " + sourceAlias + ".object_kind" +
-    " AND NOT (" + sourceAlias + ".object_kind = 'gap'" +
+  return (
+    "EXISTS (SELECT 1 FROM events other_kind" +
+    " WHERE other_kind.problem_id = " +
+    sourceAlias +
+    ".problem_id" +
+    " AND other_kind.object_id = " +
+    sourceAlias +
+    ".object_id" +
+    " AND other_kind.seq <= " +
+    publicSeq +
+    " AND other_kind.object_kind <> " +
+    sourceAlias +
+    ".object_kind" +
+    " AND NOT (" +
+    sourceAlias +
+    ".object_kind = 'gap'" +
     " AND other_kind.object_kind = 'proof_gap'" +
-    " AND other_kind.type IN ('lease.acquired', 'lease.released', 'lease.challenged')))";
+    " AND other_kind.type IN ('lease.acquired', 'lease.released', 'lease.challenged')))"
+  );
 }
 
 export interface ModerationTargetGuard {
@@ -42,18 +56,27 @@ export function moderationTargetGuard(
   options: { readonly requirePublication?: boolean } = {},
 ): ModerationTargetGuard {
   const denied = { sql: "0", bindings: [] };
-  if (/\s/.test(target.problemId) || !PublicLedgerProblemIdSchema.safeParse(target.problemId).success)
+  if (
+    /\s/.test(target.problemId) ||
+    !PublicLedgerProblemIdSchema.safeParse(target.problemId).success
+  )
     return denied;
   if (target.targetKind === "problem") {
-    return target.targetRef !== "problem" ? denied : {
-      sql: "EXISTS (SELECT 1 FROM problems control_scope WHERE control_scope.id = ?" +
-        " AND control_scope.status <> 'private-draft' AND control_scope.public_seq > 0)",
-      bindings: [target.problemId],
-    };
+    return target.targetRef !== "problem"
+      ? denied
+      : {
+          sql:
+            "EXISTS (SELECT 1 FROM problems control_scope WHERE control_scope.id = ?" +
+            " AND control_scope.status <> 'private-draft' AND control_scope.public_seq > 0)",
+          bindings: [target.problemId],
+        };
   }
   const descriptor = moderationLedgerTarget(target.targetKind);
   const requirePublication = options.requirePublication !== false;
-  if (!descriptor || (requirePublication && !moderationObjectIdIsValid(target.targetKind, target.targetRef)))
+  if (
+    !descriptor ||
+    (requirePublication && !moderationObjectIdIsValid(target.targetKind, target.targetRef))
+  )
     return denied;
   return {
     sql: [
@@ -62,18 +85,24 @@ export function moderationTargetGuard(
       "WHERE control_scope.id = control_identity.problem_id",
       "AND control_scope.status <> 'private-draft' AND control_scope.public_seq > 0",
       "AND NOT " + conflictingModerationIdentitySql("control_identity", "control_scope.public_seq"),
-      requirePublication ? [
-        "AND EXISTS (SELECT 1 FROM events control_creation",
-        "WHERE control_creation.problem_id = control_identity.problem_id",
-        "AND control_creation.object_id = control_identity.object_id",
-        "AND control_creation.object_kind = control_identity.object_kind",
-        "AND control_creation.object_version = 1 AND control_creation.type = ?",
-        "AND control_creation.seq <= control_scope.public_seq)",
-      ].join(" ") : "",
+      requirePublication
+        ? [
+            "AND EXISTS (SELECT 1 FROM events control_creation",
+            "WHERE control_creation.problem_id = control_identity.problem_id",
+            "AND control_creation.object_id = control_identity.object_id",
+            "AND control_creation.object_kind = control_identity.object_kind",
+            "AND control_creation.object_version = 1 AND control_creation.type = ?",
+            "AND control_creation.seq <= control_scope.public_seq)",
+          ].join(" ")
+        : "",
       ")",
     ].join(" "),
-    bindings: [target.problemId, target.targetRef, target.targetKind,
-      ...(requirePublication ? [descriptor.created] : [])],
+    bindings: [
+      target.problemId,
+      target.targetRef,
+      target.targetKind,
+      ...(requirePublication ? [descriptor.created] : []),
+    ],
   };
 }
 
@@ -92,22 +121,33 @@ export async function resolveModerationTarget(
     return undefined;
   if (targetRef === "problem") {
     if (targetKind !== undefined && targetKind !== "problem") return undefined;
-    const problem = await db.prepare(
-      "SELECT id FROM problems WHERE id = ? AND status <> 'private-draft' AND public_seq > 0",
-    ).bind(problemId).first<{ id: string }>();
-    return problem === null ? undefined : { problemId, targetKind: "problem", targetRef: "problem" };
+    const problem = await db
+      .prepare(
+        "SELECT id FROM problems WHERE id = ? AND status <> 'private-draft' AND public_seq > 0",
+      )
+      .bind(problemId)
+      .first<{ id: string }>();
+    return problem === null
+      ? undefined
+      : { problemId, targetKind: "problem", targetRef: "problem" };
   }
-  if (targetKind !== undefined && !moderationObjectIdIsValid(targetKind, targetRef)) return undefined;
-  if (!MODERATION_LEDGER_TARGETS.some(({ kind }) => moderationObjectIdIsValid(kind, targetRef))) return undefined;
-  const row = await db.prepare([
-    "SELECT e.object_kind FROM events e JOIN problems p ON p.id = e.problem_id",
-    "WHERE p.id = ? AND p.status <> 'private-draft' AND p.public_seq > 0",
-    "AND e.object_id = ? AND e.object_version = 1 AND e.seq <= p.public_seq",
-    "AND e.type = " + CREATION_EVENT_SQL,
-    targetKind === undefined ? "" : "AND e.object_kind = ?",
-    "AND NOT " + conflictingModerationIdentitySql("e", "p.public_seq"),
-    "ORDER BY e.seq ASC LIMIT 1",
-  ].join("\n")).bind(problemId, targetRef, ...(targetKind === undefined ? [] : [targetKind]))
+  if (targetKind !== undefined && !moderationObjectIdIsValid(targetKind, targetRef))
+    return undefined;
+  if (!MODERATION_LEDGER_TARGETS.some(({ kind }) => moderationObjectIdIsValid(kind, targetRef)))
+    return undefined;
+  const row = await db
+    .prepare(
+      [
+        "SELECT e.object_kind FROM events e JOIN problems p ON p.id = e.problem_id",
+        "WHERE p.id = ? AND p.status <> 'private-draft' AND p.public_seq > 0",
+        "AND e.object_id = ? AND e.object_version = 1 AND e.seq <= p.public_seq",
+        "AND e.type = " + CREATION_EVENT_SQL,
+        targetKind === undefined ? "" : "AND e.object_kind = ?",
+        "AND NOT " + conflictingModerationIdentitySql("e", "p.public_seq"),
+        "ORDER BY e.seq ASC LIMIT 1",
+      ].join("\n"),
+    )
+    .bind(problemId, targetRef, ...(targetKind === undefined ? [] : [targetKind]))
     .first<{ object_kind: string }>();
   const descriptor = row === null ? undefined : moderationLedgerTarget(row.object_kind);
   if (!descriptor || !moderationObjectIdIsValid(descriptor.kind, targetRef)) return undefined;
@@ -126,11 +166,16 @@ export async function resolveReportTarget(
   const target = await resolveModerationTarget(db, problemId, pin?.[1] ?? reference);
   if (target === undefined || pin === null) return target;
   if (target.targetKind !== "claim") return undefined;
-  const source = await db.prepare([
-    "SELECT e.seq FROM events e JOIN problems p ON p.id = e.problem_id",
-    "WHERE e.problem_id = ? AND e.object_kind = 'claim' AND e.object_id = ?",
-    "AND e.object_version = ? AND e.type IN ('claim.created', 'claim.revised')",
-    "AND e.seq <= p.public_seq AND p.status <> 'private-draft' LIMIT 1",
-  ].join("\n")).bind(problemId, target.targetRef, Number(pin[2])).first<{ seq: number }>();
+  const source = await db
+    .prepare(
+      [
+        "SELECT e.seq FROM events e JOIN problems p ON p.id = e.problem_id",
+        "WHERE e.problem_id = ? AND e.object_kind = 'claim' AND e.object_id = ?",
+        "AND e.object_version = ? AND e.type IN ('claim.created', 'claim.revised')",
+        "AND e.seq <= p.public_seq AND p.status <> 'private-draft' LIMIT 1",
+      ].join("\n"),
+    )
+    .bind(problemId, target.targetRef, Number(pin[2]))
+    .first<{ seq: number }>();
   return source === null ? undefined : target;
 }

@@ -5,12 +5,12 @@ import { readFileSync } from "node:fs";
 import { AdminContentControlResponseSchema, ProblemDocumentSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { runOperatorCommand } from "../../src/moderation/operator-command.ts";
-import { applyOperatorControl } from "../../src/moderation/store.ts";
 import {
   operatorContentControl,
   operatorQuarantineDecision,
   operatorReportResolution,
 } from "../../src/moderation/operator-http.ts";
+import { applyOperatorControl } from "../../src/moderation/store.ts";
 
 const databases: Database[] = [];
 afterEach(() => {
@@ -37,11 +37,16 @@ function fixture() {
     "0135_report_source_pins.sql",
   ])
     sql.exec(readFileSync(new URL(`../../../../db/migrations/${name}`, import.meta.url), "utf8"));
-  const payload = JSON.stringify({ statement: "A committed claim.", kind: "conjecture", falsifier: "A counterexample." });
+  const payload = JSON.stringify({
+    statement: "A committed claim.",
+    kind: "conjecture",
+    falsifier: "A counterexample.",
+  });
   const digest = createHash("sha256").update(payload).digest("hex");
   for (const index of [1, 2]) {
     const eventId = `EV-replay-${index}`;
-    sql.query("INSERT INTO events VALUES (?, 'P-REPLAY', ?, 'claim.created', 'claim', ?, 1, ?, ?)")
+    sql
+      .query("INSERT INTO events VALUES (?, 'P-REPLAY', ?, 'claim.created', 'claim', ?, 1, ?, ?)")
       .run(eventId, index, `C-${index}`, digest, "2026-11-01T00:00:00.000Z");
     sql.query("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(eventId, digest, payload);
   }
@@ -172,7 +177,8 @@ function publishReviewCollision(f: ReturnType<typeof fixture>) {
   const digest = createHash("sha256").update(payload).digest("hex");
   const publish = (kind: "review" | "retraction", type: string, seq: number) => {
     const eventId = "EV-collision-" + kind;
-    f.sql.query("INSERT INTO events VALUES (?, 'P-REPLAY', ?, ?, ?, 'R-1', 1, ?, ?)")
+    f.sql
+      .query("INSERT INTO events VALUES (?, 'P-REPLAY', ?, ?, ?, 'R-1', 1, ?, ?)")
       .run(eventId, seq, type, kind, digest, "2026-11-01T00:00:00.000Z");
     f.sql.query("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(eventId, digest, payload);
     f.sql.query("UPDATE problems SET public_seq=? WHERE id='P-REPLAY'").run(seq);
@@ -325,7 +331,9 @@ describe("operator command receipts commit with their decisions", () => {
     expect(f.counts()).toEqual(before);
     const fresh = await operatorContentControl(f.db, "operator", request, "fresh-pinned-command");
     expect(fresh.status).toBe(404);
-    expect(ProblemDocumentSchema.parse(await fresh.json()).code).toBe("MODERATION_TARGET_NOT_FOUND");
+    expect(ProblemDocumentSchema.parse(await fresh.json()).code).toBe(
+      "MODERATION_TARGET_NOT_FOUND",
+    );
     expect(f.visibility()).toEqual({ visibility: "visible" });
     expect(f.counts()).toEqual(before);
   });
@@ -432,14 +440,21 @@ describe("operator command receipts commit with their decisions", () => {
     const f = fixture();
     publishReviewCollision(f);
     const before = f.counts();
-    const response = await operatorContentControl(f.db, "operator", {
-      target_id: "P-REPLAY/R-1",
-      target_kind: "review",
-      action: "hide",
-      reason: "The operator reviewed the public review before the competing publication.",
-    }, "raced-review-hide");
+    const response = await operatorContentControl(
+      f.db,
+      "operator",
+      {
+        target_id: "P-REPLAY/R-1",
+        target_kind: "review",
+        action: "hide",
+        reason: "The operator reviewed the public review before the competing publication.",
+      },
+      "raced-review-hide",
+    );
     expect(response.status).toBe(409);
-    expect(ProblemDocumentSchema.parse(await response.json()).code).toBe("MODERATION_STATE_CONFLICT");
+    expect(ProblemDocumentSchema.parse(await response.json()).code).toBe(
+      "MODERATION_STATE_CONFLICT",
+    );
     expect(f.counts()).toEqual(before);
     expect(f.sql.query("SELECT * FROM content_controls WHERE target_ref='R-1'").all()).toEqual([]);
   });
@@ -452,23 +467,37 @@ describe("operator command receipts commit with their decisions", () => {
        reporter_sponsor_id, status, created_at)
       VALUES('RP-review-race', 'P-REPLAY', 'review', 'R-1', 'privacy', 'sponsor',
         'review-reporter', 'pending', '2026-11-01T00:00:00.000Z');`);
-    const response = await operatorReportResolution(f.db, "operator", {
-      report_id: "RP-review-race",
-      resolution: "uphold",
-      reason: "Resolve the reviewed allegation without hiding a colliding identity.",
-    }, "raced-review-uphold");
+    const response = await operatorReportResolution(
+      f.db,
+      "operator",
+      {
+        report_id: "RP-review-race",
+        resolution: "uphold",
+        reason: "Resolve the reviewed allegation without hiding a colliding identity.",
+      },
+      "raced-review-uphold",
+    );
     expect(response.status).toBe(200);
-    expect(f.sql.query("SELECT status FROM reports WHERE report_id='RP-review-race'").get()).toEqual({
+    expect(
+      f.sql.query("SELECT status FROM reports WHERE report_id='RP-review-race'").get(),
+    ).toEqual({
       status: "upheld",
     });
     expect(f.counts()).toMatchObject({ audits: 1, receipts: 1, controls: 0, logs: 1 });
-    expect(f.sql.query("SELECT action FROM moderation_log").all()).toEqual([{ action: "report-upheld" }]);
+    expect(f.sql.query("SELECT action FROM moderation_log").all()).toEqual([
+      { action: "report-upheld" },
+    ]);
     const before = f.counts();
-    const replay = await operatorReportResolution(f.db, "operator", {
-      report_id: "RP-review-race",
-      resolution: "uphold",
-      reason: "Resolve the reviewed allegation without hiding a colliding identity.",
-    }, "raced-review-uphold");
+    const replay = await operatorReportResolution(
+      f.db,
+      "operator",
+      {
+        report_id: "RP-review-race",
+        resolution: "uphold",
+        reason: "Resolve the reviewed allegation without hiding a colliding identity.",
+      },
+      "raced-review-uphold",
+    );
     expect(await replay.text()).toBe(await response.text());
     expect(f.counts()).toEqual(before);
   });

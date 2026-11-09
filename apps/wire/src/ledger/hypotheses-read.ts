@@ -52,7 +52,9 @@ function visibleContentSql(event: string): string {
  * unrelated history. The shared decoder owns both list and item semantics.
  * Eliminated-route selection happens before LIMIT, not by filtering one page
  * of active work. A recorded kill with an unknown later lifecycle is retained
- * as unavailable rather than silently erased from negative knowledge. */
+ * as unavailable rather than silently erased from negative knowledge. Generic
+ * leases share the object identity but do not change its scientific history;
+ * exclude only their known events, before selecting heads or computing LAG. */
 function hypothesisRowsSql(exact: boolean, killedOnly = false): string {
   return `
 WITH cut AS (
@@ -73,6 +75,7 @@ WITH cut AS (
   JOIN events h ON h.problem_id = p.id AND h.seq = (
     SELECT MAX(e.seq) FROM events e WHERE e.problem_id = p.id
       AND e.object_kind = 'hypothesis' AND e.object_id = a.object_id AND e.seq <= p.cursor
+      AND e.type NOT IN ('lease.acquired', 'lease.released', 'lease.challenged')
   )
   WHERE a.first_seq > ? AND (? = 0 OR h.type NOT IN (
     'hypothesis.killed', 'hypothesis.deferred', 'hypothesis.narrowed', 'hypothesis.superseded'
@@ -95,6 +98,7 @@ WITH cut AS (
   FROM page p JOIN cut scope
   JOIN events e ON e.problem_id = scope.id AND e.object_kind = 'hypothesis'
     AND e.object_id = p.object_id AND e.seq <= scope.cursor
+    AND e.type NOT IN ('lease.acquired', 'lease.released', 'lease.challenged')
 )
 SELECT p.object_id AS hypothesis_id, p.creations,
   c.problem_id, c.id AS event_id, c.seq, c.object_version, c.created_at, c.payload_sha256,

@@ -347,6 +347,38 @@ test("question snapshots retain the committed lease term despite operational pro
   });
 });
 
+test("only known generic lease events are excluded from the scientific question head", async () => {
+  const f = await fixture();
+  const admitted = await publish(f);
+  const original = await loadProblemQuestions(f.db, problemId);
+  for (const type of ["lease.acquired", "lease.released", "lease.challenged"]) {
+    await publish(f, "Q-1", type, { object_ref: "Q-1", object_kind: "question" });
+    expect((await loadProblemQuestions(f.db, problemId)).questions).toEqual(original.questions);
+    expect(await loadProblemQuestions(f.db, problemId, { through: admitted.seq })).toEqual(
+      original,
+    );
+  }
+  await publish(f, "Q-1", "question.leased", {
+    leased_by: f.binding.fellowId,
+    leased_until: "2099-01-01T02:00:00.000Z",
+    objective: "Check the boundary",
+    deliverable: "A cited counterexample",
+  });
+  const coordinated = await publish(f, "Q-1", "lease.released");
+  const leased = await loadProblemQuestions(f.db, problemId);
+  expect(leased.questions[0]?.status).toBe("leased");
+  expect(leased.questions[0]?.leased_until).toBe("2099-01-01T02:00:00.000Z");
+
+  // A new event family must be reviewed explicitly, never swallowed by a
+  // lease.* prefix filter or a permissive allow-list of scientific states.
+  await publish(f, "Q-1", "lease.unknown");
+  const unknown = await loadProblemQuestions(f.db, problemId, { target: "Q-1" });
+  expect(unknown.target_status).toBe("unavailable");
+  expect(unknown.questions).toEqual([]);
+  expect(unknown.omitted).toContain("Some question content or lifecycle history is unavailable.");
+  expect(await loadProblemQuestions(f.db, problemId, { through: coordinated.seq })).toEqual(leased);
+});
+
 test("hidden admissions retain the bounded page boundary instead of manufacturing an empty history", async () => {
   const f = await fixture();
   await publish(f);

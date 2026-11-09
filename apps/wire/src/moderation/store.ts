@@ -15,11 +15,13 @@
  *   content, matched patterns, reporter identity, or an accusation.
  */
 
-import { MODERATION_CONTROL_KINDS, type ScreeningPublicationContextInput } from "@asimposium/contracts";
+import {
+  MODERATION_CONTROL_KINDS,
+  type ScreeningPublicationContextInput,
+} from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { inboxNoticeStatement } from "../inbox/notice-write.ts";
 import { type OperatorCommand, operatorReceiptStatements } from "./operator-command.ts";
-import { moderationTargetGuard, type ModerationTargetGuard } from "./target.ts";
 import {
   REPORT_SOURCE_PIN_AVAILABLE_SQL,
   type ReportSourcePin,
@@ -27,6 +29,7 @@ import {
   reportSourcePinBindings,
 } from "./report-detail.ts";
 import { screeningCaseReleasedSql } from "./screening-release.ts";
+import { type ModerationTargetGuard, moderationTargetGuard } from "./target.ts";
 
 /** Independent sponsors whose reports hide a target pending review (§9.1 L2). */
 export const COMMUNITY_HIDE_THRESHOLD = 3;
@@ -571,7 +574,12 @@ export async function applyOperatorControl(
         sql: `COALESCE((SELECT control_id FROM content_controls
         WHERE problem_id = ? AND target_ref = ? ORDER BY version DESC LIMIT 1), '') = ?
         AND (${targetGuard.sql})`,
-        bindings: [input.problemId, input.targetRef, current?.control_id ?? "", ...targetGuard.bindings],
+        bindings: [
+          input.problemId,
+          input.targetRef,
+          current?.control_id ?? "",
+          ...targetGuard.bindings,
+        ],
       },
     ),
     operatorAuditStatement(
@@ -644,10 +652,14 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
   const createdAt = new Date().toISOString();
   const windowStart = new Date(Date.parse(createdAt) - REPORT_WINDOW_MS).toISOString();
   const controlId = mintModerationId("CC");
-  const sourceGuard = input.source === undefined
-    ? (input.requireSource ? "0" : "1")
-    : REPORT_SOURCE_PIN_AVAILABLE_SQL;
-  const sourceBindings = input.source === undefined ? [] : reportSourcePinBindings({ ...input, source: input.source });
+  const sourceGuard =
+    input.source === undefined
+      ? input.requireSource
+        ? "0"
+        : "1"
+      : REPORT_SOURCE_PIN_AVAILABLE_SQL;
+  const sourceBindings =
+    input.source === undefined ? [] : reportSourcePinBindings({ ...input, source: input.source });
   // The auto-hide fires only on the insert that crosses the threshold, only
   // while the target is not already hidden, and never over an operator's
   // explicit restore (an operator decision outranks report volume).
@@ -759,8 +771,10 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
   // effects. The latter cannot be mistaken for an accepted report.
   if (existing === null) {
     if (input.requireSource || input.source !== undefined) {
-      const sourceStillAvailable = await db.prepare(`SELECT 1 AS available WHERE ${sourceGuard}`)
-        .bind(...sourceBindings).first<{ available: number }>();
+      const sourceStillAvailable = await db
+        .prepare(`SELECT 1 AS available WHERE ${sourceGuard}`)
+        .bind(...sourceBindings)
+        .first<{ available: number }>();
       if (sourceStillAvailable?.available !== 1) throw new ReportSourceUnavailableError();
     }
     throw new ReportRateLimitedError();
@@ -927,11 +941,14 @@ export async function resolveReport(
   if (HIDEABLE_TARGET_KINDS.has(report.target_kind)) {
     // Resolving an allegation is distinct from changing visibility. Even a
     // legacy unpinned report cannot hide/restore another kind sharing its id.
-    const targetGuard = moderationTargetGuard({
-      problemId: report.problem_id,
-      targetKind: report.target_kind,
-      targetRef: report.target_ref,
-    }, { requirePublication: false });
+    const targetGuard = moderationTargetGuard(
+      {
+        problemId: report.problem_id,
+        targetKind: report.target_kind,
+        targetRef: report.target_ref,
+      },
+      { requirePublication: false },
+    );
     const controlId = mintModerationId("CC");
     const visibility = status === "upheld" ? "hidden" : "visible";
     const latestControl = `c.problem_id = ? AND c.target_ref = ?

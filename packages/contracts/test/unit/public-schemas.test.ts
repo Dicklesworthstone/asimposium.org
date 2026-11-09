@@ -2,7 +2,10 @@ import { expect, test } from "bun:test";
 import { type Dirent, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { generateSponsorDataExportSchema } from "../../src/account-export.ts";
-import { generateAdminReportDetailSchema, generateSponsorSuspensionsSchema } from "../../src/admin.ts";
+import {
+  generateAdminReportDetailSchema,
+  generateSponsorSuspensionsSchema,
+} from "../../src/admin.ts";
 import { generateScreeningAppealsSchema } from "../../src/appeals.ts";
 
 import { generateArtifactPublicationsSchema } from "../../src/artifact-publications.ts";

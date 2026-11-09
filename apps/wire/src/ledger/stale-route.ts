@@ -95,6 +95,7 @@ const STALE_ROUTES_SQL = `
         LEFT JOIN events e ON e.problem_id = h.problem_id
           AND e.object_kind = 'hypothesis' AND e.object_id = h.hypothesis_id
           AND e.type <> 'hypothesis.created'
+          AND e.type NOT IN ('lease.acquired', 'lease.released', 'lease.challenged')
         WHERE h.problem_id = requested.problem_id
           AND h.hypothesis_id = requested.hypothesis_id AND h.status <> 'open'
         ORDER BY e.seq DESC, e.id ASC LIMIT 1

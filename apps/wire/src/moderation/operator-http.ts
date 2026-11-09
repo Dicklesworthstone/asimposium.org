@@ -35,7 +35,6 @@ import {
   storedPublicationContextIsVisible,
 } from "../screening/publication-context";
 import { type OperatorCommand, runOperatorCommand } from "./operator-command.ts";
-import { moderationTargetGuard, resolveModerationTarget } from "./target.ts";
 import {
   applyOperatorControl,
   decideScreeningCase,
@@ -46,6 +45,7 @@ import {
   resolveReport,
   type ScreeningCaseRow,
 } from "./store";
+import { moderationTargetGuard, resolveModerationTarget } from "./target.ts";
 
 const SCREENING_SCHEMA = "https://a.asimposium.org/schemas/screening.v1.json";
 const HEX64 = /^[a-f0-9]{64}$/;
@@ -340,7 +340,12 @@ async function applyContentControlCommand(
   };
   const parsed = parseModerationControlTarget(request.target_kind, request.target_id);
   if (parsed === undefined) return notFound(example);
-  const target = await resolveModerationTarget(db, parsed.problemId, parsed.targetRef, parsed.targetKind);
+  const target = await resolveModerationTarget(
+    db,
+    parsed.problemId,
+    parsed.targetRef,
+    parsed.targetKind,
+  );
   if (target === undefined) return notFound(example);
   const result = await applyOperatorControl(
     db,

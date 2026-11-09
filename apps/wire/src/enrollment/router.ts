@@ -106,7 +106,6 @@ import {
   operatorReportResolution,
   operatorReportsQueue,
 } from "../moderation/operator-http.ts";
-import { operatorReportDetail } from "../moderation/report-detail.ts";
 import {
   clearPosture,
   PostureClearanceRefusedError,
@@ -114,6 +113,7 @@ import {
   sponsorOwnsFellow,
   sponsorPostures,
 } from "../moderation/posture.ts";
+import { operatorReportDetail } from "../moderation/report-detail.ts";
 import { fileReportRequest } from "../moderation/router.ts";
 import { problemSlowModeHttp } from "../moderation/slow-mode-http.ts";
 import { sponsorSuspensionHttp } from "../moderation/sponsor-suspension-http.ts";
@@ -2921,10 +2921,16 @@ function mountSponsorRoutes(app: Hono<{ Bindings: Env }>, options: EnrollmentRou
       return response;
     };
     if (hasQuery(c.req.raw)) {
-      return privateResponse(sponsorPathOnlyResponse(c.req.raw, `/v1/operators/reports/RP-${"0".repeat(26)}`));
+      return privateResponse(
+        sponsorPathOnlyResponse(c.req.raw, `/v1/operators/reports/RP-${"0".repeat(26)}`),
+      );
     }
-    const authenticated = await requireOperator(options, c.req.raw,
-      "/v1/operators/reports/:reportId", "operator.reports.read");
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/reports/:reportId",
+      "operator.reports.read",
+    );
     if (authenticated instanceof Response) return privateResponse(authenticated);
     if (options.db === undefined) return privateResponse(operatorControlUnavailableResponse());
     try {

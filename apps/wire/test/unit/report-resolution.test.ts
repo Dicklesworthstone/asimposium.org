@@ -34,7 +34,10 @@ describe("report admission shares one atomic sponsor budget", () => {
         falsifier: "A counterexample.",
       });
       const digest = createHash("sha256").update(payload).digest("hex");
-      f.sql.query("INSERT INTO events VALUES (?, 'P-REPORTS', 1, 'claim.created', 'claim', ?, 1, ?, ?)")
+      f.sql
+        .query(
+          "INSERT INTO events VALUES (?, 'P-REPORTS', 1, 'claim.created', 'claim', ?, 1, ?, ?)",
+        )
         .run(eventId, `C-${index}`, digest, "2026-10-30T00:00:00.000Z");
       f.sql.query("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(eventId, digest, payload);
     }

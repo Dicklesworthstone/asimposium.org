@@ -99,7 +99,8 @@ const publicProblemSql = `status <> 'private-draft'
 
 /** Work products and lifecycle state come from the captured ledger, including
  * the recorded lease term. Operational heartbeat renewal is not historical
- * scientific evidence and cannot change a pinned response. */
+ * scientific evidence and cannot change a pinned response. Generic lease.*
+ * coordination does not replace question history; question.leased still does. */
 interface QuestionReadRow {
   question_id: string;
   problem_id: string;
@@ -212,6 +213,7 @@ export async function loadProblemQuestions(
       WHERE latest.problem_id = p.id AND latest.object_kind = 'question'
         AND latest.object_id = a.object_id AND latest.seq <= p.public_seq
         AND latest.seq <= p.through
+        AND latest.type NOT IN ('lease.acquired', 'lease.released', 'lease.challenged')
     )
     LEFT JOIN event_content ec ON ec.event_id = e.id
                          AND ec.payload_sha256 = e.payload_sha256

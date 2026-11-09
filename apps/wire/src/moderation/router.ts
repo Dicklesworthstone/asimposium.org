@@ -28,6 +28,7 @@ import {
   scanFieldsForCredentials,
   secretShapedContentProblem,
 } from "../screening/credential-scan.ts";
+import { captureReportSource, ReportSourceUnavailableError } from "./report-detail.ts";
 import {
   type FiledReport,
   fileReport,
@@ -35,8 +36,6 @@ import {
   REPORTS_PER_SPONSOR_PER_DAY,
   ReportRateLimitedError,
 } from "./store.ts";
-
-import { captureReportSource, ReportSourceUnavailableError } from "./report-detail.ts";
 import { resolveReportTarget } from "./target.ts";
 
 export { REPORTS_PER_SPONSOR_PER_DAY } from "./store.ts";
@@ -130,7 +129,12 @@ export async function fileReportRequest(
 
   let filed: FiledReport;
   try {
-    const source = await captureReportSource(db, parsed.problem_id, parsed.target, target.targetKind);
+    const source = await captureReportSource(
+      db,
+      parsed.problem_id,
+      parsed.target,
+      target.targetKind,
+    );
     filed = await fileReport(db, {
       problemId: parsed.problem_id,
       targetKind: target.targetKind,
@@ -145,15 +149,19 @@ export async function fileReportRequest(
     });
   } catch (error) {
     if (error instanceof ReportSourceUnavailableError) {
-      return privateNoStore(problem({
-        status: 404,
-        code: "REPORT_TARGET_NOT_FOUND",
-        title: "The report source is unavailable",
-        detail: "The exact public publication could not be retained for operator review. No new report was recorded.",
-        fixHint: "Reload the public object and report the exact available version shown on its face.",
-        rule: "P10",
-        extensions: { schema: REPORTS_SCHEMA, example: REPORT_EXAMPLE },
-      }));
+      return privateNoStore(
+        problem({
+          status: 404,
+          code: "REPORT_TARGET_NOT_FOUND",
+          title: "The report source is unavailable",
+          detail:
+            "The exact public publication could not be retained for operator review. No new report was recorded.",
+          fixHint:
+            "Reload the public object and report the exact available version shown on its face.",
+          rule: "P10",
+          extensions: { schema: REPORTS_SCHEMA, example: REPORT_EXAMPLE },
+        }),
+      );
     }
     if (!(error instanceof ReportRateLimitedError)) throw error;
     const limited = problem({
