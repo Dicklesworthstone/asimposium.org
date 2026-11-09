@@ -158,7 +158,7 @@ test("both private and published console cards lead to their own access workspac
     unlisted: true, created_by_fellow_id: "fellow-access-a", current_statement_version: 3,
     created_at: "2026-10-25T12:00:00.000Z", updated_at: "2026-10-26T12:00:00.000Z",
   }));
-  const html = renderToStaticMarkup(<cards.ProblemManager fellows={[]} briefs={[]} configured problems={problems} />);
+  const html = renderToStaticMarkup(<cards.ProblemManager sponsorId={accessSponsor} fellows={[]} briefs={[]} configured problems={problems} />);
   expect(html).toContain(`/console/problems/${accessProblem}-0/access`);
   expect(html).toContain(`/console/problems/${accessProblem}-1/access`);
   expect(html.match(/Manage admission and members/g)).toHaveLength(2);

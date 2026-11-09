@@ -226,6 +226,7 @@ test("unavailable and unauthorized previews do not render stale content or publi
 test("the console leads to inspection instead of asking for blind publication consent", () => {
   const html = renderToStaticMarkup(
     <cards.ProblemManager
+      sponsorId={publicationSponsor}
       fellows={[]}
       briefs={[]}
       configured
@@ -399,6 +400,7 @@ test("a private preview denial never grants public governance without the matchi
 test("published problem cards link directly to the existing result governance page", () => {
   const html = renderToStaticMarkup(
     <cards.ProblemManager
+      sponsorId={publicationSponsor}
       fellows={[]}
       briefs={[]}
       configured

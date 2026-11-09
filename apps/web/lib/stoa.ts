@@ -93,6 +93,11 @@ import {
   ReportResponseSchema,
   type SaveProblemBriefRequest,
   SaveProblemBriefRequestSchema,
+  SaveProblemBriefResponseSchema,
+  type WithdrawProblemBriefRequest,
+  WithdrawProblemBriefRequestSchema,
+  type WithdrawProblemBriefResponse,
+  WithdrawProblemBriefResponseSchema,
   ScreeningPromotionDeniedResponseSchema,
   ScreeningPromotionHoldResponseSchema,
   type ScreeningPromotionPolicyResponse,
@@ -149,7 +154,6 @@ import {
   type SponsorProblemBrief,
   type SponsorProblemBriefListResponse,
   SponsorProblemBriefListResponseSchema,
-  SponsorProblemBriefSchema,
   type SponsorProblemListResponse,
   SponsorProblemListResponseSchema,
   type SponsorProposalListResponse,
@@ -1050,7 +1054,45 @@ export function stoaSaveProblemBrief(
     principalId,
     body: JSON.stringify(command),
     idempotencyKey,
-    parse: (value) => SponsorProblemBriefSchema.parse((value as { brief?: unknown } | null)?.brief),
+    parse: (value) => {
+      const { brief } = SaveProblemBriefResponseSchema.parse(value);
+      if (brief.sponsor_id !== principalId || brief.status !== "active" ||
+          (command.id !== undefined && brief.id !== command.id) ||
+          brief.version !== (command.expected_version ?? 0) + 1) {
+        throw new TypeError("The saved brief receipt does not match its command.");
+      }
+      return brief;
+    },
+  });
+}
+
+/** Withdraw the exact reviewed private brief; keep the body and key on retry. */
+export function stoaWithdrawProblemBrief(
+  principalId: string,
+  briefId: string,
+  request: WithdrawProblemBriefRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<WithdrawProblemBriefResponse>> {
+  const command = WithdrawProblemBriefRequestSchema.parse(request);
+  if (typeof briefId !== "string" || briefId.length < 1 || briefId.length > 128) {
+    return Promise.resolve({ ok: false, reason: "refused", status: 400, problemCode: "PROBLEM_BRIEF_BODY_INVALID" });
+  }
+  const path = `${ROUTE_SPONSOR_PROBLEM_BRIEFS}/${encodeURIComponent(briefId)}/withdraw`;
+  return callStoa({
+    method: "POST",
+    route: path,
+    path,
+    action: "withdraw-problem-brief",
+    principalId,
+    body: JSON.stringify(command),
+    idempotencyKey,
+    parse: (value) => {
+      const receipt = WithdrawProblemBriefResponseSchema.parse(value);
+      if (receipt.id !== briefId || receipt.version !== command.expected_version + 1) {
+        throw new TypeError("The withdrawal receipt does not match its command.");
+      }
+      return receipt;
+    },
   });
 }
 

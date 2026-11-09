@@ -14382,7 +14382,8 @@ describe("committed promotion outbox nudge", () => {
       expect(created.status).toBe(201);
       const draft = WorkshopPushResponseSchema.parse(await created.json());
       expect(
-        (await post(`/v1/sessions/${origin}/close`, { handback: "Resume the retained route." })).status,
+        (await post(`/v1/sessions/${origin}/close`, { handback: "Resume the retained route." }))
+          .status,
       ).toBe(201);
       const path = workshopDirectoryPath(await open());
       const sponsorRouter = createSessionRouter({
@@ -14421,7 +14422,10 @@ describe("committed promotion outbox nudge", () => {
             : await sponsorRouter.fetch(
                 new Request("https://a-staging.asimposium.org/v1/sponsors/workshop/action", {
                   method: "POST",
-                  headers: { "content-type": "application/json", "idempotency-key": "sponsor-wins" },
+                  headers: {
+                    "content-type": "application/json",
+                    "idempotency-key": "sponsor-wins",
+                  },
                   body: JSON.stringify({
                     problem_id: "P-4DSP",
                     fellow_id: f.binding.fellowId,
