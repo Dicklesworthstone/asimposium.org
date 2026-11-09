@@ -257,16 +257,13 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
                   <strong>Report:</strong> <code>{report.report_id}</code> ·{" "}
                   <strong>Target:</strong> <code>{report.target_id}</code> ({report.target_kind})
                 </p>
-
+                <p><Link href={`/admin/reports/${report.report_id}`} prefetch={false}>
+                  Inspect the private note and captured publication
+                </Link></p>
               </div>
             ))}
           </div>
         )}
-        <AdminModerationControl operatorId={operatorId} kind="report"
-          initialKey={`admin-report-${crypto.randomUUID()}`}
-          available={reportsData.state === "ok"}
-          targets={reportsData.reports.filter((report) => report.status === "pending")
-            .map((report) => ({ id: report.report_id, label: `${report.report_id} · ${report.target_id} · ${report.category}` }))} />
       </section>
 
       {/* Section 3: Content Controls */}

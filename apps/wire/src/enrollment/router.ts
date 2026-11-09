@@ -106,6 +106,7 @@ import {
   operatorReportResolution,
   operatorReportsQueue,
 } from "../moderation/operator-http.ts";
+import { operatorReportDetail } from "../moderation/report-detail.ts";
 import {
   clearPosture,
   PostureClearanceRefusedError,
@@ -2910,6 +2911,26 @@ function mountSponsorRoutes(app: Hono<{ Bindings: Env }>, options: EnrollmentRou
       return await operatorReportsQueue(options.db);
     } catch {
       return enrollmentUnavailableResponse();
+    }
+  });
+
+  app.get("/v1/operators/reports/:reportId", async (c) => {
+    const privateResponse = (response: Response): Response => {
+      response.headers.set("cache-control", "private, no-store");
+      response.headers.set("x-robots-tag", "noindex, nofollow");
+      return response;
+    };
+    if (hasQuery(c.req.raw)) {
+      return privateResponse(sponsorPathOnlyResponse(c.req.raw, `/v1/operators/reports/RP-${"0".repeat(26)}`));
+    }
+    const authenticated = await requireOperator(options, c.req.raw,
+      "/v1/operators/reports/:reportId", "operator.reports.read");
+    if (authenticated instanceof Response) return privateResponse(authenticated);
+    if (options.db === undefined) return privateResponse(operatorControlUnavailableResponse());
+    try {
+      return privateResponse(await operatorReportDetail(options.db, c.req.param("reportId")));
+    } catch {
+      return privateResponse(enrollmentUnavailableResponse());
     }
   });
 

@@ -67,8 +67,28 @@ export {
   SPONSOR_SUSPENSION_STEP_UP_SECONDS,
   type SponsorSuspensionStatus,
   SponsorSuspensionStatusSchema,
+  ADMIN_REPORT_DETAIL_MAX_RESPONSE_BYTES,
+  ADMIN_REPORT_DETAIL_SCHEMA_ID,
+  ADMIN_REPORT_SOURCE_MAX_BYTES,
+  AdminReportDetailSchema,
+  AdminReportIdSchema,
+  AdminReportSourceSchema,
+  type AdminReportDetail,
+  type AdminReportSource,
+  generateAdminReportDetailSchema,
 } from "./admin.ts";
 export * from "./appeals.ts";
+export {
+  MODERATION_LEDGER_TARGETS,
+  MODERATION_CONTROL_TARGETS,
+  MODERATION_CONTROL_KINDS,
+  moderationLedgerTarget,
+  moderationObjectIdIsValid,
+  parseModerationControlTarget,
+  type ModerationLedgerTargetKind,
+  type ModerationControlTargetKind,
+  type ModerationControlTarget,
+} from "./moderation-targets.ts";
 export {
   BATCH_PLAN_REFUSAL_CODES,
   BATCH_TEMP_ID_PATTERN,

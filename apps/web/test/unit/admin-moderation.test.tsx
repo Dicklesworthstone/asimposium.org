@@ -152,13 +152,36 @@ describe("operator moderation commands and honest readback", () => {
   });
 
   test("offers only supported whole-object content controls and never broadens a version pin", async () => {
-    for (const [kind, target] of [["commentary", "P-4DSP/COM-1"], ["hypothesis", "P-4DSP/H-1"], ["claim", "P-4DSP/C-12@2"], ["problem", "P-4DSP/C-12"], ["claim", "P-4DSP"]]) {
+    for (const [kind, target] of [["commentary", "P-4DSP/COM-1"], ["relation", "P-4DSP/C-1@1-implies-C-2@1"], ["claim", "P-4DSP/C-12@2"], ["problem", "P-4DSP/C-12"], ["claim", "P-4DSP"], ["hypothesis", "P-4DSP/C-12"], ["gap", "P-4DSP/G-1/extra"], ["evidence", "P-4DSP/E-1\n"]]) {
       const input = form("content"); input.set("target_kind", kind!); input.set("target_id", target!);
       expect((await run("content", IDLE, input)).status).toBe("invalid");
     }
     const ban = form("content"); ban.set("action", "ban_sponsor");
     expect((await run("content", IDLE, ban)).status).toBe("invalid");
     expect(calls).toEqual([]);
+  });
+
+  test("dispatches every supported scientific whole-object kind with the exact target and receipt", async () => {
+    for (const [kind, target] of [
+      ["problem", "P-4DSP"], ["claim", "P-4DSP/C-12"],
+      ["hypothesis", "P-4DSP/H-01ARZ3NDEKTSV4RRFFQ69G5FAV"],
+      ["evidence", "P-4DSP/E-1"], ["review", "P-4DSP/R-1"],
+      ["dead_end", "P-4DSP/DE-1"], ["gap", "P-4DSP/G-1"],
+      ["citation", "P-4DSP/L-1"], ["question", "P-4DSP/Q-1"],
+      ["conflict", "P-4DSP/CF-1"], ["synthesis", "P-4DSP/SYNTH-1"],
+      ["retraction", "P-4DSP/R-2"],
+    ] as const) {
+      const input = form("content");
+      input.set("target_kind", kind); input.set("target_id", target);
+      result = { ok: true, data: { ...receipts.content, target_id: target } };
+      const state = await run("content", IDLE, input);
+      expect(state.status).toBe("committed");
+      expect(calls.at(-1)).toEqual({
+        kind: "content", operator: OPERATOR, key: KEY,
+        request: { ...commands.content, target_kind: kind, target_id: target },
+      });
+    }
+    expect(calls).toHaveLength(12);
   });
 
   test("lost responses retain the exact request and key; retries do not create a new command", async () => {
@@ -260,9 +283,10 @@ describe("operator moderation commands and honest readback", () => {
     expect(html).toContain("<form");
     expect(html).toContain('name="idempotency_key" value="' + KEY + '"');
     expect(html).toContain('name="confirmed_review"');
-    expect(html).toContain('value="question"');
-    expect(html).toContain('value="conflict"');
-    expect(html).not.toContain('value="hypothesis"');
+    for (const kind of ["problem", "claim", "hypothesis", "evidence", "review", "dead_end", "gap", "citation", "question", "conflict", "synthesis", "retraction"]) {
+      expect(html).toContain(`value="${kind}"`);
+    }
+    expect(html).not.toContain('value="relation"');
     expect(html).not.toContain('value="commentary"');
     expect(html).not.toContain('value="ban_sponsor"');
   });

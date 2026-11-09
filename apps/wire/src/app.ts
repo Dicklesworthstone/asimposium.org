@@ -565,7 +565,7 @@ function isEnrollmentPath(pathname: string): boolean {
       (rawSegments.length === 4 &&
         staticSlotEquals(rawSegments[0], "v1") &&
         staticSlotEquals(rawSegments[1], "operators") &&
-        staticSlotEquals(rawSegments[2], "quarantine") &&
+        (staticSlotEquals(rawSegments[2], "quarantine") || staticSlotEquals(rawSegments[2], "reports")) &&
         rawSegments[3] !== "") ||
       // W2.6 ops:projection-rebuild dry run and repair.
       (rawSegments.length === 5 &&
@@ -652,7 +652,7 @@ function isEnrollmentPath(pathname: string): boolean {
     (segments.length === 4 &&
       segments[0] === "v1" &&
       segments[1] === "operators" &&
-      segments[2] === "quarantine" &&
+      (segments[2] === "quarantine" || segments[2] === "reports") &&
       finalSegment !== undefined &&
       finalSegment !== "" &&
       !finalSegment.includes("/")) ||

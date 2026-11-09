@@ -204,6 +204,7 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/operators/quarantine/:caseId": true,
   "POST /v1/operators/quarantine/decision": true,
   "GET /v1/operators/reports": true,
+  "GET /v1/operators/reports/:reportId": true,
   "POST /v1/operators/reports/resolution": true,
   "POST /v1/operators/content-control": true,
   "GET /v1/operators/problems/:problemId/slow-mode": true,

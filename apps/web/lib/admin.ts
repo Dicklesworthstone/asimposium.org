@@ -5,6 +5,7 @@ import {
   type AdminQuarantineCaseDetail,
   type AdminQuarantineItem,
   type AdminReportItem,
+  type AdminReportDetail,
   SPONSOR_SUSPENSION_STEP_UP_SECONDS,
   ScientificDispositionOverrideProhibitedError,
 } from "@asimposium/contracts";
@@ -18,6 +19,7 @@ import {
   stoaAdminQuarantineCase,
   stoaAdminQuarantineQueue,
   stoaAdminReportsQueue,
+  stoaAdminReportDetail,
 } from "./stoa";
 
 export { ScientificDispositionOverrideProhibitedError };
@@ -117,6 +119,22 @@ export async function getReportsQueue(
     return { state: result.reason === "unconfigured" ? "unconfigured" : "unreachable", reports: [], totalPending: null };
   }
   return { state: "ok", reports: result.data.reports, totalPending: result.data.total_pending };
+}
+
+/** One exact private report; no queue fan-out or mutable-source fallback. */
+export async function getReportDetail(
+  operatorId: string,
+  reportId: string,
+): Promise<{ readonly state: "ok"; readonly detail: AdminReportDetail } |
+  { readonly state: "unconfigured" | "unreachable" | "not-found" }> {
+  try {
+    const result = await stoaAdminReportDetail(operatorId, reportId);
+    if (result.ok && result.data.report.report_id === reportId) return { state: "ok", detail: result.data };
+    if (!result.ok && result.status === 404) return { state: "not-found" };
+    return { state: !result.ok && result.reason === "unconfigured" ? "unconfigured" : "unreachable" };
+  } catch {
+    return { state: "unreachable" };
+  }
 }
 
 /**

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { type Dirent, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { generateSponsorDataExportSchema } from "../../src/account-export.ts";
-import { generateSponsorSuspensionsSchema } from "../../src/admin.ts";
+import { generateAdminReportDetailSchema, generateSponsorSuspensionsSchema } from "../../src/admin.ts";
 import { generateScreeningAppealsSchema } from "../../src/appeals.ts";
 
 import { generateArtifactPublicationsSchema } from "../../src/artifact-publications.ts";
@@ -36,6 +36,7 @@ const GENERATED_SCHEMA_SUFFIX = ".schema.json";
 
 const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "account-export",
+  "admin-report-detail",
   "artifact-publications",
   "artifact-uploads",
   "citations",
@@ -175,6 +176,7 @@ test("the public schema registry serves exact artifact or canonical inline-gener
   );
   const inline = new Map([
     ["account-export", generateSponsorDataExportSchema()],
+    ["admin-report-detail", generateAdminReportDetailSchema()],
     ["artifact-publications", generateArtifactPublicationsSchema()],
     ["artifact-uploads", generateArtifactUploadsSchema()],
     ["claims-list", generateClaimsListSchema()],
@@ -217,6 +219,7 @@ test("the public schema classification is pinned to approved served ids and excl
   expect(PUBLIC_SCHEMA_IDS).toEqual(EXPECTED_PUBLIC_SCHEMA_IDS);
   expect(INLINE_PUBLIC_SCHEMA_IDS).toEqual([
     "account-export",
+    "admin-report-detail",
     "artifact-publications",
     "artifact-uploads",
     "claims-list",

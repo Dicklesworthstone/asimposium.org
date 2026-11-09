@@ -22,8 +22,7 @@ import {
   type AdminReportResolutionRequest,
   AdminReportResolutionResponseSchema,
   AdminReportsQueueResponseSchema,
-  ConflictIdSchema,
-  QuestionIdSchema,
+  parseModerationControlTarget,
   ReportReasonSchema,
   SCREENING_DECISION_PATHS,
   SCREENING_PROVIDER_STATUSES,
@@ -36,6 +35,7 @@ import {
   storedPublicationContextIsVisible,
 } from "../screening/publication-context";
 import { type OperatorCommand, runOperatorCommand } from "./operator-command.ts";
+import { moderationTargetGuard, resolveModerationTarget } from "./target.ts";
 import {
   applyOperatorControl,
   decideScreeningCase,
@@ -68,7 +68,7 @@ function notFound(example: Record<string, unknown>): Response {
     detail:
       "No case, report, problem or supported public object matches this id. Nothing was changed.",
     fixHint:
-      "Use an id from the operator queue or a public face. Content controls address P-… (the problem), P-…/C-n (a claim), P-…/Q-… (a question), or P-…/CF-… (a conflict). Question and conflict controls require their whole object id within the published problem.",
+      "Use an id from the operator queue or a public face. Content controls address a published problem P-… or a supported whole scientific object P-…/object-id matching its kind. Omit @version suffixes; ambiguous or unpublished identities cannot be controlled.",
     rule: "A5",
     extensions: { schema: SCREENING_SCHEMA, example },
   });
@@ -338,65 +338,16 @@ async function applyContentControlCommand(
     action: request.action,
     reason: request.reason,
   };
-  const match = /^(P-[A-Z0-9][A-Z0-9-]{1,30})(?:\/([A-Za-z0-9@-]{1,96}))?$/.exec(request.target_id);
-  const problemId = match?.[1];
-  if (problemId === undefined || match?.[0] !== request.target_id) return notFound(example);
-  const objectRef = match?.[2];
-  const problem = await db
-    .prepare("SELECT id FROM problems WHERE id = ?")
-    .bind(problemId)
-    .first<{ id: string }>();
-  if (problem === null) return notFound(example);
-  // Only admit kinds whose public faces enforce these controls. Claim
-  // controls retain their existing whole-lineage semantics; Q/CF selectors
-  // must name an exact whole object, never silently broaden a version pin.
-  let targetRef = "problem";
-  if (objectRef === undefined) {
-    if (request.target_kind !== "problem") return notFound(example);
-  } else if (request.target_kind === "claim") {
-    const claimId = objectRef.replace(/@[0-9]+$/, "");
-    if (!/^C-[0-9]+$/.test(claimId)) return notFound(example);
-    const exists = await db
-      .prepare(
-        "SELECT object_kind FROM events WHERE problem_id = ? AND object_id = ? AND object_kind = 'claim' LIMIT 1",
-      )
-      .bind(problemId, claimId)
-      .first<{ object_kind: string }>();
-    if (exists === null) return notFound(example);
-    targetRef = claimId;
-  } else if (request.target_kind === "question" || request.target_kind === "conflict") {
-    const identity = request.target_kind === "question" ? QuestionIdSchema : ConflictIdSchema;
-    if (!identity.safeParse(objectRef).success) return notFound(example);
-    // Scope the admission by problem, kind, creation event and public head.
-    // A same-looking id elsewhere, a private draft or a lifecycle-only row
-    // cannot authorize a control. Do not require present visibility: a hidden
-    // publication must remain restorable through the same audited command.
-    const exists = await db
-      .prepare(
-        `SELECT e.object_kind FROM events e JOIN problems p ON p.id = e.problem_id
-         WHERE p.id = ? AND p.status <> 'private-draft'
-           AND e.object_id = ? AND e.object_kind = ? AND e.object_version = 1
-           AND e.type = ? AND e.seq <= p.public_seq LIMIT 1`,
-      )
-      .bind(
-        problemId,
-        objectRef,
-        request.target_kind,
-        request.target_kind === "question" ? "question.asked" : "conflict.normalized",
-      )
-      .first<{ object_kind: string }>();
-    if (exists === null) return notFound(example);
-    targetRef = objectRef;
-  } else {
-    return notFound(example);
-  }
+  const parsed = parseModerationControlTarget(request.target_kind, request.target_id);
+  if (parsed === undefined) return notFound(example);
+  const target = await resolveModerationTarget(db, parsed.problemId, parsed.targetRef, parsed.targetKind);
+  if (target === undefined) return notFound(example);
   const result = await applyOperatorControl(
     db,
     operatorId,
     {
-      problemId,
-      targetKind: request.target_kind,
-      targetRef,
+      ...target,
+      targetGuard: moderationTargetGuard(target),
       visibility: request.action === "hide" ? "hidden" : "visible",
       reason: request.reason,
     },

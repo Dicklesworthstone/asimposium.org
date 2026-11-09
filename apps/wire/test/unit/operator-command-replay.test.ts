@@ -1,8 +1,11 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { ProblemDocumentSchema } from "@asimposium/contracts";
+import { AdminContentControlResponseSchema, ProblemDocumentSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { runOperatorCommand } from "../../src/moderation/operator-command.ts";
+import { applyOperatorControl } from "../../src/moderation/store.ts";
 import {
   operatorContentControl,
   operatorQuarantineDecision,
@@ -22,16 +25,26 @@ function fixture() {
   sql.exec(`PRAGMA foreign_keys = ON;
     CREATE TABLE enrollment_fellows(fellow_id TEXT PRIMARY KEY, sponsor_id TEXT NOT NULL);
     CREATE TABLE problems(id TEXT PRIMARY KEY, status TEXT, unlisted INTEGER, public_seq INTEGER);
-    CREATE TABLE events(problem_id TEXT, object_id TEXT, object_kind TEXT);
+    CREATE TABLE events(id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, type TEXT,
+      object_kind TEXT, object_id TEXT, object_version INTEGER, payload_sha256 TEXT, created_at TEXT);
+    CREATE TABLE event_content(event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
     INSERT INTO enrollment_fellows VALUES('author', 'sponsor');
-    INSERT INTO problems VALUES('P-REPLAY', 'active', 0, 1);
-    INSERT INTO events VALUES('P-REPLAY', 'C-1', 'claim'), ('P-REPLAY', 'C-2', 'claim');`);
+    INSERT INTO problems VALUES('P-REPLAY', 'active', 0, 2);`);
   for (const name of [
     "0064_inbox_and_follows.sql",
     "0091_moderation_plane.sql",
     "0133_operator_command_receipts.sql",
+    "0135_report_source_pins.sql",
   ])
     sql.exec(readFileSync(new URL(`../../../../db/migrations/${name}`, import.meta.url), "utf8"));
+  const payload = JSON.stringify({ statement: "A committed claim.", kind: "conjecture", falsifier: "A counterexample." });
+  const digest = createHash("sha256").update(payload).digest("hex");
+  for (const index of [1, 2]) {
+    const eventId = `EV-replay-${index}`;
+    sql.query("INSERT INTO events VALUES (?, 'P-REPLAY', ?, 'claim.created', 'claim', ?, 1, ?, ?)")
+      .run(eventId, index, `C-${index}`, digest, "2026-11-01T00:00:00.000Z");
+    sql.query("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(eventId, digest, payload);
+  }
   sql
     .query(`INSERT INTO screening_cases
     (case_id, problem_id, fellow_id, sponsor_id, route, input_digest, context_digest,
@@ -154,6 +167,20 @@ function fixture() {
   };
 }
 
+function publishReviewCollision(f: ReturnType<typeof fixture>) {
+  const payload = "{}";
+  const digest = createHash("sha256").update(payload).digest("hex");
+  const publish = (kind: "review" | "retraction", type: string, seq: number) => {
+    const eventId = "EV-collision-" + kind;
+    f.sql.query("INSERT INTO events VALUES (?, 'P-REPLAY', ?, ?, ?, 'R-1', 1, ?, ?)")
+      .run(eventId, seq, type, kind, digest, "2026-11-01T00:00:00.000Z");
+    f.sql.query("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(eventId, digest, payload);
+    f.sql.query("UPDATE problems SET public_seq=? WHERE id='P-REPLAY'").run(seq);
+  };
+  publish("review", "review.created", 3);
+  f.beforeNextBatch(async () => publish("retraction", "object.retracted", 4));
+}
+
 describe("operator command receipts commit with their decisions", () => {
   for (const operation of ["hide", "quarantine", "report"] as const) {
     test(`${operation}: retry returns the identical receipt and no additional effects`, async () => {
@@ -235,6 +262,70 @@ describe("operator command receipts commit with their decisions", () => {
     ).toBe(200);
     const before = f.counts();
     expect(await (await f.hide()).text()).toBe(hidden);
+    expect(f.visibility()).toEqual({ visibility: "visible" });
+    expect(f.counts()).toEqual(before);
+  });
+
+  test("a historical pinned-claim receipt replays before fresh whole-object admission", async () => {
+    const f = fixture();
+    const request = { ...f.controlBody, target_id: "P-REPLAY/C-1@1" };
+    // The old operator route accepted claim pins but applied a whole-lineage
+    // control. Recreate that durable receipt, then exercise today's boundary.
+    const original = await runOperatorCommand(
+      f.db,
+      {
+        operatorId: "operator",
+        key: "legacy-pinned-command",
+        operation: "content-control",
+        request,
+        parseReceipt: (value) => AdminContentControlResponseSchema.parse(value),
+        receipt: (auditEventId, appliedAt) =>
+          AdminContentControlResponseSchema.parse({
+            ok: true,
+            target_id: request.target_id,
+            action: request.action,
+            audit_event_id: auditEventId,
+            applied_at: appliedAt,
+          }),
+      },
+      async (command) => {
+        const result = await applyOperatorControl(
+          f.db,
+          "operator",
+          {
+            problemId: "P-REPLAY",
+            targetKind: "claim",
+            targetRef: "C-1",
+            visibility: "hidden",
+            reason: request.reason,
+          },
+          command,
+        );
+        if (!result.ok) throw new Error("Legacy receipt fixture did not apply.");
+        return Response.json(command.receipt(result.auditEventId, result.appliedAt));
+      },
+    );
+    expect(original.status).toBe(200);
+    const bytes = await original.text();
+    expect(
+      (
+        await operatorContentControl(
+          f.db,
+          "operator",
+          { ...f.controlBody, action: "restore" },
+          "restore-legacy",
+        )
+      ).status,
+    ).toBe(200);
+    const before = f.counts();
+    const replay = await operatorContentControl(f.db, "operator", request, "legacy-pinned-command");
+    expect(replay.status).toBe(200);
+    expect(await replay.text()).toBe(bytes);
+    expect(f.visibility()).toEqual({ visibility: "visible" });
+    expect(f.counts()).toEqual(before);
+    const fresh = await operatorContentControl(f.db, "operator", request, "fresh-pinned-command");
+    expect(fresh.status).toBe(404);
+    expect(ProblemDocumentSchema.parse(await fresh.json()).code).toBe("MODERATION_TARGET_NOT_FOUND");
     expect(f.visibility()).toEqual({ visibility: "visible" });
     expect(f.counts()).toEqual(before);
   });
@@ -335,6 +426,51 @@ describe("operator command receipts commit with their decisions", () => {
     expect((await f.hide("stale-hide")).status).toBe(409);
     expect(f.visibility()).toEqual({ visibility: "visible" });
     expect(f.counts()).toMatchObject({ controls: 2, receipts: 2, audits: 2, logs: 2 });
+  });
+
+  test("a cross-kind publication arriving before the batch refuses a stale object control", async () => {
+    const f = fixture();
+    publishReviewCollision(f);
+    const before = f.counts();
+    const response = await operatorContentControl(f.db, "operator", {
+      target_id: "P-REPLAY/R-1",
+      target_kind: "review",
+      action: "hide",
+      reason: "The operator reviewed the public review before the competing publication.",
+    }, "raced-review-hide");
+    expect(response.status).toBe(409);
+    expect(ProblemDocumentSchema.parse(await response.json()).code).toBe("MODERATION_STATE_CONFLICT");
+    expect(f.counts()).toEqual(before);
+    expect(f.sql.query("SELECT * FROM content_controls WHERE target_ref='R-1'").all()).toEqual([]);
+  });
+
+  test("upholding a report after a cross-kind publication resolves only the allegation", async () => {
+    const f = fixture();
+    publishReviewCollision(f);
+    f.sql.exec(`INSERT INTO reports
+      (report_id, problem_id, target_kind, target_ref, reason, reporter_class,
+       reporter_sponsor_id, status, created_at)
+      VALUES('RP-review-race', 'P-REPLAY', 'review', 'R-1', 'privacy', 'sponsor',
+        'review-reporter', 'pending', '2026-11-01T00:00:00.000Z');`);
+    const response = await operatorReportResolution(f.db, "operator", {
+      report_id: "RP-review-race",
+      resolution: "uphold",
+      reason: "Resolve the reviewed allegation without hiding a colliding identity.",
+    }, "raced-review-uphold");
+    expect(response.status).toBe(200);
+    expect(f.sql.query("SELECT status FROM reports WHERE report_id='RP-review-race'").get()).toEqual({
+      status: "upheld",
+    });
+    expect(f.counts()).toMatchObject({ audits: 1, receipts: 1, controls: 0, logs: 1 });
+    expect(f.sql.query("SELECT action FROM moderation_log").all()).toEqual([{ action: "report-upheld" }]);
+    const before = f.counts();
+    const replay = await operatorReportResolution(f.db, "operator", {
+      report_id: "RP-review-race",
+      resolution: "uphold",
+      reason: "Resolve the reviewed allegation without hiding a colliding identity.",
+    }, "raced-review-uphold");
+    expect(await replay.text()).toBe(await response.text());
+    expect(f.counts()).toEqual(before);
   });
 
   test("receipt rows cannot be rewritten or erased", async () => {

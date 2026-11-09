@@ -41,7 +41,7 @@ import workshopDirectorySchemaModule from "../generated/workshop-directory.schem
   type: "json",
 };
 import { generateSponsorDataExportSchema } from "./account-export.ts";
-import { generateSponsorSuspensionsSchema } from "./admin.ts";
+import { generateAdminReportDetailSchema, generateSponsorSuspensionsSchema } from "./admin.ts";
 import { generateScreeningAppealsSchema } from "./appeals.ts";
 import { generateArtifactPublicationsSchema } from "./artifact-publications.ts";
 import { generateArtifactUploadsSchema } from "./artifact-uploads.ts";
@@ -63,6 +63,7 @@ import { generateWorkshopSearchSchema } from "./workshop-search.ts";
 /** Deliberate, closed inventory of source-generated schemas without file copies. */
 export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "account-export",
+  "admin-report-detail",
   "artifact-publications",
   "artifact-uploads",
   "claims-list",
@@ -85,6 +86,7 @@ export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
 
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "account-export",
+  "admin-report-detail",
   "artifact-publications",
   "artifact-uploads",
   "citations",
@@ -184,6 +186,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/account-export.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: generateSponsorDataExportSchema(),
+  }),
+  Object.freeze({
+    id: "admin-report-detail",
+    served_at: "/schemas/admin-report-detail.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateAdminReportDetailSchema(),
   }),
   Object.freeze({
     id: "artifact-publications",

@@ -379,6 +379,8 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0131_problem_statement_boundaries.sql
   db/migrations/0132_private_fork_erasure.sql
   db/migrations/0133_operator_command_receipts.sql
+  db/migrations/0134_sponsor_brief_commands.sql
+  db/migrations/0135_report_source_pins.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -958,6 +960,8 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0131_problem_statement_boundaries.sql
   0132_private_fork_erasure.sql
   0133_operator_command_receipts.sql
+  0134_sponsor_brief_commands.sql
+  0135_report_source_pins.sql
 )
 
 

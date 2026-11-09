@@ -1,6 +1,10 @@
 import "server-only";
 
 import {
+  ADMIN_REPORT_DETAIL_MAX_RESPONSE_BYTES,
+  type AdminReportDetail,
+  AdminReportDetailSchema,
+  AdminReportIdSchema,
   SPONSOR_INBOX_MAX_RESPONSE_BYTES,
   type SponsorInboxRequest,
   SponsorInboxRequestSchema,
@@ -229,6 +233,7 @@ const ROUTE_OPERATOR_QUARANTINE = "/v1/operators/quarantine";
 const ROUTE_OPERATOR_QUARANTINE_CASE = "/v1/operators/quarantine/:caseId";
 const ROUTE_OPERATOR_QUARANTINE_DECISION = "/v1/operators/quarantine/decision";
 const ROUTE_OPERATOR_REPORTS = "/v1/operators/reports";
+const ROUTE_OPERATOR_REPORT_DETAIL = "/v1/operators/reports/:reportId";
 const ROUTE_OPERATOR_REPORTS_RESOLUTION = "/v1/operators/reports/resolution";
 const ROUTE_OPERATOR_CONTENT_CONTROL = "/v1/operators/content-control";
 const ROUTE_OPERATOR_AREA_RENAME = "/v1/operators/areas/rename";
@@ -259,6 +264,7 @@ const ACTION_OPERATOR_QUARANTINE_LIST = "operator.quarantine.list";
 const ACTION_OPERATOR_QUARANTINE_READ = "operator.quarantine.read";
 const ACTION_OPERATOR_QUARANTINE_DECIDE = "operator.quarantine.decide";
 const ACTION_OPERATOR_REPORTS_LIST = "operator.reports.list";
+const ACTION_OPERATOR_REPORT_READ = "operator.reports.read";
 const ACTION_OPERATOR_REPORTS_RESOLVE = "operator.reports.resolve";
 const ACTION_OPERATOR_CONTENT_CONTROL = "operator.content.control";
 const ACTION_OPERATOR_AREA_RENAME = "operator.area.rename";
@@ -1635,6 +1641,31 @@ export function stoaAdminReportsQueue(
     body: "",
     responseMaxBytes: MAX_STOA_OPERATOR_AUDIT_RESPONSE_BYTES,
     parse: (value) => AdminReportsQueueResponseSchema.parse(value),
+  });
+}
+
+/** One private allegation and its exact retained publication. */
+export function stoaAdminReportDetail(
+  operatorId: string,
+  reportId: string,
+): Promise<StoaCall<AdminReportDetail>> {
+  if (!AdminReportIdSchema.safeParse(reportId).success) {
+    return Promise.resolve({ ok: false, reason: "refused", status: 404 });
+  }
+  return callStoa({
+    method: "GET",
+    route: ROUTE_OPERATOR_REPORT_DETAIL,
+    path: "/v1/operators/reports/" + reportId,
+    action: ACTION_OPERATOR_REPORT_READ,
+    principalId: operatorId,
+    principalType: "operator",
+    body: "",
+    responseMaxBytes: ADMIN_REPORT_DETAIL_MAX_RESPONSE_BYTES,
+    parse: (value) => {
+      const detail = AdminReportDetailSchema.parse(value);
+      if (detail.report.report_id !== reportId) throw new Error("Report response does not match the requested report.");
+      return detail;
+    },
   });
 }
 

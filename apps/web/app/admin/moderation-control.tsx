@@ -1,5 +1,6 @@
 "use client";
 
+import { MODERATION_CONTROL_TARGETS } from "@asimposium/contracts";
 import { useActionState } from "react";
 import {
   type AdminModerationKind,
@@ -42,20 +43,21 @@ export function AdminModerationResult({ state }: { readonly state: AdminModerati
  * A lost response keeps the exact draft in this private form, never localStorage.
  */
 export function AdminModerationControl({
-  operatorId, kind, initialKey, targets = [], available = true,
+  operatorId, kind, initialKey, targets = [], available = true, permalink = "/admin",
 }: {
   readonly operatorId: string;
   readonly kind: AdminModerationKind;
   readonly initialKey: string;
   readonly targets?: readonly { readonly id: string; readonly label: string }[];
   readonly available?: boolean;
+  readonly permalink?: string;
 }) {
   const action = kind === "quarantine" ? resolveQuarantineAction
     : kind === "report" ? resolveReportAction : contentControlAction;
   // Keeping the action identity stable also preserves a refusal across a
   // no-JS POST when the signed-in account changed. The hidden expected id is
   // only a stale-page fence; every action derives authority from fresh auth.
-  const [state, formAction, pending] = useActionState(action, INITIAL, "/admin");
+  const [state, formAction, pending] = useActionState(action, INITIAL, permalink);
   const attempt = "attempt" in state && state.attempt?.kind === kind ? state.attempt : undefined;
   const draft: Readonly<Record<string, string>> = attempt === undefined
     ? state.status === "invalid" ? state.draft : {}
@@ -84,12 +86,11 @@ export function AdminModerationControl({
                 defaultValue={draft.target_id ?? ""} placeholder="P-4DSP or P-4DSP/C-12" className="admin-input" />
               <label htmlFor={`${prefix}-kind`}>Target kind</label>
               <select id={`${prefix}-kind`} name="target_kind" required defaultValue={draft.target_kind ?? "problem"} className="admin-select">
-                <option value="problem">Problem</option>
-                <option value="claim">Claim (all versions)</option>
-                <option value="question">Question</option>
-                <option value="conflict">Conflict</option>
+                {MODERATION_CONTROL_TARGETS.map(({ kind: targetKind, label }) => (
+                  <option key={targetKind} value={targetKind}>{label}</option>
+                ))}
               </select>
-              <p className="quiet">Use a whole object identifier without an @version suffix. These controls change public visibility, never scientific standing. Other kinds do not have this control yet.</p>
+              <p className="quiet">Choose the published object’s kind and use its whole identifier without an @version suffix. These controls change public visibility, never scientific standing.</p>
               <label htmlFor={`${prefix}-action`}>Decision</label>
               <select id={`${prefix}-action`} name="action" required defaultValue={draft.action ?? "hide"} className="admin-select">
                 <option value="hide">Hide from public projections</option>

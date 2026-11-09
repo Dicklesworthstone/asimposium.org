@@ -1,11 +1,18 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0134_sponsor_brief_commands.sql`.
+schema through `0135_report_source_pins.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
 deployed `0009_device_flow.sql` in `0010_device_flow_hardening.sql`.
+
+Migration `0135_report_source_pins.sql` retains the exact public event, digest,
+and requested target captured when a report is first filed. Whole-object report
+deduplication never changes that source. The binding is immutable; admission
+rechecks public scope and retained source content in the report transaction.
+Historical reports remain unpinned instead of guessing their original version.
+Apply it before the matching Worker report intake and private operator reader.
 
 Migration `0134_sponsor_brief_commands.sql` adds optimistic versions to private
 sponsor briefs and 24-hour metadata-only save/withdraw receipts. Each receipt

@@ -7,11 +7,8 @@ import {
   AdminQuarantineDecisionResponseSchema,
   AdminReportResolutionRequestSchema,
   AdminReportResolutionResponseSchema,
-  ClaimIdSchema,
-  ConflictIdSchema,
-  PublicLedgerProblemIdSchema,
-  QuestionIdSchema,
   assertNoScientificDispositionOverride,
+  parseModerationControlTarget,
 } from "@asimposium/contracts";
 
 import { requireOperatorSession } from "@/lib/admin";
@@ -74,18 +71,10 @@ function parseAttempt(kind: AdminModerationKind, form: FormData): AdminModeratio
   }
   const command = AdminContentControlRequestSchema.safeParse(raw);
   if (!command.success || command.data.action === "ban_sponsor") return undefined;
-  const [problem, target, extra] = command.data.target_id.split("/");
-  if (extra !== undefined || !PublicLedgerProblemIdSchema.safeParse(problem).success) return undefined;
-  // Match the current Worker's supported whole-object controls. A version pin
-  // must not silently turn into a hide of an entire claim lineage.
-  const validTarget = command.data.target_kind === "problem"
-    ? target === undefined
-    : command.data.target_kind === "claim"
-      ? ClaimIdSchema.safeParse(target).success
-      : command.data.target_kind === "question"
-        ? QuestionIdSchema.safeParse(target).success
-        : command.data.target_kind === "conflict" && ConflictIdSchema.safeParse(target).success;
-  return validTarget ? { kind, key, request: command.data } : undefined;
+  // Share exact selectors with Worker admission. Publication authority is
+  // checked there; neither surface silently broadens an @version pin.
+  const target = parseModerationControlTarget(command.data.target_kind, command.data.target_id);
+  return target === undefined ? undefined : { kind, key, request: command.data };
 }
 
 function matchedReceipt(attempt: AdminModerationAttempt, value: unknown): AdminModerationReceipt | undefined {
@@ -121,7 +110,7 @@ async function applyModeration(
   try { attempt = parseAttempt(kind, form); } catch { /* A scientific override is never dispatched. */ }
   if (attempt === undefined || form.get("confirmed_review") !== "yes") return {
     status: "invalid",
-    message: "Review the selected target and decision, confirm the review, and enter an audit reason of 10 to 1,000 characters. Content controls accept whole problem, claim, question or conflict identifiers only; scientific state cannot be overridden.",
+    message: "Review the selected target and decision, confirm the review, and enter an audit reason of 10 to 1,000 characters. Content controls require a whole published object matching the selected kind, without an @version suffix; scientific state cannot be overridden.",
     draft: readDraft(kind, form),
   };
   if (previous.status === "unconfirmed" &&
