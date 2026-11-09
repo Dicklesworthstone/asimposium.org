@@ -110,7 +110,7 @@ await runLocalWorkerJourney(async (context) => {
       .first()
   ).actor_fellow_id;
   const revision = (upper) =>
-    sponsorCall(owner, "POST", `/v1/sponsors/problems/${problem}/lifecycle`, "problem-lifecycle", {
+    context.reviseStatement(problem, owner, author, {
       action: "revise-statement",
       statement: `Every integer in 0..${upper} has a square of the same parity.`,
       falsifier: `An integer in 0..${upper} whose square has the opposite parity.`,

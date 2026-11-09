@@ -1,13 +1,16 @@
 import {
+  ARTIFACT_MAX_RESUMPTIONS,
   ARTIFACT_PART_SIZE_BYTES,
   ARTIFACT_UPLOADS_SCHEMA_ID,
   ArtifactCompleteRequestSchema,
   ArtifactDeclareRequestSchema,
   ArtifactDeclareResponseSchema,
   ArtifactIdempotencyKeySchema,
+  ArtifactInventoryQuerySchema,
   ArtifactRenewRequestSchema,
   ArtifactRenewResponseSchema,
   ArtifactResumableRequestSchema,
+  ArtifactResumeRequestSchema,
   ArtifactStatusResponseSchema,
   ArtifactUploadedPartSchema,
 } from "@asimposium/contracts/artifact-uploads";
@@ -15,7 +18,9 @@ import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
 import { cancelUnconsumedRequestBody, parseExactJsonBytes } from "../auth/http.ts";
 import { authorizeFellowWrite, type FellowCredentialBinding } from "../enrollment/service.ts";
 import { validatedProblem } from "../http/envelope.ts";
+import { listArtifactUploads } from "./artifact-inventory.ts";
 import type { ArtifactSigningConfig } from "./artifact-presign.ts";
+import { resumeArtifactUpload } from "./artifact-recovery.ts";
 import {
   type ArtifactManifest,
   type ArtifactReplayCodec,
@@ -53,13 +58,26 @@ const EXAMPLE = {
   },
 };
 
-type Operation = "declare" | "status" | "complete" | "content" | "renew" | "resumable" | "part";
+type Operation =
+  | "declare"
+  | "inventory"
+  | "resume"
+  | "status"
+  | "complete"
+  | "content"
+  | "renew"
+  | "resumable"
+  | "part";
 export function artifactRoute(
   path: string,
+  method = "POST",
 ): { operation: Operation; id: string | null; method: string; partNumber?: number } | undefined {
-  if (path === "/v1/artifacts") return { operation: "declare", id: null, method: "POST" };
+  if (path === "/v1/artifacts")
+    return method === "GET"
+      ? { operation: "inventory", id: null, method: "GET" }
+      : { operation: "declare", id: null, method: "POST" };
   const match =
-    /^\/v1\/artifacts\/(AU-[a-f0-9]{32})(?:\/(complete|content|renew|resumable)|\/parts\/([1-4]))?$/.exec(
+    /^\/v1\/artifacts\/(AU-[a-f0-9]{32})(?:\/(complete|content|renew|resumable|resume)|\/parts\/([1-4]))?$/.exec(
       path,
     );
   if (!match?.[1]) return undefined;
@@ -74,12 +92,17 @@ export function artifactRoute(
           ? "renew"
           : match[2] === "resumable"
             ? "resumable"
-            : "status";
+            : match[2] === "resume"
+              ? "resume"
+              : "status";
   return {
     operation,
     id: match[1],
     method:
-      operation === "complete" || operation === "renew" || operation === "resumable"
+      operation === "complete" ||
+      operation === "renew" ||
+      operation === "resumable" ||
+      operation === "resume"
         ? "POST"
         : "GET",
   };
@@ -147,6 +170,16 @@ function failure(error: unknown): Response {
         409,
         "The Idempotency-Key or upload state conflicts with an existing operation. Recover the original receipt or start a distinct upload.",
       );
+    case "RECOVERY_LIMIT":
+      return validatedProblem({
+        status: 429,
+        code: "WRITE_REFUSED",
+        title: "Artifact resumption limit reached",
+        detail: "This manifest has reached its bounded number of session resumptions.",
+        fixHint:
+          "Continue with its current authorization or create a separately budgeted manifest. Resumption never extends the original completion deadline.",
+        headers: PRIVATE_HEADERS,
+      });
     case "RENEWAL_LIMIT":
       return validatedProblem({
         status: 429,
@@ -206,7 +239,7 @@ function json(value: unknown, status = 200, extra: Record<string, string> = {}):
     headers: { ...PRIVATE_HEADERS, "content-type": "application/json; charset=utf-8", ...extra },
   });
 }
-async function statusView(db: D1Database, row: ArtifactManifest, now: number) {
+async function statusView(db: D1Database, row: ArtifactManifest, now: number, mayResume = false) {
   const verified = row.state === "verified";
   const resumable = await readArtifactResumableProgress(db, row);
   return ArtifactStatusResponseSchema.parse({
@@ -218,6 +251,21 @@ async function statusView(db: D1Database, row: ArtifactManifest, now: number) {
     created_at: row.created_at,
     expires_at: row.expires_at,
     storage: "private",
+    authorization: {
+      original_session_id: row.session_id,
+      session_id: row.authorization_session_id,
+      generation: row.authorization_generation,
+    },
+    recovery:
+      mayResume &&
+      row.state === "presigned" &&
+      now < row.expires_at &&
+      row.authorization_generation < ARTIFACT_MAX_RESUMPTIONS
+        ? {
+            resume_path: `/v1/artifacts/${row.upload_id}/resume`,
+            expected_generation: row.authorization_generation,
+          }
+        : null,
     state: row.state === "presigned" && now >= row.expires_at ? "expired" : row.state,
     verification: verified ? "bytes-only" : "not-verified",
     verified_at: row.verified_at,
@@ -363,10 +411,10 @@ export async function handleArtifactHttp(
   options: ArtifactHttpOptions,
 ): Promise<Response | undefined> {
   const url = new URL(request.url);
-  const route = artifactRoute(url.pathname);
+  const route = artifactRoute(url.pathname, request.method);
   if (!route) return undefined;
   try {
-    if (url.search !== "")
+    if (url.search !== "" && route.operation !== "inventory")
       return contract(
         400,
         "Artifact routes accept no query parameters. Credentials belong only in the Authorization header.",
@@ -381,6 +429,16 @@ export async function handleArtifactHttp(
     const credential = await options.authenticate(match[1]);
     if (!credential || credential.credentialProfile !== "bearer") return denied();
     const clock = options.clock ?? Date.now;
+    if (route.operation === "inventory") {
+      const fields = Object.fromEntries(url.searchParams);
+      const query = ArtifactInventoryQuerySchema.safeParse(fields);
+      if (!query.success || [...url.searchParams.keys()].length !== Object.keys(fields).length)
+        return contract(
+          400,
+          "Use only after from next_after and a canonical limit from 1 to 50. Repeated query fields are refused.",
+        );
+      return json(await listArtifactUploads(options.db, credential, query.data, clock()));
+    }
     if (route.operation === "part") {
       if (request.headers.get("content-type") !== "application/octet-stream")
         return contract(
@@ -425,7 +483,8 @@ export async function handleArtifactHttp(
       route.operation === "declare" ||
       route.operation === "complete" ||
       route.operation === "renew" ||
-      route.operation === "resumable"
+      route.operation === "resumable" ||
+      route.operation === "resume"
     ) {
       if (
         !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(
@@ -488,6 +547,25 @@ export async function handleArtifactHttp(
           { location: `/v1/artifacts/${receipt.upload_id}` },
         );
       }
+      if (route.operation === "resume") {
+        const input = ArtifactResumeRequestSchema.safeParse(value);
+        if (!input.success)
+          return contract(
+            422,
+            "Send an owned live session_id on this upload's problem and the expected_generation from its current status.",
+          );
+        return json(
+          await resumeArtifactUpload(
+            options.db,
+            credential,
+            route.id!,
+            input.data,
+            key.data,
+            clock,
+            (manifest) => authorizeNew(options, credential, manifest.problem_id, 0, clock()),
+          ),
+        );
+      }
       if (route.operation === "resumable") {
         if (!ArtifactResumableRequestSchema.safeParse(value).success)
           return contract(
@@ -548,14 +626,19 @@ export async function handleArtifactHttp(
       );
       return json(await statusView(options.db, row, clock()));
     }
-    if (route.operation === "status")
-      return json(
-        await statusView(
-          options.db,
-          await readArtifactManifest(options.db, credential, route.id!, clock()),
-          clock(),
-        ),
-      );
+    if (route.operation === "status") {
+      const row = await readArtifactManifest(options.db, credential, route.id!, clock());
+      let mayResume = false;
+      if (row.state === "presigned" && clock() < row.expires_at) {
+        try {
+          await authorizeNew(options, credential, row.problem_id, 0, clock());
+          mayResume = true;
+        } catch (error) {
+          if (!(error instanceof ArtifactUploadError) || error.code !== "NOT_ALLOWED") throw error;
+        }
+      }
+      return json(await statusView(options.db, row, clock(), mayResume));
+    }
     if (request.headers.has("range"))
       return contract(
         400,

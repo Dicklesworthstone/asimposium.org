@@ -80,6 +80,8 @@
       "artifact_put_renewal_immutable_update",
       "artifact_resumable_immutable_delete",
       "artifact_resumable_immutable_update",
+      "artifact_upload_authority_immutable_delete",
+      "artifact_upload_authority_immutable_update",
       "artifact_upload_events_immutable_delete",
       "artifact_upload_events_immutable_update",
       "artifact_upload_no_delete"
@@ -200,6 +202,7 @@
     ],
     "relations-gaps": ["claim_relations_immutable_delete"],
     "screening-appeals": ["screening_appeal_no_delete"],
+    "statement-revision-proposals": ["problem_statement_proposal_immutable"],
     "slow-mode": [
       "operator_audit_append_only_delete",
       "operator_audit_append_only_update",
@@ -218,9 +221,9 @@
     "sponsor_fellow_cap_audit_events_immutable_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_fellow_cap_audit_events that this trigger guards"
   },
   "definitions": {
-    "artifact_part_acknowledged": "ebe1886b259127f36f6d34d614d662eace57e1e66114f715e3c528ac9020c43c",
+    "artifact_part_acknowledged": "d70d7afceb6a600dd0f8a27d6e38b90ab816d0069bd0d4d48ed010d31374f2e4",
     "artifact_part_immutable_delete": "74b4fd2ac9f9a1071358d88e4b928a2bfb8af23fab7da8e400f7cd5c96c9c4eb",
-    "artifact_part_immutable_update": "945ab37e472860a5bd6ce63690c9b69a6e42a0aa2d46206bb7d9f2016b965806",
+    "artifact_part_immutable_update": "f5b7f2e29a724b6e5424084d6d6d44d96c755246a3d3e0164cb2476efcdfae94",
     "artifact_publication_audit_no_delete": "0c80405d567dae522e72b08d4e530e014d0220d1f5f35331af0a2278f4272013",
     "artifact_publication_audit_no_update": "583625ba3fb0ca324e7bf9703a307fea844c1552ad0d54ff8dbd4d5041f0d548",
     "artifact_publication_job_no_delete": "38f479693965271457264e0f7bc6bcef5d7d7a4fafe3be5e97054ecfc5adf944",
@@ -244,7 +247,9 @@
     "artifact_staging_retention_hold": "811267374777a668ab0394b816a72eeace49b7dfb12b642be7a15361da14d57d",
     "artifact_staging_retention_identity": "4ef31c5810ae48b6444fa6706d84fcdc174b8f52f99a802cc95560e28a269744",
     "artifact_staging_retention_no_delete": "c06aad0b23e1daedca30ad4f668a4658248996cbaabdd854a823c7dff2c85b6e",
-    "artifact_upload_authorized_verify": "5bbe09d294b92f0ad76b41e12f26ae13375c397cc9b2964ca332c74f5c0401d4",
+    "artifact_upload_authority_immutable_delete": "8450b917be2194150f18ee93b266708af229922570419dd99ca6dcfb2e7d19a9",
+    "artifact_upload_authority_immutable_update": "c1a2e8b93aff0af09438f1c66d24f8f8ba04aef28b0432016344dbe9bad91baa",
+    "artifact_upload_authorized_verify": "14e33b265a601fe6c9364bbc73addc4be2ad871c7f004b1c9b1679b2fc7b1a6f",
     "artifact_upload_events_immutable_delete": "c4cc40bf1540c5f647196f62b2b3d4962130b34130edc54c533f47f7959639c1",
     "artifact_upload_events_immutable_update": "fcf292eddf4b68aabbcc0583930cf4ecff3fe2c6752205948ab76cbdde845bb1",
     "artifact_upload_immutable": "3e4c90c9af084c5f5335be0e806aa8e86d3a823a4ff4c3361f5e15a34bec2247",
@@ -330,6 +335,7 @@
     "operator_audit_append_only_update": "0bae8ef46a707e27f67461b7db95f9f641be5a014aab8108cdb27c06fc12c61a",
     "problem_slow_mode_append_only_delete": "6128b1fc57fea603305ee837f744d928a7dba981476456db84e421c49f6963a1",
     "problem_slow_mode_append_only_update": "9c52b7ba972ef2aeefa317889f2d4e89dfb1ccf69c25c35902dc84012cd7d53d",
+    "problem_statement_proposal_immutable": "48f5cdbcf25ab1f44d305acae2ccca2f854e906efd0548aa20ebcb8f7b77a0bd",
     "problem_statement_reviews_immutable_delete": "cbe45028f5cb36d2358a9b06770a0a5f8be43983dbb22ba364615af985339cb9",
     "problem_statement_reviews_immutable_update": "fad0a632fa2328a7c701070360ae0c06fb085068156e0b7eb7671163beb92c33",
     "problem_statement_versions_immutable_delete": "b636899a0fa10b21e845f771c2559775e16c15f2267ed26b585f767c47f05c52",

@@ -61,6 +61,7 @@ export async function selectSharpenStatementMove(
     if (!isSharpening && !lacksFalsifier) {
       return { move: null, degraded: false };
     }
+    if (context.source.source_sponsor_id === undefined) return { move: null, degraded: true };
 
     const state = viewer
       ? await reviewerState(db, problemId, cursor, context.head.current_statement_version, viewer)
@@ -72,9 +73,8 @@ export async function selectSharpenStatementMove(
       (viewer.review &&
         state !== null &&
         state.already_reviewed === 0 &&
-        viewer.fellowId !== state.created_by_fellow_id &&
         viewer.fellowId !== context.source.source_fellow_id &&
-        viewer.sponsorId !== state.sponsor_id);
+        viewer.sponsorId !== context.source.source_sponsor_id);
     if (!canReview && viewer?.workshopPush !== true) return { move: null, degraded: false };
 
     if (

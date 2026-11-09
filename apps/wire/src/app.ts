@@ -736,6 +736,12 @@ function isProblemPath(pathname: string): boolean {
   if (pathname === "/v1/sponsors/problems") return true;
   if (/^\/v1\/sponsors\/problems\/[^/]+\/publication-preview$/.test(pathname)) return true;
   if (
+    /^\/v1\/sponsors\/problems\/[^/]+\/statement-proposals(?:\/[^/]+|\/after\/[^/]+)?$/.test(
+      pathname,
+    )
+  )
+    return true;
+  if (
     /^\/v1\/sponsors\/problems\/[^/]+\/governance(?:\/after\/[^/]+)?(?:\/stewards\/after\/[^/]+)?$/.test(
       pathname,
     )

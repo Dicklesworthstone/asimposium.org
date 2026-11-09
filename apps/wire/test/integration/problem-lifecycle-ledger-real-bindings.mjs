@@ -7,7 +7,18 @@ import {
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, env, fixtures, worker, origin, userAgent }) => {
+  async ({
+    call,
+    enroll,
+    sponsorCall,
+    reviseStatement,
+    prepareStatementRevision,
+    env,
+    fixtures,
+    worker,
+    origin,
+    userAgent,
+  }) => {
     const sponsor = "usr_governance";
     const token = await enroll("governance-author", sponsor);
     const proposal = {
@@ -21,6 +32,8 @@ await runLocalWorkerJourney(
     const id = created.problem.id;
     const path = `/v1/sponsors/problems/${id}/lifecycle`;
     const govern = (body, key, expected = 200, problemId = id, actor = sponsor) => {
+      if (body.action === "revise-statement" && "statement" in body)
+        return reviseStatement(problemId, actor, token, body, expected, key);
       const route = `/v1/sponsors/problems/${problemId}/lifecycle`;
       return sponsorCall(actor, "POST", route, "problem-lifecycle", body, expected, route, key);
     };
@@ -180,7 +193,21 @@ await runLocalWorkerJourney(
     const revisionContent = afterRevision.content.find(
       (item) => item.event_id === afterRevision.events[1].id,
     );
-    assert.deepEqual(JSON.parse(revisionContent.payload_json).problem, revised.problem);
+    const recordedRevision = ProblemGovernanceEventSchema.parse(
+      JSON.parse(revisionContent.payload_json),
+    );
+    assert.deepEqual(revised.problem, {
+      id: recordedRevision.problem.id,
+      status: recordedRevision.problem.status,
+      current_statement_version: recordedRevision.problem.current_statement_version,
+      updated_at: recordedRevision.problem.updated_at,
+    });
+    assert.equal(recordedRevision.problem.statement, revision.statement);
+    assert.equal(revised.statement_revision.source_fellow_id, recordedRevision.source_fellow_id);
+    assert.ok(
+      !("statement" in revised.problem),
+      "acceptance recovery contains only command metadata",
+    );
     assert.deepEqual(await govern(revision, "revision-key"), revised);
     assert.deepEqual(await govern({ action: "publish" }, "publish-stable-key"), published);
     assert.equal(
@@ -190,18 +217,26 @@ await runLocalWorkerJourney(
     assert.equal((await govern(revision, "publish-stable-key", 409)).code, "IDEMPOTENCY_CONFLICT");
     assert.equal((await govern(revision, "invalid/key", 400)).code, "IDEMPOTENCY_KEY_INVALID");
     assert.equal(
-      (await govern(revision, "another-sponsor", 403, id, "usr_other_sponsor")).code,
-      "WRITE_REFUSED",
+      (await govern(revision, "another-sponsor", 404, id, "usr_other_sponsor")).code,
+      "PROBLEM_NOT_FOUND",
     );
     assert.deepEqual(
       await state(),
       afterRevision,
       "Replays and refused writes preserve all ledger state",
     );
+    const staleRevision = await prepareStatementRevision(
+      id,
+      sponsor,
+      token,
+      revision,
+      "stale-version-key",
+    );
+    assert.ok(staleRevision.proposal_id);
     const stale = await fixtures.governanceFromSnapshot(
       { ...afterRevision.problem[0], current_statement_version: 1 },
       sponsor,
-      revision,
+      staleRevision,
       "stale-version-key",
     );
     assert.equal(stale.status, 409);
@@ -242,17 +277,33 @@ await runLocalWorkerJourney(
     await concurrentReplays(revision, "concurrent-key", 4);
     assert.equal((await state()).events.length, 3);
     assert.equal(await call("/cursor"), globalBefore + 3);
-    const beforeRace = await state();
-    const raced = await Promise.all(
+    // Prepare genuinely competing candidates before accepting any of them.
+    // The race is between immutable proposals reviewed at the same base.
+    const competingRevisions = await Promise.all(
       Array.from({ length: 4 }, (_, i) =>
-        govern({ ...revision, motivation: `Concurrent formulation ${i}` }, `race-${i}`, [200, 409]),
+        prepareStatementRevision(
+          id,
+          sponsor,
+          token,
+          { ...revision, motivation: `Concurrent formulation ${i}` },
+          `race-${i}`,
+        ),
       ),
+    );
+    const beforeRace = await state();
+    for (const command of competingRevisions)
+      assert.equal(
+        command.reviewed_statement_version,
+        beforeRace.problem[0].current_statement_version,
+      );
+    const raced = await Promise.all(
+      competingRevisions.map((command, i) => govern(command, `race-${i}`, [200, 409])),
     );
     const winners = raced.filter((outcome) => outcome.problem);
     const losers = raced.filter((outcome) => !outcome.problem);
     for (const loser of losers) assert.equal(loser.code, "OBJECT_VERSION_CONFLICT");
     const afterRace = await state();
-    assert.ok(winners.length >= 1);
+    assert.equal(winners.length, 1);
     assert.equal(afterRace.events.length, beforeRace.events.length + winners.length);
     assert.equal(afterRace.cursor, beforeRace.cursor + winners.length);
     assert.equal(afterRace.versions.length, beforeRace.versions.length + winners.length);
@@ -289,7 +340,13 @@ await runLocalWorkerJourney(
       .bind(new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(), id)
       .run();
     const beforeExpired = await state();
-    const reused = await govern(revision, "revision-key");
+    const reused = await govern(
+      {
+        ...revision,
+        motivation: "A deliberately new Fellow proposal after the prior acceptance replay expired.",
+      },
+      "revision-key",
+    );
     assert.ok(reused.problem.current_statement_version > revised.problem.current_statement_version);
     assert.equal((await state()).events.length, beforeExpired.events.length + 1);
 
@@ -418,6 +475,14 @@ await runLocalWorkerJourney(
       );
     }
     assert.notEqual(foreignClaim.claim_id, resultClaim.claim_id);
+    // This investigation is complete. Release its session before the later
+    // private draft needs a real source session for its statement proposal.
+    await call(
+      `/v1/sessions/${foreignSession.session_id}/close`,
+      { handback: "Published the two foreign claims used to check result-target isolation." },
+      token,
+      201,
+    );
     const active = await state();
     for (const result_claim of [
       { claim_id: "C-999999", version: 1 },
@@ -590,6 +655,17 @@ await runLocalWorkerJourney(
     assert.ok(!JSON.stringify(statusFailure).includes("private-status-rollback-proof"));
     assert.deepEqual(await state(), beforeStatusFailure);
     await env.DB.prepare("UPDATE governance_status_fault SET enabled = 0").run();
+    const terminalRevision = await prepareStatementRevision(
+      id,
+      sponsor,
+      token,
+      {
+        ...revision,
+        motivation: "A pending candidate must not change a subsequently retired problem.",
+      },
+      "terminal-revision-proposal",
+    );
+    assert.ok(terminalRevision.proposal_id);
     const retired = await assertTransition(
       retirement,
       "retirement-key",
@@ -607,7 +683,7 @@ await runLocalWorkerJourney(
       [retirement, "result-review-key"],
     ])
       assert.equal((await govern(action, key, 409)).code, "IDEMPOTENCY_CONFLICT");
-    for (const action of [entry, retirement, revision, { action: "publish" }])
+    for (const action of [entry, retirement, terminalRevision, { action: "publish" }])
       assert.equal(
         (await govern(action, `closed-${action.action}`, 409)).code,
         "OBJECT_VERSION_CONFLICT",
@@ -734,7 +810,8 @@ await runLocalWorkerJourney(
       "OBJECT_VERSION_CONFLICT",
     );
     assert.deepEqual(await state(), beforeExpiredPublish);
-    // The same nested error boundary also covers a Fellow proposal failure.
+    // The proposal command returns a retry-safe 503 when its batch cannot be
+    // confirmed. Underlying transaction details remain private.
     await env.DB.prepare(`CREATE TRIGGER governance_proposal_failure BEFORE INSERT ON problems
       WHEN NEW.title = 'Forced proposal failure' BEGIN SELECT RAISE(ABORT, 'private-proposal-failure'); END`).run();
     const beforeProposalFailure = await env.DB.prepare(
@@ -748,10 +825,12 @@ await runLocalWorkerJourney(
         statement: "Private failing proposal statement",
       },
       unlistedToken,
-      500,
+      503,
     );
     assert.ok(ProblemDocumentSchema.safeParse(failedProposal).success);
     assert.equal(failedProposal.code, "INTERNAL_ERROR");
+    assert.match(failedProposal.fix_hint, /exact proposal and Idempotency-Key/);
+    assert.match(failedProposal.fix_hint, /within 24 hours/);
     assert.ok(!JSON.stringify(failedProposal).includes("Private failing proposal statement"));
     assert.ok(!JSON.stringify(failedProposal).includes("private-proposal-failure"));
     assert.deepEqual(

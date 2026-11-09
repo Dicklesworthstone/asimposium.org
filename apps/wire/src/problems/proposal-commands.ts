@@ -304,11 +304,13 @@ export async function runProblemProposalCommand(
       db
         .prepare(`WITH authority AS (${problemIntentAuthoritySql(true)})
         INSERT INTO problem_statement_versions
-        (problem_id,version,statement,norm_hash,falsifier,motivation,scope,out_of_scope,success_criteria,created_at)
+        (problem_id,version,statement,norm_hash,falsifier,motivation,scope,out_of_scope,success_criteria,created_at,scientific_author_json)
         VALUES (?5,1,CASE WHEN EXISTS (${WRITE_AUTHORITY}) AND (?6 IS NULL OR EXISTS (
           SELECT 1 FROM sponsor_problem_briefs WHERE id = ?6 AND sponsor_id = ?2 AND status = 'active'
             AND version = ?7 AND (assigned_fellow_id IS NULL OR assigned_fellow_id = ?1)
-            AND (scope IS NULL OR ?8 IS NOT NULL))) THEN ?9 ELSE NULL END,?10,?11,?12,?8,?13,?14,?15)`)
+            AND (scope IS NULL OR ?8 IS NOT NULL))) THEN ?9 ELSE NULL END,?10,?11,?12,?8,?13,?14,?15,
+          (SELECT json_object('fellow_id',fellow_id,'sponsor_id',sponsor_id,'session_id',NULL,
+            'model_self_declared',model,'harness',harness) FROM authority))`)
         .bind(
           ...authorityValues,
           problemId,

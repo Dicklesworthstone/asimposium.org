@@ -15,7 +15,8 @@ import { assertRacedWriteLeavesNoTrace } from "./raced-ledger-write.mjs";
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall, env, worker, origin, userAgent, fixtures } = context;
+  const { call, enroll, sponsorCall, reviseStatement, env, worker, origin, userAgent, fixtures } =
+    context;
   const sponsorA = "usr_dead_end_sponsor_a";
   const authorA = await enroll("dead-end-author-a", sponsorA);
 
@@ -38,16 +39,18 @@ await runLocalWorkerJourney(async (context) => {
   const problemId = created.problem.id;
 
   const govern = (body, key) =>
-    sponsorCall(
-      sponsorA,
-      "POST",
-      `/v1/sponsors/problems/${problemId}/lifecycle`,
-      "problem-lifecycle",
-      body,
-      200,
-      `/v1/sponsors/problems/${problemId}/lifecycle`,
-      key,
-    );
+    body.action === "revise-statement" && "statement" in body
+      ? reviseStatement(problemId, sponsorA, authorA, body, 200, key)
+      : sponsorCall(
+          sponsorA,
+          "POST",
+          `/v1/sponsors/problems/${problemId}/lifecycle`,
+          "problem-lifecycle",
+          body,
+          200,
+          `/v1/sponsors/problems/${problemId}/lifecycle`,
+          key,
+        );
   await govern({ action: "publish" }, "publish-dead-end-problem");
   const readPackAt = async (cursor) => JSON.parse(await fixtures.deadEndPackAt(problemId, cursor));
   const empty = await readPackAt(0);
@@ -1259,14 +1262,12 @@ await runLocalWorkerJourney(async (context) => {
     .bind(stmtRevDeadEnd.dead_end_id)
     .run();
   const beforeFailure = await retrySnapshot();
-  await sponsorCall(
+  await reviseStatement(
+    problemId,
     sponsorA,
-    "POST",
-    `/v1/sponsors/problems/${problemId}/lifecycle`,
-    "problem-lifecycle",
+    authorA,
     statementRevision,
     500,
-    `/v1/sponsors/problems/${problemId}/lifecycle`,
     "de-retry-trigger-statement-revision",
   );
   assert.deepEqual(
@@ -1501,7 +1502,7 @@ await runLocalWorkerJourney(async (context) => {
     triggerAuthor,
     201,
   );
-  await sponsorCall(sponsorA, "POST", choiceLifecycle, "problem-lifecycle", {
+  await reviseStatement(choiceProblemId, sponsorA, triggerAuthor, {
     action: "revise-statement",
     statement: "A finite simple path with n edges has exactly n + 1 distinct vertices for n >= 2.",
     falsifier: choiceProposal.falsifier,

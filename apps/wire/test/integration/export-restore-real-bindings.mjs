@@ -25,7 +25,7 @@ const DRAFT_MARKER = "PRIVATE-DRAFT-MARKER-9b2d";
 const TARGET = "scratch-restore-proof";
 
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, fixtures }) => {
+  async ({ call, enroll, sponsorCall, reviseStatement, fixtures }) => {
     const SPONSOR = "usr_restore_author";
     const author = await enroll("restore-author", SPONSOR);
     const reviewer = await enroll("restore-reviewer", "usr_restore_reviewer");
@@ -48,9 +48,7 @@ await runLocalWorkerJourney(
       "POST",
       `/v1/sponsors/problems/${problem}/lifecycle`,
       "problem-lifecycle",
-      {
-        action: "publish",
-      },
+      { action: "publish" },
     );
     const reviewSession = (
       await call("/v1/sessions", { problem_id: problem, intent: "review" }, reviewer, 201)
@@ -134,18 +132,12 @@ await runLocalWorkerJourney(
     );
     // 48js: a public statement revision, so the restored problem is published
     // AND revised (version 2 by the acting sponsor; both claims drift).
-    const revised = await sponsorCall(
-      SPONSOR,
-      "POST",
-      `/v1/sponsors/problems/${problem}/lifecycle`,
-      "problem-lifecycle",
-      {
-        action: "revise-statement",
-        statement: "Every integer in 0..64 has a square of the same parity.",
-        falsifier: "An integer in 0..64 whose square has the opposite parity.",
-        motivation: "Widen the range before export and deletion-safe restore.",
-      },
-    );
+    const revised = await reviseStatement(problem, SPONSOR, author, {
+      action: "revise-statement",
+      statement: "Every integer in 0..64 has a square of the same parity.",
+      falsifier: "An integer in 0..64 whose square has the opposite parity.",
+      motivation: "Widen the range before export and deletion-safe restore.",
+    });
     assert.equal(revised.problem.current_statement_version, 2);
     // 5oyj: governance after publication: a second steward (an existing
     // sponsor), a non-default admission mode and a writer cap.

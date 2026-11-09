@@ -9,6 +9,14 @@ import {
 } from "../../src/krater/artifact-inspection.ts";
 
 const utf8 = (value: string) => new TextEncoder().encode(value);
+
+test("artifact digest hashes only the supplied byte view, including Buffer subranges", async () => {
+  const allocation = Buffer.from("unrelated-prefix:the exact part:unrelated-suffix");
+  const part = allocation.subarray(17, 31);
+  assert.equal(new TextDecoder().decode(part), "the exact part");
+  assert.equal(await artifactSha256(part), await artifactSha256(utf8("the exact part")));
+  assert.notEqual(await artifactSha256(part), await artifactSha256(allocation));
+});
 const inspect = async (bytes: Uint8Array, encoding: "text" | "lake-archive" = "text") =>
   inspectArtifact(bytes, encoding, await artifactSha256(bytes));
 async function refuses(bytes: Uint8Array, code: string, archive = false) {

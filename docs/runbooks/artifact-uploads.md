@@ -16,7 +16,12 @@ creates immutable manifests; 0101 adds bounded, immutable renewal receipts;
 The routes are dispatched by the real Worker entrypoint; the existing
 `createApp()` factory alone does not include the entrypoint adapter. The public
 schema registry serves `/schemas/artifact-uploads.v1.json`, including the
-operation sequence. These operations are not yet enumerated in OpenAPI.
+operation sequence. `/capabilities` and `/openapi.json` enumerate the upload,
+private inventory, part, completion and download operations. Apply
+`0138_artifact_upload_inventory.sql` before deploying the private inventory.
+Apply `0140_artifact_upload_recovery.sql` before deploying session/credential
+resumption. Its immutable authorization history is separate from the manifest;
+generation zero records the original authoring session and credential.
 
 Issuance additionally requires the `ARTIFACT_UPLOAD_SIGNING` Worker secret:
 
@@ -76,9 +81,10 @@ revocation are checked; sensitive mutations repeat their checks in D1.
    redirects, echo the URL, place it in a public log, or commit the receipt.
 3. If the 15-minute PUT credential expires before the file arrives, send
    `POST {}` to the returned `renew_path`
-   (`/v1/artifacts/:upload_id/renew`) with the **same Fellow credential**
-   and a new `Idempotency-Key`. The originating session and current write
-   authority must still be live. The response supplies a new whole-object PUT
+   (`/v1/artifacts/:upload_id/renew`) with the **currently authorized Fellow credential**
+   and a new `Idempotency-Key`. The upload's current working session and write
+   authority must still be live; use explicit resumption below when either has
+   changed. The response supplies a new whole-object PUT
    credential for the same staging key, digest and exact length. Upload the
    complete file again with its returned headers. To retain completed chunks
    across interruptions, select the resumable flow below instead.
@@ -90,6 +96,63 @@ revocation are checked; sensitive mutations repeat their checks in D1.
    `GET content_path` with the owner Fellow's bearer downloads the full
    hash-checked attachment. Range reads and cookie-only authentication are not
    accepted. Status and downloads are private/no-store.
+
+## Recovering a lost receipt
+
+`GET /v1/artifacts?limit=20` with the current Fellow bearer returns accessible
+private uploads, including uploads created in earlier or closed sessions.
+Each entry identifies its original session and problem, digest, byte size,
+completion deadline, effective state and authenticated `status_path`. It never
+contains a PUT URL or any file bytes. Follow `next_path` until it is null;
+`omitted: ["page_limit"]` explicitly marks a continuation. Limits are 1–50.
+
+This is current private metadata ordered by immutable upload ID, not a frozen
+snapshot. Restart from the first page to discover new uploads or changed states.
+Current credential, sponsor, grant, problem binding and membership apply on every
+page. A closed session retains the directory and verified downloads; it does not
+grant fresh upload authority. Merely listing an expired upload never deletes or
+revives its staging bytes. Copy the matching `status_path` to recover acknowledged
+parts or verified content without declaring and charging for another manifest.
+
+## Continuing after a session ends or a credential changes
+
+Read the recovered upload's status using a current credential of the **same
+Fellow and sponsor**. `authorization` distinguishes the immutable original
+session from the session currently authorized for future work. When the caller
+has current upload authority, a pending upload supplies `recovery.resume_path`
+and `recovery.expected_generation`.
+
+Open an owned live session on the same problem and send:
+
+```json
+{
+  "session_id": "S-AAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "expected_generation": 0
+}
+```
+
+POST this body to `/v1/artifacts/:upload_id/resume` with the current bearer and a
+new `Idempotency-Key`. The accepted response is a metadata-only receipt with its
+new generation and the **original** completion deadline. If the response is
+lost, replay the exact body and key. A changed body or stale generation returns
+409; refetch status before deciding whether another resumption is needed.
+Recovering an earlier receipt never changes the current generation.
+
+An active verifier or part writer returns a retryable busy response. Resumption
+retires an expired lease atomically; its old worker cannot acknowledge bytes,
+complete, quarantine the upload, or clear a later lease. Existing part intents
+and acknowledged digests remain immutable. A new credential may finish storing
+an interrupted intent only with its originally pinned bytes, and its
+acknowledgment records the new credential/generation separately.
+
+Current scope, membership, sponsor posture, grant expiry, problem binding and
+event/artifact budgets are enforced again at the SQL effect boundary. Resuming
+does not add another byte reservation, extend the 24-hour window, reset PUT
+renewal limits, change the owner, or recover a quarantined/expired upload. There
+are at most 96 resumptions per manifest. The new authorization can renew a
+whole-object PUT or send missing parts and complete. It cannot recover an older
+credential's secret PUT URL: those sealed receipts remain credential-bound.
+Verification remains private and bytes-only, with publication a separate action.
 
 ## Resuming an interrupted upload
 
@@ -216,8 +279,9 @@ refused while a verifier holds an active lease, and verified, quarantined or
 expired uploads cannot receive a fresh grant. Each manifest permits at most
 96 renewal receipts; exceeding the limit returns 429. Once the completion
 window expires, a distinct manifest requires a new key and byte reservation.
-A closed session retains verified downloads, but pending completion and fresh
-renewal require current write authority and a live originating session.
+A closed session retains verified downloads. Pending completion and fresh
+renewal require current write authority and a live session selected by the
+original declaration or a later explicit resumption.
 
 ## Inspection and failure semantics
 

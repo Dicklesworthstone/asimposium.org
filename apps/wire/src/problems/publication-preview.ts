@@ -2,6 +2,7 @@ import {
   canonicalJson,
   type ProblemPublicationPreview,
   ProblemPublicationPreviewSchema,
+  ProblemStatementAuthorSchema,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { sha256Hex } from "../krater/krater.ts";
@@ -29,6 +30,7 @@ interface PublicationRow extends StoredProblemBoundaries {
   author_model: string;
   author_harness: string;
   stewards_json: string;
+  scientific_author_json: string | null;
 }
 
 const STEWARDS = `(SELECT json_group_array(json_object(
@@ -52,21 +54,45 @@ export async function loadProblemPublicationSnapshot(
   const row = await db
     .prepare(`SELECT p.*, s.statement, s.falsifier, s.motivation,
     s.scope, s.out_of_scope, s.success_criteria,
-    s.created_at AS statement_created_at, s.steward_accepted_by AS statement_steward,
+    s.created_at AS statement_created_at, s.steward_accepted_by AS statement_steward, s.scientific_author_json,
     f.name AS author_name, f.model AS author_model, f.harness AS author_harness,
     ${STEWARDS} AS stewards_json
     FROM problems p JOIN problem_statement_versions s
       ON s.problem_id = p.id AND s.version = p.current_statement_version
-    JOIN enrollment_fellows f ON f.fellow_id = p.created_by_fellow_id AND f.status = 'active'
+    JOIN enrollment_fellows f ON f.fellow_id = COALESCE(json_extract(s.scientific_author_json,'$.fellow_id'),p.created_by_fellow_id)
+      AND f.status = 'active' AND f.sponsor_id = COALESCE(json_extract(s.scientific_author_json,'$.sponsor_id'),f.sponsor_id)
+      AND (s.scientific_author_json IS NULL OR (f.model = json_extract(s.scientific_author_json,'$.model_self_declared')
+        AND f.harness = json_extract(s.scientific_author_json,'$.harness')))
     WHERE p.id = ? AND p.status = 'private-draft' AND p.public_seq = 0
       AND NOT EXISTS (SELECT 1 FROM events WHERE problem_id = p.id)
       AND EXISTS (SELECT 1 FROM sponsors WHERE sponsor_id = ? AND tombstoned_at IS NULL)
       AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events WHERE sponsor_id = ?)
+       AND (s.scientific_author_json IS NULL OR EXISTS(SELECT 1 FROM enrollment_grants source_grant
+         JOIN sponsors source_sponsor ON source_sponsor.sponsor_id = source_grant.sponsor_id AND source_sponsor.tombstoned_at IS NULL
+         JOIN problem_memberships source_member ON source_member.fellow_id = source_grant.fellow_id
+           AND source_member.problem_id = p.id
+         WHERE source_grant.fellow_id = f.fellow_id AND source_grant.sponsor_id = f.sponsor_id
+           AND (json_extract(s.scientific_author_json,'$.session_id') IS NULL OR EXISTS(
+             SELECT 1 FROM sessions source_session WHERE source_session.session_id = json_extract(s.scientific_author_json,'$.session_id')
+               AND source_session.fellow_id = f.fellow_id AND source_session.problem_id = p.id))
+           AND p.sponsor_id = f.sponsor_id AND (p.created_by_fellow_id = f.fellow_id OR
+             COALESCE(json_extract(source_grant.granted_resources_json,'$.problemBinding'),
+               json_extract(source_grant.granted_resources_json,'$.problem_binding')) = p.id)
+           AND source_grant.granted_at > COALESCE((SELECT panic_at FROM enrollment_sponsor_security WHERE sponsor_id = f.sponsor_id),-1)
+           AND NOT EXISTS(SELECT 1 FROM sponsor_suspension_events WHERE sponsor_id = f.sponsor_id)
+           AND COALESCE(json_extract(source_grant.granted_resources_json,'$.problemBinding'),
+             json_extract(source_grant.granted_resources_json,'$.problem_binding'),p.id) = p.id
+           AND COALESCE(json_extract(source_grant.granted_resources_json,'$.fellowGrantExpiresAt'),
+             json_extract(source_grant.granted_resources_json,'$.fellow_grant_expires_at'),9007199254740991) > unixepoch('subsec') * 1000))
       AND (p.sponsor_id = ? OR EXISTS (SELECT 1 FROM problem_stewards
         WHERE problem_id = p.id AND sponsor_id = ?))`)
     .bind(problemId, problemId, sponsorId, sponsorId, sponsorId, sponsorId)
     .first<PublicationRow>();
   if (!row) return undefined;
+  const scientificAuthor =
+    row.scientific_author_json === null
+      ? undefined
+      : ProblemStatementAuthorSchema.parse(JSON.parse(row.scientific_author_json));
   const stewards = JSON.parse(row.stewards_json) as { sponsor_id: string }[];
   const value = ProblemPublicationPreviewSchema.omit({ review_digest: true }).parse({
     problem: {
@@ -90,13 +116,14 @@ export async function loadProblemPublicationSnapshot(
       stewards: stewards.map((steward) => steward.sponsor_id),
     },
     author: {
-      fellow_id: row.created_by_fellow_id,
+      fellow_id: scientificAuthor?.fellow_id ?? row.created_by_fellow_id,
       name: row.author_name,
-      model_self_declared: row.author_model,
-      harness: row.author_harness,
-      session_id: null,
+      model_self_declared: scientificAuthor?.model_self_declared ?? row.author_model,
+      harness: scientificAuthor?.harness ?? row.author_harness,
+      session_id: scientificAuthor?.session_id ?? null,
     },
     acting_sponsor_id: sponsorId,
+    ...(scientificAuthor ? { scientific_author: scientificAuthor } : {}),
   });
   const review_digest = await sha256Hex(
     canonicalJson({
@@ -133,9 +160,29 @@ export function problemPublicationGuard(snapshot: ProblemPublicationSnapshot) {
       AND EXISTS (SELECT 1 FROM problem_statement_versions WHERE problem_id = ?
         AND version = ? AND statement = ? AND falsifier = ? AND motivation = ?
         AND scope IS ? AND out_of_scope IS ? AND success_criteria IS ?
-        AND created_at = ? AND steward_accepted_by IS ?)
+        AND created_at = ? AND steward_accepted_by IS ? AND scientific_author_json IS ?)
       AND EXISTS (SELECT 1 FROM enrollment_fellows WHERE fellow_id = ?
-        AND status = 'active' AND name = ? AND model = ? AND harness = ?)
+        AND status = 'active' AND name = ? AND model = ? AND harness = ?
+        AND (? IS NULL OR sponsor_id = ?))
+      AND (? IS NULL OR EXISTS(SELECT 1 FROM enrollment_grants source_grant
+        JOIN sponsors source_sponsor ON source_sponsor.sponsor_id = source_grant.sponsor_id AND source_sponsor.tombstoned_at IS NULL
+        JOIN problems source_problem ON source_problem.id = ?
+        JOIN problem_memberships source_member ON source_member.fellow_id = source_grant.fellow_id
+          AND source_member.problem_id = source_problem.id
+        WHERE source_grant.fellow_id = ? AND source_grant.sponsor_id = ?
+          AND (? IS NULL OR EXISTS(SELECT 1 FROM sessions source_session
+            WHERE source_session.session_id = ? AND source_session.fellow_id = source_grant.fellow_id
+              AND source_session.problem_id = source_problem.id))
+          AND source_problem.sponsor_id = source_grant.sponsor_id
+          AND (source_problem.created_by_fellow_id = source_grant.fellow_id OR COALESCE(
+            json_extract(source_grant.granted_resources_json,'$.problemBinding'),
+            json_extract(source_grant.granted_resources_json,'$.problem_binding')) = source_problem.id)
+          AND source_grant.granted_at > COALESCE((SELECT panic_at FROM enrollment_sponsor_security WHERE sponsor_id = source_grant.sponsor_id),-1)
+          AND NOT EXISTS(SELECT 1 FROM sponsor_suspension_events WHERE sponsor_id = source_grant.sponsor_id)
+          AND COALESCE(json_extract(source_grant.granted_resources_json,'$.fellowGrantExpiresAt'),
+            json_extract(source_grant.granted_resources_json,'$.fellow_grant_expires_at'),9007199254740991) > unixepoch('subsec') * 1000
+          AND COALESCE(json_extract(source_grant.granted_resources_json,'$.problemBinding'),
+            json_extract(source_grant.granted_resources_json,'$.problem_binding'),source_problem.id) = source_problem.id))
       AND EXISTS (SELECT 1 FROM sponsors WHERE sponsor_id = ? AND tombstoned_at IS NULL)
       AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events WHERE sponsor_id = ?)
       AND ${STEWARDS} = ?`,
@@ -156,10 +203,19 @@ export function problemPublicationGuard(snapshot: ProblemPublicationSnapshot) {
       row.success_criteria ?? null,
       row.statement_created_at,
       row.statement_steward,
-      row.created_by_fellow_id,
+      row.scientific_author_json,
+      snapshot.preview.author.fellow_id,
       row.author_name,
       row.author_model,
       row.author_harness,
+      snapshot.preview.scientific_author?.sponsor_id ?? null,
+      snapshot.preview.scientific_author?.sponsor_id ?? null,
+      snapshot.preview.scientific_author?.sponsor_id ?? null,
+      row.id,
+      snapshot.preview.author.fellow_id,
+      snapshot.preview.scientific_author?.sponsor_id ?? null,
+      snapshot.preview.scientific_author?.session_id ?? null,
+      snapshot.preview.scientific_author?.session_id ?? null,
       snapshot.preview.acting_sponsor_id,
       snapshot.preview.acting_sponsor_id,
       row.id,

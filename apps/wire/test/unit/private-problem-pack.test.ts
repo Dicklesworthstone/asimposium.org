@@ -2,6 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import {
   type MintEnrollmentRequest,
   PackResponseSchema,
+  ProblemStatementProposalResponseSchema,
+  ProblemStatementRevisionPreviewSchema,
   type ProposeProblemRequest,
   SessionOpenResponseSchema,
   WorkshopPushResponseSchema,
@@ -342,21 +344,44 @@ for (const change of ["revocation", "formulation revision"] as const) {
     const etag = first.headers.get("etag");
     if (!etag) throw new Error("Expected the private pack ETag.");
     await first.arrayBuffer();
+    const revision =
+      change === "formulation revision"
+        ? await (async () => {
+            const proposed = await f.call(`/v1/problems/${f.problemId}/statement-proposals`, {
+              session_id: f.sessionId,
+              base_statement_version: 1,
+              statement: "A nonempty finite tree has one fewer edge than vertices.",
+              falsifier: FORMULATION.falsifier,
+              motivation: FORMULATION.motivation,
+              scope: FORMULATION.scope,
+              out_of_scope: FORMULATION.out_of_scope,
+              success_criteria: FORMULATION.success_criteria,
+            });
+            expect(proposed.status, await proposed.clone().text()).toBe(201);
+            const { proposal } = ProblemStatementProposalResponseSchema.parse(
+              await proposed.json(),
+            );
+            const preview = await f.call(
+              `/v1/sponsors/problems/${f.problemId}/statement-proposals/${proposal.proposal_id}`,
+            );
+            expect(preview.status, await preview.clone().text()).toBe(200);
+            const reviewed = ProblemStatementRevisionPreviewSchema.parse(await preview.json());
+            return {
+              action: "revise-statement" as const,
+              proposal_id: proposal.proposal_id,
+              reviewed_statement_version: proposal.base_statement_version,
+              reviewed_digest: reviewed.review_digest,
+            };
+          })()
+        : undefined;
     let changed = false;
     f.beforePrivateSource(async (read) => {
       if (read !== 2) return;
       changed = true;
       if (change === "revocation") await f.revoke();
       else {
-        const revised = await f.call(`/v1/sponsors/problems/${f.problemId}/lifecycle`, {
-          action: "revise-statement",
-          statement: "A nonempty finite tree has one fewer edge than vertices.",
-          falsifier: FORMULATION.falsifier,
-          motivation: FORMULATION.motivation,
-          scope: FORMULATION.scope,
-          out_of_scope: FORMULATION.out_of_scope,
-          success_criteria: FORMULATION.success_criteria,
-        });
+        if (!revision) throw new Error("Expected a reviewed Fellow formulation.");
+        const revised = await f.call(`/v1/sponsors/problems/${f.problemId}/lifecycle`, revision);
         expect(revised.status, await revised.clone().text()).toBe(200);
       }
     });

@@ -1,0 +1,21 @@
+{
+  "schema": "https://a.asimposium.org/schemas/artifact-uploads.v1.json",
+  "after": null,
+  "next_after": null,
+  "next_path": null,
+  "items": [
+    {
+      "upload_id": "AU-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "problem_id": "P-DEMO",
+      "original_session_id": "S-AAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size_bytes": 120,
+      "encoding": "text",
+      "state": "presigned",
+      "created_at": 1000,
+      "expires_at": 86401000,
+      "status_path": "/v1/artifacts/AU-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "omitted": []
+}

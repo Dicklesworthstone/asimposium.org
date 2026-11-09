@@ -2,6 +2,9 @@ import {
   ProblemAdmissionModeSchema,
   ProblemDetailSchema,
   ProblemLifecycleActionRequestSchema,
+  ProblemStatementProposalIdSchema,
+  ProblemStatementProposalListQuerySchema,
+  ProblemStatementProposalRequestSchema,
   ProposeProblemRequestSchema,
   SaveProblemBriefRequestSchema,
   SponsorProblemBriefListResponseSchema,
@@ -25,17 +28,12 @@ import { readPublishedProblemResolution } from "../ledger/problem-resolution-rea
 import { type PublicCandidateScreener, screenPublicCandidate } from "../screening/public-candidate";
 import { screenPromotionWithWorkersAI, type WorkersAiBinding } from "../screening/workers-ai";
 import { parseSponsorLimit } from "../sessions/quota";
-import { normHash } from "../split/policy";
 import {
   applyPrivateProblemAccessAction,
   isProblemAccessAction,
   replayPrivateProblemAccessAction,
 } from "./access-actions.ts";
-import {
-  problemBoundariesRequired,
-  problemBoundaryFields,
-  type StoredProblemBoundaries,
-} from "./boundaries.ts";
+import { problemBoundaryFields, type StoredProblemBoundaries } from "./boundaries.ts";
 import { privateBriefResponse, runSponsorBriefCommand } from "./brief-commands.ts";
 import { createFellowBriefRouter } from "./fellow-briefs.ts";
 import {
@@ -49,6 +47,16 @@ import {
 } from "./lifecycle-ledger";
 import { runProblemProposalCommand } from "./proposal-commands.ts";
 import { readProblemPublicationPreview } from "./publication-preview.ts";
+import {
+  acceptPrivateStatementProposal,
+  listStatementProposals,
+  loadStatementRevisionSnapshot,
+  privateStatementResponse,
+  readOwnStatementProposal,
+  replayPrivateStatementAcceptance,
+  statementProposalAbsent,
+  submitStatementProposal,
+} from "./statement-revision-proposals.ts";
 
 export interface ProblemRouterOptions {
   readonly service: EnrollmentService;
@@ -231,6 +239,127 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       auth.binding,
       c.req.header("Idempotency-Key") ?? null,
       parsed.data,
+    );
+  });
+
+  app.post("/v1/problems/:id/statement-proposals", async (c) => {
+    const auth = await authenticateFellow(c.req.raw);
+    if (!auth.ok) return privateStatementResponse(auth.response);
+    const raw = await readJsonBody(c.req.raw);
+    if (raw instanceof Response) return privateStatementResponse(raw);
+    const parsed = ProblemStatementProposalRequestSchema.safeParse(raw);
+    if (!parsed.success)
+      return privateStatementResponse(
+        validatedProblem({
+          status: 422,
+          code: "SCHEMA_INVALID",
+          title: "Invalid statement proposal",
+          detail:
+            "A proposal requires your owned session, exact base statement version and complete replacement formulation.",
+          fixHint:
+            "Submit session_id, base_statement_version, statement, falsifier and motivation. Supply all three boundary fields together. Submission hands this exact proposal to current stewards for review; it does not publish it.",
+          rule: "P3",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/problems.v1.json",
+            example: {
+              session_id: "SESSION",
+              base_statement_version: 1,
+              statement: "For every finite tree, |E| = |V| - 1.",
+              falsifier: "A finite tree with a different edge count.",
+              motivation: "Establish a precise invariant.",
+            },
+          },
+        }),
+      );
+    return submitStatementProposal(
+      c.env.DB,
+      auth.binding,
+      c.req.param("id"),
+      parsed.data,
+      c.req.header("Idempotency-Key") ?? null,
+    );
+  });
+
+  app.get("/v1/problems/:id/statement-proposals/:proposalId", async (c) => {
+    const auth = await authenticateFellow(c.req.raw);
+    if (!auth.ok) return privateStatementResponse(auth.response);
+    if (!ProblemStatementProposalIdSchema.safeParse(c.req.param("proposalId")).success)
+      return statementProposalAbsent();
+    return readOwnStatementProposal(
+      c.env.DB,
+      auth.binding,
+      c.req.param("id"),
+      c.req.param("proposalId"),
+    );
+  });
+
+  app.get("/v1/sponsors/problems/:id/statement-proposals", async (c) => {
+    const verified = await options.verifiedSponsor(
+      c.req.raw,
+      c.req.path,
+      "problem-statement-proposals",
+    );
+    if (verified instanceof Response) return privateStatementResponse(verified);
+    const query = ProblemStatementProposalListQuerySchema.safeParse(c.req.query());
+    if (!query.success)
+      return privateStatementResponse(
+        validatedProblem({
+          status: 400,
+          code: "SCHEMA_INVALID",
+          title: "Invalid proposal page cursor",
+          detail: "Statement proposals use the exact after cursor returned by the prior page.",
+          fixHint: "Omit the query for the first page, or pass its next_after value as after.",
+          rule: "A5",
+          extensions: { schema: "https://a.asimposium.org/schemas/problems.v1.json", example: {} },
+        }),
+      );
+    return listStatementProposals(
+      c.env.DB,
+      c.req.param("id"),
+      verified.principal.sponsorId,
+      query.data.after,
+    );
+  });
+
+  app.get("/v1/sponsors/problems/:id/statement-proposals/:proposalId", async (c) => {
+    const verified = await options.verifiedSponsor(
+      c.req.raw,
+      c.req.path,
+      "problem-statement-proposal-preview",
+    );
+    if (verified instanceof Response) return privateStatementResponse(verified);
+    if (
+      new URL(c.req.url).search !== "" ||
+      !ProblemStatementProposalIdSchema.safeParse(c.req.param("proposalId")).success
+    )
+      return statementProposalAbsent();
+    const snapshot = await loadStatementRevisionSnapshot(
+      c.env.DB,
+      c.req.param("id"),
+      c.req.param("proposalId"),
+      verified.principal.sponsorId,
+    );
+    return snapshot
+      ? privateStatementResponse(c.json(snapshot.preview))
+      : statementProposalAbsent();
+  });
+
+  app.get("/v1/sponsors/problems/:id/statement-proposals/after/:after", async (c) => {
+    const verified = await options.verifiedSponsor(
+      c.req.raw,
+      c.req.path,
+      "problem-statement-proposals",
+    );
+    if (verified instanceof Response) return privateStatementResponse(verified);
+    const query = ProblemStatementProposalListQuerySchema.safeParse({
+      after: c.req.param("after"),
+    });
+    if (!query.success || new URL(c.req.url).search !== "") return statementProposalAbsent();
+    return listStatementProposals(
+      c.env.DB,
+      c.req.param("id"),
+      verified.principal.sponsorId,
+      query.data.after,
     );
   });
 
@@ -799,6 +928,25 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     const action = parsed.data;
     const now = new Date().toISOString();
 
+    if (action.action === "revise-statement") {
+      const previous = await replayPrivateStatementAcceptance(
+        db,
+        problemId,
+        sponsor.sponsorId,
+        action,
+        c.req.header("Idempotency-Key") ?? null,
+      );
+      if (previous) return previous;
+      if (problem.status === "private-draft")
+        return acceptPrivateStatementProposal(
+          db,
+          problemId,
+          sponsor.sponsorId,
+          action,
+          c.req.header("Idempotency-Key") ?? null,
+        );
+    }
+
     if (isProblemAccessAction(action)) {
       const previous = await replayPrivateProblemAccessAction(
         db,
@@ -832,7 +980,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         return applyPrivateProblemAccessAction(db, problemId, sponsor.sponsorId, action, c.req.raw);
       }
     }
-    if (!isSteward) return problemGovernanceRefused();
+    if (!isSteward && action.action !== "revise-statement") return problemGovernanceRefused();
 
     if (
       problem.status === "private-draft" &&
@@ -846,7 +994,6 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       // after it repeats the draft condition, so a publish that commits first
       // leaves the batch changing nothing; the request then refuses instead of
       // changing a public problem's governance without an event.
-      const DRAFT = "EXISTS (SELECT 1 FROM problems WHERE id = ? AND status = 'private-draft')";
       const draftGuard = db
         .prepare("UPDATE problems SET updated_at = ? WHERE id = ? AND status = 'private-draft'")
         .bind(now, problemId);
@@ -871,89 +1018,6 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           },
         });
       };
-      if (action.action === "revise-statement") {
-        const prior = await db
-          .prepare(
-            "SELECT scope FROM problem_statement_versions WHERE problem_id = ? AND version = ?",
-          )
-          .bind(problemId, problem.current_statement_version)
-          .first<{ scope: string | null }>();
-        if (prior?.scope != null && action.scope === undefined) return problemBoundariesRequired();
-        const nextVersion = problem.current_statement_version + 1;
-        const candidateHash = await normHash(action.statement);
-        const fullHash = `sha256:${candidateHash}`;
-        const sameDraft = `${DRAFT} AND EXISTS (SELECT 1 FROM problems WHERE id = ? AND current_statement_version = ?)`;
-        const revisionGuard = db
-          .prepare(
-            "UPDATE problems SET updated_at = ? WHERE id = ? AND status = 'private-draft' AND current_statement_version = ?",
-          )
-          .bind(now, problemId, problem.current_statement_version);
-
-        const refused = await draftWrite(
-          [
-            db
-              .prepare(
-                `INSERT INTO problem_statement_versions (
-                 problem_id, version, statement, norm_hash, falsifier, motivation,
-                 scope, out_of_scope, success_criteria, steward_accepted_by, created_at
-               ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${sameDraft}`,
-              )
-              .bind(
-                problemId,
-                nextVersion,
-                action.statement,
-                fullHash,
-                action.falsifier,
-                action.motivation,
-                action.scope ?? null,
-                action.out_of_scope ?? null,
-                action.success_criteria ?? null,
-                sponsor.sponsorId,
-                now,
-                problemId,
-                problemId,
-                problem.current_statement_version,
-              ),
-            db
-              .prepare(
-                `UPDATE claims SET statement_drift = 1 WHERE problem_id = ? AND statement_version < ? AND ${sameDraft}`,
-              )
-              .bind(
-                problemId,
-                nextVersion,
-                problemId,
-                problemId,
-                problem.current_statement_version,
-              ),
-            db
-              .prepare(
-                "UPDATE problems SET current_statement_version = ?, updated_at = ? WHERE id = ? AND status = 'private-draft' AND current_statement_version = ?",
-              )
-              .bind(nextVersion, now, problemId, problem.current_statement_version),
-          ],
-          revisionGuard,
-        );
-        if (refused) return refused;
-
-        return c.json(
-          {
-            problem: {
-              id: problemId,
-              status: problem.status,
-              title: problem.title,
-              current_statement_version: nextVersion,
-              statement: action.statement,
-              falsifier: action.falsifier,
-              motivation: action.motivation,
-              ...problemBoundaryFields(action),
-              updated_at: now,
-            },
-          },
-          200,
-          { "cache-control": "private, no-store" },
-        );
-      }
-
       if (action.action === "set-writer-cap") {
         const refused = await draftWrite([
           db
@@ -982,7 +1046,10 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       action.action === "merge"
         ? {
             sponsorLimit: parseSponsorLimit(c.env.SPONSOR_PROMOTION_RATE_LIMIT),
-            screen: async () => {
+            screen: async (
+              revision?: import("@asimposium/contracts").ProblemStatementProposal,
+              publication?: import("@asimposium/contracts").ProblemPublicationPreview,
+            ) => {
               if (
                 action.action === "resolve" ||
                 action.action === "retire" ||
@@ -1013,34 +1080,27 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
                 motivation: string | null;
               };
               if (action.action === "revise-statement") {
+                if (revision === undefined) return problemGovernanceRefused();
                 candidate = {
-                  statement: action.statement,
-                  falsifier: action.falsifier,
-                  motivation: action.motivation,
-                  ...problemBoundaryFields(action),
+                  statement: revision.statement,
+                  falsifier: revision.falsifier,
+                  motivation: revision.motivation,
+                  ...problemBoundaryFields(revision),
                 };
               } else {
-                const current = await db
-                  .prepare(
-                    "SELECT statement, falsifier, motivation, scope, out_of_scope, success_criteria FROM problem_statement_versions WHERE problem_id = ? AND version = ?",
-                  )
-                  .bind(problemId, problem.current_statement_version)
-                  .first<
-                    StoredProblemBoundaries & {
-                      statement: string;
-                      falsifier: string | null;
-                      motivation: string | null;
-                    }
-                  >();
-                if (!current) return problemGovernanceRefused();
-                candidate = current;
+                if (!publication) return problemGovernanceRefused();
+                candidate = publication.problem;
               }
               const screened = await screenPublicCandidate(
                 screenPromotion,
                 c.env,
                 {
                   problemId,
-                  fellowId: problem.created_by_fellow_id ?? sponsor.sponsorId,
+                  fellowId:
+                    revision?.author.fellow_id ??
+                    publication?.author.fellow_id ??
+                    problem.created_by_fellow_id ??
+                    sponsor.sponsorId,
                   kind:
                     action.action === "publish" ? "problem-proposal" : "problem-statement-revision",
                   // The famous-problem guardrail and named other-* areas are
@@ -1060,16 +1120,18 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
                     .join("\n\n"),
                   falsifier: candidate.falsifier,
                 },
-                // A proposal belongs to its Fellow. A sponsor's replacement
-                // statement must not count refusals against that Fellow.
+                // The stored formulation belongs to the submitting Fellow;
+                // the sponsor only accepts those exact reviewed bytes.
                 action.action === "publish"
                   ? problem.created_by_fellow_id == null
                     ? undefined
-                    : { sponsorId: sponsor.sponsorId, route: `problem-${action.action}` }
+                    : {
+                        sponsorId: publication?.scientific_author?.sponsor_id ?? sponsor.sponsorId,
+                        route: `problem-${action.action}`,
+                      }
                   : {
-                      sponsorId: sponsor.sponsorId,
+                      sponsorId: revision?.author.sponsor_id ?? sponsor.sponsorId,
                       route: `problem-${action.action}`,
-                      authorKind: "sponsor",
                     },
               );
               return screened;

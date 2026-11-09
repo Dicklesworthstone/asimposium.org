@@ -43,7 +43,9 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
 const HEX = /^[a-f0-9]{64}$/;
 
 export async function artifactSha256(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer as ArrayBuffer);
+  // Copy the supplied view, not its backing allocation. Node Buffer.slice()
+  // retains that allocation and can include unrelated bytes before/after a part.
+  const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes).buffer);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 

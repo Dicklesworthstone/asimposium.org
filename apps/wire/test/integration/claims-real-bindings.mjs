@@ -177,7 +177,7 @@ async function runClaimsProof() {
     expected = 200,
     idempotencyKey,
   ) {
-    const raw = JSON.stringify(body);
+    const raw = body === undefined ? "" : JSON.stringify(body);
     const envelope = await mintServiceEnvelope({
       privateKey: signingKeys.privateKey,
       kid: keyId,
@@ -193,10 +193,10 @@ async function runClaimsProof() {
       headers: {
         ...serviceEnvelopeHeaders(envelope),
         "User-Agent": userAgent,
-        "Content-Type": "application/json",
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
         "Idempotency-Key": idempotencyKey ?? `sponsor-claims-${++sponsorKeySeq}`,
       },
-      body: raw,
+      ...(body === undefined ? {} : { body: raw }),
     });
     assert.equal(response.status, expected, `Signed sponsor call expected ${expected}`);
     assert.equal(response.headers.get("cache-control"), "private, no-store");

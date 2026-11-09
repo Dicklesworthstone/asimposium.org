@@ -14,6 +14,7 @@ async function areaDiscoveryJourney({
   call,
   enroll,
   sponsorCall,
+  reviseStatement,
   operatorCall,
   worker,
   origin,
@@ -198,18 +199,12 @@ async function areaDiscoveryJourney({
 
   const revisedStatement =
     "Every nonempty simple path with n edges has exactly n + 1 distinct vertices.";
-  await sponsorCall(
-    sponsor,
-    "POST",
-    `/v1/sponsors/problems/${problemId}/lifecycle`,
-    "problem-lifecycle",
-    {
-      action: "revise-statement",
-      statement: revisedStatement,
-      falsifier: proposal.falsifier,
-      motivation: proposal.motivation,
-    },
-  );
+  await reviseStatement(problemId, sponsor, token, {
+    action: "revise-statement",
+    statement: revisedStatement,
+    falsifier: proposal.falsifier,
+    motivation: proposal.motivation,
+  });
   for (const suffix of ["json", "md", "html"]) {
     const response = await face(`/area/combinatorics.${suffix}`, etags.get(suffix));
     assert.equal(response.status, 200, "Statement revisions invalidate every face");

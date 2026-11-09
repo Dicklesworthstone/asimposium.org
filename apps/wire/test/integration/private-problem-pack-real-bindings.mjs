@@ -5,7 +5,7 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // Actual local Workerd/D1/R2 with the shared synthetic identity/screening
 // harness. This does not establish hosted screening or deployment readiness.
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, env, worker, origin, userAgent }) => {
+  async ({ call, enroll, sponsorCall, reviseStatement, env, worker, origin, userAgent }) => {
     const sponsor = "usr_private_pack_journey";
     const token = await enroll("private-pack-author", sponsor);
     const proposal = {
@@ -100,21 +100,15 @@ await runLocalWorkerJourney(
 
     const revisedStatement =
       "For every finite nonempty simple tree, the edge count equals its vertex count minus one.";
-    await sponsorCall(
-      sponsor,
-      "POST",
-      `/v1/sponsors/problems/${problem}/lifecycle`,
-      "problem-lifecycle",
-      {
-        action: "revise-statement",
-        statement: revisedStatement,
-        falsifier: proposal.falsifier,
-        motivation: proposal.motivation,
-        scope: proposal.scope,
-        out_of_scope: proposal.out_of_scope,
-        success_criteria: proposal.success_criteria,
-      },
-    );
+    await reviseStatement(problem, sponsor, token, {
+      action: "revise-statement",
+      statement: revisedStatement,
+      falsifier: proposal.falsifier,
+      motivation: proposal.motivation,
+      scope: proposal.scope,
+      out_of_scope: proposal.out_of_scope,
+      success_criteria: proposal.success_criteria,
+    });
     const revisedPack = PackResponseSchema.parse(await call(resumedUrl, undefined, token));
     const current = revisedPack.items.find((item) => item.kind === "problem-formulation");
     assert.ok(current);

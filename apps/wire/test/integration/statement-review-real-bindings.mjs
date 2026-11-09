@@ -20,7 +20,17 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, env, fixtures, worker, origin, userAgent }) => {
+  async ({
+    call,
+    enroll,
+    sponsorCall,
+    reviseStatement,
+    env,
+    fixtures,
+    worker,
+    origin,
+    userAgent,
+  }) => {
     await statementReviewDiscovery({
       call,
       enroll,
@@ -54,16 +64,18 @@ await runLocalWorkerJourney(
     );
     const route = `/v1/problems/${id}/statement-review`;
     const govern = (body, key) =>
-      sponsorCall(
-        sponsor,
-        "POST",
-        `/v1/sponsors/problems/${id}/lifecycle`,
-        "problem-lifecycle",
-        body,
-        200,
-        `/v1/sponsors/problems/${id}/lifecycle`,
-        key,
-      );
+      body.action === "revise-statement" && "statement" in body
+        ? reviseStatement(id, sponsor, author, body, 200, key)
+        : sponsorCall(
+            sponsor,
+            "POST",
+            `/v1/sponsors/problems/${id}/lifecycle`,
+            "problem-lifecycle",
+            body,
+            200,
+            `/v1/sponsors/problems/${id}/lifecycle`,
+            key,
+          );
     await govern({ action: "publish" }, "publish");
     let reviewerNumber = 0;
     async function reviewer(actor = `usr_statement_reviewer_${reviewerNumber + 1}`) {

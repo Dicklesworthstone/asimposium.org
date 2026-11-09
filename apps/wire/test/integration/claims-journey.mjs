@@ -782,6 +782,25 @@ export async function claimsJourney({
 
   // 7b. Problem statement revision S@1 -> S@2 via sponsor lifecycle action (W5.1)
   if (sponsorCall) {
+    const proposedStatement = await call(
+      `/v1/problems/${problem}/statement-proposals`,
+      {
+        session_id: kindsFellow.session.session_id,
+        base_statement_version: 1,
+        statement:
+          "Revised problem statement S@2: every even integer greater than 4 is the sum of two odd primes.",
+        falsifier: "An even integer > 4 not expressible as sum of two odd primes.",
+        motivation: "Refining Goldbach conjecture to exclude 4 = 2 + 2.",
+      },
+      kindsFellow.token,
+      201,
+    );
+    const statementPreview = await sponsorCall(
+      "usr_claims_sponsor_1",
+      "GET",
+      `/v1/sponsors/problems/${problem}/statement-proposals/${proposedStatement.proposal.proposal_id}`,
+      "problem-statement-proposal-preview",
+    );
     const reviseStatementRes = await sponsorCall(
       "usr_claims_sponsor_1",
       "POST",
@@ -789,10 +808,9 @@ export async function claimsJourney({
       "problem-lifecycle",
       {
         action: "revise-statement",
-        statement:
-          "Revised problem statement S@2: every even integer greater than 4 is the sum of two odd primes.",
-        falsifier: "An even integer > 4 not expressible as sum of two odd primes.",
-        motivation: "Refining Goldbach conjecture to exclude 4 = 2 + 2.",
+        proposal_id: proposedStatement.proposal.proposal_id,
+        reviewed_statement_version: 1,
+        reviewed_digest: statementPreview.review_digest,
       },
       200,
     );

@@ -8,10 +8,14 @@ import {
   ArtifactDeclareRequestSchema,
   ArtifactDeclareResponseSchema,
   ArtifactIdempotencyKeySchema,
+  ArtifactInventoryQuerySchema,
+  ArtifactInventoryResponseSchema,
   ArtifactRenewRequestSchema,
   ArtifactRenewResponseSchema,
   ArtifactResumableProgressSchema,
   ArtifactResumableRequestSchema,
+  ArtifactResumeRequestSchema,
+  ArtifactResumeResponseSchema,
   ArtifactStatusResponseSchema,
   generateArtifactUploadsSchema,
 } from "../../src/artifact-uploads.ts";
@@ -252,4 +256,75 @@ test("resumable responses never expose bucket keys, arbitrary part URLs or empty
     { uploaded_parts: [{ part_number: 1, offset: 0, size_bytes: 0, sha256: request.sha256 }] },
   ])
     assert.ok(!ArtifactResumableProgressSchema.safeParse({ ...progress, ...extra }).success);
+});
+
+test("private inventory contracts bound pagination and refuse secret or foreign selector fields", () => {
+  assert.ok(ArtifactInventoryQuerySchema.safeParse({ after: upload, limit: "50" }).success);
+  for (const query of [
+    { limit: "51" },
+    { limit: "01" },
+    { limit: 20 },
+    { fellow_id: "other" },
+    { token: "secret" },
+  ])
+    assert.ok(!ArtifactInventoryQuerySchema.safeParse(query).success);
+  const page = JSON.parse(
+    readFileSync(new URL("../fixtures/valid/artifact-inventory.json", import.meta.url), "utf8"),
+  );
+  assert.ok(ArtifactInventoryResponseSchema.safeParse(page).success);
+  const leaked = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/invalid/artifact-inventory-secret.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.ok(!ArtifactInventoryResponseSchema.safeParse(leaked).success);
+});
+
+test("resumption contracts pin a generation and expose only an immutable metadata receipt", () => {
+  assert.ok(
+    ArtifactResumeRequestSchema.safeParse({
+      session_id: request.session_id,
+      expected_generation: 0,
+    }).success,
+  );
+  for (const extra of [
+    { expected_generation: -1 },
+    { expected_generation: 0.5 },
+    { expected_generation: "0" },
+    { expected_generation: 97 },
+    { expires_at: 999999999 },
+    { credential_id: "replacement" },
+    { sha256: request.sha256 },
+  ])
+    assert.ok(
+      !ArtifactResumeRequestSchema.safeParse({
+        session_id: request.session_id,
+        expected_generation: 0,
+        ...extra,
+      }).success,
+    );
+  const accepted = {
+    schema: ARTIFACT_UPLOADS_SCHEMA_ID,
+    upload_id: upload,
+    problem_id: "P-DEMO",
+    session_id: request.session_id,
+    generation: 1,
+    resumed_at: 2000,
+    expires_at: 86401000,
+    status_path: `/v1/artifacts/${upload}`,
+  };
+  assert.ok(ArtifactResumeResponseSchema.safeParse(accepted).success);
+  assert.ok(
+    !ArtifactResumeResponseSchema.safeParse({ ...accepted, put: { url: "https://secret.invalid" } })
+      .success,
+  );
+  assert.ok(!ArtifactResumeResponseSchema.safeParse({ ...accepted, generation: 0 }).success);
+  assert.ok(
+    !ArtifactStatusResponseSchema.safeParse({
+      ...pending,
+      state: "expired",
+      recovery: { resume_path: `/v1/artifacts/${upload}/resume`, expected_generation: 0 },
+    }).success,
+  );
 });

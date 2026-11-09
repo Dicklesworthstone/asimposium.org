@@ -120,6 +120,13 @@ export function ProblemManager({
                 </Link>
                 {" · "}
                 <Link
+                  href={`/console/problems/${encodeURIComponent(problem.id)}/revisions`}
+                  prefetch={false}
+                >
+                  Review Fellow statement proposals
+                </Link>
+                {" · "}
+                <Link
                   href={`/console/problems/${encodeURIComponent(problem.id)}/access`}
                   prefetch={false}
                 >
@@ -146,6 +153,13 @@ export function ProblemManager({
               <p>
                 <Link href={`/console/problems/${encodeURIComponent(problem.id)}`} prefetch={false}>
                   Review result claims and resolution
+                </Link>
+                {" · "}
+                <Link
+                  href={`/console/problems/${encodeURIComponent(problem.id)}/revisions`}
+                  prefetch={false}
+                >
+                  Review Fellow statement proposals
                 </Link>
                 {" · "}
                 <Link

@@ -43,6 +43,8 @@ export async function publicationFixture(targetKind: "claim" | "hypothesis" = "c
     PRIMARY KEY(problem_id,target_ref,version));
   CREATE TABLE artifact_uploads(upload_id TEXT PRIMARY KEY,fellow_id TEXT,sponsor_id TEXT,problem_id TEXT,state TEXT,
     sha256 TEXT,size_bytes INTEGER,encoding TEXT,content_type TEXT);
+  CREATE TABLE artifact_upload_authorizations(upload_id TEXT,generation INTEGER,credential_id TEXT,session_id TEXT,
+    PRIMARY KEY(upload_id,generation));
   CREATE TABLE public_write_attempt_reservations(reservation_id TEXT PRIMARY KEY,fellow_id TEXT,sponsor_id TEXT,problem_id TEXT,
     session_id TEXT,route TEXT,idempotency_key TEXT,request_digest TEXT,reserved_at INTEGER,expires_at INTEGER,status TEXT,settled_at INTEGER,
     UNIQUE(fellow_id,route,idempotency_key));
@@ -62,7 +64,12 @@ export async function publicationFixture(targetKind: "claim" | "hypothesis" = "c
   WHERE c.revoked_at IS NULL AND c.credential_profile='bearer'
     AND EXISTS(SELECT 1 FROM json_each(c.granted_scopes_json) scope WHERE scope.value='upload-artifacts')
     AND NOT EXISTS(SELECT 1 FROM enrollment_sponsor_security sec WHERE sec.sponsor_id=c.sponsor_id AND sec.panic_at>=c.issued_at)
-    AND (json_extract(c.granted_resources_json,'$.problemBinding') IS NULL OR json_extract(c.granted_resources_json,'$.problemBinding')=s.problem_id);`);
+    AND (json_extract(c.granted_resources_json,'$.problemBinding') IS NULL OR json_extract(c.granted_resources_json,'$.problemBinding')=s.problem_id);
+  CREATE TRIGGER fixture_upload_initial_authority AFTER INSERT ON artifact_uploads BEGIN
+    INSERT INTO artifact_upload_authorizations SELECT NEW.upload_id,0,a.credential_id,a.session_id
+      FROM artifact_upload_write_authority a WHERE a.fellow_id=NEW.fellow_id
+        AND a.sponsor_id=NEW.sponsor_id AND a.problem_id=NEW.problem_id LIMIT 1;
+  END;`);
   const moderation = readFileSync(
     new URL("../../../../db/migrations/0091_moderation_plane.sql", import.meta.url),
     "utf8",

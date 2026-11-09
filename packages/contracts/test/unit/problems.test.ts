@@ -629,11 +629,19 @@ test("W5.1 Problem lifecycle action discriminated union parses valid transitions
   expect(
     ProblemLifecycleActionRequestSchema.safeParse({
       action: "revise-statement",
+      proposal_id: "SPR-12345678-1234-1234-1234-123456789abc",
+      reviewed_statement_version: 1,
+      reviewed_digest: "b".repeat(64),
+    }).success,
+  ).toBe(true);
+  expect(
+    ProblemLifecycleActionRequestSchema.safeParse({
+      action: "revise-statement",
       statement: "Revised statement",
       falsifier: "Revised falsifier",
       motivation: "Revised motivation",
     }).success,
-  ).toBe(true);
+  ).toBe(false);
   expect(
     ProblemLifecycleActionRequestSchema.safeParse({
       action: "enter-result-review",

@@ -135,6 +135,199 @@ export const ProblemStatementVersionSchema = completeProblemBoundaries(
 
 export type ProblemStatementVersion = z.infer<typeof ProblemStatementVersionSchema>;
 
+/** Captured when a Fellow deliberately submits a scientific formulation. An
+ * initial problem proposal precedes its first research session and records
+ * that fact as null. A later statement proposal requires its genuine session.
+ * The accepting sponsor is a separate governance actor, never the author. */
+export const ProblemStatementAuthorSchema = z
+  .object({
+    fellow_id: z.string().min(1).max(128),
+    sponsor_id: SponsorIdSchema,
+    session_id: SessionIdSchema.nullable(),
+    model_self_declared: z.string().min(1).max(160),
+    harness: z.string().min(1).max(160),
+  })
+  .strict();
+export type ProblemStatementAuthor = z.infer<typeof ProblemStatementAuthorSchema>;
+
+export const ProblemStatementProposalIdSchema = z
+  .string()
+  .regex(/^SPR-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\s\S])/);
+export const ProblemStatementProposalRequestSchema = completeProblemBoundaries(
+  z
+    .object({
+      session_id: SessionIdSchema,
+      base_statement_version: z
+        .number()
+        .int()
+        .positive()
+        .max(Number.MAX_SAFE_INTEGER - 1),
+      statement: z.string().min(1).max(8192),
+      falsifier: z.string().min(1).max(8192),
+      motivation: z.string().min(1).max(8192),
+      ...OptionalProblemBoundaryFields,
+    })
+    .strict(),
+);
+export type ProblemStatementProposalRequest = z.infer<typeof ProblemStatementProposalRequestSchema>;
+
+export const ProblemStatementProposalSummarySchema = z
+  .object({
+    proposal_id: ProblemStatementProposalIdSchema,
+    base_statement_version: z
+      .number()
+      .int()
+      .positive()
+      .max(Number.MAX_SAFE_INTEGER - 1),
+    author: ProblemStatementAuthorSchema.extend({ session_id: SessionIdSchema }),
+    created_at: ProblemIndexTimestampSchema,
+    status: z.enum(["pending", "accepted"]),
+    accepted_statement_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable(),
+  })
+  .strict()
+  .refine(
+    (value) =>
+      value.status === "pending"
+        ? value.accepted_statement_version === null
+        : value.accepted_statement_version === value.base_statement_version + 1,
+    {
+      message: "Accepted proposals name the next version after their exact base.",
+    },
+  );
+
+export const ProblemStatementProposalSchema = completeProblemBoundaries(
+  z
+    .object({
+      ...ProblemStatementProposalSummarySchema.shape,
+      problem_id: PublicLedgerProblemIdSchema,
+      statement: z.string().min(1).max(8192),
+      falsifier: z.string().min(1).max(8192),
+      motivation: z.string().min(1).max(8192),
+      ...OptionalProblemBoundaryFields,
+    })
+    .strict(),
+).refine(
+  (value) =>
+    value.status === "pending"
+      ? value.accepted_statement_version === null
+      : value.accepted_statement_version === value.base_statement_version + 1,
+  {
+    message: "Accepted proposals name the next version after their exact base.",
+  },
+);
+export type ProblemStatementProposal = z.infer<typeof ProblemStatementProposalSchema>;
+export const ProblemStatementProposalResponseSchema = z
+  .object({
+    proposal: ProblemStatementProposalSchema,
+  })
+  .strict();
+export type ProblemStatementProposalResponse = z.infer<
+  typeof ProblemStatementProposalResponseSchema
+>;
+
+export const ProblemStatementProposalListQuerySchema = z
+  .object({
+    after: ProblemStatementProposalIdSchema.optional(),
+  })
+  .strict();
+export const ProblemStatementProposalListResponseSchema = z
+  .object({
+    problem_id: PublicLedgerProblemIdSchema,
+    acting_sponsor_id: SponsorIdSchema,
+    proposals: z.array(ProblemStatementProposalSummarySchema).max(16),
+    next_after: ProblemStatementProposalIdSchema.nullable(),
+    omitted: z.array(z.literal("page_limit")).max(1),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      (value.next_after !== null) !== value.omitted.includes("page_limit") ||
+      (value.next_after !== null &&
+        (value.proposals.length !== 16 ||
+          value.proposals.at(-1)?.proposal_id !== value.next_after)) ||
+      value.proposals.some(
+        (proposal, index) =>
+          index > 0 && proposal.proposal_id <= (value.proposals[index - 1]?.proposal_id ?? ""),
+      )
+    )
+      context.addIssue({
+        code: "custom",
+        message: "Proposal pages must have stable advancing cursors and explicit omissions.",
+      });
+  });
+export type ProblemStatementProposalListResponse = z.infer<
+  typeof ProblemStatementProposalListResponseSchema
+>;
+
+export const ProblemStatementRevisionPreviewSchema = z
+  .object({
+    problem: z
+      .object({
+        id: PublicLedgerProblemIdSchema,
+        title: z.string().min(1).max(120),
+        status: ProblemStatusSchema,
+        current_statement_version: z.number().int().positive(),
+      })
+      .strict(),
+    proposal: ProblemStatementProposalSchema,
+    acting_sponsor_id: SponsorIdSchema,
+    can_accept: z.boolean(),
+    review_digest: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict()
+  .refine(
+    (value) =>
+      value.proposal.problem_id === value.problem.id &&
+      (!value.can_accept ||
+        (value.proposal.status === "pending" &&
+          value.proposal.base_statement_version === value.problem.current_statement_version)),
+    {
+      message: "A review preview must identify its exact proposal and current base version.",
+    },
+  );
+export type ProblemStatementRevisionPreview = z.infer<typeof ProblemStatementRevisionPreviewSchema>;
+
+export const ProblemStatementRevisionAcceptanceSchema = z
+  .object({
+    proposal_id: ProblemStatementProposalIdSchema,
+    reviewed_digest: z.string().regex(/^[a-f0-9]{64}$/),
+    base_statement_version: z.number().int().positive(),
+    accepted_statement_version: z.number().int().positive(),
+    source_fellow_id: z.string().min(1).max(128),
+    event_id: z.string().min(1).max(128).nullable(),
+  })
+  .strict()
+  .refine((value) => value.accepted_statement_version === value.base_statement_version + 1, {
+    message: "Acceptance must mint the next exact statement version.",
+  });
+
+/** Exact command recovery carries only metadata, even after the accepting
+ * sponsor loses access to private formulation bytes. */
+export const ProblemStatementRevisionResponseSchema = z
+  .object({
+    problem: z
+      .object({
+        id: PublicLedgerProblemIdSchema,
+        status: ProblemStatusSchema,
+        current_statement_version: z.number().int().positive(),
+        updated_at: ProblemIndexTimestampSchema,
+      })
+      .strict(),
+    statement_revision: ProblemStatementRevisionAcceptanceSchema,
+  })
+  .strict()
+  .refine(
+    (value) =>
+      value.problem.current_statement_version ===
+      value.statement_revision.accepted_statement_version,
+    {
+      message: "The accepted problem and command must name the same statement version.",
+    },
+  );
+export type ProblemStatementRevisionResponse = z.infer<
+  typeof ProblemStatementRevisionResponseSchema
+>;
+
 export const SPONSOR_PROBLEM_BRIEF_STATUSES = ["active", "withdrawn", "adopted"] as const;
 export const SponsorProblemBriefStatusSchema = z.enum(SPONSOR_PROBLEM_BRIEF_STATUSES);
 export type SponsorProblemBriefStatus = z.infer<typeof SponsorProblemBriefStatusSchema>;
@@ -532,11 +725,13 @@ export const ProblemPublicationPreviewSchema = z
         name: z.string().min(1).max(128),
         model_self_declared: z.string().min(1).max(160),
         harness: z.string().min(1).max(160),
-        // The proposal endpoint records no research-session attribution.
-        session_id: z.null(),
+        // Initial proposals have no research-session attribution. Replacements
+        // retain the actual session in which their Fellow submitted them.
+        session_id: SessionIdSchema.nullable(),
       })
       .strict(),
     acting_sponsor_id: SponsorIdSchema,
+    scientific_author: ProblemStatementAuthorSchema.optional(),
     review_digest: z.string().regex(/^[a-f0-9]{64}$/),
   })
   .strict();
@@ -643,17 +838,18 @@ export const ProblemLifecycleActionRequestSchema = z.discriminatedUnion("action"
       reviewed_digest: z.string().regex(/^[a-f0-9]{64}$/),
     })
     .strict(),
-  completeProblemBoundaries(
-    z
-      .object({
-        action: z.literal("revise-statement"),
-        statement: z.string().min(1).max(8192),
-        falsifier: z.string().min(1).max(8192),
-        motivation: z.string().min(1).max(8192),
-        ...OptionalProblemBoundaryFields,
-      })
-      .strict(),
-  ),
+  z
+    .object({
+      action: z.literal("revise-statement"),
+      proposal_id: ProblemStatementProposalIdSchema,
+      reviewed_statement_version: z
+        .number()
+        .int()
+        .positive()
+        .max(Number.MAX_SAFE_INTEGER - 1),
+      reviewed_digest: z.string().regex(/^[a-f0-9]{64}$/),
+    })
+    .strict(),
   z
     .object({
       action: z.literal("enter-result-review"),
@@ -799,6 +995,7 @@ const GovernanceRecordSchema = z
   .object({
     acting_principal: z.object({ type: z.literal("sponsor"), id: SponsorIdSchema }).strict(),
     source_fellow_id: z.string().min(1).max(128),
+    scientific_author: ProblemStatementAuthorSchema.optional(),
     previous_statement_version: z.number().int().positive(),
   })
   .strict();
@@ -891,6 +1088,13 @@ export const ProblemGovernanceEventSchema = z
       action: z.literal("revise-statement"),
       previous_status: PublicGovernanceStatusSchema,
       problem: governanceFormulation({ status: PublicGovernanceStatusSchema }),
+      revision_review: z
+        .object({
+          base_statement_version: z.number().int().positive(),
+          digest: z.string().regex(/^[a-f0-9]{64}$/),
+        })
+        .strict()
+        .optional(),
     }),
     GovernanceRecordSchema.extend({
       action: z.literal("enter-result-review"),
@@ -973,6 +1177,13 @@ export const ProblemGovernanceEventSchema = z
       event.problem.current_statement_version ===
         event.previous_statement_version + (revising ? 1 : 0) &&
       (!revising || event.problem.status === event.previous_status) &&
+      (event.scientific_author === undefined ||
+        event.scientific_author.fellow_id === event.source_fellow_id) &&
+      (!revising || event.scientific_author?.session_id !== null) &&
+      (event.action !== "revise-statement" ||
+        event.revision_review === undefined ||
+        (event.revision_review.base_statement_version === event.previous_statement_version &&
+          event.scientific_author !== undefined)) &&
       (event.action !== "publish" ||
         event.publication_review === undefined ||
         event.publication_review.statement_version === event.problem.current_statement_version);
@@ -1065,6 +1276,14 @@ export const ProblemLifecycleContractsSchema = z
     resolution_response: ProblemResolutionResponseSchema,
     result_review_response: ProblemResultReviewResponseSchema,
     statement_version: ProblemStatementVersionSchema,
+    statement_author: ProblemStatementAuthorSchema,
+    statement_proposal_request: ProblemStatementProposalRequestSchema,
+    statement_proposal_response: ProblemStatementProposalResponseSchema,
+    statement_proposal_list_query: ProblemStatementProposalListQuerySchema,
+    statement_proposal_list_response: ProblemStatementProposalListResponseSchema,
+    statement_revision_preview: ProblemStatementRevisionPreviewSchema,
+    statement_revision_acceptance: ProblemStatementRevisionAcceptanceSchema,
+    statement_revision_response: ProblemStatementRevisionResponseSchema,
     brief: SponsorProblemBriefSchema,
     fellow_brief_list_query: FellowProblemBriefListQuerySchema,
     fellow_brief_list_response: FellowProblemBriefListResponseSchema,

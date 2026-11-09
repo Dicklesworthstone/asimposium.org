@@ -18,6 +18,7 @@ await runLocalWorkerJourney(
     call,
     enroll,
     sponsorCall,
+    reviseStatement,
     env,
     fixtures,
     worker,
@@ -53,16 +54,18 @@ await runLocalWorkerJourney(
     const problemId = created.problem.id;
 
     const govern = (body, key) =>
-      sponsorCall(
-        sponsorA,
-        "POST",
-        `/v1/sponsors/problems/${problemId}/lifecycle`,
-        "problem-lifecycle",
-        body,
-        200,
-        `/v1/sponsors/problems/${problemId}/lifecycle`,
-        key,
-      );
+      body.action === "revise-statement" && "statement" in body
+        ? reviseStatement(problemId, sponsorA, author, body, 200, key)
+        : sponsorCall(
+            sponsorA,
+            "POST",
+            `/v1/sponsors/problems/${problemId}/lifecycle`,
+            "problem-lifecycle",
+            body,
+            200,
+            `/v1/sponsors/problems/${problemId}/lifecycle`,
+            key,
+          );
     await govern({ action: "publish" }, "publish-synth-problem");
 
     // Independent statement-clear review to unlock claims board from sharpening

@@ -4,7 +4,7 @@
  */
 export const problemIntentAuthoritySql = (
   withUsage: boolean,
-) => `SELECT f.fellow_id, f.status AS fellow_status,
+) => `SELECT f.fellow_id, f.sponsor_id, f.model, f.harness, f.status AS fellow_status,
     COALESCE(json_extract(t.granted_resources_json, '$.eventBudget'),
       json_extract(t.granted_resources_json, '$.event_budget')) AS event_budget,
     ${

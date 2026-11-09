@@ -4757,7 +4757,9 @@ describe("session protocol routes", () => {
     expect(pack.status).toBe(200);
     const packBody = PackResponseSchema.parse(await pack.json());
     const advertisedWrites = packBody.next_actions.filter(
-      (action) => action.url?.includes("/workshop") || action.url?.includes("/promote"),
+      (action) =>
+        action.method !== "GET" &&
+        (action.url?.includes("/workshop") || action.url?.includes("/promote")),
     );
     expect(advertisedWrites).toEqual([]);
   });
@@ -6412,6 +6414,62 @@ describe("session protocol routes", () => {
 
     // --- 9. POST /v1/problems/:id/statement-review (kind: "review", sink: problem_statement_reviews, events) ---
     {
+      // Independent review requires a verified publication with the Fellow's
+      // scientific sponsor, separately from the accepting governance actor.
+      const createdAt = new Date().toISOString();
+      const title = "Parity of integers and their squares";
+      const payloadJson = JSON.stringify(
+        ProblemGovernanceEventSchema.parse({
+          action: "publish",
+          acting_principal: { type: "sponsor", id: f.binding.sponsorId },
+          source_fellow_id: f.binding.fellowId,
+          scientific_author: {
+            fellow_id: f.binding.fellowId,
+            sponsor_id: f.binding.sponsorId,
+            session_id: null,
+            model_self_declared: f.binding.model,
+            harness: f.binding.harness,
+          },
+          previous_statement_version: 1,
+          previous_status: "private-draft",
+          problem: {
+            id: "P-4DSP",
+            title,
+            status: "sharpening",
+            current_statement_version: 1,
+            ...SESSION_FIXTURE_STATEMENT,
+            updated_at: createdAt,
+          },
+        }),
+      );
+      await writeLedgerEvent(
+        f.db,
+        {
+          problemId: "P-4DSP",
+          eventId: "E-census-statement-publication",
+          idempotencyKey: "census-statement-publication",
+          requestDigest: await sha256Hex(payloadJson),
+          eventType: "problem.admitted",
+          objectKind: "problem",
+          objectId: "P-4DSP",
+          objectVersion: 1,
+          payloadJson,
+          createdAt,
+          attribution: {
+            principalType: "sponsor",
+            sponsorId: f.binding.sponsorId,
+            fellowId: null,
+            sessionId: null,
+            modelSelfDeclared: null,
+            harness: null,
+          },
+        },
+        {
+          statementsAfterEvent: () => [
+            f.db.prepare("UPDATE problems SET title = ? WHERE id = 'P-4DSP'").bind(title),
+          ],
+        },
+      );
       const beforeEvents = await rowCount("events");
       const beforeReviews = await rowCount("problem_statement_reviews");
       const srBody = {
@@ -11348,6 +11406,11 @@ describe("session protocol routes", () => {
         sql: membershipSql,
         bindings: ["P-4DSP", binding.fellowId],
       },
+      {
+        kind: "first",
+        sql: "SELECT status, unlisted FROM problems WHERE id = ?",
+        bindings: ["P-4DSP"],
+      },
       { kind: "first", sql: cursorSql, bindings: ["P-4DSP"] },
     ]);
   });
@@ -13279,9 +13342,12 @@ describe("session protocol routes", () => {
       routerSource.indexOf("async function readOwnedWorkshopPublication"),
       routerSource.indexOf("async function resolveWorkshopClaimPromotion"),
     );
+    expect(sourceReader).toContain("w.workshop_id=? AND EXISTS (SELECT 1 FROM sessions publishing");
     expect(sourceReader).toContain(
-      "w.workshop_id=? AND w.session_id=? AND w.problem_id=? AND w.fellow_id=?",
+      "publishing.session_id=? AND publishing.problem_id=w.problem_id",
     );
+    expect(sourceReader).toContain("publishing.fellow_id=w.fellow_id");
+    expect(sourceReader).toContain("AND w.problem_id=? AND w.fellow_id=?");
     // Exactly one WRITE_REFUSED literal in the file: the shared builder's.
     expect(routerSource.split('code: "WRITE_REFUSED"').length - 1).toBe(1);
     // And no route may hand-build a refusal that names its own cause again.
@@ -15485,13 +15551,25 @@ describe("committed promotion outbox nudge", () => {
       // The SQLite session fixture starts at a seeded public formulation. Give
       // both formulations real Krater envelopes so the mounted synthesis route
       // must screen the current version while retaining an older reference.
-      const appendStatement = async (version: number, statement: string) => {
+      const appendStatement = async (
+        version: number,
+        statement: string,
+        sessionId: string | null = null,
+      ) => {
         const createdAt = new Date().toISOString();
+        const scientificAuthor = {
+          fellow_id: f.binding.fellowId,
+          sponsor_id: f.binding.sponsorId,
+          session_id: sessionId,
+          model_self_declared: f.binding.model,
+          harness: f.binding.harness,
+        };
         const payloadJson = JSON.stringify(
           ProblemGovernanceEventSchema.parse({
             action: version === 1 ? "publish" : "revise-statement",
             acting_principal: { type: "sponsor", id: f.binding.sponsorId },
             source_fellow_id: f.binding.fellowId,
+            scientific_author: scientificAuthor,
             previous_statement_version: version === 1 ? 1 : version - 1,
             previous_status: version === 1 ? "private-draft" : "active",
             problem: {
@@ -15542,8 +15620,8 @@ describe("committed promotion outbox nudge", () => {
                 : [
                     f.db
                       .prepare(`INSERT INTO problem_statement_versions
-              (problem_id,version,statement,norm_hash,falsifier,motivation,created_at)
-              VALUES ('P-4DSP',?,?,?,?,?,?)`)
+              (problem_id,version,statement,norm_hash,falsifier,motivation,created_at,scientific_author_json)
+              VALUES ('P-4DSP',?,?,?,?,?,?,?)`)
                       .bind(
                         version,
                         statement,
@@ -15551,6 +15629,7 @@ describe("committed promotion outbox nudge", () => {
                         SESSION_FIXTURE_STATEMENT.falsifier,
                         SESSION_FIXTURE_STATEMENT.motivation,
                         createdAt,
+                        JSON.stringify(scientificAuthor),
                       ),
                     f.db
                       .prepare(
@@ -15640,7 +15719,11 @@ describe("committed promotion outbox nudge", () => {
         statement: "Six is even.",
         falsifier: "A nonzero remainder after division by two.",
       });
-      await appendStatement(2, "For every integer n, n squared minus n is divisible by two.");
+      await appendStatement(
+        2,
+        "For every integer n, n squared minus n is divisible by two.",
+        String(session.session_id),
+      );
       for (const anchor of [
         { target_kind: "claim", target_id: claimId },
         { target_kind: "claim", target_id: claimId, target_version: 1, target_seq: first.seq },
@@ -20573,8 +20656,14 @@ describe("committed promotion outbox nudge", () => {
           let edit: (() => Promise<void>) | undefined;
           let screens = 0;
           const f = await fixture({
-            beforeRead: async ({ sql }) => {
-              if (edit && /SELECT workshop_id,current_version\s+FROM workshop_objects/.test(sql)) {
+            beforeRead: async ({ kind, sql }) => {
+              if (
+                edit &&
+                kind === "all" &&
+                /SELECT w\.workshop_id,\s*w\.current_version\s+FROM workshop_objects w JOIN sessions s/.test(
+                  sql,
+                )
+              ) {
                 const operation = edit;
                 edit = undefined;
                 await operation();
@@ -20610,6 +20699,7 @@ describe("committed promotion outbox nudge", () => {
                   action: "promote",
                   data: request,
                 });
+          expect(edit).toBeUndefined();
           expect(response.status, await response.clone().text()).toBe(409);
           expect(await response.json()).toMatchObject({ code: "WORKSHOP_VERSION_CONFLICT" });
           expect(screens).toBe(0);

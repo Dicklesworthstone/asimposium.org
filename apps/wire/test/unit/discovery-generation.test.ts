@@ -26,6 +26,7 @@ import {
 import type { Env } from "../../src/env.ts";
 import { createInboxRouter } from "../../src/inbox/router.ts";
 import { artifactPublicationFetch } from "../../src/krater/artifact-publication-runtime.ts";
+import { artifactFetch } from "../../src/krater/artifact-runtime.ts";
 import { createSessionRouter } from "../../src/sessions/router.ts";
 
 const ROOT = resolve(import.meta.dir, "..", "..", "..", "..");
@@ -39,6 +40,7 @@ function sampleFor(honoPath: string): string {
     if (name === "enrollmentId") return "/join/ASIMP-EN-PROBE".slice(6);
     if (name === "problemId" || name === "problem") return "P-4DSP";
     if (name === "uploadId") return `AU-${"a".repeat(32)}`;
+    if (name === "partNumber") return "1";
     if (name === "publicationId") return `AP-${"b".repeat(32)}`;
     if (name === "evidenceId") return "E-1";
     if (name === "eventId") return `DD-${"a".repeat(32)}`;
@@ -122,10 +124,10 @@ describe("discovery generators (W1.6)", () => {
         headers: operation.method === "POST" ? { "content-type": "application/json" } : undefined,
         body: operation.method === "POST" ? "{}" : undefined,
       });
-      // The production entrypoint mounts artifact publication outside Hono.
+      // The production entrypoint mounts upload and publication outside Hono.
       // Missing bearer/dependency refusals prove dispatch, not successful delivery.
       const response = await artifactPublicationFetch(request, {} as Env, () =>
-        app.request(request),
+        artifactFetch(request, {} as Env, () => app.request(request)),
       );
       const missMarked =
         response.headers.get(MISS_HEADER) === "1" || response.headers.get(MISS_HEADER) === "true";
