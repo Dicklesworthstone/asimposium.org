@@ -279,7 +279,11 @@ export async function setUpProblem(target, variant = 0) {
   const proposed = await fellowPost(
     target,
     "/v1/problems",
-    { brief_id: brief.body.brief.id, ...problem },
+    {
+      brief_id: brief.body.brief.id,
+      expected_brief_version: brief.body.brief.version,
+      ...problem,
+    },
     steward.token,
   );
   assert.equal(proposed.status, 201, `propose ${proposed.body.code ?? ""}`);
