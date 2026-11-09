@@ -23,6 +23,7 @@ function fixture() {
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
     CREATE TABLE dead_ends(problem_id TEXT, dead_end_id TEXT, superseded_by TEXT);
     CREATE TABLE dead_end_fired_triggers(problem_id TEXT, dead_end_id TEXT, trigger_kind TEXT, event_id TEXT, reason TEXT);
+    CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
   `);
   const db = {
     prepare(query: string) {
@@ -166,6 +167,28 @@ test("supersession suppresses the old route even when traversing an earlier curs
   }
 });
 
+test("current source and firing-event controls override historical cursors and restore unchanged retries", async () => {
+  for (const target of ["DE-1", "DE-1@1", "#2", "P-DEMO@2", "#3", "problem", "P-DEMO"]) {
+    const f = fixture();
+    try {
+      f.add(1);
+      const original = await f.read(3);
+      f.sql.query("INSERT INTO content_controls VALUES('P-DEMO',?,'hidden',1)").run(target);
+      if (target === "problem" || target === "P-DEMO")
+        await assert.rejects(f.read(3), /UNAVAILABLE/);
+      else {
+        const hidden = await f.read(3);
+        assert.deepEqual(hidden.items, []);
+        assert.ok(hidden.omitted.includes("content_unavailable"));
+      }
+      f.sql.query("INSERT INTO content_controls VALUES('P-DEMO',?,'visible',2)").run(target);
+      assert.deepEqual(await f.read(3), original);
+    } finally {
+      f.sql.close();
+    }
+  }
+});
+
 test("a pre-source, cross-problem or future event cannot be a firing", async () => {
   for (const change of ["seq=1", "problem_id='P-OTHER'", "seq=1001"]) {
     const f = fixture();
@@ -259,6 +282,9 @@ test("redaction and privacy changes during condition verification suppress publi
     "UPDATE event_content SET redacted_at='now' WHERE event_id='SOURCE-1'",
     "UPDATE problems SET unlisted=1 WHERE id='P-DEMO'",
     "UPDATE dead_ends SET superseded_by='DE-2'",
+    "INSERT INTO content_controls VALUES('P-DEMO','DE-1@1','hidden',1)",
+    "INSERT INTO content_controls VALUES('P-DEMO','#3','hidden',1)",
+    "INSERT INTO content_controls VALUES('P-DEMO','problem','hidden',1)",
   ]) {
     const f = fixture();
     try {

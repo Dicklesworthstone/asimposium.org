@@ -114,6 +114,10 @@ function supportsPublishedWarning(
     // Original hypothesis work has an exact-publication notice on every read
     // and pack. Lifecycle and kill statements remain separate held kinds.
     (kind === "hypotheses" && holdContext?.route === "hypotheses") ||
+    // Negative knowledge carries the same publication notice through its
+    // canonical faces, resume/graveyard packs, and the Fellow's private-free history.
+    (kind === "dead-end" &&
+      (holdContext?.route === "dead-ends" || holdContext?.route === "sponsor-workshop")) ||
     // Claim and statement reviews share a classifier kind. Only the server's
     // claim-review writer has complete public notice propagation.
     (kind === "review" && holdContext?.route === "review")

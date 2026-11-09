@@ -14451,6 +14451,7 @@ describe("committed promotion outbox nudge", () => {
       const refused = await post(path, edit, "stale-resumed-edit");
       expect(overlap).toBeUndefined();
       expect(committed).toBeDefined();
+      if (committed === undefined) throw new Error("Concurrent workshop action did not commit");
       expect(refused.status, await refused.clone().text()).toBe(409);
       expect(refused.headers.get("cache-control")).toBe("private, no-store");
       expect(ContractProblemSchema.parse(await refused.json())).toMatchObject({

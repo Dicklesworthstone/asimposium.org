@@ -1536,6 +1536,39 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(typeof (await choiceSchema.json()).$schema, "string");
   assert.deepEqual(choiceMove.contract.prefilled_hints, { type: "scratch" });
   assert.equal(choiceMove.contract.preparation.dead_end_pin.dead_end_id, choiceDeadEnd.dead_end_id);
+  const controlChoiceSource = async (target, visibility, version) => {
+    await env.DB.prepare(
+      `INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,visibility,source,
+         reason_category,actor,reason,version,created_at)
+       VALUES(?,?,'ledger-object',?,?,'operator','privacy','native-negative-test',
+         'Local current-visibility proof.',?,?)`,
+    )
+      .bind(
+        `CC-NEGATIVE-${target}-${version}`,
+        choiceProblemId,
+        target,
+        visibility,
+        version,
+        new Date().toISOString(),
+      )
+      .run();
+  };
+  await controlChoiceSource(`${choiceDeadEnd.dead_end_id}@1`, "hidden", 1);
+  const hiddenChoice = await call(`/v1/p/${choiceProblemId}/next`, undefined, triggerAuthor);
+  assert.ok(
+    ![hiddenChoice.primary_move, ...hiddenChoice.alternatives].some(
+      (move) => move?.move === "retry-dead-end" && move.refs.includes(choiceDeadEnd.dead_end_id),
+    ),
+    "current controls remove even a fired retry from canonical recommendations",
+  );
+  await controlChoiceSource(`${choiceDeadEnd.dead_end_id}@1`, "visible", 2);
+  const restoredChoice = await call(`/v1/p/${choiceProblemId}/next`, undefined, triggerAuthor);
+  assert.ok(
+    [restoredChoice.primary_move, ...restoredChoice.alternatives].some(
+      (move) => move?.move === "retry-dead-end" && move.refs.includes(choiceDeadEnd.dead_end_id),
+    ),
+    "restoring the immutable source restores the eligible retry",
+  );
   const choiceBeforeWork = await call("/cursor");
   await call(
     choiceMove.contract.request.path.replace("{id}", choiceSession.session_id),
@@ -1577,6 +1610,96 @@ await runLocalWorkerJourney(async (context) => {
     "completion preserves the append-only firing record",
   );
 
+  // A classifier warning publishes negative knowledge with one durable receipt,
+  // never a review hold. Every reading surface retains the platform context.
+  await fixtures.setScreenMode("allow-with-warning");
+  const warningBody = {
+    approach: "NATIVE-WARNING-NEGATIVE: enumerate finite path spectra using transfer matrices.",
+    why_it_fails: "The transfer counts repeated vertices that the simple-path domain excludes.",
+    retry_predicate: "Retry after a transfer rule enforces distinct vertices in every path.",
+  };
+  const warningResult = await call(
+    `${choicePath}/dead-ends`,
+    warningBody,
+    triggerAuthor,
+    201,
+    "native-dead-end-warning",
+  );
+  const warningScreens = await fixtures.screeningCalls();
+  assert.deepEqual(
+    await call(
+      `${choicePath}/dead-ends`,
+      warningBody,
+      triggerAuthor,
+      200,
+      "native-dead-end-warning",
+    ),
+    warningResult,
+  );
+  assert.equal(
+    await fixtures.screeningCalls(),
+    warningScreens,
+    "replay does not screen or publish again",
+  );
+  await fixtures.setScreenMode("pass");
+  const warningNotice = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  };
+  const warningFaces = [];
+  for (const extension of ["json", "md", "html"]) {
+    const url = `${origin}/p/${choiceProblemId}/dead-ends.${extension}`;
+    const response = await worker.fetch(url, { headers: { "User-Agent": userAgent } });
+    assert.equal(response.status, 200);
+    const bytes = await response.text();
+    assert.ok(bytes.includes(warningBody.approach));
+    if (extension === "json") {
+      assert.deepEqual(
+        JSON.parse(bytes).dead_ends.find((item) => item.dead_end_id === warningResult.dead_end_id)
+          .screening_notice,
+        warningNotice,
+      );
+    } else assert.ok(bytes.includes("Published with a screening context notice:"));
+    warningFaces.push({ url, etag: response.headers.get("etag") });
+  }
+  const warningPack = PackResponseSchema.parse(
+    await call(`${choicePath}/pack?profile=graveyard&max_tokens=8000`, undefined, triggerAuthor),
+  );
+  const warningItem = warningPack.items.find((item) => item.id === warningResult.dead_end_id);
+  assert.deepEqual(warningItem?.screening_notice, warningNotice);
+  assert.ok(
+    !warningItem.body.includes("screening_notice"),
+    "platform context is outside the author's body",
+  );
+  await controlChoiceSource(`${warningResult.dead_end_id}@1`, "hidden", 1);
+  for (const face of warningFaces) {
+    const response = await worker.fetch(face.url, {
+      headers: { "User-Agent": userAgent, "If-None-Match": face.etag },
+    });
+    assert.equal(response.status, 200, "hidden work cannot validate a previously readable ETag");
+    const bytes = await response.text();
+    assert.ok(!bytes.includes(warningBody.approach));
+    assert.ok(!bytes.includes("screening-warning"));
+    assert.ok(!bytes.includes("Published with a screening context notice:"));
+  }
+  const hiddenOldPack = JSON.parse(
+    await fixtures.deadEndPackAt(choiceProblemId, warningResult.seq),
+  );
+  assert.ok(!hiddenOldPack.candidates.some((item) => item.id === warningResult.dead_end_id));
+  assert.ok(hiddenOldPack.omitted.some((item) => item.reason === "content_unavailable"));
+  await controlChoiceSource(`${warningResult.dead_end_id}@1`, "visible", 2);
+  for (const face of warningFaces) {
+    const response = await worker.fetch(face.url, {
+      headers: { "User-Agent": userAgent, "If-None-Match": face.etag },
+    });
+    assert.equal(
+      response.status,
+      304,
+      "restoration returns the identical published representation",
+    );
+  }
+
   // W2.6: every projection row this journey built is reproducible from the log.
   const rebuilt = await assertProjectionsRebuild(context.env.DB, problemId);
   console.log(JSON.stringify({ stage: "projection-rebuild", ...rebuilt }));
@@ -1604,6 +1727,9 @@ await runLocalWorkerJourney(async (context) => {
       retry_session_error_envelope_verified: true,
       retry_event_causality_and_version_scope_verified: true,
       retry_concurrent_exact_target_beyond_fifty_claims_verified: true,
+      warning_publication_and_replay_verified: true,
+      warning_faces_and_pack_verified: true,
+      current_controls_and_restoration_verified: true,
     }),
   );
 

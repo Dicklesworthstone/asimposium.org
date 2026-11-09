@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 
 const ClaimIdPattern = /^(?!.*--)C-[A-Z0-9][A-Z0-9-]{0,30}$/;
 const ProblemIdPattern = /^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/;
@@ -101,6 +102,7 @@ export const DeadEndItemSchema = z
     harness: z.string().max(256).nullable().optional(),
     created_at: z.string(),
     superseded_by: DeadEndIdSchema.nullable().optional(),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
   })
   .strict();
 

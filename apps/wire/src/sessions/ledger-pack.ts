@@ -116,6 +116,7 @@ export async function readDeadEndPack(
   const candidates: PackCandidate[] = [];
   let oversized = false;
   for (const [index, item] of result.items.entries()) {
+    const { screening_notice: screeningNotice, ...publication } = item;
     const body = headlines
       ? {
           dead_end_id: item.dead_end_id,
@@ -129,7 +130,7 @@ export async function readDeadEndPack(
           harness: item.harness,
           source: `/p/${problemId}/dead-ends.json`,
         }
-      : item;
+      : publication;
     const encoded = JSON.stringify(body);
     if (encoded.length > 18000 || neutralizeUntrustedBody(encoded).text.length > 18000) {
       oversized = true;
@@ -142,6 +143,7 @@ export async function readDeadEndPack(
       untrusted: true,
       tokens: 1,
       body: encoded,
+      ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
       why_included: headlines
         ? "published failed approach; read the graveyard for its scope, failure and retry condition"
         : "published negative knowledge and recorded retry condition, not a claim that the condition has fired",

@@ -3,11 +3,12 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { cache } from "react";
-import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
-import { publicViewWatchTargets } from "@/lib/public-watch-view";
+import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { ScreeningNotice } from "@/components/screening-notice";
 import { deadEndRetryLabel } from "@/lib/dead-end-view";
 import { stoaFetchDeadEnds } from "@/lib/public-ledger";
+import { publicViewWatchTargets } from "@/lib/public-watch-view";
 
 interface DeadEndsPageProps {
   readonly params: Promise<{ readonly slug: string }>;
@@ -37,7 +38,8 @@ export async function generateMetadata(props: DeadEndsPageProps): Promise<Metada
   const result = input.valid ? await readDeadEnds(input.slug, input.history) : undefined;
   return {
     title: `${input.slug} — Dead ends and retry conditions | ASImposium`,
-    description: "Published failed approaches, their limits, attribution and recorded retry conditions.",
+    description:
+      "Published failed approaches, their limits, attribution and recorded retry conditions.",
     ...(result?.state !== "ok" || result.noindex
       ? { robots: { index: false, follow: false } }
       : {}),
@@ -90,9 +92,9 @@ export default async function DeadEndsPage(props: DeadEndsPageProps) {
         </header>
         <PublicLedgerLive origin={result.origin} targets={publicViewWatchTargets(result.watch)} />
         <div className="loop" role="note">
-          These are published negative results, not blanket refutations. A recorded retry
-          condition is not a claim that the condition has fired. This latest public view is read
-          independently of the problem digest’s ledger snapshot.
+          These are published negative results, not blanket refutations. A recorded retry condition
+          is not a claim that the condition has fired. This latest public view is read independently
+          of the problem digest’s ledger snapshot.
         </div>
         <nav aria-label="Dead-end history">
           <Link href={path} aria-current={!history ? "page" : undefined} prefetch={false}>
@@ -112,13 +114,13 @@ export default async function DeadEndsPage(props: DeadEndsPageProps) {
             {history ? "Current and historical entries" : "Current entries"}
           </h2>
           <p className="quiet">
-            Showing {face.dead_ends.length} entries in this public response. This is not a
-            lifetime total or a ranking; see the omissions below.
+            Showing {face.dead_ends.length} entries in this public response. This is not a lifetime
+            total or a ranking; see the omissions below.
           </p>
           {face.dead_ends.length === 0 && (
             <p>
-              No readable dead-end records were returned for this view. This is not evidence
-              that no approaches have failed.
+              No readable dead-end records were returned for this view. This is not evidence that no
+              approaches have failed.
             </p>
           )}
           <ol className="claims-list">
@@ -127,6 +129,7 @@ export default async function DeadEndsPage(props: DeadEndsPageProps) {
                 <h3>
                   <code>{item.dead_end_id}</code> · ledger seq {item.seq}
                 </h3>
+                <ScreeningNotice notice={item.screening_notice} />
                 <p className="quiet">Public ledger · untrusted author-supplied data</p>
                 {item.superseded_by ? (
                   <p>

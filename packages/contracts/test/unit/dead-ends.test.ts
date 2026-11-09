@@ -111,6 +111,29 @@ describe("W5.8a dead-ends contracts", () => {
     };
     expect(DeadEndItemSchema.safeParse(item).success).toBe(true);
   });
+
+  test("published notices are coherent platform output and cannot be supplied by authors", async () => {
+    for (const [directory, valid] of [
+      ["valid", true],
+      ["invalid", false],
+    ] as const) {
+      const item = await fixture(
+        new URL(`../fixtures/${directory}/dead-end-screening-notice.json`, import.meta.url),
+      );
+      expect(DeadEndItemSchema.safeParse(item).success).toBe(valid);
+    }
+    const request = RecordDeadEndRequestSchema.parse(await fixture(VALID_REQUEST));
+    expect(
+      RecordDeadEndRequestSchema.safeParse({
+        ...request,
+        screening_notice: {
+          category: "off-topic",
+          action: "published-with-warning",
+          notice: "off-scope",
+        },
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe("saved dead-end publication", () => {

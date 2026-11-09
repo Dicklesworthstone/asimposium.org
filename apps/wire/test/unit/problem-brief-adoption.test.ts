@@ -182,6 +182,7 @@ for (const change of [
     expect(response.status).toBe(change.status);
     expect(await response.json()).toMatchObject({ code: change.code });
     expect(committedState).toBeDefined();
+    if (committedState === undefined) throw new Error("Concurrent brief change did not commit");
     expect(f.state()).toEqual(committedState);
     expect(f.sql.query("PRAGMA foreign_key_check").all()).toEqual([]);
   });
@@ -201,6 +202,7 @@ test("two admissions of the same brief commit only the winning private problem",
   expect(loser.status).toBe(404);
   expect(await loser.json()).toMatchObject({ code: "BRIEF_NOT_FOUND" });
   expect(winnerId).toBeDefined();
+  if (winningState === undefined) throw new Error("Winning brief adoption did not commit");
   expect(f.state()).toEqual(winningState);
   expect(
     f.sql.query("SELECT id,title FROM problems WHERE created_by_fellow_id=?").all(FELLOW),

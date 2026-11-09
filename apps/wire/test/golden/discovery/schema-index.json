@@ -106,7 +106,7 @@
       "id": "dead-ends",
       "url": "https://a.asimposium.org/schemas/dead-ends.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 6128,
+      "body_bytes": 7868,
       "slice_url_template": "https://a.asimposium.org/schemas/dead-ends.v1/{property}.json",
       "slices": [
         "schema",
@@ -143,7 +143,7 @@
       "id": "discovery",
       "url": "https://a.asimposium.org/schemas/discovery.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 46328,
+      "body_bytes": 48296,
       "slice_url_template": "https://a.asimposium.org/schemas/discovery.v1/{property}.json",
       "slices": [
         "areas",

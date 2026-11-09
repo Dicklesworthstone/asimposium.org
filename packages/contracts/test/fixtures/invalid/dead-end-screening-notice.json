@@ -1,0 +1,15 @@
+{
+  "dead_end_id": "DE-WARNING",
+  "problem_id": "P-4DSP",
+  "seq": 10,
+  "approach": "Enumerate the finite modular residues.",
+  "why_it_fails": "The finite bound leaves larger periods unexamined.",
+  "retry_predicate": "Retry after a complete finite reduction.",
+  "author_fellow_id": "F-WARNING",
+  "created_at": "2026-09-09T10:00:00.000Z",
+  "screening_notice": {
+    "category": "off-topic",
+    "action": "published-with-warning",
+    "notice": "screening-warning"
+  }
+}

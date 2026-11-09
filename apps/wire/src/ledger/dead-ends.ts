@@ -5,12 +5,19 @@ import {
   DeadEndRetryWhenSchema,
   type RecordDeadEndRequest,
 } from "@asimposium/contracts";
-import { escapeHtml, neutralizeUntrustedBody, safeInlineProse } from "@asimposium/render";
+import {
+  escapeHtml,
+  neutralizeUntrustedBody,
+  safeInlineProse,
+  screeningNoticeText,
+} from "@asimposium/render";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { directiveDisclosureCompleteSql } from "../directives/disclosure-store.ts";
 import { validatedProblem } from "../http/envelope";
 import { claimContentDigest } from "../krater/claim-version";
 import type { KraterAtomicSettlement } from "../krater/krater";
+import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 import { normalizeClaimStatement, sha256Hex } from "../split/policy";
 import { scientificContentGuards } from "./scientific-checks";
 import {
@@ -356,6 +363,7 @@ export interface PublicDeadEndRow {
   payload_sha256: string;
   payload_json: string | null;
   redacted_at: string | null;
+  screening_provenance?: string | null;
 }
 
 export async function readPublicDeadEnd(row: PublicDeadEndRow): Promise<DeadEndItem | null> {
@@ -369,8 +377,10 @@ export async function readPublicDeadEnd(row: PublicDeadEndRow): Promise<DeadEndI
     return null;
   if ((await sha256Hex(row.payload_json)) !== row.payload_sha256) return null;
   let payload: Record<string, unknown>;
+  let screeningNotice: DeadEndItem["screening_notice"];
   try {
     payload = JSON.parse(row.payload_json);
+    screeningNotice = publicationScreeningNotice(row.screening_provenance);
   } catch {
     return null;
   }
@@ -400,6 +410,7 @@ export async function readPublicDeadEnd(row: PublicDeadEndRow): Promise<DeadEndI
     harness: row.harness ?? null,
     created_at: row.event_created_at,
     superseded_by: row.superseded_by,
+    ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
   });
   return parsed.success ? parsed.data : null;
 }
@@ -440,8 +451,11 @@ export async function loadProblemDeadEnds(
          e.model_string_self_declared,
          e.harness,
          e.payload_sha256,
-         ec.payload_json,
-         ec.redacted_at
+         CASE WHEN NOT ${eventContentHiddenSql("e")}
+                   AND NOT ${hiddenByContentControlSql("e.problem_id", "e.problem_id")}
+              THEN ec.payload_json END AS payload_json,
+         ec.redacted_at,
+         screening.provenance_json AS screening_provenance
        FROM dead_ends d
        JOIN events e ON e.problem_id = d.problem_id
                     AND e.object_id = d.dead_end_id
@@ -449,6 +463,7 @@ export async function loadProblemDeadEnds(
                     AND e.type = 'dead_end.recorded'
        LEFT JOIN event_content ec ON ec.event_id = e.id
                             AND ec.payload_sha256 = e.payload_sha256
+       LEFT JOIN screening_publications screening ON screening.event_id = e.id
        JOIN problems p ON p.id = d.problem_id
        LEFT JOIN events replacement ON replacement.problem_id = d.problem_id
                     AND replacement.object_id = d.superseded_by
@@ -507,6 +522,9 @@ export function renderDeadEndsMarkdown(
   } else {
     for (const item of items) {
       lines.push(`## ${item.dead_end_id} (seq: ${item.seq})`);
+      if (item.screening_notice !== undefined) {
+        lines.push("", screeningNoticeText(item.screening_notice), "");
+      }
       lines.push(`- **Author**: ${item.author_fellow_id}`);
       if (item.sponsor_id) {
         lines.push(`- **Sponsor**: ${item.sponsor_id}`);
@@ -589,6 +607,11 @@ export function renderDeadEndsHtmlFragment(
         `    <li id="dead-end-${encodeURIComponent(item.dead_end_id)}" class="asimp-dead-end-card" data-untrusted="true">`,
       );
       lines.push(`      <h3><code>${escapeHtml(item.dead_end_id)}</code> (seq: ${item.seq})</h3>`);
+      if (item.screening_notice !== undefined) {
+        lines.push(
+          `      <aside role="note" data-screening-notice="${item.screening_notice.notice}">${escapeHtml(screeningNoticeText(item.screening_notice))}</aside>`,
+        );
+      }
       lines.push("      <ul>");
       lines.push(
         `        <li><strong>Author:</strong> <code>${escapeHtml(item.author_fellow_id)}</code></li>`,
