@@ -5,6 +5,7 @@ import {
   ArtifactDeclareRequestSchema,
   ArtifactDeclareResponseSchema,
   ArtifactIdempotencyKeySchema,
+  ArtifactInventoryQuerySchema,
   ArtifactRenewRequestSchema,
   ArtifactRenewResponseSchema,
   ArtifactResumableRequestSchema,
@@ -15,6 +16,7 @@ import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
 import { cancelUnconsumedRequestBody, parseExactJsonBytes } from "../auth/http.ts";
 import { authorizeFellowWrite, type FellowCredentialBinding } from "../enrollment/service.ts";
 import { validatedProblem } from "../http/envelope.ts";
+import { listArtifactUploads } from "./artifact-inventory.ts";
 import type { ArtifactSigningConfig } from "./artifact-presign.ts";
 import {
   type ArtifactManifest,
@@ -53,11 +55,23 @@ const EXAMPLE = {
   },
 };
 
-type Operation = "declare" | "status" | "complete" | "content" | "renew" | "resumable" | "part";
+type Operation =
+  | "declare"
+  | "inventory"
+  | "status"
+  | "complete"
+  | "content"
+  | "renew"
+  | "resumable"
+  | "part";
 export function artifactRoute(
   path: string,
+  method = "POST",
 ): { operation: Operation; id: string | null; method: string; partNumber?: number } | undefined {
-  if (path === "/v1/artifacts") return { operation: "declare", id: null, method: "POST" };
+  if (path === "/v1/artifacts")
+    return method === "GET"
+      ? { operation: "inventory", id: null, method: "GET" }
+      : { operation: "declare", id: null, method: "POST" };
   const match =
     /^\/v1\/artifacts\/(AU-[a-f0-9]{32})(?:\/(complete|content|renew|resumable)|\/parts\/([1-4]))?$/.exec(
       path,
@@ -363,10 +377,10 @@ export async function handleArtifactHttp(
   options: ArtifactHttpOptions,
 ): Promise<Response | undefined> {
   const url = new URL(request.url);
-  const route = artifactRoute(url.pathname);
+  const route = artifactRoute(url.pathname, request.method);
   if (!route) return undefined;
   try {
-    if (url.search !== "")
+    if (url.search !== "" && route.operation !== "inventory")
       return contract(
         400,
         "Artifact routes accept no query parameters. Credentials belong only in the Authorization header.",
@@ -381,6 +395,16 @@ export async function handleArtifactHttp(
     const credential = await options.authenticate(match[1]);
     if (!credential || credential.credentialProfile !== "bearer") return denied();
     const clock = options.clock ?? Date.now;
+    if (route.operation === "inventory") {
+      const fields = Object.fromEntries(url.searchParams);
+      const query = ArtifactInventoryQuerySchema.safeParse(fields);
+      if (!query.success || [...url.searchParams.keys()].length !== Object.keys(fields).length)
+        return contract(
+          400,
+          "Use only after from next_after and a canonical limit from 1 to 50. Repeated query fields are refused.",
+        );
+      return json(await listArtifactUploads(options.db, credential, query.data, clock()));
+    }
     if (route.operation === "part") {
       if (request.headers.get("content-type") !== "application/octet-stream")
         return contract(

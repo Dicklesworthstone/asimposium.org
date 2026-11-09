@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { SessionIdSchema } from "./sessions.ts";
+import { ProblemIdSchema, SessionIdSchema } from "./sessions.ts";
 
 export const ARTIFACT_UPLOADS_SCHEMA_ID =
   "https://a.asimposium.org/schemas/artifact-uploads.v1.json";
@@ -176,6 +176,51 @@ export const ArtifactStatusResponseSchema = z.discriminatedUnion("state", [
 ]);
 export type ArtifactStatusResponse = z.infer<typeof ArtifactStatusResponseSchema>;
 
+export const ARTIFACT_INVENTORY_DEFAULT_LIMIT = 20;
+export const ARTIFACT_INVENTORY_MAX_LIMIT = 50;
+export const ArtifactInventoryQuerySchema = z
+  .object({
+    after: ArtifactUploadIdSchema.optional(),
+    limit: z
+      .string()
+      .regex(/^(?:[1-9]|[1-4][0-9]|50)$/)
+      .optional(),
+  })
+  .strict();
+export type ArtifactInventoryQuery = z.infer<typeof ArtifactInventoryQuerySchema>;
+
+/** A live owner directory, not a publication list. Bodies, secret PUT grants,
+ * storage keys and other owners' bindings never belong in this projection. */
+export const ArtifactInventoryItemSchema = z
+  .object({
+    upload_id: ArtifactUploadIdSchema,
+    problem_id: ProblemIdSchema,
+    original_session_id: SessionIdSchema,
+    sha256: ArtifactDigestSchema,
+    size_bytes: z
+      .number()
+      .int()
+      .min(1)
+      .max(20 * 1024 * 1024),
+    encoding: z.enum(["text", "lake-archive"]),
+    state: z.enum(["presigned", "verified", "quarantined", "expired"]),
+    created_at: timestamp,
+    expires_at: timestamp,
+    status_path: uploadPath,
+  })
+  .strict();
+export const ArtifactInventoryResponseSchema = z
+  .object({
+    schema: z.literal(ARTIFACT_UPLOADS_SCHEMA_ID),
+    after: ArtifactUploadIdSchema.nullable(),
+    next_after: ArtifactUploadIdSchema.nullable(),
+    next_path: z.string().max(256).nullable(),
+    items: z.array(ArtifactInventoryItemSchema).max(ARTIFACT_INVENTORY_MAX_LIMIT),
+    omitted: z.array(z.literal("page_limit")).max(1),
+  })
+  .strict();
+export type ArtifactInventoryResponse = z.infer<typeof ArtifactInventoryResponseSchema>;
+
 export const ArtifactUploadsContractsSchema = z
   .object({
     declare_request: ArtifactDeclareRequestSchema,
@@ -187,6 +232,8 @@ export const ArtifactUploadsContractsSchema = z
     uploaded_part: ArtifactUploadedPartSchema,
     resumable_progress: ArtifactResumableProgressSchema,
     status_response: ArtifactStatusResponseSchema,
+    inventory_query: ArtifactInventoryQuerySchema,
+    inventory_response: ArtifactInventoryResponseSchema,
     idempotency_key: ArtifactIdempotencyKeySchema,
   })
   .strict();

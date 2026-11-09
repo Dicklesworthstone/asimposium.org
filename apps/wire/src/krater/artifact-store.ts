@@ -143,6 +143,22 @@ function translate(error: unknown): never {
 /** Recheck current credential, grant and membership even for readback. A
  * closed session does not erase its private artifacts; a removed membership,
  * expired grant or revoked token cannot keep reading through an old manifest. */
+export const ARTIFACT_READ_AUTHORITY_SQL = `FROM artifact_uploads a
+    JOIN problem_memberships m ON m.problem_id = a.problem_id AND m.fellow_id = a.fellow_id
+    JOIN fellow_tokens c ON c.credential_id = ? AND c.fellow_id = a.fellow_id AND c.sponsor_id = a.sponsor_id
+    JOIN enrollment_fellows f ON f.fellow_id = c.fellow_id AND f.sponsor_id = c.sponsor_id
+      AND f.status IN ('active', 'suspicious_review')
+    JOIN enrollment_grants g ON g.fellow_id = f.fellow_id AND g.sponsor_id = f.sponsor_id
+      AND g.granted_scopes_json = c.granted_scopes_json AND g.granted_resources_json = c.granted_resources_json
+    WHERE c.revoked_at IS NULL AND c.issued_at <= ? AND c.expires_at > ?
+      AND c.credential_profile = 'bearer'
+      AND NOT EXISTS (SELECT 1 FROM enrollment_sponsor_security sec
+        WHERE sec.sponsor_id = c.sponsor_id AND sec.panic_at >= c.issued_at)
+      AND (json_extract(c.granted_resources_json, '$.fellowGrantExpiresAt') IS NULL
+        OR json_extract(c.granted_resources_json, '$.fellowGrantExpiresAt') > ?)
+      AND (json_extract(c.granted_resources_json, '$.problemBinding') IS NULL
+        OR json_extract(c.granted_resources_json, '$.problemBinding') = a.problem_id)`;
+
 export async function readArtifactManifest(
   db: D1Database,
   actor: ArtifactActor,
@@ -150,23 +166,9 @@ export async function readArtifactManifest(
   now = Date.now(),
 ): Promise<ArtifactManifest> {
   const row = await db
-    .prepare(`SELECT a.* FROM artifact_uploads a
-    JOIN problem_memberships m ON m.problem_id = a.problem_id AND m.fellow_id = a.fellow_id
-    JOIN fellow_tokens c ON c.credential_id = ? AND c.fellow_id = a.fellow_id AND c.sponsor_id = a.sponsor_id
-    JOIN enrollment_fellows f ON f.fellow_id = c.fellow_id AND f.sponsor_id = c.sponsor_id
-      AND f.status IN ('active', 'suspicious_review')
-    JOIN enrollment_grants g ON g.fellow_id = f.fellow_id AND g.sponsor_id = f.sponsor_id
-      AND g.granted_scopes_json = c.granted_scopes_json AND g.granted_resources_json = c.granted_resources_json
-    WHERE a.upload_id = ? AND a.fellow_id = ? AND a.sponsor_id = ?
-      AND c.revoked_at IS NULL AND c.issued_at <= ? AND c.expires_at > ?
-      AND c.credential_profile = 'bearer'
-      AND NOT EXISTS (SELECT 1 FROM enrollment_sponsor_security sec
-        WHERE sec.sponsor_id = c.sponsor_id AND sec.panic_at >= c.issued_at)
-      AND (json_extract(c.granted_resources_json, '$.fellowGrantExpiresAt') IS NULL
-        OR json_extract(c.granted_resources_json, '$.fellowGrantExpiresAt') > ?)
-      AND (json_extract(c.granted_resources_json, '$.problemBinding') IS NULL
-        OR json_extract(c.granted_resources_json, '$.problemBinding') = a.problem_id)`)
-    .bind(actor.credentialId, uploadId, actor.fellowId, actor.sponsorId, now, now, now)
+    .prepare(`SELECT a.* ${ARTIFACT_READ_AUTHORITY_SQL}
+      AND a.upload_id = ? AND a.fellow_id = ? AND a.sponsor_id = ?`)
+    .bind(actor.credentialId, now, now, now, uploadId, actor.fellowId, actor.sponsorId)
     .first<ArtifactManifest>();
   return row ?? fail("NOT_FOUND");
 }

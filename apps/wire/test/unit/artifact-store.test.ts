@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import {
   ARTIFACT_PART_SIZE_BYTES,
+  ArtifactInventoryResponseSchema,
   ArtifactStatusResponseSchema,
 } from "@asimposium/contracts/artifact-uploads";
 import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
@@ -115,6 +116,12 @@ async function fixture(withRetention = true) {
         "utf8",
       ),
     );
+  sql.exec(
+    readFileSync(
+      new URL("../../../../db/migrations/0138_artifact_upload_inventory.sql", import.meta.url),
+      "utf8",
+    ),
+  );
   let before: ((text: string) => void) | undefined;
   const prepare = (text: string) => {
     let binds: unknown[] = [];
@@ -1042,6 +1049,91 @@ test("metadata never returns the signed capability, credential, ciphertext or ve
   });
 });
 
+test("private inventory recovers lost receipts with stable bounded owner-only pagination", async () => {
+  await withArtifactFixture(async (f) => {
+    const own = await Promise.all([
+      f.create("inventory-a"),
+      f.create("inventory-b"),
+      f.create("inventory-c"),
+    ]);
+    const foreign = await f.create(
+      "inventory-other",
+      { ...f.declaration, sessionId: `S-${"B".repeat(26)}` },
+      other,
+    );
+    const h = http(f);
+    let path = "/v1/artifacts?limit=1";
+    const recovered: string[] = [];
+    do {
+      const response = await h.call(path);
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("cache-control"), "private, no-store");
+      const page = ArtifactInventoryResponseSchema.parse(await response.json());
+      assert.equal(page.items.length, 1);
+      recovered.push(page.items[0]!.upload_id);
+      assert.equal(page.items[0]!.original_session_id, f.declaration.sessionId);
+      assert.equal(page.items[0]!.problem_id, "P-DEMO");
+      assert.equal(page.items[0]!.status_path, `/v1/artifacts/${page.items[0]!.upload_id}`);
+      assert.deepEqual(page.omitted, page.next_path ? ["page_limit"] : []);
+      for (const secret of [
+        foreign.upload_id,
+        "X-Amz-",
+        "token-a",
+        "replay_ciphertext",
+        "lease_token",
+        "usr_a",
+      ])
+        assert.ok(!JSON.stringify(page).includes(secret));
+      path = page.next_path ?? "";
+    } while (path);
+    assert.deepEqual(recovered, own.map((row) => row.upload_id).sort());
+    assert.equal(new Set(recovered).size, 3);
+    assert.equal(f.writes.length, 0, "inventory must not touch private storage");
+  });
+});
+
+test("inventory uses current read authority after session close and never cleans expired bytes", async () => {
+  await withArtifactFixture(async (f) => {
+    const receipt = await f.create();
+    f.objects.set(artifactStagingKey(receipt.upload_id), bytes);
+    f.sql.exec(`UPDATE sessions SET closed_at = '${iso()}'`);
+    const h = http(f);
+    assert.equal(
+      ArtifactInventoryResponseSchema.parse(await (await h.call("/v1/artifacts")).json()).items
+        .length,
+      1,
+    );
+    f.now(NOW + ARTIFACT_REPLAY_MS);
+    const expired = ArtifactInventoryResponseSchema.parse(
+      await (await h.call("/v1/artifacts")).json(),
+    );
+    assert.equal(expired.items[0]!.state, "expired");
+    assert.equal(f.rows()[0]!.state, "presigned");
+    assert.equal(f.deletions.length, 0);
+    f.sql.exec("UPDATE fellow_tokens SET revoked_at = 1");
+    assert.deepEqual(
+      ArtifactInventoryResponseSchema.parse(await (await h.call("/v1/artifacts")).json()).items,
+      [],
+    );
+  });
+});
+
+test("inventory refuses credential and ownership selectors, repeated fields and unbounded pages", async () => {
+  await withArtifactFixture(async (f) => {
+    const h = http(f);
+    for (const query of [
+      "token=secret",
+      "fellow_id=fellow-b",
+      "limit=51",
+      "limit=01",
+      "limit=1&limit=2",
+      "after=not-an-upload",
+    ])
+      assert.equal((await h.call(`/v1/artifacts?${query}`)).status, 400);
+    assert.equal((await http(f, "foreign").call("/v1/artifacts")).status, 401);
+  });
+});
+
 test("forged identities in headers, cookies and JSON cannot obtain an upload", async () => {
   await withArtifactFixture(async (f) => {
     const h = http(f, "forged-token");
@@ -1091,7 +1183,7 @@ test("HTTP refuses query credentials, unsupported methods, media types and shape
   await withArtifactFixture(async (f) => {
     const h = http(f);
     assert.equal((await h.call("/v1/artifacts?token=secret", "POST", h.manifest())).status, 400);
-    assert.equal((await h.call("/v1/artifacts")).status, 405);
+    assert.equal((await h.call("/v1/artifacts", "PATCH")).status, 405);
     assert.equal(
       (await h.call("/v1/artifacts", "POST", h.manifest(), { "content-type": "text/plain" }))
         .status,

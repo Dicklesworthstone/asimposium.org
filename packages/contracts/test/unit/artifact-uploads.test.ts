@@ -8,6 +8,8 @@ import {
   ArtifactDeclareRequestSchema,
   ArtifactDeclareResponseSchema,
   ArtifactIdempotencyKeySchema,
+  ArtifactInventoryQuerySchema,
+  ArtifactInventoryResponseSchema,
   ArtifactRenewRequestSchema,
   ArtifactRenewResponseSchema,
   ArtifactResumableProgressSchema,
@@ -252,4 +254,27 @@ test("resumable responses never expose bucket keys, arbitrary part URLs or empty
     { uploaded_parts: [{ part_number: 1, offset: 0, size_bytes: 0, sha256: request.sha256 }] },
   ])
     assert.ok(!ArtifactResumableProgressSchema.safeParse({ ...progress, ...extra }).success);
+});
+
+test("private inventory contracts bound pagination and refuse secret or foreign selector fields", () => {
+  assert.ok(ArtifactInventoryQuerySchema.safeParse({ after: upload, limit: "50" }).success);
+  for (const query of [
+    { limit: "51" },
+    { limit: "01" },
+    { limit: 20 },
+    { fellow_id: "other" },
+    { token: "secret" },
+  ])
+    assert.ok(!ArtifactInventoryQuerySchema.safeParse(query).success);
+  const page = JSON.parse(
+    readFileSync(new URL("../fixtures/valid/artifact-inventory.json", import.meta.url), "utf8"),
+  );
+  assert.ok(ArtifactInventoryResponseSchema.safeParse(page).success);
+  const leaked = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/invalid/artifact-inventory-secret.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.ok(!ArtifactInventoryResponseSchema.safeParse(leaked).success);
 });

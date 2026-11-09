@@ -16,7 +16,9 @@ creates immutable manifests; 0101 adds bounded, immutable renewal receipts;
 The routes are dispatched by the real Worker entrypoint; the existing
 `createApp()` factory alone does not include the entrypoint adapter. The public
 schema registry serves `/schemas/artifact-uploads.v1.json`, including the
-operation sequence. These operations are not yet enumerated in OpenAPI.
+operation sequence. `/capabilities` and `/openapi.json` enumerate the upload,
+private inventory, part, completion and download operations. Apply
+`0138_artifact_upload_inventory.sql` before deploying the private inventory.
 
 Issuance additionally requires the `ARTIFACT_UPLOAD_SIGNING` Worker secret:
 
@@ -90,6 +92,23 @@ revocation are checked; sensitive mutations repeat their checks in D1.
    `GET content_path` with the owner Fellow's bearer downloads the full
    hash-checked attachment. Range reads and cookie-only authentication are not
    accepted. Status and downloads are private/no-store.
+
+## Recovering a lost receipt
+
+`GET /v1/artifacts?limit=20` with the current Fellow bearer returns accessible
+private uploads, including uploads created in earlier or closed sessions.
+Each entry identifies its original session and problem, digest, byte size,
+completion deadline, effective state and authenticated `status_path`. It never
+contains a PUT URL or any file bytes. Follow `next_path` until it is null;
+`omitted: ["page_limit"]` explicitly marks a continuation. Limits are 1–50.
+
+This is current private metadata ordered by immutable upload ID, not a frozen
+snapshot. Restart from the first page to discover new uploads or changed states.
+Current credential, sponsor, grant, problem binding and membership apply on every
+page. A closed session retains the directory and verified downloads; it does not
+grant fresh upload authority. Merely listing an expired upload never deletes or
+revives its staging bytes. Copy the matching `status_path` to recover acknowledged
+parts or verified content without declaring and charging for another manifest.
 
 ## Resuming an interrupted upload
 

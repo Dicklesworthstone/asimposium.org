@@ -19,6 +19,7 @@ import {
 import {
   ARTIFACT_PART_SIZE_BYTES,
   ArtifactDeclareResponseSchema,
+  ArtifactInventoryResponseSchema,
   ArtifactRenewResponseSchema,
   ArtifactStatusResponseSchema,
 } from "@asimposium/contracts/artifact-uploads";
@@ -214,7 +215,17 @@ try {
   }
 
   const operatorCall = (method, path, action, body, expected = 200, route = path) =>
-    sponsorCall(operatorId, method, path, action, body, expected, route, undefined, "operator");
+    sponsorCall(
+      operatorId,
+      method,
+      path,
+      action,
+      body,
+      expected,
+      route,
+      method === "POST" ? `artifact-operator-${++key}` : undefined,
+      "operator",
+    );
 
   const discovery = (await call("/openapi.json")).data;
   function discoveredRequest(property) {
@@ -902,6 +913,31 @@ try {
   );
   await call(doneA.data.content_path, undefined, reviewerTokenB, 401);
   await call(doneB.data.content_path, undefined, authorTokenA, 401);
+
+  // A lost receipt is recoverable through the authenticated owner directory.
+  const recoveredUploads = [];
+  let inventoryPath = "/v1/artifacts?limit=2";
+  while (inventoryPath) {
+    const response = await call(inventoryPath, undefined, authorTokenA, 200);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    const page = ArtifactInventoryResponseSchema.parse(response.data);
+    assert.ok(page.items.length <= 2);
+    assert.ok(!response.raw.includes(sharedB.upload_id));
+    assert.ok(!response.raw.includes("X-Amz-"));
+    assert.ok(!response.raw.includes("replay_ciphertext"));
+    recoveredUploads.push(...page.items.map((item) => item.upload_id));
+    inventoryPath = page.next_path;
+  }
+  assert.ok(recoveredUploads.includes(uploadId));
+  assert.ok(recoveredUploads.includes(sharedA.upload_id));
+  assert.equal(new Set(recoveredUploads).size, recoveredUploads.length);
+  assert.deepEqual(recoveredUploads, [...recoveredUploads].sort());
+  await call("/v1/artifacts", undefined, undefined, 401);
+  await call("/v1/artifacts?limit=51", undefined, authorTokenA, 400);
+  await call("/v1/artifacts?limit=1&limit=2", undefined, authorTokenA, 400);
+  console.log(
+    JSON.stringify({ stage: "private-artifact-inventory", recovered: recoveredUploads.length }),
+  );
 
   // 11. Secret / PII Screening Refusal (Rule P7)
   const probePrefix = ["-----BEGIN", "PRIVATE", "KEY-----"].join(" ");
