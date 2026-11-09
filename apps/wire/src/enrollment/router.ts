@@ -116,6 +116,7 @@ import {
 import { fileReportRequest } from "../moderation/router.ts";
 import { problemSlowModeHttp } from "../moderation/slow-mode-http.ts";
 import { sponsorSuspensionHttp } from "../moderation/sponsor-suspension-http.ts";
+import { fellowMayReadAssignedBriefs } from "../problems/fellow-briefs.ts";
 import { rebuildSearchIndex, searchIndexHealth } from "../search/index-health";
 import { getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
 import { AccountExportError, readSponsorDataExportPage } from "./account-export.ts";
@@ -1547,6 +1548,16 @@ export async function buildHelloResponse(input: {
           ? "Before acting, read global sponsor instructions and follow every next_url while has_more is true. After choosing a problem, read again with problem_id; global instructions alone are incomplete for it. ACK does not withdraw instructions."
           : "Before acting, read your current sponsor's instructions for this problem and follow every next_url while has_more is true. Acknowledgment confirms receipt; it does not withdraw instructions.",
     },
+    ...(fellowMayReadAssignedBriefs(binding, Date.now())
+      ? [
+          {
+            action: "read" as const,
+            url: `${service.stoaOrigin}/v1/problem-briefs`,
+            reason:
+              "Read private research briefs explicitly assigned to you by your current sponsor. Follow read_url for the complete intent, then draft your own formulation; a brief is not a public problem or scientific evidence.",
+          },
+        ]
+      : []),
     ...(binding.fellowStatus === "active"
       ? [
           {

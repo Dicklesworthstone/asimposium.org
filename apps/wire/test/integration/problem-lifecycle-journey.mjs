@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   EnrollmentProblemBindingSchema,
+  FellowProblemBriefListResponseSchema,
+  FellowProblemBriefReadResponseSchema,
+  fellowProblemBriefReadUrl,
   ProblemAccessActionReceiptSchema,
   ProblemDetailSchema,
   ProblemIdSchema,
@@ -94,6 +97,14 @@ export async function problemLifecycleJourney({
   // another sponsor's known brief ID. Compare hashes without logging drafts.
   await refuseBriefEdit(sponsorB, savedBrief.brief.id, "Cross-sponsor overwrite attempt");
   const fellowA = await call("/v1/hello", undefined, fellowA1Token);
+  assert.ok(fellowA.next_actions.some((action) => action.url.endsWith("/v1/problem-briefs")));
+  const unassignedBriefs = FellowProblemBriefListResponseSchema.parse(
+    await call("/v1/problem-briefs", undefined, fellowA1Token),
+  );
+  assert.equal(
+    unassignedBriefs.briefs.some((brief) => brief.id === savedBrief.brief.id),
+    false,
+  );
   const editedBrief = await sponsorCall(
     sponsorA,
     "POST",
@@ -114,6 +125,38 @@ export async function problemLifecycleJourney({
   assert.equal(storedEditedBrief.assigned_fellow_id, fellowA.fellow.fellow_id);
   assert.ok(storedEditedBrief.title === "Assigned modular-cycle brief");
   assert.ok(editedBrief.brief.title === storedEditedBrief.title);
+
+  // The Fellow follows the server-authored read rather than receiving copied
+  // private intent out of band. Another sponsor's Fellow cannot read it.
+  const assignedBriefs = FellowProblemBriefListResponseSchema.parse(
+    await call("/v1/problem-briefs", undefined, fellowA1Token),
+  );
+  assert.deepEqual(
+    assignedBriefs.briefs.map((brief) => brief.id),
+    [savedBrief.brief.id],
+  );
+  assert.deepEqual(assignedBriefs.omitted, []);
+  assert.equal(JSON.stringify(assignedBriefs).includes(briefPayload.statement), false);
+  const assignedReadUrl = assignedBriefs.briefs[0].read_url;
+  const assignedDetail = FellowProblemBriefReadResponseSchema.parse(
+    await call(assignedReadUrl, undefined, fellowA1Token),
+  );
+  assert.deepEqual(assignedDetail.brief, editedBrief.brief);
+  assert.equal(assignedDetail.next_actions[0]?.url, "/v1/problems");
+  const unknownBrief = await call(
+    fellowProblemBriefReadUrl("brief-absent"),
+    undefined,
+    fellowB1Token,
+    404,
+  );
+  assert.deepEqual(await call(assignedReadUrl, undefined, fellowB1Token, 404), unknownBrief);
+  const privateResponse = await worker.fetch(`${origin}${assignedReadUrl}`, {
+    headers: { "User-Agent": userAgent, authorization: `Bearer ${fellowA1Token}` },
+  });
+  assert.equal(privateResponse.status, 200);
+  assert.equal(privateResponse.headers.get("cache-control"), "private, no-store");
+  await privateResponse.arrayBuffer();
+  await call(assignedReadUrl, undefined, undefined, 401);
 
   const briefList = await sponsorCall(
     sponsorA,
@@ -180,6 +223,14 @@ export async function problemLifecycleJourney({
   assert.equal(proposed.problem.title, proposalPayload.title);
   assert.equal(proposed.problem.status, "private-draft");
   assert.equal(proposed.problem.current_statement_version, 1);
+  await call(assignedReadUrl, undefined, fellowA1Token, 404);
+  const afterAdoption = FellowProblemBriefListResponseSchema.parse(
+    await call("/v1/problem-briefs", undefined, fellowA1Token),
+  );
+  assert.equal(
+    afterAdoption.briefs.some((brief) => brief.id === savedBrief.brief.id),
+    false,
+  );
   await refuseBriefEdit(sponsorA, savedBrief.brief.id, "Edit after adoption");
   console.log(
     JSON.stringify({
@@ -258,7 +309,7 @@ export async function problemLifecycleJourney({
     );
     assert.deepEqual(await privateState(), beforePrivateRefusals);
   }
-  async function boundFellow(name, actor, binding) {
+  async function boundFellow(name, actor, binding, grants = {}) {
     const minted = await sponsorCall(
       actor,
       "POST",
@@ -267,6 +318,7 @@ export async function problemLifecycleJourney({
       {
         requested_scopes: ["review"],
         problem_binding: binding,
+        ...grants,
       },
       201,
     );
@@ -297,6 +349,30 @@ export async function problemLifecycleJourney({
     );
     return (await call("/v1/fellows/flow", { flow_handle: claimed.flow_handle })).token;
   }
+  const boundProposer = await boundFellow("fellow-a-bound-proposer", sponsorA, problemId, {
+    requested_scopes: ["propose-problems"],
+  });
+  const beforeRejectedProposals = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM problems",
+  ).first();
+  const boundProposalRefusal = await call(
+    "/v1/problems",
+    { ...proposalPayload, brief_id: undefined },
+    boundProposer,
+    403,
+  );
+  assert.equal(boundProposalRefusal.code, "WRITE_REFUSED");
+  assert.deepEqual(
+    await env.DB.prepare("SELECT COUNT(*) AS n FROM problems").first(),
+    beforeRejectedProposals,
+  );
+  await call("/v1/problem-briefs", undefined, boundProposer, 401);
+  assert.equal(
+    (await call("/v1/hello", undefined, boundProposer)).next_actions.some((action) =>
+      action.url.endsWith("/v1/problem-briefs"),
+    ),
+    false,
+  );
   const boundPeer = await boundFellow("fellow-a-bound-peer", sponsorA, problemId);
   const foreignBound = await boundFellow("fellow-b-bound-peer", sponsorB, problemId);
   const wrongTarget = await boundFellow("fellow-a-other-binding", sponsorA, "P-OTHER");

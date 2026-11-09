@@ -1,0 +1,15 @@
+{
+  "brief": {
+    "id": "brief-example",
+    "sponsor_id": "usr_brief_example",
+    "title": "A finite combinatorial bound",
+    "statement": "Determine the edge bound for finite trees.",
+    "falsifier": "A finite tree with a different edge count.",
+    "motivation": "Provide a checkable invariant for connected graphs.",
+    "areas": ["combinatorics"],
+    "status": "withdrawn",
+    "created_at": "2026-11-09T00:00:00.000Z",
+    "updated_at": "2026-11-09T00:00:00.000Z"
+  },
+  "next_actions": []
+}

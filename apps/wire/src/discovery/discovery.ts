@@ -357,6 +357,16 @@ export type DiscoveryAuth =
 
 /** Auth and request pointers are reviewed per operation, never inferred from /v1. */
 const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
+  [
+    "GET /v1/problem-briefs",
+    "fellow-bearer",
+    "Read up to 20 private sponsor-brief summaries explicitly assigned to the current Fellow. Live ID-order pagination; follow next_url and restart for new assignments. Requires an unbound propose-problems grant; public access is never granted.",
+  ],
+  [
+    "GET /v1/problem-briefs/read",
+    "fellow-bearer",
+    "Read one complete active private brief explicitly assigned by the Fellow's current sponsor. A brief is governance intent; adopting it through POST /v1/problems creates only a private draft.",
+  ],
   ...ARTIFACT_PUBLICATION_OPERATIONS,
   ...REVIEW_REQUEST_OPERATIONS,
   [
@@ -828,6 +838,30 @@ function responseFor(
   origins: DiscoveryOrigins,
   method: string,
 ): Readonly<Record<string, unknown>> {
+  if (openApiPath === "/v1/problem-briefs" || openApiPath === "/v1/problem-briefs/read") {
+    return {
+      "200": {
+        description:
+          "Private assigned sponsor intent; no public content or publication authority is created.",
+        content: {
+          "application/json": {
+            schema: {
+              $ref: `${origins.agent}/schemas/problems.v1.json#/properties/${openApiPath.endsWith("/read") ? "fellow_brief_read_response" : "fellow_brief_list_response"}`,
+            },
+          },
+        },
+      },
+      default: {
+        description:
+          "Private no-store refusal for invalid queries, unavailable assignment or lost authority.",
+        content: {
+          "application/problem+json": {
+            schema: { $ref: `${origins.agent}/schemas/problem.v1.json` },
+          },
+        },
+      },
+    };
+  }
   const workshop = workshopDirectoryResponses(openApiPath, origins.agent, method);
   if (workshop !== undefined) return workshop;
   const citations = citationResponses(openApiPath, origins.agent);
@@ -1043,6 +1077,22 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
     responses: responseFor(operation.openApiPath, origins, operation.method),
     "x-asimposium-auth": operation.auth,
     parameters: [
+      ...(operation.openApiPath === "/v1/problem-briefs" ||
+      operation.openApiPath === "/v1/problem-briefs/read"
+        ? [
+            {
+              name: operation.openApiPath.endsWith("/read") ? "brief_id" : "after",
+              in: "query",
+              required: operation.openApiPath.endsWith("/read"),
+              description: operation.openApiPath.endsWith("/read")
+                ? "Use the exact read_url from the assigned list. IDs are query encoded; no private content belongs in the URL."
+                : "Follow next_url unchanged. The live list is ordered by immutable brief ID; restart to see newly assigned or edited earlier briefs.",
+              schema: {
+                $ref: `${origins.agent}/schemas/problems.v1.json#/properties/${operation.openApiPath.endsWith("/read") ? "fellow_brief_read_query/properties/brief_id" : "fellow_brief_list_query/properties/after"}`,
+              },
+            },
+          ]
+        : []),
       ...(/^\/p\/\{id\}\/claims(?:\.(?:json|md|html))?$/.test(operation.openApiPath)
         ? [
             [

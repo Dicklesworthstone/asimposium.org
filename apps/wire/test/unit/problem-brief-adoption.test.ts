@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { EnrollmentService, FellowCredentialBinding } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
+import { writeLedgerEvent } from "../../src/krater/krater.ts";
 import { createProblemRouter } from "../../src/problems/router.ts";
 import {
   FELLOW,
@@ -26,7 +27,7 @@ const proposal = {
   areas: ["combinatorics"],
 };
 
-async function fixture() {
+async function fixture(overrides: Partial<FellowCredentialBinding> = {}) {
   const f = await publicationContextFixture();
   fixtures.push(f);
   const now = Date.now();
@@ -44,6 +45,7 @@ async function fixture() {
     expiresAt: now + 60_000,
     credentialProfile: "bearer",
     fellowStatus: "active",
+    ...overrides,
   };
   f.sql
     .query(`INSERT INTO sponsor_problem_briefs
@@ -219,4 +221,60 @@ test("an unrelated storage failure is not misreported as lost brief authority", 
   expect(response.status).toBe(500);
   expect(await response.json()).toMatchObject({ code: "INTERNAL_ERROR" });
   expect(f.state()).toEqual(before);
+});
+
+test("problem proposals enforce resource grants with the same coarse refusal and no draft effects", async () => {
+  let refusal: unknown;
+  for (const overrides of [
+    { grantedScopes: [] },
+    { grantedResources: { problemBinding: "P-CONTEXT" } },
+    { grantedResources: { eventBudget: 0 } },
+    { grantedResources: { fellowGrantExpiresAt: Date.now() - 1 } },
+  ] satisfies Partial<FellowCredentialBinding>[]) {
+    const f = await fixture(overrides);
+    const before = f.state();
+    const response = await f.propose();
+    expect(response.status).toBe(403);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    const body: unknown = await response.json();
+    expect(body).toMatchObject({ code: "WRITE_REFUSED" });
+    refusal ??= body;
+    expect(body).toEqual(refusal);
+    expect(f.state()).toEqual(before);
+  }
+});
+
+test("an unbound Fellow with remaining event budget can still adopt its brief", async () => {
+  const f = await fixture({ grantedResources: { eventBudget: 1 } });
+  expect((await f.propose()).status).toBe(201);
+  expect(f.state().events).toEqual([]);
+});
+
+test("a credential with its positive event budget exhausted cannot adopt a brief", async () => {
+  const credentialId = "TOKEN-brief-budget-exhausted";
+  const f = await fixture({ credentialId, grantedResources: { eventBudget: 1 } });
+  const member = f.command(f.input("Previously recorded work."));
+  const attribution = member.input.attribution;
+  if (attribution.principalType !== undefined) {
+    throw new Error("Expected a Fellow-attributed fixture event.");
+  }
+  await writeLedgerEvent(
+    f.db,
+    {
+      ...member.input,
+      attribution: { ...attribution, credentialId },
+    },
+    member.projection,
+  );
+  expect(
+    f.sql.query("SELECT writer_credential_id FROM events ORDER BY problem_id,seq").all(),
+  ).toEqual([{ writer_credential_id: credentialId }]);
+
+  const before = f.state();
+  const response = await f.propose();
+  expect(response.status).toBe(403);
+  expect(response.headers.get("cache-control")).toBe("private, no-store");
+  expect(await response.json()).toMatchObject({ code: "WRITE_REFUSED" });
+  expect(f.state()).toEqual(before);
+  expect(f.sql.query("PRAGMA foreign_key_check").all()).toEqual([]);
 });

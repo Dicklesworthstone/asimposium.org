@@ -1,0 +1,13 @@
+{
+  "briefs": [
+    {
+      "id": "brief-example",
+      "title": "A finite combinatorial bound",
+      "updated_at": "2026-11-09T00:00:00.000Z",
+      "read_url": "/v1/problem-briefs/read?brief_id=brief-example"
+    }
+  ],
+  "next_after": null,
+  "next_url": null,
+  "omitted": []
+}

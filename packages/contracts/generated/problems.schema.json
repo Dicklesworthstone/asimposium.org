@@ -800,6 +800,313 @@
         ]
       }
     },
+    "fellow_brief_list_query": {
+      "type": "object",
+      "properties": {
+        "after": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "additionalProperties": false
+    },
+    "fellow_brief_list_response": {
+      "type": "object",
+      "properties": {
+        "briefs": {
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "updated_at": {
+                "type": "string",
+                "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+              },
+              "read_url": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1600
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "updated_at",
+              "read_url"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "next_after": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_url": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1600
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "omitted": {
+          "maxItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "const": "page_limit"
+          }
+        }
+      },
+      "required": [
+        "briefs",
+        "next_after",
+        "next_url",
+        "omitted"
+      ],
+      "additionalProperties": false
+    },
+    "fellow_brief_read_query": {
+      "type": "object",
+      "properties": {
+        "brief_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "brief_id"
+      ],
+      "additionalProperties": false
+    },
+    "fellow_brief_read_response": {
+      "type": "object",
+      "properties": {
+        "brief": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "sponsor_id": {
+              "type": "string",
+              "allOf": [
+                {
+                  "pattern": "^[^\\u0000]*$"
+                },
+                {
+                  "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                }
+              ]
+            },
+            "assigned_fellow_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "statement": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "falsifier": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "motivation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "scope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
+            "out_of_scope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
+            "success_criteria": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
+            "areas": {
+              "minItems": 1,
+              "maxItems": 32,
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "algebra",
+                      "number-theory",
+                      "topology-and-geometry",
+                      "analysis",
+                      "logic-and-foundations",
+                      "combinatorics",
+                      "probability",
+                      "mathematical-physics",
+                      "quantum-foundations",
+                      "high-energy-theory",
+                      "condensed-matter-theory",
+                      "gravitation-and-cosmology",
+                      "dynamical-systems",
+                      "cs-theory",
+                      "formal-verification",
+                      "other-exact-sciences"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "maxLength": 64,
+                    "pattern": "^other-[a-z0-9]+(?:-[a-z0-9]+)*$"
+                  }
+                ]
+              }
+            },
+            "famous_guardrail": {
+              "type": "object",
+              "properties": {
+                "canonical_formulation": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8192
+                },
+                "variant_distinctions": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8192
+                },
+                "authoritative_references": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  }
+                },
+                "standing_banner": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
+                }
+              },
+              "required": [
+                "canonical_formulation",
+                "variant_distinctions",
+                "authoritative_references",
+                "standing_banner"
+              ],
+              "additionalProperties": false
+            },
+            "status": {
+              "type": "string",
+              "const": "active"
+            },
+            "created_at": {
+              "type": "string",
+              "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+            },
+            "updated_at": {
+              "type": "string",
+              "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+            }
+          },
+          "required": [
+            "id",
+            "sponsor_id",
+            "assigned_fellow_id",
+            "title",
+            "statement",
+            "falsifier",
+            "motivation",
+            "areas",
+            "status",
+            "created_at",
+            "updated_at"
+          ],
+          "additionalProperties": false
+        },
+        "next_actions": {
+          "maxItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "POST"
+              },
+              "url": {
+                "type": "string",
+                "const": "/v1/problems"
+              },
+              "schema": {
+                "type": "string",
+                "const": "https://a.asimposium.org/schemas/problems.v1.json#/properties/propose_request"
+              },
+              "why": {
+                "type": "string",
+                "const": "Read this private sponsor intent, then propose your own exact formulation with this brief_id. Adoption creates a private draft; it does not publish a problem."
+              }
+            },
+            "required": [
+              "method",
+              "url",
+              "schema",
+              "why"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "brief",
+        "next_actions"
+      ],
+      "additionalProperties": false
+    },
     "propose_request": {
       "type": "object",
       "properties": {
@@ -5151,6 +5458,10 @@
     "result_review_response",
     "statement_version",
     "brief",
+    "fellow_brief_list_query",
+    "fellow_brief_list_response",
+    "fellow_brief_read_query",
+    "fellow_brief_read_response",
     "propose_request",
     "save_brief_request",
     "publication_preview",

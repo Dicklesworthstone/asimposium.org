@@ -171,6 +171,92 @@ export const SponsorProblemBriefListResponseSchema = z
   .strict();
 export type SponsorProblemBriefListResponse = z.infer<typeof SponsorProblemBriefListResponseSchema>;
 
+/** Private, explicitly assigned sponsor intent. Listing never includes the
+ * formulation bodies; each complete brief has a separately authorized read. */
+export const FELLOW_PROBLEM_BRIEF_PAGE_SIZE = 20;
+export const FellowProblemBriefListQuerySchema = z
+  .object({ after: z.string().min(1).max(128).optional() })
+  .strict();
+export type FellowProblemBriefListQuery = z.infer<typeof FellowProblemBriefListQuerySchema>;
+export const FellowProblemBriefReadQuerySchema = z
+  .object({ brief_id: z.string().min(1).max(128) })
+  .strict();
+export type FellowProblemBriefReadQuery = z.infer<typeof FellowProblemBriefReadQuerySchema>;
+
+export function fellowProblemBriefListUrl(after?: string): string {
+  return `/v1/problem-briefs${after === undefined ? "" : `?after=${encodeURIComponent(after)}`}`;
+}
+
+export function fellowProblemBriefReadUrl(id: string): string {
+  return `/v1/problem-briefs/read?brief_id=${encodeURIComponent(id)}`;
+}
+
+const FellowProblemBriefSummarySchema = z
+  .object({
+    id: z.string().min(1).max(128),
+    title: z.string().min(1).max(120),
+    updated_at: ProblemIndexTimestampSchema,
+    read_url: z.string().min(1).max(1600),
+  })
+  .strict()
+  .superRefine((brief, context) => {
+    if (brief.read_url !== fellowProblemBriefReadUrl(brief.id))
+      context.addIssue({
+        code: "custom",
+        path: ["read_url"],
+        message: "Read the exact assigned brief.",
+      });
+  });
+
+export const FellowProblemBriefListResponseSchema = z
+  .object({
+    briefs: z.array(FellowProblemBriefSummarySchema).max(FELLOW_PROBLEM_BRIEF_PAGE_SIZE),
+    next_after: z.string().min(1).max(128).nullable(),
+    next_url: z.string().min(1).max(1600).nullable(),
+    omitted: z.array(z.literal("page_limit")).max(1),
+  })
+  .strict()
+  .superRefine((page, context) => {
+    const continuing = page.next_after !== null;
+    if (
+      page.next_url !== (continuing ? fellowProblemBriefListUrl(page.next_after!) : null) ||
+      (continuing && page.briefs.at(-1)?.id !== page.next_after) ||
+      page.omitted.length !== (continuing ? 1 : 0) ||
+      new Set(page.briefs.map((brief) => brief.id)).size !== page.briefs.length
+    )
+      context.addIssue({
+        code: "custom",
+        message: "Brief continuation must follow the emitted page.",
+      });
+  });
+export type FellowProblemBriefListResponse = z.infer<typeof FellowProblemBriefListResponseSchema>;
+
+export const FellowProblemBriefReadResponseSchema = z
+  .object({
+    brief: SponsorProblemBriefSchema.safeExtend({
+      assigned_fellow_id: z.string().min(1).max(128),
+      status: z.literal("active"),
+    }),
+    next_actions: z
+      .array(
+        z
+          .object({
+            method: z.literal("POST"),
+            url: z.literal("/v1/problems"),
+            schema: z.literal(
+              "https://a.asimposium.org/schemas/problems.v1.json#/properties/propose_request",
+            ),
+            why: z.literal(
+              "Read this private sponsor intent, then propose your own exact formulation with this brief_id. Adoption creates a private draft; it does not publish a problem.",
+            ),
+          })
+          .strict(),
+      )
+      .max(1),
+  })
+  .strict();
+export type FellowProblemBriefReadResponse = z.infer<typeof FellowProblemBriefReadResponseSchema>;
+
 /**
  * GET /v1/sponsors/problems: problems this sponsor owns or stewards, including private
  * drafts adopted by its Fellows, so the console can offer the lifecycle gate.
@@ -854,6 +940,10 @@ export const ProblemLifecycleContractsSchema = z
     result_review_response: ProblemResultReviewResponseSchema,
     statement_version: ProblemStatementVersionSchema,
     brief: SponsorProblemBriefSchema,
+    fellow_brief_list_query: FellowProblemBriefListQuerySchema,
+    fellow_brief_list_response: FellowProblemBriefListResponseSchema,
+    fellow_brief_read_query: FellowProblemBriefReadQuerySchema,
+    fellow_brief_read_response: FellowProblemBriefReadResponseSchema,
     propose_request: ProposeProblemRequestSchema,
     save_brief_request: SaveProblemBriefRequestSchema,
     publication_preview: ProblemPublicationPreviewSchema,

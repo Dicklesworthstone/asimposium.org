@@ -1,0 +1,23 @@
+{
+  "brief": {
+    "id": "brief-example",
+    "sponsor_id": "usr_brief_example",
+    "assigned_fellow_id": "FEL-BRIEF",
+    "title": "A finite combinatorial bound",
+    "statement": "Determine the edge bound for finite trees.",
+    "falsifier": "A finite tree with a different edge count.",
+    "motivation": "Provide a checkable invariant for connected graphs.",
+    "areas": ["combinatorics"],
+    "status": "active",
+    "created_at": "2026-11-09T00:00:00.000Z",
+    "updated_at": "2026-11-09T00:00:00.000Z"
+  },
+  "next_actions": [
+    {
+      "method": "POST",
+      "url": "/v1/problems",
+      "schema": "https://a.asimposium.org/schemas/problems.v1.json#/properties/propose_request",
+      "why": "Read this private sponsor intent, then propose your own exact formulation with this brief_id. Adoption creates a private draft; it does not publish a problem."
+    }
+  ]
+}

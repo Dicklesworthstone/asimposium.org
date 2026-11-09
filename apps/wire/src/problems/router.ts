@@ -16,7 +16,7 @@ import { createCommentaryRouter } from "../commentary/router.ts";
 import { createDirectiveDisclosureRouter } from "../directives/disclosure-router.ts";
 import { createDirectiveRouter } from "../directives/router.ts";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service";
-import { fellowCanAccessPrivateProblem } from "../enrollment/service";
+import { authorizeFellowWrite, fellowCanAccessPrivateProblem } from "../enrollment/service";
 import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
 import { genesisChainDigest } from "../krater/krater";
@@ -37,6 +37,7 @@ import {
   problemBoundaryFields,
   type StoredProblemBoundaries,
 } from "./boundaries.ts";
+import { createFellowBriefRouter } from "./fellow-briefs.ts";
 import {
   privateProblemGovernanceResponse,
   readSponsorProblemGovernance,
@@ -96,6 +97,7 @@ async function readJsonBody(request: Request): Promise<unknown> {
 
 export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+  app.route("/", createFellowBriefRouter({ service: options.service }));
   const screenPromotion: PublicCandidateScreener =
     options.screenPromotion ??
     ((input, env) =>
@@ -198,14 +200,36 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     if (!auth.ok) return auth.response;
     const db = c.env.DB;
 
-    // Scope check: propose-problems
-    if (!auth.binding.grantedScopes.includes("propose-problems")) {
+    // A proposal creates a new resource. A token bound to one existing
+    // problem cannot escape that grant merely by carrying the proposal scope.
+    // Use the same policy evaluator as every other Fellow write, including
+    // grant expiry and exhausted event budgets. Unbounded grants need no scan.
+    let eventsRecorded = 0;
+    if (auth.binding.grantedResources.eventBudget !== undefined) {
+      const usage = await db
+        .prepare("SELECT COUNT(*) AS count FROM events WHERE writer_credential_id = ?")
+        .bind(auth.binding.credentialId)
+        .first<{ count: number }>();
+      if (!usage || !Number.isSafeInteger(usage.count) || usage.count < 0) {
+        throw new Error("PROPOSAL_GRANT_USAGE_UNAVAILABLE");
+      }
+      eventsRecorded = usage.count;
+    }
+    const authorization = authorizeFellowWrite({
+      effect: "propose-problems",
+      credential: auth.binding,
+      target: { kind: "new-problem", initialPublication: "private-draft" },
+      usage: { eventsRecorded, artifactBytesRecorded: 0 },
+      now: Date.now(),
+    });
+    if (authorization.decision !== "allow") {
       return validatedProblem({
         status: 403,
         code: "WRITE_REFUSED",
-        title: "Scope 'propose-problems' required",
-        detail: "This Fellow token does not carry the 'propose-problems' scope.",
-        fixHint: "Request an enrollment with 'propose-problems' scope.",
+        title: "The write is not authorized for this credential",
+        detail: "This credential may not perform this write now.",
+        fixHint: "Check the console for the credential state or contact your sponsor.",
+        headers: { "cache-control": "private, no-store" },
       });
     }
 
