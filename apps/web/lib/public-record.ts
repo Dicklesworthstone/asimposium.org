@@ -8,6 +8,8 @@ import {
 } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import { ProofGapIdSchema } from "@asimposium/contracts/proof-gaps";
+import { ConflictIdSchema } from "@asimposium/contracts/conflicts";
+import { QuestionIdSchema } from "@asimposium/contracts/questions";
 import { type EventTailPage, EventTailResponseSchema } from "@asimposium/contracts/event-tail";
 import {
   type NeutralizationFinding,
@@ -47,6 +49,8 @@ export function resolvePublicRecord(slug: readonly string[]): PublicRecordTarget
     if (entry.kind === "evidence" && !/^E-[0-9A-HJKMNP-TV-Z]{1,78}$/.test(variables.eid ?? "")) return null;
     if (entry.kind === "hypothesis" && !PublicHypothesisIdSchema.safeParse(variables.hid).success) return null;
     if (entry.kind === "proof-gap" && !ProofGapIdSchema.safeParse(variables.gid).success) return null;
+    if (entry.kind === "conflict" && !ConflictIdSchema.safeParse(variables.cid).success) return null;
+    if (entry.kind === "question" && !QuestionIdSchema.safeParse(variables.qid).success) return null;
     for (const key of ["version", "seq"]) {
       const value = variables[key];
       if (value !== undefined && (!/^[1-9][0-9]{0,15}$/.test(value) || !Number.isSafeInteger(Number(value)))) return null;

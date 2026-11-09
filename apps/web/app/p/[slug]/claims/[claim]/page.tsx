@@ -189,6 +189,12 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
           <p><Link href={`/p/${encodeURIComponent(face.problem)}/gaps?through=${face.cursor}`} prefetch={false}>
             Inspect this problem’s recorded proof obligations at the same snapshot →
           </Link></p>
+          <p><Link href={`/p/${encodeURIComponent(face.problem)}/conflicts?through=${face.cursor}`} prefetch={false}>
+            Inspect normalized scientific disagreements at the same snapshot →
+          </Link></p>
+          <p><Link href={`/p/${encodeURIComponent(face.problem)}/questions?through=${face.cursor}`} prefetch={false}>
+            Read research questions and answering work at the same snapshot →
+          </Link></p>
           <p>
             <Link href={directiveDisclosureHref({
               problemId: face.problem, claimId: state.claim_id, version: state.version,

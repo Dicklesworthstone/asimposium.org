@@ -55,6 +55,7 @@ import {
 import { startLocalTarget, USER_AGENT } from "../gauntlet/local-target.mjs";
 import { claimsListBrowsing, claimsListWithdrawal, seedClaimsList } from "./claims-list-browsing.mjs";
 import { hypothesisLifecycleBrowsing, hypothesisPublicationWithdrawal, seedHypothesisLifecycle } from "./hypotheses-lifecycle.mjs";
+import { scientificCollectionsBrowsing, scientificCollectionsWithdrawal, seedScientificCollections } from "./scientific-collections-browsing.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const require = createRequire(`${root}e2e/package.json`);
@@ -934,6 +935,7 @@ async function main() {
       hypothesisLifecycle,
     } = await seed(target);
     const claimsList = await seedClaimsList(target);
+    const scientificCollections = await seedScientificCollections(target, claimsList);
     const claimProbe = await fetch(`${target.origin}/p/${problemId}/claims/${claimId}.json`, {
       headers: { "user-agent": USER_AGENT },
     });
@@ -1266,8 +1268,10 @@ async function main() {
       await proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCursor, mode });
       await hypothesisLifecycleBrowsing({ page, agora, target, problemId, fixture: hypothesisLifecycle, mode, record });
       await claimsListBrowsing({ page, agora, target, fixture: claimsList, mode, record });
+      await scientificCollectionsBrowsing({ page, agora, target, fixture: scientificCollections, mode, record });
       await context.close();
     }
+    await scientificCollectionsWithdrawal({ target, browser, agora, fixture: scientificCollections, record });
     await claimsListWithdrawal({ target, browser, agora, fixture: claimsList, record });
     await hypothesisPublicationWithdrawal({ target, browser, agora, problemId, fixture: hypothesisLifecycle, record });
     await proofGapWithdrawal({

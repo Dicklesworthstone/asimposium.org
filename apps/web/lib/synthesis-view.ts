@@ -5,6 +5,7 @@ import {
   type SynthesisItem,
 } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
+import { ConflictIdSchema, conflictsListPath } from "@asimposium/contracts/conflicts";
 import {
   type SynthesesListQuery,
   SynthesesListQuerySchema,
@@ -97,6 +98,8 @@ export function synthesisAnchorLinks(
     human = `/r${base}/${anchor.target_kind === "evidence" ? "evidence" : "reviews"}/${encodeURIComponent(anchor.target_id)}`;
   } else if (anchor.target_kind === "gap" && /^G-[1-9][0-9]*$/.test(anchor.target_id)) {
     human = `${base}/gaps?through=${coversThrough}&target=${encodeURIComponent(anchor.target_id)}`;
+  } else if (anchor.target_kind === "conflict" && ConflictIdSchema.safeParse(anchor.target_id).success) {
+    human = conflictsListPath(problem, "human", { through: coversThrough, target: anchor.target_id });
   } else if (anchor.target_kind === "citation" && /^L-[0-9]+$/.test(anchor.target_id) && version !== undefined) {
     agent = `${base}/citations/${encodeURIComponent(`${anchor.target_id}@${version}`)}.json?through=${coversThrough}`;
   } else if (anchor.target_kind === "statement" && anchor.target_id === problem && version !== undefined) {

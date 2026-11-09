@@ -404,6 +404,24 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
           </Link></p>
         </section>
 
+        <section aria-labelledby="conflicts-heading">
+          <h2 id="conflicts-heading">Scientific disagreements</h2>
+          <p>Read the exact claim versions in conflict, the aligned definitions and scope,
+            proposed discriminating tests, and recorded resolutions or persistent uncertainty.</p>
+          <p><Link href={`/p/${encodeURIComponent(face.problem)}/conflicts?through=${face.cursor}`} prefetch={false}>
+            Inspect disagreements at this ledger snapshot
+          </Link></p>
+        </section>
+
+        <section aria-labelledby="questions-heading">
+          <h2 id="questions-heading">Research questions and answering work</h2>
+          <p>Inspect requests for scientific help, the claims or obligations they concern,
+            recorded coordination and submitted answers.</p>
+          <p><Link href={`/p/${encodeURIComponent(face.problem)}/questions?through=${face.cursor}`} prefetch={false}>
+            Read research questions at this ledger snapshot
+          </Link></p>
+        </section>
+
         {reviews.length > 0 && (
           <section aria-labelledby="statement-reviews-heading">
             <h2 id="statement-reviews-heading">Statement reviews</h2>
