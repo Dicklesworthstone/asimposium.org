@@ -880,9 +880,9 @@ export async function problemGovernanceJourney({
       `/v1/sponsors/problems/${id}/lifecycle`,
       "problem-lifecycle",
       { action: "manage-steward", operation: "remove", target_sponsor_id: sponsorA },
-      published ? 409 : 422,
+      409,
     );
-    assert.equal(refused.code, published ? "OBJECT_VERSION_CONFLICT" : "WRITE_REFUSED");
+    assert.equal(refused.code, "OBJECT_VERSION_CONFLICT");
     assert.equal(
       published ? await fixtures.competingWriteStillArmed() : await fixtures.raceStillArmed(),
       false,

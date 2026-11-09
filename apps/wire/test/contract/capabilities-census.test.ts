@@ -216,6 +216,10 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "signed sponsor authority and membership read; summarized by sponsor_surface",
     "GET /v1/sponsors/problems/<id>/governance/after/<cursor>":
       "signed bounded sponsor membership continuation; summarized by sponsor_surface",
+    "GET /v1/sponsors/problems/<id>/governance/stewards/after/<stewardCursor>":
+      "signed bounded sponsor stewardship continuation; summarized by sponsor_surface",
+    "GET /v1/sponsors/problems/<id>/governance/after/<cursor>/stewards/after/<stewardCursor>":
+      "signed bounded sponsor membership and stewardship continuations; summarized by sponsor_surface",
     "POST /internal/screen":
       "operator screening runs as the platform principal and is disclosed to operators, never in the public capability document",
     "GET /p/<id>":
