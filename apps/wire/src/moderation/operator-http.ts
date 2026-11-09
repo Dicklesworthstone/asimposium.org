@@ -22,6 +22,8 @@ import {
   type AdminReportResolutionRequest,
   AdminReportResolutionResponseSchema,
   AdminReportsQueueResponseSchema,
+  ConflictIdSchema,
+  QuestionIdSchema,
   ReportReasonSchema,
   SCREENING_DECISION_PATHS,
   SCREENING_PROVIDER_STATUSES,
@@ -62,9 +64,10 @@ function notFound(example: Record<string, unknown>): Response {
     status: 404,
     code: "MODERATION_TARGET_NOT_FOUND",
     title: "No such moderation target",
-    detail: "No case, report, problem or claim matches this id. Nothing was changed.",
+    detail:
+      "No case, report, problem or supported public object matches this id. Nothing was changed.",
     fixHint:
-      "Use an id from the operator queue or a public face. Content controls address P-… (the problem) or P-…/C-n (a claim); hide the problem to hide its other objects.",
+      "Use an id from the operator queue or a public face. Content controls address P-… (the problem), P-…/C-n (a claim), P-…/Q-… (a question), or P-…/CF-… (a conflict). Question and conflict controls require their whole object id within the published problem.",
     rule: "A5",
     extensions: { schema: SCREENING_SCHEMA, example },
   });
@@ -268,23 +271,22 @@ export async function operatorContentControl(
   };
   const match = /^(P-[A-Z0-9][A-Z0-9-]{1,30})(?:\/([A-Za-z0-9@-]{1,96}))?$/.exec(request.target_id);
   const problemId = match?.[1];
-  if (problemId === undefined) return notFound(example);
+  if (problemId === undefined || match?.[0] !== request.target_id) return notFound(example);
   const objectRef = match?.[2];
   const problem = await db
     .prepare("SELECT id FROM problems WHERE id = ?")
     .bind(problemId)
     .first<{ id: string }>();
   if (problem === null) return notFound(example);
-  // Faces enforce visibility for a whole problem and for a claim (by claim
-  // id, every version). Other objects are hidden by hiding their problem; a
-  // control nothing would enforce is refused rather than recorded.
-  const claimId = objectRef?.replace(/@[0-9]+$/, "");
+  // Only admit kinds whose public faces enforce these controls. Claim
+  // controls retain their existing whole-lineage semantics; Q/CF selectors
+  // must name an exact whole object, never silently broaden a version pin.
+  let targetRef = "problem";
   if (objectRef === undefined) {
     if (request.target_kind !== "problem") return notFound(example);
-  } else {
-    if (request.target_kind !== "claim" || !/^C-[0-9]+$/.test(claimId ?? "")) {
-      return notFound(example);
-    }
+  } else if (request.target_kind === "claim") {
+    const claimId = objectRef.replace(/@[0-9]+$/, "");
+    if (!/^C-[0-9]+$/.test(claimId)) return notFound(example);
     const exists = await db
       .prepare(
         "SELECT object_kind FROM events WHERE problem_id = ? AND object_id = ? AND object_kind = 'claim' LIMIT 1",
@@ -292,11 +294,37 @@ export async function operatorContentControl(
       .bind(problemId, claimId)
       .first<{ object_kind: string }>();
     if (exists === null) return notFound(example);
+    targetRef = claimId;
+  } else if (request.target_kind === "question" || request.target_kind === "conflict") {
+    const identity = request.target_kind === "question" ? QuestionIdSchema : ConflictIdSchema;
+    if (!identity.safeParse(objectRef).success) return notFound(example);
+    // Scope the admission by problem, kind, creation event and public head.
+    // A same-looking id elsewhere, a private draft or a lifecycle-only row
+    // cannot authorize a control. Do not require present visibility: a hidden
+    // publication must remain restorable through the same audited command.
+    const exists = await db
+      .prepare(
+        `SELECT e.object_kind FROM events e JOIN problems p ON p.id = e.problem_id
+         WHERE p.id = ? AND p.status <> 'private-draft'
+           AND e.object_id = ? AND e.object_kind = ? AND e.object_version = 1
+           AND e.type = ? AND e.seq <= p.public_seq LIMIT 1`,
+      )
+      .bind(
+        problemId,
+        objectRef,
+        request.target_kind,
+        request.target_kind === "question" ? "question.asked" : "conflict.normalized",
+      )
+      .first<{ object_kind: string }>();
+    if (exists === null) return notFound(example);
+    targetRef = objectRef;
+  } else {
+    return notFound(example);
   }
   const result = await applyOperatorControl(db, operatorId, {
     problemId,
     targetKind: request.target_kind,
-    targetRef: claimId ?? "problem",
+    targetRef,
     visibility: request.action === "hide" ? "hidden" : "visible",
     reason: request.reason,
   });

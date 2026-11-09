@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  AdminContentControlResponseSchema,
   AskQuestionRequestSchema,
   ProblemDocumentSchema,
   QuestionsListResponseSchema,
@@ -8,6 +9,7 @@ import type { Env } from "../../src/env.ts";
 import { sha256Hex, writeLedgerEvent } from "../../src/krater/krater.ts";
 import { loadProblemQuestions, validateQuestionSubstance } from "../../src/ledger/questions.ts";
 import { createLedgerFaceRoutes } from "../../src/ledger-face.ts";
+import { operatorContentControl } from "../../src/moderation/operator-http.ts";
 import {
   directiveDisclosureFixture,
   DISCLOSURE_PROBLEM as problemId,
@@ -214,6 +216,71 @@ test("whole-problem controls refuse question faces before conditional responses 
     }
   control(f, "problem", "visible", 2);
   expect((await face(f, "json")).status).toBe(200);
+});
+
+test("operator question controls hide pinned sources before validators and restore their exact content", async () => {
+  const f = await fixture();
+  const admitted = await publish(f);
+  const sourceSuffix = `?through=${admitted.seq}&target=Q-1`;
+  const originals = new Map<string, { etag: string; text: string }>();
+  for (const format of formats) {
+    const response = await face(f, `${format}${sourceSuffix}`);
+    expect(response.status).toBe(200);
+    originals.set(format, {
+      etag: response.headers.get("etag") ?? "",
+      text: await response.text(),
+    });
+  }
+  const apply = async (action: "hide" | "restore") => {
+    const response = await operatorContentControl(f.db, "usr_operator", {
+      target_id: `${problemId}/Q-1`,
+      target_kind: "question",
+      action,
+      reason: "Verify current question controls over immutable historical sources.",
+    });
+    if (response === undefined) throw new Error("Expected an operator control response.");
+    expect(response.status).toBe(200);
+    return AdminContentControlResponseSchema.parse(await response.json());
+  };
+  for (const invalid of [
+    { target_id: `${problemId}/Q-1@1`, target_kind: "question" },
+    { target_id: `${problemId}/Q-1`, target_kind: "conflict" },
+    { target_id: "P-OTHER/Q-1", target_kind: "question" },
+    { target_id: `${problemId}/Q-ABSENT`, target_kind: "question" },
+  ] as const) {
+    const response = await operatorContentControl(f.db, "usr_operator", {
+      ...invalid,
+      action: "hide",
+      reason: "An ambiguous or incorrectly scoped target must never change visibility.",
+    });
+    expect(response?.status).toBe(404);
+    expect(ProblemDocumentSchema.parse(await response?.json()).code).toBe(
+      "MODERATION_TARGET_NOT_FOUND",
+    );
+  }
+  const hidden = await apply("hide");
+  expect(hidden.target_id).toBe(`${problemId}/Q-1`);
+  for (const format of formats) {
+    const original = originals.get(format);
+    if (original === undefined || !original.etag) throw new Error("Expected a cache validator.");
+    for (const method of ["GET", "HEAD"]) {
+      const response = await face(f, `${format}${sourceSuffix}`, {
+        method,
+        headers: { "if-none-match": original.etag },
+      });
+      expect(response.status).toBe(404);
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      expect(await response.text()).not.toContain(body);
+    }
+  }
+  const restored = await apply("restore");
+  expect(restored.audit_event_id).not.toBe(hidden.audit_event_id);
+  for (const format of formats) {
+    const response = await face(f, `${format}${sourceSuffix}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("etag")).toBe(originals.get(format)?.etag);
+    expect(await response.text()).toBe(originals.get(format)?.text);
+  }
 });
 
 test("answer and withdrawal states are verified from events, never stale projection fields", async () => {

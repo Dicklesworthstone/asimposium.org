@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  type AdminContentControlRequest,
   ConflictsListResponseSchema,
   OpaqueProblemSchema,
   ProblemDocumentSchema,
@@ -8,6 +9,7 @@ import type { Env } from "../../src/env.ts";
 import { sha256Hex, writeLedgerEvent } from "../../src/krater/krater.ts";
 import { loadProblemConflicts } from "../../src/ledger/conflicts.ts";
 import { createLedgerFaceRoutes } from "../../src/ledger-face.ts";
+import { operatorContentControl } from "../../src/moderation/operator-http.ts";
 import {
   directiveDisclosureFixture,
   DISCLOSURE_PROBLEM as problemId,
@@ -139,6 +141,113 @@ function face(f: Fixture, format: string, init?: RequestInit, query = "") {
     { DB: f.db } as Env,
   );
 }
+
+test("audited operator conflict controls hide pinned faces and restore the original work", async () => {
+  const f = await fixture();
+  const admitted = await publish(f);
+  await publish(f, "CF-2");
+  const query = `?target=CF-1&through=${admitted.seq}`;
+  const original = await face(f, "json", undefined, query);
+  const etag = original.headers.get("etag");
+  const originalBody = await original.text();
+  const eventsBefore = f.sql.query("SELECT * FROM events ORDER BY problem_id,seq").all();
+  const request = {
+    target_id: `${problemId}/CF-1`,
+    target_kind: "conflict" as const,
+    action: "hide" as const,
+    reason: "Review this exact recorded disagreement for a privacy concern.",
+  };
+  expect((await operatorContentControl(f.db, "operator_control_test", request))?.status).toBe(200);
+  expect((await operatorContentControl(f.db, "operator_control_test", request))?.status).toBe(409);
+  for (const format of formats)
+    for (const method of ["GET", "HEAD"]) {
+      const hidden = await face(
+        f,
+        format,
+        { method, headers: { "if-none-match": etag ?? "*" } },
+        query,
+      );
+      expect(hidden.status).toBe(404);
+      expect(await hidden.text()).not.toContain(normalized.smallest_disagreement);
+    }
+  expect((await face(f, "json", undefined, "?target=CF-2")).status).toBe(200);
+  expect(
+    (await operatorContentControl(f.db, "operator_control_test", { ...request, action: "restore" }))
+      ?.status,
+  ).toBe(200);
+  const restored = await face(f, "json", undefined, query);
+  expect(restored.status).toBe(200);
+  expect(restored.headers.get("etag")).toBe(etag);
+  expect(await restored.text()).toBe(originalBody);
+  expect(f.sql.query("SELECT * FROM events ORDER BY problem_id,seq").all()).toEqual(eventsBefore);
+  expect(
+    f.sql.query("SELECT operator_id,action,target_id FROM operator_audit ORDER BY rowid").all(),
+  ).toEqual([
+    {
+      operator_id: "operator_control_test",
+      action: "content.hide",
+      target_id: `${problemId}/CF-1`,
+    },
+    {
+      operator_id: "operator_control_test",
+      action: "content.restore",
+      target_id: `${problemId}/CF-1`,
+    },
+  ]);
+  expect(f.sql.query("SELECT action FROM moderation_log ORDER BY rowid").all()).toEqual([
+    { action: "hidden" },
+    { action: "restored" },
+  ]);
+});
+
+test("operator conflict selectors reject wrong scope, kind, versions and unpublished admissions", async () => {
+  const f = await fixture();
+  const admitted = await publish(f);
+  await publish(f, "CF-ORPHAN", "resolved");
+  const now = new Date().toISOString();
+  f.sql.query("INSERT INTO problems(id,created_at,updated_at) VALUES('P-OTHER',?,?)").run(now, now);
+  const request: AdminContentControlRequest = {
+    target_id: `${problemId}/CF-1`,
+    target_kind: "conflict",
+    action: "hide",
+    reason: "Do not broaden an operator request to another object or problem.",
+  };
+  const refused = async (patch: Partial<AdminContentControlRequest> = {}) => {
+    const response = await operatorContentControl(f.db, "operator_control_test", {
+      ...request,
+      ...patch,
+    });
+    if (response === undefined) throw new Error("Expected an explicit moderation refusal.");
+    expect(response.status).toBe(404);
+    expect(ProblemDocumentSchema.parse(await response.json()).code).toBe(
+      "MODERATION_TARGET_NOT_FOUND",
+    );
+  };
+  for (const target_id of [
+    "CF-1",
+    "P-OTHER/CF-1",
+    "P-MISSING/CF-1",
+    `${problemId}/CF-999`,
+    `${problemId}/CF-ORPHAN`,
+    `${problemId}/CF-1@1`,
+    `${problemId}/CF-1@2`,
+    `${problemId}/CF-1\n`,
+    `${problemId}/CF--1`,
+    `${problemId}/C-1`,
+    `${problemId}/../CF-1`,
+  ])
+    await refused({ target_id });
+  for (const target_kind of ["question", "claim", "problem", "hypothesis"] as const)
+    await refused({ target_kind });
+  f.sql.query("UPDATE problems SET status='private-draft' WHERE id=?").run(problemId);
+  await refused();
+  f.sql
+    .query("UPDATE problems SET status='active',public_seq=? WHERE id=?")
+    .run(admitted.seq - 1, problemId);
+  await refused();
+  for (const table of ["content_controls", "operator_audit", "moderation_log"])
+    expect(f.sql.query(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({ count: 0 });
+});
 
 test("redacted conflict sources never expose retained projection prose", async () => {
   const f = await fixture(),

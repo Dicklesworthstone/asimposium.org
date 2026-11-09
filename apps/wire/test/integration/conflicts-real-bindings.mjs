@@ -12,8 +12,17 @@ import { assertRacedWriteLeavesNoTrace } from "./raced-ledger-write.mjs";
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall, worker, origin, env, fixtures, clearScreeningPosture } =
-    context;
+  const {
+    call,
+    enroll,
+    sponsorCall,
+    operatorCall,
+    worker,
+    origin,
+    env,
+    fixtures,
+    clearScreeningPosture,
+  } = context;
   const sponsorA = "usr_cf_sponsor_a";
   const authorA = await enroll("cf-author-a", sponsorA);
   const helloA = await call("/v1/hello", undefined, authorA);
@@ -509,6 +518,82 @@ await runLocalWorkerJourney(async (context) => {
   });
   assert.equal(frozenAgain.status, 304, "new admissions do not change an earlier exact snapshot");
 
+  // A signed operator control overrides every historical representation and
+  // its old validator. The withheld admission still advances the collection.
+  const conflictFormats = ["json", "md", "html"];
+  const historicalPaths = new Map();
+  const historicalTags = new Map();
+  for (const format of conflictFormats) {
+    const path = `/p/${problemId}/conflicts.${format}?through=${openCursor}&target=${conflictId}`;
+    const response = await worker.fetch(`${origin}${path}`);
+    assert.equal(response.status, 200);
+    assert.ok((await response.text()).includes(validPayload.aligned_definitions));
+    assert.ok(response.headers.get("etag"));
+    historicalPaths.set(format, path);
+    historicalTags.set(format, response.headers.get("etag"));
+  }
+  assert.equal(historicalTags.get("json"), exactOpenResponse.headers.get("etag"));
+  const controlPagePath = `/p/${problemId}/conflicts.json?through=${second.seq}&limit=1`;
+  const visibleControlPageResponse = await worker.fetch(`${origin}${controlPagePath}`);
+  assert.equal(visibleControlPageResponse.status, 200);
+  const visibleControlPage = ConflictsListResponseSchema.parse(
+    await visibleControlPageResponse.json(),
+  );
+  assert.deepEqual(
+    visibleControlPage.conflicts.map((item) => item.conflict_id),
+    [conflictId],
+  );
+  assert.equal(visibleControlPage.next_after, normalized.seq);
+  const conflictControl = (action) =>
+    operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+      target_id: `${problemId}/${conflictId}`,
+      target_kind: "conflict",
+      action,
+      reason: "Verify conflict-history visibility across captured public snapshots.",
+    });
+  await conflictControl("hide");
+  for (const format of conflictFormats) {
+    for (const method of ["GET", "HEAD"]) {
+      const response = await worker.fetch(`${origin}${historicalPaths.get(format)}`, {
+        method,
+        headers: { "If-None-Match": historicalTags.get(format) },
+      });
+      assert.equal(response.status, 404, `hidden historical conflict ${method} ${format}`);
+      assert.equal(response.headers.get("cache-control"), "private, no-store");
+      assert.ok(!(await response.text()).includes(validPayload.aligned_definitions));
+    }
+  }
+  const hiddenControlPageResponse = await worker.fetch(`${origin}${controlPagePath}`, {
+    headers: { "If-None-Match": visibleControlPageResponse.headers.get("etag") },
+  });
+  assert.equal(hiddenControlPageResponse.status, 200);
+  const hiddenControlPage = ConflictsListResponseSchema.parse(
+    await hiddenControlPageResponse.json(),
+  );
+  assert.deepEqual(hiddenControlPage.conflicts, []);
+  assert.equal(hiddenControlPage.next_after, visibleControlPage.next_after);
+  assert.ok(hiddenControlPage.omitted.includes("page_limit"));
+  const hiddenNextPath = /<([^>]+)>; rel="next"/.exec(
+    hiddenControlPageResponse.headers.get("link"),
+  )[1];
+  const hiddenNextResponse = await worker.fetch(new URL(hiddenNextPath, origin));
+  assert.equal(hiddenNextResponse.status, 200);
+  const hiddenNext = ConflictsListResponseSchema.parse(await hiddenNextResponse.json());
+  assert.equal(hiddenNext.cursor, visibleControlPage.cursor);
+  assert.equal(hiddenNext.next_after, null);
+  assert.deepEqual(
+    hiddenNext.conflicts.map((item) => item.conflict_id),
+    [second.conflict_id],
+  );
+  await conflictControl("restore");
+  const restoredConflictResponse = await worker.fetch(`${origin}${exactOpenPath}`);
+  assert.equal(restoredConflictResponse.status, 200);
+  assert.deepEqual(
+    ConflictsListResponseSchema.parse(await restoredConflictResponse.json()),
+    exactOpen,
+  );
+  assert.equal(restoredConflictResponse.headers.get("etag"), exactOpenResponse.headers.get("etag"));
+
   // Diptych census over this journey's item faces (lu59 / 92x).
   {
     const census = await faceCensus({
@@ -532,6 +617,7 @@ await runLocalWorkerJourney(async (context) => {
       status: "pass",
       conflict_id: conflictId,
       problem_id: problemId,
+      current_conflict_controls_verified: true,
     }),
   );
 });
