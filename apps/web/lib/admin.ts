@@ -76,12 +76,12 @@ export async function requireOperatorSession(): Promise<OperatorSessionResult> {
  */
 export async function getQuarantineQueue(
   operatorId: string,
-): Promise<{ readonly state: "ok" | "unconfigured" | "unreachable"; readonly items: readonly AdminQuarantineItem[] }> {
+): Promise<{ readonly state: "ok" | "unconfigured" | "unreachable"; readonly items: readonly AdminQuarantineItem[]; readonly totalPending: number | null }> {
   const result = await stoaAdminQuarantineQueue(operatorId);
   if (!result.ok) {
-    return { state: result.reason === "unconfigured" ? "unconfigured" : "unreachable", items: [] };
+    return { state: result.reason === "unconfigured" ? "unconfigured" : "unreachable", items: [], totalPending: null };
   }
-  return { state: "ok", items: result.data.items };
+  return { state: "ok", items: result.data.items, totalPending: result.data.total_pending };
 }
 
 /**
@@ -94,8 +94,13 @@ export async function getQuarantineCaseDetails(
 ): Promise<ReadonlyMap<string, AdminQuarantineCaseDetail>> {
   const details = await Promise.all(
     caseIds.slice(0, 25).map(async (caseId) => {
-      const result = await stoaAdminQuarantineCase(operatorId, caseId);
-      return result.ok ? ([caseId, result.data] as const) : undefined;
+      try {
+        const result = await stoaAdminQuarantineCase(operatorId, caseId);
+        return result.ok && result.data.item.id === caseId ? ([caseId, result.data] as const) : undefined;
+      } catch {
+        // One unreadable candidate must not hide the rest of the queue.
+        return undefined;
+      }
     }),
   );
   return new Map(details.filter((entry) => entry !== undefined));
@@ -106,12 +111,12 @@ export async function getQuarantineCaseDetails(
  */
 export async function getReportsQueue(
   operatorId: string,
-): Promise<{ readonly state: "ok" | "unconfigured" | "unreachable"; readonly reports: readonly AdminReportItem[] }> {
+): Promise<{ readonly state: "ok" | "unconfigured" | "unreachable"; readonly reports: readonly AdminReportItem[]; readonly totalPending: number | null }> {
   const result = await stoaAdminReportsQueue(operatorId);
   if (!result.ok) {
-    return { state: result.reason === "unconfigured" ? "unconfigured" : "unreachable", reports: [] };
+    return { state: result.reason === "unconfigured" ? "unconfigured" : "unreachable", reports: [], totalPending: null };
   }
-  return { state: "ok", reports: result.data.reports };
+  return { state: "ok", reports: result.data.reports, totalPending: result.data.total_pending };
 }
 
 /**

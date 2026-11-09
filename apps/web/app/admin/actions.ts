@@ -1,150 +1,188 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
 import {
-  AdminAreaRenameRequestSchema,
   AdminContentControlRequestSchema,
+  AdminContentControlResponseSchema,
   AdminQuarantineDecisionRequestSchema,
+  AdminQuarantineDecisionResponseSchema,
   AdminReportResolutionRequestSchema,
+  AdminReportResolutionResponseSchema,
+  ClaimIdSchema,
+  ConflictIdSchema,
+  PublicLedgerProblemIdSchema,
+  QuestionIdSchema,
   assertNoScientificDispositionOverride,
 } from "@asimposium/contracts";
 
 import { requireOperatorSession } from "@/lib/admin";
+import type {
+  AdminModerationAttempt,
+  AdminModerationKind,
+  AdminModerationReceipt,
+  AdminModerationState,
+} from "@/lib/admin-moderation";
 import {
   stoaAdminContentControl,
-  stoaAdminRenameArea,
   stoaAdminResolveQuarantine,
   stoaAdminResolveReport,
+  type StoaCall,
 } from "@/lib/stoa";
 
-/**
- * Adjudicates a quarantine hold (release or uphold rejection).
- * Requires step-up authentication and non-empty audit reason.
- */
-export async function resolveQuarantineAction(
-  formData: FormData,
-): Promise<void> {
-  const session = await requireOperatorSession();
-  if (session.state !== "authorized") {
-    return;
+const FIELDS = {
+  quarantine: ["case_id", "decision", "reason"],
+  report: ["report_id", "resolution", "reason"],
+  content: ["target_id", "target_kind", "action", "reason"],
+} as const;
+
+function validKey(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9._-]{1,160}$/.exec(value)?.[0] === value;
+}
+
+function readDraft(kind: AdminModerationKind, form: FormData): Record<string, string> {
+  const draft: Record<string, string> = {};
+  for (const field of [...FIELDS[kind], "idempotency_key"]) {
+    const value = form.get(field);
+    // An invalid hidden key cannot be repaired in the form; render its fresh
+    // server-provided key instead. No invalid attempt has been dispatched.
+    if (field === "idempotency_key" && !validKey(value)) continue;
+    if (typeof value === "string") draft[field] = value.slice(0, field === "reason" ? 1000 : 160);
   }
+  return draft;
+}
 
-  const raw = {
-    case_id: String(formData.get("case_id") ?? ""),
-    decision: String(formData.get("decision") ?? ""),
-    reason: String(formData.get("reason") ?? ""),
+function parseAttempt(kind: AdminModerationKind, form: FormData): AdminModerationAttempt | undefined {
+  // Read all names before selecting fields: scientific override attempts must
+  // be refused rather than silently stripped by the UI's narrower command.
+  assertNoScientificDispositionOverride(Object.fromEntries(form));
+  const fields = FIELDS[kind];
+  const allowed = new Set<string>([...fields, "idempotency_key", "confirmed_review", "expected_operator_id"]);
+  for (const name of form.keys()) {
+    if (!name.startsWith("$ACTION_") && (!allowed.has(name) || form.getAll(name).length !== 1))
+      return undefined;
+  }
+  const key = form.get("idempotency_key");
+  if (!validKey(key)) return undefined;
+  const raw = Object.fromEntries(fields.map((field) => [field, form.get(field)]));
+  if (typeof raw.reason === "string") raw.reason = raw.reason.trim();
+  if (kind === "quarantine") {
+    const command = AdminQuarantineDecisionRequestSchema.safeParse(raw);
+    return command.success ? { kind, key, request: command.data } : undefined;
+  }
+  if (kind === "report") {
+    const command = AdminReportResolutionRequestSchema.safeParse(raw);
+    return command.success ? { kind, key, request: command.data } : undefined;
+  }
+  const command = AdminContentControlRequestSchema.safeParse(raw);
+  if (!command.success || command.data.action === "ban_sponsor") return undefined;
+  const [problem, target, extra] = command.data.target_id.split("/");
+  if (extra !== undefined || !PublicLedgerProblemIdSchema.safeParse(problem).success) return undefined;
+  // Match the current Worker's supported whole-object controls. A version pin
+  // must not silently turn into a hide of an entire claim lineage.
+  const validTarget = command.data.target_kind === "problem"
+    ? target === undefined
+    : command.data.target_kind === "claim"
+      ? ClaimIdSchema.safeParse(target).success
+      : command.data.target_kind === "question"
+        ? QuestionIdSchema.safeParse(target).success
+        : command.data.target_kind === "conflict" && ConflictIdSchema.safeParse(target).success;
+  return validTarget ? { kind, key, request: command.data } : undefined;
+}
+
+function matchedReceipt(attempt: AdminModerationAttempt, value: unknown): AdminModerationReceipt | undefined {
+  if (attempt.kind === "quarantine") {
+    const parsed = AdminQuarantineDecisionResponseSchema.safeParse(value);
+    return parsed.success && parsed.data.case_id === attempt.request.case_id &&
+      parsed.data.decision === attempt.request.decision ? { kind: attempt.kind, result: parsed.data } : undefined;
+  }
+  if (attempt.kind === "report") {
+    const parsed = AdminReportResolutionResponseSchema.safeParse(value);
+    return parsed.success && parsed.data.report_id === attempt.request.report_id &&
+      parsed.data.resolution === attempt.request.resolution ? { kind: attempt.kind, result: parsed.data } : undefined;
+  }
+  const parsed = AdminContentControlResponseSchema.safeParse(value);
+  return parsed.success && parsed.data.target_id === attempt.request.target_id &&
+    parsed.data.action === attempt.request.action ? { kind: attempt.kind, result: parsed.data } : undefined;
+}
+
+async function applyModeration(
+  kind: AdminModerationKind,
+  previous: AdminModerationState,
+  form: FormData,
+): Promise<AdminModerationState> {
+  const session = await requireOperatorSession();
+  if (session.state !== "authorized" || form.getAll("expected_operator_id").length !== 1 ||
+      session.operatorId !== form.get("expected_operator_id")) {
+    return {
+      status: "refused",
+      message: "Re-authenticate as the same operator and reload this page before deciding. No command was sent.",
+    };
+  }
+  let attempt: AdminModerationAttempt | undefined;
+  try { attempt = parseAttempt(kind, form); } catch { /* A scientific override is never dispatched. */ }
+  if (attempt === undefined || form.get("confirmed_review") !== "yes") return {
+    status: "invalid",
+    message: "Review the selected target and decision, confirm the review, and enter an audit reason of 10 to 1,000 characters. Content controls accept whole problem, claim, question or conflict identifiers only; scientific state cannot be overridden.",
+    draft: readDraft(kind, form),
   };
-
+  if (previous.status === "unconfirmed" &&
+      JSON.stringify(previous.attempt) !== JSON.stringify(attempt)) return {
+    ...previous,
+    message: "The pending decision must be retried with its exact target, reason and key. Reload and inspect the audit log before starting a different decision.",
+  };
+  // Action state arrives from the browser. Even a caller-supplied terminal
+  // state cannot establish success: each submission needs a fresh Worker
+  // receipt. Replaying its exact key is safe and never reapplies the decision.
+  const unconfirmed = (message = "The decision could not be confirmed. Its exact draft and retry key are retained. Retry unchanged to recover the Worker's receipt, or inspect the audit log before starting another decision."): AdminModerationState => ({
+    status: "unconfirmed", attempt, message,
+  });
   try {
-    assertNoScientificDispositionOverride(raw);
-    const parsed = AdminQuarantineDecisionRequestSchema.safeParse(raw);
-    if (!parsed.success) {
-      return;
+    const result: StoaCall<unknown> = attempt.kind === "quarantine"
+      ? await stoaAdminResolveQuarantine(session.operatorId, attempt.request, attempt.key)
+      : attempt.kind === "report"
+        ? await stoaAdminResolveReport(session.operatorId, attempt.request, attempt.key)
+        : await stoaAdminContentControl(session.operatorId, attempt.request, attempt.key);
+    if (!result.ok) {
+      if (result.reason === "unconfigured") return {
+        status: "refused", attempt,
+        message: "Operator controls are not configured on this deployment. No command was sent. Reload after configuration is restored.",
+      };
+      if (result.status !== undefined && result.status >= 400 && result.status < 500) return {
+        status: "refused", attempt,
+        ...(result.problemCode ? { code: result.problemCode } : {}),
+        message: result.status === 401 || result.status === 403
+          ? "The Worker refused this operator's authority. Re-authenticate and reload before deciding again. No success was confirmed."
+          : result.status === 409
+            ? "The Worker refused a conflicting decision. Inspect the current queue and audit log before starting a new decision; do not assume this action was applied."
+            : result.status === 404
+              ? "The selected moderation target is no longer available. Reload and inspect its current state; no success was confirmed."
+              : "The Worker refused this decision. Reload the current target and review the command before trying again; no success was confirmed.",
+      };
+      return unconfirmed();
     }
-
-    const idempotencyKey = `admin-quarantine-${crypto.randomUUID()}`;
-    await stoaAdminResolveQuarantine(session.operatorId, parsed.data, idempotencyKey);
-    revalidatePath("/admin");
+    const receipt = matchedReceipt(attempt, result.data);
+    if (receipt === undefined) return unconfirmed("The Worker response did not contain a valid receipt for this exact target and decision. No success was confirmed. Retry unchanged to recover the receipt, or inspect the audit log.");
+    return {
+      status: "committed", attempt, receipt,
+      message: receipt.kind === "quarantine"
+        ? receipt.result.decision === "release"
+          ? "Release recorded. The author may resubmit the exact held candidate; this decision does not itself publish it."
+          : "Rejection recorded. The held submission remains unpublished; the author can use the appeal process."
+        : receipt.kind === "report"
+          ? `Report ${receipt.result.resolution === "dismiss" ? "dismissal" : "upholding"} recorded. Refresh the queue and public target to inspect the current moderation outcome.`
+          : `Content ${receipt.result.action === "hide" ? "hide" : "restore"} recorded. The receipt records this decision; later decisions or other holds may change current visibility.`,
+    };
   } catch {
-    // Fail-closed
+    return unconfirmed();
   }
 }
 
-/**
- * Resolves a content or conduct report.
- */
-export async function resolveReportAction(
-  formData: FormData,
-): Promise<void> {
-  const session = await requireOperatorSession();
-  if (session.state !== "authorized") {
-    return;
-  }
-
-  const raw = {
-    report_id: String(formData.get("report_id") ?? ""),
-    resolution: String(formData.get("resolution") ?? ""),
-    reason: String(formData.get("reason") ?? ""),
-  };
-
-  try {
-    assertNoScientificDispositionOverride(raw);
-    const parsed = AdminReportResolutionRequestSchema.safeParse(raw);
-    if (!parsed.success) {
-      return;
-    }
-
-    const idempotencyKey = `admin-report-${crypto.randomUUID()}`;
-    await stoaAdminResolveReport(session.operatorId, parsed.data, idempotencyKey);
-    revalidatePath("/admin");
-  } catch {
-    // Fail-closed
-  }
+/** Progressive forms share a reviewed draft/key, but never share authority. */
+export async function resolveQuarantineAction(previous: AdminModerationState, form: FormData): Promise<AdminModerationState> {
+  return applyModeration("quarantine", previous, form);
 }
-
-/**
- * Applies content controls (hide, restore, ban_sponsor).
- * Structural check strictly prevents disposition tampering.
- */
-export async function contentControlAction(
-  formData: FormData,
-): Promise<void> {
-  const session = await requireOperatorSession();
-  if (session.state !== "authorized") {
-    return;
-  }
-
-  const raw: Record<string, unknown> = {
-    target_id: String(formData.get("target_id") ?? ""),
-    target_kind: String(formData.get("target_kind") ?? ""),
-    action: String(formData.get("action") ?? ""),
-    reason: String(formData.get("reason") ?? ""),
-  };
-
-  // If client maliciously supplied disposition in formData, it gets captured here:
-  const disposition = formData.get("disposition");
-  if (disposition !== null) {
-    raw.disposition = String(disposition);
-  }
-
-  try {
-    assertNoScientificDispositionOverride(raw);
-    const parsed = AdminContentControlRequestSchema.safeParse(raw);
-    if (!parsed.success) {
-      return;
-    }
-
-    const idempotencyKey = `admin-content-${crypto.randomUUID()}`;
-    await stoaAdminContentControl(session.operatorId, parsed.data, idempotencyKey);
-    revalidatePath("/admin");
-  } catch {
-    // Fail-closed
-  }
+export async function resolveReportAction(previous: AdminModerationState, form: FormData): Promise<AdminModerationState> {
+  return applyModeration("report", previous, form);
 }
-
-/**
- * Renames an area with an audited reason.
- */
-export async function renameAreaAction(
-  formData: FormData,
-): Promise<void> {
-  const session = await requireOperatorSession();
-  if (session.state !== "authorized") {
-    return;
-  }
-
-  const raw = {
-    area_id: String(formData.get("area_id") ?? ""),
-    new_title: String(formData.get("new_title") ?? ""),
-    reason: String(formData.get("reason") ?? ""),
-  };
-
-  const parsed = AdminAreaRenameRequestSchema.safeParse(raw);
-  if (!parsed.success) {
-    return;
-  }
-
-  const idempotencyKey = `admin-area-${crypto.randomUUID()}`;
-  await stoaAdminRenameArea(session.operatorId, parsed.data, idempotencyKey);
-  revalidatePath("/admin");
+export async function contentControlAction(previous: AdminModerationState, form: FormData): Promise<AdminModerationState> {
+  return applyModeration("content", previous, form);
 }

@@ -57,6 +57,7 @@ import { claimsListBrowsing, claimsListWithdrawal, seedClaimsList } from "./clai
 import { hypothesisLifecycleBrowsing, hypothesisPublicationWithdrawal, seedHypothesisLifecycle } from "./hypotheses-lifecycle.mjs";
 import { scientificCollectionsBrowsing, scientificCollectionsWithdrawal, seedScientificCollections } from "./scientific-collections-browsing.mjs";
 import { citationsBrowsing, citationsWithdrawal, seedCitations } from "./citations-browsing.mjs";
+import { ADMIN_OPERATORS, operatorModerationJourney } from "./operator-moderation.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const require = createRequire(`${root}e2e/package.json`);
@@ -820,6 +821,7 @@ async function startAgora(stoaOrigin, signingEnv) {
         STOA_ORIGIN: stoaOrigin,
         AUTH_SECRET,
         AUTH_TRUST_HOST: "true",
+        OPERATOR_PRINCIPAL_IDS: ADMIN_OPERATORS.join(","),
         ...signingEnv,
         // Sponsor writes need a recovery key distinct from the envelope key.
         ENROLLMENT_RECOVERY_HMAC_KEY_HEX: Buffer.from(
@@ -913,7 +915,7 @@ async function main() {
       process.exit(1);
     }
   }
-  const target = await startLocalTarget({ injectPromoteRefusal: false });
+  const target = await startLocalTarget({ injectPromoteRefusal: false, operatorPrincipalIds: ADMIN_OPERATORS });
   let agora;
   let browser;
   try {
@@ -2448,6 +2450,12 @@ async function main() {
 
     // Accessibility and keyboard, with JavaScript on. Reduced motion, so axe
     // measures final colours rather than the body's 0.5 s fade-in.
+    await operatorModerationJourney({
+      browser, agora, target, problemId, record, privateToCaches,
+      authSecret: AUTH_SECRET, sessionCookie: SESSION_COOKIE,
+      encode: (await import(createRequire(`${root}apps/web/package.json`).resolve("next-auth/jwt"))).encode,
+    });
+
     const context = await browser.newContext({ reducedMotion: "reduce" });
     const page = await context.newPage();
     for (const path of ["/", "/problems", `/p/${problemId}`, `/p/${problemId}/claims/${claimId}`]) {

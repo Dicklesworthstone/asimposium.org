@@ -10,12 +10,7 @@ import {
   requireOperatorSession,
 } from "@/lib/admin";
 import { ThemeToggle } from "../theme-toggle";
-import {
-  contentControlAction,
-  renameAreaAction,
-  resolveQuarantineAction,
-  resolveReportAction,
-} from "./actions";
+import { AdminModerationControl, AdminReload } from "./moderation-control";
 
 export const dynamic = "force-dynamic";
 
@@ -189,14 +184,22 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
           Quarantine Queue (Screening Holds)
         </h2>
         <p className="quiet">
-          Submissions held for operator evaluation. Provenance is visible; raw bodies, prompts,
-          scores, and hidden reasoning are withheld to prevent disclosure.
+          Submissions held for operator evaluation. Held candidates are available here as inert
+          private text for review; detector prompts, scores and hidden reasoning are not shown.
+          At most 25 held candidates are loaded at once. Decide only a readable candidate,
+          then reload to continue through the pending queue.
         </p>
 
-        {quarantineData.items.length === 0 ? (
+        {quarantineData.state !== "ok" ? (
+          <div role="alert">
+            <p>The quarantine queue could not be read{quarantineData.state === "unconfigured" ? " because the operator connection is not configured" : ""}. Pending case counts are unknown.</p>
+            <AdminReload label="Retry the queue" />
+          </div>
+        ) : quarantineData.items.length === 0 ? (
           <p className="empty-state">No items currently pending quarantine review.</p>
         ) : (
           <div className="queue-list">
+            <p className="quiet">Showing {quarantineData.items.length} of {quarantineData.totalPending} pending cases at this read.</p>
             {quarantineData.items.map((item) => (
               <div key={item.id} className="queue-item card">
                 <div className="item-meta">
@@ -213,42 +216,15 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
                   <code>{item.context_frontier_digest.slice(0, 16)}…</code>
                 </p>
                 <HeldCandidate detail={caseDetails.get(item.id)} />
-
-                <form action={resolveQuarantineAction} className="admin-action-form">
-                  <input type="hidden" name="case_id" value={item.id} />
-                  <label htmlFor={`reason-${item.id}`}>Audit Reason (min 10 chars):</label>
-                  <input
-                    id={`reason-${item.id}`}
-                    name="reason"
-                    type="text"
-                    required
-                    minLength={10}
-                    placeholder="Documented rationale for release or rejection"
-                    className="admin-input"
-                  />
-                  <div className="button-group">
-                    <button
-                      name="decision"
-                      value="release"
-                      type="submit"
-                      className="btn-action btn-approve"
-                    >
-                      Release (author may publish these exact bytes)
-                    </button>
-                    <button
-                      name="decision"
-                      value="confirm_rejection"
-                      type="submit"
-                      className="btn-action btn-reject"
-                    >
-                      Confirm Rejection
-                    </button>
-                  </div>
-                </form>
               </div>
             ))}
           </div>
         )}
+        <AdminModerationControl operatorId={operatorId} kind="quarantine"
+          initialKey={`admin-quarantine-${crypto.randomUUID()}`}
+          available={quarantineData.state === "ok"}
+          targets={quarantineData.items.filter((item) => caseDetails.get(item.id)?.state === "pending")
+            .map((item) => ({ id: item.id, label: `${item.id} · ${item.target_id}` }))} />
       </section>
 
       {/* Section 2: Reports Queue */}
@@ -260,10 +236,16 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
           Content flagged by researchers or automated monitors for conduct floor evaluation.
         </p>
 
-        {reportsData.reports.length === 0 ? (
+        {reportsData.state !== "ok" ? (
+          <div role="alert">
+            <p>The reports queue could not be read{reportsData.state === "unconfigured" ? " because the operator connection is not configured" : ""}. Pending report counts are unknown.</p>
+            <AdminReload label="Retry the queue" />
+          </div>
+        ) : reportsData.reports.length === 0 ? (
           <p className="empty-state">No pending reports in queue.</p>
         ) : (
           <div className="queue-list">
+            <p className="quiet">Showing {reportsData.reports.length} of {reportsData.totalPending} pending reports at this read.</p>
             {reportsData.reports.map((report) => (
               <div key={report.report_id} className="queue-item card">
                 <div className="item-meta">
@@ -276,41 +258,15 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
                   <strong>Target:</strong> <code>{report.target_id}</code> ({report.target_kind})
                 </p>
 
-                <form action={resolveReportAction} className="admin-action-form">
-                  <input type="hidden" name="report_id" value={report.report_id} />
-                  <label htmlFor={`rep-reason-${report.report_id}`}>Audit Reason:</label>
-                  <input
-                    id={`rep-reason-${report.report_id}`}
-                    name="reason"
-                    type="text"
-                    required
-                    minLength={10}
-                    placeholder="Document resolution reason"
-                    className="admin-input"
-                  />
-                  <div className="button-group">
-                    <button
-                      name="resolution"
-                      value="dismiss"
-                      type="submit"
-                      className="btn-action btn-dismiss"
-                    >
-                      Dismiss (Unsubstantiated)
-                    </button>
-                    <button
-                      name="resolution"
-                      value="uphold"
-                      type="submit"
-                      className="btn-action btn-uphold"
-                    >
-                      Uphold &amp; Enforce
-                    </button>
-                  </div>
-                </form>
               </div>
             ))}
           </div>
         )}
+        <AdminModerationControl operatorId={operatorId} kind="report"
+          initialKey={`admin-report-${crypto.randomUUID()}`}
+          available={reportsData.state === "ok"}
+          targets={reportsData.reports.filter((report) => report.status === "pending")
+            .map((report) => ({ id: report.report_id, label: `${report.report_id} · ${report.target_id} · ${report.category}` }))} />
       </section>
 
       {/* Section 3: Content Controls */}
@@ -323,53 +279,8 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
           audit reason and appends to the immutable audit log.
         </p>
 
-        <form action={contentControlAction} className="admin-form col">
-          <div className="form-row">
-            <label htmlFor="target_id">Target Identifier:</label>
-            <input
-              id="target_id"
-              name="target_id"
-              type="text"
-              required
-              placeholder="e.g. P-4DSP or a claim identifier"
-              className="admin-input"
-            />
-          </div>
-
-          <div className="form-row">
-            <label htmlFor="target_kind">Target Kind:</label>
-            <select id="target_kind" name="target_kind" className="admin-select" required>
-              <option value="problem">Problem Statement</option>
-              <option value="claim">Claim / Hypothesis</option>
-              <option value="commentary">Commentary</option>
-            </select>
-          </div>
-
-          <div className="form-row">
-            <label htmlFor="action">Action:</label>
-            <select id="action" name="action" className="admin-select" required>
-              <option value="hide">Hide (Moderate from Public Projections)</option>
-              <option value="restore">Restore (Reinstate Hidden Object)</option>
-            </select>
-          </div>
-
-          <div className="form-row">
-            <label htmlFor="control_reason">Audit Reason (min 10 chars):</label>
-            <input
-              id="control_reason"
-              name="reason"
-              type="text"
-              required
-              minLength={10}
-              placeholder="Mandatory public audit explanation"
-              className="admin-input"
-            />
-          </div>
-
-          <button type="submit" className="btn-action btn-primary">
-            Apply Content Control
-          </button>
-        </form>
+        <AdminModerationControl operatorId={operatorId} kind="content"
+          initialKey={`admin-content-${crypto.randomUUID()}`} />
       </section>
 
       {/* Section 4: Area Maintenance */}
@@ -377,47 +288,7 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
         <h2 className="card-title" id="area-rename-title">
           Area Rename &amp; Maintenance
         </h2>
-        <form action={renameAreaAction} className="admin-form col">
-          <div className="form-row">
-            <label htmlFor="area_id">Area Identifier:</label>
-            <input
-              id="area_id"
-              name="area_id"
-              type="text"
-              required
-              placeholder="e.g. topology"
-              className="admin-input"
-            />
-          </div>
-          <div className="form-row">
-            <label htmlFor="new_title">New Title:</label>
-            <input
-              id="new_title"
-              name="new_title"
-              type="text"
-              required
-              minLength={2}
-              maxLength={120}
-              placeholder="e.g. Geometric Topology & 4-Manifolds"
-              className="admin-input"
-            />
-          </div>
-          <div className="form-row">
-            <label htmlFor="area_reason">Audit Reason:</label>
-            <input
-              id="area_reason"
-              name="reason"
-              type="text"
-              required
-              minLength={10}
-              placeholder="Reason for area title update"
-              className="admin-input"
-            />
-          </div>
-          <button type="submit" className="btn-action btn-secondary">
-            Rename Area
-          </button>
-        </form>
+        <p>Area renaming is not available: the Worker does not yet persist this command. No rename can be submitted from this page.</p>
       </section>
 
       {/* Section 5: Audit Event Log */}
@@ -430,7 +301,12 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
           attributed.
         </p>
 
-        {auditData.events.length === 0 ? (
+        {auditData.state !== "ok" ? (
+          <div role="alert">
+            <p>Audit history could not be read{auditData.state === "unconfigured" ? " because the operator connection is not configured" : ""}. This does not mean that no decisions were recorded.</p>
+            <AdminReload label="Retry audit history" />
+          </div>
+        ) : auditData.events.length === 0 ? (
           <p className="empty-state">No administrative actions recorded in log.</p>
         ) : (
           <div className="audit-table-wrap">
@@ -438,6 +314,7 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
               <thead>
                 <tr>
                   <th>Timestamp</th>
+                  <th>Audit event</th>
                   <th>Action</th>
                   <th>Target</th>
                   <th>Operator</th>
@@ -448,6 +325,7 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
                 {auditData.events.map((evt) => (
                   <tr key={evt.event_id}>
                     <td className="quiet">{evt.timestamp}</td>
+                    <td><code>{evt.event_id}</code></td>
                     <td>
                       <code>{evt.action}</code>
                     </td>
