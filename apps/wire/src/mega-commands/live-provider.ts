@@ -81,6 +81,8 @@ const NO_PERMISSIONS = {
   session_open: false,
   workshop_push: false,
   promote: false,
+  evidence: false,
+  dead_end: false,
   review: false,
 };
 
@@ -253,9 +255,17 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       unlisted: row.unlisted === 1,
       membershipRole: role,
     };
-    const allowed = (effect: "promote" | "review" | "workshop.push") =>
-      this.dependencies.authorize({ effect, credential: fellowBinding, target, usage, now })
-        .decision === "allow";
+    const allowed = (
+      effect: "promote" | "review" | "workshop.push",
+      action?: "evidence" | "dead-end",
+    ) =>
+      this.dependencies.authorize({
+        effect,
+        credential: fellowBinding,
+        target: action === undefined ? target : { ...target, action },
+        usage,
+        now,
+      }).decision === "allow";
     const effectivePermissions = {
       read: true,
       session_open:
@@ -268,6 +278,8 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
         }).decision === "allow",
       workshop_push: allowed("workshop.push"),
       promote: allowed("promote"),
+      evidence: allowed("promote", "evidence"),
+      dead_end: allowed("promote", "dead-end"),
       review: allowed("review"),
     };
 
@@ -396,7 +408,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
     if (
       this.dependencies.discriminate?.load &&
       effectivePermissions.session_open &&
-      effectivePermissions.promote
+      effectivePermissions.evidence
     ) {
       try {
         const dm = await this.dependencies.discriminate.load(db, problemId, row.cursor);
@@ -511,7 +523,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       row.has_claims > 0 &&
       this.dependencies.formalize?.load &&
       effectivePermissions.session_open &&
-      effectivePermissions.promote
+      effectivePermissions.evidence
     ) {
       try {
         const fm = await this.dependencies.formalize.load(db, problemId, row.cursor);

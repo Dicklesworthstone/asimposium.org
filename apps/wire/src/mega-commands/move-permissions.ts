@@ -19,6 +19,19 @@ export const PROMOTION_MOVE_KINDS: ReadonlySet<MoveKind> = new Set<MoveKind>([
   "retry-dead-end",
 ]);
 
+/** Overflow observers keep the same evidence and negative-result authority
+ * as the corresponding write routes. Claim promotion is a separate effect. */
+const EVIDENCE_MOVE_KINDS: ReadonlySet<MoveKind> = new Set<MoveKind>([
+  "add-refuter",
+  "discriminate",
+  "formalize",
+  "add-refuter-from-friction",
+]);
+const DEAD_END_MOVE_KINDS: ReadonlySet<MoveKind> = new Set<MoveKind>([
+  "record-dead-end",
+  "retry-dead-end",
+]);
+
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -54,7 +67,14 @@ export function filterMovesByPermissions(
       if (focus !== "review" && focus !== "add-refuter" && focus !== "close-gap") return false;
       effect = focus;
     }
-    if (PROMOTION_MOVE_KINDS.has(effect) && effectivePermissions.promote !== true) return false;
+    if (PROMOTION_MOVE_KINDS.has(effect)) {
+      const permission = EVIDENCE_MOVE_KINDS.has(effect)
+        ? "evidence"
+        : DEAD_END_MOVE_KINDS.has(effect)
+          ? "dead_end"
+          : "promote";
+      if (effectivePermissions[permission] !== true) return false;
+    }
     if (effect === "review" && effectivePermissions.review !== true) return false;
     const request = candidate.contract?.request;
     if (

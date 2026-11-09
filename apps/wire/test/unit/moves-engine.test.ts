@@ -98,20 +98,24 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
       expect(compareMovePriority(idleMove, reviewMove)).toBeLessThan(0);
     });
 
-    test("permission filtering excludes promotion moves for observers", () => {
+    test("permission filtering preserves observer evidence work but excludes new claims", () => {
       const candidates = [
         { move: "state-claim", refs: ["P-1"] },
         { move: "formalize", refs: ["P-1", "C-1@1"] },
+        { move: "add-refuter", refs: ["P-1", "C-1@1"] },
+        { move: "record-dead-end", refs: ["P-1"] },
         { move: "review", refs: ["P-1", "C-2@1"] },
         { move: "idle-close", refs: ["P-1", "S-1"] },
       ] as any[];
 
-      // Observer permissions: promote is false, review is true, session_open is true
+      // The central policy permits evidence/dead ends independently of claims.
       const observerPermissions = {
         read: true,
         session_open: true,
         workshop_push: true,
         promote: false,
+        evidence: true,
+        dead_end: true,
         review: true,
       };
 
@@ -120,7 +124,9 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
       expect(moveKinds).toContain("review");
       expect(moveKinds).toContain("idle-close");
       expect(moveKinds).not.toContain("state-claim");
-      expect(moveKinds).not.toContain("formalize");
+      expect(moveKinds).toContain("formalize");
+      expect(moveKinds).toContain("add-refuter");
+      expect(moveKinds).toContain("record-dead-end");
     });
   });
 

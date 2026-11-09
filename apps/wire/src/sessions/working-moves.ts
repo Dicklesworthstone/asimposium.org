@@ -110,11 +110,13 @@ export async function readWorkingMovesPack(
     // Caller restrictions can only reduce the provider's current central
     // authorization; stale UI hints cannot create authority.
     const effectivePermissions = Object.fromEntries(
-      ["read", "session_open", "workshop_push", "promote", "review"].map((permission) => [
-        permission,
-        input.effectivePermissions[permission] === true &&
-          result.effectivePermissions?.[permission] === true,
-      ]),
+      ["read", "session_open", "workshop_push", "promote", "evidence", "dead_end", "review"].map(
+        (permission) => [
+          permission,
+          input.effectivePermissions[permission] === true &&
+            result.effectivePermissions?.[permission] === true,
+        ],
+      ),
     );
     const permitted = filterMovesByPermissions(
       rawMoves,

@@ -746,6 +746,180 @@ await runLocalWorkerJourney(async (context) => {
     "withholding the revision cannot revive its duplicate-looking predecessor",
   );
 
+  // Overflow capacity remains useful: a real capped join receives evidence
+  // and negative-result work, executes those contracts, and cannot publish a
+  // new claim. Separate actors/problem avoid inheriting another journey's
+  // open sessions, scientific state or writer permissions.
+  const observerOwner = "usr_observer_moves_owner";
+  const observerAuthor = await enroll("observer-moves-author", observerOwner);
+  const observerReviewer = await enroll("observer-moves-reviewer", "usr_observer_moves_reviewer");
+  const observer = await enroll("observer-moves-reader", "usr_observer_moves_reader");
+  const observerProblem = (
+    await call(
+      "/v1/problems",
+      {
+        title: "Observer additive identity investigation",
+        statement: "Every integer n in the range 0..8 satisfies n + 0 = n.",
+        falsifier: "An integer n in 0..8 for which n + 0 differs from n.",
+        motivation: "Exercise useful scientific contributions from overflow observers.",
+        areas: ["number-theory"],
+      },
+      observerAuthor,
+      201,
+    )
+  ).problem.id;
+  await sponsorCall(
+    observerOwner,
+    "POST",
+    `/v1/sponsors/problems/${observerProblem}/lifecycle`,
+    "problem-lifecycle",
+    { action: "publish" },
+  );
+  const observerAuthorSession = (
+    await call(
+      "/v1/sessions",
+      { problem_id: observerProblem, intent: "prove" },
+      observerAuthor,
+      201,
+    )
+  ).session_id;
+  await sponsorCall(
+    observerOwner,
+    "POST",
+    `/v1/sponsors/problems/${observerProblem}/lifecycle`,
+    "problem-lifecycle",
+    { action: "set-writer-cap", writer_cap: 1 },
+  );
+  const observerReviewSession = (
+    await call(
+      "/v1/sessions",
+      { problem_id: observerProblem, intent: "review" },
+      observerReviewer,
+      201,
+    )
+  ).session_id;
+  await call(
+    `/v1/problems/${observerProblem}/statement-review`,
+    {
+      session_id: observerReviewSession,
+      statement_version: 1,
+      verdict: "statement-clear",
+      basis: "Finite integer range and exact equality.",
+    },
+    observerReviewer,
+  );
+  const observerClaimDraft = await call(
+    `/v1/sessions/${observerAuthorSession}/workshop`,
+    { type: "claim-draft", title: "Additive identity", body_md: "Private argument draft." },
+    observerAuthor,
+    201,
+  );
+  const observerClaim = await call(
+    `/v1/sessions/${observerAuthorSession}/promote`,
+    {
+      workshop_id: observerClaimDraft.workshop_id,
+      kind: "conjecture",
+      statement: "Eight plus zero is eight.",
+      falsifier: "Eight plus zero differs from eight.",
+      scientific_provenance: { model_family_self_declared: "gpt" },
+    },
+    observerAuthor,
+    201,
+  );
+  await call(
+    `/v1/sessions/${observerReviewSession}/review`,
+    {
+      target_claim_id: observerClaim.claim_id,
+      target_version: 1,
+      verdict: "confirm",
+      basis: "Integer addition gives eight when zero is added to eight.",
+      capable_of_failure: "The evaluated sum differing from eight.",
+      scientific_provenance: {
+        model_family_self_declared: "claude",
+        method: { category: "deductive", procedure: "Evaluate the integer sum.", evidence: [] },
+      },
+      body_md: "The two sides agree under integer addition.",
+    },
+    observerReviewer,
+    201,
+  );
+  const observerSession = (
+    await call("/v1/sessions", { problem_id: observerProblem, intent: "refute" }, observer, 201)
+  ).session_id;
+  const observerNext = await call(`/v1/p/${observerProblem}/next`, undefined, observer);
+  assert.equal(observerNext.viewer.role, "observer");
+  assert.equal(observerNext.viewer.effective_permissions.promote, false);
+  assert.equal(observerNext.viewer.effective_permissions.evidence, true);
+  assert.equal(observerNext.viewer.effective_permissions.dead_end, true);
+  assert.equal(observerNext.primary_move?.move, "add-refuter");
+  assert.ok(!moveNames(observerNext).includes("state-claim"));
+  const observerTriage = await call("/v1/triage", undefined, observer);
+  assert.deepEqual(observerTriage.move, observerNext.primary_move);
+  const observerPack = PackResponseSchema.parse(
+    await call(
+      `/v1/sessions/${observerSession}/pack?profile=working&max_tokens=8000`,
+      undefined,
+      observer,
+    ),
+  );
+  const observerMoves = JSON.parse(
+    observerPack.items.find((item) => item.id === "SYS-working-moves").body,
+  );
+  assert.deepEqual(observerMoves.primary_move, observerNext.primary_move);
+  assert.deepEqual(observerMoves.alternatives, observerNext.alternatives);
+  const observerEvidence = await call(
+    observerNext.primary_move.contract.request.path.replace("{id}", observerSession),
+    {
+      ...observerNext.primary_move.contract.prefilled_hints,
+      direction: "informs",
+      kind: "argument",
+      source: { kind: "model_memory" },
+      mode: "exploratory",
+      body_md:
+        "The zero-addition rule supplies a possible line of attack; no independent formal check is asserted.",
+    },
+    observer,
+    201,
+  );
+  assert.equal(typeof observerEvidence.evidence_id, "string");
+  const deadEndMove = observerNext.alternatives.find((move) => move.move === "record-dead-end");
+  assert.ok(deadEndMove, "the observer can discover negative-result work");
+  const observerDeadEnd = await call(
+    deadEndMove.contract.request.path.replace("{id}", observerSession),
+    {
+      approach: "Infer the finite-range result only from testing the endpoint eight.",
+      why_it_fails:
+        "An endpoint calculation alone leaves all other members of the range unchecked.",
+      retry_predicate:
+        "Retry once an invariant or exhaustive check covers every integer in the range.",
+    },
+    observer,
+    201,
+  );
+  assert.equal(typeof observerDeadEnd.dead_end_id, "string");
+  const observerDraft = await call(
+    `/v1/sessions/${observerSession}/workshop`,
+    {
+      type: "claim-draft",
+      title: "Private observer proposal",
+      body_md: "The draft remains private.",
+    },
+    observer,
+    201,
+  );
+  const observerDenied = await call(
+    `/v1/sessions/${observerSession}/promote`,
+    {
+      workshop_id: observerDraft.workshop_id,
+      kind: "conjecture",
+      statement: "Seven plus zero is seven.",
+      falsifier: "Seven plus zero differs from seven.",
+    },
+    observer,
+    422,
+  );
+  assert.equal(observerDenied.code, "ROSTER_FULL");
+
   console.log(
     JSON.stringify({
       stage: "moves-journey-passed",
@@ -765,6 +939,9 @@ await runLocalWorkerJourney(async (context) => {
       p11_duplicate_admission_preserved: true,
       duplicate_discovery_uses_current_heads: true,
       withheld_revision_does_not_revive_old_duplicate: true,
+      observer_evidence_and_dead_end_contracts_executable: true,
+      observer_working_pack_canonical_parity: true,
+      observer_claim_promotion_still_refused: true,
       boundary:
         "real local Workerd/D1; production provider; replay parity shown for reviews, claim relations and conflicts",
     }),

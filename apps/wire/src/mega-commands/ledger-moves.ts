@@ -15,6 +15,7 @@ export interface MoveViewer {
 export interface MovePermissions {
   readonly session_open?: boolean;
   readonly promote?: boolean;
+  readonly evidence?: boolean;
   readonly review?: boolean;
 }
 export interface LedgerMovesDependencies {
@@ -107,7 +108,7 @@ export function selectLedgerMoves(
       ) {
         return false;
       }
-    } else if (!permissions.promote) {
+    } else if (!permissions.evidence) {
       return false;
     }
     return true;
@@ -202,7 +203,7 @@ export async function loadLedgerMoves(
   degraded: boolean;
   continuation: string | null;
 }> {
-  if (!permissions.session_open || (!permissions.review && !permissions.promote)) {
+  if (!permissions.session_open || (!permissions.review && !permissions.evidence)) {
     return { items: [], moves: [], degraded: false, continuation: null };
   }
   const queue = await loadLedgerMoveQueue(db, problemId, dependencies, through, options);

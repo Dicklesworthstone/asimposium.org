@@ -4,7 +4,11 @@ import assert from "node:assert/strict";
 import { getMoveTemplate, type HelloAssignment, type MoveTemplate } from "@asimposium/contracts";
 import type { ReviewQueueItem, ReviewQueueResponse } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
-import type { FellowCredentialBinding } from "../../src/enrollment/service.ts";
+import {
+  authorizeFellowWrite,
+  type FellowCredentialBinding,
+} from "../../src/enrollment/service.ts";
+import { selectRecordDeadEndMove } from "../../src/mega-commands/dead-end-moves.ts";
 import {
   LedgerMovesProvider,
   type LiveMovesDependencies,
@@ -263,6 +267,50 @@ test("observer with review scope gets review work but not new-claim promotion", 
     assert.equal(result.primaryMove?.move, "review");
     assert.equal(result.effectivePermissions?.review, true);
     assert.equal(result.effectivePermissions?.promote, false);
+  } finally {
+    f.sqlite.close();
+  }
+});
+test("central observer authority feeds evidence and dead-end work into next and triage", async () => {
+  const f = fixture();
+  try {
+    f.sqlite.exec("UPDATE problem_memberships SET role='observer'");
+    const provider = new LedgerMovesProvider({
+      ...f.dependencies,
+      authorize: authorizeFellowWrite,
+      templateFor: getMoveTemplate,
+      loadQueue: async () => page("P-DEMO", [item("P-DEMO", { need: "falsification-attempt" })]),
+      deadEnds: { load: selectRecordDeadEndMove },
+    });
+    const request = { ...next(f.db), role: "observer" as const };
+    const result = await provider.nextMoves(request);
+    assert.equal(result.degraded, false);
+    assert.equal(result.effectivePermissions?.promote, false);
+    assert.equal(result.effectivePermissions?.evidence, true);
+    assert.equal(result.effectivePermissions?.dead_end, true);
+    assert.equal(result.primaryMove?.move, "add-refuter");
+    assert.deepEqual(result.primaryMove?.contract.request, getMoveTemplate("add-refuter").request);
+    assert.deepEqual(
+      result.alternatives.map((move) => move.move),
+      ["record-dead-end"],
+    );
+    const triage = await provider.triageMove({
+      db: f.db,
+      credential,
+      fellowId: credential.fellowId,
+      assignments: [{ ...assignment("P-DEMO"), role: "observer" }],
+    });
+    assert.deepEqual(triage.move, result.primaryMove);
+
+    const reviewOnly = await provider.nextMoves({
+      ...request,
+      credential: { ...credential, grantedScopes: ["review"] },
+      effectivePermissions: { promote: true, evidence: true, dead_end: true },
+    });
+    assert.equal(reviewOnly.primaryMove, null);
+    assert.deepEqual(reviewOnly.alternatives, []);
+    assert.equal(reviewOnly.effectivePermissions?.evidence, false);
+    assert.equal(reviewOnly.effectivePermissions?.dead_end, false);
   } finally {
     f.sqlite.close();
   }

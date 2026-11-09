@@ -20,6 +20,8 @@ const permissions = {
   session_open: true,
   workshop_push: true,
   promote: true,
+  evidence: true,
+  dead_end: true,
   review: true,
 };
 const input: WorkingMovesPackInput = {
@@ -122,7 +124,7 @@ test("only permissions shared by the route and current central policy can author
   const f = fixture({
     primaryMove: move("review"),
     alternatives: [move("discriminate")],
-    effectivePermissions: { ...permissions, promote: false },
+    effectivePermissions: { ...permissions, promote: false, evidence: false },
   });
   const section = await readWorkingMovesPack(input, f.provider);
   assert.equal(section.primaryMove?.move, "review");
@@ -134,6 +136,37 @@ test("only permissions shared by the route and current central policy can author
   );
   assert.equal(denied.primaryMove, null);
   assert.equal(denied.candidates[0]?.kind, "standing-context");
+});
+
+test("working packs retain observer evidence and dead-end moves without granting claims", async () => {
+  const observer = { ...permissions, promote: false };
+  const f = fixture({
+    primaryMove: move("state-claim"),
+    alternatives: [move("add-refuter"), move("record-dead-end")],
+    effectivePermissions: observer,
+  });
+  const section = await readWorkingMovesPack(
+    { ...input, role: "observer", effectivePermissions: observer },
+    f.provider,
+  );
+  assert.equal(section.primaryMove?.move, "add-refuter");
+  assert.deepEqual(
+    section.alternatives.map((candidate) => candidate.move),
+    ["record-dead-end"],
+  );
+  assert.ok(section.omitted.some((item) => item.reason === "moves_permission_filtered"));
+  for (const source of ["route", "provider"] as const) {
+    const blocked = { ...observer, evidence: false, dead_end: false };
+    const limited = await readWorkingMovesPack(
+      { ...input, role: "observer", effectivePermissions: source === "route" ? blocked : observer },
+      fixture({
+        primaryMove: move("add-refuter"),
+        alternatives: [move("record-dead-end")],
+        effectivePermissions: source === "provider" ? blocked : observer,
+      }).provider,
+    );
+    assert.equal(limited.primaryMove, null, `${source} restrictions remain authoritative`);
+  }
 });
 
 test("public-write quota removes direct reviews while preserving a permitted private investigation", async () => {

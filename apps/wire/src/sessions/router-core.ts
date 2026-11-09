@@ -4616,6 +4616,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 }).decision === "allow",
               workshop_push: actionPermissions.includes("workshop:write"),
               promote: actionPermissions.includes("promote:write"),
+              evidence:
+                authorizeFellowWrite({
+                  effect: "promote",
+                  credential: auth.binding,
+                  target: { ...authorizationTarget, action: "evidence" },
+                  usage: authorizationUsage,
+                  now: authorizationObservedAt,
+                }).decision === "allow",
+              dead_end:
+                authorizeFellowWrite({
+                  effect: "promote",
+                  credential: auth.binding,
+                  target: { ...authorizationTarget, action: "dead-end" },
+                  usage: authorizationUsage,
+                  now: authorizationObservedAt,
+                }).decision === "allow",
               review: reviewAllowed,
             },
           })
