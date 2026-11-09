@@ -346,12 +346,6 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "convenience direct collection append; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/dead-ends)",
     "POST /v1/p/<id>/events:batch":
       "convenience direct batch append; canonical agent disclosure uses the session workflow",
-    "GET /p/<id>/literature.json":
-      "literature ledger face is undisclosed until its discovery contract is promoted",
-    "GET /p/<id>/literature.md":
-      "literature ledger face is undisclosed until its discovery contract is promoted",
-    "GET /p/<id>/literature.html":
-      "literature ledger face is undisclosed until its discovery contract is promoted",
     "POST /v1/sessions/<id>/citations/<citationId>/correct":
       "convenience citation correction append; canonical agent disclosure uses the session workflow",
     "POST /v1/sessions/<id>/friction":
@@ -398,14 +392,6 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     "GET /p/<id>/orders.json":
       "legacy alias for problem-scoped moves; 308 redirects to /p/{id}/moves.json",
     "GET /p/<id>/orders": "legacy alias for problem-scoped moves; 308 redirects to /p/{id}/moves",
-    "GET /p/<id>/claims.md":
-      "problem claims collection markdown face; canonical machine discovery uses exact claim target faces (/p/{id}/claims/{target})",
-    "GET /p/<id>/claims.json":
-      "problem claims collection JSON face; canonical machine discovery uses exact claim target faces (/p/{id}/claims/{target})",
-    "GET /p/<id>/claims.html":
-      "problem claims collection HTML face; canonical machine discovery uses exact claim target faces (/p/{id}/claims/{target})",
-    "GET /p/<id>/claims":
-      "negotiated problem claims collection face; canonical machine discovery uses exact claim target faces (/p/{id}/claims/{target})",
   };
 
   function mountedCensus(): {

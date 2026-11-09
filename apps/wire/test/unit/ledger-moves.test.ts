@@ -158,7 +158,9 @@ test("observer evidence authority supplies refutation work without claim or revi
   });
   assert.equal(selected.length, 1);
   assert.equal(selected[0]?.move, "add-refuter");
-  assert.deepEqual(selected[0]?.contract.request, templateFor("add-refuter").request);
+  const refuterTemplate = templateFor("add-refuter");
+  assert.ok(refuterTemplate.availability === "available");
+  assert.deepEqual(selected[0]?.contract.request, refuterTemplate.request);
 });
 test("authors may attempt falsification without manufacturing independent review credit", () => {
   const move = choose([

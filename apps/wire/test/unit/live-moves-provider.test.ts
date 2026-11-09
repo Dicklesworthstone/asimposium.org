@@ -289,7 +289,9 @@ test("central observer authority feeds evidence and dead-end work into next and 
     assert.equal(result.effectivePermissions?.evidence, true);
     assert.equal(result.effectivePermissions?.dead_end, true);
     assert.equal(result.primaryMove?.move, "add-refuter");
-    assert.deepEqual(result.primaryMove?.contract.request, getMoveTemplate("add-refuter").request);
+    const refuterTemplate = getMoveTemplate("add-refuter");
+    assert.ok(refuterTemplate.availability === "available");
+    assert.deepEqual(result.primaryMove?.contract.request, refuterTemplate.request);
     assert.deepEqual(
       result.alternatives.map((move) => move.move),
       ["record-dead-end"],
