@@ -783,11 +783,35 @@ export interface DeletionJournalReplay {
   readonly appliedControlsCount: number;
 }
 
+// A recognized, authentic journal action is not necessarily implemented by
+// this restore. Every action must explicitly support both replay and readback
+// before it can allow a scratch database to become serviceable.
+const RETENTION_CONTROL_REPLAY_SUPPORTED = {
+  "suspend-sponsor": true,
+  "delete-private-draft": true,
+  "revoke-credential": true,
+  "cancel-enrollment": true,
+  "cancel-transfer": true,
+  "delete-account-private-data": true,
+  "unbind-private-cas": false,
+} as const satisfies Record<RetentionControlAction, boolean>;
+
+function assertReplayableControls(records: readonly RetentionControlRecord[]): void {
+  for (const control of records) {
+    if (RETENTION_CONTROL_REPLAY_SUPPORTED[control.action] !== true) {
+      throw new KraterRestoreRefusedError(
+        `DELETION_CONTROL_UNSUPPORTED: this restore cannot replay or verify '${control.action}'`,
+      );
+    }
+  }
+}
+
 /** Targets a verified journal says are deleted but the database still serves. */
 export async function findResurrectedTargets(
   db: D1Database,
   records: readonly RetentionControlRecord[],
 ): Promise<string[]> {
+  assertReplayableControls(records);
   const resurrected: string[] = [];
   for (const control of records) {
     if (control.action === "suspend-sponsor") {
@@ -859,7 +883,7 @@ export async function findResurrectedTargets(
  * Verify a signed deletion journal, reapply every control to a restored
  * scratch database, and refuse cutover if any deleted target is still
  * serviceable. A missing, unsigned, tampered or unverifiable journal refuses
- * before any write.
+ * before any write, as does a verified journal containing an unsupported action.
  */
 export async function applyDeletionJournal(options: {
   readonly db: D1Database;
@@ -893,6 +917,9 @@ async function verifiedJournalRecords(
   if (!verified.valid) {
     throw new KraterRestoreRefusedError(`DELETION_JOURNAL_VERIFICATION_FAILED: ${verified.reason}`);
   }
+  // Preflight the complete authenticated journal before restoring a snapshot
+  // or applying even an earlier supported control from the same journal.
+  assertReplayableControls(verified.records);
   return verified.records;
 }
 
@@ -996,8 +1023,8 @@ async function replayControls(
  * Deletion-safe restore of one problem export into a validated scratch target.
  *
  * 1. Refuses a non-scratch target.
- * 2. Verifies the signed deletion journal BEFORE any write; a missing or
- *    unverifiable journal refuses (fail closed).
+ * 2. Verifies the signed deletion journal and support for every action BEFORE
+ *    any write; missing, unverifiable or unsupported controls refuse (fail closed).
  * 3. Refuses to restore a problem the journal records as a deleted draft.
  * 4. Restores the verified export, reapplies every journal control, and
  *    refuses cutover if any deleted target is still serviceable.

@@ -20,6 +20,7 @@ import {
   createRetentionControlRecord,
   deletionSafeRestore,
   expireSecurityRecords,
+  findResurrectedTargets,
   hardDeletePrivateDraft,
   parseAndVerifyDeletionJournal,
   RetentionError,
@@ -513,6 +514,105 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
         .prepare("SELECT COUNT(*) AS n FROM device_lookup_attempts")
         .get() as { n: number };
       expect(remainingLookups.n).toBe(1);
+    });
+  });
+
+  describe("restore action support", () => {
+    test.each(["journal replay", "problem restore"] as const)(
+      "%s refuses a signed unsupported action before any supported control or snapshot write",
+      async (operation) => {
+        const draftId = "P-DRAFT-BEFORE-UNSUPPORTED";
+        const publicId = "P-UNSUPPORTED-RESTORE";
+        const supported = await createRetentionControlRecord({
+          action: "delete-private-draft",
+          targetId: draftId,
+          targetType: "problem",
+          payload: { sponsor_id: "usr_sponsor_1" },
+          issuedAt: NOW,
+        });
+        const unsupported = await createRetentionControlRecord({
+          action: "unbind-private-cas",
+          targetId: "a".repeat(64),
+          targetType: "cas_artifact",
+          issuedAt: NOW,
+        });
+        // The supported mutation deliberately precedes the unsupported action:
+        // refusing only when replay reaches that action would be too late.
+        const controls = [supported, unsupported];
+        const keys = await journalKeys();
+        const signed = await serializeDeletionJournal(controls, NOW, keys.signing);
+        const verified = await parseAndVerifyDeletionJournal(signed, keys.verify);
+        expect(verified.valid).toBe(true);
+        if (verified.valid) expect(verified.records).toEqual(controls);
+
+        let snapshotNdjson = "";
+        if (operation === "problem restore") {
+          const origin = freshDb();
+          const bucket = fakeBucket();
+          await seedClaimProblem(origin.db, publicId, 2);
+          const backup = await backupProblem(origin.db, bucket, publicId, "title", DATE);
+          expect(backup).not.toBeNull();
+          snapshotNdjson = bucket.writes.get(backup?.key ?? "") ?? "";
+        }
+
+        const scratch = freshDb();
+        scratch.sqlite.run(
+          `INSERT INTO problems (id, public_seq, status, unlisted, sponsor_id, title, created_at, updated_at)
+           VALUES (?, 0, 'private-draft', 1, 'usr_sponsor_1', 'Retained on refused restore', ?, ?)`,
+          [draftId, NOW, NOW],
+        );
+        const changesBefore = scratch.sqlite.prepare("SELECT total_changes() AS n").get();
+        const restore = (deletionJournalNdjson: string) => {
+          const options = {
+            db: scratch.db,
+            targetIdentifier: "scratch_unsupported_action",
+            deletionJournalNdjson,
+            verifyKeys: keys.verify,
+          };
+          return operation === "journal replay"
+            ? applyDeletionJournal(options)
+            : deletionSafeRestore({ ...options, snapshotNdjson });
+        };
+
+        // Authenticity is still checked first; unsupported actions remain
+        // parseable and exportable, but cannot authorize a successful restore.
+        const unsigned = await serializeDeletionJournal(controls, NOW);
+        await expect(restore(unsigned)).rejects.toThrow(
+          "DELETION_JOURNAL_VERIFICATION_FAILED: journal is unsigned",
+        );
+        await expect(restore(signed)).rejects.toThrow(
+          "DELETION_CONTROL_UNSUPPORTED: this restore cannot replay or verify 'unbind-private-cas'",
+        );
+        expect(scratch.sqlite.prepare("SELECT total_changes() AS n").get()).toEqual(changesBefore);
+        expect(scratch.sqlite.prepare("SELECT id, title FROM problems").all()).toEqual([
+          { id: draftId, title: "Retained on refused restore" },
+        ]);
+        expect(scratch.sqlite.prepare("SELECT COUNT(*) AS n FROM events").get()).toEqual({ n: 0 });
+        expect(await readDeletionJournalRecords(scratch.db)).toEqual([]);
+      },
+    );
+
+    test("resurrection readback cannot clear a journal with an unsupported action", async () => {
+      const supported = await createRetentionControlRecord({
+        action: "delete-private-draft",
+        targetId: "P-READBACK-SUPPORTED",
+        targetType: "problem",
+        issuedAt: NOW,
+      });
+      const unsupported = await createRetentionControlRecord({
+        action: "unbind-private-cas",
+        targetId: "b".repeat(64),
+        targetType: "cas_artifact",
+        issuedAt: NOW,
+      });
+      const db = {
+        prepare() {
+          throw new Error("The complete action set must be checked before reading any target");
+        },
+      } as never;
+      await expect(findResurrectedTargets(db, [supported, unsupported])).rejects.toThrow(
+        "DELETION_CONTROL_UNSUPPORTED",
+      );
     });
   });
 
