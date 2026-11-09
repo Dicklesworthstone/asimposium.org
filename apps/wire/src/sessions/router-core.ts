@@ -280,6 +280,11 @@ import {
 } from "./ledger-pack";
 import { readOrientationPack } from "./orientation-pack.ts";
 import {
+  type PrivateProblemPackSection,
+  privateProblemPackStillCurrent,
+  readPrivateProblemPack,
+} from "./private-problem-pack.ts";
+import {
   archivedProblemWriteProblem,
   isArchivedProblemWriteError,
 } from "./problem-archive-admission.ts";
@@ -3636,7 +3641,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   // --- GET /v1/sessions/:id/pack -----------------------------------------
   app.get("/v1/sessions/:id/pack", async (c) => {
     const auth = await authenticate(c.req.raw);
-    if (!auth.ok) return auth.response;
+    if (!auth.ok) return privateNoStore(auth.response);
     const db = c.env.DB;
     const session = await packSessionOf(db, c.req.param("id"), auth.binding.fellowId);
     if (session instanceof Response) return session;
@@ -3707,6 +3712,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (requestedMaxTokens instanceof Response) return privateNoStore(requestedMaxTokens);
 
     const membership = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const packProblem = await db
+      .prepare("SELECT status, unlisted FROM problems WHERE id = ?")
+      .bind(session.problem_id)
+      .first<{ status: string; unlisted: number }>();
+    const isPrivateDraft = packProblem?.status === "private-draft";
     const currentCursor = await readCursor(db, session.problem_id);
     let cursor = currentCursor;
     let fullAfter = 0;
@@ -3778,6 +3788,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       since = parsedSince.data.since;
     }
     let promotionBudget: RateLimitBudget | undefined;
+    let privatePack: PrivateProblemPackSection | undefined;
+    const privatePackInput = {
+      db,
+      credential: auth.binding,
+      problemId: session.problem_id,
+      sessionId: session.session_id,
+      cursor,
+      profile,
+    };
     const packResponse = async (composed: ReturnType<typeof composePack>): Promise<Response> => {
       const rendered = renderProjection(composedPackToProjection(composed), "json");
       const body = rendered.body;
@@ -3806,6 +3825,29 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         "content-type": "application/json; charset=utf-8",
         etag,
       };
+      if (privatePack !== undefined) {
+        let current = false;
+        try {
+          current = await privateProblemPackStillCurrent(
+            privatePackInput,
+            privatePack.sourceWitness,
+          );
+        } catch {
+          // A failed authority/source read must not release private bytes or
+          // endorse an earlier cached response with a 304.
+        }
+        if (!current)
+          return privateNoStore(
+            validatedProblem({
+              status: 503,
+              code: "INTERNAL_ERROR",
+              title: "The private session context changed",
+              detail:
+                "The current private formulation and access could not be confirmed. No private pack was returned.",
+              fixHint: "Refetch this same pack URL before continuing the session.",
+            }),
+          );
+      }
       const ifNoneMatch = c.req.header("if-none-match");
       if (ifNoneMatch?.split(",").some((v) => v.trim() === etag)) {
         return new Response(null, { status: 304, headers });
@@ -3952,8 +3994,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ),
               {
                 reason: "budget_exceeded",
-                detail:
-                  "orientation-context: whole formulation or event records omitted; use the linked problem and complete event-tail reads before advancing a catch-up cursor",
+                detail: isPrivateDraft
+                  ? "private-formulation: whole formulation omitted; read the linked private problem detail before continuing preparation"
+                  : "orientation-context: whole formulation or event records omitted; use the linked problem and complete event-tail reads before advancing a catch-up cursor",
               },
             ],
           });
@@ -4119,6 +4162,61 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     });
     candidates.push(...directiveContext.candidates);
 
+    if (isPrivateDraft) {
+      try {
+        const section = await readPrivateProblemPack(privatePackInput);
+        if (section === null)
+          return privateNoStore(
+            validatedProblem({
+              status: 404,
+              code: "PROBLEM_NOT_FOUND",
+              title: "Private problem context is unavailable",
+              detail: "No accessible private formulation is available for this session.",
+              fixHint: "Read /v1/hello for current assignments and session recovery.",
+              rule: "A5",
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                example: { method: "GET", path: "/v1/hello" },
+              },
+            }),
+          );
+        privatePack = section;
+      } catch {
+        return privateNoStore(
+          validatedProblem({
+            status: 503,
+            code: "INTERNAL_ERROR",
+            title: "The private session context is unavailable",
+            detail: "The private formulation and retained work could not be read safely.",
+            fixHint: "Retry this same pack URL before continuing the session.",
+          }),
+        );
+      }
+      if (["hello", "orient", "working", "digest"].includes(profile))
+        return composePackResponse({
+          schema: "asimposium.pack.v1",
+          session: session.session_id,
+          problem: session.problem_id,
+          profile,
+          cursor,
+          requested_max_tokens: requestedMaxTokens,
+          viewer: {
+            audience: "session",
+            membership: privatePack.membership,
+            effective_permissions: privatePack.effectivePermissions,
+          },
+          candidates: [...candidates, ...privatePack.candidates],
+          action_candidates: [...directiveContext.actions, ...privatePack.actions],
+          omitted: [
+            ...privatePack.omitted,
+            ...(directiveContext.omitted === null
+              ? []
+              : [{ reason: "candidate_limit", detail: directiveContext.omitted }]),
+          ],
+          degraded: [],
+        });
+    }
+
     if (profile === "digest") {
       const digest = await readDigestPack({
         db,
@@ -4191,7 +4289,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           scope: "system",
           tokens: 1,
           untrusted: false,
-          body: `No claims on ${session.problem_id} yet. The board is open.`,
+          body: isPrivateDraft
+            ? "This unpublished private draft has no public claims. Continue private workshop preparation; publication is a sponsor action."
+            : packProblem?.status === "sharpening"
+              ? "The claims board is locked until a non-proposer statement-clear review is recorded."
+              : `No claims on ${session.problem_id} yet. The board is open.`,
           why_included: "state the current public ledger baseline",
           stable_prefix: 10,
         });
@@ -4545,8 +4647,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const authorizationTarget = {
       kind: "existing-problem" as const,
       problemId: session.problem_id,
-      publication: "published" as const,
-      unlisted: false,
+      publication: isPrivateDraft ? ("private-draft" as const) : ("published" as const),
+      unlisted: packProblem?.unlisted === 1,
       membershipRole: membership,
     };
     const authorizationEventsRecorded = await credentialEventsRecorded(
