@@ -1,17 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import type { D1Database } from "@cloudflare/workers-types";
-import type { EnrollmentService, FellowCredentialBinding } from "../../src/enrollment/service.ts";
-import type { Env } from "../../src/env.ts";
+import type { FellowCredentialBinding } from "../../src/enrollment/service.ts";
 import { writeLedgerEvent } from "../../src/krater/krater.ts";
-import { createProblemRouter } from "../../src/problems/router.ts";
-import {
-  FELLOW,
-  OTHER,
-  publicationContextFixture,
-  SPONSOR,
-} from "../support/publication-context.ts";
+import { problemProposalFixture } from "../support/problem-proposal.ts";
 
-type Fixture = Awaited<ReturnType<typeof publicationContextFixture>>;
+type Fixture = Awaited<ReturnType<typeof problemProposalFixture>>;
 const fixtures: Fixture[] = [];
 afterEach(() => {
   for (const f of fixtures.splice(0)) f.sql.close();
@@ -20,6 +12,7 @@ afterEach(() => {
 const BRIEF = "brief-admission-race";
 const proposal = {
   brief_id: BRIEF,
+  expected_brief_version: 1,
   title: "A finite tree investigation",
   statement: "Every finite tree has exactly one fewer edge than vertices.",
   falsifier: "A finite tree with a different edge count.",
@@ -27,34 +20,18 @@ const proposal = {
   areas: ["combinatorics"],
 };
 
-async function fixture(overrides: Partial<FellowCredentialBinding> = {}) {
-  const f = await publicationContextFixture();
+async function fixture(options: Parameters<typeof problemProposalFixture>[0] = {}) {
+  const f = await problemProposalFixture(options);
   fixtures.push(f);
   const now = Date.now();
-  const binding: FellowCredentialBinding = {
-    fellowId: FELLOW,
-    sponsorId: SPONSOR,
-    credentialId: "TOKEN-brief-admission",
-    name: "context-0",
-    model: "model",
-    harness: "test",
-    grantedScopes: ["propose-problems"],
-    grantedResources: {},
-    tokenHash: "a".repeat(64),
-    issuedAt: now - 1000,
-    expiresAt: now + 60_000,
-    credentialProfile: "bearer",
-    fellowStatus: "active",
-    ...overrides,
-  };
   f.sql
     .query(`INSERT INTO sponsor_problem_briefs
       (id,sponsor_id,assigned_fellow_id,title,statement,falsifier,motivation,areas,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?)`)
     .run(
       BRIEF,
-      SPONSOR,
-      FELLOW,
+      f.principal.sponsorId,
+      f.binding.fellowId,
       proposal.title,
       proposal.statement,
       proposal.falsifier,
@@ -63,32 +40,7 @@ async function fixture(overrides: Partial<FellowCredentialBinding> = {}) {
       new Date(now).toISOString(),
       new Date(now).toISOString(),
     );
-  const router = createProblemRouter({
-    service: { credentialBinding: async () => binding } as unknown as EnrollmentService,
-    verifiedSponsor: async () => new Response(null, { status: 403 }),
-  });
-  // Unit-level deterministic interleaving around the real proposal SQL. The
-  // shared adapter applies the actual migrations and rolls back whole batches.
-  // The hook models a different request committing after the admission read.
-  let beforeBatch: (() => void | Promise<void>) | undefined;
-  const db = {
-    prepare: f.db.prepare.bind(f.db),
-    async batch(statements) {
-      const hook = beforeBatch;
-      beforeBatch = undefined;
-      await hook?.();
-      return f.db.batch(statements);
-    },
-  } as D1Database;
-  const propose = (body: object = proposal) =>
-    router.fetch(
-      new Request("https://a.asimposium.org/v1/problems", {
-        method: "POST",
-        headers: { authorization: "Bearer fixture", "content-type": "application/json" },
-        body: JSON.stringify(body),
-      }),
-      { DB: db } as Env,
-    );
+  const propose = (body: object = proposal, key?: string | null) => f.propose(body, key);
   const state = () => ({
     problems: f.sql.query("SELECT * FROM problems ORDER BY id").all(),
     statements: f.sql
@@ -101,23 +53,24 @@ async function fixture(overrides: Partial<FellowCredentialBinding> = {}) {
     integrity: f.sql.query("SELECT * FROM krater_integrity_backfill ORDER BY problem_id").all(),
     events: f.sql.query("SELECT * FROM events ORDER BY problem_id,seq").all(),
     briefs: f.sql.query("SELECT * FROM sponsor_problem_briefs ORDER BY id").all(),
+    receipts: f.sql
+      .query("SELECT * FROM problem_proposal_command_receipts ORDER BY fellow_id,key_digest")
+      .all(),
   });
   return {
     ...f,
     propose,
     state,
-    beforeCommit(hook: () => void | Promise<void>) {
-      beforeBatch = hook;
-    },
   };
 }
 
-for (const assigned of [FELLOW, null]) {
-  test(`eligible ${assigned === null ? "unassigned" : "assigned"} sponsor brief creates one complete private draft`, async () => {
+for (const assigned of [true, false]) {
+  test(`eligible ${assigned ? "assigned" : "unassigned"} sponsor brief creates one complete private draft`, async () => {
     const f = await fixture();
+    const originalEvents = f.state().events;
     f.sql
       .query("UPDATE sponsor_problem_briefs SET assigned_fellow_id=? WHERE id=?")
-      .run(assigned, BRIEF);
+      .run(assigned ? f.binding.fellowId : null, BRIEF);
     const response = await f.propose();
     expect(response.status).toBe(201);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
@@ -125,8 +78,11 @@ for (const assigned of [FELLOW, null]) {
       problem: { id: string; status: string; public_seq: number };
     };
     expect(result.problem).toMatchObject({ status: "private-draft", public_seq: 0 });
-    expect(f.sql.query("SELECT status FROM sponsor_problem_briefs WHERE id=?").get(BRIEF)).toEqual({
+    expect(
+      f.sql.query("SELECT status,version FROM sponsor_problem_briefs WHERE id=?").get(BRIEF),
+    ).toEqual({
       status: "adopted",
+      version: 2,
     });
     expect(
       f.sql
@@ -137,8 +93,9 @@ for (const assigned of [FELLOW, null]) {
       f.sql
         .query("SELECT fellow_id,role FROM problem_memberships WHERE problem_id=?")
         .get(result.problem.id),
-    ).toEqual({ fellow_id: FELLOW, role: "contributor" });
-    expect(f.state().events).toEqual([]);
+    ).toEqual({ fellow_id: f.binding.fellowId, role: "contributor" });
+    expect(f.state().events).toEqual(originalEvents);
+    expect(f.state().receipts).toHaveLength(1);
     expect(f.sql.query("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 }
@@ -147,28 +104,28 @@ for (const change of [
   {
     name: "withdrawal",
     sql: "UPDATE sponsor_problem_briefs SET status='withdrawn' WHERE id=?",
-    values: [BRIEF],
+    values: (_f: Fixture) => [BRIEF],
     status: 404,
     code: "BRIEF_NOT_FOUND",
   },
   {
     name: "reassignment",
     sql: "UPDATE sponsor_problem_briefs SET assigned_fellow_id=? WHERE id=?",
-    values: [OTHER, BRIEF],
+    values: (f: Fixture) => [f.peerBinding.fellowId, BRIEF],
     status: 403,
     code: "BRIEF_NOT_ASSIGNED",
   },
   {
     name: "ownership change",
-    sql: "UPDATE sponsor_problem_briefs SET sponsor_id='usr_other' WHERE id=?",
-    values: [BRIEF],
+    sql: "UPDATE sponsor_problem_briefs SET sponsor_id=? WHERE id=?",
+    values: (f: Fixture) => [f.receiver.sponsorId, BRIEF],
     status: 403,
     code: "BRIEF_NOT_ASSIGNED",
   },
   {
     name: "new scientific boundaries",
     sql: "UPDATE sponsor_problem_briefs SET scope='Finite trees',out_of_scope='Infinite trees',success_criteria='A proof or explicit counterexample' WHERE id=?",
-    values: [BRIEF],
+    values: (_f: Fixture) => [BRIEF],
     status: 422,
     code: "STATEMENT_INCOMPLETE",
   },
@@ -177,7 +134,7 @@ for (const change of [
     const f = await fixture();
     let committedState: ReturnType<typeof f.state> | undefined;
     f.beforeCommit(() => {
-      f.sql.query(change.sql).run(...change.values);
+      f.sql.query(change.sql).run(...change.values(f));
       committedState = f.state();
     });
     const response = await f.propose();
@@ -207,7 +164,9 @@ test("two admissions of the same brief commit only the winning private problem",
   if (winningState === undefined) throw new Error("Winning brief adoption did not commit");
   expect(f.state()).toEqual(winningState);
   expect(
-    f.sql.query("SELECT id,title FROM problems WHERE created_by_fellow_id=?").all(FELLOW),
+    f.sql
+      .query("SELECT id,title FROM problems WHERE created_by_fellow_id=?")
+      .all(f.binding.fellowId),
   ).toEqual([{ id: winnerId, title: "The winning formulation" }]);
 });
 
@@ -218,7 +177,7 @@ test("an unrelated storage failure is not misreported as lost brief authority", 
   });
   const before = f.state();
   const response = await f.propose();
-  expect(response.status).toBe(500);
+  expect(response.status).toBe(503);
   expect(await response.json()).toMatchObject({ code: "INTERNAL_ERROR" });
   expect(f.state()).toEqual(before);
 });
@@ -227,11 +186,11 @@ test("problem proposals enforce resource grants with the same coarse refusal and
   let refusal: unknown;
   for (const overrides of [
     { grantedScopes: [] },
-    { grantedResources: { problemBinding: "P-CONTEXT" } },
+    { grantedResources: { problemBinding: "P-DISCLOSE" } },
     { grantedResources: { eventBudget: 0 } },
     { grantedResources: { fellowGrantExpiresAt: Date.now() - 1 } },
   ] satisfies Partial<FellowCredentialBinding>[]) {
-    const f = await fixture(overrides);
+    const f = await fixture({ bindingOverride: overrides });
     const before = f.state();
     const response = await f.propose();
     expect(response.status).toBe(403);
@@ -245,29 +204,48 @@ test("problem proposals enforce resource grants with the same coarse refusal and
 });
 
 test("an unbound Fellow with remaining event budget can still adopt its brief", async () => {
-  const f = await fixture({ grantedResources: { eventBudget: 1 } });
+  const f = await fixture({ grants: { event_budget: 1 } });
+  const originalEvents = f.state().events;
   expect((await f.propose()).status).toBe(201);
-  expect(f.state().events).toEqual([]);
+  expect(f.state().events).toEqual(originalEvents);
 });
 
 test("a credential with its positive event budget exhausted cannot adopt a brief", async () => {
-  const credentialId = "TOKEN-brief-budget-exhausted";
-  const f = await fixture({ credentialId, grantedResources: { eventBudget: 1 } });
-  const member = f.command(f.input("Previously recorded work."));
-  const attribution = member.input.attribution;
-  if (attribution.principalType !== undefined) {
-    throw new Error("Expected a Fellow-attributed fixture event.");
-  }
+  const f = await fixture({
+    grants: { requested_scopes: ["propose-problems", "promote"], event_budget: 1 },
+  });
+  const credentialId = f.binding.credentialId;
   await writeLedgerEvent(
-    f.db,
+    f.baseDb,
     {
-      ...member.input,
-      attribution: { ...attribution, credentialId },
+      problemId: f.target.problemId,
+      eventId: "E-proposal-prior-work",
+      idempotencyKey: "proposal-prior-work",
+      requestDigest: "a".repeat(64),
+      eventType: "hypothesis.created",
+      objectKind: "hypothesis",
+      objectId: "H-proposal-prior-work",
+      objectVersion: 1,
+      payloadJson: JSON.stringify({
+        body_md: "Previously recorded work.",
+        falsifier: "A counterexample.",
+      }),
+      createdAt: new Date().toISOString(),
+      attribution: {
+        fellowId: f.binding.fellowId,
+        sponsorId: f.binding.sponsorId,
+        credentialId,
+        sessionId: "S-proposal-prior-work",
+        modelSelfDeclared: f.binding.model,
+        harness: f.binding.harness,
+      },
     },
-    member.projection,
+    { statementsAfterEvent: () => [] },
   );
   expect(
-    f.sql.query("SELECT writer_credential_id FROM events ORDER BY problem_id,seq").all(),
+    f.sql
+      .query("SELECT writer_credential_id FROM events WHERE writer_credential_id=?")
+      .all(credentialId),
   ).toEqual([{ writer_credential_id: credentialId }]);
 
   const before = f.state();

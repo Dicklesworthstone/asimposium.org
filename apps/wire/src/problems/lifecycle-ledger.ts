@@ -224,15 +224,17 @@ export async function governanceTargetRefusal(
   }
   if (action.action === "manage-steward") {
     const target = await db
-      .prepare("SELECT 1 FROM sponsors WHERE sponsor_id = ?")
-      .bind(action.target_sponsor_id)
+      .prepare(`SELECT 1 FROM sponsors WHERE sponsor_id = ? AND (? = 'remove' OR (
+        tombstoned_at IS NULL AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events
+          WHERE sponsor_id = sponsors.sponsor_id)))`)
+      .bind(action.target_sponsor_id, action.operation)
       .first();
     if (!target) {
       return refusal(
         "WRITE_REFUSED",
         422,
-        "The target sponsor is not known to this site.",
-        "Name a sponsor who has signed in to ASImposium.",
+        "The target sponsor is not available for this stewardship action.",
+        "Name an active sponsor who has signed in to ASImposium; an existing inactive steward may still be removed.",
       );
     }
   }
@@ -294,8 +296,19 @@ export async function applyPublicProblemGovernance(
       FROM idempotency i LEFT JOIN events e ON e.id = i.event_id
       LEFT JOIN event_content c ON c.event_id = e.id
       WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.created_at > ?
+      ${
+        action.action === "manage-steward"
+          ? `AND EXISTS (SELECT 1 FROM sponsors WHERE sponsor_id = ? AND tombstoned_at IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events WHERE sponsor_id = ?)`
+          : ""
+      }
     `)
-      .bind(problem.id, scopedKey, cutoff)
+      .bind(
+        problem.id,
+        scopedKey,
+        cutoff,
+        ...(action.action === "manage-steward" ? [sponsorId, sponsorId] : []),
+      )
       .first<{
         request_digest: string;
         event_id: string;
@@ -336,10 +349,18 @@ export async function applyPublicProblemGovernance(
         ? { action: event.action, mode: event.problem.admission_mode }
         : event.action === "manage-member"
           ? event
-          : undefined;
+          : event.action === "manage-steward" && action.action === "manage-steward"
+            ? action
+            : undefined;
     return Response.json(
       {
-        problem: responseProblem,
+        // A transfer may revoke the acting sponsor's authority. Its own
+        // historical command remains recoverable without returning any
+        // formulation or newly governed workspace content.
+        problem:
+          event.action === "manage-steward"
+            ? { id: problem.id, updated_at: event.problem.updated_at }
+            : responseProblem,
         ...(accessAction
           ? {
               governance_action: problemAccessActionReceipt(
@@ -359,6 +380,10 @@ export async function applyPublicProblemGovernance(
 
   const previous = await replay();
   if (previous) return previous;
+  // A concurrent identical transfer can remove this actor after the first
+  // receipt lookup. Its completed command wins over later mutable refusals.
+  const currentStateRefusal = async (response: Response): Promise<Response> =>
+    action.action === "manage-steward" ? ((await replay()) ?? response) : response;
   const publishing = action.action === "publish";
   const revising = action.action === "revise-statement";
   let reviewedPublication: ProblemPublicationSnapshot | undefined;
@@ -431,11 +456,13 @@ export async function applyPublicProblemGovernance(
     )
   ) {
     if (problem.status === "retired" || problem.status === "resolved") {
-      return refusal(
-        "WRITE_REFUSED",
-        422,
-        "Cannot modify a closed problem.",
-        "Fork the problem if you want to explore an alternate formulation.",
+      return currentStateRefusal(
+        refusal(
+          "WRITE_REFUSED",
+          422,
+          "Cannot modify a closed problem.",
+          "Fork the problem if you want to explore an alternate formulation.",
+        ),
       );
     }
   }
@@ -446,7 +473,7 @@ export async function applyPublicProblemGovernance(
     .bind(problem.id, sponsorId)
     .first();
   if (!steward && problem.sponsor_id !== sponsorId) {
-    return problemGovernanceRefused();
+    return currentStateRefusal(problemGovernanceRefused());
   }
 
   if (publishing) {
@@ -495,7 +522,7 @@ export async function applyPublicProblemGovernance(
   }
 
   const targetRefused = await governanceTargetRefusal(db, action, sponsorId);
-  if (targetRefused) return targetRefused;
+  if (targetRefused) return currentStateRefusal(targetRefused);
 
   // 0a5p: the count below can be stale under concurrent removes, so the
   // ledger precondition also requires another steward to remain.
@@ -510,11 +537,13 @@ export async function applyPublicProblemGovernance(
       (stewardCount?.count ?? 1) <= 1 &&
       (action.target_sponsor_id === sponsorId || action.target_sponsor_id === problem.sponsor_id)
     ) {
-      return refusal(
-        "WRITE_REFUSED",
-        422,
-        "Cannot remove the sole steward of a problem.",
-        "Add another steward before removing this one.",
+      return currentStateRefusal(
+        refusal(
+          "WRITE_REFUSED",
+          422,
+          "Cannot remove the sole steward of a problem.",
+          "Add another steward before removing this one.",
+        ),
       );
     }
   }
@@ -934,6 +963,17 @@ export async function applyPublicProblemGovernance(
             : ""
         }
         ${
+          action.action === "manage-steward" && action.expected_stewardship_version !== undefined
+            ? "AND stewardship_version = ?"
+            : ""
+        }
+        ${
+          action.action === "manage-steward" && action.operation !== "remove"
+            ? `AND EXISTS (SELECT 1 FROM sponsors WHERE sponsor_id = ? AND tombstoned_at IS NULL)
+             AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events WHERE sponsor_id = ?)`
+            : ""
+        }
+        ${
           publishing
             ? `AND admission_mode IS ? AND writer_cap IS ? AND sponsor_id IS ?
         AND (SELECT group_concat(sponsor_id || ':' || is_founding || ':' || created_at, ',')
@@ -981,6 +1021,13 @@ export async function applyPublicProblemGovernance(
             ? [sponsorId, sponsorId]
             : []),
           ...(removingSteward ? [problem.id, removedSteward, problem.id] : []),
+          ...(action.action === "manage-steward" &&
+          action.expected_stewardship_version !== undefined
+            ? [action.expected_stewardship_version]
+            : []),
+          ...(action.action === "manage-steward" && action.operation !== "remove"
+            ? [action.target_sponsor_id, action.target_sponsor_id]
+            : []),
           ...(publishing
             ? [
                 problem.admission_mode ?? null,

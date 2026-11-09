@@ -605,10 +605,7 @@ for (const kind of ["evidence", "review"] as const) {
         : await scientificReview(f, 2, "C-1");
     const before = await f.pack("C-1@1", 2);
     const original = bodies(before, `claim-${kind}`)[0];
-    expect(original.scientific_status).toEqual({
-      withdrawal: "not-recorded",
-      positive_authority: "not-assessed",
-    });
+    expect(original.scientific_status).toBeUndefined();
     const correction = await withdrawInput(f, source, 3);
     expect(await f.pack("C-1@1", 2)).toEqual(before);
     const current = await f.pack("C-1@1", 3);
@@ -763,10 +760,7 @@ test("a contradictory withdrawal witness is not promoted into a pack correction"
   f.db
     .prepare("UPDATE scientific_withdrawals SET event_sha256 = ? WHERE event_id = ?")
     .run(hash, correction.event);
-  expect(bodies(await f.pack("C-1@1", 3), "claim-evidence")[0].scientific_status).toEqual({
-    withdrawal: "not-recorded",
-    positive_authority: "not-assessed",
-  });
+  expect(bodies(await f.pack("C-1@1", 3), "claim-evidence")[0].scientific_status).toBeUndefined();
 });
 
 async function focusedClaimHistory() {

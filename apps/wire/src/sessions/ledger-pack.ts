@@ -674,7 +674,10 @@ async function composeTargetClaimPack(
               kind === "claim-evidence" ? "evidence" : "review",
               row.payload_sha256,
             );
-            projected.scientific_status = status;
+            // Exception metadata must travel with the affected record. A
+            // neutral "not assessed" result adds no authority and needlessly
+            // displaces ordinary evidence/reviews from the bounded read window.
+            if (status.positive_authority !== "not-assessed") projected.scientific_status = status;
             if (status.withdrawal === "withdrawn")
               why = `withdrawn public record for ${problemId}#${target}; retained history without positive authority; adverse findings are not resolved by withdrawal`;
             else if (status.positive_authority !== "not-assessed")

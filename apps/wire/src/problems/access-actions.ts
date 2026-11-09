@@ -1,7 +1,7 @@
 import {
   canonicalJson,
-  type ProblemAccessActionReceipt,
-  ProblemAccessActionReceiptSchema,
+  type ProblemGovernanceActionReceipt,
+  ProblemGovernanceActionReceiptSchema,
   ProblemGovernanceKeySchema,
   type ProblemLifecycleActionRequest,
 } from "@asimposium/contracts";
@@ -12,13 +12,17 @@ import { privateProblemGovernanceResponse } from "./governance-read.ts";
 
 export type ProblemAccessAction = Extract<
   ProblemLifecycleActionRequest,
-  { action: "set-admission-mode" | "manage-member" }
+  { action: "set-admission-mode" | "manage-member" | "manage-steward" }
 >;
 
 export function isProblemAccessAction(
   action: ProblemLifecycleActionRequest,
 ): action is ProblemAccessAction {
-  return action.action === "set-admission-mode" || action.action === "manage-member";
+  return (
+    action.action === "set-admission-mode" ||
+    action.action === "manage-member" ||
+    action.action === "manage-steward"
+  );
 }
 
 export function problemAccessActionReceipt(
@@ -27,24 +31,31 @@ export function problemAccessActionReceipt(
   action: ProblemAccessAction,
   updatedAt: string,
   eventId: string | null,
-): ProblemAccessActionReceipt {
-  return ProblemAccessActionReceiptSchema.parse({
+): ProblemGovernanceActionReceipt {
+  return ProblemGovernanceActionReceiptSchema.parse({
     problem_id: problemId,
     acting_sponsor_id: sponsorId,
     updated_at: updatedAt,
     event_id: eventId,
     ...(action.action === "set-admission-mode"
       ? { action: action.action, mode: action.mode }
-      : {
-          action: action.action,
-          operation: action.operation,
-          target_fellow_id: action.target_fellow_id,
-          role: action.operation === "remove" ? null : (action.role ?? "contributor"),
-        }),
+      : action.action === "manage-steward"
+        ? {
+            action: action.action,
+            operation: action.operation,
+            target_sponsor_id: action.target_sponsor_id,
+            expected_stewardship_version: action.expected_stewardship_version ?? null,
+          }
+        : {
+            action: action.action,
+            operation: action.operation,
+            target_fellow_id: action.target_fellow_id,
+            role: action.operation === "remove" ? null : (action.role ?? "contributor"),
+          }),
   });
 }
 
-function response(receipt: ProblemAccessActionReceipt): Response {
+function response(receipt: ProblemGovernanceActionReceipt): Response {
   return privateProblemGovernanceResponse(
     Response.json({
       problem: {
@@ -92,7 +103,8 @@ async function replay(
       AND s.tombstoned_at IS NULL
       AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events WHERE sponsor_id = s.sponsor_id)
       AND NOT EXISTS (SELECT 1 FROM private_draft_erasures WHERE problem_id = p.id)
-      AND (p.sponsor_id = s.sponsor_id OR EXISTS (SELECT 1 FROM problem_stewards
+      AND (json_extract(r.receipt_json, '$.action') = 'manage-steward'
+        OR p.sponsor_id = s.sponsor_id OR EXISTS (SELECT 1 FROM problem_stewards
         WHERE problem_id = p.id AND sponsor_id = s.sponsor_id))`)
     .bind(problemId, sponsorId, identity.keyHash, now)
     .first<{ request_digest: string; receipt_json: string }>();
@@ -112,7 +124,7 @@ async function replay(
         },
       }),
     );
-  const receipt = ProblemAccessActionReceiptSchema.parse(JSON.parse(row.receipt_json));
+  const receipt = ProblemGovernanceActionReceiptSchema.parse(JSON.parse(row.receipt_json));
   if (
     receipt.problem_id !== problemId ||
     receipt.acting_sponsor_id !== sponsorId ||
@@ -123,7 +135,9 @@ async function replay(
 }
 
 /** Read before selecting draft/public handling: publication cannot turn an old
- * private retry into a fresh public action. Current authority is still required. */
+ * private retry into a fresh public action. An active actor may recover their
+ * own metadata-only stewardship receipt after a transfer removed authority;
+ * a new command always passes the transactional current-authority guard. */
 export async function replayPrivateProblemAccessAction(
   db: D1Database,
   problemId: string,
@@ -148,6 +162,25 @@ export async function applyPrivateProblemAccessAction(
   const now = new Date().toISOString();
   const previous = await replay(db, problemId, sponsorId, identity, now);
   if (previous) return previous;
+  if (action.action === "manage-steward" && action.operation === "remove") {
+    const count = await db
+      .prepare("SELECT COUNT(*) AS n FROM problem_stewards WHERE problem_id = ?")
+      .bind(problemId)
+      .first<{ n: number }>();
+    if ((count?.n ?? 0) <= 1) {
+      const winner = await replay(db, problemId, sponsorId, identity, now);
+      if (winner) return winner;
+      return privateProblemGovernanceResponse(
+        validatedProblem({
+          status: 422,
+          code: "WRITE_REFUSED",
+          title: "Cannot remove sole steward",
+          detail: "Cannot remove the final steward of a problem.",
+          fixHint: "Add another steward before removing this one.",
+        }),
+      );
+    }
+  }
   const receipt = problemAccessActionReceipt(problemId, sponsorId, action, now, null);
   try {
     await db.batch([

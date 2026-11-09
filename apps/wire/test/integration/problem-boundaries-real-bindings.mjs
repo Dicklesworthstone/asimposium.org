@@ -65,12 +65,19 @@ await runLocalWorkerJourney(
     );
     assert.equal(omittedBrief.code, "STATEMENT_INCOMPLETE");
     assert.equal(
-      (await call("/v1/problems", { ...proposal, brief_id: brief.id }, author, 422)).code,
+      (
+        await call(
+          "/v1/problems",
+          { ...proposal, brief_id: brief.id, expected_brief_version: brief.version },
+          author,
+          422,
+        )
+      ).code,
       "STATEMENT_INCOMPLETE",
     );
     const created = await call(
       "/v1/problems",
-      { ...proposal, ...initial, brief_id: brief.id },
+      { ...proposal, ...initial, brief_id: brief.id, expected_brief_version: brief.version },
       author,
       201,
     );

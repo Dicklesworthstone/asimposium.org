@@ -272,7 +272,7 @@ await runLocalWorkerJourney(
     const { assigned_fellow_id: _assignedFellow, ...formulation } = adoptionRequest;
     const adopted = await call(
       "/v1/problems",
-      { ...formulation, brief_id: adoptionId },
+      { ...formulation, brief_id: adoptionId, expected_brief_version: adoptedBrief.brief.version },
       firstToken,
       201,
     );

@@ -541,6 +541,55 @@ test("the invalid Fellow brief fixture rejects withdrawn intent rather than miss
   expect(FellowProblemBriefReadResponseSchema.safeParse(active).success).toBe(true);
 });
 
+test("brief adoption requires the exact version pin in the proposal contract", () => {
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.propose_request);
+  for (const directory of ["valid", "invalid"] as const) {
+    const proposal = JSON.parse(
+      readFileSync(
+        new URL(`../fixtures/${directory}/problems-proposal-from-brief.json`, import.meta.url),
+        "utf8",
+      ),
+    );
+    expect(ProposeProblemRequestSchema.safeParse(proposal).success).toBe(directory === "valid");
+    expect(published(proposal)).toBe(directory === "valid");
+  }
+  const valid = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/valid/problems-proposal-from-brief.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  for (const missing of ["brief_id", "expected_brief_version"]) {
+    const partial = { ...valid };
+    delete partial[missing];
+    expect(ProposeProblemRequestSchema.safeParse(partial).success).toBe(false);
+  }
+  for (const version of [-1, 1.5, "2", null, Number.MAX_SAFE_INTEGER + 1]) {
+    const invalid = { ...valid, expected_brief_version: version };
+    expect(ProposeProblemRequestSchema.safeParse(invalid).success).toBe(false);
+    expect(published(invalid)).toBe(false);
+  }
+});
+
+test("Fellow brief action prefill pins the exact returned intent without drafting its scientific content", () => {
+  const read = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/valid/problems-fellow-brief-read.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  expect(FellowProblemBriefReadResponseSchema.safeParse(read).success).toBe(true);
+  expect(Object.keys(read.next_actions[0].body_prefill)).toEqual([
+    "brief_id",
+    "expected_brief_version",
+  ]);
+  read.next_actions[0].body_prefill.expected_brief_version += 1;
+  expect(FellowProblemBriefReadResponseSchema.safeParse(read).success).toBe(false);
+});
+
 test("W5.1 Fellow propose problem request validates inputs", () => {
   const validProposal = {
     title: "Goldbach Conjecture Investigation",

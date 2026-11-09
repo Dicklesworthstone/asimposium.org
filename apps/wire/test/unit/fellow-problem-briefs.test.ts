@@ -126,6 +126,7 @@ test("hello leads an assigned Fellow from private sponsor intent into its own pr
   const brief = detail.brief;
   const proposed = await f.request("/v1/problems", {
     brief_id: brief.id,
+    expected_brief_version: brief.version,
     title: brief.title,
     statement: brief.statement,
     falsifier: brief.falsifier,

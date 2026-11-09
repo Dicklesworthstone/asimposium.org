@@ -43,6 +43,8 @@ const LANES = [
   "problem-dormancy",
   "problem-duplicate-privacy",
   "problem-lifecycle",
+  "problem-proposal-commands",
+  "problem-stewardship-commands",
   "projection-doctor",
   "projection-legacy-backfill",
   "publication-context",

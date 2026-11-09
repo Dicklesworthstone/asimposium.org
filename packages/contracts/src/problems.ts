@@ -252,15 +252,33 @@ export const FellowProblemBriefReadResponseSchema = z
             schema: z.literal(
               "https://a.asimposium.org/schemas/problems.v1.json#/properties/propose_request",
             ),
+            body_prefill: z
+              .object({
+                brief_id: z.string().min(1).max(128),
+                expected_brief_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+              })
+              .strict(),
             why: z.literal(
-              "Read this private sponsor intent, then propose your own exact formulation with this brief_id. Adoption creates a private draft; it does not publish a problem.",
+              "Read this private sponsor intent, then propose your own exact formulation with this brief_id and expected_brief_version. Keep the same Idempotency-Key and exact body when retrying. Adoption creates a private draft; it does not publish a problem.",
             ),
           })
           .strict(),
       )
       .max(1),
   })
-  .strict();
+  .strict()
+  .superRefine((read, ctx) => {
+    const prefill = read.next_actions[0]?.body_prefill;
+    if (
+      prefill &&
+      (prefill.brief_id !== read.brief.id || prefill.expected_brief_version !== read.brief.version)
+    )
+      ctx.addIssue({
+        code: "custom",
+        path: ["next_actions"],
+        message: "The proposal action must pin the exact private brief returned by this read.",
+      });
+  });
 export type FellowProblemBriefReadResponse = z.infer<typeof FellowProblemBriefReadResponseSchema>;
 
 /**
@@ -294,6 +312,7 @@ const GovernanceFellowIdSchema = z.string().min(1).max(128);
 export const SponsorProblemGovernanceQuerySchema = z
   .object({
     after: GovernanceFellowIdSchema.optional(),
+    steward_after: SponsorIdSchema.optional(),
   })
   .strict();
 export type SponsorProblemGovernanceQuery = z.infer<typeof SponsorProblemGovernanceQuerySchema>;
@@ -321,6 +340,27 @@ export const SponsorProblemGovernanceResponseSchema = z
         can_edit_access: z.boolean(),
       })
       .strict(),
+    stewardship: z
+      .object({
+        version: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+        accountable_sponsor_id: SponsorIdSchema.nullable(),
+        stewards: z
+          .array(
+            z
+              .object({
+                sponsor_id: SponsorIdSchema,
+                is_founding: z.boolean(),
+                created_at: ProblemIndexTimestampSchema,
+              })
+              .strict(),
+          )
+          .max(50),
+        total_count: z.number().int().nonnegative(),
+        has_more: z.boolean(),
+        next_after: SponsorIdSchema.nullable(),
+      })
+      .strict()
+      .optional(),
     members: z
       .array(
         z
@@ -348,6 +388,31 @@ export const SponsorProblemGovernanceResponseSchema = z
   .strict()
   .superRefine((page, ctx) => {
     const counts = page.member_counts;
+    if (page.stewardship) {
+      const roster = page.stewardship;
+      let previousSponsor = "";
+      let ordered = true;
+      for (const steward of roster.stewards) {
+        if (steward.sponsor_id <= previousSponsor) ordered = false;
+        previousSponsor = steward.sponsor_id;
+      }
+      if (
+        !ordered ||
+        roster.total_count < roster.stewards.length ||
+        (roster.has_more
+          ? roster.stewards.length !== 50 ||
+            roster.total_count <= 50 ||
+            roster.next_after !== previousSponsor
+          : roster.next_after !== null)
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["stewardship"],
+          message:
+            "The bounded steward roster must be distinct, ordered, and identify its exact continuation.",
+        });
+      }
+    }
     if (
       counts.total !== counts.observer + counts.contributor + counts.steward ||
       page.members.length > counts.total
@@ -419,6 +484,24 @@ export const ProblemAccessActionReceiptSchema = z.union([
 ]);
 export type ProblemAccessActionReceipt = z.infer<typeof ProblemAccessActionReceiptSchema>;
 
+export const ProblemStewardshipActionReceiptSchema = AccessReceiptBaseSchema.extend({
+  action: z.literal("manage-steward"),
+  operation: z.enum(["add", "transfer", "remove"]),
+  target_sponsor_id: SponsorIdSchema,
+  expected_stewardship_version: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(Number.MAX_SAFE_INTEGER)
+    .nullable(),
+}).strict();
+export type ProblemStewardshipActionReceipt = z.infer<typeof ProblemStewardshipActionReceiptSchema>;
+export const ProblemGovernanceActionReceiptSchema = z.union([
+  ProblemAccessActionReceiptSchema,
+  ProblemStewardshipActionReceiptSchema,
+]);
+export type ProblemGovernanceActionReceipt = z.infer<typeof ProblemGovernanceActionReceiptSchema>;
+
 /** Private, signed sponsor read of the exact draft proposed for publication. */
 export const ProblemPublicationPreviewSchema = z
   .object({
@@ -489,6 +572,7 @@ export const ProposeProblemRequestSchema = completeProblemBoundaries(
   z
     .object({
       brief_id: z.string().min(1).max(128).optional(),
+      expected_brief_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
       title: z.string().min(1).max(120),
       statement: z.string().min(1).max(8192),
       falsifier: z.string().min(1).max(8192),
@@ -500,7 +584,15 @@ export const ProposeProblemRequestSchema = completeProblemBoundaries(
       unlisted: z.boolean().optional(),
     })
     .strict(),
-);
+).superRefine((proposal, ctx) => {
+  if ((proposal.brief_id === undefined) !== (proposal.expected_brief_version === undefined)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["expected_brief_version"],
+      message: "Brief adoption must name both brief_id and the exact expected_brief_version read.",
+    });
+  }
+});
 
 export type ProposeProblemRequest = z.infer<typeof ProposeProblemRequestSchema>;
 
@@ -593,6 +685,12 @@ export const ProblemLifecycleActionRequestSchema = z.discriminatedUnion("action"
       action: z.literal("manage-steward"),
       operation: z.enum(["add", "transfer", "remove"]),
       target_sponsor_id: SponsorIdSchema,
+      expected_stewardship_version: z
+        .number()
+        .int()
+        .nonnegative()
+        .max(Number.MAX_SAFE_INTEGER)
+        .optional(),
     })
     .strict(),
   z
@@ -672,6 +770,9 @@ const ProblemDetailObjectSchema = z
 export const ProblemDetailSchema = completeProblemBoundaries(ProblemDetailObjectSchema);
 
 export type ProblemDetail = z.infer<typeof ProblemDetailSchema>;
+
+export const ProposeProblemResponseSchema = z.object({ problem: ProblemDetailSchema }).strict();
+export type ProposeProblemResponse = z.infer<typeof ProposeProblemResponseSchema>;
 
 const PublicGovernanceStatusSchema = z.enum([
   "sharpening",
@@ -970,6 +1071,7 @@ export const ProblemLifecycleContractsSchema = z
     fellow_brief_read_query: FellowProblemBriefReadQuerySchema,
     fellow_brief_read_response: FellowProblemBriefReadResponseSchema,
     propose_request: ProposeProblemRequestSchema,
+    propose_response: ProposeProblemResponseSchema,
     save_brief_request: SaveProblemBriefRequestSchema,
     save_brief_response: SaveProblemBriefResponseSchema,
     withdraw_brief_request: WithdrawProblemBriefRequestSchema,
@@ -978,6 +1080,8 @@ export const ProblemLifecycleContractsSchema = z
     governance_query: SponsorProblemGovernanceQuerySchema,
     governance_response: SponsorProblemGovernanceResponseSchema,
     access_action_receipt: ProblemAccessActionReceiptSchema,
+    stewardship_action_receipt: ProblemStewardshipActionReceiptSchema,
+    governance_action_receipt: ProblemGovernanceActionReceiptSchema,
     lifecycle_request: ProblemLifecycleActionRequestSchema,
     reanchor_request: ClaimReanchorRequestSchema,
     statement_review_request: ProblemStatementReviewRequestSchema,

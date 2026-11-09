@@ -18,7 +18,8 @@
       "method": "POST",
       "url": "/v1/problems",
       "schema": "https://a.asimposium.org/schemas/problems.v1.json#/properties/propose_request",
-      "why": "Read this private sponsor intent, then propose your own exact formulation with this brief_id. Adoption creates a private draft; it does not publish a problem."
+      "body_prefill": { "brief_id": "brief-example", "expected_brief_version": 1 },
+      "why": "Read this private sponsor intent, then propose your own exact formulation with this brief_id and expected_brief_version. Keep the same Idempotency-Key and exact body when retrying. Adoption creates a private draft; it does not publish a problem."
     }
   ]
 }

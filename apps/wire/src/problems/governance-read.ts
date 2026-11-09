@@ -16,6 +16,7 @@ export async function readSponsorProblemGovernance(
   const row = await db
     .prepare(`SELECT p.id, p.title, p.status, p.unlisted,
     p.current_statement_version, p.admission_mode, p.writer_cap, p.updated_at,
+    p.stewardship_version, p.sponsor_id AS accountable_sponsor_id,
     p.sponsor_id = ? AS is_owner,
     EXISTS (SELECT 1 FROM problem_stewards WHERE problem_id = p.id AND sponsor_id = ?) AS is_steward,
     (SELECT json_object('total', COUNT(*),
@@ -28,7 +29,12 @@ export async function readSponsorProblemGovernance(
       FROM (SELECT m.fellow_id, f.name, m.role, f.status AS fellow_status, m.joined_at
         FROM problem_memberships m JOIN enrollment_fellows f ON f.fellow_id = m.fellow_id
         WHERE m.problem_id = p.id AND m.fellow_id > ?
-        ORDER BY m.fellow_id LIMIT ?)) AS members_json
+        ORDER BY m.fellow_id LIMIT ?)) AS members_json,
+    (SELECT COUNT(*) FROM problem_stewards WHERE problem_id = p.id) AS steward_count,
+    (SELECT json_group_array(json_object('sponsor_id', sponsor_id,
+      'is_founding', json(CASE WHEN is_founding = 1 THEN 'true' ELSE 'false' END), 'created_at', created_at))
+      FROM (SELECT sponsor_id, is_founding, created_at FROM problem_stewards
+        WHERE problem_id = p.id AND sponsor_id > ? ORDER BY sponsor_id LIMIT 51)) AS stewards_json
     FROM problems p WHERE p.id = ?
       AND NOT EXISTS (SELECT 1 FROM private_draft_erasures WHERE problem_id = p.id)
       AND EXISTS (SELECT 1 FROM sponsors WHERE sponsor_id = ? AND tombstoned_at IS NULL)
@@ -40,6 +46,7 @@ export async function readSponsorProblemGovernance(
       sponsorId,
       query.after ?? "",
       PROBLEM_GOVERNANCE_MEMBER_PAGE_SIZE + 1,
+      query.steward_after ?? "",
       problemId,
       sponsorId,
       sponsorId,
@@ -59,11 +66,20 @@ export async function readSponsorProblemGovernance(
       is_steward: number;
       counts_json: string;
       members_json: string;
+      stewardship_version: number;
+      accountable_sponsor_id: string | null;
+      steward_count: number;
+      stewards_json: string;
     }>();
   if (!row) return undefined;
   const allMembers = JSON.parse(row.members_json) as SponsorProblemGovernanceResponse["members"];
   const has_more = allMembers.length > PROBLEM_GOVERNANCE_MEMBER_PAGE_SIZE;
   const members = allMembers.slice(0, PROBLEM_GOVERNANCE_MEMBER_PAGE_SIZE);
+  const allStewards = JSON.parse(row.stewards_json) as NonNullable<
+    SponsorProblemGovernanceResponse["stewardship"]
+  >["stewards"];
+  const stewards = allStewards.slice(0, 50);
+  const moreStewards = allStewards.length > 50;
   return SponsorProblemGovernanceResponseSchema.parse({
     problem: {
       id: row.id,
@@ -80,6 +96,14 @@ export async function readSponsorProblemGovernance(
       owner: row.is_owner === 1,
       steward: row.is_steward === 1,
       can_edit_access: row.status !== "resolved" && row.status !== "retired",
+    },
+    stewardship: {
+      version: row.stewardship_version,
+      accountable_sponsor_id: row.accountable_sponsor_id,
+      stewards,
+      total_count: row.steward_count,
+      has_more: moreStewards,
+      next_after: moreStewards ? stewards.at(-1)?.sponsor_id : null,
     },
     members,
     member_counts: JSON.parse(row.counts_json),

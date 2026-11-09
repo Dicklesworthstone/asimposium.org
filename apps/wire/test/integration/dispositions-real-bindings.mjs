@@ -1005,7 +1005,7 @@ await runLocalWorkerJourney(async (context) => {
     const beforeItem = beforeWithdrawal.items.find((item) => item.id === objectId);
     assert.ok(beforeItem, "the original scientific input is visible before correction");
     const beforeBody = JSON.parse(beforeItem.body);
-    assert.equal(beforeBody.scientific_status.withdrawal, "not-recorded");
+    assert.equal(beforeBody.scientific_status, undefined);
     const correction = await call(path, body, reviewerB, 200, key);
     assert.deepEqual(
       await call(path, body, reviewerB, 200, key),
@@ -1049,10 +1049,9 @@ await runLocalWorkerJourney(async (context) => {
     const historical = ClaimFaceResponseSchema.parse(
       await call(`/p/${problemId}/claims/${claimId}@1.json?through=${beforeWithdrawal.cursor}`),
     );
-    assert.equal(
-      JSON.parse(historical.items.find((item) => item.id === objectId).body).scientific_status
-        .withdrawal,
-      "not-recorded",
+    assert.deepEqual(
+      JSON.parse(historical.items.find((item) => item.id === objectId).body),
+      beforeBody,
       "an earlier scientific cut excludes the later correction",
     );
     const retained = face.items.find((item) => item.id === objectId);

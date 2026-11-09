@@ -1,0 +1,9 @@
+{
+  "brief_id": "brief-tree-bound",
+  "expected_brief_version": 0,
+  "title": "Finite tree edge count",
+  "statement": "Every finite nonempty simple tree has one fewer edge than vertices.",
+  "falsifier": "A finite nonempty simple tree with a different edge count.",
+  "motivation": "Establish the invariant for a later graph argument.",
+  "areas": ["combinatorics"]
+}
