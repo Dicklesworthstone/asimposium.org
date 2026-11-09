@@ -12,7 +12,18 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // proposal, reviewed publication, revision and fork paths. Identity and model
 // observations are local fixtures; this is not a deployed/OAuth/model claim.
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, reviseStatement, operatorCall, env, fixtures, worker, origin, userAgent }) => {
+  async ({
+    call,
+    enroll,
+    sponsorCall,
+    reviseStatement,
+    operatorCall,
+    env,
+    fixtures,
+    worker,
+    origin,
+    userAgent,
+  }) => {
     const owner = "usr_boundary_owner";
     const author = await enroll("boundary-author", owner);
     const reviewer = await enroll("boundary-reviewer", "usr_boundary_reviewer");
@@ -84,18 +95,19 @@ await runLocalWorkerJourney(
     const problem = created.problem.id;
     assert.deepEqual(fields(created.problem), initial);
     const lifecyclePath = `/v1/sponsors/problems/${problem}/lifecycle`;
-    const govern = (body, expected = 200, key) => body.action === "revise-statement" && "statement" in body
-      ? reviseStatement(problem, owner, author, body, expected, key)
-      : sponsorCall(
-        owner,
-        "POST",
-        lifecyclePath,
-        "problem-lifecycle",
-        body,
-        expected,
-        lifecyclePath,
-        key,
-      );
+    const govern = (body, expected = 200, key) =>
+      body.action === "revise-statement" && "statement" in body
+        ? reviseStatement(problem, owner, author, body, expected, key)
+        : sponsorCall(
+            owner,
+            "POST",
+            lifecyclePath,
+            "problem-lifecycle",
+            body,
+            expected,
+            lifecyclePath,
+            key,
+          );
     const preview = () =>
       sponsorCall(
         owner,

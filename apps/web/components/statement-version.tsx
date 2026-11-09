@@ -65,7 +65,7 @@ export function StatementVersion({
         </p>
         {statement.scientific_author && (
           <dl aria-label="Scientific authorship at submission">
-            <dt>Author's sponsor at submission</dt>
+            <dt>Sponsor at submission</dt>
             <dd>
               <code>{statement.scientific_author.sponsor_id}</code>
             </dd>

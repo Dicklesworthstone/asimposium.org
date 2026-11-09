@@ -8,7 +8,18 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // Genuine local Workerd/D1/R2: author, sponsor and screening observations are
 // fixtures. This proves the public product journey, not deployed OAuth/model use.
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, reviseStatement, operatorCall, worker, fixtures, env, origin, userAgent }) => {
+  async ({
+    call,
+    enroll,
+    sponsorCall,
+    reviseStatement,
+    operatorCall,
+    worker,
+    fixtures,
+    env,
+    origin,
+    userAgent,
+  }) => {
     const owner = "usr_statement_history_owner";
     const author = await enroll("statement-history-author", owner);
     const privateText = "A private preliminary tree formulation, never published.";
@@ -37,9 +48,10 @@ await runLocalWorkerJourney(
     );
     const problem = created.problem.id;
     const lifecyclePath = `/v1/sponsors/problems/${problem}/lifecycle`;
-    const govern = (body) => body.action === "revise-statement" && "statement" in body
-      ? reviseStatement(problem, owner, author, body)
-      : sponsorCall(owner, "POST", lifecyclePath, "problem-lifecycle", body);
+    const govern = (body) =>
+      body.action === "revise-statement" && "statement" in body
+        ? reviseStatement(problem, owner, author, body)
+        : sponsorCall(owner, "POST", lifecyclePath, "problem-lifecycle", body);
     const read = async (path, init = {}) =>
       worker.fetch(`${origin}${path}`, {
         ...init,

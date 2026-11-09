@@ -100,20 +100,15 @@ await runLocalWorkerJourney(
 
     const revisedStatement =
       "For every finite nonempty simple tree, the edge count equals its vertex count minus one.";
-    await reviseStatement(
-      problem,
-      sponsor,
-      token,
-      {
-        action: "revise-statement",
-        statement: revisedStatement,
-        falsifier: proposal.falsifier,
-        motivation: proposal.motivation,
-        scope: proposal.scope,
-        out_of_scope: proposal.out_of_scope,
-        success_criteria: proposal.success_criteria,
-      },
-    );
+    await reviseStatement(problem, sponsor, token, {
+      action: "revise-statement",
+      statement: revisedStatement,
+      falsifier: proposal.falsifier,
+      motivation: proposal.motivation,
+      scope: proposal.scope,
+      out_of_scope: proposal.out_of_scope,
+      success_criteria: proposal.success_criteria,
+    });
     const revisedPack = PackResponseSchema.parse(await call(resumedUrl, undefined, token));
     const current = revisedPack.items.find((item) => item.kind === "problem-formulation");
     assert.ok(current);

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   ProblemDocumentSchema,
+  ProblemGovernanceEventSchema,
   PromoteResponseSchema,
   SessionOpenResponseSchema,
   WorkshopPushResponseSchema,
@@ -65,6 +66,11 @@ async function statementRaceFixture() {
       return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
     },
   });
+  await f.db
+    .prepare(
+      "UPDATE problems SET title = 'Parity under bounded statement revisions' WHERE id = 'P-4DSP'",
+    )
+    .run();
   async function appendStatement(createdAt = new Date().toISOString()) {
     const version = ++statementVersion;
     const statement = `For every even integer n in 0..${version * 10}, n squared is even.`;
@@ -74,23 +80,33 @@ async function statementRaceFixture() {
       .prepare("SELECT title FROM problems WHERE id = 'P-4DSP'")
       .first<{ title: string }>();
     if (!problem) throw new Error("Missing fixture problem");
-    const payloadJson = JSON.stringify({
-      action: "revise-statement",
-      acting_principal: { type: "sponsor", id: f.binding.sponsorId },
-      source_fellow_id: f.binding.fellowId,
-      previous_statement_version: version - 1,
-      previous_status: "active",
-      problem: {
-        id: "P-4DSP",
-        title: problem.title,
-        status: "active",
-        current_statement_version: version,
-        statement,
-        falsifier,
-        motivation,
-        updated_at: createdAt,
-      },
-    });
+    const scientificAuthor = {
+      fellow_id: f.binding.fellowId,
+      sponsor_id: f.binding.sponsorId,
+      session_id: session.session_id,
+      model_self_declared: f.binding.model,
+      harness: f.binding.harness,
+    };
+    const payloadJson = JSON.stringify(
+      ProblemGovernanceEventSchema.parse({
+        action: "revise-statement",
+        acting_principal: { type: "sponsor", id: f.binding.sponsorId },
+        source_fellow_id: f.binding.fellowId,
+        scientific_author: scientificAuthor,
+        previous_statement_version: version - 1,
+        previous_status: "active",
+        problem: {
+          id: "P-4DSP",
+          title: problem.title,
+          status: "active",
+          current_statement_version: version,
+          statement,
+          falsifier,
+          motivation,
+          updated_at: createdAt,
+        },
+      }),
+    );
     const hash = `sha256:${await normHash(statement)}`;
     return writeLedgerEvent(
       f.db,
@@ -118,9 +134,17 @@ async function statementRaceFixture() {
         statementsAfterEvent: () => [
           f.db
             .prepare(`INSERT INTO problem_statement_versions
-            (problem_id, version, statement, norm_hash, falsifier, motivation, created_at)
-            VALUES ('P-4DSP', ?, ?, ?, ?, ?, ?)`)
-            .bind(version, statement, hash, falsifier, motivation, createdAt),
+            (problem_id, version, statement, norm_hash, falsifier, motivation, created_at, scientific_author_json)
+            VALUES ('P-4DSP', ?, ?, ?, ?, ?, ?, ?)`)
+            .bind(
+              version,
+              statement,
+              hash,
+              falsifier,
+              motivation,
+              createdAt,
+              JSON.stringify(scientificAuthor),
+            ),
           f.db
             .prepare("UPDATE problems SET current_statement_version = ? WHERE id = 'P-4DSP'")
             .bind(version),
@@ -689,7 +713,7 @@ describe("statement context race", () => {
       });
       await f.db
         .prepare(
-          "UPDATE problems SET status = 'private-draft', sponsor_id = ?, created_by_fellow_id = ? WHERE id = 'P-4DSP'",
+          "UPDATE problems SET status = 'private-draft', title = 'Parity publication race', sponsor_id = ?, created_by_fellow_id = ? WHERE id = 'P-4DSP'",
         )
         .bind(f.binding.sponsorId, f.binding.fellowId)
         .run();
@@ -702,20 +726,29 @@ describe("statement context race", () => {
           .first<{ title: string; statement: string; falsifier: string; motivation: string }>();
         if (!formulation) throw new Error("Missing fixture formulation");
         const createdAt = new Date().toISOString();
-        const payloadJson = JSON.stringify({
-          action: "publish",
-          acting_principal: { type: "sponsor", id: f.binding.sponsorId },
-          source_fellow_id: f.binding.fellowId,
-          previous_statement_version: 1,
-          previous_status: "private-draft",
-          problem: {
-            id: "P-4DSP",
-            ...formulation,
-            status: "sharpening",
-            current_statement_version: 1,
-            updated_at: createdAt,
-          },
-        });
+        const payloadJson = JSON.stringify(
+          ProblemGovernanceEventSchema.parse({
+            action: "publish",
+            acting_principal: { type: "sponsor", id: f.binding.sponsorId },
+            source_fellow_id: f.binding.fellowId,
+            scientific_author: {
+              fellow_id: f.binding.fellowId,
+              sponsor_id: f.binding.sponsorId,
+              session_id: null,
+              model_self_declared: f.binding.model,
+              harness: f.binding.harness,
+            },
+            previous_statement_version: 1,
+            previous_status: "private-draft",
+            problem: {
+              id: "P-4DSP",
+              ...formulation,
+              status: "sharpening",
+              current_statement_version: 1,
+              updated_at: createdAt,
+            },
+          }),
+        );
         await writeLedgerEvent(
           f.db,
           {

@@ -15,7 +15,8 @@ import { assertRacedWriteLeavesNoTrace } from "./raced-ledger-write.mjs";
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall, reviseStatement, env, worker, origin, userAgent, fixtures } = context;
+  const { call, enroll, sponsorCall, reviseStatement, env, worker, origin, userAgent, fixtures } =
+    context;
   const sponsorA = "usr_dead_end_sponsor_a";
   const authorA = await enroll("dead-end-author-a", sponsorA);
 
@@ -37,18 +38,19 @@ await runLocalWorkerJourney(async (context) => {
   );
   const problemId = created.problem.id;
 
-  const govern = (body, key) => body.action === "revise-statement" && "statement" in body
-    ? reviseStatement(problemId, sponsorA, authorA, body, 200, key)
-    : sponsorCall(
-      sponsorA,
-      "POST",
-      `/v1/sponsors/problems/${problemId}/lifecycle`,
-      "problem-lifecycle",
-      body,
-      200,
-      `/v1/sponsors/problems/${problemId}/lifecycle`,
-      key,
-    );
+  const govern = (body, key) =>
+    body.action === "revise-statement" && "statement" in body
+      ? reviseStatement(problemId, sponsorA, authorA, body, 200, key)
+      : sponsorCall(
+          sponsorA,
+          "POST",
+          `/v1/sponsors/problems/${problemId}/lifecycle`,
+          "problem-lifecycle",
+          body,
+          200,
+          `/v1/sponsors/problems/${problemId}/lifecycle`,
+          key,
+        );
   await govern({ action: "publish" }, "publish-dead-end-problem");
   const readPackAt = async (cursor) => JSON.parse(await fixtures.deadEndPackAt(problemId, cursor));
   const empty = await readPackAt(0);

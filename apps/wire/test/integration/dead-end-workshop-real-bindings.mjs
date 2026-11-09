@@ -37,18 +37,19 @@ await runLocalWorkerJourney(
     );
     const problem = created.problem.id;
     const governancePath = `/v1/sponsors/problems/${problem}/lifecycle`;
-    const govern = (body, key) => body.action === "revise-statement" && "statement" in body
-      ? reviseStatement(problem, sponsor, authorToken, body, 200, key)
-      : sponsorCall(
-        sponsor,
-        "POST",
-        governancePath,
-        "problem-lifecycle",
-        body,
-        200,
-        governancePath,
-        key,
-      );
+    const govern = (body, key) =>
+      body.action === "revise-statement" && "statement" in body
+        ? reviseStatement(problem, sponsor, authorToken, body, 200, key)
+        : sponsorCall(
+            sponsor,
+            "POST",
+            governancePath,
+            "problem-lifecycle",
+            body,
+            200,
+            governancePath,
+            key,
+          );
     await govern({ action: "publish" }, "dew-publish-problem");
     const reviewSession = await call(
       "/v1/sessions",

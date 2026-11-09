@@ -988,6 +988,10 @@ try {
     await fixtures.snapshotRows("artifact_upload_parts", "upload_id", recoveryUpload.upload_id)
   )[0];
   const recoveryReservation = await fixtures.artifactReservationSummary(recoveryFellow);
+  assert.ok(recoveryReservation !== null);
+  assert.equal(recoveryReservation.manifests, 1);
+  assert.equal(recoveryReservation.bytes, resumableBytes.length);
+  assert.equal(recoveryReservation.renewals, 0);
   await call(
     `/v1/sessions/${originalWork}/close`,
     {
@@ -1145,7 +1149,12 @@ try {
   const replacementPart = recoveredParts.find((part) => part.part_number === 2);
   assert.equal(replacementPart.acknowledged_credential_id, replacementCredential);
   assert.equal(replacementPart.acknowledged_generation, 1);
-  assert.deepEqual(await fixtures.artifactReservationSummary(recoveryFellow), recoveryReservation);
+  const recoveredReservation = await fixtures.artifactReservationSummary(recoveryFellow);
+  assert.ok(recoveredReservation !== null);
+  // Workerd returns RPC proxies; compare the actual reservation counters.
+  assert.equal(recoveredReservation.manifests, recoveryReservation.manifests);
+  assert.equal(recoveredReservation.bytes, recoveryReservation.bytes);
+  assert.equal(recoveredReservation.renewals, recoveryReservation.renewals);
   assert.equal(await fixtures.readPublicCas(resumeDigest), null);
   console.log(
     JSON.stringify({

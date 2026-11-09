@@ -810,7 +810,8 @@ await runLocalWorkerJourney(
       "OBJECT_VERSION_CONFLICT",
     );
     assert.deepEqual(await state(), beforeExpiredPublish);
-    // The same nested error boundary also covers a Fellow proposal failure.
+    // The proposal command returns a retry-safe 503 when its batch cannot be
+    // confirmed. Underlying transaction details remain private.
     await env.DB.prepare(`CREATE TRIGGER governance_proposal_failure BEFORE INSERT ON problems
       WHEN NEW.title = 'Forced proposal failure' BEGIN SELECT RAISE(ABORT, 'private-proposal-failure'); END`).run();
     const beforeProposalFailure = await env.DB.prepare(
@@ -824,10 +825,12 @@ await runLocalWorkerJourney(
         statement: "Private failing proposal statement",
       },
       unlistedToken,
-      500,
+      503,
     );
     assert.ok(ProblemDocumentSchema.safeParse(failedProposal).success);
     assert.equal(failedProposal.code, "INTERNAL_ERROR");
+    assert.match(failedProposal.fix_hint, /exact proposal and Idempotency-Key/);
+    assert.match(failedProposal.fix_hint, /within 24 hours/);
     assert.ok(!JSON.stringify(failedProposal).includes("Private failing proposal statement"));
     assert.ok(!JSON.stringify(failedProposal).includes("private-proposal-failure"));
     assert.deepEqual(

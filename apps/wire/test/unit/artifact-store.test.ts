@@ -2485,10 +2485,9 @@ for (const kind of ["part", "complete"] as const) {
         1,
       );
       if (kind === "part")
-        assert.deepEqual(
-          f.sql.query("SELECT acknowledged_at FROM artifact_upload_parts").get(),
-          { acknowledged_at: null },
-        );
+        assert.deepEqual(f.sql.query("SELECT acknowledged_at FROM artifact_upload_parts").get(), {
+          acknowledged_at: null,
+        });
     });
   });
 }
