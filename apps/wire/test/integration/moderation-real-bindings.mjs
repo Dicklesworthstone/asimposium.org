@@ -154,19 +154,76 @@ await runLocalWorkerJourney(
       await env.DB.prepare("DROP TRIGGER lane_fail_decision_notice").run();
     }
 
-    // Retrying completes exactly once; a second decision is refused.
+    // A failed receipt insert must also roll back the decision, audit, log
+    // and private notice. The key is not consumed by a rolled-back attempt.
+    const releaseCommand = {
+      case_id: held.case_id,
+      decision: "release",
+      reason: "Reviewed: ordinary arithmetic, odd wording.",
+    };
+    const releasePath = "/v1/operators/quarantine/decision";
+    const releaseKey = "moderation-release-receipt";
+    await env.DB.prepare(
+      `CREATE TRIGGER lane_fail_operator_receipt BEFORE INSERT ON operator_command_receipts
+       BEGIN SELECT RAISE(ABORT, 'planted receipt failure'); END`,
+    ).run();
+    try {
+      const unavailable = await operatorCall(
+        "POST",
+        releasePath,
+        "operator.quarantine.decide",
+        releaseCommand,
+        503,
+        releasePath,
+        releaseKey,
+      );
+      assert.equal(unavailable.code, "ENROLLMENT_UNAVAILABLE");
+      assert.deepEqual(await decisionEffects(), beforeFailedDecision);
+      assert.equal(
+        (await env.DB.prepare("SELECT COUNT(*) AS n FROM operator_command_receipts").first()).n,
+        0,
+      );
+    } finally {
+      await env.DB.prepare("DROP TRIGGER lane_fail_operator_receipt").run();
+    }
+
+    // Retrying completes exactly once; matching concurrent retries recover the
+    // original receipt, whereas a genuinely different decision remains refused.
     const released = await operatorCall(
       "POST",
-      "/v1/operators/quarantine/decision",
+      releasePath,
       "operator.quarantine.decide",
-      {
-        case_id: held.case_id,
-        decision: "release",
-        reason: "Reviewed: ordinary arithmetic, odd wording.",
-      },
+      releaseCommand,
+      200,
+      releasePath,
+      releaseKey,
     );
     assert.equal(released.decision, "release");
     assert.match(released.audit_event_id, /^OA-/);
+    for (const replay of await Promise.all(
+      Array.from({ length: 4 }, () =>
+        operatorCall(
+          "POST",
+          releasePath,
+          "operator.quarantine.decide",
+          releaseCommand,
+          200,
+          releasePath,
+          releaseKey,
+        ),
+      ),
+    ))
+      assert.deepEqual(replay, released);
+    const changedIntent = await operatorCall(
+      "POST",
+      releasePath,
+      "operator.quarantine.decide",
+      { ...releaseCommand, reason: "A different explanation must not reuse the accepted key." },
+      409,
+      releasePath,
+      releaseKey,
+    );
+    assert.equal(changedIntent.code, "IDEMPOTENCY_CONFLICT");
     const twice = await operatorCall(
       "POST",
       "/v1/operators/quarantine/decision",
@@ -336,11 +393,33 @@ await runLocalWorkerJourney(
     assert.equal(onTarget.length, 3, "one report per sponsor family");
     assert.ok(onTarget.every((entry) => entry.category === "injection"));
     assert.ok(!JSON.stringify(reports).includes("reading agents"), "notes stay private");
-    await operatorCall("POST", "/v1/operators/reports/resolution", "operator.reports.resolve", {
+    const reportResolutionPath = "/v1/operators/reports/resolution";
+    const reportResolutionCommand = {
       report_id: onTarget[0].report_id,
       resolution: "dismiss",
       reason: "Reviewed: ordinary arithmetic, not an injection.",
-    });
+    };
+    const resolvedReport = await operatorCall(
+      "POST",
+      reportResolutionPath,
+      "operator.reports.resolve",
+      reportResolutionCommand,
+      200,
+      reportResolutionPath,
+      "moderation-report-receipt",
+    );
+    assert.deepEqual(
+      await operatorCall(
+        "POST",
+        reportResolutionPath,
+        "operator.reports.resolve",
+        reportResolutionCommand,
+        200,
+        reportResolutionPath,
+        "moderation-report-receipt",
+      ),
+      resolvedReport,
+    );
     const control = await env.DB.prepare(
       "SELECT visibility, source FROM content_controls WHERE problem_id = ? AND target_ref = ? ORDER BY version DESC LIMIT 1",
     )
@@ -571,7 +650,7 @@ await runLocalWorkerJourney(
     await call(`/p/${problem}/claims/${upheldTarget}.json`, undefined, undefined, 403);
 
     // 8. Operator hide/restore, audited; a no-op transition is refused.
-    const hide = (action, expected = 200) =>
+    const hide = (action, expected = 200, idempotencyKey) =>
       operatorCall(
         "POST",
         "/v1/operators/content-control",
@@ -583,10 +662,40 @@ await runLocalWorkerJourney(
           reason: "Operator review of a reported claim.",
         },
         expected,
+        "/v1/operators/content-control",
+        idempotencyKey,
       );
-    await hide("hide");
+    const hiddenReceipt = await hide("hide", 200, "moderation-hide-receipt");
     assert.equal((await hide("hide", 409)).code, "MODERATION_STATE_CONFLICT");
     await hide("restore");
+    const controlsAfterRestore = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM content_controls",
+    ).first();
+    assert.deepEqual(await hide("hide", 200, "moderation-hide-receipt"), hiddenReceipt);
+    assert.deepEqual(
+      await env.DB.prepare("SELECT COUNT(*) AS n FROM content_controls").first(),
+      controlsAfterRestore,
+    );
+    assert.equal(
+      (
+        await env.DB.prepare(`SELECT visibility FROM content_controls
+      WHERE problem_id = ? AND target_ref = ? ORDER BY version DESC LIMIT 1`)
+          .bind(problem, target)
+          .first()
+      ).visibility,
+      "visible",
+    );
+    await claimFace(200);
+    const crossRouteReplay = await operatorCall(
+      "POST",
+      releasePath,
+      "operator.quarantine.decide",
+      releaseCommand,
+      409,
+      releasePath,
+      "moderation-hide-receipt",
+    );
+    assert.equal(crossRouteReplay.code, "IDEMPOTENCY_CONFLICT");
 
     // A whole problem can be hidden pending review, then restored.
     const problemControl = (action) =>

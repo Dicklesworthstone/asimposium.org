@@ -1,11 +1,18 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0132_private_fork_erasure.sql`.
+schema through `0133_operator_command_receipts.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
 deployed `0009_device_flow.sql` in `0010_device_flow_hardening.sql`.
+
+Migration `0133_operator_command_receipts.sql` binds each accepted quarantine,
+report, or visibility command to its operator, hashed replay key, canonical
+intent digest, and immutable audit receipt. The receipt commits with all effects;
+retries recover the original outcome without reapplying a later-reversed control.
+Reasons and held content are not copied into this receipt store. Apply it before
+the matching Worker; operator mutations fail closed without it.
 
 Migration `0132_private_fork_erasure.sql` allows a never-published fork to erase
 its private content while retaining the empty, ownerless identity required by

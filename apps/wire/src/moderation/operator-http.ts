@@ -35,6 +35,7 @@ import {
   screeningContextUnavailableProblem,
   storedPublicationContextIsVisible,
 } from "../screening/publication-context";
+import { type OperatorCommand, runOperatorCommand } from "./operator-command.ts";
 import {
   applyOperatorControl,
   decideScreeningCase,
@@ -162,29 +163,51 @@ export async function operatorQuarantineDecision(
   db: D1Database,
   operatorId: string,
   request: AdminQuarantineDecisionRequest,
+  idempotencyKey: string,
 ): Promise<Response> {
-  const result = await decideScreeningCase(db, operatorId, {
-    caseId: request.case_id,
-    decision: request.decision,
-    reason: request.reason,
-  });
-  if (!result.ok) {
-    return result.reason === "not-found"
-      ? notFound({ case_id: request.case_id, decision: request.decision, reason: request.reason })
-      : stateConflict("This case was already decided. Nothing was changed.", {
+  return runOperatorCommand(
+    db,
+    {
+      operatorId,
+      key: idempotencyKey,
+      operation: "quarantine",
+      request,
+      parseReceipt: (value) => AdminQuarantineDecisionResponseSchema.parse(value),
+      receipt: (auditEventId, decidedAt) =>
+        AdminQuarantineDecisionResponseSchema.parse({
+          ok: true,
           case_id: request.case_id,
           decision: request.decision,
+          audit_event_id: auditEventId,
+          decided_at: decidedAt,
+        }),
+    },
+    async (command) => {
+      const result = await decideScreeningCase(
+        db,
+        operatorId,
+        {
+          caseId: request.case_id,
+          decision: request.decision,
           reason: request.reason,
-        });
-  }
-  return privateJson(
-    AdminQuarantineDecisionResponseSchema.parse({
-      ok: true,
-      case_id: request.case_id,
-      decision: request.decision,
-      audit_event_id: result.auditEventId,
-      decided_at: result.decidedAt,
-    }),
+        },
+        command,
+      );
+      if (!result.ok) {
+        return result.reason === "not-found"
+          ? notFound({
+              case_id: request.case_id,
+              decision: request.decision,
+              reason: request.reason,
+            })
+          : stateConflict("This case was already decided. Nothing was changed.", {
+              case_id: request.case_id,
+              decision: request.decision,
+              reason: request.reason,
+            });
+      }
+      return privateJson(command.receipt(result.auditEventId, result.decidedAt));
+    },
   );
 }
 
@@ -210,30 +233,48 @@ export async function operatorReportResolution(
   db: D1Database,
   operatorId: string,
   request: AdminReportResolutionRequest,
+  idempotencyKey: string,
 ): Promise<Response> {
-  const result = await resolveReport(db, operatorId, {
-    reportId: request.report_id,
-    resolution: request.resolution,
-    reason: request.reason,
-  });
-  if (!result.ok) {
-    const example = {
-      report_id: request.report_id,
-      resolution: request.resolution,
-      reason: request.reason,
-    };
-    return result.reason === "not-found"
-      ? notFound(example)
-      : stateConflict("This report was already resolved. Nothing was changed.", example);
-  }
-  return privateJson(
-    AdminReportResolutionResponseSchema.parse({
-      ok: true,
-      report_id: request.report_id,
-      resolution: request.resolution,
-      audit_event_id: result.auditEventId,
-      resolved_at: result.resolvedAt,
-    }),
+  return runOperatorCommand(
+    db,
+    {
+      operatorId,
+      key: idempotencyKey,
+      operation: "report",
+      request,
+      parseReceipt: (value) => AdminReportResolutionResponseSchema.parse(value),
+      receipt: (auditEventId, resolvedAt) =>
+        AdminReportResolutionResponseSchema.parse({
+          ok: true,
+          report_id: request.report_id,
+          resolution: request.resolution,
+          audit_event_id: auditEventId,
+          resolved_at: resolvedAt,
+        }),
+    },
+    async (command) => {
+      const result = await resolveReport(
+        db,
+        operatorId,
+        {
+          reportId: request.report_id,
+          resolution: request.resolution,
+          reason: request.reason,
+        },
+        command,
+      );
+      if (!result.ok) {
+        const example = {
+          report_id: request.report_id,
+          resolution: request.resolution,
+          reason: request.reason,
+        };
+        return result.reason === "not-found"
+          ? notFound(example)
+          : stateConflict("This report was already resolved. Nothing was changed.", example);
+      }
+      return privateJson(command.receipt(result.auditEventId, result.resolvedAt));
+    },
   );
 }
 
@@ -247,7 +288,35 @@ export async function operatorContentControl(
   db: D1Database,
   operatorId: string,
   request: AdminContentControlRequest,
-): Promise<Response | undefined> {
+  idempotencyKey: string,
+): Promise<Response> {
+  return runOperatorCommand(
+    db,
+    {
+      operatorId,
+      key: idempotencyKey,
+      operation: "content-control",
+      request,
+      parseReceipt: (value) => AdminContentControlResponseSchema.parse(value),
+      receipt: (auditEventId, appliedAt) =>
+        AdminContentControlResponseSchema.parse({
+          ok: true,
+          target_id: request.target_id,
+          action: request.action,
+          audit_event_id: auditEventId,
+          applied_at: appliedAt,
+        }),
+    },
+    (command) => applyContentControlCommand(db, operatorId, request, command),
+  );
+}
+
+async function applyContentControlCommand(
+  db: D1Database,
+  operatorId: string,
+  request: AdminContentControlRequest,
+  command: OperatorCommand,
+): Promise<Response> {
   if (request.action === "ban_sponsor")
     return validatedProblem({
       status: 422,
@@ -321,28 +390,25 @@ export async function operatorContentControl(
   } else {
     return notFound(example);
   }
-  const result = await applyOperatorControl(db, operatorId, {
-    problemId,
-    targetKind: request.target_kind,
-    targetRef,
-    visibility: request.action === "hide" ? "hidden" : "visible",
-    reason: request.reason,
-  });
+  const result = await applyOperatorControl(
+    db,
+    operatorId,
+    {
+      problemId,
+      targetKind: request.target_kind,
+      targetRef,
+      visibility: request.action === "hide" ? "hidden" : "visible",
+      reason: request.reason,
+    },
+    command,
+  );
   if (!result.ok) {
     return stateConflict(
-      `The target is already ${request.action === "hide" ? "hidden" : "visible"}. Nothing was changed.`,
+      "The target changed after it was read, or already has the requested visibility. Nothing was changed.",
       example,
     );
   }
-  return privateJson(
-    AdminContentControlResponseSchema.parse({
-      ok: true,
-      target_id: request.target_id,
-      action: request.action,
-      audit_event_id: result.auditEventId,
-      applied_at: result.appliedAt,
-    }),
-  );
+  return privateJson(command.receipt(result.auditEventId, result.appliedAt));
 }
 
 export async function operatorAuditHistory(db: D1Database): Promise<Response> {

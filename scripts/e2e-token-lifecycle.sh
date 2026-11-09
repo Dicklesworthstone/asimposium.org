@@ -175,6 +175,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0130_session_opened_public_cursor.sql"
   "0131_problem_statement_boundaries.sql"
   "0132_private_fork_erasure.sql"
+  "0133_operator_command_receipts.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then

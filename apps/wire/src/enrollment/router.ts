@@ -2857,10 +2857,13 @@ function mountSponsorRoutes(app: Hono<{ Bindings: Env }>, options: EnrollmentRou
         );
       }
       if (options.db === undefined) return operatorControlUnavailableResponse();
+      const replay = idempotencyOptions(c.req.raw);
+      if (replay instanceof Response) return replay;
       return await operatorQuarantineDecision(
         options.db,
         authenticated.principal.operatorId,
         parsed.data,
+        replay.idempotencyKey,
       );
     } catch (err) {
       if (
@@ -2939,10 +2942,13 @@ function mountSponsorRoutes(app: Hono<{ Bindings: Env }>, options: EnrollmentRou
         );
       }
       if (options.db === undefined) return operatorControlUnavailableResponse();
+      const replay = idempotencyOptions(c.req.raw);
+      if (replay instanceof Response) return replay;
       return await operatorReportResolution(
         options.db,
         authenticated.principal.operatorId,
         parsed.data,
+        replay.idempotencyKey,
       );
     } catch (err) {
       if (
@@ -3003,6 +3009,8 @@ function mountSponsorRoutes(app: Hono<{ Bindings: Env }>, options: EnrollmentRou
         );
       }
       if (options.db === undefined) return operatorControlUnavailableResponse();
+      const replay = idempotencyOptions(c.req.raw);
+      if (replay instanceof Response) return replay;
       // A legacy generic ban action teaches the dedicated reviewed suspension
       // command; it cannot bypass that command's recent-auth and replay law.
       return (
@@ -3010,6 +3018,7 @@ function mountSponsorRoutes(app: Hono<{ Bindings: Env }>, options: EnrollmentRou
           options.db,
           authenticated.principal.operatorId,
           parsed.data,
+          replay.idempotencyKey,
         )) ?? operatorControlUnavailableResponse()
       );
     } catch (err) {

@@ -157,8 +157,13 @@ test("audited operator conflict controls hide pinned faces and restore the origi
     action: "hide" as const,
     reason: "Review this exact recorded disagreement for a privacy concern.",
   };
-  expect((await operatorContentControl(f.db, "operator_control_test", request))?.status).toBe(200);
-  expect((await operatorContentControl(f.db, "operator_control_test", request))?.status).toBe(409);
+  expect(
+    (await operatorContentControl(f.db, "operator_control_test", request, "conflict-hide"))?.status,
+  ).toBe(200);
+  expect(
+    (await operatorContentControl(f.db, "operator_control_test", request, "conflict-hide-again"))
+      ?.status,
+  ).toBe(409);
   for (const format of formats)
     for (const method of ["GET", "HEAD"]) {
       const hidden = await face(
@@ -172,8 +177,14 @@ test("audited operator conflict controls hide pinned faces and restore the origi
     }
   expect((await face(f, "json", undefined, "?target=CF-2")).status).toBe(200);
   expect(
-    (await operatorContentControl(f.db, "operator_control_test", { ...request, action: "restore" }))
-      ?.status,
+    (
+      await operatorContentControl(
+        f.db,
+        "operator_control_test",
+        { ...request, action: "restore" },
+        "conflict-restore",
+      )
+    )?.status,
   ).toBe(200);
   const restored = await face(f, "json", undefined, query);
   expect(restored.status).toBe(200);
@@ -213,10 +224,15 @@ test("operator conflict selectors reject wrong scope, kind, versions and unpubli
     reason: "Do not broaden an operator request to another object or problem.",
   };
   const refused = async (patch: Partial<AdminContentControlRequest> = {}) => {
-    const response = await operatorContentControl(f.db, "operator_control_test", {
-      ...request,
-      ...patch,
-    });
+    const response = await operatorContentControl(
+      f.db,
+      "operator_control_test",
+      {
+        ...request,
+        ...patch,
+      },
+      `conflict-refused-${crypto.randomUUID()}`,
+    );
     if (response === undefined) throw new Error("Expected an explicit moderation refusal.");
     expect(response.status).toBe(404);
     expect(ProblemDocumentSchema.parse(await response.json()).code).toBe(

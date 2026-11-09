@@ -232,12 +232,17 @@ test("operator question controls hide pinned sources before validators and resto
     });
   }
   const apply = async (action: "hide" | "restore") => {
-    const response = await operatorContentControl(f.db, "usr_operator", {
-      target_id: `${problemId}/Q-1`,
-      target_kind: "question",
-      action,
-      reason: "Verify current question controls over immutable historical sources.",
-    });
+    const response = await operatorContentControl(
+      f.db,
+      "usr_operator",
+      {
+        target_id: `${problemId}/Q-1`,
+        target_kind: "question",
+        action,
+        reason: "Verify current question controls over immutable historical sources.",
+      },
+      `question-${action}`,
+    );
     if (response === undefined) throw new Error("Expected an operator control response.");
     expect(response.status).toBe(200);
     return AdminContentControlResponseSchema.parse(await response.json());
@@ -248,11 +253,16 @@ test("operator question controls hide pinned sources before validators and resto
     { target_id: "P-OTHER/Q-1", target_kind: "question" },
     { target_id: `${problemId}/Q-ABSENT`, target_kind: "question" },
   ] as const) {
-    const response = await operatorContentControl(f.db, "usr_operator", {
-      ...invalid,
-      action: "hide",
-      reason: "An ambiguous or incorrectly scoped target must never change visibility.",
-    });
+    const response = await operatorContentControl(
+      f.db,
+      "usr_operator",
+      {
+        ...invalid,
+        action: "hide",
+        reason: "An ambiguous or incorrectly scoped target must never change visibility.",
+      },
+      `question-refused-${crypto.randomUUID()}`,
+    );
     expect(response?.status).toBe(404);
     expect(ProblemDocumentSchema.parse(await response?.json()).code).toBe(
       "MODERATION_TARGET_NOT_FOUND",

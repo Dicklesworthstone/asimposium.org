@@ -18,6 +18,7 @@
 import type { ScreeningPublicationContextInput } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { inboxNoticeStatement } from "../inbox/notice-write.ts";
+import { type OperatorCommand, operatorReceiptStatements } from "./operator-command.ts";
 import { screeningCaseReleasedSql } from "./screening-release.ts";
 
 /** Independent sponsors whose reports hide a target pending review (§9.1 L2). */
@@ -337,6 +338,7 @@ export async function decideScreeningCase(
   db: D1Database,
   operatorId: string,
   input: { readonly caseId: string; readonly decision: CaseDecision; readonly reason: string },
+  command?: OperatorCommand,
 ): Promise<
   | { readonly ok: true; readonly auditEventId: string; readonly decidedAt: string }
   | { readonly ok: false; readonly reason: "not-found" | "not-pending" }
@@ -415,6 +417,7 @@ export async function decideScreeningCase(
       },
       audited,
     ),
+    ...operatorReceiptStatements(db, command, auditEventId, decidedAt),
   ]);
   if ((update?.meta.changes ?? 0) !== 1) return { ok: false, reason: "not-pending" };
   return { ok: true, auditEventId, decidedAt };
@@ -523,6 +526,7 @@ export async function applyOperatorControl(
     readonly visibility: "hidden" | "visible";
     readonly reason: string;
   },
+  command?: OperatorCommand,
 ): Promise<
   | { readonly ok: true; readonly auditEventId: string; readonly appliedAt: string }
   | { readonly ok: false; readonly reason: "unchanged" }
@@ -533,37 +537,60 @@ export async function applyOperatorControl(
   const appliedAt = new Date().toISOString();
   const auditEventId = mintModerationId("OA");
   const controlId = mintModerationId("CC");
-  await db.batch([
-    contentControlStatement(db, {
-      controlId,
-      problemId: input.problemId,
-      targetKind: input.targetKind,
-      targetRef: input.targetRef,
-      visibility: input.visibility,
-      source: "operator",
-      reasonCategory: "operator-review",
-      actor: operatorId,
-      reason: input.reason,
-      createdAt: appliedAt,
-    }),
-    operatorAuditStatement(db, {
-      eventId: auditEventId,
-      operatorId,
-      action: input.visibility === "hidden" ? "content.hide" : "content.restore",
-      targetId: `${input.problemId}/${input.targetRef}`.slice(0, 128),
-      reason: input.reason,
-      before: await stateDigest({ target: input.targetRef, visibility: currentVisibility }),
-      after: await stateDigest({ target: input.targetRef, visibility: input.visibility }),
-      createdAt: appliedAt,
-    }),
-    moderationLogStatement(db, {
-      action: input.visibility === "hidden" ? "hidden" : "restored",
-      category: "operator-review",
-      subject: input.targetKind === "problem" ? "problem" : "ledger-object",
-      problemId: input.problemId,
-      createdAt: appliedAt,
-    }),
+  const controlled = {
+    sql: "EXISTS (SELECT 1 FROM content_controls WHERE control_id = ?)",
+    bindings: [controlId],
+  };
+  const [control] = await db.batch([
+    contentControlStatement(
+      db,
+      {
+        controlId,
+        problemId: input.problemId,
+        targetKind: input.targetKind,
+        targetRef: input.targetRef,
+        visibility: input.visibility,
+        source: "operator",
+        reasonCategory: "operator-review",
+        actor: operatorId,
+        reason: input.reason,
+        createdAt: appliedAt,
+      },
+      {
+        // A stale pre-read must not overwrite another operator's newer decision.
+        sql: `COALESCE((SELECT control_id FROM content_controls
+        WHERE problem_id = ? AND target_ref = ? ORDER BY version DESC LIMIT 1), '') = ?`,
+        bindings: [input.problemId, input.targetRef, current?.control_id ?? ""],
+      },
+    ),
+    operatorAuditStatement(
+      db,
+      {
+        eventId: auditEventId,
+        operatorId,
+        action: input.visibility === "hidden" ? "content.hide" : "content.restore",
+        targetId: `${input.problemId}/${input.targetRef}`.slice(0, 128),
+        reason: input.reason,
+        before: await stateDigest({ target: input.targetRef, visibility: currentVisibility }),
+        after: await stateDigest({ target: input.targetRef, visibility: input.visibility }),
+        createdAt: appliedAt,
+      },
+      controlled,
+    ),
+    moderationLogStatement(
+      db,
+      {
+        action: input.visibility === "hidden" ? "hidden" : "restored",
+        category: "operator-review",
+        subject: input.targetKind === "problem" ? "problem" : "ledger-object",
+        problemId: input.problemId,
+        createdAt: appliedAt,
+      },
+      controlled,
+    ),
+    ...operatorReceiptStatements(db, command, auditEventId, appliedAt),
   ]);
+  if ((control?.meta.changes ?? 0) !== 1) return { ok: false, reason: "unchanged" };
   return { ok: true, auditEventId, appliedAt };
 }
 
@@ -760,6 +787,7 @@ export async function resolveReport(
     readonly resolution: "dismiss" | "uphold";
     readonly reason: string;
   },
+  command?: OperatorCommand,
 ): Promise<
   | { readonly ok: true; readonly auditEventId: string; readonly resolvedAt: string }
   | { readonly ok: false; readonly reason: "not-found" | "not-pending" }
@@ -923,6 +951,7 @@ export async function resolveReport(
       ),
     );
   }
+  statements.push(...operatorReceiptStatements(db, command, auditEventId, resolvedAt));
   const [update] = await db.batch(statements);
   if ((update?.meta.changes ?? 0) !== 1) return { ok: false, reason: "not-pending" };
   return { ok: true, auditEventId, resolvedAt };
