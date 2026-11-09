@@ -2,7 +2,11 @@ import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { SynthesesListResponseSchema, type SynthesisItem } from "@asimposium/contracts";
+import {
+  OpaqueProblemSchema,
+  SynthesesListResponseSchema,
+  type SynthesisItem,
+} from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { Hono } from "hono";
 import type { Env } from "../../src/env.ts";
@@ -121,6 +125,31 @@ async function using(run: (f: ReturnType<typeof fixture>) => Promise<void>) {
     f.sql.close();
   }
 }
+
+test("unavailable synthesis collection reads return the opaque retryable error contract", () =>
+  using(async (f) => {
+    f.publish();
+    f.sql.exec("ALTER TABLE events RENAME TO unavailable_events");
+    for (const format of ["json", "md", "html"])
+      for (const method of ["GET", "HEAD"]) {
+        const response = await f.http(`/p/P-SYNTH/syntheses.${format}`, {
+          method,
+          headers: { "if-none-match": "*" },
+        });
+        assert.equal(response.status, 503);
+        assert.equal(response.headers.get("cache-control"), "private, no-store");
+        assert.equal(response.headers.get("retry-after"), "5");
+        if (method === "HEAD") assert.equal(await response.text(), "");
+        else {
+          const error = OpaqueProblemSchema.parse(await response.json());
+          assert.equal(error.code, "INTERNAL_ERROR");
+          assert.ok(!("rule" in error));
+          assert.ok(!("schema" in error));
+          assert.ok(!("example" in error));
+          assert.ok(!JSON.stringify(error).includes("unavailable_events"));
+        }
+      }
+  }));
 
 test("reconstructs complete published work without a syntheses projection", () =>
   using(async (f) => {

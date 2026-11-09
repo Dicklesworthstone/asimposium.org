@@ -50,11 +50,15 @@ function refusal(method: string, kind: "query" | "not-found" | "unavailable") {
               "The bounded publication snapshot could not be established. This is not an empty collection.",
             fixHint: "Retry the unchanged request without advancing your saved cursor.",
           }),
-    rule: "A5",
-    extensions: {
-      schema: SYNTHESES_SCHEMA_ID,
-      example: { method: "GET", path: "/p/P-EXAMPLE/syntheses.json?through=20&before=12" },
-    },
+    ...(kind === "unavailable"
+      ? {}
+      : {
+          rule: "A5" as const,
+          extensions: {
+            schema: SYNTHESES_SCHEMA_ID,
+            example: { method: "GET", path: "/p/P-EXAMPLE/syntheses.json?through=20&before=12" },
+          },
+        }),
     headers: {
       "cache-control": "private, no-store",
       ...(kind === "unavailable" ? { "retry-after": "5" } : {}),
