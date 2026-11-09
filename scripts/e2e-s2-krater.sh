@@ -383,6 +383,9 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0135_report_source_pins.sql
   db/migrations/0136_problem_proposal_commands.sql
   db/migrations/0137_problem_stewardship_commands.sql
+  db/migrations/0138_artifact_upload_inventory.sql
+  db/migrations/0139_statement_revision_proposals.sql
+  db/migrations/0140_artifact_upload_recovery.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -752,6 +755,10 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/directives/disclosure-router.ts
   apps/wire/src/directives/disclosure-store.ts
   apps/wire/src/discovery/artifact-publications-discovery.ts
+  apps/wire/src/discovery/artifact-uploads-discovery.ts
+  apps/wire/src/krater/artifact-inventory.ts
+  apps/wire/src/krater/artifact-recovery.ts
+  apps/wire/src/problems/statement-revision-proposals.ts
   apps/wire/src/discovery/directive-disclosures-discovery.ts
   apps/wire/src/discovery/honors-context.ts
   apps/wire/src/discovery/honors-eligibility.ts
@@ -989,6 +996,9 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0135_report_source_pins.sql
   0136_problem_proposal_commands.sql
   0137_problem_stewardship_commands.sql
+  0138_artifact_upload_inventory.sql
+  0139_statement_revision_proposals.sql
+  0140_artifact_upload_recovery.sql
 )
 
 

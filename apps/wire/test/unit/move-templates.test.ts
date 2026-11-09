@@ -6,6 +6,7 @@ import {
 } from "@asimposium/contracts";
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import Ajv2020 from "ajv/dist/2020.js";
+import { ProblemLifecycleContractsSchema } from "../../../../packages/contracts/src/problems.ts";
 import { SessionsContractsSchema } from "../../../../packages/contracts/src/sessions.ts";
 import { createApp } from "../../src/app";
 import { generateOpenApiDocument, normalizeOpenApiPath } from "../../src/discovery/discovery";
@@ -28,6 +29,12 @@ const evidence = {
   body_md: "A concrete counterexample at the boundary.",
 };
 const bodies: Partial<Record<MoveKind, Record<string, unknown>>> = {
+  "sharpen-statement": {
+    session_id: "S-abcdefghijklmnopqrstuvwxyz",
+    statement_version: 1,
+    verdict: "statement-clear",
+    basis: "The recorded scope, quantifiers and falsifier describe one testable formulation.",
+  },
   "state-claim": {
     workshop_id: "W-abcdefghijklmnopqrstuvwxyz",
     statement: "Every even integer is divisible by two.",
@@ -109,29 +116,46 @@ test("available move guidance agrees with mounted POSTs, published schemas and a
       (route) => `${route.method} ${normalizeOpenApiPath(route.path)}`,
     ),
   );
+  // A template names its problem slot explicitly; Hono names that same path
+  // position :id. Only placeholder names vary. Every literal and method must
+  // agree with exactly one actual registered route and its OpenAPI operation.
+  const routeShape = (route: string) => route.replace(/\{[A-Za-z_][A-Za-z0-9_]*\}/g, "{}");
   const openapi = JSON.parse(generateOpenApiDocument());
   const ajv = new Ajv2020({ strict: true, allErrors: true });
-  const sessions = listPublicSchemas().find((schema) => schema.id === "sessions");
-  if (!sessions) throw new Error("Missing served sessions schema");
-  const document = JSON.parse(sessions.body);
+  const families = { sessions: SessionsContractsSchema, problems: ProblemLifecycleContractsSchema };
+  const served = listPublicSchemas();
   let count = 0;
   for (const template of Object.values(generateMoveTemplatesDocument().moves)) {
     if (template.availability !== "available") continue;
     count++;
-    expect(mounted.has(`${template.request.method} ${template.request.path}`), template.move).toBe(
-      true,
+    const routes = [...mounted].filter(
+      (route) =>
+        routeShape(route) === routeShape(`${template.request.method} ${template.request.path}`),
     );
-    const operation = openapi.paths[template.request.path]?.post;
+    expect(routes, template.move).toHaveLength(1);
+    const registeredPath = routes[0]?.slice(template.request.method.length + 1);
+    if (!registeredPath) throw new Error(`Missing registered move route: ${template.move}`);
+    const operation = openapi.paths[registeredPath]?.post;
     expect(operation?.security, template.move).toEqual([{ bearerAuth: [] }]);
     // The move links a served slice; OpenAPI references the same property by
     // fragment. Both must name the same request shape.
-    const slice = /^\/schemas\/sessions\.v1\/([a-z_]+)\.json$/.exec(template.target_contract);
-    expect(slice, template.move).not.toBeNull();
-    const property = slice?.[1] as keyof typeof SessionsContractsSchema.shape;
-    expect(operation?.requestBody.content["application/json"].schema.$ref, template.move).toBe(
-      `${origin}/schemas/sessions.v1.json#/properties/${property}`,
+    const slice = /^\/schemas\/(sessions|problems)\.v1\/([a-z_]+)\.json$/.exec(
+      template.target_contract,
     );
-    const contract = SessionsContractsSchema.shape[property];
+    expect(slice, template.move).not.toBeNull();
+    if (!slice || !slice[1] || !slice[2])
+      throw new Error(`Unknown move contract: ${template.move}`);
+    const family = slice[1] as keyof typeof families;
+    const property = slice[2];
+    const definition = Object.entries(families[family].shape).find(([key]) => key === property);
+    const schema = served.find((row) => row.id === family);
+    if (!definition || !schema)
+      throw new Error(`Missing canonical move contract: ${template.move}`);
+    const contract = definition[1];
+    const document = JSON.parse(schema.body);
+    expect(operation?.requestBody.content["application/json"].schema.$ref, template.move).toBe(
+      `${origin}/schemas/${family}.v1.json#/properties/${property}`,
+    );
     const body = { ...bodies[template.move], ...template.prefilled_hints };
     expect(contract.safeParse(body).success, template.move).toBe(true);
     const validate = ajv.compile(document.properties[property]);
@@ -144,7 +168,7 @@ test("available move guidance agrees with mounted POSTs, published schemas and a
         expect(template.required_fields, template.move).toContain(field);
     }
   }
-  expect(count).toBe(16);
+  expect(count).toBe(17);
   expect(Object.keys(bodies)).toHaveLength(count);
 });
 

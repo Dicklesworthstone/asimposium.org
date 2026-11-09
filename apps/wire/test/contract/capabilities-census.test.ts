@@ -18,15 +18,21 @@
  * editing mounted paths to chase advertisement text.
  */
 import { describe, expect, test } from "bun:test";
-import { PromoteRequestSchema, WorkshopPushRequestSchema } from "@asimposium/contracts";
+import {
+  ProblemDocumentSchema,
+  PromoteRequestSchema,
+  WorkshopPushRequestSchema,
+} from "@asimposium/contracts";
 import { getDocument } from "@asimposium/protocol";
 
 import { createApp } from "../../src/app.ts";
 import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
 import type { Env } from "../../src/env.ts";
 import { createInboxRouter } from "../../src/inbox/router.ts";
+import { artifactRoute } from "../../src/krater/artifact-http.ts";
 import { artifactPublicationRoute } from "../../src/krater/artifact-publication-http.ts";
 import { artifactPublicationFetch } from "../../src/krater/artifact-publication-runtime.ts";
+import { artifactFetch } from "../../src/krater/artifact-runtime.ts";
 import { createMegaCommandsRouter } from "../../src/mega-commands/router.ts";
 import { createModerationRouter } from "../../src/moderation/router.ts";
 import { createProblemRouter } from "../../src/problems/router.ts";
@@ -113,6 +119,42 @@ async function artifactPublicationGatewayHasMount(key: string): Promise<boolean>
   const isPublic = route.kind === "manifest" || route.kind === "evidence";
   const expectedMethod = route.kind === "publish" || route.kind === "retry" ? "POST" : "GET";
   return method === expectedMethod && response.status === (isPublic ? 503 : 401);
+}
+
+/** Dispatch/refusal proof only: valid runtime configuration lets a missing
+ * bearer reach the real 401 without touching storage. It proves no upload. */
+async function artifactUploadGatewayHasMount(key: string): Promise<boolean> {
+  const separator = key.indexOf(" ");
+  const method = key.slice(0, separator);
+  const samples: Readonly<Record<string, string>> = {
+    uploadId: `AU-${"a".repeat(32)}`,
+    partNumber: "1",
+  };
+  const path = key
+    .slice(separator + 1)
+    .replace(/<([A-Za-z0-9_]+)>/g, (whole, name: string) => samples[name] ?? whole);
+  const route = artifactRoute(path, method);
+  let fellThrough = false;
+  const response = await artifactFetch(
+    new Request(`https://a.asimposium.org${path}`, { method }),
+    {
+      STOA_ORIGIN: "https://a.asimposium.org",
+      AGORA_ORIGIN: "https://asimposium.org",
+      ENROLLMENT_REPLAY_KEY: "A".repeat(43),
+      DB: {
+        prepare() {
+          throw new Error("Unauthenticated upload discovery must not query D1");
+        },
+      },
+    } as unknown as Env,
+    () => {
+      fellThrough = true;
+      return new Response(null, { status: 404 });
+    },
+  );
+  if (fellThrough || route === undefined || method !== route.method) return false;
+  const problem = ProblemDocumentSchema.safeParse(await response.json());
+  return response.status === 401 && problem.success && problem.data.code === "UNAUTHORIZED";
 }
 
 const STUB_SERVICE = {} as never;
@@ -212,6 +254,12 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "signed exact-lineage sponsor disclosure decision; summarized by sponsor_surface",
     "GET /v1/sponsors/problems/<id>/publication-preview":
       "signed private formulation preview; summarized by sponsor_surface",
+    "GET /v1/sponsors/problems/<id>/statement-proposals":
+      "signed current-steward private proposal queue; summarized by sponsor_surface",
+    "GET /v1/sponsors/problems/<id>/statement-proposals/<proposalId>":
+      "signed current-steward exact private proposal preview; summarized by sponsor_surface",
+    "GET /v1/sponsors/problems/<id>/statement-proposals/after/<after>":
+      "signed current-steward private proposal continuation; summarized by sponsor_surface",
     "GET /v1/sponsors/problems/<id>/governance":
       "signed sponsor authority and membership read; summarized by sponsor_surface",
     "GET /v1/sponsors/problems/<id>/governance/after/<cursor>":
@@ -474,7 +522,9 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     // Phantom direction: no advertisement may name a route nothing mounts.
     for (const key of advertised) {
       expect(
-        advertisementHasMount(key, all) || (await artifactPublicationGatewayHasMount(key)),
+        advertisementHasMount(key, all) ||
+          (await artifactPublicationGatewayHasMount(key)) ||
+          (await artifactUploadGatewayHasMount(key)),
         key,
       ).toBe(true);
     }
@@ -515,6 +565,38 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     expect(
       await artifactPublicationGatewayHasMount("POST /v1/artifact-publications/<different>/retry"),
     ).toBe(false);
+  });
+
+  test("the nine private upload operations reach typed authorization without blessing fallback paths or methods", async () => {
+    const advertised = new Set<string>(
+      (await servedCapabilities()).operations.map((operation) =>
+        normalizeAdvertisedEntry(`${operation.method} ${operation.path}`),
+      ),
+    );
+    for (const key of [
+      "GET /v1/artifacts",
+      "POST /v1/artifacts",
+      "GET /v1/artifacts/<uploadId>",
+      "GET /v1/artifacts/<uploadId>/content",
+      "POST /v1/artifacts/<uploadId>/complete",
+      "POST /v1/artifacts/<uploadId>/renew",
+      "POST /v1/artifacts/<uploadId>/resumable",
+      "POST /v1/artifacts/<uploadId>/resume",
+      "PUT /v1/artifacts/<uploadId>/parts/<partNumber>",
+    ]) {
+      expect(advertised.has(key), key).toBe(true);
+      expect(await artifactUploadGatewayHasMount(key), key).toBe(true);
+    }
+    for (const key of [
+      "POST /v1/artifacts/extra/complete",
+      "POST /v1/artifacts/<uploadId>/resume/extra",
+      "GET /v1/artifacts/<uploadId>/resume",
+      "POST /v1/artifacts/<different>/complete",
+      "POST /v1/artifacts/<uploadId>/parts/<partNumber>",
+      "PUT /v1/artifacts/<uploadId>/parts/5",
+      "DELETE /v1/artifacts",
+    ])
+      expect(await artifactUploadGatewayHasMount(key), key).toBe(false);
   });
 
   test("normalization preserves parameter names, HTTP methods and face suffixes", () => {

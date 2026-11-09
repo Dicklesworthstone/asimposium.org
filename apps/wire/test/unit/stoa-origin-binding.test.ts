@@ -8,6 +8,7 @@ import {
   OperatorFellowCapOverrideResponseSchema,
   PRODUCTION_STOA_ORIGIN,
   ProblemDocumentSchema,
+  ProblemGovernanceEventSchema,
   STAGING_AGORA_ORIGIN,
   STAGING_STOA_ORIGIN,
   stoaHelloUrl,
@@ -23,6 +24,8 @@ import {
   enrollmentCapsuleProjection,
 } from "../../src/enrollment/capsule.ts";
 import { EnrollmentService } from "../../src/enrollment/service.ts";
+import { writeLedgerEvent } from "../../src/krater/krater.ts";
+import { normHash, sha256Hex } from "../../src/split/policy.ts";
 
 /**
  * The Stoa origin is a binding, never a request.
@@ -436,8 +439,8 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
       async first<T>(): Promise<T | null> {
         return (sqlite.prepare(query).get(...values) ?? null) as T | null;
       },
-      async all<T>(): Promise<{ results: T[] }> {
-        return { results: sqlite.prepare(query).all(...values) as T[] };
+      async all<T>(): Promise<{ results: T[]; meta: { changes: number } }> {
+        return { results: sqlite.prepare(query).all(...values) as T[], meta: { changes: 0 } };
       },
     });
     const prepare = (query: string) => ({
@@ -637,9 +640,76 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
     const { db, sqlite } = latestD1();
     const problemId = "P-OPERATOR-REPLAY";
     const createdAt = "2026-11-01T00:00:00.000Z";
+    const title = "Published operator replay fixture";
+    const formulation = {
+      statement: "Every finite tree has one fewer edge than vertices.",
+      falsifier: "A finite tree whose edge and vertex counts violate that equality.",
+      motivation: "Give moderation a public scientific target without bypassing its scope guard.",
+    };
     sqlite
-      .prepare("INSERT INTO problems (id, created_at, updated_at) VALUES (?, ?, ?)")
-      .run(problemId, createdAt, createdAt);
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(SPONSOR_ID, Date.parse(createdAt), Date.parse(createdAt));
+    sqlite
+      .prepare(
+        "INSERT INTO problems (id, title, status, sponsor_id, created_at, updated_at) VALUES (?, ?, 'sharpening', ?, ?, ?)",
+      )
+      .run(problemId, title, SPONSOR_ID, createdAt, createdAt);
+    sqlite
+      .prepare(`INSERT INTO problem_statement_versions
+      (problem_id,version,statement,norm_hash,falsifier,motivation,created_at)
+      VALUES(?,1,?,?,?,?,?)`)
+      .run(
+        problemId,
+        formulation.statement,
+        `sha256:${await normHash(formulation.statement)}`,
+        formulation.falsifier,
+        formulation.motivation,
+        createdAt,
+      );
+    const publication = ProblemGovernanceEventSchema.parse({
+      action: "publish",
+      previous_status: "private-draft",
+      previous_statement_version: 1,
+      source_fellow_id: "F-operator-replay-fixture",
+      acting_principal: { type: "sponsor", id: SPONSOR_ID },
+      problem: {
+        id: problemId,
+        title,
+        status: "sharpening",
+        current_statement_version: 1,
+        ...formulation,
+        updated_at: createdAt,
+      },
+    });
+    // Unit setup establishes a real public event through the canonical writer;
+    // it is not proof of the publication route or external Fellow identity.
+    await writeLedgerEvent(
+      db,
+      {
+        problemId,
+        eventId: "PG-operator-replay-fixture",
+        idempotencyKey: "operator-replay-fixture-publication",
+        requestDigest: await sha256Hex(JSON.stringify(publication)),
+        eventType: "problem.admitted",
+        objectKind: "problem",
+        objectId: problemId,
+        objectVersion: 1,
+        payloadJson: JSON.stringify(publication),
+        createdAt,
+        attribution: {
+          principalType: "sponsor",
+          sponsorId: SPONSOR_ID,
+          fellowId: null,
+          sessionId: null,
+          modelSelfDeclared: null,
+          harness: null,
+        },
+      },
+      { statementsAfterEvent: () => [] },
+    );
+    expect(sqlite.prepare("SELECT public_seq FROM problems WHERE id=?").get(problemId)).toEqual({
+      public_seq: 1,
+    });
     const keypair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
       "sign",
       "verify",

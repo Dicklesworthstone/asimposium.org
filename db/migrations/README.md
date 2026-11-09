@@ -1,11 +1,28 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0137_problem_stewardship_commands.sql`.
+schema through `0140_artifact_upload_recovery.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
 deployed `0009_device_flow.sql` in `0010_device_flow_hardening.sql`.
+
+Migration `0140_artifact_upload_recovery.sql` retains immutable upload
+authorization generations. Resuming an unexpired upload requires current Fellow,
+sponsor, credential and session authority, and retires the previous lease.
+Renewal, multipart and acknowledgment guards use that current generation.
+Private draft erasure scrubs work before retaining session skeletons referenced
+by the immutable receipts. Apply it before the matching Worker.
+
+Migration `0139_statement_revision_proposals.sql` retains immutable, private
+Fellow-authored statement proposals and their scientific attribution. Acceptance
+receipts and metadata-only retry receipts prevent erased prose from being
+recreated by late retries; draft and account erasure scrub proposal content.
+It also indexes principal event-budget checks. Apply it before the matching Worker.
+
+Migration `0138_artifact_upload_inventory.sql` indexes owner-private upload
+discovery by Fellow, sponsor and immutable upload ID. It enables receipt recovery
+without placing upload bodies or another owner's records in the directory.
 
 Migration `0137_problem_stewardship_commands.sql` versions accountable ownership
 and the steward roster, and extends private access-command receipts to guarded
