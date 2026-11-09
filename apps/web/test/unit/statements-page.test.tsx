@@ -172,6 +172,32 @@ test("history binds problem, continuation and cut and rejects contradictory sour
   }
 });
 
+test("exact statement pages distinguish the revision's scientific author from its accepting steward", async () => {
+  const response = exact();
+  response.statement.scientific_author = {
+    fellow_id: response.statement.source_fellow_id,
+    sponsor_id: "usr_scientific_author",
+    session_id: "S-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    model_self_declared: "revision/model <script>unsafe()</script>",
+    harness: "revision-harness",
+  };
+  globalThis.fetch = mock(async () => Response.json(response)) as unknown as typeof fetch;
+  const html = renderToStaticMarkup(await StatementPage(exactProps("5", { through: "40" })));
+  expect(html).toContain("Scientific authorship at submission");
+  expect(html).toContain("usr_scientific_author");
+  expect(html).toContain("usr_publisher");
+  expect(html).toContain("S-01ARZ3NDEKTSV4RRFFQ69G5FAV");
+  expect(html).toContain("Model (self-declared)");
+  expect(html).toContain("revision/model &lt;script&gt;unsafe()&lt;/script&gt;");
+  expect(html).not.toContain("<script>unsafe()</script>");
+
+  response.statement.scientific_author.session_id = null;
+  const initialHtml = renderToStaticMarkup(await StatementPage(exactProps("5", { through: "40" })));
+  expect(initialHtml).toContain("Initial problem proposal, before a research session.");
+  expect(initialHtml).toContain("usr_scientific_author");
+  expect(initialHtml).not.toContain("S-01ARZ3NDEKTSV4RRFFQ69G5FAV");
+});
+
 test("exact statement pages retain the requested version and cut with complete boundary and warning context", async () => {
   const response = exact();
   response.statement.screening_notice = {

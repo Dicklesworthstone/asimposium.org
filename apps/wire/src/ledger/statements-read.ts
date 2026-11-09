@@ -93,6 +93,9 @@ async function publicVersion(
     ...formulation,
     version,
     source_fellow_id: source.source_fellow_id,
+    ...(source.scientific_author === undefined
+      ? {}
+      : { scientific_author: source.scientific_author }),
     acting_principal: source.acting_principal,
     publication: source.publication,
     ...(source.screening_notice === undefined ? {} : { screening_notice: source.screening_notice }),

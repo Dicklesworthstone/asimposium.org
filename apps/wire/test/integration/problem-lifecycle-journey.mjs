@@ -39,6 +39,7 @@ export async function problemLifecycleJourney({
   origin,
   userAgent,
   sponsorCall,
+  reviseStatement,
   fixtures,
 }) {
   const sponsorA = "usr_problem_sponsor_a";
@@ -804,11 +805,10 @@ export async function problemLifecycleJourney({
   assert.ok(promotedClaim.claim_id.startsWith("C-"));
 
   // --- Step 7: Problem Statement Revision (S@1 -> S@2) & Statement Drift ---
-  const revisedProblem = await sponsorCall(
+  const revisedProblem = await reviseStatement(
+    problemId,
     sponsorA,
-    "POST",
-    `/v1/sponsors/problems/${problemId}/lifecycle`,
-    "problem-lifecycle",
+    fellowA1Token,
     {
       action: "revise-statement",
       statement: "For all k >= 3, the non-trivial 3x+1 cycle mod 2^k has length bounded by k - 2.",

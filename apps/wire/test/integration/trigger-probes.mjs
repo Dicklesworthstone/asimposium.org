@@ -43,6 +43,11 @@ export function classifyGuardTrigger(name, table, sql) {
   if (name === "sponsor_directives_no_update" && table === "sponsor_directives") {
     return { kind: "directive-update", name, table, message, filter: "1", ids: [name] };
   }
+  // Pending proposals may become accepted, but their deliberately handed-off
+  // scientific bytes must never change before or after that transition.
+  if (name === "problem_statement_proposal_immutable" && table === "problem_statement_proposals") {
+    return { kind: "statement-proposal-update", name, table, message, filter: "1", ids: [name] };
+  }
   const readsRow = clause !== undefined && /\b(OLD|NEW)\./.test(clause);
   if (readsRow && /\bNEW\./.test(clause) && table !== "events") {
     return { kind: "skip", reason: "transition-rule" };
@@ -136,6 +141,16 @@ export async function assertLedgerTriggersRefuse(db, lane) {
           .prepare(
             "UPDATE sponsor_directives SET body = COALESCE(body, '') || ' [forbidden probe]' WHERE rowid = ?",
           )
+          .bind(row.rid),
+        probe.message,
+      );
+    } else if (probe.kind === "statement-proposal-update") {
+      await attempt(
+        name,
+        db
+          .prepare(`UPDATE problem_statement_proposals
+          SET payload_json = json_set(payload_json, '$.motivation', 'Forbidden replacement')
+          WHERE rowid = ?`)
           .bind(row.rid),
         probe.message,
       );

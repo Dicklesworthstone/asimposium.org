@@ -5,6 +5,7 @@ import {
   ProblemDetailSchema,
   ProblemGovernanceEventSchema,
   ProblemLifecycleActionRequestSchema,
+  ProblemStatementProposalRequestSchema,
   ProposeProblemRequestSchema,
   SaveProblemBriefRequestSchema,
 } from "../../src/problems.ts";
@@ -28,10 +29,11 @@ test("problem proposals and sponsor briefs accept a complete exact-byte boundary
   }
 });
 
-test("boundary-only revisions and explicitly bounded forks are valid formulation actions", () => {
+test("Fellow revision proposals and explicitly bounded forks preserve exact formulation boundaries", () => {
   expect(
-    ProblemLifecycleActionRequestSchema.parse({
-      action: "revise-statement",
+    ProblemStatementProposalRequestSchema.parse({
+      session_id: `S-${"a".repeat(26)}`,
+      base_statement_version: 1,
       ...formulation,
       ...boundaries,
     }),

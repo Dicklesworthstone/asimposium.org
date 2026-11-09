@@ -9,10 +9,10 @@ import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import { configuredStoaOrigin, stoaProblemPublicationPreview } from "@/lib/stoa";
 import {
   parseSynthesisConsoleQuery,
+  type SynthesisSelectionPage,
   synthesisConsolePath,
   synthesisListSearch,
   synthesisSelectionPage,
-  type SynthesisSelectionPage,
 } from "@/lib/synthesis-view";
 
 export const dynamic = "force-dynamic";
@@ -46,8 +46,10 @@ export default async function ProblemPublicationPage({
     typeof problemId === "string" &&
     problemId.trim() === problemId &&
     synthesisQuery !== null;
-  const returnPath = valid && synthesisQuery !== null
-    ? synthesisConsolePath(problemId, synthesisQuery.selected, synthesisQuery.list) : "/console";
+  const returnPath =
+    valid && synthesisQuery !== null
+      ? synthesisConsolePath(problemId, synthesisQuery.selected, synthesisQuery.list)
+      : "/console";
   const session = valid ? await auth() : null;
   const principal = session?.user?.id;
   let read: Awaited<ReturnType<typeof stoaProblemPublicationPreview>> | undefined;
@@ -85,9 +87,13 @@ export default async function ProblemPublicationPage({
   let synthesisChoices: SynthesisSelectionPage | null = null;
   if (workspace?.problem.status === "under-result-review" && synthesisQuery !== null) {
     try {
-      const choices = await stoaFetchSyntheses(problemId, undefined, Object.fromEntries(
-        new URLSearchParams(synthesisListSearch(problemId, synthesisQuery.list)),
-      ));
+      const choices = await stoaFetchSyntheses(
+        problemId,
+        undefined,
+        Object.fromEntries(
+          new URLSearchParams(synthesisListSearch(problemId, synthesisQuery.list)),
+        ),
+      );
       if (choices.state === "ok") synthesisChoices = synthesisSelectionPage(choices.data);
     } catch {
       // Discovery can fail without disabling the existing exact-identifier preview.
@@ -105,6 +111,16 @@ export default async function ProblemPublicationPage({
             ← Sponsor console
           </Link>
         </p>
+        {valid && (preview !== undefined || workspace !== undefined) ? (
+          <p>
+            <Link
+              href={`/console/problems/${encodeURIComponent(problemId)}/revisions`}
+              prefetch={false}
+            >
+              Review Fellow statement proposals
+            </Link>
+          </p>
+        ) : null}
         <p>
           {workspace === undefined
             ? "Inspect the complete private formulation and its authorship before making it public. Published problems use this page to select exact result claims and Fellow-authored closing syntheses."
@@ -113,8 +129,8 @@ export default async function ProblemPublicationPage({
       </header>
       {!valid ? (
         <p role="alert">
-          Choose an adopted private problem or a published problem from the sponsor console.
-          Only a synthesis identifier and the published-synthesis page cursors are supported here.
+          Choose an adopted private problem or a published problem from the sponsor console. Only a
+          synthesis identifier and the published-synthesis page cursors are supported here.
         </p>
       ) : !isCanonicalSponsorId(principal) ? (
         <section className="card">

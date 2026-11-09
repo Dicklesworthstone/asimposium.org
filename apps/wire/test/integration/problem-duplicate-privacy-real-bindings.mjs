@@ -18,7 +18,7 @@ const problemBody = (title, statement) => ({
   areas: ["number-theory"],
 });
 
-await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, userAgent }) => {
+await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, reviseStatement, worker, origin, userAgent }) => {
   const SPONSOR_A = "usr_dup_privacy_a";
   const SPONSOR_B = "usr_dup_privacy_b";
   const fellowA = await enroll("dup-privacy-a", SPONSOR_A);
@@ -39,11 +39,10 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
   const privateFace = await publicRead(`/p/${problem}.json`);
   assert.equal(privateFace.status, 404);
   assert.ok(!(await privateFace.text()).includes(DRAFT_WORDING));
-  await sponsorCall(
+  await reviseStatement(
+    problem,
     SPONSOR_A,
-    "POST",
-    `/v1/sponsors/problems/${problem}/lifecycle`,
-    "problem-lifecycle",
+    fellowA,
     {
       action: "revise-statement",
       statement: PUBLISHED_WORDING,

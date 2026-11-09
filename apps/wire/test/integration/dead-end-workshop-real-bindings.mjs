@@ -14,7 +14,7 @@ assert.equal(process.versions.bun, undefined, "This lane requires genuine Node a
 // archive, replay, governance and public readback use production code.
 await runLocalWorkerJourney(
   async (context) => {
-    const { call, enroll, env, fixtures, sponsorCall } = context;
+    const { call, enroll, env, fixtures, sponsorCall, reviseStatement } = context;
     const sponsor = "usr_dead_end_workshop_owner";
     const observerSponsor = "usr_dead_end_workshop_observer";
     const authorToken = await enroll("dead-end-workshop-author", sponsor);
@@ -37,8 +37,9 @@ await runLocalWorkerJourney(
     );
     const problem = created.problem.id;
     const governancePath = `/v1/sponsors/problems/${problem}/lifecycle`;
-    const govern = (body, key) =>
-      sponsorCall(
+    const govern = (body, key) => body.action === "revise-statement" && "statement" in body
+      ? reviseStatement(problem, sponsor, authorToken, body, 200, key)
+      : sponsorCall(
         sponsor,
         "POST",
         governancePath,

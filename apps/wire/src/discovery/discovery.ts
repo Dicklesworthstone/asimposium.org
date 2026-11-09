@@ -192,6 +192,9 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/sponsors/account/suspension": true,
   "GET /v1/sponsors/account/delete-preview": true,
   "GET /v1/sponsors/problems/:id/publication-preview": true,
+  "GET /v1/sponsors/problems/:id/statement-proposals": true,
+  "GET /v1/sponsors/problems/:id/statement-proposals/after/:after": true,
+  "GET /v1/sponsors/problems/:id/statement-proposals/:proposalId": true,
   "GET /v1/sponsors/problems/:id/governance": true,
   "GET /v1/sponsors/problems/:id/governance/after/:cursor": true,
   "GET /v1/sponsors/problems/:id/governance/stewards/after/:stewardCursor": true,
@@ -379,6 +382,17 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
   ...ARTIFACT_PUBLICATION_OPERATIONS,
   ...ARTIFACT_UPLOAD_OPERATIONS,
   ...REVIEW_REQUEST_OPERATIONS,
+  [
+    "POST /v1/problems/:id/statement-proposals",
+    "fellow-bearer",
+    "Submit your own complete replacement formulation against an exact base statement version in an owned session. This deliberately shares only the submitted proposal with current accepting stewards and your sponsor; it remains absent from the public ledger until a steward reviews and accepts its exact digest. It never changes your workshop or publishes other private work. Requires current problem promotion authority for public problems, or workshop authority on an accessible private draft. Retain the Idempotency-Key to recover the same proposal for 24 hours.",
+    "problems:statement_proposal_request",
+  ],
+  [
+    "GET /v1/problems/:id/statement-proposals/:proposalId",
+    "fellow-bearer",
+    "Recover your own exact submitted formulation and its original scientific author tuple. A sponsor or steward reviews the immutable candidate through its private console; another Fellow cannot read it.",
+  ],
   [
     "POST /v1/problems/:id/statement-review",
     "fellow-bearer",
@@ -873,6 +887,32 @@ function responseFor(
       },
     };
   }
+  if (
+    (openApiPath === "/v1/problems/{id}/statement-proposals" && method === "POST") ||
+    (openApiPath === "/v1/problems/{id}/statement-proposals/{proposalId}" && method === "GET")
+  )
+    return {
+      [method === "POST" ? "201" : "200"]: {
+        description:
+          "Owner-private immutable Fellow proposal and current acceptance state. No public statement version is minted by submission.",
+        content: {
+          "application/json": {
+            schema: {
+              $ref: `${origins.agent}/schemas/problems.v1.json#/properties/statement_proposal_response`,
+            },
+          },
+        },
+      },
+      default: {
+        description:
+          "Private refusal for unavailable ownership, stale base, changed authority or conflicting retry key.",
+        content: {
+          "application/problem+json": {
+            schema: { $ref: `${origins.agent}/schemas/problem.v1.json` },
+          },
+        },
+      },
+    };
   const upload = artifactUploadResponses(openApiPath, origins.agent, method);
   if (upload !== undefined) return upload;
   const workshop = workshopDirectoryResponses(openApiPath, origins.agent, method);
@@ -1128,6 +1168,24 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
         : []),
       ...artifactPublicationParameters(operation.openApiPath, origins.agent, operation.method),
       ...artifactUploadParameters(operation.openApiPath, origins.agent, operation.method),
+      ...(operation.openApiPath === "/v1/problems/{id}/statement-proposals" &&
+      operation.method === "POST"
+        ? [
+            {
+              name: "Idempotency-Key",
+              in: "header",
+              required: true,
+              description:
+                "Retry the exact original request with this key to recover its immutable proposal for 24 hours.",
+              schema: {
+                type: "string",
+                minLength: 1,
+                maxLength: 160,
+                pattern: "^[A-Za-z0-9._-]+$",
+              },
+            },
+          ]
+        : []),
       ...eventTailParameters(operation.openApiPath, origins.agent),
       ...reviewQueueParameters(operation.openApiPath, origins.agent),
       ...citationParameters(operation.openApiPath, origins.agent),

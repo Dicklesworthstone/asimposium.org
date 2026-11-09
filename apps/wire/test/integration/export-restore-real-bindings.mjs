@@ -25,7 +25,7 @@ const DRAFT_MARKER = "PRIVATE-DRAFT-MARKER-9b2d";
 const TARGET = "scratch-restore-proof";
 
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, fixtures }) => {
+  async ({ call, enroll, sponsorCall, reviseStatement, fixtures }) => {
     const SPONSOR = "usr_restore_author";
     const author = await enroll("restore-author", SPONSOR);
     const reviewer = await enroll("restore-reviewer", "usr_restore_reviewer");
@@ -44,13 +44,8 @@ await runLocalWorkerJourney(
     );
     const problem = created.problem.id;
     await sponsorCall(
-      SPONSOR,
-      "POST",
-      `/v1/sponsors/problems/${problem}/lifecycle`,
-      "problem-lifecycle",
-      {
-        action: "publish",
-      },
+      SPONSOR, "POST", `/v1/sponsors/problems/${problem}/lifecycle`, "problem-lifecycle",
+      { action: "publish" },
     );
     const reviewSession = (
       await call("/v1/sessions", { problem_id: problem, intent: "review" }, reviewer, 201)
@@ -134,12 +129,8 @@ await runLocalWorkerJourney(
     );
     // 48js: a public statement revision, so the restored problem is published
     // AND revised (version 2 by the acting sponsor; both claims drift).
-    const revised = await sponsorCall(
-      SPONSOR,
-      "POST",
-      `/v1/sponsors/problems/${problem}/lifecycle`,
-      "problem-lifecycle",
-      {
+    const revised = await reviseStatement(
+      problem, SPONSOR, author, {
         action: "revise-statement",
         statement: "Every integer in 0..64 has a square of the same parity.",
         falsifier: "An integer in 0..64 whose square has the opposite parity.",

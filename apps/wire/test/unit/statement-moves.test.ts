@@ -79,6 +79,13 @@ function fixture() {
       previous_statement_version: Math.max(1, version - 1),
       acting_principal: { type: "sponsor", id: "usr_author" },
       source_fellow_id: AUTHOR,
+      scientific_author: {
+        fellow_id: AUTHOR,
+        sponsor_id: "usr_author",
+        session_id: version === 1 ? null : "S-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        model_self_declared: "statement-fixture-model",
+        harness: "statement-fixture-harness",
+      },
       problem: {
         id: PROBLEM,
         title: "Formulation context",
@@ -374,6 +381,117 @@ test("independent statement review is executable with review authority and no cl
     assert.deepEqual(filterMovesByPermissions([move], permissions, true), []);
   }));
 
+test("review recommendations follow the current version's scientific author and sponsor", () =>
+  run(async (f) => {
+    f.sql
+      .query("UPDATE problems SET status='sharpening', sponsor_id='usr_new_steward' WHERE id=?")
+      .run(PROBLEM);
+    const source = f.payloads.get("EV-3");
+    assert.ok(source);
+    f.replace("EV-3", {
+      ...source,
+      source_fellow_id: "F-REVISION-AUTHOR",
+      scientific_author: {
+        fellow_id: "F-REVISION-AUTHOR",
+        sponsor_id: "usr_revision_author",
+        session_id: "S-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        model_self_declared: "revision-model",
+        harness: "revision-harness",
+      },
+    });
+    for (const viewer of [
+      { ...independentReviewer, fellowId: "F-REVISION-AUTHOR" },
+      { ...independentReviewer, sponsorId: "usr_revision_author" },
+    ]) {
+      const result = await f.sharpen(f.cursor(), viewer);
+      assert.equal(result.degraded, false);
+      assert.equal(isStatementReviewMove(NextMoveCandidateSchema.parse(result.move)), false);
+    }
+    // A prior version's author is not this version's author. Workspace owners
+    // likewise have no scientific authorship merely because they govern it.
+    for (const viewer of [
+      { ...independentReviewer, fellowId: AUTHOR, sponsorId: "usr_author" },
+      { ...independentReviewer, sponsorId: "usr_new_steward" },
+    ])
+      assert.ok(
+        isStatementReviewMove(
+          NextMoveCandidateSchema.parse((await f.sharpen(f.cursor(), viewer)).move),
+        ),
+      );
+  }));
+
+test("initial publication preserves scientific independence when another steward accepts it", async () => {
+  const f = fixture();
+  try {
+    f.formulation(1, 1, "sharpening");
+    const source = f.payloads.get("EV-1");
+    assert.ok(source);
+    f.replace("EV-1", { ...source, acting_principal: { type: "sponsor", id: "usr_accepting" } });
+    f.sql
+      .query("UPDATE problems SET status='sharpening', sponsor_id='usr_new_steward' WHERE id=?")
+      .run(PROBLEM);
+    for (const viewer of [
+      { ...independentReviewer, fellowId: AUTHOR },
+      { ...independentReviewer, sponsorId: "usr_author" },
+    ]) {
+      const result = await f.sharpen(f.cursor(), viewer);
+      assert.equal(result.degraded, false);
+      assert.equal(isStatementReviewMove(NextMoveCandidateSchema.parse(result.move)), false);
+    }
+    for (const sponsorId of ["usr_accepting", "usr_new_steward", "usr_reviewer"]) {
+      const result = await f.sharpen(f.cursor(), { ...independentReviewer, sponsorId });
+      assert.equal(result.degraded, false);
+      assert.ok(isStatementReviewMove(NextMoveCandidateSchema.parse(result.move)));
+    }
+  } finally {
+    f.close();
+  }
+});
+
+test("legacy initial publication cannot infer scientific sponsorship from its accepting or current steward", async () => {
+  const f = fixture();
+  try {
+    f.formulation(1, 1, "sharpening");
+    const source = f.payloads.get("EV-1");
+    assert.ok(source);
+    const { scientific_author: _missing, ...legacy } = source;
+    f.replace("EV-1", { ...legacy, acting_principal: { type: "sponsor", id: "usr_accepting" } });
+    f.sql.query("UPDATE problems SET sponsor_id='usr_new_steward' WHERE id=?").run(PROBLEM);
+    for (const sponsorId of ["usr_author", "usr_accepting", "usr_new_steward", "usr_reviewer"])
+      assert.deepEqual(await f.sharpen(f.cursor(), { ...independentReviewer, sponsorId }), {
+        move: null,
+        degraded: true,
+      });
+  } finally {
+    f.close();
+  }
+});
+
+test("legacy revision cannot borrow its Fellow's earlier admission sponsorship", () =>
+  run(async (f) => {
+    f.sql.query("UPDATE problems SET status='sharpening' WHERE id=?").run(PROBLEM);
+    const source = f.payloads.get("EV-3");
+    assert.ok(source);
+    const { scientific_author: _missing, ...legacy } = source;
+    f.replace("EV-3", legacy);
+    // S@1 has a verified author tuple, but it cannot prove the Fellow kept
+    // that sponsor when authoring the separately recorded S@2 formulation.
+    assert.ok(f.payloads.get("EV-1")?.scientific_author);
+    assert.deepEqual(await f.sharpen(f.cursor(), independentReviewer), {
+      move: null,
+      degraded: true,
+    });
+  }));
+
+test("the current version's own author tuple remains sufficient when the earlier admission is withheld", () =>
+  run(async (f) => {
+    f.sql.query("UPDATE problems SET status='sharpening' WHERE id=?").run(PROBLEM);
+    f.control("#1");
+    const result = await f.sharpen(f.cursor(), independentReviewer);
+    assert.equal(result.degraded, false);
+    assert.ok(isStatementReviewMove(NextMoveCandidateSchema.parse(result.move)));
+  }));
+
 for (const restriction of ["author", "same-sponsor", "missing-review-scope", "already-reviewed"])
   test(`statement sharpening offers private preparation for ${restriction}, without a review action`, () =>
     run(async (f) => {
@@ -434,6 +552,30 @@ for (const change of ["review", "sponsor"])
       });
       assert.ok(changed);
     }));
+
+test("a changed scientific source tuple invalidates a prepared independent-review move", () =>
+  run(async (f) => {
+    f.sql.query("UPDATE problems SET status='sharpening' WHERE id=?").run(PROBLEM);
+    let changed = false;
+    f.setAfterRead((query) => {
+      if (changed || !query.includes("AS already_reviewed")) return;
+      changed = true;
+      const source = ProblemGovernanceEventSchema.parse(f.payloads.get("EV-3"));
+      assert.ok(source.scientific_author);
+      f.replace("EV-3", {
+        ...source,
+        scientific_author: {
+          ...source.scientific_author,
+          sponsor_id: independentReviewer.sponsorId,
+        },
+      });
+    });
+    assert.deepEqual(await f.sharpen(f.cursor(), independentReviewer), {
+      move: null,
+      degraded: true,
+    });
+    assert.ok(changed);
+  }));
 
 for (const damage of ["hidden", "redacted", "missing", "digest-mismatch", "stale-cut"])
   test(`sharpening refuses ${damage} formulation authority`, () =>

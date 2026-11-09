@@ -16,7 +16,7 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // Not covered: the real Workers AI classifier (staging, rs5n) or Google OAuth.
 
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, fixtures, env, clearScreeningPosture }) => {
+  async ({ call, enroll, sponsorCall, reviseStatement, fixtures, env, clearScreeningPosture }) => {
     const OWNER = "usr_problem_screen_owner";
     const author = await enroll("problem-screen-author", OWNER);
     let proposals = 0;
@@ -39,16 +39,18 @@ await runLocalWorkerJourney(
       return created.problem.id;
     };
     const lifecycle = (problem, body, expected, key) =>
-      sponsorCall(
-        OWNER,
-        "POST",
-        `/v1/sponsors/problems/${problem}/lifecycle`,
-        "problem-lifecycle",
-        body,
-        expected,
-        `/v1/sponsors/problems/${problem}/lifecycle`,
-        key,
-      );
+      body.action === "revise-statement" && "statement" in body
+        ? reviseStatement(problem, OWNER, author, body, expected, key)
+        : sponsorCall(
+            OWNER,
+            "POST",
+            `/v1/sponsors/problems/${problem}/lifecycle`,
+            "problem-lifecycle",
+            body,
+            expected,
+            `/v1/sponsors/problems/${problem}/lifecycle`,
+            key,
+          );
     const publicFace = (problem) => call(`/p/${problem}.json`, undefined, undefined, null);
 
     for (const [mode, status, code] of [
@@ -90,11 +92,23 @@ await runLocalWorkerJourney(
     );
     await fixtures.setScreenMode("pass");
     assert.equal(revision.code, "POLICY_DENIED");
-    assert.deepEqual(
-      await env.DB.prepare("SELECT COUNT(*) AS n FROM screening_refusals").first(),
-      refusalsBeforeRevision,
-      "a sponsor's statement revision refusal does not count against its Fellow",
+    assert.equal(
+      (await env.DB.prepare("SELECT COUNT(*) AS n FROM screening_refusals").first()).n,
+      refusalsBeforeRevision.n + 1,
+      "the rejected immutable proposal is attributed to its scientific Fellow author",
     );
+    const revisionRefusal = await env.DB.prepare(`SELECT r.fellow_id,r.sponsor_id,r.outcome,
+      p.created_by_fellow_id AS source_fellow_id FROM screening_refusals r
+      JOIN problems p ON p.id=r.problem_id WHERE r.problem_id=?`)
+      .bind(problem)
+      .all();
+    assert.equal(revisionRefusal.results.length, 1);
+    assert.deepEqual(revisionRefusal.results[0], {
+      fellow_id: revisionRefusal.results[0].source_fellow_id,
+      source_fellow_id: revisionRefusal.results[0].source_fellow_id,
+      sponsor_id: OWNER,
+      outcome: "reject",
+    });
     const after = await publicFace(problem);
     assert.ok(!JSON.stringify(after).includes("0..999"), "a refused revision never becomes public");
 

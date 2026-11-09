@@ -369,6 +369,125 @@ export async function runLocalWorkerJourney(journey, options = {}) {
       return data;
     }
 
+    // Fixture science is still submitted by a real enrolled Fellow. This
+    // helper performs the explicit proposal -> exact sponsor preview ->
+    // acceptance journey; it never sends sponsor-authored scientific prose
+    // to the lifecycle endpoint. Retained pins preserve ambiguous retries.
+    const statementRevisionReviews = new Map();
+    const statementRevisionPreparations = new Map();
+    async function prepareStatementRevision(problemId, sponsorId, token, formulation, requestKey) {
+      const credential = createHash("sha256").update(token).digest("hex");
+      const identity = JSON.stringify([problemId, sponsorId, credential, requestKey, formulation]);
+      let preparation = statementRevisionReviews.get(identity);
+      if (preparation === undefined) {
+        // Queue temporary source sessions for this Fellow, while acceptance
+        // remains concurrent. Parallel fixture setup must not consume the
+        // Fellow's global two-open-session budget or mint competing replay pins.
+        const previous = statementRevisionPreparations.get(credential) ?? Promise.resolve();
+        preparation = previous
+          .catch(() => undefined)
+          .then(async () => {
+            const current = await call(`/v1/problems/${problemId}`, undefined, token);
+            const previousSession = await env.DB.prepare(`SELECT s.session_id FROM sessions s
+            JOIN fellow_tokens t ON t.fellow_id = s.fellow_id
+            WHERE t.token_hash = ? AND s.problem_id = ? AND s.closed_at IS NULL
+              AND julianday(s.idle_close_at) > julianday('now')
+            ORDER BY s.opened_at DESC LIMIT 1`)
+              .bind(credential, problemId)
+              .first();
+            const session =
+              previousSession ??
+              (await call(
+                "/v1/sessions",
+                { problem_id: problemId, intent: "sharpen-statement" },
+                token,
+                201,
+              ));
+            let submitted;
+            try {
+              const { action: _action, ...authored } = formulation;
+              // Proposal keys are Fellow-wide, whereas lifecycle keys are scoped
+              // to the problem/sponsor. Distinct input must reach lifecycle's
+              // conflict check without accidentally replaying another proposal.
+              const proposalKey = `native-proposal-${createHash("sha256").update(identity).digest("hex")}`;
+              submitted = await call(
+                `/v1/problems/${problemId}/statement-proposals`,
+                {
+                  ...authored,
+                  session_id: session.session_id,
+                  base_statement_version: current.problem.current_statement_version,
+                },
+                token,
+                null,
+                proposalKey,
+              );
+            } finally {
+              if (!previousSession)
+                await call(
+                  `/v1/sessions/${session.session_id}/close`,
+                  { handback: "Submitted a deliberate statement candidate for steward review." },
+                  token,
+                  201,
+                );
+            }
+            if (submitted.code) return submitted;
+            const preview = await sponsorCall(
+              sponsorId,
+              "GET",
+              `/v1/sponsors/problems/${problemId}/statement-proposals/${submitted.proposal.proposal_id}`,
+              "problem-statement-proposal-preview",
+              undefined,
+              [200, 403, 404, 409],
+            );
+            if (preview.code) return preview;
+            return {
+              action: "revise-statement",
+              proposal_id: submitted.proposal.proposal_id,
+              reviewed_statement_version: submitted.proposal.base_statement_version,
+              reviewed_digest: preview.review_digest,
+            };
+          });
+        statementRevisionReviews.set(identity, preparation);
+        statementRevisionPreparations.set(credential, preparation);
+      }
+      return preparation;
+    }
+    async function reviseStatement(
+      problemId,
+      sponsorId,
+      token,
+      formulation,
+      expected = 200,
+      idempotencyKey,
+    ) {
+      const requestKey = idempotencyKey ?? `native-statement-${++key}`;
+      const reviewed = await prepareStatementRevision(
+        problemId,
+        sponsorId,
+        token,
+        formulation,
+        requestKey,
+      );
+      if (reviewed.code) {
+        assert.ok(
+          (Array.isArray(expected) ? expected : [expected]).includes(reviewed.status),
+          `statement proposal journey: status=${reviewed.status} expected=${expected} code=${reviewed.code}`,
+        );
+        return reviewed;
+      }
+      const path = `/v1/sponsors/problems/${problemId}/lifecycle`;
+      return sponsorCall(
+        sponsorId,
+        "POST",
+        path,
+        "problem-lifecycle",
+        reviewed,
+        expected,
+        path,
+        requestKey,
+      );
+    }
+
     // An operator-signed call as the allowlisted local operator.
     const operatorCall = (
       method,
@@ -400,6 +519,8 @@ export async function runLocalWorkerJourney(journey, options = {}) {
       origin,
       userAgent,
       sponsorCall,
+      reviseStatement,
+      prepareStatementRevision,
       operatorCall,
       clearScreeningPosture,
       // The Worker's own runtime log lines since workerd started (or since

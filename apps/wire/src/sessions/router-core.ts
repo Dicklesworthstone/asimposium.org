@@ -187,6 +187,7 @@ import {
 import { displayClaimDisposition, reviewStateFromRecordedReviews } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
 import { loadFormalRecords } from "../ledger/formal-records-service";
+import { readPublishedProblemFormulation } from "../ledger/problem-formulation-read.ts";
 import { validateQuestionSubstance } from "../ledger/questions";
 import { parseRelationTarget } from "../ledger/relations";
 import { determineRetractionKind, validateRetractionSubstance } from "../ledger/retractions";
@@ -9418,12 +9419,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         if (cursorConflict !== null) return cursorConflict;
       }
       const problem = await db
-        .prepare(`SELECT status, current_statement_version, sponsor_id,
+        .prepare(`SELECT status, current_statement_version, public_seq, sponsor_id,
         created_by_fellow_id, unlisted FROM problems WHERE id = ?`)
         .bind(problemId)
         .first<{
           status: string;
           current_statement_version: number;
+          public_seq: number;
           sponsor_id: string | null;
           created_by_fellow_id: string | null;
           unlisted: number;
@@ -9452,17 +9454,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         now: Date.now(),
       });
       if (decision.decision !== "allow") return writeRefusedProblem();
-      if (
-        auth.binding.fellowId === problem.created_by_fellow_id ||
-        auth.binding.sponsorId === problem.sponsor_id
-      )
-        return refuse(
-          "REVIEWER_IS_AUTHOR",
-          422,
-          "A proposer or its sponsor cannot certify its own formulation.",
-          "Have an independent Fellow from a different sponsor review the statement.",
-          "P1",
-        );
       const stale = () =>
         refuse(
           "OBJECT_VERSION_CONFLICT",
@@ -9475,6 +9466,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         problem.current_statement_version !== parsed.data.statement_version
       )
         return stale();
+      // Independence belongs to this exact published version. A replacement
+      // Fellow may have authored it, and today's steward is not necessarily
+      // the sponsor of the scientific work recorded at publication.
+      const formulation = await readPublishedProblemFormulation(db, problemId, problem.public_seq);
+      if (
+        !formulation ||
+        formulation.problem.current_statement_version !== parsed.data.statement_version ||
+        formulation.source_sponsor_id === undefined
+      )
+        return stale();
+      if (
+        auth.binding.fellowId === formulation.source_fellow_id ||
+        auth.binding.sponsorId === formulation.source_sponsor_id
+      )
+        return refuse(
+          "REVIEWER_IS_AUTHOR",
+          422,
+          "The author of this statement version or its sponsor cannot certify the formulation.",
+          "Have an independent Fellow from a different sponsor review the exact statement version.",
+          "P1",
+        );
       const duplicate = async () =>
         (await db
           .prepare(`SELECT 1 FROM problem_statement_reviews
@@ -9565,6 +9577,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               auth.binding.fellowId,
             ],
             statementsAfterEvent: () => [
+              ...scientificContentGuards(db, [
+                {
+                  eventId: formulation.publication.event_id,
+                  payloadDigest: formulation.publication.payload_sha256,
+                  payloadJson: formulation.source_payload_json,
+                  problemId,
+                },
+              ]),
               db
                 .prepare(`INSERT INTO problem_statement_reviews
               (problem_id, version, reviewer_fellow_id, verdict, basis, created_at)
@@ -9650,7 +9670,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           currentProblem.created_by_fellow_id !== problem.created_by_fellow_id
         )
           return stale();
-        if (error instanceof KraterLedgerPreconditionError) return stale();
+        if (error instanceof KraterLedgerPreconditionError || isScientificReferenceChanged(error))
+          return stale();
         throw error;
       }
     } catch (error) {

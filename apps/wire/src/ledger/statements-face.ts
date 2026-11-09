@@ -29,6 +29,9 @@ function statementItems(statement: PublicStatementVersion): ProjectionItem[] {
       body: JSON.stringify({
         version: statement.version,
         source_fellow_id: statement.source_fellow_id,
+        ...(statement.scientific_author === undefined
+          ? {}
+          : { scientific_author: statement.scientific_author }),
         acting_principal: statement.acting_principal,
         updated_at: statement.updated_at,
         publication: statement.publication,

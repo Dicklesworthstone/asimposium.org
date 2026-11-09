@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ProblemIndexTimestampSchema, PublicLedgerProblemIdSchema } from "./ledger.ts";
 import { completeProblemBoundaries, OptionalProblemBoundaryFields } from "./problem-boundaries.ts";
+import { ProblemStatementAuthorSchema } from "./problems.ts";
 import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 
 export const STATEMENTS_SCHEMA_ID = "https://a.asimposium.org/schemas/statements.v1.json";
@@ -41,6 +42,7 @@ export const PublicStatementVersionSchema = completeProblemBoundaries(
       ...OptionalProblemBoundaryFields,
       updated_at: ProblemIndexTimestampSchema,
       source_fellow_id: z.string().min(1).max(128),
+      scientific_author: ProblemStatementAuthorSchema.optional(),
       acting_principal: z
         .object({ type: z.literal("sponsor"), id: z.string().min(1).max(128) })
         .strict(),
@@ -54,6 +56,13 @@ export const PublicStatementVersionSchema = completeProblemBoundaries(
       screening_notice: ScreeningPublicationNoticeSchema.optional(),
     })
     .strict(),
+).refine(
+  (value) =>
+    value.scientific_author === undefined ||
+    value.scientific_author.fellow_id === value.source_fellow_id,
+  {
+    message: "The source Fellow must be the captured scientific author.",
+  },
 );
 export type PublicStatementVersion = z.infer<typeof PublicStatementVersionSchema>;
 

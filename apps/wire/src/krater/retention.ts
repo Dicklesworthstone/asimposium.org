@@ -531,6 +531,13 @@ export function sponsorAccountDeletionStatements(
     db
       .prepare("DELETE FROM problem_proposal_command_receipts WHERE sponsor_id = ?")
       .bind(sponsorId),
+    db.prepare("DELETE FROM problem_statement_proposals WHERE sponsor_id = ?").bind(sponsorId),
+    db
+      .prepare("DELETE FROM problem_statement_proposal_receipts WHERE sponsor_id = ?")
+      .bind(sponsorId),
+    db
+      .prepare("DELETE FROM private_statement_acceptance_receipts WHERE sponsor_id = ?")
+      .bind(sponsorId),
   ];
 }
 
@@ -769,6 +776,10 @@ export async function expireSecurityRecords(
     db.prepare("DELETE FROM device_codes WHERE expires_at <= ?").bind(nowMs),
     db.prepare("DELETE FROM sponsor_brief_command_receipts WHERE expires_at <= ?").bind(nowMs),
     db.prepare("DELETE FROM problem_proposal_command_receipts WHERE expires_at <= ?").bind(nowMs),
+    db.prepare("DELETE FROM problem_statement_proposal_receipts WHERE expires_at <= ?").bind(nowMs),
+    db
+      .prepare("DELETE FROM private_statement_acceptance_receipts WHERE expires_at <= ?")
+      .bind(nowMs),
     // enrollment_proposals is append-only (0011 enrollment_proposals_no_delete):
     // a DELETE here aborts the whole batch on real D1, so no nonce is ever
     // swept. Dead proposals stay as the sponsor's decision history.

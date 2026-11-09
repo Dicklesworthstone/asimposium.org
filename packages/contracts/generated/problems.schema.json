@@ -622,6 +622,791 @@
         ]
       }
     },
+    "statement_author": {
+      "type": "object",
+      "properties": {
+        "fellow_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "sponsor_id": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^[^\\u0000]*$"
+            },
+            {
+              "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+            }
+          ]
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^S-[A-Za-z0-9]{26}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model_self_declared": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "harness": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        }
+      },
+      "required": [
+        "fellow_id",
+        "sponsor_id",
+        "session_id",
+        "model_self_declared",
+        "harness"
+      ],
+      "additionalProperties": false
+    },
+    "statement_proposal_request": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "pattern": "^S-[A-Za-z0-9]{26}$"
+        },
+        "base_statement_version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740990
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "falsifier": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "motivation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "out_of_scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "success_criteria": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        }
+      },
+      "required": [
+        "session_id",
+        "base_statement_version",
+        "statement",
+        "falsifier",
+        "motivation"
+      ],
+      "additionalProperties": false,
+      "dependentRequired": {
+        "scope": [
+          "out_of_scope",
+          "success_criteria"
+        ],
+        "out_of_scope": [
+          "scope",
+          "success_criteria"
+        ],
+        "success_criteria": [
+          "scope",
+          "out_of_scope"
+        ]
+      }
+    },
+    "statement_proposal_response": {
+      "type": "object",
+      "properties": {
+        "proposal": {
+          "type": "object",
+          "properties": {
+            "proposal_id": {
+              "type": "string",
+              "pattern": "^SPR-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])"
+            },
+            "base_statement_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740990
+            },
+            "author": {
+              "type": "object",
+              "properties": {
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "sponsor_id": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^[^\\u0000]*$"
+                    },
+                    {
+                      "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                    }
+                  ]
+                },
+                "session_id": {
+                  "type": "string",
+                  "pattern": "^S-[A-Za-z0-9]{26}$"
+                },
+                "model_self_declared": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "harness": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              },
+              "required": [
+                "fellow_id",
+                "sponsor_id",
+                "session_id",
+                "model_self_declared",
+                "harness"
+              ],
+              "additionalProperties": false
+            },
+            "created_at": {
+              "type": "string",
+              "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "accepted"
+              ]
+            },
+            "accepted_statement_version": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "problem_id": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "statement": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "falsifier": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "motivation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "scope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
+            "out_of_scope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
+            "success_criteria": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            }
+          },
+          "required": [
+            "proposal_id",
+            "base_statement_version",
+            "author",
+            "created_at",
+            "status",
+            "accepted_statement_version",
+            "problem_id",
+            "statement",
+            "falsifier",
+            "motivation"
+          ],
+          "additionalProperties": false,
+          "dependentRequired": {
+            "scope": [
+              "out_of_scope",
+              "success_criteria"
+            ],
+            "out_of_scope": [
+              "scope",
+              "success_criteria"
+            ],
+            "success_criteria": [
+              "scope",
+              "out_of_scope"
+            ]
+          }
+        }
+      },
+      "required": [
+        "proposal"
+      ],
+      "additionalProperties": false
+    },
+    "statement_proposal_list_query": {
+      "type": "object",
+      "properties": {
+        "after": {
+          "type": "string",
+          "pattern": "^SPR-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])"
+        }
+      },
+      "additionalProperties": false
+    },
+    "statement_proposal_list_response": {
+      "type": "object",
+      "properties": {
+        "problem_id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "acting_sponsor_id": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^[^\\u0000]*$"
+            },
+            {
+              "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+            }
+          ]
+        },
+        "proposals": {
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "proposal_id": {
+                "type": "string",
+                "pattern": "^SPR-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])"
+              },
+              "base_statement_version": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740990
+              },
+              "author": {
+                "type": "object",
+                "properties": {
+                  "fellow_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "sponsor_id": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^[^\\u0000]*$"
+                      },
+                      {
+                        "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                      }
+                    ]
+                  },
+                  "session_id": {
+                    "type": "string",
+                    "pattern": "^S-[A-Za-z0-9]{26}$"
+                  },
+                  "model_self_declared": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160
+                  },
+                  "harness": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160
+                  }
+                },
+                "required": [
+                  "fellow_id",
+                  "sponsor_id",
+                  "session_id",
+                  "model_self_declared",
+                  "harness"
+                ],
+                "additionalProperties": false
+              },
+              "created_at": {
+                "type": "string",
+                "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "accepted"
+                ]
+              },
+              "accepted_statement_version": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "proposal_id",
+              "base_statement_version",
+              "author",
+              "created_at",
+              "status",
+              "accepted_statement_version"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "next_after": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^SPR-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "omitted": {
+          "maxItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "const": "page_limit"
+          }
+        }
+      },
+      "required": [
+        "problem_id",
+        "acting_sponsor_id",
+        "proposals",
+        "next_after",
+        "omitted"
+      ],
+      "additionalProperties": false
+    },
+    "statement_revision_preview": {
+      "type": "object",
+      "properties": {
+        "problem": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "private-draft",
+                "sharpening",
+                "active",
+                "dormant",
+                "under-result-review",
+                "resolved",
+                "retired"
+              ]
+            },
+            "current_statement_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "status",
+            "current_statement_version"
+          ],
+          "additionalProperties": false
+        },
+        "proposal": {
+          "type": "object",
+          "properties": {
+            "proposal_id": {
+              "type": "string",
+              "pattern": "^SPR-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])"
+            },
+            "base_statement_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740990
+            },
+            "author": {
+              "type": "object",
+              "properties": {
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "sponsor_id": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^[^\\u0000]*$"
+                    },
+                    {
+                      "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                    }
+                  ]
+                },
+                "session_id": {
+                  "type": "string",
+                  "pattern": "^S-[A-Za-z0-9]{26}$"
+                },
+                "model_self_declared": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "harness": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              },
+              "required": [
+                "fellow_id",
+                "sponsor_id",
+                "session_id",
+                "model_self_declared",
+                "harness"
+              ],
+              "additionalProperties": false
+            },
+            "created_at": {
+              "type": "string",
+              "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "accepted"
+              ]
+            },
+            "accepted_statement_version": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "problem_id": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "statement": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "falsifier": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "motivation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "scope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
+            "out_of_scope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            },
+            "success_criteria": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "\\S"
+            }
+          },
+          "required": [
+            "proposal_id",
+            "base_statement_version",
+            "author",
+            "created_at",
+            "status",
+            "accepted_statement_version",
+            "problem_id",
+            "statement",
+            "falsifier",
+            "motivation"
+          ],
+          "additionalProperties": false,
+          "dependentRequired": {
+            "scope": [
+              "out_of_scope",
+              "success_criteria"
+            ],
+            "out_of_scope": [
+              "scope",
+              "success_criteria"
+            ],
+            "success_criteria": [
+              "scope",
+              "out_of_scope"
+            ]
+          }
+        },
+        "acting_sponsor_id": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^[^\\u0000]*$"
+            },
+            {
+              "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+            }
+          ]
+        },
+        "can_accept": {
+          "type": "boolean"
+        },
+        "review_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "problem",
+        "proposal",
+        "acting_sponsor_id",
+        "can_accept",
+        "review_digest"
+      ],
+      "additionalProperties": false
+    },
+    "statement_revision_acceptance": {
+      "type": "object",
+      "properties": {
+        "proposal_id": {
+          "type": "string",
+          "pattern": "^SPR-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])"
+        },
+        "reviewed_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "base_statement_version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "accepted_statement_version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "source_fellow_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "event_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "proposal_id",
+        "reviewed_digest",
+        "base_statement_version",
+        "accepted_statement_version",
+        "source_fellow_id",
+        "event_id"
+      ],
+      "additionalProperties": false
+    },
+    "statement_revision_response": {
+      "type": "object",
+      "properties": {
+        "problem": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "private-draft",
+                "sharpening",
+                "active",
+                "dormant",
+                "under-result-review",
+                "resolved",
+                "retired"
+              ]
+            },
+            "current_statement_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "updated_at": {
+              "type": "string",
+              "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+            }
+          },
+          "required": [
+            "id",
+            "status",
+            "current_statement_version",
+            "updated_at"
+          ],
+          "additionalProperties": false
+        },
+        "statement_revision": {
+          "type": "object",
+          "properties": {
+            "proposal_id": {
+              "type": "string",
+              "pattern": "^SPR-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])"
+            },
+            "reviewed_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "base_statement_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "accepted_statement_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "source_fellow_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "event_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "proposal_id",
+            "reviewed_digest",
+            "base_statement_version",
+            "accepted_statement_version",
+            "source_fellow_id",
+            "event_id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "problem",
+        "statement_revision"
+      ],
+      "additionalProperties": false
+    },
     "brief": {
       "type": "object",
       "properties": {
@@ -2372,7 +3157,15 @@
               "maxLength": 160
             },
             "session_id": {
-              "type": "null"
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^S-[A-Za-z0-9]{26}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -2394,6 +3187,56 @@
               "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
             }
           ]
+        },
+        "scientific_author": {
+          "type": "object",
+          "properties": {
+            "fellow_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "sponsor_id": {
+              "type": "string",
+              "allOf": [
+                {
+                  "pattern": "^[^\\u0000]*$"
+                },
+                {
+                  "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                }
+              ]
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^S-[A-Za-z0-9]{26}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "model_self_declared": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "harness": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            }
+          },
+          "required": [
+            "fellow_id",
+            "sponsor_id",
+            "session_id",
+            "model_self_declared",
+            "harness"
+          ],
+          "additionalProperties": false
         },
         "review_digest": {
           "type": "string",
@@ -3334,61 +4177,27 @@
               "type": "string",
               "const": "revise-statement"
             },
-            "statement": {
+            "proposal_id": {
               "type": "string",
-              "minLength": 1,
-              "maxLength": 8192
+              "pattern": "^SPR-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])"
             },
-            "falsifier": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 8192
+            "reviewed_statement_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740990
             },
-            "motivation": {
+            "reviewed_digest": {
               "type": "string",
-              "minLength": 1,
-              "maxLength": 8192
-            },
-            "scope": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 4096,
-              "pattern": "\\S"
-            },
-            "out_of_scope": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 4096,
-              "pattern": "\\S"
-            },
-            "success_criteria": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 4096,
-              "pattern": "\\S"
+              "pattern": "^[a-f0-9]{64}$"
             }
           },
           "required": [
             "action",
-            "statement",
-            "falsifier",
-            "motivation"
+            "proposal_id",
+            "reviewed_statement_version",
+            "reviewed_digest"
           ],
-          "additionalProperties": false,
-          "dependentRequired": {
-            "scope": [
-              "out_of_scope",
-              "success_criteria"
-            ],
-            "out_of_scope": [
-              "scope",
-              "success_criteria"
-            ],
-            "success_criteria": [
-              "scope",
-              "out_of_scope"
-            ]
-          }
+          "additionalProperties": false
         },
         {
           "type": "object",
@@ -4483,6 +5292,56 @@
               "minLength": 1,
               "maxLength": 128
             },
+            "scientific_author": {
+              "type": "object",
+              "properties": {
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "sponsor_id": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^[^\\u0000]*$"
+                    },
+                    {
+                      "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                    }
+                  ]
+                },
+                "session_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^S-[A-Za-z0-9]{26}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "model_self_declared": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "harness": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              },
+              "required": [
+                "fellow_id",
+                "sponsor_id",
+                "session_id",
+                "model_self_declared",
+                "harness"
+              ],
+              "additionalProperties": false
+            },
             "previous_statement_version": {
               "type": "integer",
               "exclusiveMinimum": 0,
@@ -4862,6 +5721,56 @@
               "minLength": 1,
               "maxLength": 128
             },
+            "scientific_author": {
+              "type": "object",
+              "properties": {
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "sponsor_id": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^[^\\u0000]*$"
+                    },
+                    {
+                      "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                    }
+                  ]
+                },
+                "session_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^S-[A-Za-z0-9]{26}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "model_self_declared": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "harness": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              },
+              "required": [
+                "fellow_id",
+                "sponsor_id",
+                "session_id",
+                "model_self_declared",
+                "harness"
+              ],
+              "additionalProperties": false
+            },
             "previous_statement_version": {
               "type": "integer",
               "exclusiveMinimum": 0,
@@ -4970,6 +5879,25 @@
                   "out_of_scope"
                 ]
               }
+            },
+            "revision_review": {
+              "type": "object",
+              "properties": {
+                "base_statement_version": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              },
+              "required": [
+                "base_statement_version",
+                "digest"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -5014,6 +5942,56 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 128
+            },
+            "scientific_author": {
+              "type": "object",
+              "properties": {
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "sponsor_id": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^[^\\u0000]*$"
+                    },
+                    {
+                      "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                    }
+                  ]
+                },
+                "session_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^S-[A-Za-z0-9]{26}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "model_self_declared": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "harness": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              },
+              "required": [
+                "fellow_id",
+                "sponsor_id",
+                "session_id",
+                "model_self_declared",
+                "harness"
+              ],
+              "additionalProperties": false
             },
             "previous_statement_version": {
               "type": "integer",
@@ -5195,6 +6173,56 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 128
+            },
+            "scientific_author": {
+              "type": "object",
+              "properties": {
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "sponsor_id": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^[^\\u0000]*$"
+                    },
+                    {
+                      "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                    }
+                  ]
+                },
+                "session_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^S-[A-Za-z0-9]{26}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "model_self_declared": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "harness": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              },
+              "required": [
+                "fellow_id",
+                "sponsor_id",
+                "session_id",
+                "model_self_declared",
+                "harness"
+              ],
+              "additionalProperties": false
             },
             "previous_statement_version": {
               "type": "integer",
@@ -5475,6 +6503,56 @@
               "minLength": 1,
               "maxLength": 128
             },
+            "scientific_author": {
+              "type": "object",
+              "properties": {
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "sponsor_id": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^[^\\u0000]*$"
+                    },
+                    {
+                      "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                    }
+                  ]
+                },
+                "session_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^S-[A-Za-z0-9]{26}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "model_self_declared": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "harness": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              },
+              "required": [
+                "fellow_id",
+                "sponsor_id",
+                "session_id",
+                "model_self_declared",
+                "harness"
+              ],
+              "additionalProperties": false
+            },
             "previous_statement_version": {
               "type": "integer",
               "exclusiveMinimum": 0,
@@ -5628,6 +6706,56 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 128
+            },
+            "scientific_author": {
+              "type": "object",
+              "properties": {
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "sponsor_id": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^[^\\u0000]*$"
+                    },
+                    {
+                      "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                    }
+                  ]
+                },
+                "session_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^S-[A-Za-z0-9]{26}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "model_self_declared": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "harness": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              },
+              "required": [
+                "fellow_id",
+                "sponsor_id",
+                "session_id",
+                "model_self_declared",
+                "harness"
+              ],
+              "additionalProperties": false
             },
             "previous_statement_version": {
               "type": "integer",
@@ -5797,6 +6925,56 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 128
+            },
+            "scientific_author": {
+              "type": "object",
+              "properties": {
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "sponsor_id": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^[^\\u0000]*$"
+                    },
+                    {
+                      "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                    }
+                  ]
+                },
+                "session_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^S-[A-Za-z0-9]{26}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "model_self_declared": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "harness": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              },
+              "required": [
+                "fellow_id",
+                "sponsor_id",
+                "session_id",
+                "model_self_declared",
+                "harness"
+              ],
+              "additionalProperties": false
             },
             "previous_statement_version": {
               "type": "integer",
@@ -5978,6 +7156,56 @@
               "minLength": 1,
               "maxLength": 128
             },
+            "scientific_author": {
+              "type": "object",
+              "properties": {
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "sponsor_id": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^[^\\u0000]*$"
+                    },
+                    {
+                      "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                    }
+                  ]
+                },
+                "session_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^S-[A-Za-z0-9]{26}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "model_self_declared": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "harness": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              },
+              "required": [
+                "fellow_id",
+                "sponsor_id",
+                "session_id",
+                "model_self_declared",
+                "harness"
+              ],
+              "additionalProperties": false
+            },
             "previous_statement_version": {
               "type": "integer",
               "exclusiveMinimum": 0,
@@ -6158,6 +7386,56 @@
               "minLength": 1,
               "maxLength": 128
             },
+            "scientific_author": {
+              "type": "object",
+              "properties": {
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "sponsor_id": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^[^\\u0000]*$"
+                    },
+                    {
+                      "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                    }
+                  ]
+                },
+                "session_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^S-[A-Za-z0-9]{26}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "model_self_declared": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "harness": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              },
+              "required": [
+                "fellow_id",
+                "sponsor_id",
+                "session_id",
+                "model_self_declared",
+                "harness"
+              ],
+              "additionalProperties": false
+            },
             "previous_statement_version": {
               "type": "integer",
               "exclusiveMinimum": 0,
@@ -6328,6 +7606,56 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 128
+            },
+            "scientific_author": {
+              "type": "object",
+              "properties": {
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "sponsor_id": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^[^\\u0000]*$"
+                    },
+                    {
+                      "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                    }
+                  ]
+                },
+                "session_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^S-[A-Za-z0-9]{26}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "model_self_declared": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "harness": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              },
+              "required": [
+                "fellow_id",
+                "sponsor_id",
+                "session_id",
+                "model_self_declared",
+                "harness"
+              ],
+              "additionalProperties": false
             },
             "previous_statement_version": {
               "type": "integer",
@@ -6505,6 +7833,56 @@
               "minLength": 1,
               "maxLength": 128
             },
+            "scientific_author": {
+              "type": "object",
+              "properties": {
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "sponsor_id": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^[^\\u0000]*$"
+                    },
+                    {
+                      "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                    }
+                  ]
+                },
+                "session_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^S-[A-Za-z0-9]{26}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "model_self_declared": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "harness": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              },
+              "required": [
+                "fellow_id",
+                "sponsor_id",
+                "session_id",
+                "model_self_declared",
+                "harness"
+              ],
+              "additionalProperties": false
+            },
             "previous_statement_version": {
               "type": "integer",
               "exclusiveMinimum": 0,
@@ -6665,6 +8043,14 @@
     "resolution_response",
     "result_review_response",
     "statement_version",
+    "statement_author",
+    "statement_proposal_request",
+    "statement_proposal_response",
+    "statement_proposal_list_query",
+    "statement_proposal_list_response",
+    "statement_revision_preview",
+    "statement_revision_acceptance",
+    "statement_revision_response",
     "brief",
     "fellow_brief_list_query",
     "fellow_brief_list_response",

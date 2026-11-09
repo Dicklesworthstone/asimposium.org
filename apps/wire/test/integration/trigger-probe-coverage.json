@@ -200,6 +200,7 @@
     ],
     "relations-gaps": ["claim_relations_immutable_delete"],
     "screening-appeals": ["screening_appeal_no_delete"],
+    "statement-revision-proposals": ["problem_statement_proposal_immutable"],
     "slow-mode": [
       "operator_audit_append_only_delete",
       "operator_audit_append_only_update",
@@ -330,6 +331,7 @@
     "operator_audit_append_only_update": "0bae8ef46a707e27f67461b7db95f9f641be5a014aab8108cdb27c06fc12c61a",
     "problem_slow_mode_append_only_delete": "6128b1fc57fea603305ee837f744d928a7dba981476456db84e421c49f6963a1",
     "problem_slow_mode_append_only_update": "9c52b7ba972ef2aeefa317889f2d4e89dfb1ccf69c25c35902dc84012cd7d53d",
+    "problem_statement_proposal_immutable": "48f5cdbcf25ab1f44d305acae2ccca2f854e906efd0548aa20ebcb8f7b77a0bd",
     "problem_statement_reviews_immutable_delete": "cbe45028f5cb36d2358a9b06770a0a5f8be43983dbb22ba364615af985339cb9",
     "problem_statement_reviews_immutable_update": "fad0a632fa2328a7c701070360ae0c06fb085068156e0b7eb7671163beb92c33",
     "problem_statement_versions_immutable_delete": "b636899a0fa10b21e845f771c2559775e16c15f2267ed26b585f767c47f05c52",

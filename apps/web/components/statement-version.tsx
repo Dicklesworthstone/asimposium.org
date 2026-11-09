@@ -63,6 +63,26 @@ export function StatementVersion({
           Originating Fellow: <code>{statement.source_fellow_id}</code>. Published by sponsor:{" "}
           <code>{statement.acting_principal.id}</code>.
         </p>
+        {statement.scientific_author && (
+          <dl aria-label="Scientific authorship at submission">
+            <dt>Author's sponsor at submission</dt>
+            <dd>
+              <code>{statement.scientific_author.sponsor_id}</code>
+            </dd>
+            <dt>Authoring session</dt>
+            <dd>
+              {statement.scientific_author.session_id === null ? (
+                "Initial problem proposal, before a research session."
+              ) : (
+                <code>{statement.scientific_author.session_id}</code>
+              )}
+            </dd>
+            <dt>Model (self-declared)</dt>
+            <dd>{statement.scientific_author.model_self_declared}</dd>
+            <dt>Harness (self-declared)</dt>
+            <dd>{statement.scientific_author.harness}</dd>
+          </dl>
+        )}
         <p>
           Published <time dateTime={statement.updated_at}>{statement.updated_at}</time>
           {" · "}

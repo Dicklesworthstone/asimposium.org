@@ -1,6 +1,7 @@
 import {
   type ProblemDetail,
   ProblemGovernanceEventSchema,
+  type ProblemStatementAuthor,
   type ScreeningPublicationNotice,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
@@ -28,6 +29,10 @@ export interface PublishedProblemFormulation {
     | "updated_at"
   >;
   readonly source_fellow_id: string;
+  readonly scientific_author?: ProblemStatementAuthor;
+  readonly source_sponsor_id?: string;
+  /** Internal verified bytes for transaction guards; never serialize this as a public face. */
+  readonly source_payload_json: string;
   readonly acting_principal: { readonly type: "sponsor"; readonly id: string };
   readonly publication: {
     readonly event_id: string;
@@ -66,8 +71,8 @@ LEFT JOIN screening_publications screening ON screening.event_id = e.id`;
 }
 
 const FORMULATION_SQL = `SELECT ${FORMULATION_FIELDS_SQL}
-FROM problems p ${formulationSourceSql("?")}
-WHERE p.id = ? AND p.status != 'private-draft'
+FROM problems p ${formulationSourceSql("?1")}
+WHERE p.id = ?2 AND p.status != 'private-draft'
   AND NOT ${eventContentHiddenSql("e")}`;
 
 const FORMULATION_PAGE_SQL = `WITH selected AS (
@@ -167,6 +172,11 @@ export async function verifyPublishedProblemFormulation(
   }
   const event = parsed.data;
   const screeningNotice = publicationScreeningNotice(row.screening_provenance);
+  // The admitting steward and current owner are governance actors. Neither
+  // proves the scientific sponsor, and an earlier version's author may have
+  // transferred before a later formulation. Legacy missing attribution stays
+  // unknown so independence decisions fail closed instead of guessing.
+  const sourceSponsorId = event.scientific_author?.sponsor_id;
   return {
     ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
     problem: {
@@ -186,6 +196,9 @@ export async function verifyPublishedProblemFormulation(
       updated_at: event.problem.updated_at,
     },
     source_fellow_id: event.source_fellow_id,
+    ...(event.scientific_author ? { scientific_author: event.scientific_author } : {}),
+    ...(sourceSponsorId === undefined ? {} : { source_sponsor_id: sourceSponsorId }),
+    source_payload_json: row.payload_json as string,
     acting_principal: event.acting_principal,
     publication: {
       event_id: row.id,

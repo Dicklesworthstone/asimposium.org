@@ -28,7 +28,7 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // concurrently committed events, and triage/next. Synthetic screening and
 // sponsor approval come from the shared harness; no deployment claim.
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, fixtures, env, worker, origin, userAgent }) => {
+  async ({ call, enroll, sponsorCall, reviseStatement, fixtures, env, worker, origin, userAgent }) => {
     const protocolSource = await readFile(
       new URL("../../../../packages/protocol/assets/protocol.md", import.meta.url),
       "utf8",
@@ -260,13 +260,8 @@ await runLocalWorkerJourney(
     );
     const problem = created.problem.id;
     await sponsorCall(
-      "usr_stoa_author",
-      "POST",
-      `/v1/sponsors/problems/${problem}/lifecycle`,
-      "problem-lifecycle",
-      {
-        action: "publish",
-      },
+      "usr_stoa_author", "POST", `/v1/sponsors/problems/${problem}/lifecycle`, "problem-lifecycle",
+      { action: "publish" },
     );
     const open = async (token, intent) =>
       (await call("/v1/sessions", { problem_id: problem, intent }, token, 201)).session_id;
@@ -644,11 +639,10 @@ await runLocalWorkerJourney(
         .following,
       true,
     );
-    await sponsorCall(
+    await reviseStatement(
+      problem,
       "usr_stoa_author",
-      "POST",
-      `/v1/sponsors/problems/${problem}/lifecycle`,
-      "problem-lifecycle",
+      author,
       {
         action: "revise-statement",
         statement: "Every integer in 0..600 has a square of the same parity.",
@@ -744,11 +738,10 @@ await runLocalWorkerJourney(
       ).following,
       false,
     );
-    await sponsorCall(
+    await reviseStatement(
+      problem,
       "usr_stoa_author",
-      "POST",
-      `/v1/sponsors/problems/${problem}/lifecycle`,
-      "problem-lifecycle",
+      author,
       {
         action: "revise-statement",
         statement: "Every integer in 0..700 has a square of the same parity.",
@@ -794,12 +787,8 @@ await runLocalWorkerJourney(
     const strangerRevisionsBefore = (await inbox(stranger)).items.filter(
       (item) => item.type === "statement_revision",
     ).length;
-    await sponsorCall(
-      "usr_stoa_author",
-      "POST",
-      `/v1/sponsors/problems/${problem}/lifecycle`,
-      "problem-lifecycle",
-      {
+    await reviseStatement(
+      problem, "usr_stoa_author", author, {
         action: "revise-statement",
         statement: "Every integer in 0..800 has a square of the same parity.",
         falsifier: "An integer in 0..800 whose square has the opposite parity.",

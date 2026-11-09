@@ -16,6 +16,10 @@ import {
   publicationContextFixture,
   SPONSOR,
 } from "../support/publication-context.ts";
+import {
+  reviewedStatementRevisionFixture,
+  submitStatementRevisionFixture,
+} from "../support/statement-proposal.ts";
 
 type Fixture = Awaited<ReturnType<typeof publicationContextFixture>>;
 type Problem = Parameters<typeof applyPublicProblemGovernance>[1];
@@ -156,7 +160,13 @@ test("boundary-only revision mints an immutable version and omission cannot eras
   const f = await fixture();
   await publish(f);
   const before = problem(f);
-  const omitted = await apply(f, { action: "revise-statement", ...formulation }, "omit-boundaries");
+  const omitted = await submitStatementRevisionFixture(
+    f.db,
+    SPONSOR,
+    PROBLEM,
+    formulation,
+    "omit-boundaries",
+  );
   expect(omitted.status).toBe(422);
   expect(await omitted.text()).toContain("success_criteria");
   expect(problem(f)).toEqual(before);
@@ -164,11 +174,23 @@ test("boundary-only revision mints an immutable version and omission cannot eras
     ...boundaries,
     success_criteria: "A proof covering the one-vertex tree as well.",
   };
-  const command = { action: "revise-statement" as const, ...formulation, ...revised };
+  const command = await reviewedStatementRevisionFixture(
+    f.db,
+    SPONSOR,
+    PROBLEM,
+    { ...formulation, ...revised },
+    "boundary-proposal",
+  );
   const response = await apply(f, command, "revise-boundaries");
   expect(response.status).toBe(200);
   const receipt = await receiptFrom(response);
-  expect(receipt.problem).toMatchObject({ ...revised, current_statement_version: 3 });
+  expect(receipt.problem).toMatchObject({ current_statement_version: 3 });
+  expect(
+    f.sql
+      .query(`SELECT scope,out_of_scope,success_criteria FROM problem_statement_versions
+    WHERE problem_id=? AND version=3`)
+      .get(PROBLEM),
+  ).toEqual(revised);
   expect(problem(f).public_seq).toBe(before.public_seq + 1);
   expect(
     f.sql

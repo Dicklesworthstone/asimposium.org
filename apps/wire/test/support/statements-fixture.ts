@@ -1,8 +1,17 @@
 import type { ProblemLifecycleActionRequest } from "@asimposium/contracts";
 import { createApp } from "../../src/app.ts";
+import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
+import {
+  EnrollmentService,
+  enrollmentReplayProtectorFromBase64Url,
+} from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
 import { readProblemPublicationPreview } from "../../src/problems/publication-preview.ts";
+import {
+  loadStatementRevisionSnapshot,
+  submitStatementProposal,
+} from "../../src/problems/statement-revision-proposals.ts";
 import { normHash } from "../../src/split/policy.ts";
 import { FELLOW, PROBLEM, publicationContextFixture, SPONSOR } from "./publication-context.ts";
 
@@ -68,8 +77,84 @@ export async function statementsFixture() {
     reviewed_statement_version: preview.problem.current_statement_version,
     reviewed_digest: preview.review_digest,
   });
-  const revise = (scope: string) =>
-    govern({ action: "revise-statement", ...STATEMENT_TEXT, ...STATEMENT_BOUNDARIES, scope });
+  const service = new EnrollmentService({
+    stoaOrigin: "https://a.asimposium.org",
+    agoraOrigin: "https://asimposium.org",
+    store: new D1EnrollmentStore(f.db),
+    replayProtector: enrollmentReplayProtectorFromBase64Url(
+      "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ),
+  });
+  const principal = { type: "sponsor" as const, sponsorId: SPONSOR };
+  const grant = await service.mint(principal, { requested_scopes: ["promote"] });
+  const claimed = await service.claim({
+    enrollment_id: grant.enrollmentId,
+    secret: grant.secret,
+    name: "statement-revision-author",
+    model: "model",
+    harness: "harness",
+  });
+  await service.decide(principal, grant.enrollmentId, {
+    enrollment_id: grant.enrollmentId,
+    decision: "approve",
+    step_up_authenticated_at: Math.floor(Date.now() / 1000),
+  });
+  const issued = await service.poll({ flow_handle: claimed.flowHandle });
+  if (!("token" in issued)) throw new Error("Statement fixture credential not issued");
+  const binding = await service.credentialBinding(issued.token);
+  if (!binding) throw new Error("Statement fixture credential unavailable");
+  const sessionId = `S-${"P".repeat(26)}`,
+    sessionAt = new Date().toISOString();
+  f.sql
+    .query(`INSERT INTO sessions(session_id,fellow_id,problem_id,opened_at,last_heartbeat_at,idle_close_at)
+    VALUES(?,?,?,?,?,?)`)
+    .run(
+      sessionId,
+      binding.fellowId,
+      PROBLEM,
+      sessionAt,
+      sessionAt,
+      new Date(Date.now() + 3600000).toISOString(),
+    );
+  f.sql
+    .query(
+      "INSERT INTO problem_memberships(problem_id,fellow_id,role,joined_at) VALUES(?,?,'contributor',?)",
+    )
+    .run(PROBLEM, binding.fellowId, sessionAt);
+  const revise = async (scope: string) => {
+    const base = f.sql
+      .query("SELECT current_statement_version FROM problems WHERE id=?")
+      .get(PROBLEM) as { current_statement_version: number };
+    const proposed = await submitStatementProposal(
+      f.db,
+      binding,
+      PROBLEM,
+      {
+        session_id: sessionId,
+        base_statement_version: base.current_statement_version,
+        ...STATEMENT_TEXT,
+        ...STATEMENT_BOUNDARIES,
+        scope,
+      },
+      `fixture-proposal-${++serial}`,
+    );
+    if (proposed.status !== 201)
+      throw new Error(`Statement fixture proposal: ${proposed.status} ${await proposed.text()}`);
+    const proposal = (await proposed.json()) as { proposal: { proposal_id: string } };
+    const reviewed = await loadStatementRevisionSnapshot(
+      f.db,
+      PROBLEM,
+      proposal.proposal.proposal_id,
+      SPONSOR,
+    );
+    if (!reviewed) throw new Error("Statement fixture revision preview unavailable");
+    return govern({
+      action: "revise-statement",
+      proposal_id: proposal.proposal.proposal_id,
+      reviewed_statement_version: base.current_statement_version,
+      reviewed_digest: reviewed.preview.review_digest,
+    });
+  };
   await revise("Finite rooted trees.");
   const app = createApp();
   return {

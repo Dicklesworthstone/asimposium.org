@@ -1,10 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import {
-  ProblemDocumentSchema,
-  type ProblemLifecycleActionRequest,
-  ScreeningPublicationProvenanceSchema,
-} from "@asimposium/contracts";
+import { ProblemDocumentSchema, ScreeningPublicationProvenanceSchema } from "@asimposium/contracts";
 import type { Env } from "../../src/env";
 import { decideScreeningCase } from "../../src/moderation/store";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger";
@@ -18,6 +14,10 @@ import {
   SPONSOR,
 } from "../support/publication-context";
 import { syntheticScreeningObservation } from "../support/screening";
+import {
+  reviewedStatementRevisionFixture,
+  statementRevisionSourceFixture,
+} from "../support/statement-proposal.ts";
 
 type Fixture = Awaited<ReturnType<typeof publicationContextFixture>>;
 type Problem = Parameters<typeof applyPublicProblemGovernance>[1];
@@ -26,11 +26,15 @@ const count = (f: Fixture, table: string) =>
 const snapshot = (f: Fixture, id = PROBLEM) =>
   f.sql.query("SELECT * FROM problems WHERE id = ?").get(id) as Problem;
 const revise = {
-  action: "revise-statement",
   statement: "Exact replacement public statement.",
   falsifier: "Exact replacement falsifier.",
   motivation: "Explain the narrower replacement.",
-} as const satisfies ProblemLifecycleActionRequest;
+} as const;
+async function reviewedRevision(f: Fixture, key: string) {
+  const command = await reviewedStatementRevisionFixture(f.db, SPONSOR, PROBLEM, revise, key);
+  const source = await statementRevisionSourceFixture(f.db, SPONSOR, PROBLEM);
+  return { command, sourceFellowId: source.binding.fellowId };
+}
 function request(key: string) {
   return new Request("https://a.asimposium.org/v1/sponsors/problems/context/lifecycle", {
     method: "POST",
@@ -158,9 +162,11 @@ test("governance publication retains a contextual sponsor receipt and exact repl
 
 test("a public statement revision screens its prior statement and commits the exact version transition", () =>
   using(async (f) => {
+    const { command, sourceFellowId } = await reviewedRevision(f, "revision-proposal");
     const calls = { calls: 0 };
     const candidate = {
       ...f.input(`${snapshot(f).title}\n\n${revise.statement}\n\n${revise.motivation}`),
+      fellowId: sourceFellowId,
       kind: "problem-statement-revision",
       falsifier: revise.falsifier,
     };
@@ -168,7 +174,7 @@ test("a public statement revision screens its prior statement and commits the ex
       f.db,
       snapshot(f),
       SPONSOR,
-      revise,
+      command,
       request("revision-context"),
       screening(f, candidate, calls),
     );
@@ -188,8 +194,10 @@ test("a public statement revision screens its prior statement and commits the ex
 
 test("operator rejection during sponsor revision cannot publish the declined statement", () =>
   using(async (f) => {
+    const { command, sourceFellowId } = await reviewedRevision(f, "rejected-proposal");
     const candidate = {
       ...f.input(`${snapshot(f).title}\n\n${revise.statement}\n\n${revise.motivation}`),
+      fellowId: sourceFellowId,
       kind: "problem-statement-revision",
       falsifier: revise.falsifier,
     };
@@ -212,7 +220,7 @@ test("operator rejection during sponsor revision cannot publish the declined sta
       f.db,
       snapshot(f),
       SPONSOR,
-      revise,
+      command,
       request("rejected-revision"),
       screening(f, candidate, calls, async () => {
         assert.equal(
@@ -244,7 +252,7 @@ test("operator rejection during sponsor revision cannot publish the declined sta
       f.db,
       snapshot(f),
       SPONSOR,
-      revise,
+      command,
       request("rejected-revision"),
       screening(f, candidate, calls),
     );
@@ -254,10 +262,12 @@ test("operator rejection during sponsor revision cannot publish the declined sta
 
 test("same-Fellow publication during sponsor revision refuses stale context and rolls back governance and quota", () =>
   using(async (f) => {
-    await f.write(f.input("First public source."));
+    const { command, sourceFellowId } = await reviewedRevision(f, "racing-proposal");
+    await f.write({ ...f.input("First public source."), fellowId: sourceFellowId });
     const calls = { calls: 0 };
     const candidate = {
       ...f.input(revise.statement),
+      fellowId: sourceFellowId,
       kind: "problem-statement-revision",
       falsifier: revise.falsifier,
     };
@@ -265,10 +275,10 @@ test("same-Fellow publication during sponsor revision refuses stale context and 
       f.db,
       snapshot(f),
       SPONSOR,
-      revise,
+      command,
       request("racing-revision"),
       screening(f, candidate, calls, async () => {
-        await f.write(f.input("Overlapping same-Fellow source."));
+        await f.write({ ...f.input("Overlapping same-Fellow source."), fellowId: sourceFellowId });
       }),
     );
     assert.equal(response.status, 409, await response.clone().text());
@@ -292,13 +302,15 @@ test("same-Fellow publication during sponsor revision refuses stale context and 
 
 test("complete-context failure settles governance quota before any paid classifier call", () =>
   using(async (f) => {
+    const { command, sourceFellowId } = await reviewedRevision(f, "unavailable-proposal");
     const overhead = JSON.stringify({ body_md: "", falsifier: "Exact falsifier." }).length;
     const source = "S".repeat(512 * 1024 - overhead);
-    await f.write(f.input(source));
-    await f.write(f.input(source));
+    await f.write({ ...f.input(source), fellowId: sourceFellowId });
+    await f.write({ ...f.input(source), fellowId: sourceFellowId });
     const calls = { calls: 0 };
     const candidate = {
       ...f.input(revise.statement),
+      fellowId: sourceFellowId,
       kind: "problem-statement-revision",
       falsifier: revise.falsifier,
     };
@@ -306,7 +318,7 @@ test("complete-context failure settles governance quota before any paid classifi
       f.db,
       snapshot(f),
       SPONSOR,
-      revise,
+      command,
       request("unavailable-revision"),
       screening(f, candidate, calls),
     );

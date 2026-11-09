@@ -18,6 +18,7 @@ await runLocalWorkerJourney(
     call,
     enroll,
     sponsorCall,
+    reviseStatement,
     env,
     fixtures,
     worker,
@@ -52,8 +53,9 @@ await runLocalWorkerJourney(
     );
     const problemId = created.problem.id;
 
-    const govern = (body, key) =>
-      sponsorCall(
+    const govern = (body, key) => body.action === "revise-statement" && "statement" in body
+      ? reviseStatement(problemId, sponsorA, author, body, 200, key)
+      : sponsorCall(
         sponsorA,
         "POST",
         `/v1/sponsors/problems/${problemId}/lifecycle`,

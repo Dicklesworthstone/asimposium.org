@@ -244,6 +244,7 @@ async function statementVersionRow(
   problem: Record<string, unknown>,
   stewardAcceptedBy: unknown,
   createdAt: unknown,
+  scientificAuthor?: unknown,
 ): Promise<void> {
   const statement = String(problem.statement);
   state.problem_statement_versions.set(String(version), {
@@ -258,6 +259,7 @@ async function statementVersionRow(
     success_criteria: nullable(problem.success_criteria),
     steward_accepted_by: nullable(stewardAcceptedBy),
     created_at: createdAt,
+    scientific_author_json: json(scientificAuthor),
   });
 }
 
@@ -844,6 +846,7 @@ const REPLAYERS: Readonly<Record<string, Replayer>> = {
         problem,
         admitted.steward_accepted_by,
         admitted.created_at,
+        p.scientific_author,
       );
       context.statementVersionsFrom = version;
     } else {
@@ -912,6 +915,7 @@ const REPLAYERS: Readonly<Record<string, Replayer>> = {
       problem,
       principal.id,
       event.createdAt,
+      p.scientific_author,
     );
   },
   // A statement review of one statement version, by the event's actor.
