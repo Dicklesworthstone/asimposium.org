@@ -76,6 +76,10 @@ import {
   reviewRequestResponses,
 } from "./review-requests-discovery";
 import {
+  scientificCollectionParameters,
+  scientificCollectionResponses,
+} from "./scientific-collections-discovery.ts";
+import {
   SCIENTIFIC_HISTORY_PUBLIC_READS,
   scientificHistoryParameters,
   scientificHistoryResponses,
@@ -817,6 +821,8 @@ function responseFor(
   origins: DiscoveryOrigins,
   method: string,
 ): Readonly<Record<string, unknown>> {
+  const collection = scientificCollectionResponses(openApiPath, origins.agent);
+  if (collection !== undefined) return collection;
   const history = scientificHistoryResponses(openApiPath, origins.agent);
   if (history !== undefined) return history;
   if (/^\/p\/\{id\}\/claims(?:\.(?:json|md|html))?$/.test(openApiPath)) {
@@ -1049,6 +1055,7 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
       ...artifactPublicationParameters(operation.openApiPath, origins.agent, operation.method),
       ...eventTailParameters(operation.openApiPath, origins.agent),
       ...reviewQueueParameters(operation.openApiPath, origins.agent),
+      ...scientificCollectionParameters(operation.openApiPath, origins.agent),
       ...scientificHistoryParameters(operation.openApiPath, origins.agent),
       ...hypothesesParameters(operation.openApiPath, origins.agent),
       ...(commentaryParameters(operation.openApiPath, origins.agent) ?? []),

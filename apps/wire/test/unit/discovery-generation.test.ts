@@ -268,6 +268,51 @@ describe("discovery generators (W1.6)", () => {
     }
   });
 
+  test("conflict and question discovery explains exact targets and snapshot continuation on every face", () => {
+    for (const agent of [DISCOVERY_ORIGINS.agent, "https://a-staging.asimposium.org"]) {
+      const doc = JSON.parse(generateOpenApiDocument({ ...DISCOVERY_ORIGINS, agent }));
+      for (const section of ["questions", "conflicts"]) {
+        const registered = listPublicSchemas().find((schema) => schema.id === section);
+        expect(registered).toBeDefined();
+        const query = JSON.parse(registered?.body ?? "{}").$defs?.query;
+        for (const [face, media] of [
+          ["json", "application/json"],
+          ["md", "text/markdown"],
+          ["html", "text/html"],
+        ]) {
+          const operation = doc.paths[`/p/{id}/${section}.${face}`].get;
+          const parameters = operation.parameters.filter(
+            (parameter: { in: string }) => parameter.in === "query",
+          );
+          expect(parameters.map((parameter: { name: string }) => parameter.name)).toEqual([
+            "through",
+            "after",
+            "limit",
+            "status",
+            "target",
+          ]);
+          for (const parameter of parameters) {
+            expect(parameter.required).toBe(false);
+            expect(parameter.schema.$ref).toBe(
+              `${agent}/schemas/${section}.v1.json#/$defs/query/properties/${parameter.name}`,
+            );
+            expect(query?.properties?.[parameter.name]).toBeDefined();
+          }
+          expect(parameters[1].description).toContain("Requires the original through cursor");
+          expect(parameters[2].description).toContain("defaults to 50");
+          expect(parameters[4].description).toContain("cannot be combined with after or status");
+          expect(operation.responses["200"].content[media as string]).toBeDefined();
+          expect(operation.responses["200"].headers["Content-Location"]).toBeDefined();
+          expect(operation.responses["200"].headers.Link).toBeDefined();
+          for (const status of ["304", "400", "404", "503"])
+            expect(operation.responses[status]).toBeDefined();
+          expect(operation.responses["503"].headers["Retry-After"]).toBeDefined();
+          expect(operation.security).toEqual([]);
+        }
+      }
+    }
+  });
+
   test("hono parameter qualifiers normalize to OpenAPI parameters", () => {
     expect(normalizeOpenApiPath("/p/:id{.+\\.json$}")).toBe("/p/{id}.json");
     expect(normalizeOpenApiPath("/v1/sessions/:id/promote")).toBe("/v1/sessions/{id}/promote");

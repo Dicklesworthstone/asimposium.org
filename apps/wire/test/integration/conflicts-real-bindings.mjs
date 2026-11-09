@@ -302,6 +302,36 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(firstConflict.status, "open");
   assert.equal(firstConflict.claims[0].claim_id, claim1Id);
   assert.equal(firstConflict.claims[1].claim_id, claim2Id);
+  assert.equal(conflictsJson.target, null);
+  const openCursor = conflictsJson.cursor;
+  const exactOpenPath = `/p/${problemId}/conflicts.json?through=${openCursor}&target=${conflictId}`;
+  const exactOpenResponse = await worker.fetch(`${origin}${exactOpenPath}`);
+  assert.equal(exactOpenResponse.status, 200);
+  const exactOpen = ConflictsListResponseSchema.parse(await exactOpenResponse.json());
+  assert.equal(exactOpen.target, conflictId);
+  assert.deepEqual(
+    exactOpen.conflicts.map((item) => item.conflict_id),
+    [conflictId],
+  );
+  assert.equal(exactOpen.conflicts[0].resolution_event, null);
+  const missingTarget = await worker.fetch(
+    `${origin}/p/${problemId}/conflicts.json?target=CF-ABSENT`,
+  );
+  assert.equal(missingTarget.status, 404, "an exact missing target cannot return the collection");
+  assert.equal((await missingTarget.json()).code, "CONFLICT_NOT_FOUND");
+  for (const query of [
+    "after=1",
+    "limit=1junk",
+    "through=01",
+    "status=unknown",
+    "limit=1&limit=2",
+    `target=${conflictId}&status=open`,
+  ]) {
+    const invalid = await worker.fetch(`${origin}/p/${problemId}/conflicts.json?${query}`);
+    assert.equal(invalid.status, 400, `strict conflict query: ${query}`);
+    assert.equal((await invalid.json()).code, "CURSOR_INVALID");
+    assert.equal(invalid.headers.get("cache-control"), "private, no-store");
+  }
 
   const conflictsMdRes = await worker.fetch(`${origin}/p/${problemId}/conflicts.md`);
   assert.equal(conflictsMdRes.status, 200);
@@ -401,12 +431,83 @@ await runLocalWorkerJourney(async (context) => {
   const updatedJson = ConflictsListResponseSchema.parse(await updatedJsonRes.json());
   assert.equal(updatedJson.conflicts[0].status, "resolved");
   assert.equal(updatedJson.conflicts[0].resolution, resolvePayload.resolution);
+  assert.deepEqual(updatedJson.conflicts[0].resolution_event, {
+    event_id: (
+      await env.DB.prepare("SELECT id FROM events WHERE problem_id = ? AND seq = ?")
+        .bind(problemId, resolved.seq)
+        .first()
+    ).id,
+    seq: resolved.seq,
+    author_fellow_id: _fellowIdA,
+    sponsor_id: sponsorA,
+    session_id: sessionIdA,
+    model_string_self_declared: firstConflict.model_string_self_declared,
+    harness: firstConflict.harness,
+    created_at: resolved.resolved_at,
+  });
+  const historicalResponse = await worker.fetch(`${origin}${exactOpenPath}`);
+  assert.equal(historicalResponse.status, 200);
+  const historical = ConflictsListResponseSchema.parse(await historicalResponse.json());
+  assert.deepEqual(
+    historical,
+    exactOpen,
+    "a later resolution cannot rewrite a captured ledger cut",
+  );
+  assert.equal(historicalResponse.headers.get("etag"), exactOpenResponse.headers.get("etag"));
 
   const updatedMdRes = await worker.fetch(`${origin}/p/${problemId}/conflicts.md`);
   assert.equal(updatedMdRes.status, 200);
   const updatedMd = await updatedMdRes.text();
   assert.ok(updatedMd.includes("resolved"));
   assert.ok(updatedMd.includes("### Resolution"));
+
+  // A second admitted disagreement proves continuation is an actual next page,
+  // including an empty filtered first page, rather than a truncation notice.
+  const second = await call(
+    `/v1/sessions/${sessionIdA}/conflicts`,
+    {
+      ...validPayload,
+      smallest_disagreement:
+        "A second boundary case remains unsettled after the initial resolution.",
+    },
+    authorA,
+    201,
+    "second-conflict-for-pagination",
+  );
+  assert.notEqual(second.conflict_id, conflictId);
+  for (const status of [undefined, "open"]) {
+    const pageResponse = await worker.fetch(
+      `${origin}/p/${problemId}/conflicts.json?limit=1${status ? `&status=${status}` : ""}`,
+    );
+    assert.equal(pageResponse.status, 200);
+    const page = ConflictsListResponseSchema.parse(await pageResponse.json());
+    assert.equal(page.next_after, normalized.seq);
+    assert.ok(page.omitted.includes("page_limit"));
+    assert.equal(page.conflicts.length, status ? 0 : 1);
+    const nextPath = /<([^>]+)>; rel="next"/.exec(pageResponse.headers.get("link"))[1];
+    const nextResponse = await worker.fetch(new URL(nextPath, origin));
+    assert.equal(nextResponse.status, 200);
+    const next = ConflictsListResponseSchema.parse(await nextResponse.json());
+    assert.equal(next.cursor, page.cursor);
+    assert.equal(next.after, normalized.seq);
+    assert.equal(next.next_after, null);
+    assert.deepEqual(
+      next.conflicts.map((item) => item.conflict_id),
+      [second.conflict_id],
+    );
+  }
+  const exactSecond = await worker.fetch(
+    `${origin}/p/${problemId}/conflicts.json?limit=1&target=${second.conflict_id}`,
+  );
+  assert.equal(exactSecond.status, 200);
+  assert.deepEqual(
+    (await exactSecond.json()).conflicts.map((item) => item.conflict_id),
+    [second.conflict_id],
+  );
+  const frozenAgain = await worker.fetch(`${origin}${exactOpenPath}`, {
+    headers: { "if-none-match": exactOpenResponse.headers.get("etag") },
+  });
+  assert.equal(frozenAgain.status, 304, "new admissions do not change an earlier exact snapshot");
 
   // Diptych census over this journey's item faces (lu59 / 92x).
   {

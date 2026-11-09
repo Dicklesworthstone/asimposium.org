@@ -13,7 +13,10 @@ import {
   QuestionIdSchema,
   QuestionItemSchema,
   QuestionStatusSchema,
+  QuestionsListQuerySchema,
   QuestionsListResponseSchema,
+  questionsListMatchesQuery,
+  questionsListPath,
   RETRACTION_KINDS,
   RETRACTIONS_SCHEMA_ID,
   RetractionIdSchema,
@@ -172,10 +175,94 @@ describe("W5.8d Questions & Retractions contracts", () => {
       const listRes = {
         schema: QUESTIONS_SCHEMA_ID,
         problem_id: "P-100",
+        cursor: 8,
+        after: 0,
+        scanned_through: 8,
+        next_after: null,
+        target: null,
+        status: null,
         questions: [item],
         omitted: [],
       };
       expect(QuestionsListResponseSchema.safeParse(listRes).success).toBe(true);
+      const parsed = QuestionsListResponseSchema.parse(listRes);
+      expect(questionsListMatchesQuery("P-100", { through: 8 }, parsed)).toBe(true);
+      expect(questionsListMatchesQuery("P-100", { through: 9 }, parsed)).toBe(false);
+      expect(questionsListMatchesQuery("P-OTHER", {}, parsed)).toBe(false);
+      expect(questionsListMatchesQuery("P-100", { status: "open" }, parsed)).toBe(false);
+      for (const mutation of [
+        { cursor: 3 },
+        { after: 4 },
+        { scanned_through: 7 },
+        { next_after: 0 },
+        { next_after: 8 },
+        { target: "Q-2" },
+        { status: "resolved" },
+        { questions: [item, item] },
+        { questions: [{ ...item, problem_id: "P-OTHER" }] },
+      ])
+        expect(QuestionsListResponseSchema.safeParse({ ...listRes, ...mutation }).success).toBe(
+          false,
+        );
+      expect(
+        QuestionsListResponseSchema.safeParse({
+          ...listRes,
+          scanned_through: 4,
+          next_after: 4,
+          questions: [],
+          omitted: ["Some question content or lifecycle history is unavailable."],
+        }).success,
+      ).toBe(true);
+    });
+
+    test("question query fixtures preserve exact identities and advancing frozen snapshots", async () => {
+      const query = QuestionsListQuerySchema.parse(
+        await Bun.file(
+          new URL("../fixtures/valid/questions-list-query.json", import.meta.url),
+        ).json(),
+      );
+      expect(query).toEqual({ through: 80, after: 15, limit: 8, status: "open" });
+      expect(questionsListPath("P-100", "json", query)).toBe(
+        "/p/P-100/questions.json?through=80&after=15&limit=8&status=open",
+      );
+      expect(questionsListPath("P-100", "human", { target: "Q-60", through: 80 })).toBe(
+        "/p/P-100/questions?through=80&target=Q-60",
+      );
+      expect(
+        QuestionsListQuerySchema.safeParse(
+          await Bun.file(
+            new URL(
+              "../fixtures/invalid/questions-list-query-without-snapshot.json",
+              import.meta.url,
+            ),
+          ).json(),
+        ).success,
+      ).toBe(false);
+      expect(QuestionsListQuerySchema.parse({ through: "0" })).toEqual({ through: 0 });
+      expect(QuestionsListQuerySchema.parse({ target: "Q-60", through: "80" })).toEqual({
+        target: "Q-60",
+        through: 80,
+      });
+      for (const invalid of [
+        { after: "1" },
+        { through: "1", after: "2" },
+        { through: "1e3" },
+        { through: "01" },
+        { through: "1\n" },
+        { through: "9007199254740992" },
+        { limit: "0" },
+        { limit: "201" },
+        { limit: "1junk" },
+        { target: "Q-1", status: "open" },
+        { target: "Q-1", through: "80", after: "0" },
+        { target: "Q-1\n" },
+        { target: "Q-1\r" },
+        { target: "Q-1\u2028" },
+        { target: "Q-1\u2029" },
+        { status: "pending" },
+        { skipped: "1" },
+      ])
+        expect(QuestionsListQuerySchema.safeParse(invalid).success).toBe(false);
     });
 
     test("Question response schemas validate canonical responses", () => {

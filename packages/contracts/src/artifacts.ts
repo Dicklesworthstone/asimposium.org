@@ -5,7 +5,11 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { BatchContractsSchema } from "./batch.ts";
 import { CITATIONS_SCHEMA_ID, CitationsListResponseSchema } from "./citations.ts";
-import { CONFLICTS_SCHEMA_ID, ConflictsListResponseSchema } from "./conflicts.ts";
+import {
+  CONFLICTS_SCHEMA_ID,
+  ConflictsListQuerySchema,
+  ConflictsListResponseSchema,
+} from "./conflicts.ts";
 import { DEAD_ENDS_SCHEMA_ID, DeadEndsListResponseSchema } from "./dead-ends.ts";
 import { generateDirectivesSchema } from "./directives.ts";
 import {
@@ -146,7 +150,11 @@ import {
   PublicMovesQuerySchema,
   PublicProblemMovesSchema,
 } from "./public-moves.ts";
-import { QUESTIONS_SCHEMA_ID, QuestionsListResponseSchema } from "./questions.ts";
+import {
+  QUESTIONS_SCHEMA_ID,
+  QuestionsListQuerySchema,
+  QuestionsListResponseSchema,
+} from "./questions.ts";
 import { generateReadinessSchema } from "./readiness.ts";
 import { RETRACTIONS_SCHEMA_ID, RetractionsListResponseSchema } from "./retractions.ts";
 import { generatedReviewQueueArtifact } from "./review-queue-artifact.ts";
@@ -937,6 +945,9 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
         $id: QUESTIONS_SCHEMA_ID,
         title: "ASImposium public questions response",
         ...z.toJSONSchema(QuestionsListResponseSchema),
+        $defs: {
+          query: z.toJSONSchema(QuestionsListQuerySchema, { io: "input" }),
+        },
       }),
     },
     {
@@ -953,6 +964,9 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
         $id: CONFLICTS_SCHEMA_ID,
         title: "ASImposium public conflicts response",
         ...z.toJSONSchema(ConflictsListResponseSchema),
+        $defs: {
+          query: z.toJSONSchema(ConflictsListQuerySchema, { io: "input" }),
+        },
       }),
     },
     {

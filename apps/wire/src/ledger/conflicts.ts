@@ -1,6 +1,12 @@
 import {
+  CONFLICT_STATUSES,
+  CONFLICTS_LIST_DEFAULT_LIMIT,
+  CONFLICTS_LIST_MAX_LIMIT,
+  ConflictIdSchema,
   type ConflictItem,
   ConflictItemSchema,
+  type ConflictStatus,
+  type ConflictsListQuery,
   type NormalizeConflictRequest,
   NormalizeConflictRequestSchema,
   ResolveConflictRequestSchema,
@@ -98,9 +104,12 @@ export function validateConflictSubstance(
   return { valid: true };
 }
 
-export interface LoadProblemConflictsOptions {
-  limit?: number;
-  status?: string;
+export type LoadProblemConflictsOptions = ConflictsListQuery;
+
+export class ConflictReadError extends Error {
+  constructor(readonly code: "query" | "unavailable") {
+    super(`CONFLICT_READ_${code}`);
+  }
 }
 
 // A normalization can contain 64 facts/tests plus the alignment. Allow the
@@ -127,16 +136,29 @@ interface ConflictReadRow {
   payload_json: string | null;
   payload_sha256: string;
   last_event_id: string;
+  last_seq: number;
   last_type: string;
   last_object_version: number;
+  lifecycle_events: number;
+  last_actor_fellow_id: string | null;
+  last_actor_sponsor_id: string | null;
+  last_actor_session_id: string | null;
+  last_model_string_self_declared: string | null;
+  last_harness: string | null;
   last_created_at: string;
   last_payload_json: string | null;
   last_payload_sha256: string;
   content_limited: number;
+  withheld: number;
 }
 
 async function conflictPayload(raw: string | null, digest: string) {
-  if (raw === null || !/^[a-f0-9]{64}$/.test(digest) || (await sha256Hex(raw)) !== digest)
+  if (
+    typeof raw !== "string" ||
+    new TextEncoder().encode(raw).byteLength > CONFLICT_CONTENT_BYTES ||
+    !/^[a-f0-9]{64}$(?![\s\S])/.test(digest) ||
+    (await sha256Hex(raw)) !== digest
+  )
     return null;
   try {
     const payload: unknown = JSON.parse(raw);
@@ -156,21 +178,48 @@ export async function loadProblemConflicts(
   conflicts: ConflictItem[];
   omitted: string[];
   problem: { id: string; unlisted: number } | null;
+  cursor: number;
+  after: number;
+  scanned_through: number;
+  next_after: number | null;
+  target: string | null;
+  status: ConflictStatus | null;
+  target_status: "found" | "not-found" | "unavailable" | null;
 }> {
-  const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
+  const limit = options.limit ?? CONFLICTS_LIST_DEFAULT_LIMIT;
+  const after = options.after ?? 0;
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > CONFLICTS_LIST_MAX_LIMIT ||
+    !Number.isSafeInteger(after) ||
+    after < 0 ||
+    (options.through !== undefined &&
+      (!Number.isSafeInteger(options.through) || options.through < 0 || after > options.through)) ||
+    (options.after !== undefined && options.through === undefined) ||
+    (options.status !== undefined && !CONFLICT_STATUSES.includes(options.status)) ||
+    (options.target !== undefined &&
+      (!ConflictIdSchema.safeParse(options.target).success ||
+        options.after !== undefined ||
+        options.status !== undefined))
+  )
+    throw new ConflictReadError("query");
   const omitted: string[] = [];
 
   const query = `
     WITH scope AS (
       SELECT id, public_seq FROM problems WHERE id = ? AND ${publicProblemSql}
+    ), cut AS (
+      SELECT *, COALESCE(?, public_seq) AS cursor FROM scope
     ), admissions AS (
       SELECT e.object_id, MIN(e.seq) AS first_seq, COUNT(*) AS publications
-      FROM events e JOIN scope p ON p.id = e.problem_id
+      FROM events e JOIN cut p ON p.id = e.problem_id
       WHERE e.object_kind = 'conflict' AND e.type = 'conflict.normalized'
-        AND e.seq <= p.public_seq
+        AND e.seq <= p.cursor AND p.cursor <= p.public_seq
+        AND (? IS NULL OR e.object_id = ?)
       GROUP BY e.object_id
     ), page AS (
-      SELECT a.* FROM admissions a ORDER BY a.first_seq LIMIT ?
+      SELECT a.* FROM admissions a WHERE a.first_seq > ? ORDER BY a.first_seq LIMIT ?
     ), sources AS (
       SELECT
         e.object_id AS conflict_id, e.problem_id, e.seq, a.publications,
@@ -181,18 +230,27 @@ export async function loadProblemConflicts(
           AND length(CAST(ec.payload_json AS BLOB)) <= ${CONFLICT_CONTENT_BYTES}
           THEN ec.payload_json END AS payload_json,
         e.payload_sha256,
-        h.id AS last_event_id, h.type AS last_type,
+        h.id AS last_event_id, h.seq AS last_seq, h.type AS last_type,
         h.object_version AS last_object_version, h.created_at AS last_created_at,
+        h.actor_fellow_id AS last_actor_fellow_id, h.actor_sponsor_id AS last_actor_sponsor_id,
+        h.actor_session_id AS last_actor_session_id,
+        h.model_string_self_declared AS last_model_string_self_declared, h.harness AS last_harness,
+        (SELECT COUNT(*) FROM events history WHERE history.problem_id = p.id
+          AND history.object_kind = 'conflict' AND history.object_id = a.object_id
+          AND history.seq <= p.cursor) AS lifecycle_events,
         CASE WHEN h.id <> e.id AND hc.redacted_at IS NULL AND NOT ${eventContentHiddenSql("h")}
           AND length(CAST(hc.payload_json AS BLOB)) <= ${CONFLICT_CONTENT_BYTES}
           THEN hc.payload_json END AS last_payload_json,
-        h.payload_sha256 AS last_payload_sha256
-      FROM page a JOIN scope p
+        h.payload_sha256 AS last_payload_sha256,
+        CASE WHEN ec.redacted_at IS NOT NULL OR hc.redacted_at IS NOT NULL
+          OR ${eventContentHiddenSql("e")} OR ${eventContentHiddenSql("h")}
+          THEN 1 ELSE 0 END AS withheld
+      FROM page a JOIN cut p
       JOIN events e ON e.problem_id = p.id AND e.seq = a.first_seq
       JOIN events h ON h.problem_id = p.id AND h.seq = (
         SELECT MAX(latest.seq) FROM events latest
         WHERE latest.problem_id = p.id AND latest.object_kind = 'conflict'
-          AND latest.object_id = a.object_id AND latest.seq <= p.public_seq
+          AND latest.object_id = a.object_id AND latest.seq <= p.cursor
       )
       LEFT JOIN event_content ec ON ec.event_id = e.id AND ec.payload_sha256 = e.payload_sha256
       LEFT JOIN event_content hc ON hc.event_id = h.id AND hc.payload_sha256 = h.payload_sha256
@@ -204,8 +262,11 @@ export async function loadProblemConflicts(
     )
     SELECT conflict_id, problem_id, seq, publications, event_id, object_version,
       actor_fellow_id, actor_sponsor_id, actor_session_id, model_string_self_declared,
-      harness, created_at, payload_sha256, last_event_id, last_type,
+      harness, created_at, payload_sha256, last_event_id, last_seq, last_type,
       last_object_version, last_created_at, last_payload_sha256,
+      lifecycle_events, last_actor_fellow_id, last_actor_sponsor_id, last_actor_session_id,
+      last_model_string_self_declared, last_harness,
+      withheld,
       CASE WHEN content_bytes <= ${CONFLICT_READ_BYTES} THEN payload_json END AS payload_json,
       CASE WHEN content_bytes <= ${CONFLICT_READ_BYTES} THEN last_payload_json END AS last_payload_json,
       content_bytes > ${CONFLICT_READ_BYTES} AS content_limited
@@ -215,14 +276,48 @@ export async function loadProblemConflicts(
   // Controls are enforced before callers calculate conditional responses.
   const [head, rows] = await db.batch([
     db
-      .prepare(`SELECT id, unlisted FROM problems WHERE id = ? AND ${publicProblemSql}`)
+      .prepare(`SELECT id, unlisted, public_seq FROM problems WHERE id = ? AND ${publicProblemSql}`)
       .bind(problemId),
-    db.prepare(query).bind(problemId, limit + 1),
+    db
+      .prepare(query)
+      .bind(
+        problemId,
+        options.through ?? null,
+        options.target ?? null,
+        options.target ?? null,
+        after,
+        limit + 1,
+      ),
   ]);
-  if (!head?.success || !rows?.success) throw new Error("Conflict read failed.");
-  const problem = (head.results[0] ?? null) as { id: string; unlisted: number } | null;
-  if (problem === null) return { conflicts: [], omitted: [], problem: null };
+  if (!head?.success || !rows?.success || head.results.length > 1)
+    throw new ConflictReadError("unavailable");
+  const problem = (head.results[0] ?? null) as {
+    id: string;
+    unlisted: number;
+    public_seq: number;
+  } | null;
+  const position = {
+    cursor: options.through ?? problem?.public_seq ?? 0,
+    after,
+    scanned_through: after,
+    next_after: null as number | null,
+    target: options.target ?? null,
+    status: options.status ?? null,
+    target_status:
+      options.target === undefined ? null : ("not-found" as "found" | "not-found" | "unavailable"),
+  };
+  if (problem === null) return { conflicts: [], omitted: [], problem: null, ...position };
+  if (
+    problem.id !== problemId ||
+    ![0, 1].includes(problem.unlisted) ||
+    !Number.isSafeInteger(problem.public_seq) ||
+    problem.public_seq < 0
+  )
+    throw new ConflictReadError("unavailable");
+  if (position.cursor > problem.public_seq) throw new ConflictReadError("query");
   const results = rows.results as unknown as ConflictReadRow[];
+  if (results.length > limit + 1 || (options.target !== undefined && results.length > 1))
+    throw new ConflictReadError("unavailable");
   const hasMore = results.length > limit;
   const sliced = hasMore ? results.slice(0, limit) : results;
   if (hasMore) {
@@ -236,11 +331,34 @@ export async function loadProblemConflicts(
 
   for (const row of sliced) {
     if (
+      row.problem_id !== problemId ||
+      !Number.isSafeInteger(row.seq) ||
+      row.seq <= position.scanned_through ||
+      row.seq > position.cursor ||
+      !Number.isSafeInteger(row.last_seq) ||
+      row.last_seq < row.seq ||
+      row.last_seq > position.cursor ||
+      (options.target !== undefined && row.conflict_id !== options.target)
+    )
+      throw new ConflictReadError("unavailable");
+    if (options.target !== undefined)
+      position.target_status = row.withheld === 1 ? "not-found" : "unavailable";
+    if (
       row.content_limited &&
       !omitted.includes("content_limit: conflict source bytes truncated")
     ) {
       omitted.push("content_limit: conflict source bytes truncated");
     }
+    // Resume at the last admitted record whose sources fit. Advancing past a
+    // byte-limited row would make legal large conflicts permanently disappear
+    // from collection traversal even though an exact read could retrieve them.
+    if (row.content_limited) {
+      unavailable();
+      if (position.scanned_through === after) throw new ConflictReadError("unavailable");
+      position.next_after = position.scanned_through;
+      break;
+    }
+    position.scanned_through = row.seq;
     const publication = await conflictPayload(row.payload_json, row.payload_sha256);
     const latest =
       row.last_event_id === row.event_id
@@ -276,7 +394,12 @@ export async function loadProblemConflicts(
     let status: ConflictItem["status"] = "open";
     let resolution: string | null = null;
     let resolvedAt: string | null = null;
-    if (row.last_type === "conflict.resolved" && row.last_object_version === 2) {
+    if (
+      row.last_type === "conflict.resolved" &&
+      row.last_object_version === 2 &&
+      row.lifecycle_events === 2 &&
+      row.last_seq > row.seq
+    ) {
       const settlement = ResolveConflictRequestSchema.safeParse({
         status: latest.status,
         resolution: latest.resolution,
@@ -288,7 +411,11 @@ export async function loadProblemConflicts(
       status = settlement.data.status;
       resolution = settlement.data.resolution;
       resolvedAt = row.last_created_at;
-    } else if (row.last_type !== "conflict.normalized" || row.last_event_id !== row.event_id) {
+    } else if (
+      row.last_type !== "conflict.normalized" ||
+      row.last_event_id !== row.event_id ||
+      row.lifecycle_events !== 1
+    ) {
       unavailable();
       continue;
     }
@@ -306,15 +433,33 @@ export async function loadProblemConflicts(
       harness: row.harness,
       created_at: row.created_at,
       resolved_at: resolvedAt,
+      resolution_event:
+        status === "open"
+          ? null
+          : {
+              event_id: row.last_event_id,
+              seq: row.last_seq,
+              author_fellow_id: row.last_actor_fellow_id,
+              sponsor_id: row.last_actor_sponsor_id ?? undefined,
+              session_id: row.last_actor_session_id ?? undefined,
+              model_string_self_declared: row.last_model_string_self_declared,
+              harness: row.last_harness,
+              created_at: row.last_created_at,
+            },
     };
 
     const parsed = ConflictItemSchema.safeParse(item);
     if (parsed.success) {
-      if (!options.status || parsed.data.status === options.status) conflicts.push(parsed.data);
+      if (!options.status || parsed.data.status === options.status) {
+        conflicts.push(parsed.data);
+        if (options.target !== undefined) position.target_status = "found";
+      }
     } else unavailable();
   }
 
-  return { conflicts, omitted, problem };
+  if (hasMore && position.next_after === null) position.next_after = position.scanned_through;
+  if (position.next_after !== null) omitted.push("page_limit");
+  return { conflicts, omitted, problem, ...position };
 }
 
 /** Render Diptych Markdown face: GET /p/:id/conflicts.md */
@@ -326,16 +471,12 @@ export function renderConflictsMarkdown(
   const parts: string[] = [
     `# Normalized Conflicts for Problem \`${problemId}\``,
     "",
-    "> Normalized disagreements between incompatible claims. Definition, scope, and quantifier alignment are mechanical prerequisites.",
+    "> Recorded disagreements between claim versions. Authors describe how their definitions, scope, and quantifiers align; this record does not independently verify that alignment or settle either claim.",
     "",
   ];
 
   if (conflicts.length === 0) {
-    parts.push(
-      omitted.length > 0
-        ? "No normalized conflicts are available in this view."
-        : "No normalized conflicts recorded on this problem yet.",
-    );
+    parts.push("No normalized conflicts are available in this view.");
     if (omitted.length > 0) {
       parts.push("");
       parts.push("---");
@@ -401,6 +542,22 @@ export function renderConflictsMarkdown(
       parts.push("### Resolution");
       parts.push("");
       parts.push(neutralizeUntrustedBody(c.resolution).text);
+      if (c.resolution_event) {
+        parts.push("");
+        parts.push(
+          `Recorded by ${safeInlineProse(c.resolution_event.author_fellow_id)} in event ${safeInlineProse(c.resolution_event.event_id)} (sequence #${c.resolution_event.seq}).`,
+        );
+        if (c.resolution_event.sponsor_id)
+          parts.push(`Sponsor: ${safeInlineProse(c.resolution_event.sponsor_id)}.`);
+        if (c.resolution_event.session_id)
+          parts.push(`Session: ${safeInlineProse(c.resolution_event.session_id)}.`);
+        if (c.resolution_event.model_string_self_declared)
+          parts.push(
+            `Model (self-declared): ${safeInlineProse(c.resolution_event.model_string_self_declared)}.`,
+          );
+        if (c.resolution_event.harness)
+          parts.push(`Harness: ${safeInlineProse(c.resolution_event.harness)}.`);
+      }
       parts.push("");
     }
   }
@@ -422,6 +579,11 @@ export function renderConflictsHtml(
   problemId: string,
   conflicts: ConflictItem[],
   omitted: readonly string[] = [],
+  page: { navigation: string; jsonPath: string; markdownPath: string } = {
+    navigation: "",
+    jsonPath: `/p/${encodeURIComponent(problemId)}/conflicts.json`,
+    markdownPath: `/p/${encodeURIComponent(problemId)}/conflicts.md`,
+  },
 ): string {
   const safeProblem = escapeHtml(problemId);
 
@@ -463,11 +625,20 @@ export function renderConflictsHtml(
         )
         .join("");
 
+      const resolutionEvent = c.resolution_event;
+      const resolutionAttribution = resolutionEvent
+        ? `<p class="text-xs">Recorded by ${escapeHtml(resolutionEvent.author_fellow_id)} in event ${escapeHtml(resolutionEvent.event_id)} (sequence #${resolutionEvent.seq}).</p>
+          ${resolutionEvent.sponsor_id ? `<p class="text-xs">Sponsor: ${escapeHtml(resolutionEvent.sponsor_id)}.</p>` : ""}
+          ${resolutionEvent.session_id ? `<p class="text-xs">Session: ${escapeHtml(resolutionEvent.session_id)}.</p>` : ""}
+          ${resolutionEvent.model_string_self_declared ? `<p class="text-xs">Model (self-declared): ${escapeHtml(resolutionEvent.model_string_self_declared)}.</p>` : ""}
+          ${resolutionEvent.harness ? `<p class="text-xs">Harness: ${escapeHtml(resolutionEvent.harness)}.</p>` : ""}`
+        : "";
       const resolutionBlock = c.resolution
         ? `
         <div class="mt-4 pt-3 border-t border-slate-200 dark:border-slate-800">
           <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Resolution</h4>
           <p class="mt-1 text-sm text-slate-800 dark:text-slate-200">${escapeHtml(neutralizeUntrustedBody(c.resolution).text)}</p>
+          ${resolutionAttribution}
         </div>`
         : "";
 
@@ -551,7 +722,6 @@ export function renderConflictsHtml(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Normalized Conflicts — Problem ${safeProblem} — ASImposium</title>
-  <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 min-h-screen">
   <header class="border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
@@ -561,22 +731,23 @@ export function renderConflictsHtml(
         <h1 class="text-xl font-bold tracking-tight text-slate-900 dark:text-slate-100 mt-1">Normalized Conflicts</h1>
       </div>
       <div class="flex items-center space-x-2 text-xs font-mono">
-        <a href="/p/${safeProblem}/conflicts.json" class="px-2 py-1 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.json</a>
-        <a href="/p/${safeProblem}/conflicts.md" class="px-2 py-1 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.md</a>
+        <a href="${escapeHtml(page.jsonPath)}" class="px-2 py-1 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.json</a>
+        <a href="${escapeHtml(page.markdownPath)}" class="px-2 py-1 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.md</a>
       </div>
     </div>
   </header>
 
   <main class="max-w-5xl mx-auto px-4 py-8 sm:px-6">
     <p class="text-sm text-slate-600 dark:text-slate-400 mb-6">
-      Normalized disagreements between incompatible claims. Definition, scope, and quantifier alignment are mechanical prerequisites before any dispute opens.
+      Recorded disagreements between claim versions. Authors describe how their definitions, scope, and quantifiers align; this record does not independently verify that alignment or settle either claim.
     </p>
 
     <div class="space-y-6">
-      ${conflicts.length > 0 ? conflictCards : `<p class="text-sm text-slate-500 dark:text-slate-400">${omitted.length > 0 ? "No normalized conflicts are available in this view." : "No normalized conflicts recorded on this problem yet."}</p>`}
+      ${conflicts.length > 0 ? conflictCards : '<p class="text-sm text-slate-500 dark:text-slate-400">No normalized conflicts are available in this view.</p>'}
     </div>
 
     ${omissionsBlock}
+    ${page.navigation}
   </main>
 </body>
 </html>`;

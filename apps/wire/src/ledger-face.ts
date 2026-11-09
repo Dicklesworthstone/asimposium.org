@@ -3,8 +3,6 @@ import {
   CitationsListResponseSchema,
   ClaimFaceQuerySchema,
   ClaimFaceResponseSchema,
-  CONFLICTS_SCHEMA_ID,
-  ConflictsListResponseSchema,
   DEAD_ENDS_SCHEMA_ID,
   DeadEndsListResponseSchema,
   EnrollmentDeclaredRuntimeSchema,
@@ -19,8 +17,6 @@ import {
   PublicClaimStateSchema,
   PublicClaimTargetSchema,
   PublicLedgerProblemIdSchema,
-  QUESTIONS_SCHEMA_ID,
-  QuestionsListResponseSchema,
   RETRACTIONS_SCHEMA_ID,
   RetractionsListResponseSchema,
   SingleCitationResponseSchema,
@@ -73,11 +69,7 @@ import {
   renderSingleCitationMarkdown,
 } from "./ledger/citations";
 import { ClaimsListReadError, loadClaimsList } from "./ledger/claims-list-read";
-import {
-  loadProblemConflicts,
-  renderConflictsHtml,
-  renderConflictsMarkdown,
-} from "./ledger/conflicts";
+import { handleConflictsList } from "./ledger/conflicts-http.ts";
 import {
   loadProblemDeadEnds,
   MAX_DEAD_ENDS_PER_PAGE,
@@ -91,11 +83,7 @@ import { loadFormalRecordResource } from "./ledger/formal-records-service";
 import { loadHypothesisEvidenceItem } from "./ledger/hypothesis-evidence-read";
 import { readPublishedProblemFormulation } from "./ledger/problem-formulation-read.ts";
 import { readPublishedProblemResolution } from "./ledger/problem-resolution-read.ts";
-import {
-  loadProblemQuestions,
-  renderQuestionsHtmlFragment,
-  renderQuestionsMarkdown,
-} from "./ledger/questions";
+import { handleQuestionsList } from "./ledger/questions-http.ts";
 import {
   loadProblemRetractions,
   renderRetractionsHtmlFragment,
@@ -2261,62 +2249,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   });
 
   // --- W5.8d Questions Diptych faces ---
-  app.on(["GET", "HEAD"], "/p/:id/questions.json", async (c) => {
-    const problemId = c.req.param("id");
-    const { questions, omitted, problem } = await loadProblemQuestions(c.env.DB, problemId);
-    if (!problem) return problemNotFound(c.req.method);
-    const body = JSON.stringify(
-      QuestionsListResponseSchema.parse({
-        schema: QUESTIONS_SCHEMA_ID,
-        problem_id: problemId,
-        questions,
-        omitted,
-      }),
-      null,
-      2,
-    );
-    const etag = await strongEtag("json", body);
-    const headers = {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
-
-  app.on(["GET", "HEAD"], "/p/:id/questions.md", async (c) => {
-    const problemId = c.req.param("id");
-    const { questions, omitted, problem } = await loadProblemQuestions(c.env.DB, problemId);
-    if (!problem) return problemNotFound(c.req.method);
-    const body = renderQuestionsMarkdown(problemId, questions, omitted);
-    const etag = await strongEtag("markdown", body);
-    const headers = {
-      "content-type": "text/markdown; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
-
-  app.on(["GET", "HEAD"], "/p/:id/questions.html", async (c) => {
-    const problemId = c.req.param("id");
-    const { questions, omitted, problem } = await loadProblemQuestions(c.env.DB, problemId);
-    if (!problem) return problemNotFound(c.req.method);
-    const body = renderQuestionsHtmlFragment(problemId, questions, omitted);
-    const etag = await strongEtag("html", body);
-    const headers = {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
+  for (const format of ["json", "md", "html"] as const)
+    app.on(["GET", "HEAD"], `/p/:id/questions.${format}`, (c) => handleQuestionsList(c, format));
 
   // --- W5.8d Retractions Diptych faces ---
   app.on(["GET", "HEAD"], "/p/:id/retractions.json", async (c) => {
@@ -2376,80 +2310,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
   });
 
-  app.on(["GET", "HEAD"], "/p/:id/conflicts.json", async (c) => {
-    const problemId = c.req.param("id");
-    const statusParam = c.req.query("status");
-    const limitParam = c.req.query("limit");
-    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const { conflicts, omitted, problem } = await loadProblemConflicts(c.env.DB, problemId, {
-      status: statusParam,
-      limit: Number.isFinite(limit) ? limit : undefined,
-    });
-    if (!problem) return problemNotFound(c.req.method);
-    const body = JSON.stringify(
-      ConflictsListResponseSchema.parse({
-        schema: CONFLICTS_SCHEMA_ID,
-        problem_id: problemId,
-        conflicts,
-        omitted,
-      }),
-      null,
-      2,
-    );
-    const etag = await strongEtag("json", body);
-    const headers = {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
-
-  app.on(["GET", "HEAD"], "/p/:id/conflicts.md", async (c) => {
-    const problemId = c.req.param("id");
-    const statusParam = c.req.query("status");
-    const limitParam = c.req.query("limit");
-    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const { conflicts, omitted, problem } = await loadProblemConflicts(c.env.DB, problemId, {
-      status: statusParam,
-      limit: Number.isFinite(limit) ? limit : undefined,
-    });
-    if (!problem) return problemNotFound(c.req.method);
-    const body = renderConflictsMarkdown(problemId, conflicts, omitted);
-    const etag = await strongEtag("markdown", body);
-    const headers = {
-      "content-type": "text/markdown; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
-
-  app.on(["GET", "HEAD"], "/p/:id/conflicts.html", async (c) => {
-    const problemId = c.req.param("id");
-    const statusParam = c.req.query("status");
-    const limitParam = c.req.query("limit");
-    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const { conflicts, omitted, problem } = await loadProblemConflicts(c.env.DB, problemId, {
-      status: statusParam,
-      limit: Number.isFinite(limit) ? limit : undefined,
-    });
-    if (!problem) return problemNotFound(c.req.method);
-    const body = renderConflictsHtml(problemId, conflicts, omitted);
-    const etag = await strongEtag("html", body);
-    const headers = {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
+  for (const format of ["json", "md", "html"] as const)
+    app.on(["GET", "HEAD"], `/p/:id/conflicts.${format}`, (c) => handleConflictsList(c, format));
 
   for (const format of ["json", "md", "html"] as const)
     app.on(["GET", "HEAD"], `/p/:id/syntheses.${format}`, (c) => handleSynthesesList(c, format));

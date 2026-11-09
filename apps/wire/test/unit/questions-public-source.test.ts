@@ -1,7 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
+import {
+  AskQuestionRequestSchema,
+  ProblemDocumentSchema,
+  QuestionsListResponseSchema,
+} from "@asimposium/contracts";
 import type { Env } from "../../src/env.ts";
 import { sha256Hex, writeLedgerEvent } from "../../src/krater/krater.ts";
-import { loadProblemQuestions } from "../../src/ledger/questions.ts";
+import { loadProblemQuestions, validateQuestionSubstance } from "../../src/ledger/questions.ts";
 import { createLedgerFaceRoutes } from "../../src/ledger-face.ts";
 import {
   directiveDisclosureFixture,
@@ -236,7 +241,7 @@ test("answer and withdrawal states are verified from events, never stale project
   });
 });
 
-test("lease renewal may extend only the holder proven by the latest lease event", async () => {
+test("question snapshots retain the committed lease term despite operational projection changes", async () => {
   const f = await fixture();
   await publish(f);
   const deadline = "2099-01-01T02:00:00.000Z",
@@ -253,7 +258,7 @@ test("lease renewal may extend only the holder proven by the latest lease event"
   expect((await loadProblemQuestions(f.db, problemId)).questions[0]).toMatchObject({
     status: "leased",
     leased_by: f.binding.fellowId,
-    leased_until: renewed,
+    leased_until: deadline,
   });
   f.sql.query("UPDATE questions SET leased_by='FORGED-HOLDER', leased_until=?").run(renewed);
   expect((await loadProblemQuestions(f.db, problemId)).questions[0]).toMatchObject({
@@ -272,4 +277,215 @@ test("hidden admissions retain the bounded page boundary instead of manufacturin
   expect(result.questions).toHaveLength(0);
   expect(result.omitted).toContain("truncated at limit of 1 questions");
   expect(result.omitted).toContain("Some question content or lifecycle history is unavailable.");
+  expect(result.next_after).toBeGreaterThan(0);
+  if (result.next_after === null)
+    throw new Error("Expected a continuation over the withheld page.");
+  const continued = await loadProblemQuestions(f.db, problemId, {
+    through: result.cursor,
+    after: result.next_after,
+    limit: 1,
+  });
+  expect(continued.questions.map((question) => question.question_id)).toEqual(["Q-2"]);
+  expect(continued.next_after).toBeNull();
+  expect(continued.scanned_through).toBe(continued.cursor);
+});
+
+test("exact question targets beyond the default collection page never substitute earlier records", async () => {
+  const f = await fixture();
+  for (let n = 1; n <= 51; n++)
+    await publish(f, `Q-${n}`, "question.asked", {
+      body_md: `Which verified boundary instance decides research question number ${n}?`,
+    });
+  const initial = QuestionsListResponseSchema.parse(await (await face(f, "json")).json());
+  expect(initial.questions).toHaveLength(50);
+  expect(
+    initial.questions.some((question: { question_id: string }) => question.question_id === "Q-51"),
+  ).toBe(false);
+  expect(initial.next_after).toBeGreaterThan(0);
+  const next = await face(f, `json?through=${initial.cursor}&after=${initial.next_after}`);
+  expect(
+    QuestionsListResponseSchema.parse(await next.json()).questions.map(
+      (question) => question.question_id,
+    ),
+  ).toEqual(["Q-51"]);
+  for (const format of formats) {
+    const response = await face(f, `${format}?target=Q-51`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-location")).toContain("target=Q-51");
+    const text = await response.text();
+    expect(text).toContain("research question number 51?");
+    expect(text).not.toContain("research question number 1?");
+    expect(text).not.toContain("research question number 50?");
+  }
+  const exact = QuestionsListResponseSchema.parse(await (await face(f, "json?target=Q-51")).json());
+  expect(exact.questions).toHaveLength(1);
+  expect(exact.target).toBe("Q-51");
+  expect(exact.next_after).toBeNull();
+});
+
+test("question pagination and exact reads freeze lifecycle state before concurrent answers and new asks", async () => {
+  const f = await fixture();
+  await publish(f);
+  await publish(f, "Q-2");
+  const response = await face(f, "json?limit=1");
+  const first = QuestionsListResponseSchema.parse(await response.json());
+  expect(first.questions.map((question: { question_id: string }) => question.question_id)).toEqual([
+    "Q-1",
+  ]);
+  expect(response.headers.get("link")).toContain(
+    `through=${first.cursor}&after=${first.next_after}&limit=1`,
+  );
+  const canonical = response.headers.get("content-location") ?? "";
+  expect(canonical).toContain("questions.json");
+  const frozenInitial = await face(f, `json?through=${first.cursor}&limit=1`);
+  const frozenText = await frozenInitial.text();
+  await publish(f, "Q-1", "question.answered", { resolved_by_object: "C-1@1" });
+  await publish(f, "Q-2", "question.withdrawn", {
+    reason: "The original obligation is withdrawn.",
+  });
+  await publish(f, "Q-3");
+  expect(await (await face(f, `json?through=${first.cursor}&limit=1`)).text()).toBe(frozenText);
+  const reproduced = await createLedgerFaceRoutes().request(
+    `https://a.asimposium.org${canonical}`,
+    undefined,
+    { DB: f.db } as Env,
+  );
+  expect(QuestionsListResponseSchema.parse(await reproduced.json()).questions[0]?.status).toBe(
+    "open",
+  );
+  const continued = await face(f, `json?through=${first.cursor}&after=${first.next_after}&limit=1`);
+  const second = QuestionsListResponseSchema.parse(await continued.json());
+  expect(second.questions).toHaveLength(1);
+  expect(second.questions[0]).toMatchObject({ question_id: "Q-2", status: "open" });
+  expect(second.next_after).toBeNull();
+  expect(second.cursor).toBe(first.cursor);
+  const beforeAnswer = QuestionsListResponseSchema.parse(
+    await (await face(f, `json?target=Q-1&through=${first.cursor}`)).json(),
+  );
+  expect(beforeAnswer.questions[0]?.status).toBe("open");
+  const afterAnswer = QuestionsListResponseSchema.parse(
+    await (await face(f, "json?target=Q-1")).json(),
+  );
+  expect(afterAnswer.questions[0]).toMatchObject({
+    status: "resolved",
+    resolved_by_object: "C-1@1",
+  });
+  expect((await face(f, `json?target=Q-3&through=${first.cursor}`)).status).toBe(404);
+});
+
+test("question status filters advance over nonmatching pages with links on every representation", async () => {
+  const f = await fixture();
+  await publish(f);
+  await publish(f, "Q-2");
+  await publish(f, "Q-1", "question.answered", { resolved_by_object: "C-1@1" });
+  const first = QuestionsListResponseSchema.parse(
+    await (await face(f, "json?limit=1&status=open")).json(),
+  );
+  expect(first.questions).toHaveLength(0);
+  expect(first.status).toBe("open");
+  expect(first.next_after).toBeGreaterThan(first.after);
+  const suffix = `?through=${first.cursor}&after=${first.next_after}&limit=1&status=open`;
+  const next = QuestionsListResponseSchema.parse(await (await face(f, `json${suffix}`)).json());
+  expect(next.questions.map((question: { question_id: string }) => question.question_id)).toEqual([
+    "Q-2",
+  ]);
+  for (const format of ["md", "html"] as const) {
+    const response = await face(f, `${format}?limit=1&status=open`);
+    expect(response.headers.get("link")).toContain(`questions.${format}${suffix}`);
+    expect(await response.text()).toContain("More questions");
+  }
+});
+
+test("question byte-bounded pages retain every complete legal record through continuation", async () => {
+  const f = await fixture();
+  const source = AskQuestionRequestSchema.parse({
+    body_md: "Which finite boundary cases decide this conjecture? ".padEnd(4000, "\u0001"),
+    target_refs: Array.from({ length: 32 }, (_, index) => String(index).padEnd(128, "\u0001")),
+    blocking: "\u0001".repeat(128),
+  });
+  expect(validateQuestionSubstance(source)).toEqual({ valid: true });
+  for (let index = 1; index <= 90; index++)
+    await publish(f, `Q-${index}`, "question.asked", source);
+  const response = await face(f, "json?limit=200");
+  expect(response.status).toBe(200);
+  const first = QuestionsListResponseSchema.parse(await response.json());
+  expect(first.questions.length).toBeGreaterThan(0);
+  expect(first.questions.length).toBeLessThan(90);
+  expect(first.omitted).toContain(
+    "Question source-byte budget reached; continue at the same snapshot.",
+  );
+  expect(first.next_after).toBe(first.scanned_through);
+  if (first.next_after === null) throw new Error("Expected a source-byte continuation.");
+  expect(response.headers.get("link")).toContain(
+    `through=${first.cursor}&after=${first.next_after}&limit=200`,
+  );
+  const continued = await face(
+    f,
+    `json?through=${first.cursor}&after=${first.next_after}&limit=200`,
+  );
+  expect(continued.status).toBe(200);
+  const second = QuestionsListResponseSchema.parse(await continued.json());
+  expect(second.next_after).toBeNull();
+  expect(second.scanned_through).toBe(first.cursor);
+  const all = [...first.questions, ...second.questions];
+  expect(all.map((question) => question.question_id)).toEqual(
+    Array.from({ length: 90 }, (_, index) => `Q-${index + 1}`),
+  );
+  for (const question of all) {
+    expect(question.body_md).toBe(source.body_md);
+    expect(question.target_refs).toEqual(source.target_refs);
+    expect(question.blocking).toBe(source.blocking);
+  }
+});
+
+test("question selectors refuse ambiguity and unavailable exact sources before conditional responses", async () => {
+  const f = await fixture();
+  const admitted = await publish(f);
+  for (const query of [
+    "after=1",
+    "through=1&after=2",
+    "through=9007199254740992",
+    "through=01",
+    "through=1%0A",
+    "limit=201",
+    "limit=0",
+    "target=Q-1&status=open",
+    "target=Q-1&through=80&after=0",
+    "target=Q-1&target=Q-2",
+    "target=Q-1%0A",
+    "status=closed",
+    "unrecognized=value",
+  ])
+    for (const format of formats) {
+      const response = await face(f, `${format}?${query}`, { headers: { "if-none-match": "*" } });
+      expect(response.status).toBe(400);
+      expect(ProblemDocumentSchema.parse(await response.json()).code).toBe("CURSOR_INVALID");
+    }
+  expect((await face(f, "json?through=9007199254740991")).status).toBe(400);
+  expect((await face(f, "json?target=Q-UNKNOWN")).status).toBe(404);
+  for (const [index, format] of formats.entries()) {
+    const exact = await face(f, `${format}?target=Q-1`);
+    const etag = exact.headers.get("etag") ?? "";
+    expect(etag).not.toBe("");
+    control(f, "Q-1", "hidden", 2 * index + 1);
+    for (const method of ["GET", "HEAD"]) {
+      const hidden = await face(f, `${format}?target=Q-1`, {
+        method,
+        headers: { "if-none-match": etag },
+      });
+      expect(hidden.status).toBe(404);
+      expect(hidden.headers.get("cache-control")).toContain("no-store");
+      expect(await hidden.text()).not.toContain(body);
+    }
+    control(f, "Q-1", "visible", 2 * index + 2);
+  }
+  f.sql.query("DELETE FROM event_content WHERE event_id=?").run(admitted.eventId);
+  for (const format of formats) {
+    const unavailable = await face(f, `${format}?target=Q-1`, {
+      headers: { "if-none-match": "*" },
+    });
+    expect(unavailable.status).toBe(503);
+    expect(unavailable.headers.get("retry-after")).toBe("5");
+    expect(ProblemDocumentSchema.parse(await unavailable.json()).code).toBe("INTERNAL_ERROR");
+  }
 });

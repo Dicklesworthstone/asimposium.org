@@ -12,7 +12,62 @@
       "type": "string",
       "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
     },
+    "cursor": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "after": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "scanned_through": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "next_after": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "target": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(?!.*--)Q-[A-Z0-9][A-Z0-9-]{0,40}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "open",
+            "leased",
+            "resolved",
+            "withdrawn"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "questions": {
+      "maxItems": 200,
       "type": "array",
       "items": {
         "type": "object",
@@ -27,7 +82,7 @@
           },
           "seq": {
             "type": "integer",
-            "exclusiveMinimum": 0,
+            "minimum": 1,
             "maximum": 9007199254740991
           },
           "target_refs": {
@@ -158,8 +213,48 @@
   "required": [
     "schema",
     "problem_id",
+    "cursor",
+    "after",
+    "scanned_through",
+    "next_after",
+    "target",
+    "status",
     "questions",
     "omitted"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "query": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "through": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$(?![\\s\\S])"
+        },
+        "after": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$(?![\\s\\S])"
+        },
+        "limit": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$(?![\\s\\S])"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "open",
+            "leased",
+            "resolved",
+            "withdrawn"
+          ]
+        },
+        "target": {
+          "type": "string",
+          "pattern": "^(?!.*--)Q-[A-Z0-9][A-Z0-9-]{0,40}$"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
 }

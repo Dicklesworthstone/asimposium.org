@@ -7,8 +7,11 @@ import {
   ConflictItemSchema,
   ConflictingClaimRefSchema,
   ConflictStatusSchema,
+  ConflictsListQuerySchema,
   ConflictsListResponseSchema,
   ContractProblemSchema,
+  conflictsListMatchesQuery,
+  conflictsListPath,
   NormalizeConflictRequestSchema,
   NormalizeConflictResponseSchema,
   ProblemDocumentSchema,
@@ -225,10 +228,131 @@ describe("W5.5 Conflicts contracts", () => {
       const listRes = {
         schema: CONFLICTS_SCHEMA_ID,
         problem_id: "P-456",
+        cursor: 20,
+        after: 0,
+        scanned_through: 15,
+        next_after: null,
+        target: null,
+        status: null,
         conflicts: [item],
         omitted: [],
       };
       expect(ConflictsListResponseSchema.safeParse(listRes).success).toBe(true);
+
+      for (const change of [
+        { cursor: 14 },
+        { after: 16 },
+        { scanned_through: 21 },
+        { next_after: 0, omitted: ["page_limit"] },
+        { next_after: 15 },
+        { omitted: ["page_limit"] },
+        { target: "CF-2" },
+        { status: "resolved" },
+        { conflicts: [item, item] },
+        { conflicts: [{ ...item, problem_id: "P-OTHER" }] },
+      ])
+        expect(ConflictsListResponseSchema.safeParse({ ...listRes, ...change }).success).toBe(
+          false,
+        );
+
+      const exact = ConflictsListResponseSchema.parse({ ...listRes, target: "CF-1" });
+      expect(conflictsListMatchesQuery("P-456", { target: "CF-1", through: 20 }, exact)).toBe(true);
+      expect(conflictsListMatchesQuery("P-456", { target: "CF-2" }, exact)).toBe(false);
+      expect(conflictsListMatchesQuery("P-456", { target: "CF-1", through: 19 }, exact)).toBe(
+        false,
+      );
+      expect(conflictsListMatchesQuery("P-OTHER", { target: "CF-1" }, exact)).toBe(false);
+      expect(ConflictsListResponseSchema.safeParse({ ...exact, conflicts: [] }).success).toBe(
+        false,
+      );
+
+      const resolution_event = {
+        event_id: "evt-resolution",
+        seq: 19,
+        author_fellow_id: "fel_reviewer",
+        sponsor_id: "usr_reviewer",
+        session_id: "ses_review",
+        model_string_self_declared: "reviewer-model",
+        harness: "reviewer-harness",
+        created_at: "2026-09-09T19:00:00.000Z",
+      };
+      const resolved = {
+        ...item,
+        status: "resolved",
+        resolution: "The distinguishing construction refutes the narrower claim.",
+        resolved_at: resolution_event.created_at,
+        resolution_event,
+      };
+      expect(ConflictItemSchema.safeParse(resolved).success).toBe(true);
+      expect(ConflictItemSchema.safeParse({ ...item, resolution_event }).success).toBe(false);
+      expect(
+        ConflictItemSchema.safeParse({
+          ...resolved,
+          resolution_event: { ...resolution_event, seq: 15 },
+        }).success,
+      ).toBe(false);
+      expect(
+        ConflictsListResponseSchema.safeParse({
+          ...listRes,
+          cursor: 18,
+          conflicts: [resolved],
+        }).success,
+      ).toBe(false);
+    });
+
+    test("a withheld or filtered page can advance without inventing an empty collection", () => {
+      const face = {
+        schema: CONFLICTS_SCHEMA_ID,
+        problem_id: "P-456",
+        cursor: 30,
+        after: 5,
+        scanned_through: 15,
+        next_after: 15,
+        target: null,
+        status: "open",
+        conflicts: [],
+        omitted: ["page_limit", "Some conflict content or lifecycle history is unavailable."],
+      };
+      expect(ConflictsListResponseSchema.safeParse(face).success).toBe(true);
+      expect(ConflictsListResponseSchema.safeParse({ ...face, next_after: 5 }).success).toBe(false);
+    });
+
+    test("query fixtures preserve exact targets and canonical snapshot continuations", async () => {
+      const continued = ConflictsListQuerySchema.parse(
+        await loadFixture("valid/conflicts-list-query.json"),
+      );
+      expect(continued).toEqual({ through: 80, after: 15, limit: 8, status: "open" });
+      expect(conflictsListPath("P-456", "json", continued)).toBe(
+        "/p/P-456/conflicts.json?through=80&after=15&limit=8&status=open",
+      );
+      const exact = ConflictsListQuerySchema.parse({ target: "CF-60", through: "80" });
+      expect(conflictsListPath("P-456", "human", exact)).toBe(
+        "/p/P-456/conflicts?through=80&target=CF-60",
+      );
+      expect(
+        ConflictsListQuerySchema.safeParse(
+          await loadFixture("invalid/conflicts-list-query-without-snapshot.json"),
+        ).success,
+      ).toBe(false);
+      for (const query of [
+        { through: "1e3" },
+        { through: "1\n" },
+        { through: "01" },
+        { through: "9007199254740992" },
+        { through: "1", after: "2" },
+        { limit: "0" },
+        { limit: "201" },
+        { limit: "2junk" },
+        { status: "closed" },
+        { target: "CF-1", status: "open" },
+        { target: "CF-1\n" },
+        { target: "CF-1\r" },
+        { target: "CF-1\u2028" },
+        { target: "CF-1\u2029" },
+        { target: "CF-1", through: "20", after: "0" },
+        { target: "CF-1", ignored: "value" },
+      ])
+        expect(ConflictsListQuerySchema.safeParse(query).success).toBe(false);
     });
   });
 

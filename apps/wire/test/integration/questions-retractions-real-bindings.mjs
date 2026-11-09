@@ -13,7 +13,7 @@ import { assertRacedWriteLeavesNoTrace } from "./raced-ledger-write.mjs";
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall, env, worker, origin, fixtures } = context;
+  const { call, enroll, sponsorCall, operatorCall, env, worker, origin, fixtures } = context;
   const sponsorA = "usr_qr_sponsor_a";
   const authorA = await enroll("qr-author-a", sponsorA);
   const helloA = await call("/v1/hello", undefined, authorA);
@@ -453,6 +453,94 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(qListHtml.includes(`<h3>Question <code>${question1Id}</code></h3>`));
   assert.ok(qListHtml.includes("asimp-status asimp-status-resolved"));
 
+  // Exact links and complete collection browsing use the same bounded
+  // scientific snapshot. The second source is outside a one-admission page.
+  const frozenQuestionPath = `/p/${problemId}/questions.json?through=${qListJson.cursor}&limit=1`;
+  const firstQuestionPageResponse = await worker.fetch(`${origin}${frozenQuestionPath}`);
+  assert.equal(firstQuestionPageResponse.status, 200);
+  const frozenQuestionText = await firstQuestionPageResponse.text();
+  const firstQuestionPage = QuestionsListResponseSchema.parse(JSON.parse(frozenQuestionText));
+  assert.deepEqual(
+    firstQuestionPage.questions.map((question) => question.question_id),
+    [question1Id],
+  );
+  assert.equal(firstQuestionPage.next_after, question1.seq);
+  const continuation = `/p/${problemId}/questions.json?through=${qListJson.cursor}&after=${firstQuestionPage.next_after}&limit=1`;
+  assert.ok(
+    firstQuestionPageResponse.headers.get("link").includes(`<${continuation}>; rel="next"`),
+  );
+  const secondQuestionPageResponse = await worker.fetch(`${origin}${continuation}`);
+  assert.equal(secondQuestionPageResponse.status, 200);
+  const secondQuestionPage = QuestionsListResponseSchema.parse(
+    await secondQuestionPageResponse.json(),
+  );
+  assert.deepEqual(
+    secondQuestionPage.questions.map((question) => question.question_id),
+    [question2Id],
+  );
+  assert.equal(secondQuestionPage.next_after, null);
+  assert.equal(secondQuestionPage.scanned_through, qListJson.cursor);
+  for (const format of ["json", "md", "html"]) {
+    const exact = await worker.fetch(
+      `${origin}/p/${problemId}/questions.${format}?target=${question2Id}&limit=1`,
+    );
+    assert.equal(exact.status, 200);
+    const text = await exact.text();
+    assert.ok(text.includes(question2Id));
+    assert.ok(
+      !text.includes(question1Id),
+      "exact question retrieval cannot substitute the first question",
+    );
+    const conditional = await worker.fetch(
+      `${origin}/p/${problemId}/questions.${format}?target=${question2Id}&limit=1`,
+      {
+        headers: { "If-None-Match": exact.headers.get("etag") },
+      },
+    );
+    assert.equal(conditional.status, 304);
+  }
+  const historicalQuestion = await worker.fetch(
+    `${origin}/p/${problemId}/questions.json?target=${question1Id}&through=${question1.seq}`,
+  );
+  assert.equal(historicalQuestion.status, 200);
+  assert.equal(
+    (await historicalQuestion.json()).questions[0].status,
+    "open",
+    "a later lease and answer cannot cross the public snapshot",
+  );
+  const filteredQuestionPage = await worker.fetch(
+    `${origin}/p/${problemId}/questions.json?through=${qListJson.cursor}&limit=1&status=withdrawn`,
+  );
+  const filteredQuestionBody = QuestionsListResponseSchema.parse(await filteredQuestionPage.json());
+  assert.deepEqual(filteredQuestionBody.questions, []);
+  assert.equal(
+    filteredQuestionBody.next_after,
+    question1.seq,
+    "an empty filtered page still advances over its admitted source",
+  );
+  const filteredQuestionNext = await worker.fetch(
+    `${origin}/p/${problemId}/questions.json?through=${qListJson.cursor}&after=${filteredQuestionBody.next_after}&limit=1&status=withdrawn`,
+  );
+  assert.deepEqual(
+    (await filteredQuestionNext.json()).questions.map((question) => question.question_id),
+    [question2Id],
+  );
+  for (const query of [
+    "after=1",
+    "through=01",
+    "limit=201",
+    "through=1&after=2",
+    "status=closed",
+    `target=${question1Id}&status=open`,
+    `target=${question1Id}&target=${question2Id}`,
+  ]) {
+    const refused = await worker.fetch(`${origin}/p/${problemId}/questions.json?${query}`, {
+      headers: { "If-None-Match": "*" },
+    });
+    assert.equal(refused.status, 400);
+    assert.equal((await refused.json()).code, "CURSOR_INVALID");
+  }
+
   // --------------------------------------------------------------------------
   // RETRACTIONS JOURNEY
   // --------------------------------------------------------------------------
@@ -631,6 +719,18 @@ await runLocalWorkerJourney(async (context) => {
       .bind(reviewQuestion.question_id)
       .first(),
     { status: "resolved", resolved_by_object: refutingReview.review_id },
+  );
+  assert.equal(
+    await (await worker.fetch(`${origin}${frozenQuestionPath}`)).text(),
+    frozenQuestionText,
+    "a later genuine question and answer cannot change the captured collection page",
+  );
+  assert.deepEqual(
+    (await (await worker.fetch(`${origin}${continuation}`)).json()).questions.map(
+      (question) => question.question_id,
+    ),
+    [question2Id],
+    "a later question never enters an existing continuation",
   );
 
   // Now Author A retracts Claim 2 -> must be classified as 'externally-refuted'!
@@ -933,6 +1033,37 @@ await runLocalWorkerJourney(async (context) => {
     "resolved",
   );
 
+  // Present-day policy wins over a frozen read and its prior cache validator.
+  // Use the real signed operator command, then restore before shared replay.
+  const questionControl = (action) =>
+    operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+      target_id: `${problemId}/${question1Id}`,
+      target_kind: "question",
+      action,
+      reason: "Verify question-history visibility across captured public snapshots.",
+    });
+  const exactQuestionPath = `/p/${problemId}/questions.json?target=${question1Id}&through=${question1.seq}`;
+  const visibleQuestionResponse = await worker.fetch(`${origin}${exactQuestionPath}`);
+  assert.equal(visibleQuestionResponse.status, 200);
+  const visibleQuestionTag = visibleQuestionResponse.headers.get("etag");
+  await visibleQuestionResponse.text();
+  await questionControl("hide");
+  for (const method of ["GET", "HEAD"]) {
+    const hiddenQuestion = await worker.fetch(`${origin}${exactQuestionPath}`, {
+      method,
+      headers: { "If-None-Match": visibleQuestionTag },
+    });
+    assert.equal(hiddenQuestion.status, 404);
+    assert.ok(!(await hiddenQuestion.text()).includes("known non-archimedean metric"));
+  }
+  const hiddenPageResponse = await worker.fetch(`${origin}${frozenQuestionPath}`);
+  assert.equal(hiddenPageResponse.status, 200);
+  const hiddenPage = QuestionsListResponseSchema.parse(await hiddenPageResponse.json());
+  assert.deepEqual(hiddenPage.questions, []);
+  assert.equal(hiddenPage.next_after, firstQuestionPage.next_after);
+  await questionControl("restore");
+  assert.equal((await worker.fetch(`${origin}${exactQuestionPath}`)).status, 200);
+
   console.log(
     JSON.stringify({
       stage: "questions-retractions-real-bindings",
@@ -951,6 +1082,8 @@ await runLocalWorkerJourney(async (context) => {
       private_draft_secrecy_verified: true,
       claim_standing_reflection_verified: true,
       historical_pre_retraction_cut_verified: true,
+      question_exact_and_snapshot_pagination_verified: true,
+      question_current_controls_before_conditional_verified: true,
       redaction_staleness_without_cosmetic_restore_verified: true,
       revision_cannot_restore_withdrawn_standing_verified: true,
     }),

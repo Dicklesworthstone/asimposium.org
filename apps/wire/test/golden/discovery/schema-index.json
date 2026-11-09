@@ -82,11 +82,17 @@
       "id": "conflicts",
       "url": "https://a.asimposium.org/schemas/conflicts.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 4882,
+      "body_bytes": 8869,
       "slice_url_template": "https://a.asimposium.org/schemas/conflicts.v1/{property}.json",
       "slices": [
         "schema",
         "problem_id",
+        "cursor",
+        "after",
+        "scanned_through",
+        "next_after",
+        "target",
+        "status",
         "conflicts",
         "omitted"
       ]
@@ -391,11 +397,17 @@
       "id": "questions",
       "url": "https://a.asimposium.org/schemas/questions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 3849,
+      "body_bytes": 5775,
       "slice_url_template": "https://a.asimposium.org/schemas/questions.v1/{property}.json",
       "slices": [
         "schema",
         "problem_id",
+        "cursor",
+        "after",
+        "scanned_through",
+        "next_after",
+        "target",
+        "status",
         "questions",
         "omitted"
       ]

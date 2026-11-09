@@ -1,4 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
+import {
+  ConflictsListResponseSchema,
+  OpaqueProblemSchema,
+  ProblemDocumentSchema,
+} from "@asimposium/contracts";
 import type { Env } from "../../src/env.ts";
 import { sha256Hex, writeLedgerEvent } from "../../src/krater/krater.ts";
 import { loadProblemConflicts } from "../../src/ledger/conflicts.ts";
@@ -127,9 +132,9 @@ function control(f: Fixture, ref: string, visibility: "hidden" | "visible", vers
       new Date().toISOString(),
     );
 }
-function face(f: Fixture, format: string, init?: RequestInit) {
+function face(f: Fixture, format: string, init?: RequestInit, query = "") {
   return createLedgerFaceRoutes().request(
-    `https://a.asimposium.org/p/${problemId}/conflicts.${format}`,
+    `https://a.asimposium.org/p/${problemId}/conflicts.${format}${query}`,
     init,
     { DB: f.db } as Env,
   );
@@ -318,6 +323,198 @@ test("large legal normalizations remain readable within a bounded source-byte wi
   expect(result.conflicts.length).toBeLessThan(24);
   expect(result.omitted).toContain("content_limit: conflict source bytes truncated");
   expect(result.omitted).toContain("Some conflict content or lifecycle history is unavailable.");
+  expect(result.next_after).not.toBeNull();
+  const remaining = await loadProblemConflicts(f.db, problemId, {
+    limit: 30,
+    through: result.cursor,
+    after: result.next_after ?? 0,
+  });
+  expect(remaining.next_after).toBeNull();
+  expect([...result.conflicts, ...remaining.conflicts]).toHaveLength(24);
+  expect(
+    new Set([...result.conflicts, ...remaining.conflicts].map((item) => item.conflict_id)).size,
+  ).toBe(24);
+});
+
+test("exact conflict links work beyond the default window and continuations freeze lifecycle state", async () => {
+  const f = await fixture();
+  for (let n = 1; n <= 51; n++) await publish(f, `CF-${n}`);
+  const first = await loadProblemConflicts(f.db, problemId);
+  expect(first.conflicts).toHaveLength(50);
+  expect(first.next_after).toBe(first.scanned_through);
+  expect(first.omitted).toContain("page_limit");
+  const resolutionWrite = await publish(f, "CF-51", "resolved");
+  await publish(f, "CF-52");
+
+  const second = await loadProblemConflicts(f.db, problemId, {
+    through: first.cursor,
+    after: first.next_after ?? 0,
+  });
+  expect(second.conflicts.map((item) => item.conflict_id)).toEqual(["CF-51"]);
+  expect(second.conflicts[0]?.status).toBe("open");
+  expect(second.conflicts[0]?.resolution_event).toBeNull();
+  expect(second.cursor).toBe(first.cursor);
+  expect(second.next_after).toBeNull();
+  const exact = await loadProblemConflicts(f.db, problemId, { target: "CF-51" });
+  for (const format of formats) {
+    const response = await face(f, format, undefined, "?target=CF-51&limit=1");
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).toContain("CF-51");
+    expect(text).not.toContain('"conflict_id":"CF-1"');
+    expect(text).toContain(resolution);
+    expect(text).toContain(resolutionWrite.eventId);
+    if (format !== "json") expect(text).toContain(`ledger cursor: ${exact.cursor}`);
+    expect(response.headers.get("content-location")).toContain("target=CF-51");
+    expect(response.headers.get("link")).not.toContain('rel="next"');
+  }
+  expect(exact.conflicts).toHaveLength(1);
+  expect(exact.conflicts[0]?.resolution_event).toMatchObject({
+    event_id: resolutionWrite.eventId,
+    seq: resolutionWrite.seq,
+    author_fellow_id: f.binding.fellowId,
+    sponsor_id: sponsorId,
+    session_id: "S-conflict",
+    model_string_self_declared: "test/model",
+    harness: "curl",
+  });
+  const old = await loadProblemConflicts(f.db, problemId, {
+    target: "CF-51",
+    through: first.cursor,
+  });
+  expect(old.conflicts[0]?.status).toBe("open");
+});
+
+test("filtered and withheld empty conflict pages retain progress and stable next links", async () => {
+  const f = await fixture();
+  const first = await publish(f, "CF-1");
+  const hidden = await publish(f, "CF-2");
+  await publish(f, "CF-3");
+  await publish(f, "CF-1", "resolved");
+  control(f, "CF-2", "hidden", 1);
+  const firstResponse = await face(f, "json", undefined, "?limit=1&status=open");
+  expect(firstResponse.status).toBe(200);
+  const firstPage = ConflictsListResponseSchema.parse(await firstResponse.json());
+  expect(firstPage.conflicts).toEqual([]);
+  expect(firstPage.next_after).toBe(first.seq);
+  expect(firstPage.status).toBe("open");
+  expect(firstResponse.headers.get("link")).toContain(`through=${firstPage.cursor}`);
+  expect(firstResponse.headers.get("link")).toContain(`after=${first.seq}`);
+  expect(firstResponse.headers.get("link")).toContain("status=open");
+  const continuation = `?limit=1&status=open&through=${firstPage.cursor}&after=${first.seq}`;
+  const secondResponse = await face(f, "json", undefined, continuation);
+  const secondPage = ConflictsListResponseSchema.parse(await secondResponse.json());
+  expect(secondPage.conflicts).toEqual([]);
+  expect(secondPage.next_after).toBe(hidden.seq);
+  expect(secondPage.omitted).toContain(
+    "Some conflict content or lifecycle history is unavailable.",
+  );
+  if (secondPage.next_after === null) throw new Error("Expected a conflict continuation.");
+  await publish(f, "CF-3", "persistent-uncertainty");
+  const third = await loadProblemConflicts(f.db, problemId, {
+    status: "open",
+    limit: 1,
+    through: firstPage.cursor,
+    after: secondPage.next_after,
+  });
+  expect(third.conflicts.map((item) => item.conflict_id)).toEqual(["CF-3"]);
+  expect(third.next_after).toBeNull();
+  for (const format of ["md", "html"]) {
+    const response = await face(f, format, undefined, continuation);
+    const text = await response.text();
+    expect(text).toContain("More conflicts");
+    expect(text).toContain(`through=${firstPage.cursor}`);
+    expect(text).not.toContain("No normalized conflicts recorded on this problem");
+  }
+});
+
+test("exact missing and withheld conflicts never serve unrelated records or cached private bytes", async () => {
+  const f = await fixture();
+  await publish(f, "CF-1");
+  await publish(f, "CF-2");
+  const pinned = (await loadProblemConflicts(f.db, problemId)).cursor;
+  for (const format of formats) {
+    const absent = await face(f, format, undefined, "?target=CF-MISSING");
+    expect(absent.status).toBe(404);
+    expect(await absent.text()).not.toContain(normalized.smallest_disagreement);
+  }
+  for (const [index, format] of formats.entries()) {
+    const query = `?target=CF-2&through=${pinned}`;
+    const initial = await face(f, format, undefined, query);
+    expect(initial.status).toBe(200);
+    control(f, "CF-2", "hidden", index * 2 + 1);
+    for (const method of ["GET", "HEAD"]) {
+      const response = await face(
+        f,
+        format,
+        {
+          method,
+          headers: { "if-none-match": initial.headers.get("etag") ?? "" },
+        },
+        query,
+      );
+      expect(response.status).toBe(404);
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      expect(await response.text()).not.toContain(normalized.smallest_disagreement);
+    }
+    control(f, "CF-2", "visible", index * 2 + 2);
+    f.sql.query("UPDATE problems SET unlisted=1 WHERE id=?").run(problemId);
+    const unlisted = await face(f, format, undefined, query);
+    expect(unlisted.status).toBe(200);
+    expect(unlisted.headers.get("cache-control")).toBe("private, no-store");
+  }
+});
+
+test("unavailable exact conflict sources use the opaque 503 contract", async () => {
+  const f = await fixture();
+  const admitted = await publish(f, "CF-1");
+  f.sql.query("DELETE FROM event_content WHERE event_id=?").run(admitted.eventId);
+  for (const format of formats)
+    for (const method of ["GET", "HEAD"]) {
+      const response = await face(f, format, { method }, "?target=CF-1");
+      expect(response.status).toBe(503);
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      expect(response.headers.get("retry-after")).toBe("5");
+      if (method === "HEAD") expect(await response.text()).toBe("");
+      else {
+        const error = OpaqueProblemSchema.parse(await response.json());
+        expect(error.code).toBe("INTERNAL_ERROR");
+        expect("rule" in error).toBe(false);
+        expect("schema" in error).toBe(false);
+        expect("example" in error).toBe(false);
+      }
+    }
+});
+
+test("conflict pagination rejects ambiguous query spellings and future cuts", async () => {
+  const f = await fixture();
+  await publish(f);
+  for (const query of [
+    "?after=1",
+    "?through=1&after=2",
+    "?limit=01",
+    "?limit=1x",
+    "?limit=0",
+    "?limit=201",
+    "?through=-1",
+    "?through=1.5",
+    "?through=9007199254740992",
+    "?status=unknown",
+    "?target=CF-1&after=0&through=20",
+    "?target=CF-1&status=open",
+    "?target=CF-1&target=CF-2",
+    "?limit=1&limit=2",
+    "?unrecognized=1",
+    "?through=999999",
+  ]) {
+    for (const method of ["GET", "HEAD"]) {
+      const response = await face(f, "json", { method }, query);
+      expect(response.status).toBe(400);
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      if (method === "HEAD") expect(await response.text()).toBe("");
+      else expect(ProblemDocumentSchema.parse(await response.json()).code).toBe("CURSOR_INVALID");
+    }
+  }
 });
 
 test("missing, corrupt and mismatched conflict sources remain omitted within their admission window", async () => {
