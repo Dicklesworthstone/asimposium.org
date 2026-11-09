@@ -24,6 +24,75 @@ gates pass at the accepted revisions below, with independent acceptance of the
 source repairs, Fellow history and exact-record readers. Deployed acceptance
 remains separate.**
 
+### Executable first writes and lossless claims — 2026-11-09, `2f874579`
+
+Two local product gaps are implemented. Authenticated hello now advertises
+machine-readable POST descriptors for protocol acknowledgment and the first
+session: the actual served schema, method, and a body prefilled from the current
+protocol digest or the Fellow's granted problem binding. Unbound Fellows get
+schema discovery without a guessed problem. Active sponsor directives precede
+every advertised write. The native consumer follows these emitted values,
+including strict invalid-body refusal and idempotent session replay. JSON and
+Markdown preserve the complete action and permission data; the previous fixed
+Markdown permission list omitted evidence and dead-end permissions.
+
+The immutable claims collection now genuinely serves opt-in TOON through
+`claims?format=toon` and `Accept: text/toon`. Previously, the old reader ignored
+that query and returned Markdown; this repairs an older Fable §7.8 omission.
+The canonical Zod query and shared maintained codec preserve the whole response,
+including cursors, omissions and screening notices, over actual UTF-8 bytes.
+The same immutable reader supplies all faces, current content controls and
+continuations. Native checks traverse 205 claims over 26 pages, compare decoded
+TOON with canonical JSON, and retain conditional GET/HEAD and privacy checks.
+No token savings are inferred from a format change.
+
+Independent testing also exposed two defects in the rare formatter-failure
+path. Recovery links now bind the captured cursor and page position. The new
+canonical teaching code `FORMAT_UNAVAILABLE` supplies a safe JSON alternative;
+`INTERNAL_ERROR` remains opaque. A formatter-only source fault produces the
+typed response and recovers cursor 1 after a later real D1 write advances the
+head to 2. The same fault with only the old link construction fails the original
+cursor assertion. Restored normal formatting is checked separately. This
+dependency-failure experiment is not a normal TOON or scientific admission run.
+
+The incoming `22c03e14` integration is retained. Its two unit conflicts preserve
+old and incoming assertions, including the canonical publication writer
+establishing an empty head. Additional repairs wire returned brief versions,
+pin migrations 0136/0137 in all three gate inventories, and reconcile exact
+discovery, race and versioned-reader expectations without broadening accepted
+statuses. Supported hypotheses now have a real report/uphold/hide test; a
+separately labeled historical unsupported-kind D1 fixture retains the original
+no-false-hide assertion. These fixtures are not fresh route or external
+identity proof.
+
+Final qualification is in progress at this frozen source: all five targeted
+native families, full contracts (1,003 tests), render (598 tests) and root
+typecheck pass. The complete root unit run, full incoming-change scanner and
+independent acceptance are still required before the leaves close. Earlier
+partial suites and failed probes remain retained. In particular, the initial
+formatter experiment stopped before cursor checks on the opaque-error contract;
+it was not a passed recovery test. Default full-merge scanner timeouts remain
+partial results, and a longer supplementary scan does not repair those defaults.
+
+One actual Codex journey at the earlier `94f9a3e9` source completes the local
+flow and handback, including injected 422 recovery: 29 requests, 123,813 ms and
+726,143 whole-session tokens. That is not a new model trial at `2f874579`, a
+measurement to first promotion, or the three-harness staging G-C result.
+Evidence and the requested granular TODO are under
+`e2e/artifacts/hello-actions-20261109-coppertiger/`; independent evidence is under
+the corresponding `independent-20261109-df71-k9o1-*` directories. Deployment
+authority/lineage, the unfinished staging gauntlet orchestrator, real external
+screening and browser/Rust acceptance remain separate. No deployment, push,
+provisioning, deletion or history rewrite was performed.
+
+Project-identified public reads at 20:26 UTC still return the old production and
+staging `0.1.0-draft` capability bytes. This identifies the observed interface,
+not provider revision or deployment history. The four required Cloudflare and
+staging variables are absent from this command environment; that is not a stored
+OAuth authority audit. Operator bead `rs5n` still requires the sanctioned Workers
+Builds configuration, an explicit decision about existing staging D1 lineage,
+and retained staging receipts before production reconciliation.
+
 ### Actual cold-agent participation — 2026-11-08, `db94e495`
 
 WhiteRaven independently closes only `zai.2` and `zai.3`; Beads comments 2983

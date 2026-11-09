@@ -1,11 +1,22 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0135_report_source_pins.sql`.
+schema through `0137_problem_stewardship_commands.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
 deployed `0009_device_flow.sql` in `0010_device_flow_hardening.sql`.
+
+Migration `0137_problem_stewardship_commands.sql` versions accountable ownership
+and the steward roster, and extends private access-command receipts to guarded
+add, transfer and removal operations. Existing receipts are retained. Apply it
+before the matching Worker; concurrent commands recheck the captured version
+and cannot remove the final private steward.
+
+Migration `0136_problem_proposal_commands.sql` records Fellow-scoped, 24-hour
+creation and brief-adoption receipts. They retain identity metadata and digests,
+not private formulation prose, and survive draft erasure so a late retry cannot
+recreate erased work. Apply it before the matching Worker.
 
 Migration `0135_report_source_pins.sql` retains the exact public event, digest,
 and requested target captured when a report is first filed. Whole-object report

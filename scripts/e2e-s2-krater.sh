@@ -409,17 +409,21 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/fellow-card.ts
   packages/contracts/src/honors.ts
   packages/contracts/src/ledger.ts
+  packages/contracts/src/claims-list.ts
   packages/contracts/src/problem.ts
   packages/contracts/src/problems.ts
+  packages/contracts/src/problem-boundaries.ts
   packages/contracts/src/schema.ts
   packages/contracts/src/screening.ts
   packages/contracts/src/scientific-provenance.ts
   packages/contracts/src/sessions.ts
+  packages/contracts/src/statements.ts
   packages/contracts/src/health.ts
   packages/contracts/src/readiness.ts
   packages/contracts/src/search.ts
   packages/contracts/src/search-pagination.ts
   packages/contracts/src/moderation.ts
+  packages/contracts/src/moderation-targets.ts
   packages/contracts/src/rubrics.ts
   packages/contracts/src/moves.ts
   packages/contracts/src/dead-ends.ts
@@ -484,6 +488,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/discovery/commentary-discovery.ts
   apps/wire/src/discovery/citations-discovery.ts
   apps/wire/src/discovery/scientific-collections-discovery.ts
+  apps/wire/src/discovery/scientific-history-discovery.ts
   apps/wire/src/discovery/workshop-directory-discovery.ts
   apps/wire/src/discovery/hypotheses-discovery.ts
   apps/wire/src/discovery/router.ts
@@ -530,6 +535,12 @@ readonly -a S2_SOURCE_PATHS=(
   # mechanical walk flagged it on first run, which is this attestation working.
   apps/wire/src/ledger/relations.ts
   apps/wire/src/ledger/synthesis.ts
+  apps/wire/src/ledger/synthesis-events.ts
+  apps/wire/src/ledger/syntheses-list-http.ts
+  apps/wire/src/ledger/claims-list-read.ts
+  apps/wire/src/ledger/statements-router.ts
+  apps/wire/src/ledger/statements-face.ts
+  apps/wire/src/ledger/statements-read.ts
   apps/wire/src/ledger/dead-ends.ts
   apps/wire/src/ledger/dead-end-served-echo.ts
   apps/wire/src/ledger/dead-end-retries.ts
@@ -597,11 +608,16 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/screening/types.ts
   apps/wire/src/screening/workers-ai.ts
   apps/wire/src/moderation/operator-http.ts
+  apps/wire/src/moderation/operator-command.ts
+  apps/wire/src/moderation/report-detail.ts
+  apps/wire/src/moderation/target.ts
   apps/wire/src/moderation/posture.ts
   apps/wire/src/moderation/router.ts
   apps/wire/src/moderation/store.ts
   apps/wire/src/sessions/router.ts
   apps/wire/src/sessions/router-core.ts
+  apps/wire/src/sessions/claim-input-status.ts
+  apps/wire/src/sessions/private-problem-pack.ts
   apps/wire/src/sessions/statement-context.ts
   apps/wire/src/sessions/refusal-schema.ts
   apps/wire/src/sessions/scientific-withdrawal-router.ts
@@ -636,6 +652,11 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/search/page.ts
   apps/wire/src/search/window.ts
   apps/wire/src/problems/router.ts
+  apps/wire/src/problems/boundaries.ts
+  apps/wire/src/problems/brief-commands.ts
+  apps/wire/src/problems/fellow-briefs.ts
+  apps/wire/src/problems/proposal-commands.ts
+  apps/wire/src/problems/problem-intent-authority.ts
   apps/wire/src/problems/lifecycle-ledger.ts
   apps/wire/src/problems/roster.ts
   apps/wire/src/inbox/markdown.ts
@@ -708,6 +729,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/protocol/assets/inoculation.md
   packages/render/package.json
   packages/render/src/index.ts
+  packages/render/src/claims-list.ts
   packages/render/src/hypotheses.ts
   packages/render/src/canonical.ts
   packages/render/src/commentary.ts

@@ -120,6 +120,10 @@
       "conflicts_immutable_update:problem_id",
       "conflicts_immutable_update:smallest_disagreement"
     ],
+    "content-hide-sweep": [
+      "operator_command_receipts_append_only_delete",
+      "operator_command_receipts_append_only_update"
+    ],
     "dead-ends": [
       "dead_ends_immutable_delete",
       "evidence_immutable_delete",
@@ -333,6 +337,8 @@
     "moderation_log_append_only_update": "2efd705884754c4787c34abd4574550938d936c8fefe25e2ac35a942059d0fa1",
     "operator_audit_append_only_delete": "bdc2e6f84f504a224724474c70d11446fb549a573fc1c01f1621a4aa3766cfb9",
     "operator_audit_append_only_update": "0bae8ef46a707e27f67461b7db95f9f641be5a014aab8108cdb27c06fc12c61a",
+    "operator_command_receipts_append_only_delete": "e95cb7dfb2e497b990bb1813d9b5825de7100a21b086b94e3cd917c8bd05c12d",
+    "operator_command_receipts_append_only_update": "5e9d40dd21348aab660eb33162ca97e968e0bcb6f51d16668812a881b7d59981",
     "problem_slow_mode_append_only_delete": "6128b1fc57fea603305ee837f744d928a7dba981476456db84e421c49f6963a1",
     "problem_slow_mode_append_only_update": "9c52b7ba972ef2aeefa317889f2d4e89dfb1ccf69c25c35902dc84012cd7d53d",
     "problem_statement_proposal_immutable": "48f5cdbcf25ab1f44d305acae2ccca2f854e906efd0548aa20ebcb8f7b77a0bd",
@@ -346,6 +352,7 @@
     "public_write_reservations_update_guard": "20b3af9710e1016c0191faa6a47e439bfceec4aa9cd22e68896ec624a90165d3",
     "questions_immutable_delete": "6554f9bc3e0bc5c9e9d4956d6d75ec89a07a85d6bf6af27586b6b873620e6179",
     "reports_no_delete": "01e847c1e32c286e7b54d56f2b80b9fefd2eab9738c7ea02024a19fbee33182f",
+    "reports_source_pin_immutable": "6e9b31e9fe9639aae8763921dcc856465fd657ae6b46651e3b067a653de2eaeb",
     "retractions_immutable_delete": "3a699f94ce843a4e0f51cb07d1929b5bac411c9d3e5c0146d5e31b9cc390b34b",
     "review_request_events_no_delete": "74d154d6f57a5f1dc4c91f4d6a0790fc5596301f0ea65d56b31ce9d36acb6c1e",
     "review_request_events_no_update": "184ba442d04c1156c5c46b354f634f57f69298d330bf41d5691dcff90d78a7de",
@@ -373,6 +380,8 @@
     "sponsor_enrollment_bootstrap_migration_witness_immutable_update": "8db1319739b03cd33ae0a46e91b80a46134f1e0d102e7936b8ac2d0c667de11b",
     "sponsor_fellow_cap_audit_events_immutable_delete": "ea15942ce9a62bb467d2aadbb256e12316df764fabe9e3f45cd692544f213009",
     "sponsor_fellow_cap_audit_events_immutable_update": "ffa6311a106a010e442953fa25a1fe0bf6db7078886964dd0c20003988866791",
+    "sponsor_problem_boundaries_preserved": "47e061fe724b5001dab853edc47691c3311d3009c03f04d2d40ed70b8f2db0b0",
+    "sponsor_problem_boundary_bundle_update": "2511df49d19c13c9dbe81f78ddf5ef9b424ec0a2968eaf5dc9188ac37bbb4de3",
     "sponsors_active_fellow_limit_guard": "71b2899283ef5e1aa74a9519c8305daa4397accbb8d5d25064414c3f049d014f",
     "sponsors_enrollment_authority_delete": "eeb76fa771bed25442b9f86d072f75c4836c0221ec668026df93ce7911ee2805",
     "sponsors_fellow_cap_transition_requires_audit": "fa2f3363423efe0d31ec32089ed869d3d93a895eb52e5a5a8a275d2f8778dc7b",
