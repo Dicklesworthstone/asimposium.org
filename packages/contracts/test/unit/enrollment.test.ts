@@ -22,6 +22,7 @@ import {
   DeviceCodeStartResponseSchema,
   DeviceLookupRequestSchema,
   EnrollmentFlowPollRequestSchema,
+  EnrollmentNextActionSchema,
   EnrollmentSecretSchema,
   encodeOperatorFellowCapAuditCursor,
   encodeSponsorFellowCursor,
@@ -53,6 +54,24 @@ import {
 } from "../../src/enrollment.ts";
 
 const VALID_FIXTURE = new URL("../fixtures/valid/enrollment.json", import.meta.url);
+
+test("hello first-write action fixtures are additive, POST-only and object-valued", async () => {
+  const valid = await fixture(new URL("../fixtures/valid/hello-next-action.json", import.meta.url));
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/hello-next-action-get.json", import.meta.url),
+  );
+  const action = EnrollmentNextActionSchema.parse(valid);
+  expect(action.request?.body_prefill).toEqual({ problem_id: "P-HELLO" });
+  expect(EnrollmentNextActionSchema.safeParse(invalid).success).toBe(false);
+  expect(
+    EnrollmentNextActionSchema.safeParse({
+      ...action,
+      request: { ...action.request, body_prefill: ["P-HELLO"] },
+    }).success,
+  ).toBe(false);
+  const { request: _request, ...oldAction } = action;
+  expect(EnrollmentNextActionSchema.parse(oldAction)).toEqual(oldAction);
+});
 const SYNTHETIC_ENROLLMENT_SECRET = `v1.${"A".repeat(43)}`;
 const MALFORMED_ENROLLMENT_SECRET = ["v1", "short"].join(".");
 const INVALID_FIXTURE = new URL(

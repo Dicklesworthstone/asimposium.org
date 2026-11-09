@@ -799,6 +799,17 @@ export const EnrollmentNextActionSchema = z
     action: z.string().min(1).max(80),
     url: z.string().min(1).max(400),
     reason: z.string().min(1).max(280),
+    // Optional so existing actions remain valid. The producer validates each
+    // prefill with the request schema named here; this is a transport envelope,
+    // not a second definition of any write payload.
+    request: z
+      .object({
+        method: z.literal("POST"),
+        schema: z.url().max(400),
+        body_prefill: z.record(z.string(), z.unknown()).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

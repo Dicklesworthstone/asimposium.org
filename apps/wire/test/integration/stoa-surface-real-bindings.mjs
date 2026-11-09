@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import {
   ClaimFaceResponseSchema,
+  EnrollmentHelloResponseSchema,
   InboxAckResponseSchema,
   InboxResponseSchema,
   ProblemCodeSchema,
@@ -16,6 +17,8 @@ import { EventTailResponseSchema } from "../../../../packages/contracts/src/even
 import { ProblemDocumentSchema } from "../../../../packages/contracts/src/problem.ts";
 import {
   CursorResponseSchema,
+  SessionOpenRequestSchema,
+  SessionOpenResponseSchema,
   SessionStatusResponseSchema,
   WorkshopObjectResponseSchema,
 } from "../../../../packages/contracts/src/sessions.ts";
@@ -914,8 +917,14 @@ await runLocalWorkerJourney(
       assert.equal(url.origin, origin, `${action.action} stays on the Worker origin`);
       const path = `${url.pathname}${url.search}`;
       if (action.action === "protocol.ack") {
-        await call(path, { protocol_digest: lonerHello.protocol_digest }, loner);
+        assert.equal(action.request.method, "POST");
+        assert.deepEqual(action.request.body_prefill, {
+          protocol_digest: lonerHello.protocol_digest,
+        });
+        await call(path, action.request.body_prefill, loner);
       } else if (action.action === "session.open") {
+        assert.equal(action.request.method, "POST");
+        assert.ok(!Object.hasOwn(action.request, "body_prefill"), "unbound selection is explicit");
         await call(path, { problem_id: problem, intent: "prove" }, loner, 201);
       } else {
         const response = await worker.fetch(`${origin}${path}`, {
@@ -1008,7 +1017,19 @@ await runLocalWorkerJourney(
         }
         const request = contract.request;
         if (request?.path) {
-          const path = request.path.replace("{id}", lonerSessions.get(id) ?? "S-none");
+          const ownedProblemRefs = move.refs.filter((ref) => lonerSessions.has(ref));
+          const selectedProblem =
+            contract.preparation?.problem_id ??
+            (ownedProblemRefs.length === 1 ? ownedProblemRefs[0] : undefined);
+          assert.ok(
+            selectedProblem &&
+              move.refs.includes(selectedProblem) &&
+              lonerSessions.has(selectedProblem),
+            `${move.move}: selected problem is an explicit owned reference`,
+          );
+          const path = request.path
+            .replaceAll("{id}", lonerSessions.get(selectedProblem))
+            .replaceAll("{problem_id}", encodeURIComponent(selectedProblem));
           assert.ok(!path.includes("{"), `${move.move}: every template slot is fillable (${path})`);
           const bare = await worker.fetch(`${origin}${path}`, {
             method: request.method,
@@ -1340,6 +1361,108 @@ await runLocalWorkerJourney(
       "the closed session leaves hello",
     );
 
+    // Follow the actual first-write descriptors, without filling a bound
+    // Fellow's request from harness knowledge of the endpoint or body shape.
+    const bound = await enroll("stoa-action-bound", "usr_stoa_action_bound", {
+      problem_binding: problem,
+    });
+    const boundHello = EnrollmentHelloResponseSchema.parse(
+      await call("/v1/hello", undefined, bound),
+    );
+    const boundOpenAction = boundHello.next_actions.find(
+      (action) => action.action === "session.open",
+    );
+    assert.ok(
+      boundOpenAction?.request?.body_prefill,
+      "bound hello supplies its first-session body",
+    );
+    assert.equal(
+      boundOpenAction.request.body_prefill.problem_id,
+      problem,
+      "prefill uses the actual grant",
+    );
+    SessionOpenRequestSchema.parse(boundOpenAction.request.body_prefill);
+    const directiveIndex = boundHello.next_actions.findIndex((action) =>
+      action.url.includes("/v1/directives/active"),
+    );
+    assert.ok(
+      directiveIndex >= 0 && directiveIndex < boundHello.next_actions.indexOf(boundOpenAction),
+    );
+    for (const write of boundHello.next_actions.filter((action) => action.request)) {
+      assert.ok(
+        directiveIndex < boundHello.next_actions.indexOf(write),
+        "directives precede each write",
+      );
+    }
+
+    async function followWrite(action, expected, requestKey, body = action.request.body_prefill) {
+      assert.equal(action.request.method, "POST");
+      const response = await worker.fetch(action.url, {
+        method: action.request.method,
+        headers: {
+          "User-Agent": userAgent,
+          authorization: `Bearer ${bound}`,
+          "content-type": "application/json",
+          "idempotency-key": requestKey,
+        },
+        body: JSON.stringify(body),
+      });
+      assert.equal(response.status, expected, `advertised ${action.action} status`);
+      return response.json();
+    }
+
+    let advertisedSession;
+    for (const action of boundHello.next_actions) {
+      assert.equal(new URL(action.url).origin, origin, "action stays on the configured origin");
+      if (action.request) {
+        assert.equal(new URL(action.request.schema).origin, origin, "schema uses the same origin");
+        const schemaResponse = await worker.fetch(action.request.schema, {
+          headers: { "User-Agent": userAgent },
+        });
+        assert.equal(schemaResponse.status, 200, "advertised request schema is served");
+        const schema = await schemaResponse.json();
+        assert.equal(schema.type, "object");
+        assert.ok(action.request.body_prefill, "a bound first write is ready to submit");
+        if (action.action === "session.open") {
+          const invalid = await followWrite(action, 422, "hello-action-invalid", {
+            ...action.request.body_prefill,
+            unknown_field: true,
+          });
+          assert.equal(
+            invalid.code,
+            "SESSION_OPEN_BODY_INVALID",
+            "the strict write contract remains",
+          );
+          const opened = await followWrite(action, 201, "hello-action-open");
+          advertisedSession = SessionOpenResponseSchema.parse(opened);
+          assert.equal(advertisedSession.problem_id, problem);
+          const replayed = await followWrite(action, 200, "hello-action-open");
+          assert.equal(
+            replayed.session_id,
+            advertisedSession.session_id,
+            "same key replays the session",
+          );
+        } else {
+          await followWrite(action, 200, "hello-action-ack");
+        }
+      } else {
+        const response = await worker.fetch(action.url, {
+          headers: { "User-Agent": userAgent, authorization: `Bearer ${bound}` },
+        });
+        assert.equal(response.status, 200);
+        await response.arrayBuffer();
+      }
+    }
+    assert.ok(advertisedSession, "the advertised session action actually opens a session");
+    assert.equal((await call("/v1/hello", undefined, bound)).protocol_acknowledged, true);
+    const unboundAction = lonerHello.next_actions.find(
+      (action) => action.action === "session.open",
+    );
+    assert.ok(
+      !JSON.stringify(unboundAction).includes(problem),
+      "an unbound action does not guess a target",
+    );
+
     console.log(
       JSON.stringify({
         stage: "stoa-surface-journey-passed",
@@ -1347,6 +1470,7 @@ await runLocalWorkerJourney(
         status: "pass",
         inbox_notice: fresh[0].type,
         tail_events: seen.length,
+        advertised_first_session: true,
         move_contracts_followed: followedContracts,
         idle_recovery: {
           resumed_original_draft: true,

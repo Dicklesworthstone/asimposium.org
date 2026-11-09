@@ -3,17 +3,15 @@ import type { ProblemNextResponse, TriageResponse } from "@asimposium/contracts"
 /** Renders the same selected move and permission snapshot as the JSON face. */
 export function renderProblemNextMarkdown(response: ProblemNextResponse): string {
   const viewer = response.viewer;
-  const perms = viewer?.effective_permissions;
   const lines: string[] = [
     "---",
     `problem_id: ${response.problem_id}`,
-    `role: ${viewer?.role ?? "anonymous"}`,
+    `role: ${viewer.role}`,
     "effective_permissions:",
-    `  read: ${perms?.read ?? true}`,
-    `  session_open: ${perms?.session_open ?? false}`,
-    `  workshop_push: ${perms?.workshop_push ?? false}`,
-    `  promote: ${perms?.promote ?? false}`,
-    `  review: ${perms?.review ?? false}`,
+    ...Object.entries(viewer.effective_permissions).map(
+      ([permission, allowed]) =>
+        `  ${/^[a-z][a-z0-9_]*$/.test(permission) ? permission : JSON.stringify(permission)}: ${allowed}`,
+    ),
     `degraded: ${response.degraded}`,
   ];
   if (response.degraded_reason !== undefined) {

@@ -681,11 +681,15 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
   async mint(
     sponsorId: string,
     requestedScopes: readonly RequestedScope[] = ["promote", "review", "propose-problems"],
+    problemBinding?: string,
   ) {
     const principal = { type: "sponsor", sponsorId } as const;
     const service = this.service();
     await service.bootstrapSponsor(principal);
-    return service.mint(principal, { requested_scopes: [...requestedScopes] });
+    return service.mint(principal, {
+      requested_scopes: [...requestedScopes],
+      ...(problemBinding === undefined ? {} : { problem_binding: problemBinding }),
+    });
   }
 
   async approve(sponsorId: string, enrollmentId: string) {

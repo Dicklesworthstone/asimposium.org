@@ -83,11 +83,24 @@ describe("authenticated hello sponsor-directive continuation", () => {
     expect(hello.next_actions.indexOf(action!)).toBeLessThan(
       hello.next_actions.findIndex((item) => item.action === "session.open"),
     );
+    for (const write of hello.next_actions.filter((item) => item.request)) {
+      expect(hello.next_actions.indexOf(action!)).toBeLessThan(hello.next_actions.indexOf(write));
+    }
     expect(hello.next_actions.length).toBeLessThanOrEqual(8);
     expect(hello.next_actions.some((item) => item.url.endsWith("/protocol.md"))).toBe(true);
     expect(hello.next_actions.some((item) => item.url.endsWith("/skill.md"))).toBe(true);
     expect(hello.next_actions.some((item) => item.action === "protocol.ack")).toBe(true);
     expect(hello.next_actions.some((item) => item.action === "triage")).toBe(true);
+    expect(hello.next_actions.find((item) => item.action === "protocol.ack")?.request).toEqual({
+      method: "POST",
+      schema: ORIGIN + "/schemas/enrollment.v1/protocol_ack_request.json",
+      body_prefill: { protocol_digest: hello.protocol_digest },
+    });
+    expect(hello.next_actions.find((item) => item.action === "session.open")?.request).toEqual({
+      method: "POST",
+      schema: ORIGIN + "/schemas/sessions.v1/session_open_request.json",
+      body_prefill: { problem_id: "P-HELLO" },
+    });
     expect(JSON.stringify(action)).not.toContain(owner.directive);
     expect(JSON.stringify(action)).not.toContain(owner.binding.fellowId);
     expect(JSON.stringify(action)).not.toContain(owner.binding.sponsorId);
@@ -105,6 +118,12 @@ describe("authenticated hello sponsor-directive continuation", () => {
     expect(action?.reason).toContain("incomplete");
     expect(action?.reason).toContain("ACK does not withdraw");
     expect(hello.granted_resources.problem_binding).toBeUndefined();
+    const sessionAction = hello.next_actions.find((item) => item.action === "session.open");
+    expect(sessionAction?.request?.method).toBe("POST");
+    expect(sessionAction?.request?.schema).toBe(
+      ORIGIN + "/schemas/sessions.v1/session_open_request.json",
+    );
+    expect(sessionAction?.request).not.toHaveProperty("body_prefill");
   });
 
   test("triage JSON and Markdown retain the same bounded instruction read before a recommended move", async () => {
@@ -147,6 +166,11 @@ describe("authenticated hello sponsor-directive continuation", () => {
     expect(text).not.toContain(owner.directive);
     expect(text).not.toContain("P-OWNER");
     expect(text).not.toContain(owner.binding.fellowId);
+    expect(hello.next_actions.find((item) => item.action === "session.open")?.request).toEqual({
+      method: "POST",
+      schema: ORIGIN + "/schemas/sessions.v1/session_open_request.json",
+      body_prefill: { problem_id: "P-OTHER" },
+    });
     const injected = await f.get("/v1/hello?fellow_id=" + owner.binding.fellowId, other.token);
     expect(injected.status).toBe(400);
     expect(await injected.text()).not.toContain(owner.directive);

@@ -241,7 +241,7 @@ export async function runLocalWorkerJourney(journey, options = {}) {
     }
 
     async function enroll(name, sponsor = "usr_sponsor_problems", declaration = {}) {
-      const minted = await fixtures.mint(sponsor);
+      const minted = await fixtures.mint(sponsor, undefined, declaration.problem_binding);
       mintedSecrets.push(minted.secret);
       const claimed = await call(
         discoveredRequest("fellow_registration_request"),

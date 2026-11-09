@@ -2768,6 +2768,32 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 280
+              },
+              "request": {
+                "type": "object",
+                "properties": {
+                  "method": {
+                    "type": "string",
+                    "const": "POST"
+                  },
+                  "schema": {
+                    "type": "string",
+                    "maxLength": 400,
+                    "format": "uri"
+                  },
+                  "body_prefill": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {}
+                  }
+                },
+                "required": [
+                  "method",
+                  "schema"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [

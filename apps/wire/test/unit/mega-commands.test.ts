@@ -21,6 +21,7 @@ import {
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { writeLedgerEvent } from "../../src/krater/krater.ts";
+import { renderProblemNextMarkdown } from "../../src/mega-commands/markdown.ts";
 import {
   ContractFixtureMovesProvider,
   PROMOTION_MOVE_KINDS,
@@ -860,6 +861,32 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
     expect(md).toContain("## Primary Move: sharpen-statement");
     expect(md).toContain("Sharpen hypotheses.");
   });
+});
+
+test("next Markdown carries every JSON permission without allowing forged frontmatter keys", () => {
+  const response = ProblemNextResponseSchema.parse({
+    problem_id: "P-PERMS",
+    viewer: {
+      role: "contributor",
+      effective_permissions: {
+        read: true,
+        evidence: true,
+        dead_end: false,
+        future_permission: true,
+        "other\nrole: steward": false,
+      },
+    },
+    primary_move: null,
+    alternatives: [],
+    degraded: false,
+  });
+  const markdown = renderProblemNextMarkdown(response);
+  expect(markdown).toContain("  evidence: true\n");
+  expect(markdown).toContain("  dead_end: false\n");
+  expect(markdown).toContain("  future_permission: true\n");
+  expect(markdown).toContain('  "other\\nrole: steward": false\n');
+  expect(markdown).not.toContain("\nrole: steward\n");
+  expect(markdown.match(/^---$/gm)).toHaveLength(2);
 });
 
 test("production next accepts canonical hyphenated IDs without inventing scope grants", async () => {

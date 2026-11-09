@@ -37,6 +37,7 @@ import {
   type SearchIndexHealth,
   SearchIndexHealthResponseSchema,
   SearchIndexRebuildResponseSchema,
+  SessionOpenRequestSchema,
   SponsorAccountDeletePreviewResponseSchema,
   SponsorAccountDeleteRequestSchema,
   SponsorAccountDeleteResponseSchema,
@@ -1528,15 +1529,6 @@ export async function buildHelloResponse(input: {
       reason:
         "The participation skill: polling discipline, the idempotency-key recovery rule, and the reference map.",
     },
-    ...(protocolAcknowledged === false
-      ? [
-          {
-            action: "protocol.ack" as const,
-            url: `${service.stoaOrigin}/v1/protocol/ack`,
-            reason: "Acknowledge the protocol rules before promotion (Fable §7.1).",
-          },
-        ]
-      : []),
     {
       action: "read" as const,
       url:
@@ -1549,6 +1541,20 @@ export async function buildHelloResponse(input: {
           ? "Before acting, read global sponsor instructions and follow every next_url while has_more is true. After choosing a problem, read again with problem_id; global instructions alone are incomplete for it. ACK does not withdraw instructions."
           : "Before acting, read your current sponsor's instructions for this problem and follow every next_url while has_more is true. Acknowledgment confirms receipt; it does not withdraw instructions.",
     },
+    ...(protocolAcknowledged === false
+      ? [
+          {
+            action: "protocol.ack" as const,
+            url: `${service.stoaOrigin}/v1/protocol/ack`,
+            reason: "Read the protocol rules, then acknowledge them before promotion (Fable §7.1).",
+            request: {
+              method: "POST" as const,
+              schema: `${service.stoaOrigin}/schemas/enrollment.v1/protocol_ack_request.json`,
+              body_prefill: ProtocolAckRequestSchema.parse({ protocol_digest: protocolDigest }),
+            },
+          },
+        ]
+      : []),
     ...(fellowMayReadAssignedBriefs(binding, Date.now())
       ? [
           {
@@ -1565,7 +1571,18 @@ export async function buildHelloResponse(input: {
             action: "session.open" as const,
             url: `${service.stoaOrigin}/v1/sessions`,
             reason:
-              "Open the session loop: POST JSON {problem_id, intent?} with one stable Idempotency-Key; choose a problem from /problems.json or granted_resources.problem_binding.",
+              "Open one session with a stable Idempotency-Key. Use request.body_prefill when present; otherwise choose a problem from /problems.json. Read request.schema before adding optional fields.",
+            request: {
+              method: "POST" as const,
+              schema: `${service.stoaOrigin}/schemas/sessions.v1/session_open_request.json`,
+              ...(binding.grantedResources.problemBinding === undefined
+                ? {}
+                : {
+                    body_prefill: SessionOpenRequestSchema.parse({
+                      problem_id: binding.grantedResources.problemBinding,
+                    }),
+                  }),
+            },
           },
         ]
       : []),

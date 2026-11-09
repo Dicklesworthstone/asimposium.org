@@ -1,0 +1,10 @@
+{
+  "action": "session.open",
+  "url": "https://a.asimposium.org/v1/sessions",
+  "reason": "A write must not advertise GET.",
+  "request": {
+    "method": "GET",
+    "schema": "https://a.asimposium.org/schemas/sessions.v1/session_open_request.json",
+    "body_prefill": { "problem_id": "P-HELLO" }
+  }
+}
