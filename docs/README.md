@@ -18,15 +18,15 @@ observed.
 delivered the public instrument promised by Fable. The main obstacle is now
 finishing and deploying a qualified candidate, then earning the external
 collaboration, safety and operational evidence. Rebuilding the existing source
-subsystems would miss that obstacle. The initial lint and Worker contract
-failures are repaired below. Earlier accepted repairs have scoped green
-receipts; qualification of the latest combined candidate remains incomplete.
-The full root and scanner results below take precedence over focused passes.
+subsystems would miss that obstacle. The current candidate, `151469e3`, passes
+the full root suite, typecheck, lint, full contracts/render and HTTP contracts.
+Independent repetition of those gates also passes. Broad JavaScript scanner
+coverage remains incomplete and prevents complete integration acceptance.
 Deployed acceptance remains separate.**
 
-### Executable first writes and lossless claims — 2026-11-09, `2f874579`
+### Executable first writes, lossless claims and integration repairs — `151469e3`
 
-The combined successor is `467f99eb`, through migration 0140. Its current
+The combined candidate is `151469e3`, through migration 0140. At `467f99eb`,
 typecheck and lint both pass all eight groups with unchanged hashes for 2,661
 source files. Independent checks at that exact revision pass the seven native
 duplicate, governance, lifecycle, hide, claims-TOON, Stoa and scripted-reference
@@ -39,18 +39,66 @@ The 64 earlier unit failures have repairs covering fixtures, strict route and
 schema checks, source closure and all three migration inventories. A seven-file
 exploratory run passes 552 tests; its source map records concurrent edits to the
 two separate capability-census files, so it is not frozen aggregate acceptance.
-The current unfiltered root run, full packages and HTTP contracts are pending.
+The retained complete root at `467f99eb` is red: seven groups pass, while Worker
+has 7,225 passes and 14 failures across three additional incoming-affected
+files. Its original 64 failing cases now pass. The remaining failures are
+strict public-write classifications and formulation fixtures with unknown
+scientific authorship. The runtime correctly withholds independent review for
+unknown authors. Successor `151469e3` supplies canonical attributed fixtures,
+accepts a real private Fellow proposal before the warning fixture publishes,
+uses its returned statement version, and retains all claim-version, warning and
+withdrawal checks. It also adds an explicit legacy-author refusal. All three
+files pass. The successor's unfiltered `bun run test` passes all eight groups
+in 1,482.61 seconds, normal owner exit zero at 22:44:24.370 UTC. Worker has
+7,240 passes, zero failures and 37,287 expectations across 317 files; Agora has
+1,053 passes. All 2,661 source hashes remain unchanged. Typecheck and lint each
+pass eight groups; full contracts pass 1,005 tests, render 598, and HTTP contracts
+pass five with two original, inapplicable skips. Scoped UBS covers all three
+changed test files completely, with reviewed findings and no suppressions.
+
+Independent review at `151469e3` also re-executes 108 affected and authority tests,
+then ten source faults: seven native authority/privacy regressions, two emitted
+first-write regressions and a new forbidden scientific-sponsor inference. Each
+reaches its intended assertion; exact restored controls pass. The primary reads
+all ten minimal diffs and raw assertion results and reruns those 108 tests.
+These are local fault experiments, not observed production exploits. The
+verifier's separate typecheck, lint and package/HTTP gates pass. Its unfiltered
+root rerun also passes all eight groups in 1,461.55 seconds, normal owner exit
+zero at 23:25:25.129 UTC, with the same Worker and Agora test counts. All 2,661
+before/after hashes match the current source in both full-root runs.
 
 Scanning remains incomplete. The normal staged command reproduced a
 `FREE_SLOTS` scheduler crash; documented serial mode completely covers the six
 supported files in the latest repair, with 468 reviewed findings and exit 1.
-A separate isolated tool variant retains every rule and integrity check while
-memoizing regex compilation. Its actual patch, all 387 tool hashes and
-semantic comparisons are preserved, but JavaScript still times out at the
-unchanged 300-second bound over all 430 changed paths. SQL covers ten files and
-Bash two; those completed languages cannot replace missing JavaScript coverage.
-The global scanner remains unchanged. No default repair, full-scan acceptance,
-security-clean result or issue closure follows from this experiment.
+Two isolated tool variants retain every rule and integrity check: one memoizes
+regex compilation; the next also tests necessary literal membership before the
+unchanged whole-word match. Their exact patches, all 387 tool hashes, inverse-AST
+checks and executable semantic comparisons are retained. Both still time out
+JavaScript at the unchanged 300-second bound. The latest selects all 431 changed
+paths through `151469e3`: 357 JS/TS sources, two Bash, ten SQL and 62 unsupported
+types. Independent live inspection verifies all 357 sources plus three
+lockfile/package contexts and the isolated helper resolution. That proves input
+identity, not analysis completion. SQL and Bash complete; the 31 Bash findings
+are reviewed.
+No index or independent repeat follows the failed full working scan. Tool work
+is stopped, `g4b4` remains open, and the global scanner remains unchanged.
+No default repair, full-scan acceptance, security-clean result or issue closure
+follows from these experiments.
+
+The two product leaves have a separate applicable source scope. Current stock
+UBS executes all 35 paths changed by their four feature/recovery commits,
+including dependency and lockfile context: 23 actual module inputs, complete
+2,147-location output, finding exit 1 in 14.10 seconds. All critical/warning
+sites and information classes are reviewed; no additional product defect is
+established. The initial 21-source-only selection omitted dependency context
+and is retained with that correction. All 35 working/index/HEAD bytes match,
+and all 2,661 source hashes stay unchanged. Independent stock repetition also
+completes in 14.16 seconds with identical finding records and original tool
+bytes. WhiteRaven independently closes only `df71.1` and `k9o.1`; Beads comments
+3008 and 3009 map their original criteria to exact source and evidence. The
+ordinary Node claims gate is also rerun by both agents at `151469e3`. These
+closures do not complete the 431-path integration scan or close `df71`, its
+integration repair children, `k9o`, or `g4b4`.
 
 Two local product gaps are implemented. Authenticated hello now advertises
 machine-readable POST descriptors for protocol acknowledgment and the first
@@ -95,12 +143,12 @@ At `2f874579`, all thirteen checks preceding the aggregate pass, including five
 targeted native families, full contracts (1,003 tests), render (598 tests),
 typecheck, lint and HTTP contracts. The complete root unit run is **red**:
 seven groups pass, but Worker has 7,135 passes and 64 failures. These failures
-are being repaired under `df71.2`; they must not be replaced by the focused
-passes. An additional 377-path scan also remains **partial**: JS times out at
+are repaired by the successor above; the original red result remains retained.
+An additional 377-path scan also remains **partial**: JS times out at
 1,200 seconds; SQL covers seven files and Bash two, with reviewed findings.
 Neither longer time nor selected successful languages supplies missing JS
-coverage. All feature and integration leaves remain open. In particular, the initial
-formatter experiment stopped before cursor checks on the opaque-error contract;
+coverage. Those focused passes did not close the feature or integration tasks.
+The initial formatter experiment stopped before cursor checks on the opaque-error contract;
 it was not a passed recovery test. Default full-merge scanner timeouts remain
 partial results, and a longer supplementary scan does not repair those defaults.
 
