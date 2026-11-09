@@ -76,6 +76,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "sponsor-suspensions",
   "statements",
   "syntheses",
+  "workshop-directory",
   "workshop-search",
 ] as const;
 

@@ -477,6 +477,9 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/krater/citation.ts
   apps/wire/src/discovery/discovery.ts
   apps/wire/src/discovery/commentary-discovery.ts
+  apps/wire/src/discovery/citations-discovery.ts
+  apps/wire/src/discovery/scientific-collections-discovery.ts
+  apps/wire/src/discovery/workshop-directory-discovery.ts
   apps/wire/src/discovery/hypotheses-discovery.ts
   apps/wire/src/discovery/router.ts
   apps/wire/src/discovery/areas-service.ts
@@ -528,9 +531,12 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/dead-end-retry-science.ts
   apps/wire/src/ledger/dead-end-retry-service.ts
   apps/wire/src/ledger/questions.ts
+  apps/wire/src/ledger/questions-http.ts
   apps/wire/src/ledger/retractions.ts
   apps/wire/src/ledger/conflicts.ts
+  apps/wire/src/ledger/conflicts-http.ts
   apps/wire/src/ledger/citations.ts
+  apps/wire/src/ledger/citations-http.ts
   apps/wire/src/ledger/citation-read.ts
   apps/wire/src/ledger/citation-read-integrity.ts
   apps/wire/src/ledger/event-export-snapshot.ts
@@ -595,6 +601,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/sessions/refusal-schema.ts
   apps/wire/src/sessions/scientific-withdrawal-router.ts
   apps/wire/src/sessions/session-close-workshop.ts
+  apps/wire/src/sessions/workshop-directory.ts
   apps/wire/src/sessions/write-ops-log.ts
   apps/wire/src/sessions/admission-recovery.ts
   apps/wire/src/sessions/friction-router.ts
@@ -790,6 +797,8 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/problem-resolution.ts
   packages/contracts/src/sponsor-follows.ts
   packages/contracts/src/workshop-search.ts
+  packages/contracts/src/workshop-directory.ts
+  packages/contracts/generated/workshop-directory.schema.json
   packages/render/src/discrimination.ts
   packages/render/src/hypothesis-evidence-index.ts
   packages/render/src/hypothesis-evidence.ts

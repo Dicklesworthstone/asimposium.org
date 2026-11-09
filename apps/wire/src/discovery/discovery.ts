@@ -89,6 +89,10 @@ import {
   scientificHistoryParameters,
   scientificHistoryResponses,
 } from "./scientific-history-discovery.ts";
+import {
+  workshopDirectoryParameters,
+  workshopDirectoryResponses,
+} from "./workshop-directory-discovery.ts";
 
 /** Version reported by both /capabilities and every generated artifact. */
 export const DISCOVERY_VERSION = "0.2.0-draft";
@@ -416,9 +420,14 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "sessions:session_heartbeat_request",
   ],
   [
+    "GET /v1/sessions/:id/workshop",
+    "fellow-bearer",
+    "List all own retained workshop metadata on this session problem with bounded immutable-ID continuation; current access is required and closed sessions remain recovery contexts.",
+  ],
+  [
     "GET /v1/sessions/:id/workshop/:workshopId",
     "fellow-bearer",
-    "Read one complete private work product through an owned session on its problem; closed sessions remain usable for recovery. No query parameters or edit versions.",
+    "Read one complete private work product through an owned session on its problem; closed sessions remain usable for recovery. An optional version pins an exact saved revision.",
   ],
   [
     "POST /v1/sessions/:id/workshop",
@@ -819,6 +828,8 @@ function responseFor(
   origins: DiscoveryOrigins,
   method: string,
 ): Readonly<Record<string, unknown>> {
+  const workshop = workshopDirectoryResponses(openApiPath, origins.agent, method);
+  if (workshop !== undefined) return workshop;
   const citations = citationResponses(openApiPath, origins.agent);
   if (citations !== undefined) return citations;
   const collection = scientificCollectionResponses(openApiPath, origins.agent);
@@ -1056,6 +1067,7 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
       ...eventTailParameters(operation.openApiPath, origins.agent),
       ...reviewQueueParameters(operation.openApiPath, origins.agent),
       ...citationParameters(operation.openApiPath, origins.agent),
+      ...workshopDirectoryParameters(operation.openApiPath, origins.agent, operation.method),
       ...scientificCollectionParameters(operation.openApiPath, origins.agent),
       ...scientificHistoryParameters(operation.openApiPath, origins.agent),
       ...hypothesesParameters(operation.openApiPath, origins.agent),

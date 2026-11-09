@@ -250,6 +250,7 @@ import {
   SynthesesListQuerySchema,
   SynthesesListResponseSchema,
 } from "./syntheses.ts";
+import { generateWorkshopDirectorySchema } from "./workshop-directory.ts";
 
 export interface GeneratedArtifact {
   readonly relativePath: string;
@@ -929,6 +930,15 @@ function generatedMovesTypes(): string {
 
 export function generatedArtifacts(): readonly GeneratedArtifact[] {
   return [
+    {
+      relativePath: "generated/workshop-directory.schema.json",
+      content: generateWorkshopDirectorySchema(),
+    },
+    {
+      relativePath: "generated/workshop-directory.types.ts",
+      content:
+        "// Generated from src/workshop-directory.ts. Do not edit.\nexport type { WorkshopDirectoryQuery, WorkshopDirectoryItem, WorkshopDirectoryResponse } from '../src/workshop-directory.ts';\n",
+    },
     generatedEventTailArtifact(),
     generatedReviewQueueArtifact(),
     { relativePath: "generated/directives.schema.json", content: generateDirectivesSchema() },

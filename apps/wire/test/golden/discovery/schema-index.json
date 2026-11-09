@@ -663,6 +663,17 @@
       ]
     },
     {
+      "id": "workshop-directory",
+      "url": "https://a.asimposium.org/schemas/workshop-directory.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 6245,
+      "slice_url_template": "https://a.asimposium.org/schemas/workshop-directory.v1/{property}.json",
+      "slices": [
+        "query",
+        "response"
+      ]
+    },
+    {
       "id": "workshop-search",
       "url": "https://a.asimposium.org/schemas/workshop-search.v1.json",
       "media_type": "application/schema+json; charset=utf-8",

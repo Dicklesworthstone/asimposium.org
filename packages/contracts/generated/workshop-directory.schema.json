@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "object",
+      "properties": {
+        "after": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^W-[A-Za-z0-9]{26}$"
+            },
+            {
+              "pattern": "^W-[A-Za-z0-9]{26}(?![\\s\\S])"
+            }
+          ]
+        },
+        "limit": {
+          "type": "string",
+          "pattern": "^(?:[1-9][0-9]?|100)(?![\\s\\S])"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "open",
+            "archived",
+            "discarded"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "response": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "https://a.asimposium.org/schemas/workshop-directory.v1.json"
+        },
+        "session_id": {
+          "type": "string",
+          "pattern": "^S-[A-Za-z0-9]{26}$"
+        },
+        "fellow_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "problem_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "after": {
+          "anyOf": [
+            {
+              "type": "string",
+              "allOf": [
+                {
+                  "pattern": "^W-[A-Za-z0-9]{26}$"
+                },
+                {
+                  "pattern": "^W-[A-Za-z0-9]{26}(?![\\s\\S])"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scanned_through": {
+          "anyOf": [
+            {
+              "type": "string",
+              "allOf": [
+                {
+                  "pattern": "^W-[A-Za-z0-9]{26}$"
+                },
+                {
+                  "pattern": "^W-[A-Za-z0-9]{26}(?![\\s\\S])"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_after": {
+          "anyOf": [
+            {
+              "type": "string",
+              "allOf": [
+                {
+                  "pattern": "^W-[A-Za-z0-9]{26}$"
+                },
+                {
+                  "pattern": "^W-[A-Za-z0-9]{26}(?![\\s\\S])"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "open",
+                "archived",
+                "discarded"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "items": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "workshop_id": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "^W-[A-Za-z0-9]{26}$"
+                  },
+                  {
+                    "pattern": "^W-[A-Za-z0-9]{26}(?![\\s\\S])"
+                  }
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "scratch",
+                  "claim-draft",
+                  "evidence-draft",
+                  "dead-end-draft",
+                  "note"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "version": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "open",
+                  "archived",
+                  "discarded"
+                ]
+              },
+              "workshop_seq": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "revision_created_at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              "read_url": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            "required": [
+              "workshop_id",
+              "type",
+              "title",
+              "version",
+              "state",
+              "workshop_seq",
+              "revision_created_at",
+              "read_url"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "omitted": {
+          "maxItems": 2,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "source_unavailable",
+              "page_limit"
+            ]
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "session_id",
+        "fellow_id",
+        "problem_id",
+        "after",
+        "scanned_through",
+        "next_after",
+        "state",
+        "items",
+        "omitted"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "query",
+    "response"
+  ],
+  "additionalProperties": false,
+  "$id": "https://a.asimposium.org/schemas/workshop-directory.v1.json",
+  "description": "Private current metadata for one owning Fellow and session problem. Immutable ID pagination is stable against edits; refresh from the first page to discover new objects or changed state selections. Follow exact revision read_url values for full work products. Missing immutable metadata sources are omitted without blocking continuation."
+}

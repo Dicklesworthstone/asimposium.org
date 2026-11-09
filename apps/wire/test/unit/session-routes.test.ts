@@ -54,6 +54,10 @@ import {
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
+import {
+  WorkshopDirectoryResponseSchema,
+  workshopDirectoryPath,
+} from "@asimposium/contracts/workshop-directory";
 import { protocolVersionPair } from "@asimposium/protocol";
 import type { ExecutionContext } from "@cloudflare/workers-types";
 import { createApp } from "../../src/app.ts";
@@ -109,6 +113,7 @@ import {
   readTargetClaimPack,
 } from "../../src/sessions/ledger-pack.ts";
 import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
+import { WORKSHOP_DIRECTORY_SQL } from "../../src/sessions/workshop-directory.ts";
 import { normHash, sha256Hex } from "../../src/split/policy.ts";
 import { migratedSqlite } from "../support/migrated-sqlite";
 import { syntheticScreeningObservation } from "../support/screening.ts";
@@ -14352,6 +14357,147 @@ describe("committed promotion outbox nudge", () => {
     expect(closeReplay.status).toBe(200);
   });
 
+  test("workshop directory supports exact recovery, current filters, conditional HEAD and archived closed contexts", async () => {
+    const f = await fixture();
+    let key = 0;
+    const post = (path: string, body: unknown) =>
+      f.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `directory-${++key}` },
+        body: JSON.stringify(body),
+      });
+    const opened = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" });
+    const session = SessionOpenResponseSchema.parse(await opened.json()).session_id;
+    const drafts = [];
+    for (const title of ["Boundary attempt", "Retained counterexample"]) {
+      const pushed = await post(workshopDirectoryPath(session), {
+        type: "scratch",
+        title,
+        body_md: "PRIVATE_BODY_CANARY",
+        relates_to: [],
+      });
+      expect(pushed.status).toBe(201);
+      drafts.push(WorkshopPushResponseSchema.parse(await pushed.json()));
+    }
+    const url = workshopDirectoryPath(session, { limit: 1, state: "open" });
+    const response = await f.call(url);
+    expect(response.status, await response.clone().text()).toBe(200);
+    const first = WorkshopDirectoryResponseSchema.parse(await response.json());
+    expect(first.items).toHaveLength(1);
+    expect(first.next_after).not.toBeNull();
+    expect(response.headers.get("link")).toContain(`after=${first.next_after}&limit=1&state=open`);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    expect(JSON.stringify(first)).not.toContain("PRIVATE_BODY_CANARY");
+    const next = WorkshopDirectoryResponseSchema.parse(
+      await (
+        await f.call(
+          workshopDirectoryPath(session, { limit: 1, state: "open", after: first.next_after! }),
+        )
+      ).json(),
+    );
+    expect(new Set([...first.items, ...next.items].map((item) => item.workshop_id)).size).toBe(2);
+    expect(next.next_after).toBeNull();
+    const pinned = first.items[0]!.read_url;
+    const recovered = await f.call(pinned);
+    expect(recovered.status).toBe(200);
+    expect(WorkshopObjectResponseSchema.parse(await recovered.json()).object.body_md).toBe(
+      "PRIVATE_BODY_CANARY",
+    );
+    const conditional = await f.call(url, {
+      method: "HEAD",
+      headers: { "if-none-match": response.headers.get("etag")! },
+    });
+    expect(conditional.status).toBe(304);
+    expect(await conditional.text()).toBe("");
+    expect(conditional.headers.get("cache-control")).toBe("private, no-store");
+    for (const query of [
+      "?state=all",
+      "?limit=101",
+      "?limit=2%0A",
+      "?limit=1&limit=2",
+      "?fellow_id=foreign",
+    ]) {
+      const refused = await f.call(workshopDirectoryPath(session) + query);
+      expect(refused.status).toBe(400);
+      expect(ContractProblemSchema.parse(await refused.json()).code).toBe("SCHEMA_INVALID");
+    }
+    const closed = await post(`/v1/sessions/${session}/close`, {
+      handback: "Retain the exact drafts for later recovery.",
+      keep: drafts.map((item) => item.workshop_id),
+    });
+    expect(closed.status, await closed.clone().text()).toBe(201);
+    await f.db
+      .prepare("UPDATE problems SET admission_mode='archived-read-only' WHERE id='P-4DSP'")
+      .run();
+    const archived = await f.call(workshopDirectoryPath(session));
+    expect(archived.status, await archived.clone().text()).toBe(200);
+    expect(WorkshopDirectoryResponseSchema.parse(await archived.json()).items).toHaveLength(2);
+    expect((await f.call(pinned)).status).toBe(200);
+    // An updated resource grant also controls recovery of own historical work.
+    f.service.credentialBinding = async () => ({
+      ...f.binding,
+      grantedResources: { ...f.binding.grantedResources, problemBinding: "P-OTHER" },
+    });
+    for (const path of [workshopDirectoryPath(session), pinned]) {
+      const denied = await f.call(path);
+      expect(denied.status).toBe(404);
+      expect(ProblemDocumentSchema.parse(await denied.json()).code).toBe("WORKSHOP_NOT_FOUND");
+      expect(denied.headers.get("cache-control")).toBe("private, no-store");
+    }
+  });
+
+  test("workshop directory rechecks reduced credentials before bytes or conditional receipts and fails storage opaquely", async () => {
+    let afterRead: (() => void) | undefined;
+    let unavailable = false;
+    const f = await fixture({
+      afterRead: async (read) => {
+        if (read.kind === "all" && read.sql === WORKSHOP_DIRECTORY_SQL) afterRead?.();
+      },
+      beforeRead: async (read) => {
+        if (unavailable && read.sql === WORKSHOP_DIRECTORY_SQL)
+          throw new Error("SQL_DIAGNOSTIC_CANARY");
+      },
+    });
+    const opened = await f.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "directory-race-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json()).session_id;
+    const url = workshopDirectoryPath(session);
+    const first = await f.call(url);
+    expect(first.status).toBe(200);
+    const original = f.service.credentialBinding.bind(f.service);
+    afterRead = () => {
+      f.service.credentialBinding = async () => ({
+        ...f.binding,
+        grantedResources: { ...f.binding.grantedResources, problemBinding: "P-OTHER" },
+      });
+    };
+    const changed = await f.call(url, { headers: { "if-none-match": first.headers.get("etag")! } });
+    expect(changed.status).toBe(404);
+    expect(changed.headers.get("cache-control")).toBe("private, no-store");
+    f.service.credentialBinding = original;
+    afterRead = () => {
+      f.service.credentialBinding = async () => undefined;
+    };
+    const revoked = await f.call(url, {
+      method: "HEAD",
+      headers: { "if-none-match": first.headers.get("etag")! },
+    });
+    expect(revoked.status).toBe(401);
+    expect(await revoked.text()).toBe("");
+    expect(revoked.headers.get("cache-control")).toBe("private, no-store");
+    f.service.credentialBinding = original;
+    afterRead = undefined;
+    unavailable = true;
+    const failed = await f.call(url);
+    expect(failed.status).toBe(503);
+    expect(failed.headers.get("cache-control")).toBe("private, no-store");
+    expect(await failed.text()).not.toContain("SQL_DIAGNOSTIC_CANARY");
+  });
+
   test("PLANTED: working packs disclose workshop-head truncation at six rows (j9hw)", async () => {
     // The working-profile workshop query reads one row past the emitted five
     // purely to decide disclosure: five heads compose with no truncation
@@ -14433,6 +14579,12 @@ describe("committed promotion outbox nudge", () => {
     expect(packSixResponse.status).toBe(200);
     const packSixText = await packSixResponse.text();
     const packSix = PackResponseSchema.parse(JSON.parse(packSixText));
+    expect(packSix.next_actions).toContainEqual(
+      expect.objectContaining({
+        method: "GET",
+        url: workshopDirectoryPath(sixSession),
+      }),
+    );
     const headItems = packSix.items.filter((item) => item.kind === "workshop-head");
     expect(headItems).toHaveLength(5);
     expect(packSix.omitted).toContainEqual({

@@ -33,6 +33,7 @@
     "./search-pagination": "./src/search-pagination.ts",
     "./public-watch": "./src/public-watch.ts",
     "./public-schemas": "./src/public-schemas.ts",
+    "./workshop-directory": "./src/workshop-directory.ts",
     "./workshop-search": "./src/workshop-search.ts"
   },
   "scripts": {

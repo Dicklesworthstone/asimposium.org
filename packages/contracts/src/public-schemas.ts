@@ -37,6 +37,9 @@ import rubricsSchemaModule from "../generated/rubrics.schema.json" with { type: 
 import screeningSchemaModule from "../generated/screening.schema.json" with { type: "json" };
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "json" };
 import synthesesSchemaModule from "../generated/syntheses.schema.json" with { type: "json" };
+import workshopDirectorySchemaModule from "../generated/workshop-directory.schema.json" with {
+  type: "json",
+};
 import { generateSponsorDataExportSchema } from "./account-export.ts";
 import { generateSponsorSuspensionsSchema } from "./admin.ts";
 import { generateScreeningAppealsSchema } from "./appeals.ts";
@@ -121,6 +124,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "sponsor-suspensions",
   "statements",
   "syntheses",
+  "workshop-directory",
   "workshop-search",
 ] as const);
 
@@ -418,6 +422,15 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/syntheses.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: canonicalSchemaText(synthesesSchemaModule, "generated/syntheses.schema.json"),
+  }),
+  Object.freeze({
+    id: "workshop-directory",
+    served_at: "/schemas/workshop-directory.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: canonicalSchemaText(
+      workshopDirectorySchemaModule,
+      "generated/workshop-directory.schema.json",
+    ),
   }),
   Object.freeze({
     id: "workshop-search",

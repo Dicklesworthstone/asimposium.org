@@ -108,6 +108,12 @@ import {
 } from "@asimposium/contracts";
 import { eventTailCursor } from "@asimposium/contracts/event-tail";
 import {
+  WORKSHOP_DIRECTORY_MAX_RESPONSE_BYTES,
+  WORKSHOP_DIRECTORY_SCHEMA_ID,
+  WorkshopDirectoryQuerySchema,
+  workshopDirectoryPath,
+} from "@asimposium/contracts/workshop-directory";
+import {
   bucketizePackBudget,
   byteLength,
   composedPackToProjection,
@@ -321,6 +327,7 @@ import {
   clientStatementContextGuard,
 } from "./statement-context";
 import { readWorkingMovesPack } from "./working-moves";
+import { readWorkshopDirectory, WorkshopDirectoryUnavailable } from "./workshop-directory.ts";
 import { logFellowWrite } from "./write-ops-log";
 
 /**
@@ -1736,6 +1743,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     db: Env["DB"],
     problemId: string,
     binding: FellowCredentialBinding,
+    access: { readonly readOnly?: boolean } = {},
   ): Promise<void> {
     const problem = await db
       .prepare(
@@ -1765,7 +1773,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     )
       throw new SessionProblemMissingError(problemId);
 
-    if (problem.admission_mode === "archived-read-only") {
+    if (problem.admission_mode === "archived-read-only" && !access.readOnly) {
       throw new ProblemArchivedError(problemId);
     }
 
@@ -2551,6 +2559,127 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }),
     );
 
+  app.use("/v1/sessions/:id/workshop", async (c, next) => {
+    await next();
+    if (c.req.method !== "GET" && c.req.method !== "HEAD") return;
+    c.res.headers.set("cache-control", "private, no-store");
+    c.res.headers.set("x-robots-tag", "noindex, nofollow");
+    if (c.req.method === "HEAD") {
+      c.res = new Response(null, { status: c.res.status, headers: c.res.headers });
+    }
+  });
+  app.get("/v1/sessions/:id/workshop", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return privateNoStore(auth.response);
+    const params = new URL(c.req.url).searchParams;
+    const repeated = new Set(params.keys()).size !== params.size;
+    const parsed = WorkshopDirectoryQuerySchema.safeParse(Object.fromEntries(params));
+    if (repeated || !parsed.success) {
+      return privateNoStore(
+        validatedProblem({
+          status: 400,
+          code: "SCHEMA_INVALID",
+          title: "Invalid workshop directory selection",
+          detail:
+            "Use only one after, limit or state value. The directory derives ownership and problem scope from your session.",
+          fixHint:
+            "Omit parameters to read all states, or use state=open|archived|discarded and limit=1..100. Follow next_after with the same state selection.",
+          rule: "A5",
+          extensions: {
+            schema: WORKSHOP_DIRECTORY_SCHEMA_ID,
+            example: {
+              method: "GET",
+              path: workshopDirectoryPath(c.req.param("id"), { limit: 20 }),
+            },
+          },
+        }),
+      );
+    }
+    try {
+      const ownedSession = () =>
+        c.env.DB.prepare("SELECT problem_id FROM sessions WHERE session_id = ? AND fellow_id = ?")
+          .bind(c.req.param("id"), auth.binding.fellowId)
+          .first<{ problem_id: string }>();
+      // Closed sessions are recovery contexts. A later owned session can also
+      // recover this Fellow's earlier retained work on the same problem.
+      const session = await ownedSession();
+      if (
+        session === null ||
+        (auth.binding.grantedResources.problemBinding !== undefined &&
+          auth.binding.grantedResources.problemBinding !== session.problem_id)
+      )
+        return workshopNotFound();
+      await requireSessionProblemAccess(c.env.DB, session.problem_id, auth.binding, {
+        readOnly: true,
+      });
+      const page = await readWorkshopDirectory(
+        c.env.DB,
+        {
+          sessionId: c.req.param("id"),
+          problemId: session.problem_id,
+          fellowId: auth.binding.fellowId,
+        },
+        parsed.data,
+      );
+      const body = JSON.stringify(page);
+      if (byteLength(body) > WORKSHOP_DIRECTORY_MAX_RESPONSE_BYTES)
+        throw new WorkshopDirectoryUnavailable();
+      const etag = `"${await sha256Text(body)}"`;
+      const current = await authenticate(c.req.raw);
+      if (!current.ok) return privateNoStore(current.response);
+      const currentSession = await ownedSession();
+      if (
+        current.binding.fellowId !== auth.binding.fellowId ||
+        currentSession?.problem_id !== session.problem_id ||
+        (current.binding.grantedResources.problemBinding !== undefined &&
+          current.binding.grantedResources.problemBinding !== session.problem_id)
+      )
+        return workshopNotFound();
+      await requireSessionProblemAccess(c.env.DB, session.problem_id, current.binding, {
+        readOnly: true,
+      });
+      const next =
+        page.next_after === null
+          ? null
+          : workshopDirectoryPath(c.req.param("id"), {
+              ...parsed.data,
+              after: page.next_after,
+            });
+      const headers = {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "private, no-store",
+        "x-robots-tag": "noindex, nofollow",
+        etag,
+        link: `<${WORKSHOP_DIRECTORY_SCHEMA_ID}>; rel="describedby"${next === null ? "" : `, <${next}>; rel="next"`}`,
+      };
+      if (
+        c.req
+          .header("if-none-match")
+          ?.split(",")
+          .some((value) => value.trim() === etag)
+      )
+        return new Response(null, { status: 304, headers });
+      return new Response(body, { status: 200, headers });
+    } catch (error) {
+      if (
+        error instanceof SessionProblemMissingError ||
+        error instanceof ProblemArchivedError ||
+        error instanceof AdmissionRequiredError
+      )
+        return workshopNotFound();
+      return privateNoStore(
+        validatedProblem({
+          status: 503,
+          code: "INTERNAL_ERROR",
+          title: "The private workshop directory is unavailable",
+          detail: "Current private metadata could not be read safely.",
+          fixHint: "Retry the same request without advancing its continuation.",
+          headers: { "retry-after": "5" },
+        }),
+      );
+    }
+  });
+
   app.use("/v1/sessions/:id/workshop/:workshopId", async (c, next) => {
     await next();
     c.res.headers.set("cache-control", "private, no-store");
@@ -2615,8 +2744,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       )
         .bind(c.req.param("id"), auth.binding.fellowId)
         .first<{ problem_id: string }>();
-      if (session === null) return workshopNotFound();
-      await requireSessionProblemAccess(c.env.DB, session.problem_id, auth.binding);
+      if (
+        session === null ||
+        (auth.binding.grantedResources.problemBinding !== undefined &&
+          auth.binding.grantedResources.problemBinding !== session.problem_id)
+      )
+        return workshopNotFound();
+      await requireSessionProblemAccess(c.env.DB, session.problem_id, auth.binding, {
+        readOnly: true,
+      });
       const head = await c.env.DB.prepare(
         `SELECT workshop_id, type, title, body_md, cas_hash, relates_to_json,
           workshop_seq, created_at, revision_json, publication_json, current_version, state, ledger_intent_json
@@ -2714,7 +2850,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // either private bytes or a conditional receipt after a pause/revocation.
       const current = await authenticate(c.req.raw);
       if (!current.ok) return privateNoStore(current.response);
-      await requireSessionProblemAccess(c.env.DB, session.problem_id, current.binding);
+      if (
+        current.binding.fellowId !== auth.binding.fellowId ||
+        (current.binding.grantedResources.problemBinding !== undefined &&
+          current.binding.grantedResources.problemBinding !== session.problem_id)
+      )
+        return workshopNotFound();
+      await requireSessionProblemAccess(c.env.DB, session.problem_id, current.binding, {
+        readOnly: true,
+      });
       const headers = {
         "content-type": "application/json; charset=utf-8",
         "cache-control": "private, no-store",
@@ -4516,6 +4660,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       action_candidates: [
         ...orientation.actions,
         ...directiveContext.actions,
+        ...(profile === "working"
+          ? [
+              {
+                method: "GET" as const,
+                url: workshopDirectoryPath(session.session_id),
+                why: "Find all your retained workshop drafts on this problem, including earlier sessions and archived work. Follow each exact revision read_url to resume it; refresh the first page for new drafts or changed states.",
+                public_read: false,
+                requires: ["workshop:read"],
+              },
+            ]
+          : []),
         ...(deadEndSection.candidates.some((item) => item.scope === "ledger") ||
         deadEndSection.omitted.length > 0
           ? [

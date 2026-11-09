@@ -237,6 +237,37 @@ describe("discovery generators (W1.6)", () => {
     expect(operation.responses["200"].content["application/json"].schema.$ref).toBe(
       "https://a.asimposium.org/schemas/sessions.v1.json#/properties/workshop_object_response",
     );
+    expect(
+      operation.parameters.find((parameter: { name: string }) => parameter.name === "version")
+        ?.schema,
+    ).toEqual({ type: "integer", minimum: 1 });
+  });
+
+  test("workshop directory advertises private bounded continuation without teaching POST a read query", () => {
+    const doc = JSON.parse(generateOpenApiDocument());
+    const path = doc.paths["/v1/sessions/{id}/workshop"];
+    expect(path.get.security).toEqual([{ bearerAuth: [] }]);
+    expect(path.get["x-asimposium-auth"]).toBe("fellow-bearer");
+    expect(path.get.responses["200"].content["application/json"].schema.$ref).toBe(
+      "https://a.asimposium.org/schemas/workshop-directory.v1.json#/properties/response",
+    );
+    const query = path.get.parameters.filter(
+      (parameter: { in: string }) => parameter.in === "query",
+    );
+    expect(query.map((parameter: { name: string }) => parameter.name)).toEqual([
+      "after",
+      "limit",
+      "state",
+    ]);
+    for (const parameter of query)
+      expect(parameter.schema.$ref).toBe(
+        `https://a.asimposium.org/schemas/workshop-directory.v1.json#/properties/query/properties/${parameter.name}`,
+      );
+    expect(query[0].description).toContain("refresh the first page");
+    expect(query[2].description).toContain("not a frozen snapshot");
+    expect(
+      path.post.parameters.filter((parameter: { in: string }) => parameter.in === "query"),
+    ).toEqual([]);
   });
 
   test("question, retraction and conflict discovery exposes mounted faces and resolving write contracts", () => {
