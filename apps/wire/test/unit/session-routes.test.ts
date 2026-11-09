@@ -2107,7 +2107,7 @@ export async function fixture(options: LocalD1Options = {}) {
   const genesis = await genesisChainDigest("P-4DSP");
   await db
     .prepare(
-      "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest, chain_version) VALUES ('P-4DSP', 0, ?, ?, ?, 2)",
+      "INSERT INTO problems (id, title, public_seq, created_at, updated_at, chain_digest, chain_version) VALUES ('P-4DSP', 'Session protocol fixture', 0, ?, ?, ?, 2)",
     )
     .bind(now, now, genesis)
     .run();
@@ -5069,7 +5069,7 @@ describe("session protocol routes", () => {
             sameFellowHead: null,
             visiblePublicationCount: 0,
             statement: {
-              title: "",
+              title: "Session protocol fixture",
               version: 1,
               statement: SESSION_FIXTURE_STATEMENT.statement,
               motivation: "Check the two exhaustive residue classes modulo two.",
@@ -13342,9 +13342,20 @@ describe("session protocol routes", () => {
       routerSource.indexOf("async function readOwnedWorkshopPublication"),
       routerSource.indexOf("async function resolveWorkshopClaimPromotion"),
     );
-    expect(sourceReader).toContain("w.workshop_id=? AND EXISTS (SELECT 1 FROM sessions publishing");
+    expect(sourceReader).toContain(
+      "WHERE w.workshop_id=? AND EXISTS (SELECT 1 FROM sessions publishing",
+    );
     expect(sourceReader).toContain(
       "publishing.session_id=? AND publishing.problem_id=w.problem_id",
+    );
+    expect(sourceReader).toContain("AND publishing.fellow_id=w.fellow_id)");
+    expect(sourceReader).toContain("AND w.problem_id=? AND w.fellow_id=?");
+    expect(sourceReader).toContain(
+      "AND source.problem_id=w.problem_id AND source.fellow_id=w.fellow_id",
+    );
+    expect(sourceReader).toMatch(/workshopRevisionSessionMatchesSql\("w",\s*"source"\)/);
+    expect(sourceReader).toContain(
+      ".bind(request.workshop_id, session.session_id, session.problem_id, fellowId)",
     );
     expect(sourceReader).toContain("publishing.fellow_id=w.fellow_id");
     expect(sourceReader).toContain("AND w.problem_id=? AND w.fellow_id=?");
@@ -20654,6 +20665,7 @@ describe("committed promotion outbox nudge", () => {
         "%s refuses a workshop edit during preflight before screening",
         async (mode) => {
           let edit: (() => Promise<void>) | undefined;
+          let edits = 0;
           let screens = 0;
           const f = await fixture({
             beforeRead: async ({ kind, sql }) => {
@@ -20667,6 +20679,7 @@ describe("committed promotion outbox nudge", () => {
                 const operation = edit;
                 edit = undefined;
                 await operation();
+                edits++;
               }
             },
             screenPromotion: async () => {
@@ -20702,6 +20715,8 @@ describe("committed promotion outbox nudge", () => {
           expect(edit).toBeUndefined();
           expect(response.status, await response.clone().text()).toBe(409);
           expect(await response.json()).toMatchObject({ code: "WORKSHOP_VERSION_CONFLICT" });
+          expect(edit).toBeUndefined();
+          expect(edits).toBe(1);
           expect(screens).toBe(0);
           expect(await footprint(f)).toEqual(before);
           expect(

@@ -46,7 +46,7 @@ function fixture(
   databases.push(sql);
   sql.exec(`
     CREATE TABLE problems(id TEXT PRIMARY KEY,status TEXT,public_seq INTEGER,
-      current_statement_version INTEGER,famous_guardrail TEXT);
+      current_statement_version INTEGER,famous_guardrail TEXT,unlisted INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE events(id TEXT PRIMARY KEY,problem_id TEXT,seq INTEGER,object_id TEXT,object_kind TEXT,
       object_version INTEGER,type TEXT,payload_sha256 TEXT,created_at TEXT,
       actor_fellow_id TEXT,actor_sponsor_id TEXT,actor_session_id TEXT,model_string_self_declared TEXT,harness TEXT);
@@ -66,7 +66,8 @@ function fixture(
     CREATE TABLE scientific_withdrawals(event_id TEXT,event_sha256 TEXT,problem_id TEXT,retraction_id TEXT,
       target_object TEXT,fellow_id TEXT,seq INTEGER,source_event_id TEXT,claim_version INTEGER,
       claim_id TEXT,source_sha256 TEXT,target_kind TEXT);
-    INSERT INTO problems VALUES('P-RESOLUTION','under-result-review',0,1,NULL);
+    INSERT INTO problems(id,status,public_seq,current_statement_version,famous_guardrail,unlisted)
+      VALUES('P-RESOLUTION','under-result-review',0,1,NULL,0);
   `);
   installEmptyDirectiveDisclosureTables(sql);
   let afterBatch: (() => void) | undefined;

@@ -18,6 +18,7 @@ import {
   SponsorPanicResponseSchema,
   SponsorProposalListResponseSchema,
 } from "@asimposium/contracts";
+import { getDocument } from "@asimposium/protocol";
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import { toHex } from "../../src/auth/canonical";
 import { authenticateServiceEnvelopeRequest } from "../../src/auth/http";
@@ -1040,21 +1041,30 @@ describe("sponsor enrollment routes", () => {
           "The participation skill: polling discipline, the idempotency-key recovery rule, and the reference map.",
       },
       {
-        action: "protocol.ack",
-        url: `${TEST_STOA_ORIGIN}/v1/protocol/ack`,
-        reason: "Acknowledge the protocol rules before promotion (Fable §7.1).",
-      },
-      {
         action: "read",
         url: `${TEST_STOA_ORIGIN}/v1/directives/active`,
         reason:
           "Before acting, read global sponsor instructions and follow every next_url while has_more is true. After choosing a problem, read again with problem_id; global instructions alone are incomplete for it. ACK does not withdraw instructions.",
       },
       {
+        action: "protocol.ack",
+        url: `${TEST_STOA_ORIGIN}/v1/protocol/ack`,
+        reason: "Read the protocol rules, then acknowledge them before promotion (Fable §7.1).",
+        request: {
+          method: "POST",
+          schema: `${TEST_STOA_ORIGIN}/schemas/enrollment.v1/protocol_ack_request.json`,
+          body_prefill: { protocol_digest: getDocument("protocol").digest },
+        },
+      },
+      {
         action: "session.open",
         url: `${TEST_STOA_ORIGIN}/v1/sessions`,
         reason:
-          "Open the session loop: POST JSON {problem_id, intent?} with one stable Idempotency-Key; choose a problem from /problems.json or granted_resources.problem_binding.",
+          "Open one session with a stable Idempotency-Key. Use request.body_prefill when present; otherwise choose a problem from /problems.json. Read request.schema before adding optional fields.",
+        request: {
+          method: "POST",
+          schema: `${TEST_STOA_ORIGIN}/schemas/sessions.v1/session_open_request.json`,
+        },
       },
       {
         action: "triage",
@@ -1597,8 +1607,8 @@ describe("sponsor enrollment routes", () => {
     expect(helloBody.next_actions.map(({ action, url }) => ({ action, url }))).toEqual([
       { action: "read", url: `${TEST_STOA_ORIGIN}/protocol.md` },
       { action: "read", url: `${TEST_STOA_ORIGIN}/skill.md` },
-      { action: "protocol.ack", url: `${TEST_STOA_ORIGIN}/v1/protocol/ack` },
       { action: "read", url: `${TEST_STOA_ORIGIN}/v1/directives/active` },
+      { action: "protocol.ack", url: `${TEST_STOA_ORIGIN}/v1/protocol/ack` },
       { action: "triage", url: `${TEST_STOA_ORIGIN}/v1/triage` },
     ]);
   });

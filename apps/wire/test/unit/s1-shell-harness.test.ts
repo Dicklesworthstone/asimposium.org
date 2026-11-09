@@ -434,10 +434,33 @@ function failureEvidence(run: Run): string {
   // Only the nonsecret PID/PGID and ps birth time may accompany this refusal.
   // Never echo an arbitrary stderr line, argv, or a credential-bearing value.
   const derivationChild = run.stderr.match(
-    /^\[s1-cold-enrollment\] replay-derivation-started pid=([1-9][0-9]*) identity= ([1-9][0-9]* [A-Za-z]{3} [A-Za-z]{3} [0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4})$/m,
+    /^\[s1-cold-enrollment\] replay-derivation-started pid=([1-9][0-9]*) identity= ?([1-9][0-9]* [A-Za-z]{3} [A-Za-z]{3} [0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4})$/m,
   );
   return `exit=${run.exitCode}\nenv_keys=${relevantEnvironment || "none"}\nstdout=${safeCaptureSummary(run.stdout)}\nstderr=${safeCaptureSummary(run.stderr)}\nderivation_child=${derivationChild ? `${derivationChild[1]} ${derivationChild[2]}` : "unavailable"}`;
 }
+
+test.each(["", " "])("safe derivation diagnostics accept ps padding %j", (padding) => {
+  const run = {
+    exitCode: 0,
+    stdout: "",
+    stderr: `[s1-cold-enrollment] replay-derivation-started pid=1234567 identity=${padding}1234567 Mon Nov 9 20:00:00 2026\n`,
+  };
+  expect(failureEvidence(run)).toContain(
+    "derivation_child=1234567 1234567 Mon Nov 9 20:00:00 2026",
+  );
+});
+
+test("safe derivation diagnostics reject a multiline or arbitrary identity", () => {
+  for (const identity of ["\n1234567 Mon Nov 9 20:00:00 2026", "private-parser-canary"]) {
+    const result = failureEvidence({
+      exitCode: 1,
+      stdout: "",
+      stderr: `[s1-cold-enrollment] replay-derivation-started pid=1234567 identity=${identity}\n`,
+    });
+    expect(result).toContain("derivation_child=unavailable");
+    expect(result).not.toContain("private-parser-canary");
+  }
+});
 
 async function runScript(
   args: readonly string[],
