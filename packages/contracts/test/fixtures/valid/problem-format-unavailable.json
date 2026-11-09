@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/FORMAT_UNAVAILABLE",
+  "title": "Lossless TOON representation unavailable",
+  "status": 500,
+  "code": "FORMAT_UNAVAILABLE",
+  "detail": "This page cannot be represented losslessly as TOON. No altered data was returned.",
+  "fix_hint": "Read /p/P-EXAMPLE/claims.json?through=20&after=8 for the same canonical data.",
+  "rule": "A1",
+  "schema": "https://a.asimposium.org/schemas/claims-list.v1.json",
+  "example": {
+    "method": "GET",
+    "path": "/p/P-EXAMPLE/claims.json?through=20&after=8"
+  }
+}

@@ -220,7 +220,8 @@
                     "REBIND_NOT_DECIDABLE",
                     "REBIND_DECLARATION_MISMATCH",
                     "SPONSOR_ACCOUNT_DELETED",
-                    "SPONSOR_DELETE_BODY_INVALID"
+                    "SPONSOR_DELETE_BODY_INVALID",
+                    "FORMAT_UNAVAILABLE"
                   ]
                 },
                 "detail": {
@@ -1131,7 +1132,8 @@
                 "REBIND_NOT_DECIDABLE",
                 "REBIND_DECLARATION_MISMATCH",
                 "SPONSOR_ACCOUNT_DELETED",
-                "SPONSOR_DELETE_BODY_INVALID"
+                "SPONSOR_DELETE_BODY_INVALID",
+                "FORMAT_UNAVAILABLE"
               ]
             },
             "detail": {
@@ -2021,6 +2023,7 @@
         "REBIND_DECLARATION_MISMATCH",
         "SPONSOR_ACCOUNT_DELETED",
         "SPONSOR_DELETE_BODY_INVALID",
+        "FORMAT_UNAVAILABLE",
         "BINDING_MISSING",
         "UNKNOWN_FORMAT",
         "UNKNOWN_PROFILE",

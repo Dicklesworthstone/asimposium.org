@@ -148,6 +148,7 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-route-not-found.json", "ROUTE_NOT_FOUND", 404, "opaque"],
   ["problem-schema-slice-not-found.json", "SCHEMA_SLICE_NOT_FOUND", 404, "contract"],
   ["problem-internal-error.json", "INTERNAL_ERROR", 500, "opaque"],
+  ["problem-format-unavailable.json", "FORMAT_UNAVAILABLE", 500, "contract"],
   ["problem-enrollment-id-invalid.json", "ENROLLMENT_ID_INVALID", 422, "contract"],
   ["problem-device-code-body-invalid.json", "DEVICE_CODE_BODY_INVALID", 422, "contract"],
   ["problem-json-content-type-required.json", "JSON_CONTENT_TYPE_REQUIRED", 415, "contract"],
@@ -189,6 +190,29 @@ async function fixture(url: URL): Promise<unknown> {
     throw new Error("synthetic problem fixture is not valid JSON");
   }
 }
+
+test("unavailable lossless formats teach recovery while internal errors stay opaque", async () => {
+  const document = await fixture(
+    new URL("../fixtures/valid/problem-format-unavailable.json", import.meta.url),
+  );
+  expect(ProblemDocumentSchema.safeParse(document).success).toBe(true);
+  expect(ContractProblemSchema.safeParse(document).success).toBe(true);
+  expect(OpaqueProblemSchema.safeParse(document).success).toBe(false);
+  expect(
+    ProblemDocumentSchema.safeParse(
+      await fixture(
+        new URL("../fixtures/invalid/problem-format-unavailable-untaught.json", import.meta.url),
+      ),
+    ).success,
+  ).toBe(false);
+  expect(
+    ProblemDocumentSchema.safeParse({
+      ...(document as object),
+      type: `${PROBLEM_TYPE_PREFIX}INTERNAL_ERROR`,
+      code: "INTERNAL_ERROR",
+    }).success,
+  ).toBe(false);
+});
 
 test("the MINT_BODY_INVALID refusal the Worker emits validates as a contract problem", async () => {
   const parsed = ProblemDocumentSchema.safeParse(await fixture(VALID_MINT_BODY_INVALID));

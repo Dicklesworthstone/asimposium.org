@@ -288,7 +288,7 @@ async function claimsToonRecoveryJourney({ call, env, worker, origin, userAgent 
   });
   assert.equal(failed.status, 500, "this isolated mode requires the formatter source fault");
   const refusal = ContractProblemSchema.parse(await failed.json());
-  assert.equal(refusal.code, "INTERNAL_ERROR");
+  assert.equal(refusal.code, "FORMAT_UNAVAILABLE");
   assert.equal(refusal.schema, "https://a.asimposium.org/schemas/claims-list.v1.json");
   const path = refusal.example.path;
   assert.equal(typeof path, "string");

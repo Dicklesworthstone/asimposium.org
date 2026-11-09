@@ -289,6 +289,10 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "REBIND_DECLARATION_MISMATCH",
   "SPONSOR_ACCOUNT_DELETED",
   "SPONSOR_DELETE_BODY_INVALID",
+  // A1: a requested encoding cannot preserve the canonical public page. The
+  // alternative representation is public and safe to teach; internal errors
+  // and policy refusals remain opaque.
+  "FORMAT_UNAVAILABLE",
 ] as const;
 
 export const CONTRACT_PROBLEM_CODES = [

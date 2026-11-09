@@ -2637,7 +2637,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
       });
       const response = problemDocument({
         status: 500,
-        code: "INTERNAL_ERROR",
+        code: "FORMAT_UNAVAILABLE",
         title: "Lossless TOON representation unavailable",
         detail: "This page cannot be represented losslessly as TOON. No altered data was returned.",
         fixHint: `Read ${recoveryPath} for the same canonical data.`,
