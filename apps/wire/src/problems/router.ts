@@ -234,10 +234,15 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       });
     }
 
-    // If adopting a sponsor brief, verify brief ownership and assignment
-    if (parsed.data.brief_id) {
+    // Admission is checked before expensive reads and again by the proposal
+    // transaction. A sponsor can withdraw or reassign a brief while the Fellow
+    // is preparing its formulation; another session can also adopt it first.
+    const briefAdmissionRefusal = async (): Promise<Response | undefined> => {
+      if (!parsed.data.brief_id) return undefined;
       const brief = await db
-        .prepare("SELECT * FROM sponsor_problem_briefs WHERE id = ?")
+        .prepare(
+          "SELECT id, sponsor_id, assigned_fellow_id, status, scope FROM sponsor_problem_briefs WHERE id = ?",
+        )
         .bind(parsed.data.brief_id)
         .first<{
           id: string;
@@ -283,7 +288,10 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       }
       if (brief.scope != null && parsed.data.scope === undefined)
         return problemBoundariesRequired();
-    }
+      return undefined;
+    };
+    const briefRefusal = await briefAdmissionRefusal();
+    if (briefRefusal) return briefRefusal;
 
     // P11 Duplicate-problem screening
     const candidateHash = await normHash(parsed.data.statement);
@@ -369,16 +377,21 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
              problem_id, version, statement, norm_hash, falsifier, motivation,
              scope, out_of_scope, success_criteria, created_at
            ) VALUES (?, 1,
-             CASE WHEN ? IS NULL OR ? IS NOT NULL OR NOT EXISTS (
-               SELECT 1 FROM sponsor_problem_briefs WHERE id = ? AND scope IS NOT NULL
+             CASE WHEN ? IS NULL OR EXISTS (
+               SELECT 1 FROM sponsor_problem_briefs
+               WHERE id = ? AND sponsor_id = ? AND status = 'active'
+                 AND (assigned_fellow_id IS NULL OR assigned_fellow_id = ?)
+                 AND (scope IS NULL OR ? IS NOT NULL)
              ) THEN ? ELSE NULL END,
              ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           problemId,
           parsed.data.brief_id ?? null,
-          parsed.data.scope ?? null,
           parsed.data.brief_id ?? null,
+          auth.binding.sponsorId,
+          auth.binding.fellowId,
+          parsed.data.scope ?? null,
           parsed.data.statement,
           fullHash,
           parsed.data.falsifier,
@@ -414,25 +427,23 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       batchStatements.push(
         db
           .prepare(
-            "UPDATE sponsor_problem_briefs SET status = 'adopted', updated_at = ? WHERE id = ?",
+            `UPDATE sponsor_problem_briefs SET status = 'adopted', updated_at = ?
+             WHERE id = ? AND sponsor_id = ? AND status = 'active'
+               AND (assigned_fellow_id IS NULL OR assigned_fellow_id = ?)`,
           )
-          .bind(now, parsed.data.brief_id),
+          .bind(now, parsed.data.brief_id, auth.binding.sponsorId, auth.binding.fellowId),
       );
     }
 
     try {
       await db.batch(batchStatements);
     } catch (error) {
-      // The brief may acquire boundaries after admission. The version insert's
-      // NOT NULL guard then rolls back the entire proposal rather than dropping
-      // context on adoption. Return the same teaching refusal as preflight.
-      if (parsed.data.brief_id && parsed.data.scope === undefined) {
-        const current = await db
-          .prepare("SELECT scope FROM sponsor_problem_briefs WHERE id = ? AND sponsor_id = ?")
-          .bind(parsed.data.brief_id, auth.binding.sponsorId)
-          .first<{ scope: string | null }>();
-        if (current?.scope != null) return problemBoundariesRequired();
-      }
+      // The statement's NOT NULL guard rolls back every draft, membership and
+      // steward write if admission changed. Report the current actionable
+      // refusal instead of a generic database failure; unrelated failures still
+      // reach the router's error boundary.
+      const refusal = await briefAdmissionRefusal();
+      if (refusal) return refusal;
       throw error;
     }
 
