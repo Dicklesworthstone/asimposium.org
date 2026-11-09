@@ -14357,6 +14357,149 @@ describe("committed promotion outbox nudge", () => {
     expect(closeReplay.status).toBe(200);
   });
 
+  test.each(["fellow-edit", "sponsor-discard"] as const)(
+    "resumed workshop edits recover from a %s committed during the CAS write",
+    async (winner) => {
+      const f = await fixture();
+      let key = 0;
+      const post = (path: string, body: unknown, idempotencyKey = `workshop-race-${++key}`) =>
+        f.call(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
+          body: JSON.stringify(body),
+        });
+      const open = async () => {
+        const response = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" });
+        expect(response.status, await response.clone().text()).toBe(201);
+        return SessionOpenResponseSchema.parse(await response.json()).session_id;
+      };
+      const origin = await open();
+      const created = await post(workshopDirectoryPath(origin), {
+        type: "scratch",
+        title: "Retained route",
+        body_md: "Original private work remains recoverable.",
+      });
+      expect(created.status).toBe(201);
+      const draft = WorkshopPushResponseSchema.parse(await created.json());
+      expect(
+        (await post(`/v1/sessions/${origin}/close`, { handback: "Resume the retained route." })).status,
+      ).toBe(201);
+      const path = workshopDirectoryPath(await open());
+      const sponsorRouter = createSessionRouter({
+        service: f.service,
+        replayProtector: f.replayProtector,
+        verifiedSponsor: async (request) => ({
+          principal: { type: "sponsor", sponsorId: f.binding.sponsorId },
+          rawBody: new Uint8Array(await request.arrayBuffer()),
+        }),
+      });
+      const snapshot = async () => ({
+        heads: (await f.db.prepare("SELECT * FROM workshop_objects ORDER BY workshop_id").all())
+          .results,
+        revisions: (
+          await f.db.prepare("SELECT * FROM workshop_revisions ORDER BY workshop_id, version").all()
+        ).results,
+        replays: (
+          await f.db
+            .prepare(
+              "SELECT * FROM session_write_replays ORDER BY scope, principal_scope, idempotency_key",
+            )
+            .all()
+        ).results,
+        events: (await f.db.prepare("SELECT * FROM events ORDER BY id").all()).results,
+        cursor: (await f.db.prepare("SELECT * FROM public_cursor").all()).results,
+      });
+      let committed: Awaited<ReturnType<typeof snapshot>> | undefined;
+      let overlap: (() => Promise<void>) | undefined = async () => {
+        const response =
+          winner === "fellow-edit"
+            ? await post(path, {
+                workshop_id: draft.workshop_id,
+                base_version: 1,
+                body_md: "The concurrent Fellow edit must survive.",
+              })
+            : await sponsorRouter.fetch(
+                new Request("https://a-staging.asimposium.org/v1/sponsors/workshop/action", {
+                  method: "POST",
+                  headers: { "content-type": "application/json", "idempotency-key": "sponsor-wins" },
+                  body: JSON.stringify({
+                    problem_id: "P-4DSP",
+                    fellow_id: f.binding.fellowId,
+                    workshop_id: draft.workshop_id,
+                    expected_workshop_version: 1,
+                    action: "discard",
+                  }),
+                }),
+                f.env,
+              );
+        expect(response.status, await response.clone().text()).toBe(201);
+        committed = await snapshot();
+      };
+      f.env.ARTIFACTS = {
+        put: async () => {
+          const interleave = overlap;
+          overlap = undefined;
+          await interleave?.();
+          return {};
+        },
+      } as never;
+      const edit = {
+        workshop_id: draft.workshop_id,
+        base_version: 1,
+        body_md: "Recovered private boundary calculation. ".repeat(40),
+      };
+      const refused = await post(path, edit, "stale-resumed-edit");
+      expect(overlap).toBeUndefined();
+      expect(committed).toBeDefined();
+      expect(refused.status, await refused.clone().text()).toBe(409);
+      expect(refused.headers.get("cache-control")).toBe("private, no-store");
+      expect(ContractProblemSchema.parse(await refused.json())).toMatchObject({
+        code: "WORKSHOP_VERSION_CONFLICT",
+        current_version: 2,
+        suggested_action: "refetch_and_reapply",
+        refetch_url: `${path}/${draft.workshop_id}`,
+        example: { workshop_id: draft.workshop_id, base_version: 2 },
+      });
+      // A losing edit owns neither a receipt nor a private revision. Its CAS
+      // write cannot replace the winning work-product binding or public state.
+      expect(await snapshot()).toEqual(committed);
+      expect((await post(path, edit, "stale-resumed-edit")).status).toBe(409);
+      expect(await snapshot()).toEqual(committed);
+      const read = await f.call(`${path}/${draft.workshop_id}`);
+      expect(read.status).toBe(200);
+      const winnerObject = WorkshopObjectResponseSchema.parse(await read.json()).object;
+      expect(winnerObject.current_version).toBe(2);
+      expect(winnerObject.state).toBe(winner === "fellow-edit" ? "open" : "discarded");
+      expect(winnerObject.body_md).toBe(
+        winner === "fellow-edit"
+          ? "The concurrent Fellow edit must survive."
+          : "Original private work remains recoverable.",
+      );
+      const recoveredEdit = {
+        ...edit,
+        base_version: winnerObject.current_version,
+        body_md: "Reapplied after reviewing the concurrent change.",
+      };
+      const recovered = await post(path, recoveredEdit, "reapplied-resumed-edit");
+      expect(recovered.status, await recovered.clone().text()).toBe(201);
+      const receipt = WorkshopPushResponseSchema.parse(await recovered.json());
+      expect(receipt.version).toBe(3);
+      const afterRecovery = await snapshot();
+      const replay = await post(path, recoveredEdit, "reapplied-resumed-edit");
+      expect(replay.status).toBe(200);
+      expect(await replay.json()).toEqual(receipt);
+      expect(await snapshot()).toEqual(afterRecovery);
+      const restored = WorkshopObjectResponseSchema.parse(
+        await (await f.call(`${path}/${draft.workshop_id}`)).json(),
+      ).object;
+      expect(restored).toMatchObject({ version: 3, state: "open", body_md: recoveredEdit.body_md });
+      const historical = WorkshopObjectResponseSchema.parse(
+        await (await f.call(`${path}/${draft.workshop_id}?version=1`)).json(),
+      ).object;
+      expect(historical.body_md).toBe("Original private work remains recoverable.");
+    },
+  );
+
   test("workshop directory supports exact recovery, current filters, conditional HEAD and archived closed contexts", async () => {
     const f = await fixture();
     let key = 0;

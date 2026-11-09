@@ -4933,30 +4933,31 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         }>();
       if (head === null) return workshopNotFound();
 
-      if (head.current_version !== reviseData.base_version) {
-        return validatedProblem({
-          status: 409,
-          code: "WORKSHOP_VERSION_CONFLICT",
-          title: "The workshop object base version is stale",
-          detail: `Workshop object ${head.workshop_id} is at version ${head.current_version}; the revision was based on ${reviseData.base_version}.`,
-          fixHint:
-            "Refetch the current workshop object version with GET /v1/sessions/:id/workshop/:workshop_id and reapply your edit.",
-          rule: "A5",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            current_version: head.current_version,
-            suggested_action: "refetch_and_reapply",
-            refetch_url: `/v1/sessions/${session.session_id}/workshop/${head.workshop_id}`,
-            example: {
-              workshop_id: head.workshop_id,
-              base_version: head.current_version,
-              type: head.type,
-              title: head.title,
-              body_md: "<new text>",
+      const versionConflict = (currentVersion: number) =>
+        privateNoStore(
+          validatedProblem({
+            status: 409,
+            code: "WORKSHOP_VERSION_CONFLICT",
+            title: "The workshop object base version is stale",
+            detail: `Workshop object ${head.workshop_id} is at version ${currentVersion}; the revision was based on ${reviseData.base_version}.`,
+            fixHint:
+              "Refetch the current workshop object version with GET /v1/sessions/:id/workshop/:workshop_id and reapply your edit.",
+            rule: "A5",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              current_version: currentVersion,
+              suggested_action: "refetch_and_reapply",
+              refetch_url: `/v1/sessions/${session.session_id}/workshop/${head.workshop_id}`,
+              example: {
+                workshop_id: head.workshop_id,
+                base_version: currentVersion,
+                body_md: "<new text>",
+              },
             },
-          },
-        });
-      }
+          }),
+        );
+      if (head.current_version !== reviseData.base_version)
+        return versionConflict(head.current_version);
 
       const effectiveType = reviseData.type ?? head.type;
       if (
@@ -5095,6 +5096,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                          AND closed_at IS NULL
                      )
                        AND EXISTS (
+                         SELECT 1 FROM workshop_objects
+                         WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ?
+                           AND current_version = ?
+                       )
+                       AND EXISTS (
                          SELECT 1 FROM fellow_tokens
                          WHERE credential_id = ? AND revoked_at IS NULL
                        )
@@ -5111,6 +5117,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                     session.session_id,
                     auth.binding.fellowId,
                     session.problem_id,
+                    head.workshop_id,
+                    session.problem_id,
+                    auth.binding.fellowId,
+                    head.current_version,
                     auth.binding.credentialId,
                   ),
                 db
@@ -5200,6 +5210,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         if (error instanceof ReplayClaimNotCommittedError) {
           const current = await openSessionOf(db, sessionId, auth.binding.fellowId);
           if (current instanceof Response) return current;
+          // The CAS body write and replay sealing both await. A sponsor action
+          // or another edit may win meanwhile. The batch elects a receipt only
+          // while the captured draft version still matches, so a losing edit
+          // has no private revision or replay to mistake for a committed edit.
+          const retained = await db
+            .prepare(
+              `SELECT current_version FROM workshop_objects
+               WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ?`,
+            )
+            .bind(head.workshop_id, session.problem_id, auth.binding.fellowId)
+            .first<{ current_version: number }>();
+          if (!retained) return workshopNotFound();
+          if (retained.current_version !== reviseData.base_version)
+            return versionConflict(retained.current_version);
           return writeRefusedProblem();
         }
         throw error;
