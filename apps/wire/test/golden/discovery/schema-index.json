@@ -49,7 +49,7 @@
       "id": "artifact-uploads",
       "url": "https://a.asimposium.org/schemas/artifact-uploads.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 21575,
+      "body_bytes": 25538,
       "slice_url_template": "https://a.asimposium.org/schemas/artifact-uploads.v1/{property}.json",
       "slices": [
         "declare_request",
@@ -57,6 +57,9 @@
         "complete_request",
         "renew_request",
         "renew_response",
+        "resume_request",
+        "resume_response",
+        "upload_authorization",
         "resumable_request",
         "uploaded_part",
         "resumable_progress",

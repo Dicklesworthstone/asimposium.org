@@ -24,6 +24,7 @@ export type ArtifactFailure =
   | "EXPIRED"
   | "BUDGET"
   | "RENEWAL_LIMIT"
+  | "RECOVERY_LIMIT"
   | "BUSY"
   | "NOT_UPLOADED"
   | "MISMATCH"
@@ -64,6 +65,9 @@ export interface ArtifactManifest {
   credential_id: string;
   sponsor_id: string;
   session_id: string;
+  authorization_generation: number;
+  authorization_credential_id: string;
+  authorization_session_id: string;
   problem_id: string;
   sha256: string;
   size_bytes: number;
@@ -72,6 +76,8 @@ export interface ArtifactManifest {
   created_at: number;
   updated_at: number;
   expires_at: number;
+  lease_token: string | null;
+  lease_until: number | null;
   put_expires_at: number;
   key_hash: string;
   request_digest: string;
@@ -105,6 +111,7 @@ interface ArtifactPutRenewal {
   put_expires_at: number;
   replay_ciphertext: string;
   replay_iv: string;
+  authorization_generation: number;
 }
 export const ARTIFACT_REPLAY_MS = 24 * 60 * 60 * 1000;
 export const ARTIFACT_VERIFY_LEASE_MS = 60_000;
@@ -130,7 +137,7 @@ const context = (
     row.request_digest,
   ]);
 
-function translate(error: unknown): never {
+export function translateArtifactFailure(error: unknown): never {
   if (error instanceof ArtifactUploadError) throw error;
   const message = error instanceof Error ? error.message : "";
   if (message.includes("ARTIFACT_BUDGET_EXHAUSTED")) return fail("BUDGET");
@@ -139,11 +146,15 @@ function translate(error: unknown): never {
   if (message.includes("ARTIFACT_STATE_CONFLICT")) return fail("CONFLICT");
   return fail("UNAVAILABLE");
 }
+const translate = translateArtifactFailure;
 
 /** Recheck current credential, grant and membership even for readback. A
  * closed session does not erase its private artifacts; a removed membership,
  * expired grant or revoked token cannot keep reading through an old manifest. */
 export const ARTIFACT_READ_AUTHORITY_SQL = `FROM artifact_uploads a
+    JOIN artifact_upload_authorizations current_authority ON current_authority.upload_id = a.upload_id
+      AND current_authority.generation = (SELECT MAX(generation) FROM artifact_upload_authorizations
+        WHERE upload_id = a.upload_id)
     JOIN problem_memberships m ON m.problem_id = a.problem_id AND m.fellow_id = a.fellow_id
     JOIN fellow_tokens c ON c.credential_id = ? AND c.fellow_id = a.fellow_id AND c.sponsor_id = a.sponsor_id
     JOIN enrollment_fellows f ON f.fellow_id = c.fellow_id AND f.sponsor_id = c.sponsor_id
@@ -166,7 +177,10 @@ export async function readArtifactManifest(
   now = Date.now(),
 ): Promise<ArtifactManifest> {
   const row = await db
-    .prepare(`SELECT a.* ${ARTIFACT_READ_AUTHORITY_SQL}
+    .prepare(`SELECT a.*, current_authority.generation AS authorization_generation,
+      current_authority.credential_id AS authorization_credential_id,
+      current_authority.session_id AS authorization_session_id
+      ${ARTIFACT_READ_AUTHORITY_SQL}
       AND a.upload_id = ? AND a.fellow_id = ? AND a.sponsor_id = ?`)
     .bind(actor.credentialId, now, now, now, uploadId, actor.fellowId, actor.sponsorId)
     .first<ArtifactManifest>();
@@ -384,7 +398,7 @@ export async function renewArtifactPut(
       await expireManifest(db, bucket, row.upload_id, now, clock);
       return fail("EXPIRED");
     }
-    if (row.credential_id !== actor.credentialId) return fail("NOT_ALLOWED");
+    if (row.authorization_credential_id !== actor.credentialId) return fail("NOT_ALLOWED");
     if (await readArtifactResumableProgress(db, row)) return fail("CONFLICT");
     await authorizeNew?.(row);
     const createdAt = clock();
@@ -421,7 +435,7 @@ export async function renewArtifactPut(
     await db
       .prepare(`INSERT INTO artifact_put_renewals
         (fellow_id, key_hash, upload_id, credential_id, sponsor_id, created_at, authorized_at,
-         put_expires_at, replay_ciphertext, replay_iv) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+         put_expires_at, replay_ciphertext, replay_iv, authorization_generation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(
         actor.fellowId,
         keyHash,
@@ -433,6 +447,7 @@ export async function renewArtifactPut(
         put.expires_at,
         sealed.ciphertext,
         sealed.initializationVector,
+        row.authorization_generation,
       )
       .run();
     return receipt;
@@ -656,8 +671,23 @@ async function withArtifactPartLease<T>(
     const leased = await db
       .prepare(`UPDATE artifact_uploads SET lease_token = ?, lease_until = ?, updated_at = ?
       WHERE upload_id = ? AND state = 'presigned' AND expires_at > ?
-        AND (lease_until IS NULL OR lease_until <= ?) RETURNING upload_id`)
-      .bind(token, now + ARTIFACT_VERIFY_LEASE_MS, now, row.upload_id, now, now)
+        AND (lease_until IS NULL OR lease_until <= ?)
+        AND EXISTS (SELECT 1 FROM artifact_upload_authorizations a
+          WHERE a.upload_id = artifact_uploads.upload_id AND a.generation = ?
+            AND a.credential_id = ? AND a.session_id = ?
+            AND a.generation = (SELECT MAX(generation) FROM artifact_upload_authorizations
+              WHERE upload_id = a.upload_id)) RETURNING upload_id`)
+      .bind(
+        token,
+        now + ARTIFACT_VERIFY_LEASE_MS,
+        now,
+        row.upload_id,
+        now,
+        now,
+        row.authorization_generation,
+        row.authorization_credential_id,
+        row.authorization_session_id,
+      )
       .first();
     if (!leased) return fail("BUSY");
     return await work(token);
@@ -690,7 +720,7 @@ async function writablePartManifest(
     await expireManifest(db, bucket, uploadId, clock(), clock);
     return fail("EXPIRED");
   }
-  if (row.credential_id !== actor.credentialId) return fail("NOT_ALLOWED");
+  if (row.authorization_credential_id !== actor.credentialId) return fail("NOT_ALLOWED");
   return row;
 }
 
@@ -716,9 +746,9 @@ export async function startArtifactResumable(
     // A previous identical starter may have won before this lease was taken.
     if (await readArtifactResumableProgress(db, row)) return;
     await db
-      .prepare(`INSERT INTO artifact_resumable_uploads (upload_id, credential_id, started_at, lease_token)
-      VALUES (?, ?, ?, ?)`)
-      .bind(uploadId, actor.credentialId, clock(), token)
+      .prepare(`INSERT INTO artifact_resumable_uploads (upload_id, credential_id, started_at, lease_token, authorization_generation)
+      VALUES (?, ?, ?, ?, ?)`)
+      .bind(uploadId, actor.credentialId, clock(), token, row.authorization_generation)
       .run();
   });
   return readArtifactManifest(db, actor, uploadId, clock());
@@ -764,9 +794,18 @@ export async function putArtifactPart(
       // One reservation can therefore address at most its declared bytes.
       await db
         .prepare(`INSERT INTO artifact_upload_parts
-        (upload_id, part_number, credential_id, sha256, size_bytes, created_at, lease_token)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`)
-        .bind(uploadId, partNumber, actor.credentialId, sha256, bytes.length, clock(), token)
+        (upload_id, part_number, credential_id, sha256, size_bytes, created_at, lease_token, authorization_generation)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(
+          uploadId,
+          partNumber,
+          actor.credentialId,
+          sha256,
+          bytes.length,
+          clock(),
+          token,
+          row.authorization_generation,
+        )
         .run();
     }
     await putVerifiedBytes(
@@ -777,9 +816,17 @@ export async function putArtifactPart(
       "application/octet-stream",
     );
     const acknowledged = await db
-      .prepare(`UPDATE artifact_upload_parts SET acknowledged_at = ?, lease_token = ?
+      .prepare(`UPDATE artifact_upload_parts SET acknowledged_at = ?, lease_token = ?, acknowledged_credential_id = ?, acknowledged_generation = ?
       WHERE upload_id = ? AND part_number = ? AND sha256 = ? AND acknowledged_at IS NULL RETURNING part_number`)
-      .bind(clock(), token, uploadId, partNumber, sha256)
+      .bind(
+        clock(),
+        token,
+        actor.credentialId,
+        row.authorization_generation,
+        uploadId,
+        partNumber,
+        sha256,
+      )
       .first();
     if (!acknowledged) return fail("BUSY");
   });
@@ -824,15 +871,30 @@ export async function completeArtifact(
     await expireManifest(db, bucket, uploadId, now, clock);
     return fail("EXPIRED");
   }
-  if (row.credential_id !== actor.credentialId) return fail("NOT_ALLOWED");
+  if (row.authorization_credential_id !== actor.credentialId) return fail("NOT_ALLOWED");
   await authorizeNew?.(row);
   const token = crypto.randomUUID().replaceAll("-", "");
   try {
     const leased = await db
       .prepare(`UPDATE artifact_uploads SET lease_token = ?, lease_until = ?, updated_at = ?
       WHERE upload_id = ? AND state = 'presigned' AND expires_at > ?
-        AND (lease_until IS NULL OR lease_until <= ?) RETURNING upload_id`)
-      .bind(token, now + ARTIFACT_VERIFY_LEASE_MS, now, uploadId, now, now)
+        AND (lease_until IS NULL OR lease_until <= ?)
+        AND EXISTS (SELECT 1 FROM artifact_upload_authorizations a
+          WHERE a.upload_id = artifact_uploads.upload_id AND a.generation = ?
+            AND a.credential_id = ? AND a.session_id = ?
+            AND a.generation = (SELECT MAX(generation) FROM artifact_upload_authorizations
+              WHERE upload_id = a.upload_id)) RETURNING upload_id`)
+      .bind(
+        token,
+        now + ARTIFACT_VERIFY_LEASE_MS,
+        now,
+        uploadId,
+        now,
+        now,
+        row.authorization_generation,
+        actor.credentialId,
+        row.authorization_session_id,
+      )
       .first();
     if (!leased) {
       const winner = await readArtifactManifest(db, actor, uploadId, clock());
@@ -865,7 +927,12 @@ export async function completeArtifact(
     // The verified bytes now live in the CAS; the per-upload staging copy has
     // no reader left, and keeping it would store every artifact twice.
     await discardStaging(bucket, uploadId, db, clock, waitUntil);
-    return committed;
+    return {
+      ...committed,
+      authorization_generation: row.authorization_generation,
+      authorization_credential_id: row.authorization_credential_id,
+      authorization_session_id: row.authorization_session_id,
+    };
   } catch (error) {
     if (
       error instanceof ArtifactInspectionError ||

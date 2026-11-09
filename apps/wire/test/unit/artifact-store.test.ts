@@ -6,6 +6,7 @@ import { gzipSync } from "node:zlib";
 import {
   ARTIFACT_PART_SIZE_BYTES,
   ArtifactInventoryResponseSchema,
+  ArtifactResumeResponseSchema,
   ArtifactStatusResponseSchema,
 } from "@asimposium/contracts/artifact-uploads";
 import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
@@ -17,6 +18,7 @@ import {
 } from "../../src/krater/artifact-http.ts";
 import { artifactSha256 } from "../../src/krater/artifact-inspection.ts";
 import { artifactStagingKey } from "../../src/krater/artifact-presign.ts";
+import { resumeArtifactUpload } from "../../src/krater/artifact-recovery.ts";
 import {
   ARTIFACT_STAGING_RETRY_MS,
   reconcileArtifactStaging,
@@ -70,6 +72,8 @@ async function fixture(withRetention = true) {
       opened_at TEXT, idle_close_at TEXT, closed_at TEXT);
     CREATE TABLE problem_memberships (problem_id TEXT, fellow_id TEXT, role TEXT);
     CREATE TABLE events (writer_credential_id TEXT);
+    CREATE TABLE private_draft_erasures (problem_id TEXT PRIMARY KEY);
+    CREATE TRIGGER private_draft_erase_content AFTER INSERT ON private_draft_erasures BEGIN SELECT 1; END;
     CREATE TABLE public_cursor (cursor INTEGER);
     INSERT INTO public_cursor VALUES (7);
     INSERT INTO problems VALUES ('P-DEMO', 'private-draft', 1);`);
@@ -122,6 +126,15 @@ async function fixture(withRetention = true) {
       "utf8",
     ),
   );
+  sql.exec(
+    readFileSync(
+      new URL("../../../../db/migrations/0140_artifact_upload_recovery.sql", import.meta.url),
+      "utf8",
+    ),
+  );
+  // This focused model omits private content tables. The complete erasure
+  // trigger runs against every migration in private-draft-erasure.test.ts.
+  sql.exec("DROP TRIGGER private_draft_erase_content");
   let before: ((text: string) => void) | undefined;
   const prepare = (text: string) => {
     let binds: unknown[] = [];
@@ -186,7 +199,7 @@ async function fixture(withRetention = true) {
   const writes: string[] = [];
   const deletions: string[][] = [];
   let onGet: ((key: string) => void) | undefined;
-  let onPut: ((key: string) => void) | undefined;
+  let onPut: ((key: string) => void | Promise<void>) | undefined;
   let onDelete: ((keys: string[]) => void | Promise<void>) | undefined;
   const bucket = {
     async get(key: string) {
@@ -212,7 +225,7 @@ async function fixture(withRetention = true) {
         httpMetadata: { contentDisposition: string };
       },
     ) {
-      onPut?.(key);
+      await onPut?.(key);
       assert.equal(options.onlyIf.etagDoesNotMatch, "*");
       assert.equal(options.httpMetadata.contentDisposition, "attachment");
       if (objects.has(key)) return null;
@@ -280,7 +293,7 @@ async function fixture(withRetention = true) {
     onGet: (hook: ((key: string) => void) | undefined) => {
       onGet = hook;
     },
-    onPut: (hook: ((key: string) => void) | undefined) => {
+    onPut: (hook: ((key: string) => void | Promise<void>) | undefined) => {
       onPut = hook;
     },
     onDelete: (hook: ((keys: string[]) => void | Promise<void>) | undefined) => {
@@ -522,11 +535,11 @@ test("authority lost during R2 part storage cannot acknowledge the part", async 
   await withArtifactFixture(async (f) => {
     const original = await f.create();
     await startArtifactResumable(f.db, f.bucket, actor, original.upload_id, f.clock);
-    f.onPut(() =>
+    f.onPut(() => {
       f.sql
         .query("UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ?")
-        .run(NOW, actor.credentialId),
-    );
+        .run(NOW, actor.credentialId);
+    });
     await assert.rejects(
       putArtifactPart(f.db, f.bucket, actor, original.upload_id, 1, bytes, f.clock),
       failure("NOT_ALLOWED"),
@@ -840,7 +853,9 @@ test("revocation during storage work prevents a verified manifest or readable pr
   await withArtifactFixture(async (f) => {
     const a = await f.create();
     f.objects.set(artifactStagingKey(a.upload_id), bytes);
-    f.onPut(() => f.sql.exec("UPDATE fellow_tokens SET revoked_at = 1"));
+    f.onPut(() => {
+      f.sql.exec("UPDATE fellow_tokens SET revoked_at = 1");
+    });
     await assert.rejects(f.complete(a.upload_id), failure("NOT_ALLOWED"));
     assert.equal(f.rows()[0]?.state, "presigned");
     await assert.rejects(f.read(a.upload_id), failure("NOT_FOUND"));
@@ -932,7 +947,7 @@ test("database constraints refuse incomplete verification and one-sided leases",
   });
 });
 
-function http(f: Awaited<ReturnType<typeof fixture>>, token = "valid-test-token") {
+function http(f: Awaited<ReturnType<typeof fixture>>, token = "valid-test-token", who = actor) {
   let authentications = 0;
   const options: ArtifactHttpOptions = {
     db: f.db,
@@ -944,13 +959,13 @@ function http(f: Awaited<ReturnType<typeof fixture>>, token = "valid-test-token"
       authentications++;
       if (presented !== "valid-test-token") return undefined;
       const c = f.sql
-        .query("SELECT * FROM fellow_tokens WHERE credential_id='token-a'")
-        .get() as Record<string, unknown>;
+        .query("SELECT * FROM fellow_tokens WHERE credential_id=?")
+        .get(who.credentialId) as Record<string, unknown>;
       const fellow = f.sql
-        .query("SELECT status FROM enrollment_fellows WHERE fellow_id='fellow-a'")
-        .get() as { status: string };
+        .query("SELECT status FROM enrollment_fellows WHERE fellow_id=?")
+        .get(who.fellowId) as { status: string };
       return {
-        ...actor,
+        ...who,
         grantedScopes: JSON.parse(String(c.granted_scopes_json)),
         grantedResources: JSON.parse(String(c.granted_resources_json)),
         issuedAt: Number(c.issued_at),
@@ -2133,4 +2148,475 @@ test("retention migration queues existing manifests and preserves their immutabl
   } finally {
     f.sql.close();
   }
+});
+
+function replacementUploadActor(f: Awaited<ReturnType<typeof fixture>>) {
+  const who = { ...actor, credentialId: "replacement-token" };
+  const session = `S-${"R".repeat(26)}`;
+  f.sql
+    .query(`INSERT INTO fellow_tokens
+    SELECT ?, fellow_id, sponsor_id, granted_scopes_json, granted_resources_json, ?, expires_at, NULL, credential_profile
+    FROM fellow_tokens WHERE credential_id = ?`)
+    .run(who.credentialId, NOW, actor.credentialId);
+  f.sql
+    .query("INSERT INTO sessions VALUES (?, ?, 'P-DEMO', ?, ?, NULL)")
+    .run(session, actor.fellowId, iso(), iso(12 * 3600000));
+  return { who, session };
+}
+
+test("resumption completes retained parts after credential rotation and session closure without rewriting provenance", async () => {
+  await withArtifactFixture(async (f) => {
+    const archive = resumableArchive();
+    const declaration = {
+      ...f.declaration,
+      size: archive.length,
+      sha256: await artifactSha256(archive),
+      encoding: "lake-archive" as const,
+    };
+    const created = await f.create("recovery-archive", declaration);
+    await startArtifactResumable(f.db, f.bucket, actor, created.upload_id, f.clock);
+    await putArtifactPart(
+      f.db,
+      f.bucket,
+      actor,
+      created.upload_id,
+      1,
+      archive.subarray(0, ARTIFACT_PART_SIZE_BYTES),
+      f.clock,
+    );
+    const original = f.rows()[0]!;
+    const firstPart = f.sql
+      .query("SELECT * FROM artifact_upload_parts WHERE part_number = 1")
+      .get();
+    const { who, session } = replacementUploadActor(f);
+    f.sql
+      .query("UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ?")
+      .run(NOW, actor.credentialId);
+    f.sql
+      .query("UPDATE sessions SET closed_at = ? WHERE session_id = ?")
+      .run(iso(), f.declaration.sessionId);
+    await assert.rejects(f.complete(created.upload_id), failure("NOT_FOUND"));
+    const h = http(f, "valid-test-token", who);
+    const status = ArtifactStatusResponseSchema.parse(
+      await (await h.call(`/v1/artifacts/${created.upload_id}`)).json(),
+    );
+    assert.equal(status.recovery?.expected_generation, 0);
+    assert.equal(status.authorization?.original_session_id, f.declaration.sessionId);
+    const body = { session_id: session, expected_generation: 0 };
+    const accepted = await h.call(`/v1/artifacts/${created.upload_id}/resume`, "POST", body);
+    assert.equal(accepted.status, 200);
+    const resumed = ArtifactResumeResponseSchema.parse(await accepted.json());
+    assert.equal(resumed.generation, 1);
+    assert.equal(resumed.expires_at, created.expires_at);
+    assert.deepEqual(
+      await (await h.call(`/v1/artifacts/${created.upload_id}/resume`, "POST", body)).json(),
+      resumed,
+    );
+    assert.equal(f.rows().length, 1);
+    for (const field of [
+      "credential_id",
+      "session_id",
+      "fellow_id",
+      "sponsor_id",
+      "problem_id",
+      "sha256",
+      "size_bytes",
+      "created_at",
+      "expires_at",
+      "put_expires_at",
+      "key_hash",
+      "request_digest",
+      "replay_ciphertext",
+      "replay_iv",
+    ])
+      assert.equal(f.rows()[0]![field], original[field], field);
+    assert.deepEqual(
+      f.sql.query("SELECT * FROM artifact_upload_parts WHERE part_number = 1").get(),
+      firstPart,
+    );
+    await putArtifactPart(
+      f.db,
+      f.bucket,
+      who,
+      created.upload_id,
+      2,
+      archive.subarray(ARTIFACT_PART_SIZE_BYTES),
+      f.clock,
+    );
+    const verified = await f.complete(created.upload_id, who);
+    assert.equal(verified.state, "verified");
+    assert.equal(verified.authorization_generation, 1);
+    assert.deepEqual(
+      Buffer.from((await f.read(created.upload_id, who)).bytes),
+      Buffer.from(archive),
+    );
+    const second = f.sql
+      .query(
+        "SELECT credential_id, authorization_generation, acknowledged_credential_id, acknowledged_generation FROM artifact_upload_parts WHERE part_number = 2",
+      )
+      .get();
+    assert.deepEqual(second, {
+      credential_id: who.credentialId,
+      authorization_generation: 1,
+      acknowledged_credential_id: who.credentialId,
+      acknowledged_generation: 1,
+    });
+    assert.deepEqual(
+      f.audit().map((row) => row.state),
+      ["presigned", "verified"],
+    );
+    assert.deepEqual(f.sql.query("SELECT cursor FROM public_cursor").get(), { cursor: 7 });
+  });
+});
+
+test("resumption receipts are exact across later generations while sealed URLs stay credential-bound", async () => {
+  await withArtifactFixture(async (f) => {
+    const original = await f.create();
+    const oldRenewal = await f.renew(original.upload_id);
+    const { who, session } = replacementUploadActor(f);
+    const first = { session_id: session, expected_generation: 0 };
+    const accepted = await resumeArtifactUpload(
+      f.db,
+      who,
+      original.upload_id,
+      first,
+      "resume-one",
+      f.clock,
+    );
+    assert.deepEqual(await f.create(), original);
+    await assert.rejects(f.create("request-1", f.declaration, who), failure("CONFLICT"));
+    assert.deepEqual(await f.renew(original.upload_id), oldRenewal);
+    await assert.rejects(f.renew(original.upload_id, "renewal-1", who), failure("CONFLICT"));
+    await assert.rejects(f.renew(original.upload_id, "old-token-fresh"), failure("NOT_ALLOWED"));
+    const fresh = await f.renew(original.upload_id, "new-token-fresh", who);
+    assert.equal(fresh.expires_at, original.expires_at);
+    assert.equal(f.rows().length, 1);
+    const second = await resumeArtifactUpload(
+      f.db,
+      actor,
+      original.upload_id,
+      { session_id: f.declaration.sessionId, expected_generation: 1 },
+      "resume-two",
+      f.clock,
+    );
+    assert.equal(second.generation, 2);
+    assert.deepEqual(
+      await resumeArtifactUpload(f.db, actor, original.upload_id, first, "resume-one", f.clock),
+      accepted,
+    );
+    assert.equal(
+      (await readArtifactManifest(f.db, actor, original.upload_id, f.clock()))
+        .authorization_generation,
+      2,
+    );
+    await assert.rejects(
+      resumeArtifactUpload(f.db, who, original.upload_id, first, "stale", f.clock),
+      failure("CONFLICT"),
+    );
+    await assert.rejects(
+      resumeArtifactUpload(
+        f.db,
+        who,
+        original.upload_id,
+        { ...first, session_id: f.declaration.sessionId },
+        "resume-one",
+        f.clock,
+      ),
+      failure("CONFLICT"),
+    );
+    assert.throws(
+      () => f.sql.exec("UPDATE artifact_upload_authorizations SET authorized_at = authorized_at"),
+      /ARTIFACT_AUTHORITY_IMMUTABLE/,
+    );
+    assert.throws(
+      () => f.sql.exec("DELETE FROM artifact_upload_authorizations"),
+      /ARTIFACT_AUTHORITY_IMMUTABLE/,
+    );
+    assert.throws(
+      () =>
+        f.sql.exec(
+          "INSERT OR REPLACE INTO artifact_upload_authorizations SELECT * FROM artifact_upload_authorizations WHERE generation = 0",
+        ),
+      /ARTIFACT_STATE_CONFLICT/,
+    );
+    assert.deepEqual(
+      f.sql.query("SELECT COUNT(*) AS n FROM artifact_upload_authorizations").get(),
+      { n: 3 },
+    );
+  });
+});
+
+test("resumption preserves an interrupted part intent while recording its replacement acknowledgment", async () => {
+  await withArtifactFixture(async (f) => {
+    const created = await f.create();
+    await startArtifactResumable(f.db, f.bucket, actor, created.upload_id, f.clock);
+    f.onPut(() => {
+      f.sql
+        .query("UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ?")
+        .run(NOW, actor.credentialId);
+    });
+    await assert.rejects(
+      putArtifactPart(f.db, f.bucket, actor, created.upload_id, 1, bytes, f.clock),
+      failure("NOT_ALLOWED"),
+    );
+    f.onPut(undefined);
+    const { who, session } = replacementUploadActor(f);
+    await resumeArtifactUpload(
+      f.db,
+      who,
+      created.upload_id,
+      { session_id: session, expected_generation: 0 },
+      "repair-ack",
+      f.clock,
+    );
+    await assert.rejects(
+      putArtifactPart(
+        f.db,
+        f.bucket,
+        who,
+        created.upload_id,
+        1,
+        new Uint8Array(bytes.length).fill(65),
+        f.clock,
+      ),
+      failure("CONFLICT"),
+    );
+    await putArtifactPart(f.db, f.bucket, who, created.upload_id, 1, bytes, f.clock);
+    assert.deepEqual(
+      f.sql
+        .query(
+          "SELECT credential_id, authorization_generation, acknowledged_credential_id, acknowledged_generation FROM artifact_upload_parts",
+        )
+        .get(),
+      {
+        credential_id: actor.credentialId,
+        authorization_generation: 0,
+        acknowledged_credential_id: who.credentialId,
+        acknowledged_generation: 1,
+      },
+    );
+    assert.equal((await f.complete(created.upload_id, who)).state, "verified");
+  });
+});
+
+test("resumption refuses an active lease and stale work cannot acquire a lease after generation changes", async () => {
+  await withArtifactFixture(async (f) => {
+    const created = await f.create();
+    const { who, session } = replacementUploadActor(f);
+    const lease = "a".repeat(32);
+    f.sql
+      .query("UPDATE artifact_uploads SET lease_token = ?, lease_until = ?")
+      .run(lease, NOW + ARTIFACT_VERIFY_LEASE_MS);
+    await assert.rejects(
+      resumeArtifactUpload(
+        f.db,
+        who,
+        created.upload_id,
+        { session_id: session, expected_generation: 0 },
+        "busy",
+        f.clock,
+      ),
+      failure("BUSY"),
+    );
+    f.now(NOW + ARTIFACT_VERIFY_LEASE_MS + 1);
+    const resumed = await resumeArtifactUpload(
+      f.db,
+      who,
+      created.upload_id,
+      { session_id: session, expected_generation: 0 },
+      "busy",
+      f.clock,
+    );
+    assert.equal(resumed.generation, 1);
+    assert.equal(f.rows()[0]!.lease_token, null);
+    f.objects.set(artifactStagingKey(created.upload_id), bytes);
+    await assert.rejects(
+      completeArtifact(f.db, f.bucket, who, created.upload_id, f.clock, async () => {
+        await resumeArtifactUpload(
+          f.db,
+          actor,
+          created.upload_id,
+          { session_id: f.declaration.sessionId, expected_generation: 1 },
+          "raced",
+          f.clock,
+        );
+      }),
+      failure("BUSY"),
+    );
+    assert.equal(f.rows()[0]!.state, "presigned");
+    assert.equal(f.writes.length, 0);
+  });
+});
+
+for (const kind of ["part", "complete"] as const) {
+  test(`resumption generation stops an expired ${kind} worker from finishing or clearing a successor`, async () => {
+    await withArtifactFixture(async (f) => {
+      const created = await f.create();
+      const { who, session } = replacementUploadActor(f);
+      if (kind === "part")
+        await startArtifactResumable(f.db, f.bucket, actor, created.upload_id, f.clock);
+      else f.objects.set(artifactStagingKey(created.upload_id), bytes);
+      const successor = "b".repeat(32);
+      f.onPut(async () => {
+        f.now(NOW + ARTIFACT_VERIFY_LEASE_MS + 1);
+        await resumeArtifactUpload(
+          f.db,
+          who,
+          created.upload_id,
+          { session_id: session, expected_generation: 0 },
+          "expired-worker",
+          f.clock,
+        );
+        f.sql
+          .query("UPDATE artifact_uploads SET lease_token = ?, lease_until = ?, updated_at = ?")
+          .run(successor, f.clock() + ARTIFACT_VERIFY_LEASE_MS, f.clock());
+      });
+      if (kind === "part")
+        await assert.rejects(
+          putArtifactPart(f.db, f.bucket, actor, created.upload_id, 1, bytes, f.clock),
+          failure("NOT_ALLOWED"),
+        );
+      else await assert.rejects(f.complete(created.upload_id), failure("BUSY"));
+      assert.equal(f.rows()[0]!.state, "presigned");
+      assert.equal(f.rows()[0]!.lease_token, successor);
+      assert.equal(
+        (await readArtifactManifest(f.db, who, created.upload_id, f.clock()))
+          .authorization_generation,
+        1,
+      );
+      if (kind === "part")
+        assert.deepEqual(
+          f.sql.query("SELECT acknowledged_at FROM artifact_upload_parts").get(),
+          { acknowledged_at: null },
+        );
+    });
+  });
+}
+
+for (const [label, mutate] of [
+  [
+    "current artifact budget",
+    (f: Awaited<ReturnType<typeof fixture>>) => f.grant({ artifactBudgetBytes: bytes.length - 1 }),
+  ],
+  ["current event budget", (f: Awaited<ReturnType<typeof fixture>>) => f.grant({ eventBudget: 0 })],
+  [
+    "current upload scope",
+    (f: Awaited<ReturnType<typeof fixture>>) =>
+      f.sql.exec(
+        "UPDATE fellow_tokens SET granted_scopes_json = '[]'; UPDATE enrollment_grants SET granted_scopes_json = '[]'",
+      ),
+  ],
+  [
+    "suspicious Fellow posture",
+    (f: Awaited<ReturnType<typeof fixture>>) =>
+      f.sql.exec("UPDATE enrollment_fellows SET status = 'suspicious_review'"),
+  ],
+  [
+    "erased private problem",
+    (f: Awaited<ReturnType<typeof fixture>>) =>
+      f.sql.exec("INSERT INTO private_draft_erasures VALUES ('P-DEMO')"),
+  ],
+] as const) {
+  test(`resumption cannot bypass ${label}`, async () => {
+    await withArtifactFixture(async (f) => {
+      const created = await f.create();
+      const { who, session } = replacementUploadActor(f);
+      mutate(f);
+      await assert.rejects(
+        resumeArtifactUpload(
+          f.db,
+          who,
+          created.upload_id,
+          { session_id: session, expected_generation: 0 },
+          "denied-recovery",
+          f.clock,
+        ),
+        failure("NOT_ALLOWED"),
+      );
+      assert.deepEqual(
+        f.sql.query("SELECT COUNT(*) AS n FROM artifact_upload_authorizations").get(),
+        { n: 1 },
+      );
+      assert.equal(f.rows().length, 1);
+    });
+  });
+}
+
+test("resumption requires the same owner and problem and cannot resurrect terminal uploads", async () => {
+  await withArtifactFixture(async (f) => {
+    const created = await f.create();
+    const { who, session } = replacementUploadActor(f);
+    await assert.rejects(
+      resumeArtifactUpload(
+        f.db,
+        other,
+        created.upload_id,
+        { session_id: `S-${"B".repeat(26)}`, expected_generation: 0 },
+        "foreign-resume",
+        f.clock,
+      ),
+      failure("NOT_FOUND"),
+    );
+    f.sql.exec("INSERT INTO problems VALUES ('P-OTHER', 'open', 0)");
+    f.sql.query("UPDATE sessions SET problem_id = 'P-OTHER' WHERE session_id = ?").run(session);
+    f.sql
+      .query("INSERT INTO problem_memberships VALUES ('P-OTHER', ?, 'contributor')")
+      .run(actor.fellowId);
+    await assert.rejects(
+      resumeArtifactUpload(
+        f.db,
+        who,
+        created.upload_id,
+        { session_id: session, expected_generation: 0 },
+        "wrong-problem",
+        f.clock,
+      ),
+      failure("NOT_ALLOWED"),
+    );
+    f.sql.query("UPDATE sessions SET problem_id = 'P-DEMO' WHERE session_id = ?").run(session);
+    f.now(created.expires_at);
+    await assert.rejects(
+      resumeArtifactUpload(
+        f.db,
+        who,
+        created.upload_id,
+        { session_id: session, expected_generation: 0 },
+        "expired",
+        f.clock,
+      ),
+      failure("EXPIRED"),
+    );
+    assert.deepEqual(
+      f.sql.query("SELECT COUNT(*) AS n FROM artifact_upload_authorizations").get(),
+      { n: 1 },
+    );
+    assert.equal(f.deletions.length, 0);
+  });
+});
+
+test("recovered completion rechecks current grant budgets after asynchronous storage", async () => {
+  await withArtifactFixture(async (f) => {
+    const created = await f.create();
+    const { who, session } = replacementUploadActor(f);
+    f.grant({ eventBudget: 1 });
+    await resumeArtifactUpload(
+      f.db,
+      who,
+      created.upload_id,
+      { session_id: session, expected_generation: 0 },
+      "budget-race",
+      f.clock,
+    );
+    f.objects.set(artifactStagingKey(created.upload_id), bytes);
+    f.onPut(() => {
+      f.sql.query("INSERT INTO events VALUES (?)").run(who.credentialId);
+    });
+    await assert.rejects(f.complete(created.upload_id, who), failure("NOT_ALLOWED"));
+    assert.equal(f.rows()[0]!.state, "presigned");
+    await assert.rejects(f.read(created.upload_id, who), failure("NOT_FOUND"));
+    assert.deepEqual(
+      f.audit().map((row) => row.state),
+      ["presigned"],
+    );
+  });
 });

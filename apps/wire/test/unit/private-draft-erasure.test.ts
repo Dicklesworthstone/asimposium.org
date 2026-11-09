@@ -7,6 +7,7 @@ import {
   EnrollmentService,
   enrollmentReplayProtectorFromBase64Url,
 } from "../../src/enrollment/service.ts";
+import { resumeArtifactUpload } from "../../src/krater/artifact-recovery.ts";
 import { declareArtifact, readArtifactManifest } from "../../src/krater/artifact-store.ts";
 import { checkpointSigningKey } from "../../src/krater/checkpoint-signing.ts";
 import {
@@ -304,6 +305,65 @@ for (const route of ["draft", "account"] as const) {
         )
         .run(f.actor.fellowId, PROBLEM, ISO, ISO, ISO),
     ).toThrow();
+    f.sql.close();
+  });
+}
+
+for (const route of ["draft", "account"] as const) {
+  test(`${route} erasure scrubs resumed artifact sessions while retaining immutable recovery receipts`, async () => {
+    const f = await fixture();
+    const resumedSession = `S-${"R".repeat(26)}`;
+    f.sql.query("UPDATE sessions SET closed_at = ? WHERE session_id = ?").run(ISO, SESSION);
+    f.sql
+      .query(`INSERT INTO sessions
+      (session_id,fellow_id,problem_id,opened_at,last_heartbeat_at,idle_close_at,handback)
+      VALUES (?,?,?,?,?,?,'Secret resumed work')`)
+      .run(
+        resumedSession,
+        f.actor.fellowId,
+        PROBLEM,
+        ISO,
+        ISO,
+        new Date(NOW + 3600000).toISOString(),
+      );
+    await resumeArtifactUpload(
+      f.db,
+      f.actor,
+      f.upload.upload_id,
+      { session_id: resumedSession, expected_generation: 0 },
+      "resume-before-erasure",
+      () => NOW,
+    );
+    const receipts = f.sql
+      .query("SELECT * FROM artifact_upload_authorizations ORDER BY generation")
+      .all();
+    if (route === "draft") await hardDeletePrivateDraft(f.db, PROBLEM, SPONSOR, { now: ISO });
+    else {
+      const preview = await f.service.previewDeleteSponsorAccount(f.principal);
+      await f.service.deleteSponsorAccount(
+        f.principal,
+        {
+          confirm: "delete-sponsor-account-and-revoke-all-fellows",
+          expected_preview: preview.review,
+          step_up_authenticated_at: NOW / 1000,
+        },
+        { idempotencyKey: "resumed-account-erasure" },
+      );
+    }
+    expect(
+      f.sql.query("SELECT * FROM artifact_upload_authorizations ORDER BY generation").all(),
+    ).toEqual(receipts);
+    expect(
+      f.sql.query("SELECT session_id, handback, closed_at FROM sessions ORDER BY session_id").all(),
+    ).toEqual([
+      { session_id: SESSION, handback: null, closed_at: ISO },
+      { session_id: resumedSession, handback: null, closed_at: ISO },
+    ]);
+    expect(f.sql.query("SELECT COUNT(*) AS n FROM workshop_objects").get()).toEqual({ n: 0 });
+    expect(f.sql.query("SELECT title, sponsor_id FROM problems WHERE id = ?").get(PROBLEM)).toEqual(
+      { title: "", sponsor_id: null },
+    );
+    await expect(readArtifactManifest(f.db, f.actor, f.upload.upload_id, NOW)).rejects.toThrow();
     f.sql.close();
   });
 }

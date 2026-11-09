@@ -6,6 +6,7 @@ import {
   AdminQuarantineCaseDetailSchema,
   AdminQuarantineDecisionResponseSchema,
   AdminQuarantineQueueResponseSchema,
+  FellowTokenSchema,
   InboxResponseSchema,
   ProblemPublicationPreviewSchema,
 } from "@asimposium/contracts";
@@ -21,6 +22,7 @@ import {
   ArtifactDeclareResponseSchema,
   ArtifactInventoryResponseSchema,
   ArtifactRenewResponseSchema,
+  ArtifactResumeResponseSchema,
   ArtifactStatusResponseSchema,
 } from "@asimposium/contracts/artifact-uploads";
 import { createTestHarness } from "wrangler";
@@ -937,6 +939,223 @@ try {
   await call("/v1/artifacts?limit=1&limit=2", undefined, authorTokenA, 400);
   console.log(
     JSON.stringify({ stage: "private-artifact-inventory", recovered: recoveredUploads.length }),
+  );
+
+  // Credential issuance below is harness-migration fixture setup. Revocation,
+  // session closure, inventory, resumption and byte work use the real HTTP path.
+  const recoverySponsor = "usr_artifact_recovery_sponsor";
+  const recoveryOriginalToken = await enroll("art-recovery-owner", recoverySponsor);
+  const recoveryFellow = (await call("/v1/hello", undefined, recoveryOriginalToken)).data.fellow
+    .fellow_id;
+  const originalWork = (
+    await call(
+      "/v1/sessions",
+      { problem_id: problemId, intent: "explore" },
+      recoveryOriginalToken,
+      201,
+    )
+  ).data.session_id;
+  const recoveryDeclaration = {
+    session_id: originalWork,
+    sha256: resumeDigest,
+    size_bytes: resumableBytes.length,
+    encoding: "lake-archive",
+  };
+  const recoveryUpload = ArtifactDeclareResponseSchema.parse(
+    (
+      await call(
+        "/v1/artifacts",
+        recoveryDeclaration,
+        recoveryOriginalToken,
+        201,
+        "recovery-declare",
+      )
+    ).data,
+  );
+  const recoveryStart = ArtifactStatusResponseSchema.parse(
+    (await call(recoveryUpload.resumable_path, {}, recoveryOriginalToken)).data,
+  );
+  const recoveryFirst = recoveryStart.resumable.remaining_parts[0];
+  await uploadPart(
+    recoveryFirst.path,
+    resumableBytes.subarray(recoveryFirst.offset, recoveryFirst.offset + recoveryFirst.size_bytes),
+    recoveryOriginalToken,
+  );
+  const immutableUpload = (
+    await fixtures.snapshotRows("artifact_uploads", "upload_id", recoveryUpload.upload_id)
+  )[0];
+  const immutablePart = (
+    await fixtures.snapshotRows("artifact_upload_parts", "upload_id", recoveryUpload.upload_id)
+  )[0];
+  const recoveryReservation = await fixtures.artifactReservationSummary(recoveryFellow);
+  await call(
+    `/v1/sessions/${originalWork}/close`,
+    {
+      handback: "Retain the acknowledged artifact part for a replacement credential.",
+      promote: [],
+      keep: [],
+      discard: [],
+    },
+    recoveryOriginalToken,
+    201,
+  );
+  const originalCredential = (
+    await fixtures.snapshotRows("fellow_tokens", "fellow_id", recoveryFellow)
+  )[0];
+  const replacementTokenId = `0${crypto.randomUUID().replaceAll("-", "").slice(0, 25).toUpperCase()}`;
+  const replacementToken = FellowTokenSchema.parse(
+    `asimp_ag_${replacementTokenId}_${Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url")}`,
+  );
+  const replacementCredential = `cred-artifact-recovery-${crypto.randomUUID()}`;
+  await fixtures.execRaw(
+    `INSERT INTO fellow_tokens
+    (credential_id, proposal_id, fellow_id, sponsor_id, token_hash, granted_scopes_json,
+      granted_resources_json, issued_at, expires_at, credential_profile, credential_origin)
+    SELECT ?, NULL, fellow_id, sponsor_id, ?, granted_scopes_json, granted_resources_json,
+      ?, expires_at, 'bearer', 'harness-migration' FROM fellow_tokens WHERE credential_id = ?`,
+    [
+      replacementCredential,
+      createHash("sha256").update(replacementToken).digest("hex"),
+      Date.now(),
+      originalCredential.credential_id,
+    ],
+  );
+  await sponsorCall(
+    recoverySponsor,
+    "POST",
+    "/v1/fellows/credentials/revoke",
+    "fellow.credential.revoke",
+    {
+      fellow_id: recoveryFellow,
+      credential_id: originalCredential.credential_id,
+      confirm: "revoke-credential",
+      step_up_authenticated_at: Math.floor(Date.now() / 1000),
+    },
+    200,
+    "/v1/fellows/credentials/revoke",
+    "recovery-revoke-original",
+  );
+  await call(recoveryUpload.status_path, undefined, recoveryOriginalToken, 401);
+  const recoveredDirectory = ArtifactInventoryResponseSchema.parse(
+    (await call("/v1/artifacts", undefined, replacementToken)).data,
+  );
+  assert.equal(recoveredDirectory.items.length, 1);
+  assert.equal(recoveredDirectory.items[0].upload_id, recoveryUpload.upload_id);
+  assert.equal(recoveredDirectory.items[0].original_session_id, originalWork);
+  const replacementWork = (
+    await call("/v1/sessions", { problem_id: problemId, intent: "explore" }, replacementToken, 201)
+  ).data.session_id;
+  const pendingRecovery = ArtifactStatusResponseSchema.parse(
+    (await call(recoveryUpload.status_path, undefined, replacementToken)).data,
+  );
+  assert.equal(pendingRecovery.authorization.generation, 0);
+  assert.deepEqual(
+    pendingRecovery.resumable.uploaded_parts.map((part) => part.part_number),
+    [1],
+  );
+  await call(recoveryUpload.complete_path, {}, replacementToken, 401);
+  const resumeBody = {
+    session_id: replacementWork,
+    expected_generation: pendingRecovery.recovery.expected_generation,
+  };
+  await call(pendingRecovery.recovery.resume_path, resumeBody, reviewerTokenB, 401);
+  const recovered = ArtifactResumeResponseSchema.parse(
+    (
+      await call(
+        pendingRecovery.recovery.resume_path,
+        resumeBody,
+        replacementToken,
+        200,
+        "recover-session",
+      )
+    ).data,
+  );
+  assert.equal(recovered.generation, 1);
+  assert.equal(recovered.expires_at, recoveryUpload.expires_at);
+  assert.deepEqual(
+    (
+      await call(
+        pendingRecovery.recovery.resume_path,
+        resumeBody,
+        replacementToken,
+        200,
+        "recover-session",
+      )
+    ).data,
+    recovered,
+  );
+  await call(
+    pendingRecovery.recovery.resume_path,
+    resumeBody,
+    replacementToken,
+    409,
+    "stale-generation",
+  );
+  await call("/v1/artifacts", recoveryDeclaration, replacementToken, 409, "recovery-declare");
+  const recoveryMissing = pendingRecovery.resumable.remaining_parts[0];
+  await uploadPart(
+    recoveryMissing.path,
+    resumableBytes.subarray(
+      recoveryMissing.offset,
+      recoveryMissing.offset + recoveryMissing.size_bytes,
+    ),
+    replacementToken,
+  );
+  const recoveredVerified = ArtifactStatusResponseSchema.parse(
+    (await call(recoveryUpload.complete_path, {}, replacementToken)).data,
+  );
+  assert.equal(recoveredVerified.state, "verified");
+  assert.equal(recoveredVerified.authorization.original_session_id, originalWork);
+  assert.equal(recoveredVerified.authorization.session_id, replacementWork);
+  assert.equal(recoveredVerified.recovery, null);
+  const recoveredBytes = await worker.fetch(`${origin}${recoveredVerified.content_path}`, {
+    headers: { "User-Agent": userAgent, authorization: `Bearer ${replacementToken}` },
+  });
+  assert.equal(recoveredBytes.status, 200);
+  assert.deepEqual(Buffer.from(await recoveredBytes.arrayBuffer()), resumableBytes);
+  const finalUpload = (
+    await fixtures.snapshotRows("artifact_uploads", "upload_id", recoveryUpload.upload_id)
+  )[0];
+  for (const field of [
+    "session_id",
+    "credential_id",
+    "fellow_id",
+    "sponsor_id",
+    "problem_id",
+    "sha256",
+    "size_bytes",
+    "created_at",
+    "expires_at",
+    "put_expires_at",
+    "key_hash",
+    "request_digest",
+    "replay_ciphertext",
+    "replay_iv",
+  ])
+    assert.equal(finalUpload[field], immutableUpload[field], `recovery preserves ${field}`);
+  const recoveredParts = await fixtures.snapshotRows(
+    "artifact_upload_parts",
+    "upload_id",
+    recoveryUpload.upload_id,
+  );
+  assert.deepEqual(
+    recoveredParts.find((part) => part.part_number === 1),
+    immutablePart,
+  );
+  const replacementPart = recoveredParts.find((part) => part.part_number === 2);
+  assert.equal(replacementPart.acknowledged_credential_id, replacementCredential);
+  assert.equal(replacementPart.acknowledged_generation, 1);
+  assert.deepEqual(await fixtures.artifactReservationSummary(recoveryFellow), recoveryReservation);
+  assert.equal(await fixtures.readPublicCas(resumeDigest), null);
+  console.log(
+    JSON.stringify({
+      stage: "artifact-session-credential-recovery",
+      status: "pass",
+      generation: 1,
+      retained_parts: 1,
+      single_reservation: true,
+      original_provenance: true,
+    }),
   );
 
   // 11. Secret / PII Screening Refusal (Rule P7)

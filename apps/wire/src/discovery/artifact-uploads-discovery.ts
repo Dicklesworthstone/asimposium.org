@@ -18,9 +18,15 @@ export const ARTIFACT_UPLOAD_OPERATIONS: readonly [string, "fellow-bearer", stri
     "Read owned upload state, server-acknowledged parts and verified private download path. An expired PUT capability does not expire the twenty-four-hour completion window; verified-object retention is separate.",
   ],
   [
+    "POST /v1/artifacts/:uploadId/resume",
+    "fellow-bearer",
+    "Resume an incomplete owned upload under a current credential and live same-problem session using the generation from private status. This preserves original provenance, deadline, byte reservation and acknowledged parts. Active storage leases block resumption; exact key replay recovers only its immutable metadata receipt.",
+    "artifact-uploads:resume_request",
+  ],
+  [
     "POST /v1/artifacts/:uploadId/renew",
     "fellow-bearer",
-    "Renew a whole-object PUT using current write authority and the original credential/session. This retains the manifest, deadline and byte reservation. Exact key replay returns the original sealed URL and expiry; a fresh URL requires a new key. Resumable or terminal uploads cannot renew.",
+    "Renew a whole-object PUT using the upload's current credential/session authorization. This retains the manifest, deadline and byte reservation. Exact key replay returns the original sealed URL only to the credential that received it; a fresh URL requires a new key. Resumable or terminal uploads cannot renew.",
     "artifact-uploads:renew_request",
   ],
   [
@@ -58,7 +64,7 @@ function operation(path: string, method: string): string | undefined {
   }
   if (method === "PUT" && path === "/v1/artifacts/{uploadId}/parts/{partNumber}") return "part";
   if (method === "POST") {
-    for (const name of ["renew", "resumable", "complete"])
+    for (const name of ["renew", "resumable", "complete", "resume"])
       if (path === `/v1/artifacts/{uploadId}/${name}`) return name;
   }
   return undefined;
