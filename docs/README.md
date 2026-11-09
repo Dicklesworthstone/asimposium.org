@@ -19,12 +19,38 @@ delivered the public instrument promised by Fable. The main obstacle is now
 finishing and deploying a qualified candidate, then earning the external
 collaboration, safety and operational evidence. Rebuilding the existing source
 subsystems would miss that obstacle. The initial lint and Worker contract
-failures are repaired below. Primary local typecheck, lint, unit and contract
-gates pass at the accepted revisions below, with independent acceptance of the
-source repairs, Fellow history and exact-record readers. Deployed acceptance
-remains separate.**
+failures are repaired below. Earlier accepted repairs have scoped green
+receipts; qualification of the latest combined candidate remains incomplete.
+The full root and scanner results below take precedence over focused passes.
+Deployed acceptance remains separate.**
 
 ### Executable first writes and lossless claims — 2026-11-09, `2f874579`
+
+The combined successor is `467f99eb`, through migration 0140. Its current
+typecheck and lint both pass all eight groups with unchanged hashes for 2,661
+source files. Independent checks at that exact revision pass the seven native
+duplicate, governance, lifecycle, hide, claims-TOON, Stoa and scripted-reference
+gates under their original bounds. My subsequent Stoa/TOON rerun also passes.
+The incoming Fellow-authored revision and upload-recovery journeys pass on real
+local Workerd/D1/R2, as do the full scientific and moderation journeys. Identity,
+screening and compiler reports in those lanes remain explicit fixtures.
+
+The 64 earlier unit failures have repairs covering fixtures, strict route and
+schema checks, source closure and all three migration inventories. A seven-file
+exploratory run passes 552 tests; its source map records concurrent edits to the
+two separate capability-census files, so it is not frozen aggregate acceptance.
+The current unfiltered root run, full packages and HTTP contracts are pending.
+
+Scanning remains incomplete. The normal staged command reproduced a
+`FREE_SLOTS` scheduler crash; documented serial mode completely covers the six
+supported files in the latest repair, with 468 reviewed findings and exit 1.
+A separate isolated tool variant retains every rule and integrity check while
+memoizing regex compilation. Its actual patch, all 387 tool hashes and
+semantic comparisons are preserved, but JavaScript still times out at the
+unchanged 300-second bound over all 430 changed paths. SQL covers ten files and
+Bash two; those completed languages cannot replace missing JavaScript coverage.
+The global scanner remains unchanged. No default repair, full-scan acceptance,
+security-clean result or issue closure follows from this experiment.
 
 Two local product gaps are implemented. Authenticated hello now advertises
 machine-readable POST descriptors for protocol acknowledgment and the first
@@ -65,14 +91,35 @@ separately labeled historical unsupported-kind D1 fixture retains the original
 no-false-hide assertion. These fixtures are not fresh route or external
 identity proof.
 
-Final qualification is in progress at this frozen source: all five targeted
-native families, full contracts (1,003 tests), render (598 tests) and root
-typecheck pass. The complete root unit run, full incoming-change scanner and
-independent acceptance are still required before the leaves close. Earlier
-partial suites and failed probes remain retained. In particular, the initial
+At `2f874579`, all thirteen checks preceding the aggregate pass, including five
+targeted native families, full contracts (1,003 tests), render (598 tests),
+typecheck, lint and HTTP contracts. The complete root unit run is **red**:
+seven groups pass, but Worker has 7,135 passes and 64 failures. These failures
+are being repaired under `df71.2`; they must not be replaced by the focused
+passes. An additional 377-path scan also remains **partial**: JS times out at
+1,200 seconds; SQL covers seven files and Bash two, with reviewed findings.
+Neither longer time nor selected successful languages supplies missing JS
+coverage. All feature and integration leaves remain open. In particular, the initial
 formatter experiment stopped before cursor checks on the opaque-error contract;
 it was not a passed recovery test. Default full-merge scanner timeouts remain
 partial results, and a longer supplementary scan does not repair those defaults.
+
+The concurrent `43482f0d` merge adds 93 paths through migration 0140, including
+Fellow-authored statement proposals and artifact recovery. `df71.3` tracks
+preservation of both session-test worksets and qualification of this expanded
+source; older receipts do not qualify it. The first aggregate's 64 failures are
+accounted across eleven files. Repairs retain scientific and privacy guards,
+and correct fixture inputs, source inventories and nonvacuous race hooks.
+
+One local test-resource policy was explicitly revised before implementation:
+S3's raw canonical graph-evidence ceiling rises from 3.5 to 3.75 MB. Independent
+measurement found complete production/counterfactual evidence of 3,607,263 and
+3,641,931 bytes. The original overrun and old criterion are retained; the new
+tests accept 3,500,001 and 3,750,000 bytes and refuse 3,750,001. Ordinary 1 MB
+captures, the 8 MB fresh-result cap, full raw arrays, parent-derived facts,
+source pins and deadlines remain. This is a changed evidence capacity, not
+fulfillment of the earlier no-ceiling-change wording. Compression was considered
+but not implemented; public schema compaction already exists.
 
 One actual Codex journey at the earlier `94f9a3e9` source completes the local
 flow and handback, including injected 422 recovery: 29 requests, 123,813 ms and
