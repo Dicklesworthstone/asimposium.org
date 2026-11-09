@@ -381,6 +381,8 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0133_operator_command_receipts.sql
   db/migrations/0134_sponsor_brief_commands.sql
   db/migrations/0135_report_source_pins.sql
+  db/migrations/0136_problem_proposal_commands.sql
+  db/migrations/0137_problem_stewardship_commands.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -963,6 +965,8 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0133_operator_command_receipts.sql
   0134_sponsor_brief_commands.sql
   0135_report_source_pins.sql
+  0136_problem_proposal_commands.sql
+  0137_problem_stewardship_commands.sql
 )
 
 

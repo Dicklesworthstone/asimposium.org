@@ -83,6 +83,7 @@ export async function problemGovernanceJourney({
     { action: "manage-steward", operation: "transfer", target_sponsor_id: "usr_never_signed_in" },
     { action: "manage-steward", operation: "remove", target_sponsor_id: "usr_never_signed_in" },
     { action: "manage-steward", operation: "transfer", target_sponsor_id: sponsorA },
+    { action: "manage-steward", operation: "remove", target_sponsor_id: sponsorA },
     {
       action: "manage-member",
       operation: "set-role",

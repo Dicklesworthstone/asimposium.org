@@ -906,18 +906,18 @@ export const PLANTS = [
   {
     id: "duplicate-screen-matches-draft-versions",
     bead: "0er0",
-    file: "apps/wire/src/problems/router.ts",
-    find: "                   AND e.object_version = v.version",
+    file: "apps/wire/src/problems/proposal-commands.ts",
+    find: " AND e.object_version = v.version",
     replace: "",
     command: LANE("problem-duplicate-privacy"),
   },
   {
     id: "duplicate-screen-exempts-public-unlisted",
     bead: "u2fe",
-    file: "apps/wire/src/problems/router.ts",
-    find: "(p.status IN ('active', 'sharpening', 'under-result-review')\n",
+    file: "apps/wire/src/problems/proposal-commands.ts",
+    find: "(p.status IN ('active', 'sharpening', 'under-result-review') AND EXISTS (",
     replace:
-      "(p.status IN ('active', 'sharpening', 'under-result-review')\n               AND p.unlisted = 0\n",
+      "(p.status IN ('active', 'sharpening', 'under-result-review') AND p.unlisted = 0 AND EXISTS (",
     command: LANE("problem-duplicate-privacy"),
   },
   {
@@ -1180,10 +1180,18 @@ export const PLANTS = [
   {
     id: "draft-steward-remove-count-unguarded",
     bead: "0a5p",
-    file: "apps/wire/src/problems/router.ts",
-    find: "                   AND (SELECT COUNT(*) FROM problem_stewards WHERE problem_id = ?) > 1`,",
-    replace:
-      "                   AND (SELECT COUNT(*) FROM problem_stewards WHERE problem_id = ?) > 0`,",
+    // The command and its transactional trigger now both protect the last
+    // steward. Reintroduce the same defect at both current enforcement sites.
+    file: "apps/wire/src/problems/access-actions.ts",
+    find: "    if ((count?.n ?? 0) <= 1) {",
+    replace: "    if ((count?.n ?? 0) < 1) {",
+    also: [
+      {
+        file: "db/migrations/0137_problem_stewardship_commands.sql",
+        find: "OR (SELECT COUNT(*) FROM problem_stewards WHERE problem_id = p.id) > 1)",
+        replace: "OR (SELECT COUNT(*) FROM problem_stewards WHERE problem_id = p.id) > 0)",
+      },
+    ],
     command: LANE("problem-governance"),
   },
   {
@@ -1251,8 +1259,8 @@ export const PLANTS = [
     id: "steward-target-existence-unchecked",
     bead: "ux6q",
     file: "apps/wire/src/problems/lifecycle-ledger.ts",
-    find: '.prepare("SELECT 1 FROM sponsors WHERE sponsor_id = ?")',
-    replace: '.prepare("SELECT 1 WHERE ? IS NOT NULL")',
+    find: ".prepare(`SELECT 1 FROM sponsors WHERE sponsor_id = ? AND (? = 'remove' OR (\n        tombstoned_at IS NULL AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events\n          WHERE sponsor_id = sponsors.sponsor_id)))`)",
+    replace: ".prepare(`SELECT 1 WHERE ? IS NOT NULL AND (? = 'remove' OR 1)`)",
     command: LANE("problem-governance"),
   },
   {
@@ -1291,8 +1299,8 @@ export const PLANTS = [
     id: "governance-response-leaks-unlisted",
     bead: "48js",
     file: "apps/wire/src/problems/lifecycle-ledger.ts",
-    find: "problem: responseProblem,",
-    replace: "problem: event.problem,",
+    find: "            : responseProblem,",
+    replace: "            : event.problem,",
     command: LANE("problem-lifecycle"),
   },
   {
@@ -1775,10 +1783,18 @@ export const PLANTS = [
   {
     id: "hide-sweep-board-serves-hidden-claims",
     bead: "f3v1",
-    file: "apps/wire/src/ledger-face.ts",
-    // The claims board treats every claim as available again.
-    find: "        CASE WHEN ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} THEN 1 ELSE 0 END AS available",
-    replace: "        1 AS available",
+    file: "apps/wire/src/ledger/claims-list-read.ts",
+    // The immutable collection now checks body privacy and scientific source
+    // availability separately. Bypass both collection guards, leaving the
+    // exact reader and every assertion unchanged.
+    find: 'AND c.redacted_at IS NULL AND NOT ${eventContentHiddenSql("e")}',
+    replace: "AND c.redacted_at IS NULL",
+    also: [
+      {
+        find: "    if (fold.currentVersion !== row.version) {",
+        replace: "    if (false && fold.currentVersion !== row.version) {",
+      },
+    ],
     command: LANE("content-hide-sweep"),
   },
   {
