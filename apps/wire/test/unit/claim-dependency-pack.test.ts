@@ -546,6 +546,229 @@ async function scientificReview(
   return { event, id };
 }
 
+async function withdrawInput(
+  f: ReturnType<typeof fixture>,
+  source: { event: string; id: string },
+  seq: number,
+  reason = "WITHDRAWAL_REASON_CANARY: the original scope was mistaken.",
+) {
+  const original = f.db.prepare("SELECT * FROM events WHERE id = ?").get(source.event) as {
+    object_kind: "evidence" | "review";
+    payload_sha256: string;
+    actor_fellow_id: string;
+    actor_sponsor_id: string;
+  };
+  const event = `EV-WITHDRAWAL-${seq}`;
+  const retraction = `R-WITHDRAWAL-${seq}`;
+  const payload = JSON.stringify({
+    target_object: source.id,
+    target_event_id: source.event,
+    target_kind: original.object_kind,
+    target_digest: `sha256:${original.payload_sha256}`,
+    claim_id: "C-1",
+    claim_version: 1,
+    reason,
+  });
+  const hash = await digest(payload);
+  f.db
+    .prepare(`INSERT INTO events VALUES (?, 'P-PACK', ?, 1, 'object.retracted', 'retraction',
+      ?, ?, ?, ?, 'S-correction', 'declared-model', 'declared-harness', '2026-10-01T00:00:00.000Z')`)
+    .run(event, retraction, seq, hash, original.actor_fellow_id, original.actor_sponsor_id);
+  f.db.prepare("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(event, hash, payload);
+  f.db
+    .prepare("INSERT INTO retractions VALUES ('P-PACK', ?, ?, ?, ?)")
+    .run(retraction, source.id, seq, original.actor_fellow_id);
+  f.db
+    .prepare(`INSERT INTO scientific_withdrawals VALUES (?, ?, 'P-PACK', ?, ?, ?, ?, ?,
+      1, 'C-1', ?, ?)`)
+    .run(
+      event,
+      hash,
+      retraction,
+      source.id,
+      original.actor_fellow_id,
+      seq,
+      source.event,
+      original.payload_sha256,
+      original.object_kind,
+    );
+  return { event, retraction, hash, reason };
+}
+
+for (const kind of ["evidence", "review"] as const) {
+  test(`claim packs and public item faces identify withdrawn ${kind} without erasing its history`, async () => {
+    const f = fixture();
+    await f.add(1);
+    const source =
+      kind === "evidence"
+        ? await scientificEvidence(f, 2, "C-1", "computation", { direction: "refutes" }, "E-2")
+        : await scientificReview(f, 2, "C-1");
+    const before = await f.pack("C-1@1", 2);
+    const original = bodies(before, `claim-${kind}`)[0];
+    expect(original.scientific_status).toEqual({
+      withdrawal: "not-recorded",
+      positive_authority: "not-assessed",
+    });
+    const correction = await withdrawInput(f, source, 3);
+    expect(await f.pack("C-1@1", 2)).toEqual(before);
+    const current = await f.pack("C-1@1", 3);
+    const item = current.candidates.find((candidate) => candidate.id === source.id);
+    if (!item) throw new Error("The withdrawn record must remain readable history.");
+    const body = JSON.parse(item.body);
+    expect(body.scientific_status).toMatchObject({
+      withdrawal: "withdrawn",
+      positive_authority: "removed",
+      withdrawal_event: {
+        id: correction.event,
+        seq: 3,
+        digest: `sha256:${correction.hash}`,
+        reason: correction.reason,
+        read_url: "/p/P-PACK/events.json?since=2&limit=1&through=3",
+      },
+      standing_url: "/p/P-PACK/claims/C-1@1.json?through=3",
+    });
+    expect(body.body_md).toBe(original.body_md);
+    expect(body[kind === "evidence" ? "direction" : "verdict"]).toBe(
+      original[kind === "evidence" ? "direction" : "verdict"],
+    );
+    expect(item.why_included).toContain("withdrawn public record");
+    expect(item.why_included).toContain("adverse findings are not resolved");
+    expect(item.untrusted).toBe(true);
+    const snapshot = await readPublicClaimSnapshot(f.d1, "P-PACK", 3, "C-1", 1);
+    expect(snapshot.section).toEqual(current);
+    if (kind === "evidence") expect(snapshot.fold.disposition).toBe("disputed");
+    f.db.exec("UPDATE problems SET public_seq = 3 WHERE id = 'P-PACK'");
+    const app = createLedgerFaceRoutes();
+    for (const path of [
+      "claims/C-1@1",
+      `${kind === "review" ? "reviews" : "evidence"}/${source.id}`,
+    ]) {
+      const response = await app.request(`https://a.asimposium.org/p/P-PACK/${path}.json`, {}, {
+        DB: f.d1,
+      } as Env);
+      expect(response.status).toBe(200);
+      const face = ClaimFaceResponseSchema.parse(await response.json());
+      const record = face.items.find((record) => record.id === source.id);
+      if (!record) throw new Error("The public face must retain the withdrawn record.");
+      expect(JSON.parse(record.body).scientific_status).toEqual(body.scientific_status);
+    }
+  });
+}
+
+for (const visibility of ["hidden", "redacted", "corrupt", "missing"] as const) {
+  test(`${visibility} withdrawal explanation keeps the explicit marker without leaking its reason`, async () => {
+    const f = fixture();
+    await f.add(1);
+    const source = await scientificEvidence(f, 2, "C-1");
+    const correction = await withdrawInput(f, source, 3);
+    if (visibility === "hidden") control(f, "#3");
+    else if (visibility === "redacted")
+      f.db
+        .prepare("UPDATE event_content SET redacted_at = 'now' WHERE event_id = ?")
+        .run(correction.event);
+    else if (visibility === "corrupt")
+      f.db
+        .prepare("UPDATE event_content SET payload_json = '{}' WHERE event_id = ?")
+        .run(correction.event);
+    else f.db.prepare("DELETE FROM event_content WHERE event_id = ?").run(correction.event);
+    const pack = await f.pack("C-1@1", 3);
+    const status = bodies(pack, "claim-evidence")[0].scientific_status;
+    expect(status.withdrawal).toBe("withdrawn");
+    expect(status.positive_authority).toBe("removed");
+    expect(status.withdrawal_event.id).toBe(correction.event);
+    expect(status.withdrawal_event.reason).toBe(null);
+    expect(JSON.stringify(pack)).not.toContain("WITHDRAWAL_REASON_CANARY");
+    control(f, source.id);
+    expect(bodies(await f.pack("C-1@1", 3), "claim-evidence")).toEqual([]);
+  });
+}
+
+test("claim packs label transitive evidence grounded in a withdrawn input without relabeling it as withdrawn", async () => {
+  const f = fixture();
+  const claim = await f.add(1);
+  const base = await scientificEvidence(f, 2, "C-1");
+  let source = base;
+  for (const seq of [3, 4]) {
+    const row = f.db
+      .prepare("SELECT payload_sha256 FROM events WHERE id = ?")
+      .get(source.event) as { payload_sha256: string };
+    source = await scientificEvidence(f, seq, "C-1", "computation", {
+      falsification_check: {
+        target_digest: claim.content_digest,
+        attempted_falsifier: "Check the exact finite boundary.",
+        capable_of_failure: "An observation outside the stated bound.",
+        result: "survived",
+        evidence: [{ evidence_id: source.id, digest: `sha256:${row.payload_sha256}` }],
+      },
+    });
+  }
+  await withdrawInput(f, base, 5);
+  const records = bodies(await f.pack("C-1@1", 5), "claim-evidence");
+  expect(records[0].scientific_status.withdrawal).toBe("withdrawn");
+  for (const record of records.slice(1)) {
+    expect(record.scientific_status).toMatchObject({
+      withdrawal: "not-recorded",
+      positive_authority: "removed",
+      grounding: "invalidated",
+    });
+    expect(record.body_md).toBe("Reproducible finite computation.");
+  }
+});
+
+test("a correction beyond the display limit still marks the retained first evidence", async () => {
+  const f = fixture();
+  await f.add(1);
+  const first = await scientificEvidence(f, 2, "C-1");
+  for (let seq = 3; seq <= 23; seq++) await scientificEvidence(f, seq, "C-1");
+  const correction = await withdrawInput(f, first, 24);
+  const pack = await f.pack("C-1@1", 24);
+  expect(bodies(pack, "claim-evidence")).toHaveLength(20);
+  expect(bodies(pack, "claim-evidence")[0].scientific_status.withdrawal_event.id).toBe(
+    correction.event,
+  );
+  expect(pack.omitted).toContainEqual({
+    reason: "candidate_limit",
+    detail: "C-1@1:claim-evidence",
+  });
+});
+
+test("incomplete scientific history cannot label a displayed input as unwithdrawn authority", async () => {
+  const f = fixture();
+  await f.add(1);
+  await scientificEvidence(f, 2, "C-1");
+  const unavailable = await scientificEvidence(f, 3, "C-1");
+  f.db.prepare("DELETE FROM evidence WHERE evidence_id = ?").run(unavailable.id);
+  const pack = await f.pack("C-1@1", 3);
+  expect(bodies(pack, "claim-evidence")[0].scientific_status).toMatchObject({
+    withdrawal: "unavailable",
+    positive_authority: "unavailable",
+    standing_url: "/p/P-PACK/claims/C-1@1.json?through=3",
+  });
+});
+
+test("a contradictory withdrawal witness is not promoted into a pack correction", async () => {
+  const f = fixture();
+  await f.add(1);
+  const source = await scientificEvidence(f, 2, "C-1");
+  const correction = await withdrawInput(f, source, 3);
+  const row = f.db
+    .prepare("SELECT payload_json FROM event_content WHERE event_id = ?")
+    .get(correction.event) as { payload_json: string };
+  const payload = JSON.stringify({ ...JSON.parse(row.payload_json), target_object: "E-OTHER" });
+  const hash = await digest(payload);
+  f.db.prepare("UPDATE events SET payload_sha256 = ? WHERE id = ?").run(hash, correction.event);
+  f.db
+    .prepare("UPDATE event_content SET payload_json = ?, payload_sha256 = ? WHERE event_id = ?")
+    .run(payload, hash, correction.event);
+  f.db
+    .prepare("UPDATE scientific_withdrawals SET event_sha256 = ? WHERE event_id = ?")
+    .run(hash, correction.event);
+  expect(bodies(await f.pack("C-1@1", 3), "claim-evidence")[0].scientific_status).toEqual({
+    withdrawal: "not-recorded",
+    positive_authority: "not-assessed",
+  });
+});
+
 async function focusedClaimHistory() {
   const f = fixture();
   await f.add(1);
