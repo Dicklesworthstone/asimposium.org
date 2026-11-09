@@ -12,7 +12,7 @@ provisioned provider resource, a completed recovery exercise, or a green launch
 gate. Each report and runbook must state which of those proof levels it actually
 observed.
 
-## Current reality check — 2026-11-07
+## Current reality check — 2026-11-09
 
 **ASImposium has a substantial working local research workflow, but it has not
 delivered the public instrument promised by Fable. The main obstacle is now
@@ -23,6 +23,91 @@ failures are repaired below. Primary local typecheck, lint, unit and contract
 gates pass at the accepted revisions below, with independent acceptance of the
 source repairs, Fellow history and exact-record readers. Deployed acceptance
 remains separate.**
+
+### Actual cold-agent participation — 2026-11-08, `db94e495`
+
+WhiteRaven independently closes only `zai.2` and `zai.3`; Beads comments 2983
+and 2984 map their original acceptance to exact source lines and owned evidence.
+These are local participation-tooling repairs, with no new public feature.
+
+The actual local runner now supplies the sponsor paste through stdin, uses
+Claude's nonpersistent safe mode and Codex's ephemeral mode, and ignores
+Codex user configuration while retaining its normal execution policy. Gemini
+and Grok report a privacy prerequisite before spawning because a recording
+disable control has not been verified. This concerns the harness launch and
+runner retention; it does not attest every argument of arbitrary tools an
+agent subsequently executes. Real-trial output contains counts, digests,
+coarse statuses and fixed route templates, with no raw stderr or scientific
+face samples. Oversized stdout is fully drained and hashed, with usage unknown
+rather than inferred from a partial capture.
+
+The runner also consumes the existing authoritative usage parsers. Previously,
+its duplicate Codex parser kept only the final turn, and missing Claude usage
+became an invented zero. The regression cases distinguish 460 from 340 tokens,
+preserve additive Anthropic cache accounting and require null on missing or
+malformed usage. Provider totals are explicitly for the **whole session**;
+tokens to first promotion remain unmeasured.
+
+At this frozen source, an actual Codex agent completes the local Workerd/D1/R2
+journey: enrollment and sponsor approval, session and pack, workshop, recovery
+from an injected `PROMOTE_BODY_INVALID` 422, public falsifiable claim, and close
+with a handback. It makes 22 requests in 101,214 ms and reports 611,598
+whole-session tokens. Claude is usage-limited before any site request; Gemini
+never starts. The requested-three command therefore exits 78 **blocked**.
+These are one completed model journey and two prerequisite outcomes, not a
+three-harness result. Identity and screening are local fixtures, not Google
+or hosted screening. The default ten-case run is a separate scripted oracle
+check: three positives and seven negatives, with zero model trials.
+
+An independent actual Codex run at the same source also completes all stages,
+including the injected refusal: 25 requests in 97,470 ms, with 662,796
+whole-session tokens (659,695 input plus 3,101 output). Cached input and reasoning
+are subsets and are not added again. Its normal owner exits zero, with all
+2,473 source inputs unchanged. Neither actual run measures tokens at promotion.
+
+Both agents pass the whole gauntlet package: 94 tests / 252 expectations plus
+its original shell self-test, the ten scripted oracle cases, and root typecheck
+and lint (all eight groups). The primary unfiltered root unit run passes all
+eight groups in 1,399.71 seconds, normal owner exit zero at 00:15:52.395 UTC on
+November 9. Worker has 6,924 passes / 32,658 expectations, Agora 918 / 6,242,
+gauntlet 94 / 252 and render 398 / 4,445. The original 54 individual toolchain
+skips remain; no whole group fails, blocks, skips or goes missing. All six
+primary and six independent positive before/after maps match the current
+2,473 source inputs. This is a primary full-root result, not an independent
+full-root, fresh full-contract, browser or optional Rust result.
+Four independent source mutations already reach their intended original
+assertions: expose the paste in argv, return raw stderr, retain only the last
+Codex turn, or replace missing Claude usage with zero. Each owner exits one
+normally with stable mutant inputs; exact restoration precedes positive gates.
+UBS completes five inputs with zero critical findings, nine reviewed warnings
+and 120 information items, without suppression. The warnings concern fail-loud
+fixture parsing, synthetic synchronous fixture writes, awaited promise chains
+and existing bounded loopback fetches.
+
+The first exploratory Codex run inherited user configuration and is not frozen
+qualification. The initial synthetic unit failure printed only a synthetic
+paste, and an initial typecheck failure exposed an incorrect spawn overload
+type; both were corrected before this source freeze. A bounded diagnostic
+identified Claude's structured provider status 429. One diagnostic discarded
+stderr and is not complete gate evidence. Failed and partial records remain
+under `e2e/artifacts/cold-journey-20261108-coppertiger/`; independent evidence is
+under `e2e/artifacts/independent-20261108-zai-2-3-db94e495/`.
+
+This repairs participation tooling, not the unfinished staging orchestrator.
+`run-gauntlet.ts` still reports `GAUNTLET_PRODUCT_FLOW_NOT_IMPLEMENTED`;
+credentials alone cannot supply that implementation. Parent `zai`, the
+10-session/three-harness/eight-completion/25K-token criteria, semantic following
+of an offered move, deployment, G0 and launch remain unearned.
+Fresh project-identified public reads at 00:01 UTC on November 9 still return
+the old production/staging `0.1.0-draft` capability bodies. That identifies the
+observed interface, not provider revision or deployment history. The four
+required Cloudflare/staging variables remain absent in this command environment.
+The physical primary also has about 13 GiB available, and normal
+`TMPDIR=/data/tmp` Beads doctor/export/staging work. Doctor exits one with a
+healthy database and existing housekeeping warnings. Independent review keeps
+`0oi3` open: its named historical full snapshot is still absent without a
+byte-verified equivalent. Current headroom and a successful export cannot
+satisfy that preservation condition; no cleanup or recovery cause is claimed.
 
 ### Replay observer publication — 2026-11-08, `10bbe002`
 
