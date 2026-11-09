@@ -2631,17 +2631,21 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
               : renderClaimsListMarkdown(face);
     } catch (error) {
       if (!(error instanceof ClaimsListToonUnavailableError)) throw error;
+      const recoveryPath = claimsListPath(problemId, "json", {
+        through: face.cursor,
+        after: face.after,
+      });
       const response = problemDocument({
         status: 500,
         code: "INTERNAL_ERROR",
         title: "Lossless TOON representation unavailable",
         detail: "This page cannot be represented losslessly as TOON. No altered data was returned.",
-        fixHint: `Read ${claimsListPath(problemId, "json", query.data)} for the same canonical data.`,
+        fixHint: `Read ${recoveryPath} for the same canonical data.`,
         rule: "A1",
         headers: { "cache-control": "no-store" },
         extensions: {
           schema: CLAIMS_LIST_SCHEMA_ID,
-          example: { method: "GET", path: claimsListPath(problemId, "json", query.data) },
+          example: { method: "GET", path: recoveryPath },
         },
       });
       return c.req.method === "HEAD"

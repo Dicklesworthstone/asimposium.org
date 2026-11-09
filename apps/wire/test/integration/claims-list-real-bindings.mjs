@@ -275,10 +275,53 @@ async function claimsListJourney({ call, worker, env, origin, userAgent }) {
   };
 }
 
-runLocalWorkerJourney(claimsListJourney, {
-  // Explicit source/projection fixtures above bypass the publication writers.
-  projectionParitySeeded: (id) => id === problem,
-})
+// An isolated source-fault experiment forces only the formatter to fail.
+// Without that fault this mode must fail its expected500 assertion; it never
+// substitutes for the ordinary successful TOON journey above.
+async function claimsToonRecoveryJourney({ call, env, worker, origin, userAgent }) {
+  await ensureProblem(env.DB, problem, "2026-10-27T12:00:00.000Z");
+  await env.DB.prepare("UPDATE problems SET status='active' WHERE id=?").bind(problem).run();
+  await appendClaimsListFixture(env.DB, problem, 1);
+  const captured = ClaimsListResponseSchema.parse(await call(`/p/${problem}/claims.json`));
+  const failed = await worker.fetch(`${origin}/p/${problem}/claims?format=toon`, {
+    headers: { "User-Agent": userAgent },
+  });
+  assert.equal(failed.status, 500, "this isolated mode requires the formatter source fault");
+  const refusal = ContractProblemSchema.parse(await failed.json());
+  assert.equal(refusal.code, "INTERNAL_ERROR");
+  assert.equal(refusal.schema, "https://a.asimposium.org/schemas/claims-list.v1.json");
+  const path = refusal.example.path;
+  assert.equal(typeof path, "string");
+  const recovery = new URL(path, "https://a.asimposium.org");
+  assert.equal(recovery.origin, "https://a.asimposium.org");
+  assert.equal(recovery.pathname, `/p/${problem}/claims.json`);
+  assert.equal(recovery.searchParams.get("through"), String(captured.cursor));
+  assert.equal(recovery.searchParams.get("after"), String(captured.after));
+  assert.ok(refusal.fix_hint.includes(path));
+  await appendClaimsListFixture(env.DB, problem, 2);
+  const later = ClaimsListResponseSchema.parse(await call(`/p/${problem}/claims.json`));
+  assert.ok(later.cursor > captured.cursor, "a genuine later publication advances the head");
+  assert.deepEqual(
+    ClaimsListResponseSchema.parse(await call(`${recovery.pathname}${recovery.search}`)),
+    captured,
+    "the offered JSON recovers the captured page after a later write",
+  );
+  return {
+    kind: "claims-toon-recovery-real-bindings",
+    status: "pass",
+    scope: "isolated source-forced formatter failure; not a normal TOON success",
+    captured_cursor: captured.cursor,
+    later_cursor: later.cursor,
+  };
+}
+
+runLocalWorkerJourney(
+  process.argv.includes("--formatter-failure") ? claimsToonRecoveryJourney : claimsListJourney,
+  {
+    // Explicit source/projection fixtures above bypass the publication writers.
+    projectionParitySeeded: (id) => id === problem,
+  },
+)
   .then((receipt) => console.log(JSON.stringify(receipt)))
   .catch((error) => {
     console.error(error);
