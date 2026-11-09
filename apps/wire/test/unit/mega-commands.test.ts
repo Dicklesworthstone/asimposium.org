@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   EnrollmentHelloResponseSchema,
+  getMoveTemplate,
   type NextMoveCandidate,
   ProblemGovernanceEventSchema,
   ProblemNextResponseSchema,
@@ -574,7 +575,7 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
       move: "sharpen-statement",
       why: "The statement needs clearer boundary conditions.",
       refs: ["P-CUSTOM1"],
-      contract: { action: "statement_review", schema: "problems:statement_review_request" },
+      contract: { ...getMoveTemplate("sharpen-statement") },
     };
     const fixtureProvider = new ContractFixtureMovesProvider({
       triageMoves: {
@@ -820,7 +821,7 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
       move: "sharpen-statement",
       why: "Sharpen hypotheses.",
       refs: ["P-MD1"],
-      contract: { action: "statement_review", schema: "problems:statement_review_request" },
+      contract: { ...getMoveTemplate("sharpen-statement") },
     };
     const fixtureProvider = new ContractFixtureMovesProvider({
       problemMoves: {

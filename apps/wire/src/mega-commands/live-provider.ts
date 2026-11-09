@@ -277,7 +277,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
           now,
         }).decision === "allow",
       workshop_push: allowed("workshop.push"),
-      promote: allowed("promote"),
+      promote: row.status !== "sharpening" && allowed("promote"),
       evidence: allowed("promote", "evidence"),
       dead_end: allowed("promote", "dead-end"),
       review: allowed("review"),
@@ -329,10 +329,15 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
     if (
       this.dependencies.sharpen?.load &&
       effectivePermissions.session_open &&
-      effectivePermissions.promote
+      (effectivePermissions.review || effectivePermissions.workshop_push)
     ) {
       try {
-        const sm = await this.dependencies.sharpen.load(db, problemId, row.cursor);
+        const sm = await this.dependencies.sharpen.load(db, problemId, row.cursor, {
+          fellowId: fellowBinding.fellowId,
+          sponsorId: fellowBinding.sponsorId,
+          review: effectivePermissions.review,
+          workshopPush: effectivePermissions.workshop_push,
+        });
         if (sm.move) allCandidates.push(sm.move);
         degraded ||= sm.degraded;
       } catch {
@@ -341,7 +346,12 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
     }
 
     // 4. Ledger Moves (reviews and refuters)
-    if (row.has_claims === 0 && effectivePermissions.session_open && effectivePermissions.promote) {
+    if (
+      row.status !== "sharpening" &&
+      row.has_claims === 0 &&
+      effectivePermissions.session_open &&
+      effectivePermissions.promote
+    ) {
       const template = this.dependencies.firstClaimTemplate();
       const first = firstClaimMove(problemId, row.cursor, template, LIVE_MOVES_BOUNDARY);
       if (first) allCandidates.push(first);

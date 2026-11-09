@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import {
+  PackResponseSchema,
   ProblemDocumentSchema,
   ProblemFaceResponseSchema,
+  ProblemNextResponseSchema,
   ProblemStatementReviewEventSchema,
   ScreeningPromotionDeniedResponseSchema,
+  TriageResponseSchema,
 } from "@asimposium/contracts";
 import {
   ProjectionRepairRefusedError,
@@ -18,6 +21,15 @@ import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
 await runLocalWorkerJourney(
   async ({ call, enroll, sponsorCall, env, fixtures, worker, origin, userAgent }) => {
+    await statementReviewDiscovery({
+      call,
+      enroll,
+      sponsorCall,
+      fixtures,
+      worker,
+      origin,
+      userAgent,
+    });
     const sponsor = "usr_statement_author";
     const author = await enroll("statement-author", sponsor);
     const created = await call(
@@ -744,3 +756,196 @@ await runLocalWorkerJourney(
     };
   },
 );
+
+/** Follow discovery into an actual independent review; the existing journey
+ * above retains its transaction, policy, replay and public-reader assertions. */
+async function statementReviewDiscovery({
+  call,
+  enroll,
+  sponsorCall,
+  fixtures,
+  worker,
+  origin,
+  userAgent,
+}) {
+  const sponsor = "usr_statement_discovery_owner";
+  const author = await enroll("statement-discovery-author", sponsor);
+  const formulation = {
+    title: "Finite path statement review discovery",
+    statement: "Every nonempty finite simple path has one more vertex than edges.",
+    falsifier:
+      "A nonempty finite simple path whose vertex count differs from its edge count plus one.",
+    motivation: "Establish an exact finite graph invariant before claims are admitted.",
+    scope: "Finite nonempty undirected simple paths, including a single vertex.",
+    out_of_scope: "Cycles, disconnected graphs and infinite paths.",
+    success_criteria: "An explicit formulation check followed by independently reviewable work.",
+    areas: ["combinatorics"],
+  };
+  const created = await call(
+    "/v1/problems",
+    formulation,
+    author,
+    201,
+    "statement-discovery-proposal",
+  );
+  const problem = created.problem.id;
+  const lifecycle = `/v1/sponsors/problems/${problem}/lifecycle`;
+  await sponsorCall(sponsor, "POST", lifecycle, "problem-lifecycle", { action: "publish" });
+  await sponsorCall(sponsor, "POST", lifecycle, "problem-lifecycle", {
+    action: "set-writer-cap",
+    writer_cap: 1,
+  });
+  const authorSession = (await call("/v1/sessions", { problem_id: problem }, author, 201))
+    .session_id;
+  const draft = await call(
+    `/v1/sessions/${authorSession}/workshop`,
+    {
+      type: "claim-draft",
+      title: "The one-vertex boundary case",
+      body_md: "STATEMENT_DISCOVERY_PRIVATE_AUTHOR: the one-vertex path has zero edges.",
+    },
+    author,
+    201,
+  );
+  const claim = {
+    workshop_id: draft.workshop_id,
+    kind: "conjecture",
+    statement: "A simple path consisting of one vertex has zero edges.",
+    falsifier: "An edge in a simple path consisting of exactly one vertex.",
+  };
+  const promote = `/v1/sessions/${authorSession}/promote`;
+  assert.equal((await call(promote, claim, author, 422)).code, "CLAIMS_BOARD_LOCKED");
+
+  const next = async (token) =>
+    ProblemNextResponseSchema.parse(await call(`/v1/p/${problem}/next`, undefined, token));
+  const pack = async (token, session, maxTokens = 8000) =>
+    PackResponseSchema.parse(
+      await call(
+        `/v1/sessions/${session}/pack?profile=working&max_tokens=${maxTokens}`,
+        undefined,
+        token,
+      ),
+    );
+  const ownerMove = (await next(author)).primary_move;
+  assert.equal(ownerMove.move, "sharpen-statement");
+  assert.equal(ownerMove.contract.request.path, "/v1/sessions/{id}/workshop");
+  assert.ok(
+    !(await pack(author, authorSession)).next_actions.some(
+      (action) => action.url.endsWith("/statement-review") || action.url.endsWith("/promote"),
+    ),
+  );
+  const sameSponsor = await enroll("statement-discovery-colleague", sponsor);
+  await call("/v1/sessions", { problem_id: problem }, sameSponsor, 201);
+  assert.equal(
+    (await next(sameSponsor)).primary_move.contract.request.path,
+    "/v1/sessions/{id}/workshop",
+  );
+
+  async function reviewOnly(name, reviewerSponsor) {
+    const invitation = await fixtures.mint(reviewerSponsor, ["review"]);
+    const claimed = await call(
+      "/v1/fellows",
+      {
+        enrollment_id: invitation.enrollmentId,
+        secret: invitation.secret,
+        name,
+        model: "synthetic-statement-discovery",
+        harness: "local-statement-discovery-proof",
+      },
+      undefined,
+      202,
+    );
+    await fixtures.approve(reviewerSponsor, invitation.enrollmentId);
+    const { token } = await call("/v1/fellows/flow", { flow_handle: claimed.flow_handle });
+    const { session_id: session } = await call(
+      "/v1/sessions",
+      {
+        problem_id: problem,
+        intent: "review",
+      },
+      token,
+      201,
+    );
+    return { token, session };
+  }
+  async function reviewFromPack(reviewer, verdict) {
+    const recommendation = await next(reviewer.token);
+    assert.equal(recommendation.viewer.role, "observer");
+    assert.equal(recommendation.viewer.effective_permissions.review, true);
+    assert.equal(recommendation.viewer.effective_permissions.promote, false);
+    assert.equal(recommendation.primary_move.move, "sharpen-statement");
+    assert.ok(!recommendation.alternatives.some((move) => move.move === "state-claim"));
+    const triage = TriageResponseSchema.parse(await call("/v1/triage", undefined, reviewer.token));
+    assert.deepEqual(triage.move.refs, recommendation.primary_move.refs);
+    const working = await pack(reviewer.token, reviewer.session);
+    assert.ok(!JSON.stringify(working).includes("STATEMENT_DISCOVERY_PRIVATE_AUTHOR"));
+    const item = working.items.find((candidate) => candidate.id === "SYS-working-moves");
+    assert.ok(item);
+    const selected = JSON.parse(item.body).primary_move;
+    const { contract } = selected;
+    assert.equal(contract.request.path, `/v1/problems/${problem}/statement-review`);
+    assert.equal(contract.prefilled_hints.session_id, reviewer.session);
+    assert.equal(contract.prefilled_hints.statement_version, 1);
+    assert.equal(Object.hasOwn(contract.prefilled_hints, "verdict"), false);
+    assert.equal(Object.hasOwn(contract.prefilled_hints, "basis"), false);
+    assert.ok(
+      working.next_actions.some(
+        (action) => action.method === "POST" && action.url === contract.request.path,
+      ),
+    );
+    assert.ok(!working.next_actions.some((action) => action.url.endsWith("/promote")));
+    const source = await worker.fetch(origin + contract.preparation.read_first.path, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(source.status, 200);
+    const exact = await source.text();
+    for (const key of [
+      "statement",
+      "falsifier",
+      "motivation",
+      "scope",
+      "out_of_scope",
+      "success_criteria",
+    ])
+      assert.ok(exact.includes(formulation[key]));
+    const small = await pack(reviewer.token, reviewer.session, 800);
+    assert.ok(small.tokens_estimate <= 800);
+    assert.ok(small.next_actions.some((action) => action.method === "GET"));
+    return call(
+      contract.request.path,
+      {
+        ...contract.prefilled_hints,
+        verdict,
+        basis:
+          verdict === "statement-clear"
+            ? "Checked the finite domain, single-vertex convention, excluded graphs and exact counterexample condition."
+            : "The path convention needs explicit scrutiny before the claims board can open.",
+      },
+      reviewer.token,
+    );
+  }
+  const uncertain = await reviewOnly(
+    "statement-discovery-checker",
+    "usr_statement_discovery_check",
+  );
+  assert.equal((await reviewFromPack(uncertain, "statement-unclear")).status, "sharpening");
+  assert.equal(
+    (await next(uncertain.token)).primary_move.contract.request.path,
+    "/v1/sessions/{id}/workshop",
+  );
+  assert.equal((await call(promote, claim, author, 422)).code, "CLAIMS_BOARD_LOCKED");
+  const clear = await reviewOnly("statement-discovery-verifier", "usr_statement_discovery_verify");
+  assert.equal((await reviewFromPack(clear, "statement-clear")).status, "active");
+  assert.equal((await next(clear.token)).primary_move, null);
+  assert.ok((await call(promote, claim, author, 201)).claim_id);
+  console.log(
+    JSON.stringify({
+      stage: "statement-review-discovery-passed",
+      observer_review_only: true,
+      exact_formulation: true,
+      private_author_work_excluded: true,
+      unclear_preserves_lock: true,
+      independent_clear_unlocks_claims: true,
+    }),
+  );
+}

@@ -224,6 +224,7 @@ import {
   isSynthesisReferenceChanged,
   synthesisAnchorGuards,
 } from "../ledger/synthesis-references.ts";
+import { isStatementReviewMove } from "../mega-commands/move-permissions.ts";
 import { isScreeningPostureChangedError } from "../moderation/posture";
 import { logRosterDiagnostic } from "../problems/roster";
 import { scanFieldsForCredentials, secretShapedContentProblem } from "../screening/credential-scan";
@@ -4672,6 +4673,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       actionPermissions.push("workshop:write");
     }
     if (
+      packProblem?.status !== "sharpening" &&
       authorizeFellowWrite({
         effect: "promote",
         credential: auth.binding,
@@ -4739,6 +4741,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           })
         : { candidates: [], omitted: [], primaryMove: null, degraded: false };
     candidates.push(...workingMoves.candidates);
+    if (
+      reviewAllowed &&
+      workingMoves.primaryMove !== null &&
+      isStatementReviewMove(workingMoves.primaryMove)
+    )
+      actionPermissions.push("review:write");
     const firstReviewTarget =
       profile === "working"
         ? workingMoves.primaryMove?.move === "review"
@@ -4778,6 +4786,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       action_candidates: [
         ...orientation.actions,
         ...directiveContext.actions,
+        ...(workingMoves.primaryMove !== null && isStatementReviewMove(workingMoves.primaryMove)
+          ? [
+              {
+                method: "POST" as const,
+                url: `/v1/problems/${session.problem_id}/statement-review`,
+                why: "Submit your own verdict and basis for the exact formulation using the statement-review contract and session pin in the selected move.",
+                public_read: false,
+                requires: ["review:write"],
+              },
+            ]
+          : []),
         ...(profile === "working"
           ? [
               {

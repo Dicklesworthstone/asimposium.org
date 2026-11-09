@@ -548,6 +548,59 @@ test("an observer cannot receive the first-claim promotion move", async () => {
     f.sqlite.close();
   }
 });
+
+test("next and triage select statement review for review-only observers while the claims board is locked", async () => {
+  const f = fixture();
+  try {
+    f.sqlite.exec("UPDATE problems SET status='sharpening',public_seq=0");
+    f.sqlite.exec("UPDATE problem_memberships SET role='observer'");
+    const reviewCredential = {
+      ...credential,
+      grantedScopes: ["review"],
+    } as FellowCredentialBinding;
+    let selections = 0;
+    const provider = new LedgerMovesProvider({
+      ...f.dependencies,
+      sharpen: {
+        async load(_db, problem, cursor, viewer) {
+          selections++;
+          assert.equal(viewer?.fellowId, credential.fellowId);
+          assert.equal(viewer?.sponsorId, credential.sponsorId);
+          return {
+            move: {
+              move: "sharpen-statement",
+              why: "Inspect the exact current formulation before deciding a verdict.",
+              refs: [problem, "S@1"],
+              contract: {
+                ...getMoveTemplate("sharpen-statement"),
+                preparation: { problem_id: problem, captured_cursor: cursor },
+              },
+            },
+            degraded: false,
+          };
+        },
+      },
+    });
+    const result = await provider.nextMoves(next(f.db, reviewCredential));
+    assert.equal(result.primaryMove?.move, "sharpen-statement");
+    assert.equal(result.effectivePermissions?.review, true);
+    assert.equal(result.effectivePermissions?.promote, false);
+    assert.deepEqual(result.alternatives, []);
+    assert.equal(f.queueReads(), 0);
+    const triage = await provider.triageMove({
+      db: f.db,
+      credential: reviewCredential,
+      fellowId: reviewCredential.fellowId,
+      assignments: [assignment("P-DEMO")],
+    });
+    assert.equal(triage.move?.move, "sharpen-statement");
+    const denied = await provider.nextMoves(next(f.db, { ...reviewCredential, grantedScopes: [] }));
+    assert.equal(denied.primaryMove, null);
+    assert.equal(selections, 3);
+  } finally {
+    f.sqlite.close();
+  }
+});
 test("triage selects a first claim when assigned boards have no existing review need", async () => {
   const f = fixture(["P-AAA", "P-BBB"]);
   try {

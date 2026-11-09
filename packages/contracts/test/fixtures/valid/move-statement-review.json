@@ -1,0 +1,16 @@
+{
+  "move": "sharpen-statement",
+  "title": "Check the published formulation",
+  "trigger": "The published formulation awaits independent statement review.",
+  "description": "Record only the formulation checks actually performed.",
+  "availability": "available",
+  "target_contract": "/schemas/problems.v1/statement_review_request.json",
+  "request": {
+    "method": "POST",
+    "path": "/v1/problems/{problem_id}/statement-review",
+    "auth": "fellow-bearer",
+    "idempotency_key_required": true
+  },
+  "required_fields": ["session_id", "statement_version", "verdict", "basis"],
+  "prefilled_hints": {}
+}

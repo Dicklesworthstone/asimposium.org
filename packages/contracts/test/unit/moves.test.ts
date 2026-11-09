@@ -48,8 +48,8 @@ describe("Move Templates registry", () => {
   test("getMoveTemplate returns the template or throws on unknown", () => {
     const sharpen = getMoveTemplate("sharpen-statement");
     expect(sharpen.move).toBe("sharpen-statement");
-    expect(sharpen.availability).toBe("unavailable");
-    expect(sharpen).not.toHaveProperty("request");
+    expect(sharpen.availability).toBe("available");
+    expect(sharpen).toHaveProperty("request.path", "/v1/problems/{problem_id}/statement-review");
 
     expect(() => getMoveTemplate("nonexistent" as never)).toThrow("UNKNOWN_MOVE_KIND");
   });
@@ -67,7 +67,7 @@ describe("Move Templates registry", () => {
       if (template.availability === "available") {
         available++;
         expect(template.target_contract).toMatch(
-          /^\/schemas\/sessions\.v1\/[a-z_]+_request\.json$/,
+          /^\/schemas\/(?:sessions\.v1\/[a-z_]+_request|problems\.v1\/statement_review_request)\.json$/,
         );
         expect(template.required_fields.length).toBeGreaterThan(0);
         expect(new Set(template.required_fields).size).toBe(template.required_fields.length);
@@ -81,7 +81,7 @@ describe("Move Templates registry", () => {
         expect(template).not.toHaveProperty("prefilled_hints");
       }
     }
-    expect(available).toBe(16);
+    expect(available).toBe(17);
   });
 
   test("golden availability fixtures agree in strict Zod and served JSON Schema", async () => {
@@ -95,6 +95,8 @@ describe("Move Templates registry", () => {
     for (const [directory, name, expected, code] of [
       ["valid", "move-available", true, undefined],
       ["valid", "move-unavailable", true, undefined],
+      ["valid", "move-statement-review", true, undefined],
+      ["invalid", "move-statement-review-sponsor", false, "invalid_format"],
       ["invalid", "move-unavailable-action", false, "unrecognized_keys"],
       ["invalid", "move-available-missing-request", false, "invalid_type"],
     ] as const) {
@@ -122,23 +124,23 @@ describe("Move Templates registry", () => {
     ).toBe(false);
   });
 
-  test("available moves reference valid target contracts and properties in sessions schema", async () => {
-    const sessionsSchema = await Bun.file(
-      new URL("../../generated/sessions.schema.json", import.meta.url),
-    ).json();
+  test("available moves reference valid small request contracts in the served schema registry", async () => {
     for (const kind of MOVE_KINDS) {
       const template = MOVE_TEMPLATES[kind];
       if (template.availability !== "available") continue;
 
       const propMatch = template.target_contract.match(
-        /^\/schemas\/sessions\.v1\/([a-z_]+)\.json$/,
+        /^\/schemas\/(sessions|problems)\.v1\/([a-z_]+)\.json$/,
       );
       expect(propMatch).not.toBeNull();
-      if (!propMatch?.[1]) {
+      if (!propMatch?.[1] || !propMatch[2]) {
         throw new Error(`Invalid target contract format: ${template.target_contract}`);
       }
-      const propName: string = propMatch[1];
-      const targetDef = (sessionsSchema as Record<string, unknown>).properties as
+      const document = await Bun.file(
+        new URL(`../../generated/${propMatch[1]}.schema.json`, import.meta.url),
+      ).json();
+      const propName: string = propMatch[2];
+      const targetDef = (document as Record<string, unknown>).properties as
         | Record<string, unknown>
         | undefined;
       const moveDef = targetDef?.[propName];

@@ -2,7 +2,6 @@ import type { MoveKind, NextMoveCandidate } from "@asimposium/contracts";
 
 /** Reviews have their own scope and remain available to observers (§9.3). */
 export const PROMOTION_MOVE_KINDS: ReadonlySet<MoveKind> = new Set<MoveKind>([
-  "sharpen-statement",
   "state-claim",
   "add-refuter",
   "third-alternative",
@@ -34,6 +33,22 @@ const DEAD_END_MOVE_KINDS: ReadonlySet<MoveKind> = new Set<MoveKind>([
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** The existing statement-review route is a review effect, including when
+ * a working pack binds its exact problem path and owned session. */
+export function isStatementReviewMove(candidate: NextMoveCandidate): boolean {
+  const request = candidate.contract?.request;
+  return (
+    candidate.move === "sharpen-statement" &&
+    candidate.contract?.availability === "available" &&
+    candidate.contract.target_contract === "/schemas/problems.v1/statement_review_request.json" &&
+    record(request) &&
+    request.method === "POST" &&
+    (request.path === "/v1/problems/{problem_id}/statement-review" ||
+      request.path ===
+        `/v1/problems/${encodeURIComponent(candidate.refs[0] ?? "")}/statement-review`)
+  );
 }
 
 /** The public-write quota also covers review. Keep only a genuinely private
@@ -74,6 +89,19 @@ export function filterMovesByPermissions(
           ? "dead_end"
           : "promote";
       if (effectivePermissions[permission] !== true) return false;
+    }
+    if (effect === "sharpen-statement") {
+      if (isStatementReviewMove(candidate)) {
+        if (effectivePermissions.review !== true) return false;
+      } else {
+        const request = candidate.contract?.request;
+        if (
+          !record(request) ||
+          request.path !== "/v1/sessions/{id}/workshop" ||
+          effectivePermissions.workshop_push !== true
+        )
+          return false;
+      }
     }
     if (effect === "review" && effectivePermissions.review !== true) return false;
     const request = candidate.contract?.request;
