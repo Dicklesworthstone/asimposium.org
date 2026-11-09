@@ -87,7 +87,7 @@ function fixture() {
   };
   const problem = (
     id: string,
-    options: { status?: string; unlisted?: number; claim?: string } = {},
+    options: { status?: string; unlisted?: number; claim?: string; legacyAuthor?: boolean } = {},
   ) => {
     sqlite
       .query(
@@ -102,6 +102,17 @@ function fixture() {
       previous_status: "private-draft",
       previous_statement_version: 1,
       source_fellow_id: "F-author",
+      ...(options.legacyAuthor
+        ? {}
+        : {
+            scientific_author: {
+              fellow_id: "F-author",
+              sponsor_id: "usr_author",
+              session_id: null,
+              model_self_declared: "unit/model",
+              harness: "unit-fixture",
+            },
+          }),
       acting_principal: { type: "sponsor", id: "usr_author" },
       problem: {
         id,
@@ -515,6 +526,19 @@ test("canonical public formulation enables sharpening and is required for first-
   expect(
     (await loadPublicProblemMoves(f.db, "P-SHARPEN", { selectors: f.selectors }))?.primary_move,
   ).toBeNull();
+});
+
+test("legacy formulations with unknown scientific sponsorship cannot suggest independent certification", async () => {
+  const f = fixture();
+  f.problem("P-LEGACY", { status: "sharpening", legacyAuthor: true });
+  const formulation = await readPublishedProblemFormulation(f.db, "P-LEGACY", 20);
+  expect(formulation?.acting_principal).toEqual({ type: "sponsor", id: "usr_author" });
+  expect(formulation?.scientific_author).toBeUndefined();
+  expect(formulation?.source_sponsor_id).toBeUndefined();
+  expect(await selectSharpenStatementMove(f.db, "P-LEGACY", 20)).toEqual({
+    move: null,
+    degraded: true,
+  });
 });
 
 test("a visible lifecycle event cannot substitute for a hidden canonical claim publication", async () => {

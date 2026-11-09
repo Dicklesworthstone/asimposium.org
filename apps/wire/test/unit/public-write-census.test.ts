@@ -109,6 +109,9 @@ const PATH_MATCHED_WRITES = [
   "POST /v1/artifacts",
   "POST /v1/artifacts/:id/complete",
   "POST /v1/artifacts/:id/renew",
+  "POST /v1/artifacts/:id/resumable",
+  "POST /v1/artifacts/:id/resume",
+  "PUT /v1/artifacts/:id/parts/:partNumber",
   "POST /v1/artifacts/:id/publish",
   "POST /v1/sessions/:id/evidence/:eid/retract",
   "POST /v1/sessions/:id/reviews/:rid/retract",
@@ -284,6 +287,8 @@ const CENSUS: Readonly<Record<string, Class>> = {
       canonical_problem_id: "must name an existing, non-retired problem (merge refuses otherwise)",
       reviewed_digest:
         "SHA-256 concurrency pin compared with the exact reviewed publication preview; not public prose",
+      proposal_id:
+        "selects an immutable private Fellow formulation; exact reviewed prose is screened before a public revision commits",
       "closing_synthesis.synthesis_id":
         "selects an existing immutable Fellow synthesis; its original public prose was screened on publication",
       external_expert_review_proof:
@@ -359,6 +364,22 @@ const CENSUS: Readonly<Record<string, Class>> = {
   "POST /v1/artifacts/:id/renew": {
     kind: "private",
     why: "renews a private upload capability; no user prose",
+  },
+  "POST /v1/artifacts/:id/resumable": {
+    kind: "private",
+    why: "selects private digest-pinned upload parts; no publication",
+  },
+  "POST /v1/artifacts/:id/resume": {
+    kind: "private",
+    why: "reauthorizes an owned private upload under a current session; no publication",
+  },
+  "PUT /v1/artifacts/:id/parts/:partNumber": {
+    kind: "private",
+    why: "stores private digest-pinned bytes; public release uses the screened publication path",
+  },
+  "POST /v1/problems/:id/statement-proposals": {
+    kind: "private",
+    why: "stores an immutable Fellow formulation privately; explicit steward acceptance screens its exact prose before publication",
   },
   "POST /v1/p/:problem/review-requests": { kind: "private", why: "private coordination, ids only" },
   "POST /v1/p/:problem/review-requests/:requestId/respond": {
@@ -611,7 +632,7 @@ describe("P7 public-write census (kqz5)", () => {
     // classified above.
     const KNOWN: Record<string, string> = {
       "src/krater/artifact-http.ts":
-        "POST /v1/artifacts, /v1/artifacts/:id/complete, /v1/artifacts/:id/renew",
+        "private declare/complete/renew/resumable/resume POSTs and digest-pinned part PUT",
       "src/krater/artifact-publication-http.ts": "POST /v1/artifacts/:id/publish",
       "src/ledger/scientific-withdrawal-http.ts": "evidence/review retract",
       "src/mega-commands/move-permissions.ts":
@@ -621,6 +642,7 @@ describe("P7 public-write census (kqz5)", () => {
       "src/sessions/refusal-schema.ts": "maps refused routes to schema slices; writes nothing",
       "src/discovery/discovery.ts": "OpenAPI generation, not dispatch",
       "src/discovery/artifact-publications-discovery.ts": "OpenAPI generation, not dispatch",
+      "src/discovery/artifact-uploads-discovery.ts": "OpenAPI generation, not dispatch",
       "src/discovery/review-requests-discovery.ts": "OpenAPI generation, not dispatch",
     };
     const matcherFiles = sourceFiles(SRC)

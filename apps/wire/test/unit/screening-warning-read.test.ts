@@ -4,6 +4,7 @@ import {
   type PackResponse,
   PackResponseSchema,
   ProblemFaceResponseSchema,
+  ProblemStatementRevisionResponseSchema,
   PromoteResponseSchema,
   ReviewResponseSchema,
   ReviseResponseSchema,
@@ -23,6 +24,7 @@ import { parseEventTailToon } from "../../src/ledger/event-tail-http";
 import { findScientificClaim } from "../../src/ledger/scientific-checks";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger";
 import { readProblemPublicationPreview } from "../../src/problems/publication-preview";
+import { acceptPrivateStatementProposal } from "../../src/problems/statement-revision-proposals";
 import { screenPublicCandidate } from "../../src/screening/public-candidate";
 import { rebuildSearchIndex } from "../../src/search/index-health";
 import {
@@ -32,6 +34,7 @@ import {
   SPONSOR,
 } from "../support/publication-context";
 import { syntheticScreeningObservation } from "../support/screening";
+import { reviewedStatementRevisionFixture } from "../support/statement-proposal";
 
 const ORIGIN = "https://a.asimposium.org";
 const REPLAY_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -133,8 +136,38 @@ async function readFixture(f: DatabaseFixture) {
   f.sql
     .query("UPDATE problems SET status='private-draft',created_by_fellow_id=? WHERE id=?")
     .run(FELLOW, PROBLEM);
+  // The shared seed deliberately has unknown legacy authorship. Obtain a
+  // current approved source and accept its immutable private proposal before
+  // publishing, so later independent review has actual version attribution.
+  const revision = await reviewedStatementRevisionFixture(
+    f.db,
+    SPONSOR,
+    PROBLEM,
+    {
+      statement: "Exact public problem statement.",
+      falsifier: "Exact public falsifier.",
+      motivation: "Exact public motivation.",
+    },
+    "warning-read-authored-formulation",
+  );
+  const accepted = await acceptPrivateStatementProposal(
+    f.db,
+    PROBLEM,
+    SPONSOR,
+    revision,
+    "warning-read-accept-formulation",
+  );
+  expect(accepted.status).toBe(200);
+  const acceptedVersion = ProblemStatementRevisionResponseSchema.parse(await accepted.json())
+    .problem.current_statement_version;
+  expect(acceptedVersion).toBe(2);
+  expect(f.sql.query("SELECT public_seq FROM problems WHERE id=?").get(PROBLEM)).toEqual({
+    public_seq: 0,
+  });
   const preview = await readProblemPublicationPreview(f.db, PROBLEM, SPONSOR);
   if (preview === undefined) throw new Error("The warning fixture needs a publication preview.");
+  expect(preview.problem.current_statement_version).toBe(acceptedVersion);
+  expect(preview.scientific_author?.fellow_id).toBe(preview.author.fellow_id);
   const snapshot = f.sql.query("SELECT * FROM problems WHERE id=?").get(PROBLEM) as Parameters<
     typeof applyPublicProblemGovernance
   >[1];
@@ -161,6 +194,7 @@ async function readFixture(f: DatabaseFixture) {
             ...f.input(
               "Context problem\n\nExact public problem statement.\n\nExact public motivation.",
             ),
+            fellowId: preview.author.fellow_id,
             kind: "problem-proposal",
             falsifier: "Exact public falsifier.",
           },
@@ -176,7 +210,7 @@ async function readFixture(f: DatabaseFixture) {
     `/v1/problems/${PROBLEM}/statement-review`,
     {
       session_id: reviewerSession,
-      statement_version: 1,
+      statement_version: preview.problem.current_statement_version,
       verdict: "statement-clear",
       basis: "The finite set, parity predicate and explicit falsifier are separately stated.",
     },
