@@ -276,10 +276,12 @@ test("operator question controls hide pinned sources before validators and resto
   const restored = await apply("restore");
   expect(restored.audit_event_id).not.toBe(hidden.audit_event_id);
   for (const format of formats) {
+    const original = originals.get(format);
+    if (original === undefined) throw new Error("Expected the original question representation.");
     const response = await face(f, `${format}${sourceSuffix}`);
     expect(response.status).toBe(200);
-    expect(response.headers.get("etag")).toBe(originals.get(format)?.etag);
-    expect(await response.text()).toBe(originals.get(format)?.text);
+    expect(response.headers.get("etag")).toBe(original.etag);
+    expect(await response.text()).toBe(original.text);
   }
 });
 
