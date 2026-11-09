@@ -4,13 +4,17 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import type { CitationItem } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
-import { loadCommittedCitation, loadCommittedCitations } from "../../src/ledger/citation-read";
+import {
+  CitationReadError,
+  loadCommittedCitation,
+  loadCommittedCitations,
+} from "../../src/ledger/citation-read";
 
 /** SQL unit fixture, not a deployed D1 or migration/chain-integrity proof. */
 function fixture() {
   const sqlite = new Database(":memory:");
   sqlite.exec(`
-    CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT);
+    CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER DEFAULT 0);
     CREATE TABLE events (
       id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, type TEXT,
       object_kind TEXT, object_id TEXT, object_version INTEGER,
@@ -23,7 +27,7 @@ function fixture() {
     CREATE TABLE citations (problem_id TEXT, citation_id TEXT, title TEXT);
     CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
-    INSERT INTO problems VALUES ('P-TEST', 1000, 'active'), ('P-OTHER', 1000, 'active');
+    INSERT INTO problems(id,public_seq,status) VALUES ('P-TEST', 1000, 'active'), ('P-OTHER', 1000, 'active');
     INSERT INTO citations VALUES ('P-TEST', 'L-1', 'PRIVATE_PROJECTION_CANARY');
   `);
   const prepare = (sql: string) => {
@@ -199,7 +203,10 @@ test("tampered and missing content cannot be replaced by retained projections", 
         (await loadCommittedCitations(db, "P-TEST", {}, decodeFixture)).citations.length,
         0,
       );
-      assert.equal(await loadCommittedCitation(db, "P-TEST", "L-1", {}, decodeFixture), null);
+      await assert.rejects(
+        loadCommittedCitation(db, "P-TEST", "L-1", {}, decodeFixture),
+        new CitationReadError("CONTENT_UNAVAILABLE"),
+      );
     } finally {
       sqlite.close();
     }
@@ -365,15 +372,21 @@ test("payload identity disagreement and canonical decoder refusal withhold a cit
   const { sqlite, db, event } = fixture();
   try {
     await event(1, "L-1", 1, citation("L-2"));
-    assert.equal(await loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture), null);
+    await assert.rejects(
+      loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture),
+      new CitationReadError("CONTENT_UNAVAILABLE"),
+    );
     await event(2, "L-3", 1, citation("L-3"));
-    assert.equal(await loadCommittedCitation(db, "P-TEST", "L-3@1", {}, () => undefined), null);
+    await assert.rejects(
+      loadCommittedCitation(db, "P-TEST", "L-3@1", {}, () => undefined),
+      new CitationReadError("CONTENT_UNAVAILABLE"),
+    );
   } finally {
     sqlite.close();
   }
 });
 
-test("lists preserve numeric citation order and disclose filter and count bounds", async () => {
+test("lists preserve selected publication order and disclose filter and scanned-head bounds", async () => {
   const { sqlite, db, event } = fixture();
   try {
     await event(1, "L-10", 1, citation("L-10", "Source ten", false));
@@ -382,7 +395,7 @@ test("lists preserve numeric citation order and disclose filter and count bounds
     const all = await loadCommittedCitations(db, "P-TEST", {}, decodeFixture);
     assert.deepEqual(
       all.citations.map((item) => item.citation_id),
-      ["L-1", "L-2", "L-10"],
+      ["L-10", "L-2", "L-1"],
     );
     const filtered = await loadCommittedCitations(
       db,
@@ -390,7 +403,8 @@ test("lists preserve numeric citation order and disclose filter and count bounds
       { limit: 1, unanchored: true },
       decodeFixture,
     );
-    assert.equal(filtered.citations.length, 1);
+    assert.equal(filtered.citations.length, 0);
+    assert.equal(filtered.next_after, 1);
     assert.ok(filtered.omitted.some((message) => message.includes("filter")));
     assert.ok(filtered.omitted.some((message) => message.includes("bounded")));
   } finally {
@@ -420,7 +434,7 @@ test("invalid version syntax and impossible read bounds fail before SQL", async 
   for (const through of [-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
     await assert.rejects(
       loadCommittedCitations(db, "P-TEST", { through }, decodeFixture),
-      /Invalid citation read bounds/,
+      new CitationReadError("CURSOR_INVALID"),
     );
   }
 });
@@ -432,7 +446,7 @@ test("duplicate citation versions refuse ambiguous history rather than selecting
     await event(2, "L-1", 1, citation("L-1", "Conflicting duplicate"));
     await assert.rejects(
       loadCommittedCitation(db, "P-TEST", "L-1", {}, decodeFixture),
-      /Citation history is unavailable/,
+      new CitationReadError("CONTENT_UNAVAILABLE"),
     );
   } finally {
     sqlite.close();
@@ -448,7 +462,10 @@ for (const through of [undefined, 2]) {
       sqlite.exec("INSERT INTO content_controls VALUES ('P-TEST', 'problem', 'hidden', 1)");
       const options = through === undefined ? {} : { through };
       const list = await loadCommittedCitations(db, "P-TEST", options, decodeFixture);
-      assert.deepEqual(list, { citations: [], omitted: [] });
+      assert.deepEqual(list.citations, []);
+      assert.deepEqual(list.omitted, []);
+      assert.equal(list.problem, null);
+      assert.equal(list.cursor, through ?? 0);
       for (const target of ["L-1", "L-1@1"])
         assert.equal(
           await loadCommittedCitation(db, "P-TEST", target, options, decodeFixture),
@@ -555,6 +572,35 @@ test("hidden claims do not exhaust the bounded backlink candidate budget", async
       ["C-202"],
     );
     assert.ok(!JSON.stringify(result).includes("CANARY"));
+  } finally {
+    sqlite.close();
+  }
+});
+
+test("bounded backlinks disclose candidate, returned-item and source-byte omissions", async () => {
+  const { sqlite, db, event } = fixture();
+  try {
+    await event(1, "L-1", 1, citation());
+    for (let index = 1; index <= 201; index++)
+      await event(
+        index + 1,
+        `C-${index}`,
+        1,
+        { statement: "Recorded claim cites L-1@1." },
+        "claim",
+      );
+    const countBounded = await loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture);
+    assert.equal(countBounded?.associated_claims.length, 20);
+    assert.ok(countBounded?.omitted.some((detail) => detail.includes("20 claims")));
+    assert.ok(countBounded?.omitted.some((detail) => detail.includes("200 candidate heads")));
+    const largeStatement = `Large immutable associated claim L-1@1. ${"a".repeat(60_000)}`;
+    for (let index = 1; index <= 40; index++)
+      await event(index + 300, `C-${index}`, 2, { statement: largeStatement }, "claim");
+    const byteBounded = await loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture);
+    assert.equal(byteBounded?.citation.version, 1);
+    assert.equal(byteBounded?.associated_claims.length, 20);
+    assert.ok(byteBounded?.omitted.some((detail) => detail.includes("source-byte budget")));
+    assert.ok(!JSON.stringify(byteBounded).includes("PRIVATE_PROJECTION_CANARY"));
   } finally {
     sqlite.close();
   }

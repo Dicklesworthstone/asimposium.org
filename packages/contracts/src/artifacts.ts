@@ -4,7 +4,13 @@ import { fileURLToPath } from "node:url";
 
 import { z } from "zod";
 import { BatchContractsSchema } from "./batch.ts";
-import { CITATIONS_SCHEMA_ID, CitationsListResponseSchema } from "./citations.ts";
+import {
+  CITATIONS_SCHEMA_ID,
+  CitationReadQuerySchema,
+  CitationsListQuerySchema,
+  CitationsListResponseSchema,
+  SingleCitationResponseSchema,
+} from "./citations.ts";
 import {
   CONFLICTS_SCHEMA_ID,
   ConflictsListQuerySchema,
@@ -987,6 +993,11 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
         $id: CITATIONS_SCHEMA_ID,
         title: "ASImposium public citations response",
         ...z.toJSONSchema(CitationsListResponseSchema),
+        $defs: {
+          query: z.toJSONSchema(CitationsListQuerySchema, { io: "input" }),
+          read_query: z.toJSONSchema(CitationReadQuerySchema, { io: "input" }),
+          single: z.toJSONSchema(SingleCitationResponseSchema),
+        },
       }),
     },
     {

@@ -1,12 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import {
+  CITATIONS_LIST_DEFAULT_LIMIT,
+  CITATIONS_LIST_MAX_LIMIT,
   CITATIONS_SCHEMA_ID,
   CitationIdSchema,
   CitationItemSchema,
+  CitationReadQuerySchema,
+  CitationsListQuerySchema,
   CitationsListResponseSchema,
   CorrectCitationRequestSchema,
   CorrectCitationResponseSchema,
   canonicalizeLocator,
+  citationMatchesQuery,
+  citationPath,
+  citationsListMatchesQuery,
+  citationsListPath,
   computeCitationNormHash,
   LOCATOR_KINDS,
   LocatorKindSchema,
@@ -42,6 +50,9 @@ describe("W5.8c Citations contracts", () => {
       expect(PublicCitationTargetSchema.safeParse("L-1@-1").success).toBe(false);
       expect(PublicCitationTargetSchema.safeParse("L-1@").success).toBe(false);
       expect(PublicCitationTargetSchema.safeParse("invalid").success).toBe(false);
+      for (const target of ["L-1\n", "L-1@2\n", "L-1@01", "L-1@9007199254740992", "L-1@2/extra"])
+        expect(PublicCitationTargetSchema.safeParse(target).success).toBe(false);
+      expect(PublicCitationTargetSchema.safeParse("L-1@9007199254740991").success).toBe(true);
     });
 
     test("LocatorKindSchema covers all required locator kinds", () => {
@@ -58,6 +69,234 @@ describe("W5.8c Citations contracts", () => {
         expect(SourceProvenanceSchema.safeParse(prov).success).toBe(true);
       }
       expect(SourceProvenanceSchema.safeParse("synthetic").success).toBe(false);
+    });
+  });
+
+  describe("Public citation selection and continuation", () => {
+    const citation = CitationItemSchema.parse({
+      citation_id: "L-1",
+      problem_id: "P-4DSP",
+      version: 2,
+      seq: 45,
+      title: "A checked source",
+      authors: ["Research Author"],
+      locator_kind: "doi",
+      canonical_locator: "10.1000/182",
+      source_provenance: "retrieved",
+      unanchored: false,
+      norm_hash: "citation:doi:10.1000/182",
+      author_fellow_id: "F-author",
+      created_at: "2026-09-02T12:00:00.000Z",
+    });
+    const page = CitationsListResponseSchema.parse({
+      schema: CITATIONS_SCHEMA_ID,
+      problem_id: "P-4DSP",
+      cursor: 80,
+      after: 40,
+      scanned_through: 45,
+      next_after: 45,
+      unanchored: false,
+      citations: [citation],
+      omitted: ["Additional citation heads are available after this page."],
+    });
+    const single = SingleCitationResponseSchema.parse({
+      schema: CITATIONS_SCHEMA_ID,
+      cursor: 80,
+      citation,
+      versions: [{ ...citation, version: 1, seq: 20 }, citation],
+      associated_claims: [],
+      associated_evidence: [],
+      omitted: [],
+    });
+
+    test("strict string queries preserve the selected snapshot and false provenance filter", () => {
+      expect(CitationsListQuerySchema.parse({})).toEqual({});
+      expect(
+        CitationsListQuerySchema.parse({
+          through: "80",
+          after: "40",
+          limit: "1",
+          unanchored: "false",
+        }),
+      ).toEqual({
+        through: 80,
+        after: 40,
+        limit: 1,
+        unanchored: false,
+      });
+      expect(
+        CitationsListQuerySchema.parse({
+          through: "0",
+          after: "0",
+          limit: "200",
+          unanchored: "true",
+        }),
+      ).toEqual({
+        through: 0,
+        after: 0,
+        limit: 200,
+        unanchored: true,
+      });
+      expect(CitationReadQuerySchema.parse({ through: "9007199254740991" })).toEqual({
+        through: Number.MAX_SAFE_INTEGER,
+      });
+      expect(CITATIONS_LIST_DEFAULT_LIMIT).toBe(50);
+      expect(CITATIONS_LIST_MAX_LIMIT).toBe(200);
+    });
+
+    test("queries reject lossy numbers, incompatible continuations and unsupported selectors", () => {
+      for (const through of [
+        "",
+        "-1",
+        "+1",
+        "01",
+        "1.0",
+        "1e2",
+        " 1",
+        "1 ",
+        "1\n",
+        "0\n",
+        "9007199254740992",
+        1,
+      ]) {
+        expect(CitationsListQuerySchema.safeParse({ through }).success).toBe(false);
+        expect(CitationReadQuerySchema.safeParse({ through }).success).toBe(false);
+      }
+      for (const query of [
+        { after: "0" },
+        { through: "40", after: "41" },
+        { limit: "0" },
+        { limit: "201" },
+        { limit: "1\n" },
+        { unanchored: true },
+        { unanchored: "1" },
+        { unanchored: "FALSE" },
+        { unanchored: "false\n" },
+        { target: "L-1" },
+        { before: "40" },
+        { through: ["40", "50"] },
+      ])
+        expect(CitationsListQuerySchema.safeParse(query).success).toBe(false);
+      for (const query of [
+        { after: "0" },
+        { limit: "1" },
+        { unanchored: "true" },
+        { target: "L-1@1" },
+      ])
+        expect(CitationReadQuerySchema.safeParse(query).success).toBe(false);
+    });
+
+    test("an empty filtered or withheld page can advance without pretending the collection is complete", () => {
+      expect(CitationsListResponseSchema.safeParse({ ...page, citations: [] }).success).toBe(true);
+      for (const mutation of [
+        { after: 46 },
+        { scanned_through: 81 },
+        { next_after: 40 },
+        { next_after: 44 },
+        { omitted: [] },
+      ])
+        expect(CitationsListResponseSchema.safeParse({ ...page, ...mutation }).success).toBe(false);
+      expect(
+        CitationsListResponseSchema.safeParse({ ...page, next_after: null, omitted: [] }).success,
+      ).toBe(true);
+    });
+
+    test("list pages enforce unique scoped heads in sequence order within the selected cut and filter", () => {
+      const other = { ...citation, citation_id: "L-2", seq: 44 };
+      for (const citations of [
+        [{ ...citation, problem_id: "P-OTHER" }],
+        [{ ...citation, seq: 40 }],
+        [{ ...citation, seq: 46 }],
+        [{ ...citation, unanchored: true }],
+        [citation, other],
+        [other, { ...citation, citation_id: "L-2" }],
+      ])
+        expect(CitationsListResponseSchema.safeParse({ ...page, citations }).success).toBe(false);
+      expect(
+        CitationsListResponseSchema.safeParse({ ...page, citations: [other, citation] }).success,
+      ).toBe(true);
+      for (const key of [
+        "cursor",
+        "after",
+        "scanned_through",
+        "next_after",
+        "unanchored",
+      ] as const) {
+        const incomplete: Record<string, unknown> = { ...page };
+        delete incomplete[key];
+        expect(CitationsListResponseSchema.safeParse(incomplete).success).toBe(false);
+      }
+    });
+
+    test("a successful response must match its requested scope, snapshot, filter and page size", () => {
+      const query = { through: 80, after: 40, limit: 1, unanchored: false };
+      expect(citationsListMatchesQuery("P-4DSP", query, page)).toBe(true);
+      expect(citationsListMatchesQuery("P-OTHER", query, page)).toBe(false);
+      for (const changed of [{ through: 79 }, { after: 39 }, { unanchored: true }])
+        expect(citationsListMatchesQuery("P-4DSP", { ...query, ...changed }, page)).toBe(false);
+      expect(citationsListMatchesQuery("P-4DSP", { through: 80, after: 40 }, page)).toBe(false);
+      const oversized = {
+        ...page,
+        after: 0,
+        unanchored: null,
+        citations: Array.from({ length: 51 }, (_, index) => ({
+          ...citation,
+          citation_id: `L-${index + 1}`,
+          seq: index + 1,
+        })),
+        scanned_through: 51,
+        next_after: 51,
+      };
+      expect(
+        citationsListMatchesQuery("P-4DSP", {}, CitationsListResponseSchema.parse(oversized)),
+      ).toBe(false);
+    });
+
+    test("exact citation histories reject mixed identities, future or reordered source versions", () => {
+      for (const mutation of [
+        { cursor: 44 },
+        { versions: [citation, { ...citation, version: 1, seq: 20 }] },
+        { versions: [{ ...citation, citation_id: "L-2" }] },
+        { versions: [{ ...citation, problem_id: "P-OTHER" }] },
+        { versions: [{ ...citation, seq: 81 }] },
+        { versions: [citation, { ...citation, seq: 46 }] },
+      ])
+        expect(SingleCitationResponseSchema.safeParse({ ...single, ...mutation }).success).toBe(
+          false,
+        );
+      const { cursor: _cursor, ...uncaptured } = single;
+      expect(SingleCitationResponseSchema.safeParse(uncaptured).success).toBe(false);
+    });
+
+    test("exact selectors cannot silently substitute another citation, version, snapshot or stale head", () => {
+      expect(citationMatchesQuery("P-4DSP", "L-1@2", { through: 80 }, single)).toBe(true);
+      expect(citationMatchesQuery("P-4DSP", "L-1", {}, single)).toBe(true);
+      expect(citationMatchesQuery("P-OTHER", "L-1", {}, single)).toBe(false);
+      expect(citationMatchesQuery("P-4DSP", "L-2", {}, single)).toBe(false);
+      expect(citationMatchesQuery("P-4DSP", "L-1@1", {}, single)).toBe(false);
+      expect(citationMatchesQuery("P-4DSP", "L-1\n", {}, single)).toBe(false);
+      expect(citationMatchesQuery("P-4DSP", "L-1", { through: 79 }, single)).toBe(false);
+      const oldVersion = SingleCitationResponseSchema.parse({
+        ...single,
+        citation: { ...citation, version: 1, seq: 20 },
+      });
+      expect(citationMatchesQuery("P-4DSP", "L-1", {}, oldVersion)).toBe(false);
+      expect(citationMatchesQuery("P-4DSP", "L-1@1", {}, oldVersion)).toBe(true);
+    });
+
+    test("links preserve frozen cuts, false filters and exact version identifiers across every face", () => {
+      const query = { through: 80, after: 40, limit: 1, unanchored: false };
+      expect(citationsListPath("P-4DSP")).toBe("/p/P-4DSP/citations");
+      expect(citationsListPath("P-4DSP", "json", query)).toBe(
+        "/p/P-4DSP/citations.json?through=80&after=40&limit=1&unanchored=false",
+      );
+      expect(citationsListPath("P-OTHER/path", "md", { through: 0 })).toBe(
+        "/p/P-OTHER%2Fpath/citations.md?through=0",
+      );
+      for (const format of ["human", "json", "md", "html", "bib", "csl.json"] as const)
+        expect(citationPath("P-4DSP", "L-1@2", format, { through: 80 })).toBe(
+          `/p/P-4DSP/citations/L-1%402${format === "human" ? "" : `.${format}`}?through=80`,
+        );
     });
   });
 
@@ -332,6 +571,11 @@ describe("W5.8c Citations contracts", () => {
       const list = {
         schema: CITATIONS_SCHEMA_ID,
         problem_id: "P-4DSP",
+        cursor: 45,
+        after: 0,
+        scanned_through: 45,
+        next_after: null,
+        unanchored: null,
         citations: [
           {
             citation_id: "L-1",
@@ -382,6 +626,7 @@ describe("W5.8c Citations contracts", () => {
     test("SingleCitationResponseSchema validates single face with version history and associations", () => {
       const single = {
         schema: CITATIONS_SCHEMA_ID,
+        cursor: 45,
         citation: {
           citation_id: "L-1",
           problem_id: "P-4DSP",
@@ -443,6 +688,7 @@ describe("W5.8c Citations contracts", () => {
             computed_class: "citation",
           },
         ],
+        omitted: [],
       };
       expect(SingleCitationResponseSchema.safeParse(single).success).toBe(true);
       const parsed = SingleCitationResponseSchema.parse(single);

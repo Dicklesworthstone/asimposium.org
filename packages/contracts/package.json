@@ -12,6 +12,7 @@
     "./artifact-publications": "./src/artifact-publications.ts",
     "./artifact-uploads": "./src/artifact-uploads.ts",
     "./claims-list": "./src/claims-list.ts",
+    "./citations": "./src/citations.ts",
     "./conflicts": "./src/conflicts.ts",
     "./diagnostic-safety": "./src/diagnostic-safety.ts",
     "./directive-disclosures": "./src/directive-disclosures.ts",

@@ -47,6 +47,11 @@ import {
   artifactPublicationResponses,
 } from "./artifact-publications-discovery";
 import {
+  CITATIONS_PUBLIC_READS,
+  citationParameters,
+  citationResponses,
+} from "./citations-discovery.ts";
+import {
   COMMENTARY_PUBLIC_READS,
   commentaryParameters,
   commentaryResponses,
@@ -240,9 +245,6 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "POST /v1/p/:id/reviews": true,
   "POST /v1/p/:id/dead-ends": true,
   "POST /v1/p/:id/events:batch": true,
-  "GET /p/:id/literature.json": true,
-  "GET /p/:id/literature.md": true,
-  "GET /p/:id/literature.html": true,
   "POST /v1/sessions/:id/citations/:citationId/correct": true,
   "POST /v1/sessions/:id/friction": true,
 });
@@ -322,11 +324,7 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /p/:id/conflicts.json": "Version-pinned conflicts and their resolutions (JSON face).",
   "GET /p/:id/conflicts.md": "Version-pinned conflicts and their resolutions (Markdown face).",
   "GET /p/:id/conflicts.html": "Version-pinned conflicts and their resolutions (HTML face).",
-  "GET /p/:id/citations.json": "Literature and source-provenance citations ledger (JSON face).",
-  "GET /p/:id/citations.md": "Literature and source-provenance citations ledger (Markdown face).",
-  "GET /p/:id/citations.html": "Literature and source-provenance citations ledger (HTML face).",
-  "GET /p/:id/citations/:target":
-    "Exact citation head or version (.json, .md, .html, .bib, .csl.json).",
+  ...CITATIONS_PUBLIC_READS,
   ...SCIENTIFIC_HISTORY_PUBLIC_READS,
   "GET /p/:id/relations/:target":
     "One typed claim relation (<seq>.md/.json), cited by the seq of its relation.asserted event.",
@@ -821,6 +819,8 @@ function responseFor(
   origins: DiscoveryOrigins,
   method: string,
 ): Readonly<Record<string, unknown>> {
+  const citations = citationResponses(openApiPath, origins.agent);
+  if (citations !== undefined) return citations;
   const collection = scientificCollectionResponses(openApiPath, origins.agent);
   if (collection !== undefined) return collection;
   const history = scientificHistoryResponses(openApiPath, origins.agent);
@@ -1055,6 +1055,7 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
       ...artifactPublicationParameters(operation.openApiPath, origins.agent, operation.method),
       ...eventTailParameters(operation.openApiPath, origins.agent),
       ...reviewQueueParameters(operation.openApiPath, origins.agent),
+      ...citationParameters(operation.openApiPath, origins.agent),
       ...scientificCollectionParameters(operation.openApiPath, origins.agent),
       ...scientificHistoryParameters(operation.openApiPath, origins.agent),
       ...hypothesesParameters(operation.openApiPath, origins.agent),
