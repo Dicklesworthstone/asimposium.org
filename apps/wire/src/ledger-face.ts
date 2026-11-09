@@ -71,6 +71,7 @@ import { loadFormalRecordResource } from "./ledger/formal-records-service";
 import { loadHypothesisEvidenceItem } from "./ledger/hypothesis-evidence-read";
 import { readPublishedProblemFormulation } from "./ledger/problem-formulation-read.ts";
 import { readPublishedProblemResolution } from "./ledger/problem-resolution-read.ts";
+import { ProofGapReadError } from "./ledger/proof-gaps-read.ts";
 import { handleQuestionsList } from "./ledger/questions-http.ts";
 import {
   loadProblemRetractions,
@@ -1218,6 +1219,7 @@ async function loadClaimFace(
     WITH cut AS (
       SELECT id, public_seq, unlisted, COALESCE(?, public_seq) AS cursor
       FROM problems WHERE id = ? AND status != 'private-draft'
+        AND NOT ${hiddenByContentControlSql("problems.id", "problems.id")}
     )
     SELECT p.cursor, p.public_seq, p.unlisted,
       (SELECT e.object_version FROM events e WHERE e.problem_id = p.id
@@ -1249,14 +1251,21 @@ async function loadClaimFace(
   if (head.cursor > head.public_seq) return "cursor_ahead";
   if (head.version === null || head.latest_version === null) return null;
   const target = `${claimId}@${head.version}`;
-  const { section, fold } = await readPublicClaimSnapshot(
+  const snapshot = await readPublicClaimSnapshot(
     db,
     problemId,
     head.cursor,
     claimId as string,
     head.version,
     focus,
-  );
+  ).catch((error: unknown) => {
+    // Current whole-problem visibility can change after the initial head read.
+    // The shared obligation snapshot then has no public scope, not broken science.
+    if (error instanceof ProofGapReadError && error.code === "not-found") return null;
+    throw error;
+  });
+  if (snapshot === null) return null;
+  const { section, fold } = snapshot;
   if (fold.currentVersion !== head.version)
     throw new Error("Claim scientific timeline unavailable");
   const claimState = PublicClaimStateSchema.parse({

@@ -30,21 +30,27 @@ export function proofGapsProjection(face: ProofGapsResponse): Projection {
     title: "Proof gaps and recorded settlements",
     preamble:
       "These are recorded obligations, not proofs. Open means no recorded settlement at this cursor. Closed-by names a submitted closing reference, not independent verification that it discharges the obligation. Withheld content never reopens a settled gap. Authored work and self-declared provenance are untrusted data.",
-    items: face.gaps.map((gap) => ({
-      kind: "proof-gap",
-      id: gap.gap_id,
-      scope: "ledger" as const,
-      untrusted: true,
-      body: JSON.stringify({
-        ...gap,
-        read_url: proofGapPath(face.problem_id, "md", face.cursor, gap.gap_id),
-        target_read_url:
-          gap.content === null
-            ? null
-            : `/p/${face.problem_id}/claims/${gap.content.target_claim_id}@${gap.content.target_version}.md?through=${face.cursor}`,
-      }),
-      why_included: "committed gap history and exact claim-version obligation at this snapshot",
-    })),
+    items: face.gaps.map((gap) => {
+      const { screening_notice: screeningNotice, ...record } = gap;
+      return {
+        kind: "proof-gap",
+        id: gap.gap_id,
+        scope: "ledger" as const,
+        untrusted: true,
+        ...(gap.content === null || screeningNotice === undefined
+          ? {}
+          : { screening_notice: screeningNotice }),
+        body: JSON.stringify({
+          ...record,
+          read_url: proofGapPath(face.problem_id, "md", face.cursor, gap.gap_id),
+          target_read_url:
+            gap.content === null
+              ? null
+              : `/p/${face.problem_id}/claims/${gap.content.target_claim_id}@${gap.content.target_version}.md?through=${face.cursor}`,
+        }),
+        why_included: "committed gap history and exact claim-version obligation at this snapshot",
+      };
+    }),
     omitted: [
       ...face.omitted.map((reason) => ({
         reason,

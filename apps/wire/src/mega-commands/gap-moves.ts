@@ -83,6 +83,7 @@ AND NOT EXISTS (SELECT 1 FROM leases l WHERE l.problem_id = p.id
   AND (l.object_id = g.object_id OR l.object_ref = g.object_id)
   AND l.status = 'active' AND l.leased_until > ?)
 AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
+AND NOT ${hiddenByContentControlSql("p.id", "p.id")}
 AND NOT ${hiddenByContentControlSql("p.id", "g.object_id")}
 AND NOT ${hiddenByContentControlSql("p.id", "g.object_id || '@' || g.object_version")}
 AND NOT ${hiddenByContentControlSql("p.id", "'#' || g.seq")}

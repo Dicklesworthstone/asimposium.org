@@ -141,6 +141,11 @@ function gapItem(
   order: number,
 ) {
   const source = `/p/${problem}/gaps.md?through=${cursor}&target=${gap.gap_id}`;
+  const { screening_notice: screeningNotice, ...record } = gap;
+  const notice =
+    gap.content === null || screeningNotice === undefined
+      ? undefined
+      : ScreeningPublicationNoticeSchema.parse(screeningNotice);
   const reference = {
     gap_id: gap.gap_id,
     status: gap.status,
@@ -153,11 +158,12 @@ function gapItem(
     section,
     "proof-gap",
     gap.gap_id,
-    { ...gap, source },
+    { ...record, source },
     reference,
     `proof-gap:${gap.gap_id}; full record: ${source}`,
     order,
     neutralize,
+    notice,
   );
 }
 

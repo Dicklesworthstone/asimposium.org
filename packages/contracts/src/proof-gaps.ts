@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 import { GapFileRequestSchema, ProblemIdSchema } from "./sessions.ts";
 
 export const PROOF_GAPS_SCHEMA_ID = "https://a.asimposium.org/schemas/proof-gaps.v1.json";
@@ -55,6 +56,7 @@ export const ProofGapRecordSchema = z
     last_event: ProofGapEventSchema,
     content: GapFileRequestSchema.nullable(),
     closed_by: z.string().max(80).nullable(),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
   })
   .strict();
 export type ProofGapRecord = z.infer<typeof ProofGapRecordSchema>;

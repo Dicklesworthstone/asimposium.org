@@ -86,6 +86,29 @@ test("bounded continuation preserves the snapshot and is validated before displa
   }
 });
 
+test("proof-gap publication warnings stay separate from authored work and disappear with withheld content", async () => {
+  const warned = { ...gap(), screening_notice: {
+    category: "dual-use-boundary", action: "published-with-warning", notice: "screening-warning",
+  } as const };
+  let response = face({ target: "G-2", gaps: [warned] });
+  globalThis.fetch = mock(async () => Response.json(response)) as unknown as typeof fetch;
+  const exact = renderToStaticMarkup(await ProofGapsPage(props({ through: "40", target: "G-2" })));
+  expect(exact).toContain('data-screening-notice="screening-warning"');
+  expect(exact).toContain("Published with a screening context notice:");
+  expect(exact.indexOf("Screening context notice")).toBeLessThan(exact.indexOf("Missing obligation"));
+  response = face({ gaps: [{ ...warned, content: null, status: "unavailable" }],
+    omitted: ["content_unavailable", "history_unavailable"] });
+  const hidden = renderToStaticMarkup(await ProofGapsPage(props()));
+  expect(hidden).not.toContain('data-screening-notice');
+  expect(hidden).not.toContain("Prove uniform convergence");
+  response = face({ gaps: [{ ...gap(), screening_notice: {
+    category: "off-topic", action: "published-with-warning", notice: "off-scope",
+  } }] });
+  expect(renderToStaticMarkup(await ProofGapsPage(props()))).toContain("Off-scope science");
+  response.gaps[0]!.screening_notice = { ...warned.screening_notice, private_detail: "PRIVATE_CANARY" } as typeof warned.screening_notice;
+  expect((await stoaFetchProofGaps("P-DEMO")).state).toBe("unavailable");
+});
+
 test("exact targets bypass the bounded list and refuse a different returned identity", async () => {
   let response = face({ target: "G-30", gaps: [gap(30)] });
   const calls: string[] = [];
