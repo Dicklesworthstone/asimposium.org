@@ -148,6 +148,7 @@ export const SponsorProblemBriefSchema = completeProblemBoundaries(
     .object({
       id: z.string().min(1).max(128),
       sponsor_id: SponsorIdSchema,
+      version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
       assigned_fellow_id: z.string().min(1).max(128).optional(),
       title: z.string().min(1).max(120),
       statement: z.string().min(1).max(8192),
@@ -164,6 +165,11 @@ export const SponsorProblemBriefSchema = completeProblemBoundaries(
 );
 
 export type SponsorProblemBrief = z.infer<typeof SponsorProblemBriefSchema>;
+
+export const SaveProblemBriefResponseSchema = z
+  .object({ brief: SponsorProblemBriefSchema })
+  .strict();
+export type SaveProblemBriefResponse = z.infer<typeof SaveProblemBriefResponseSchema>;
 
 /** GET /v1/sponsors/problem-briefs: the sponsor's active (unadopted) briefs. */
 export const SponsorProblemBriefListResponseSchema = z
@@ -503,6 +509,7 @@ export const SaveProblemBriefRequestSchema = completeProblemBoundaries(
   z
     .object({
       id: z.string().min(1).max(128).optional(),
+      expected_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
       assigned_fellow_id: z.string().min(1).max(128).optional(),
       title: z.string().min(1).max(120),
       statement: z.string().min(1).max(8192),
@@ -512,10 +519,28 @@ export const SaveProblemBriefRequestSchema = completeProblemBoundaries(
       areas: z.array(AreaSlugSchema).min(1).max(32),
       famous_guardrail: ProblemFamousGuardrailSchema.optional(),
     })
-    .strict(),
+    .strict()
+    .refine((request) => request.expected_version === undefined || request.id !== undefined, {
+      path: ["expected_version"],
+      message: "An edit version must identify the existing brief.",
+    }),
 );
 
 export type SaveProblemBriefRequest = z.infer<typeof SaveProblemBriefRequestSchema>;
+
+export const WithdrawProblemBriefRequestSchema = z
+  .object({ expected_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER) })
+  .strict();
+export type WithdrawProblemBriefRequest = z.infer<typeof WithdrawProblemBriefRequestSchema>;
+
+export const WithdrawProblemBriefResponseSchema = z
+  .object({
+    withdrawn: z.literal(true),
+    id: z.string().min(1).max(128),
+    version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type WithdrawProblemBriefResponse = z.infer<typeof WithdrawProblemBriefResponseSchema>;
 
 /** Sponsor problem lifecycle transition: POST /v1/sponsors/problems/:id/lifecycle. */
 export const ProblemLifecycleActionRequestSchema = z.discriminatedUnion("action", [
@@ -946,6 +971,9 @@ export const ProblemLifecycleContractsSchema = z
     fellow_brief_read_response: FellowProblemBriefReadResponseSchema,
     propose_request: ProposeProblemRequestSchema,
     save_brief_request: SaveProblemBriefRequestSchema,
+    save_brief_response: SaveProblemBriefResponseSchema,
+    withdraw_brief_request: WithdrawProblemBriefRequestSchema,
+    withdraw_brief_response: WithdrawProblemBriefResponseSchema,
     publication_preview: ProblemPublicationPreviewSchema,
     governance_query: SponsorProblemGovernanceQuerySchema,
     governance_response: SponsorProblemGovernanceResponseSchema,

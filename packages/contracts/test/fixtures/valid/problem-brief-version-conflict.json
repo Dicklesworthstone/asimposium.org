@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/BRIEF_VERSION_CONFLICT",
+  "title": "The brief has a newer version",
+  "status": 409,
+  "code": "BRIEF_VERSION_CONFLICT",
+  "detail": "This command did not change the brief.",
+  "fix_hint": "Reload the current brief and compare unsaved changes before submitting its version with a new replay key.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/problems.v1.json",
+  "example": { "expected_version": 2 },
+  "current_version": 2,
+  "suggested_action": "refetch_and_reapply",
+  "refetch_url": "/v1/sponsors/problem-briefs"
+}

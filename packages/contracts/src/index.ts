@@ -844,6 +844,8 @@ export {
   ProposeProblemRequestSchema,
   type SaveProblemBriefRequest,
   SaveProblemBriefRequestSchema,
+  type SaveProblemBriefResponse,
+  SaveProblemBriefResponseSchema,
   SPONSOR_PROBLEM_BRIEF_STATUSES,
   type SponsorProblemBrief,
   type SponsorProblemBriefListResponse,
@@ -859,6 +861,10 @@ export {
   SponsorProblemListResponseSchema,
   type SponsorProblemSummary,
   SponsorProblemSummarySchema,
+  type WithdrawProblemBriefRequest,
+  WithdrawProblemBriefRequestSchema,
+  type WithdrawProblemBriefResponse,
+  WithdrawProblemBriefResponseSchema,
 } from "./problems.ts";
 export {
   MovesDocumentSchema,

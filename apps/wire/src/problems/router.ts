@@ -5,9 +5,9 @@ import {
   ProposeProblemRequestSchema,
   SaveProblemBriefRequestSchema,
   SponsorProblemBriefListResponseSchema,
-  SponsorProblemBriefSchema,
   SponsorProblemGovernanceQuerySchema,
   SponsorProblemListResponseSchema,
+  WithdrawProblemBriefRequestSchema,
 } from "@asimposium/contracts";
 import type { D1PreparedStatement } from "@cloudflare/workers-types";
 import { type Handler, Hono } from "hono";
@@ -37,6 +37,7 @@ import {
   problemBoundaryFields,
   type StoredProblemBoundaries,
 } from "./boundaries.ts";
+import { privateBriefResponse, runSponsorBriefCommand } from "./brief-commands.ts";
 import { createFellowBriefRouter } from "./fellow-briefs.ts";
 import {
   privateProblemGovernanceResponse,
@@ -218,7 +219,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     const authorization = authorizeFellowWrite({
       effect: "propose-problems",
       credential: auth.binding,
-      target: { kind: "new-problem", initialPublication: "private-draft" },
+      target: { kind: "new-problem", initialPublication: "private-draft", unlisted: false },
       usage: { eventsRecorded, artifactBytesRecorded: 0 },
       now: Date.now(),
     });
@@ -451,7 +452,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       batchStatements.push(
         db
           .prepare(
-            `UPDATE sponsor_problem_briefs SET status = 'adopted', updated_at = ?
+            `UPDATE sponsor_problem_briefs SET status = 'adopted', version = version + 1, updated_at = ?
              WHERE id = ? AND sponsor_id = ? AND status = 'active'
                AND (assigned_fellow_id IS NULL OR assigned_fellow_id = ?)`,
           )
@@ -691,9 +692,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       "/v1/sponsors/problem-briefs",
       "save-problem-brief",
     );
-    if (verified instanceof Response) return verified;
-    const sponsor = verified.principal;
-    const db = c.env.DB;
+    if (verified instanceof Response) return privateBriefResponse(verified);
 
     let rawJson: unknown;
     try {
@@ -704,156 +703,34 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
 
     const parsed = SaveProblemBriefRequestSchema.safeParse(rawJson);
     if (!parsed.success) {
-      return validatedProblem({
-        status: 422,
-        code: "PROBLEM_BRIEF_BODY_INVALID",
-        title: "Invalid problem brief request body",
-        detail: "The request body did not match the save problem brief contract.",
-        fixHint:
-          "Provide title, statement, falsifier, motivation, and areas. Supply scope, out_of_scope and success_criteria together; an existing bundle cannot be omitted on update.",
-        rule: "A5",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/problems.v1.json",
-          example: {
-            title: "Riemann Hypothesis Brief",
-            statement: "All non-trivial zeros have real part 1/2.",
-            falsifier: "A zero off the line.",
-            motivation: "Prime distribution.",
-            areas: ["number-theory"],
-          },
-        },
-      });
-    }
-
-    // If assigned_fellow_id, verify fellow belongs to sponsor
-    if (parsed.data.assigned_fellow_id) {
-      const fellow = await db
-        .prepare("SELECT sponsor_id FROM enrollment_fellows WHERE fellow_id = ?")
-        .bind(parsed.data.assigned_fellow_id)
-        .first<{ sponsor_id: string }>();
-
-      if (!fellow || fellow.sponsor_id !== sponsor.sponsorId) {
-        return validatedProblem({
-          status: 403,
-          code: "BRIEF_NOT_ASSIGNED",
-          title: "Assigned Fellow does not belong to this sponsor",
-          detail: "A sponsor can only assign problem briefs to their own registered Fellows.",
-          fixHint: "Assign to a fellow belonging to your sponsor.",
+      return privateBriefResponse(
+        validatedProblem({
+          status: 422,
+          code: "PROBLEM_BRIEF_BODY_INVALID",
+          title: "Invalid problem brief request body",
+          detail: "The request body did not match the save problem brief contract.",
+          fixHint:
+            "Provide title, statement, falsifier, motivation, and areas. Editing also needs id and expected_version from the current brief. Supply scope, out_of_scope and success_criteria together; an existing bundle cannot be omitted on update.",
           rule: "A5",
           extensions: {
             schema: "https://a.asimposium.org/schemas/problems.v1.json",
-            example: { assigned_fellow_id: parsed.data.assigned_fellow_id },
+            example: {
+              title: "Riemann Hypothesis Brief",
+              statement: "All non-trivial zeros have real part 1/2.",
+              falsifier: "A zero off the line.",
+              motivation: "Prime distribution.",
+              areas: ["number-theory"],
+            },
           },
-        });
-      }
-    }
-
-    const briefId = parsed.data.id ?? `brief-${crypto.randomUUID().slice(0, 12)}`;
-    const now = new Date().toISOString();
-    const famousJson = parsed.data.famous_guardrail
-      ? JSON.stringify(parsed.data.famous_guardrail)
-      : null;
-
-    if (parsed.data.id && parsed.data.scope === undefined) {
-      const previous = await db
-        .prepare(
-          "SELECT scope FROM sponsor_problem_briefs WHERE id = ? AND sponsor_id = ? AND status = 'active'",
-        )
-        .bind(parsed.data.id, sponsor.sponsorId)
-        .first<{ scope: string | null }>();
-      if (previous?.scope != null) return problemBoundariesRequired();
-    }
-
-    // Ownership and private state are checked by the same statement that
-    // changes the brief, including concurrent requests sharing a caller ID.
-    const saved = await db
-      .prepare(
-        `INSERT INTO sponsor_problem_briefs (
-           id, sponsor_id, assigned_fellow_id, title, statement, falsifier,
-           motivation, scope, out_of_scope, success_criteria, areas, famous_guardrail,
-           status, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-           assigned_fellow_id = excluded.assigned_fellow_id,
-           title = excluded.title,
-           statement = excluded.statement,
-           falsifier = excluded.falsifier,
-           motivation = excluded.motivation,
-           scope = excluded.scope,
-           out_of_scope = excluded.out_of_scope,
-           success_criteria = excluded.success_criteria,
-           areas = excluded.areas,
-           famous_guardrail = excluded.famous_guardrail,
-           updated_at = excluded.updated_at
-         WHERE sponsor_problem_briefs.sponsor_id = excluded.sponsor_id
-           AND sponsor_problem_briefs.status = 'active'
-           AND (sponsor_problem_briefs.scope IS NULL OR excluded.scope IS NOT NULL)
-         RETURNING *`,
-      )
-      .bind(
-        briefId,
-        sponsor.sponsorId,
-        parsed.data.assigned_fellow_id ?? null,
-        parsed.data.title,
-        parsed.data.statement,
-        parsed.data.falsifier,
-        parsed.data.motivation,
-        parsed.data.scope ?? null,
-        parsed.data.out_of_scope ?? null,
-        parsed.data.success_criteria ?? null,
-        JSON.stringify(parsed.data.areas),
-        famousJson,
-        now,
-        now,
-      )
-      .first<
-        StoredProblemBoundaries & {
-          id: string;
-          sponsor_id: string;
-          assigned_fellow_id: string | null;
-          title: string;
-          statement: string;
-          falsifier: string;
-          motivation: string;
-          areas: string;
-          famous_guardrail: string | null;
-          status: string;
-          created_at: string;
-          updated_at: string;
-        }
-      >();
-
-    if (!saved) {
-      return validatedProblem({
-        status: 404,
-        code: "BRIEF_NOT_FOUND",
-        title: "Editable brief not found",
-        detail: "No active private brief with this id is available to this sponsor.",
-        fixHint:
-          "Use an active brief from your sponsor brief list, or omit id to create a new one.",
-        rule: "A5",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/problem.v1.json",
-          example: { method: "GET", path: "/v1/sponsors/problem-briefs" },
-        },
-        headers: { "cache-control": "private, no-store" },
-      });
-    }
-
-    return c.json(
-      {
-        brief: SponsorProblemBriefSchema.parse({
-          ...saved,
-          scope: saved.scope ?? undefined,
-          out_of_scope: saved.out_of_scope ?? undefined,
-          success_criteria: saved.success_criteria ?? undefined,
-          assigned_fellow_id: saved.assigned_fellow_id ?? undefined,
-          areas: JSON.parse(saved.areas),
-          famous_guardrail: saved.famous_guardrail ? JSON.parse(saved.famous_guardrail) : undefined,
         }),
-      },
-      201,
-      { "cache-control": "private, no-store" },
+      );
+    }
+
+    return runSponsorBriefCommand(
+      c.env.DB,
+      verified.principal.sponsorId,
+      c.req.header("idempotency-key") ?? null,
+      { operation: "save", request: parsed.data },
     );
   });
 
@@ -870,13 +747,17 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
 
     const rows = await db
       .prepare(
-        "SELECT * FROM sponsor_problem_briefs WHERE sponsor_id = ? AND status = 'active' ORDER BY updated_at DESC",
+        `SELECT * FROM sponsor_problem_briefs b WHERE sponsor_id = ? AND status = 'active'
+         AND EXISTS (SELECT 1 FROM sponsors s WHERE s.sponsor_id = b.sponsor_id AND s.tombstoned_at IS NULL)
+         AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events WHERE sponsor_id = b.sponsor_id)
+         ORDER BY updated_at DESC, id`,
       )
       .bind(sponsor.sponsorId)
       .all<
         StoredProblemBoundaries & {
           id: string;
           sponsor_id: string;
+          version: number;
           assigned_fellow_id: string | null;
           title: string;
           statement: string;
@@ -893,6 +774,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     const briefs = rows.results.map((r) => ({
       id: r.id,
       sponsor_id: r.sponsor_id,
+      version: r.version,
       assigned_fellow_id: r.assigned_fellow_id ?? undefined,
       title: r.title,
       statement: r.statement,
@@ -960,36 +842,37 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
   app.post("/v1/sponsors/problem-briefs/:id/withdraw", async (c) => {
     const briefId = c.req.param("id");
     const verified = await options.verifiedSponsor(c.req.raw, c.req.path, "withdraw-problem-brief");
-    if (verified instanceof Response) return verified;
-    const sponsor = verified.principal;
-    const db = c.env.DB;
-
-    const brief = await db
-      .prepare("SELECT * FROM sponsor_problem_briefs WHERE id = ?")
-      .bind(briefId)
-      .first<{ id: string; sponsor_id: string }>();
-
-    if (!brief || brief.sponsor_id !== sponsor.sponsorId) {
-      return validatedProblem({
-        status: 404,
-        code: "BRIEF_NOT_FOUND",
-        title: "Brief not found",
-        detail: `No brief with id '${briefId}' exists under this sponsor.`,
-        fixHint: "Verify the brief id.",
-      });
+    if (verified instanceof Response) return privateBriefResponse(verified);
+    let raw: unknown;
+    try {
+      raw = JSON.parse(new TextDecoder().decode(verified.rawBody));
+    } catch {
+      raw = undefined;
     }
-
-    const now = new Date().toISOString();
-    await db
-      .prepare(
-        "UPDATE sponsor_problem_briefs SET status = 'withdrawn', updated_at = ? WHERE id = ?",
-      )
-      .bind(now, briefId)
-      .run();
-
-    return c.json({ withdrawn: true, id: briefId }, 200, {
-      "cache-control": "private, no-store",
-    });
+    const parsed = WithdrawProblemBriefRequestSchema.safeParse(raw);
+    if (!parsed.success)
+      return privateBriefResponse(
+        validatedProblem({
+          status: 422,
+          code: "PROBLEM_BRIEF_BODY_INVALID",
+          title: "A reviewed brief version is required",
+          detail: "Withdrawal must identify the current version of an active private brief.",
+          fixHint:
+            "Read the sponsor brief list, then send its expected_version with a stable Idempotency-Key.",
+          rule: "A5",
+          extensions: {
+            schema:
+              "https://a.asimposium.org/schemas/problems.v1.json#/properties/withdraw_brief_request",
+            example: { expected_version: 1 },
+          },
+        }),
+      );
+    return runSponsorBriefCommand(
+      c.env.DB,
+      verified.principal.sponsorId,
+      c.req.header("idempotency-key") ?? null,
+      { operation: "withdraw", id: briefId, request: parsed.data },
+    );
   });
 
   // A private draft must be readable by its accountable sponsor before the

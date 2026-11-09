@@ -59,6 +59,7 @@ async function fixture(grants: Partial<MintEnrollmentRequest> = {}) {
     AGORA_ORIGIN: "https://asimposium.org",
     ENROLLMENT_REPLAY_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   } as Env;
+  let commandSerial = 0;
   const request = (path: string, body?: unknown, token: string | null = issued.token) =>
     router.request(
       ORIGIN + path,
@@ -68,7 +69,10 @@ async function fixture(grants: Partial<MintEnrollmentRequest> = {}) {
           ...(token ? { authorization: `Bearer ${token}` } : {}),
           ...(body === undefined
             ? {}
-            : { "content-type": "application/json", "idempotency-key": "brief-test" }),
+            : {
+                "content-type": "application/json",
+                "idempotency-key": `brief-test-${++commandSerial}`,
+              }),
         },
       },
       env,

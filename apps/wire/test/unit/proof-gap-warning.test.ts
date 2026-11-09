@@ -242,9 +242,12 @@ describe("proof-gap warning publications", () => {
         expect(response.status, await response.clone().text()).toBe(200);
         const pack = PackResponseSchema.parse(await response.json());
         const item = pack.items.find((candidate) => candidate.id === result.gap_id);
-        expect(item?.screening_notice).toEqual(WARNING);
-        expect(item?.body).toContain(OBLIGATION);
-        expect(item?.body).not.toContain("screening_notice");
+        if (item === undefined || !("screening_notice" in item)) {
+          throw new Error(`The ${profile} pack is missing the gap's screening notice.`);
+        }
+        expect(item.screening_notice).toEqual(WARNING);
+        expect(item.body).toContain(OBLIGATION);
+        expect(item.body).not.toContain("screening_notice");
       }
       const calls = route.screens();
       await route.post(

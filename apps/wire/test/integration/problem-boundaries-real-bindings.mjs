@@ -60,7 +60,7 @@ await runLocalWorkerJourney(
       "POST",
       "/v1/sponsors/problem-briefs",
       "save-problem-brief",
-      { ...proposal, id: brief.id },
+      { ...proposal, id: brief.id, expected_version: brief.version },
       422,
     );
     assert.equal(omittedBrief.code, "STATEMENT_INCOMPLETE");

@@ -1,11 +1,17 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0133_operator_command_receipts.sql`.
+schema through `0134_sponsor_brief_commands.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
 deployed `0009_device_flow.sql` in `0010_device_flow_hardening.sql`.
+
+Migration `0134_sponsor_brief_commands.sql` adds optimistic versions to private
+sponsor briefs and 24-hour metadata-only save/withdraw receipts. Each receipt
+commits with its guarded effect; uncertain retries recover the original result
+without restoring a later-edited, withdrawn or adopted brief. Apply it before
+the matching Worker. Existing briefs begin at version 1.
 
 Migration `0133_operator_command_receipts.sql` binds each accepted quarantine,
 report, or visibility command to its operator, hashed replay key, canonical

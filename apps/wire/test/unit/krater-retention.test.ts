@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import type { D1Database } from "@cloudflare/workers-types";
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
 import { retentionCredentialRevoker } from "../../src/enrollment/service.ts";
 import { type BackupBucket, backupProblem } from "../../src/krater/backup.ts";
@@ -26,6 +27,7 @@ import {
   RetentionError,
   readDeletionJournalRecords,
   serializeDeletionJournal,
+  sponsorAccountDeletionStatements,
   validateScratchTarget,
   verifyRetentionControlRecord,
 } from "../../src/krater/retention.ts";
@@ -82,6 +84,35 @@ function freshDb() {
     sqlite.run(readFileSync(join(MIGRATIONS, f), "utf8"));
   }
   return { sqlite, db: localD1(sqlite) };
+}
+
+function seedBriefReceipt(
+  sqlite: Database,
+  sponsorId: string,
+  keyDigit: string,
+  expiresAt: number,
+) {
+  const createdAt = expiresAt - 24 * 60 * 60 * 1000;
+  sqlite.run(
+    "INSERT OR IGNORE INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)",
+    [sponsorId, createdAt, createdAt],
+  );
+  sqlite.run(
+    `INSERT INTO sponsor_brief_command_receipts
+      (sponsor_id,key_digest,operation,request_digest,brief_id,brief_version,
+       brief_created_at,brief_updated_at,created_at,expires_at)
+     VALUES (?, ?, 'save', ?, ?, 1, ?, ?, ?, ?)`,
+    [
+      sponsorId,
+      keyDigit.repeat(64),
+      "f".repeat(64),
+      `${sponsorId}-brief-${keyDigit}`,
+      NOW,
+      NOW,
+      createdAt,
+      expiresAt,
+    ],
+  );
 }
 
 function fakeBucket(): BackupBucket & { readonly writes: Map<string, string> } {
@@ -468,6 +499,26 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
   });
 
   describe("expireSecurityRecords", () => {
+    test("expires sponsor brief receipts at their millisecond boundary and keeps live receipts", async () => {
+      const { sqlite, db } = freshDb();
+      const nowMs = Date.parse(NOW);
+      seedBriefReceipt(sqlite, "usr_receipt_expiry", "a", nowMs - 1);
+      seedBriefReceipt(sqlite, "usr_receipt_expiry", "b", nowMs);
+      seedBriefReceipt(sqlite, "usr_receipt_expiry", "c", nowMs + 1);
+
+      const result = await expireSecurityRecords(db, { nowMs });
+      expect(result.expiredSponsorBriefReceipts).toBe(2);
+      expect(
+        sqlite.prepare("SELECT key_digest, expires_at FROM sponsor_brief_command_receipts").all(),
+      ).toEqual([{ key_digest: "c".repeat(64), expires_at: nowMs + 1 }]);
+
+      const later = await expireSecurityRecords(db, { nowMs: nowMs + 1 });
+      expect(later.expiredSponsorBriefReceipts).toBe(1);
+      expect(
+        sqlite.prepare("SELECT COUNT(*) AS n FROM sponsor_brief_command_receipts").get(),
+      ).toEqual({ n: 0 });
+    });
+
     test("cleans up expired nonces, lookup attempts, and device codes", async () => {
       const { sqlite, db } = freshDb();
       const nowMs = 1724112000000; // 2026-08-20T00:00:00.000Z
@@ -514,6 +565,78 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
         .prepare("SELECT COUNT(*) AS n FROM device_lookup_attempts")
         .get() as { n: number };
       expect(remainingLookups.n).toBe(1);
+    });
+  });
+
+  describe("sponsor brief receipt account erasure", () => {
+    test("account deletion removes only the intended sponsor's receipts and keeps the sponsor tombstone", async () => {
+      const { sqlite, db } = freshDb();
+      const nowMs = Date.parse(NOW);
+      const owner = "usr_receipt_deleted";
+      const other = "usr_receipt_retained";
+      seedBriefReceipt(sqlite, owner, "a", nowMs + 60_000);
+      seedBriefReceipt(sqlite, owner, "b", nowMs + 60_000);
+      // Identical key hashes in different sponsor scopes are independent.
+      seedBriefReceipt(sqlite, other, "a", nowMs + 60_000);
+      const retained = sqlite
+        .prepare("SELECT * FROM sponsor_brief_command_receipts WHERE sponsor_id = ?")
+        .all(other);
+
+      const results = await (db as D1Database).batch(
+        sponsorAccountDeletionStatements(db, owner, nowMs),
+      );
+      expect(results[0]?.meta.changes).toBe(1);
+      expect(
+        sqlite.prepare("SELECT tombstoned_at FROM sponsors WHERE sponsor_id = ?").get(owner),
+      ).toEqual({ tombstoned_at: nowMs });
+      expect(
+        sqlite.prepare("SELECT tombstoned_at FROM sponsors WHERE sponsor_id = ?").get(other),
+      ).toEqual({ tombstoned_at: null });
+      expect(
+        sqlite
+          .prepare("SELECT * FROM sponsor_brief_command_receipts WHERE sponsor_id = ?")
+          .all(owner),
+      ).toEqual([]);
+      expect(sqlite.prepare("SELECT * FROM sponsor_brief_command_receipts").all()).toEqual(
+        retained,
+      );
+    });
+
+    test("deletion journal replay erases restored receipts even when the sponsor is already tombstoned", async () => {
+      const { sqlite, db } = freshDb();
+      const nowMs = Date.parse(NOW);
+      const owner = "usr_receipt_restored";
+      const other = "usr_receipt_untouched";
+      seedBriefReceipt(sqlite, owner, "a", nowMs + 60_000);
+      sqlite.run("UPDATE sponsors SET tombstoned_at = ? WHERE sponsor_id = ?", [nowMs, owner]);
+      seedBriefReceipt(sqlite, other, "a", nowMs + 60_000);
+      const retained = sqlite
+        .prepare("SELECT * FROM sponsor_brief_command_receipts WHERE sponsor_id = ?")
+        .all(other);
+      const control = await createRetentionControlRecord({
+        action: "delete-account-private-data",
+        targetId: owner,
+        targetType: "user_private_data",
+        payload: { sponsor_id: owner, deleted_at: NOW },
+        issuedAt: NOW,
+      });
+      const keys = await journalKeys();
+      const journal = await serializeDeletionJournal([control], NOW, keys.signing);
+
+      const replay = await applyDeletionJournal({
+        db,
+        targetIdentifier: "scratch_brief_receipt_erasure",
+        deletionJournalNdjson: journal,
+        verifyKeys: keys.verify,
+      });
+      expect(replay.appliedControlsCount).toBe(1);
+      expect(sqlite.prepare("SELECT * FROM sponsor_brief_command_receipts").all()).toEqual(
+        retained,
+      );
+      expect(
+        sqlite.prepare("SELECT tombstoned_at FROM sponsors WHERE sponsor_id = ?").get(owner),
+      ).toEqual({ tombstoned_at: nowMs });
+      expect(await findResurrectedTargets(db, [control])).toEqual([]);
     });
   });
 

@@ -113,6 +113,7 @@ export async function problemLifecycleJourney({
     {
       ...briefPayload,
       id: savedBrief.brief.id,
+      expected_version: savedBrief.brief.version,
       title: "Assigned modular-cycle brief",
       assigned_fellow_id: fellowA.fellow.fellow_id,
     },
@@ -182,7 +183,7 @@ export async function problemLifecycleJourney({
     "POST",
     `/v1/sponsors/problem-briefs/${withdrawableBrief.brief.id}/withdraw`,
     "withdraw-problem-brief",
-    {},
+    { expected_version: withdrawableBrief.brief.version },
     200,
   );
   assert.equal(withdrawRes.withdrawn, true);

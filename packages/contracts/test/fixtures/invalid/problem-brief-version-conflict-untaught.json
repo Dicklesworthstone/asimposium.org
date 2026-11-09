@@ -1,0 +1,9 @@
+{
+  "type": "https://asimposium.org/errors/BRIEF_VERSION_CONFLICT",
+  "title": "The brief has a newer version",
+  "status": 409,
+  "code": "BRIEF_VERSION_CONFLICT",
+  "detail": "This command did not change the brief.",
+  "fix_hint": "Reload the current brief.",
+  "current_version": 2
+}

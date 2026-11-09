@@ -1048,7 +1048,7 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
     {
       relativePath: "generated/problems.types.ts",
       content:
-        "// Generated from src/problems.ts. Do not edit.\nexport type { ProposeProblemRequest, SaveProblemBriefRequest, FellowProblemBriefListQuery, FellowProblemBriefListResponse, FellowProblemBriefReadQuery, FellowProblemBriefReadResponse, ProblemDetail, ProblemLifecycleActionRequest, ProblemPublicationPreview, ProblemPublicationResponse, ProblemResolutionResponse, ProblemResultReviewResponse, SponsorProblemGovernanceQuery, SponsorProblemGovernanceResponse, ProblemAccessActionReceipt, ProblemStatementReviewRequest, ProblemStatementReviewResponse } from '../src/problems.ts';\n",
+        "// Generated from src/problems.ts. Do not edit.\nexport type { ProposeProblemRequest, SaveProblemBriefRequest, SaveProblemBriefResponse, WithdrawProblemBriefRequest, WithdrawProblemBriefResponse, FellowProblemBriefListQuery, FellowProblemBriefListResponse, FellowProblemBriefReadQuery, FellowProblemBriefReadResponse, ProblemDetail, ProblemLifecycleActionRequest, ProblemPublicationPreview, ProblemPublicationResponse, ProblemResolutionResponse, ProblemResultReviewResponse, SponsorProblemGovernanceQuery, SponsorProblemGovernanceResponse, ProblemAccessActionReceipt, ProblemStatementReviewRequest, ProblemStatementReviewResponse } from '../src/problems.ts';\n",
     },
     {
       relativePath: "generated/discovery.schema.json",

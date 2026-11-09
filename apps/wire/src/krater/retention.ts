@@ -105,6 +105,7 @@ export interface ExpireSecurityRecordsResult {
   readonly expiredNonces: number;
   readonly expiredLookupAttempts: number;
   readonly expiredDeviceCodes: number;
+  readonly expiredSponsorBriefReceipts: number;
 }
 
 /**
@@ -523,6 +524,9 @@ export function sponsorAccountDeletionStatements(
       .prepare(`UPDATE fellow_rebinds SET status = 'superseded'
       WHERE sponsor_id = ? AND status IN ('awaiting-claim', 'awaiting-approval', 'approved')`)
       .bind(sponsorId),
+    // Replay receipts are private account metadata, not permanent audit. This
+    // also runs when journal replay finds an already-tombstoned sponsor.
+    db.prepare("DELETE FROM sponsor_brief_command_receipts WHERE sponsor_id = ?").bind(sponsorId),
   ];
 }
 
@@ -741,7 +745,7 @@ export async function hardDeletePrivateDraft(
 
 /**
  * Sweeps and expires raw IP and security records on schedule without changing public ledger history.
- * Bounded cleanup of expired nonces, device lookups, and expired device-flow codes.
+ * Cleanup of expired nonces, device lookups, device-flow codes and brief receipts.
  */
 export async function expireSecurityRecords(
   db: D1Database,
@@ -759,6 +763,7 @@ export async function expireSecurityRecords(
     db.prepare("DELETE FROM auth_envelope_nonces WHERE expires_at <= ?").bind(nowSeconds),
     db.prepare("DELETE FROM device_lookup_attempts WHERE attempted_at <= ?").bind(lookupThreshold),
     db.prepare("DELETE FROM device_codes WHERE expires_at <= ?").bind(nowMs),
+    db.prepare("DELETE FROM sponsor_brief_command_receipts WHERE expires_at <= ?").bind(nowMs),
     // enrollment_proposals is append-only (0011 enrollment_proposals_no_delete):
     // a DELETE here aborts the whole batch on real D1, so no nonce is ever
     // swept. Dead proposals stay as the sponsor's decision history.
@@ -770,6 +775,7 @@ export async function expireSecurityRecords(
     expiredNonces: (results[0]?.meta?.changes as number) ?? 0,
     expiredLookupAttempts: (results[1]?.meta?.changes as number) ?? 0,
     expiredDeviceCodes: (results[2]?.meta?.changes as number) ?? 0,
+    expiredSponsorBriefReceipts: (results[3]?.meta?.changes as number) ?? 0,
   };
 }
 

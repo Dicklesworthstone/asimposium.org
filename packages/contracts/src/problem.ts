@@ -191,6 +191,7 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "PREMATURE_RESOLUTION",
   "BRIEF_NOT_FOUND",
   "BRIEF_NOT_ASSIGNED",
+  "BRIEF_VERSION_CONFLICT",
   "STATEMENT_DRIFT",
   "PROBLEM_PROPOSE_BODY_INVALID",
   "PROBLEM_BRIEF_BODY_INVALID",
@@ -491,7 +492,7 @@ const generalContractProblem = z
     existing_dead_end_id: z.string().min(1).max(64).optional(),
     existing_conflict_id: z.string().min(1).max(64).optional(),
     missing_dependency_ids: z.array(z.string().min(1).max(64)).max(20).optional(),
-    /** Current head version, present only on OBJECT_VERSION_CONFLICT or WORKSHOP_VERSION_CONFLICT. */
+    /** Current head version on an object, workshop, or private-brief version conflict. */
     head_version: z.number().int().min(1).optional(),
     current_version: z.number().int().min(1).optional(),
     suggested_action: z.string().optional(),

@@ -79,6 +79,7 @@ const authoritySql = (withUsage: boolean) => `SELECT f.fellow_id, f.status AS fe
 interface BriefRow extends StoredProblemBoundaries {
   id: string | null;
   sponsor_id: string;
+  version: number;
   assigned_fellow_id: string;
   title: string;
   statement: string;
@@ -207,7 +208,7 @@ export function createFellowBriefRouter(options: {
               fellowStatus: first.fellow_status,
               grantedResources: resources,
             },
-            target: { kind: "new-problem", initialPublication: "private-draft" },
+            target: { kind: "new-problem", initialPublication: "private-draft", unlisted: false },
             usage: { eventsRecorded: first.events_recorded, artifactBytesRecorded: 0 },
             now: Date.now(),
           }).decision === "allow";
@@ -217,6 +218,7 @@ export function createFellowBriefRouter(options: {
               brief: {
                 id: first.id,
                 sponsor_id: first.sponsor_id,
+                version: first.version,
                 assigned_fellow_id: first.assigned_fellow_id,
                 title: first.title,
                 statement: first.statement,

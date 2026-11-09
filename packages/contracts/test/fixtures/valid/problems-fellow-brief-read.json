@@ -2,6 +2,7 @@
   "brief": {
     "id": "brief-example",
     "sponsor_id": "usr_brief_example",
+    "version": 1,
     "assigned_fellow_id": "FEL-BRIEF",
     "title": "A finite combinatorial bound",
     "statement": "Determine the edge bound for finite trees.",
