@@ -4,8 +4,16 @@ import { auth, signIn } from "@/auth";
 import { ProblemPublicationControl } from "@/components/problem-publication-control";
 import { ProblemResearchControl } from "@/components/problem-research-control";
 import { stoaProblemGovernance } from "@/lib/problem-governance";
+import { stoaFetchSyntheses } from "@/lib/public-syntheses";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import { configuredStoaOrigin, stoaProblemPublicationPreview } from "@/lib/stoa";
+import {
+  parseSynthesisConsoleQuery,
+  synthesisConsolePath,
+  synthesisListSearch,
+  synthesisSelectionPage,
+  type SynthesisSelectionPage,
+} from "@/lib/synthesis-view";
 
 export const dynamic = "force-dynamic";
 export const metadata = {
@@ -32,12 +40,14 @@ export default async function ProblemPublicationPage({
 }) {
   const { problem: problemId } = await params;
   const query = await searchParams;
+  const synthesisQuery = parseSynthesisConsoleQuery(query);
   const valid =
     PublicLedgerProblemIdSchema.safeParse(problemId).success &&
     typeof problemId === "string" &&
     problemId.trim() === problemId &&
-    Object.keys(query).length === 0;
-  const returnPath = valid ? `/console/problems/${encodeURIComponent(problemId)}` : "/console";
+    synthesisQuery !== null;
+  const returnPath = valid && synthesisQuery !== null
+    ? synthesisConsolePath(problemId, synthesisQuery.selected, synthesisQuery.list) : "/console";
   const session = valid ? await auth() : null;
   const principal = session?.user?.id;
   let read: Awaited<ReturnType<typeof stoaProblemPublicationPreview>> | undefined;
@@ -72,6 +82,18 @@ export default async function ProblemPublicationPage({
     governance.data.problem.status !== "private-draft"
       ? governance.data
       : undefined;
+  let synthesisChoices: SynthesisSelectionPage | null = null;
+  if (workspace?.problem.status === "under-result-review" && synthesisQuery !== null) {
+    try {
+      const choices = await stoaFetchSyntheses(problemId, undefined, Object.fromEntries(
+        new URLSearchParams(synthesisListSearch(problemId, synthesisQuery.list)),
+      ));
+      if (choices.state === "ok") synthesisChoices = synthesisSelectionPage(choices.data);
+    } catch {
+      // Discovery can fail without disabling the existing exact-identifier preview.
+      synthesisChoices = null;
+    }
+  }
   return (
     <main className="landing col console" id="content">
       <header className="masthead console-head">
@@ -92,7 +114,7 @@ export default async function ProblemPublicationPage({
       {!valid ? (
         <p role="alert">
           Choose an adopted private problem or a published problem from the sponsor console.
-          Additional query parameters are not supported.
+          Only a synthesis identifier and the published-synthesis page cursors are supported here.
         </p>
       ) : !isCanonicalSponsorId(principal) ? (
         <section className="card">
@@ -114,11 +136,14 @@ export default async function ProblemPublicationPage({
         </section>
       ) : workspace !== undefined ? (
         <ProblemResearchControl
-          key={`${principal}:${workspace.problem.id}:${workspace.problem.updated_at}`}
+          key={`${principal}:${workspace.problem.id}:${workspace.problem.updated_at}:${returnPath}`}
           sponsorId={principal}
           initial={{ problem: workspace.problem, authority: workspace.authority }}
           returnPath={returnPath}
           stoaOrigin={configuredStoaOrigin()}
+          synthesisChoices={synthesisChoices}
+          synthesisQuery={synthesisQuery?.list}
+          selectedSynthesis={synthesisQuery?.selected}
         />
       ) : preview === undefined ? (
         <section className="card">
@@ -185,12 +210,21 @@ export default async function ProblemPublicationPage({
               <dd>{preview.problem.stewards.join(", ")}</dd>
             </dl>
           </section>
-          <PrivateText heading="Exact statement and scope" text={preview.problem.statement} />
+          <PrivateText heading="Exact statement" text={preview.problem.statement} />
           <PrivateText
             heading="Falsifier: what would refute this formulation?"
             text={preview.problem.falsifier}
           />
           <PrivateText heading="Motivation" text={preview.problem.motivation} />
+          {preview.problem.scope !== undefined &&
+            preview.problem.out_of_scope !== undefined &&
+            preview.problem.success_criteria !== undefined && (
+              <>
+                <PrivateText heading="Scope" text={preview.problem.scope} />
+                <PrivateText heading="Out of scope" text={preview.problem.out_of_scope} />
+                <PrivateText heading="Success criteria" text={preview.problem.success_criteria} />
+              </>
+            )}
           {preview.problem.famous_guardrail === null ? null : (
             <section className="card" aria-labelledby="famous-problem-boundary">
               <h2 id="famous-problem-boundary">Famous-problem scope and standing boundary</h2>

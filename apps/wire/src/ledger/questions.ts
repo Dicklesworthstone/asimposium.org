@@ -3,8 +3,13 @@ import {
   type AskQuestionRequest,
   AskQuestionRequestSchema,
   LeaseQuestionRequestSchema,
+  QUESTIONS_LIST_DEFAULT_LIMIT,
+  QUESTIONS_LIST_MAX_LIMIT,
   type QuestionItem,
   QuestionItemSchema,
+  type QuestionStatus,
+  type QuestionsListQuery,
+  QuestionsListQuerySchema,
   WithdrawQuestionRequestSchema,
 } from "@asimposium/contracts";
 import {
@@ -77,18 +82,25 @@ export function validateQuestionSubstance(
   return { valid: true };
 }
 
-export interface LoadProblemQuestionsOptions {
-  limit?: number;
-  status?: string;
+export type LoadProblemQuestionsOptions = QuestionsListQuery;
+
+export class QuestionReadError extends Error {
+  constructor(readonly code: "CURSOR_INVALID" | "CONTENT_UNAVAILABLE") {
+    super(code);
+    this.name = "QuestionReadError";
+  }
 }
 
 const QUESTION_CONTENT_BYTES = 65_536;
+const QUESTION_READ_BYTES = 4_194_304;
 const QUESTION_UNAVAILABLE = "Some question content or lifecycle history is unavailable.";
 const publicProblemSql = `status <> 'private-draft'
   AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
 
-/** The projection is allowed to renew a lease without appending scientific
- * history. Every public work product and terminal state comes from the log. */
+/** Work products and lifecycle state come from the captured ledger, including
+ * the recorded lease term. Operational heartbeat renewal is not historical
+ * scientific evidence and cannot change a pinned response. Generic lease.*
+ * coordination does not replace question history; question.leased still does. */
 interface QuestionReadRow {
   question_id: string;
   problem_id: string;
@@ -108,8 +120,8 @@ interface QuestionReadRow {
   last_actor_fellow_id: string | null;
   last_payload_json: string | null;
   last_payload_sha256: string;
-  lease_holder: string | null;
-  lease_deadline: string | null;
+  content_limited: number;
+  withheld: number;
 }
 
 async function questionPayload(raw: string | null, digest: string) {
@@ -133,22 +145,41 @@ export async function loadProblemQuestions(
   questions: QuestionItem[];
   omitted: string[];
   problem: { id: string; unlisted: number } | null;
+  cursor: number;
+  after: number;
+  scanned_through: number;
+  next_after: number | null;
+  target: string | null;
+  status: QuestionStatus | null;
+  target_status: "found" | "not-found" | "unavailable" | null;
 }> {
-  const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
+  const parsedOptions = QuestionsListQuerySchema.safeParse(
+    Object.fromEntries(
+      Object.entries(options)
+        .filter(([, value]) => value !== undefined)
+        .map(([key, value]) => [key, String(value)]),
+    ),
+  );
+  if (!parsedOptions.success) throw new QuestionReadError("CURSOR_INVALID");
+  const { through, after = 0, target, status: requestedStatus } = parsedOptions.data;
+  const limit =
+    target === undefined ? (parsedOptions.data.limit ?? QUESTIONS_LIST_DEFAULT_LIMIT) : 1;
   const omitted: string[] = [];
 
   const query = `
     WITH scope AS (
-      SELECT id, public_seq FROM problems WHERE id = ? AND ${publicProblemSql}
+      SELECT id, public_seq, COALESCE(?, public_seq) AS through
+      FROM problems WHERE id = ? AND ${publicProblemSql}
     ), admissions AS (
       SELECT e.object_id, MIN(e.seq) AS first_seq, COUNT(*) AS creations
       FROM events e JOIN scope p ON p.id = e.problem_id
       WHERE e.object_kind = 'question' AND e.type = 'question.asked'
-        AND e.seq <= p.public_seq
+        AND e.seq <= p.public_seq AND e.seq <= p.through
+        AND (? IS NULL OR e.object_id = ?)
       GROUP BY e.object_id
     ), page AS (
-      SELECT a.* FROM admissions a ORDER BY a.first_seq LIMIT ?
-    )
+      SELECT a.* FROM admissions a WHERE a.first_seq > ? ORDER BY a.first_seq LIMIT ?
+    ), sources AS (
     SELECT
       e.object_id AS question_id,
       e.problem_id,
@@ -168,43 +199,98 @@ export async function loadProblemQuestions(
       h.id AS last_event_id,
       h.type AS last_type,
       h.actor_fellow_id AS last_actor_fellow_id,
-      CASE WHEN hc.redacted_at IS NULL AND NOT ${eventContentHiddenSql("h")}
+      CASE WHEN h.id <> e.id AND hc.redacted_at IS NULL AND NOT ${eventContentHiddenSql("h")}
         AND length(CAST(hc.payload_json AS BLOB)) <= ${QUESTION_CONTENT_BYTES}
         THEN hc.payload_json END AS last_payload_json,
       h.payload_sha256 AS last_payload_sha256,
-      q.leased_by AS lease_holder,
-      q.leased_until AS lease_deadline
+      CASE WHEN ec.redacted_at IS NOT NULL OR hc.redacted_at IS NOT NULL
+        OR ${eventContentHiddenSql("e")} OR ${eventContentHiddenSql("h")}
+        THEN 1 ELSE 0 END AS withheld
     FROM page a JOIN scope p
     JOIN events e ON e.problem_id = p.id AND e.seq = a.first_seq
     JOIN events h ON h.problem_id = p.id AND h.seq = (
       SELECT MAX(latest.seq) FROM events latest
       WHERE latest.problem_id = p.id AND latest.object_kind = 'question'
         AND latest.object_id = a.object_id AND latest.seq <= p.public_seq
+        AND latest.seq <= p.through
+        AND latest.type NOT IN ('lease.acquired', 'lease.released', 'lease.challenged')
     )
     LEFT JOIN event_content ec ON ec.event_id = e.id
                          AND ec.payload_sha256 = e.payload_sha256
     LEFT JOIN event_content hc ON hc.event_id = h.id
                          AND hc.payload_sha256 = h.payload_sha256
-    LEFT JOIN questions q ON q.problem_id = p.id AND q.question_id = a.object_id
-    ORDER BY e.seq
+    ), budgeted AS (
+      SELECT *, SUM(COALESCE(length(CAST(payload_json AS BLOB)), 0)
+        + COALESCE(length(CAST(last_payload_json AS BLOB)), 0))
+        OVER (ORDER BY seq ROWS UNBOUNDED PRECEDING) AS content_bytes
+      FROM sources
+    )
+    SELECT question_id, problem_id, seq, creations, event_id,
+      actor_fellow_id, actor_sponsor_id, actor_session_id, model_string_self_declared,
+      harness, created_at, payload_sha256, last_event_id, last_type,
+      last_actor_fellow_id, last_payload_sha256, withheld,
+      CASE WHEN content_bytes <= ${QUESTION_READ_BYTES} THEN payload_json END AS payload_json,
+      CASE WHEN content_bytes <= ${QUESTION_READ_BYTES} THEN last_payload_json END AS last_payload_json,
+      content_bytes > ${QUESTION_READ_BYTES} AS content_limited
+    FROM budgeted ORDER BY seq
   `;
   // D1 batch gives the scope check and content selection one read snapshot.
   // In particular, a problem control is evaluated before any 304 decision.
   const [head, rows] = await db.batch([
     db
-      .prepare(`SELECT id, unlisted FROM problems WHERE id = ? AND ${publicProblemSql}`)
+      .prepare(`SELECT id, unlisted, public_seq FROM problems WHERE id = ? AND ${publicProblemSql}`)
       .bind(problemId),
-    db.prepare(query).bind(problemId, limit + 1),
+    db
+      .prepare(query)
+      .bind(through ?? null, problemId, target ?? null, target ?? null, after, limit + 1),
   ]);
   if (!head?.success || !rows?.success) throw new Error("Question read failed.");
-  const problem = (head.results[0] ?? null) as { id: string; unlisted: number } | null;
-  if (problem === null) return { questions: [], omitted: [], problem: null };
+  const headRow = (head.results[0] ?? null) as {
+    id: string;
+    unlisted: number;
+    public_seq: number;
+  } | null;
+  if (headRow !== null && (!Number.isSafeInteger(headRow.public_seq) || headRow.public_seq < 0))
+    throw new QuestionReadError("CONTENT_UNAVAILABLE");
+  if (headRow !== null && through !== undefined && through > headRow.public_seq)
+    throw new QuestionReadError("CURSOR_INVALID");
+  const cursor = through ?? headRow?.public_seq ?? 0;
+  const problem = headRow === null ? null : { id: headRow.id, unlisted: headRow.unlisted };
+  const page = {
+    cursor,
+    after,
+    scanned_through: cursor,
+    next_after: null as number | null,
+    target: target ?? null,
+    status: requestedStatus ?? null,
+    target_status:
+      target === undefined ? null : ("not-found" as "found" | "not-found" | "unavailable"),
+  };
+  if (problem === null) return { questions: [], omitted: [], problem: null, ...page };
   const results = rows.results as unknown as QuestionReadRow[];
+  if (results.length > limit + 1 || limit > QUESTIONS_LIST_MAX_LIMIT)
+    throw new QuestionReadError("CONTENT_UNAVAILABLE");
   const hasMore = results.length > limit;
   const sliced = hasMore ? results.slice(0, limit) : results;
+  let previous = after;
+  for (const row of results) {
+    if (
+      row.problem_id !== problemId ||
+      !Number.isSafeInteger(row.seq) ||
+      row.seq <= previous ||
+      row.seq > cursor ||
+      (target !== undefined && row.question_id !== target)
+    )
+      throw new QuestionReadError("CONTENT_UNAVAILABLE");
+    previous = row.seq;
+  }
 
   if (hasMore) {
     omitted.push(`truncated at limit of ${limit} questions`);
+    const last = sliced[sliced.length - 1];
+    if (last === undefined) throw new QuestionReadError("CONTENT_UNAVAILABLE");
+    page.scanned_through = last.seq;
+    page.next_after = page.scanned_through;
   }
 
   const questions: QuestionItem[] = [];
@@ -212,7 +298,19 @@ export async function loadProblemQuestions(
     if (!omitted.includes(QUESTION_UNAVAILABLE)) omitted.push(QUESTION_UNAVAILABLE);
   };
 
+  let consumedThrough = after;
   for (const row of sliced) {
+    if (target !== undefined) page.target_status = row.withheld === 1 ? "not-found" : "unavailable";
+    // A legal complete question must survive bounded traversal. Stop before
+    // the first source beyond the byte budget and admit it on the next page.
+    if (row.content_limited) {
+      if (consumedThrough === after) throw new QuestionReadError("CONTENT_UNAVAILABLE");
+      omitted.push("Question source-byte budget reached; continue at the same snapshot.");
+      page.scanned_through = consumedThrough;
+      page.next_after = consumedThrough;
+      break;
+    }
+    consumedThrough = row.seq;
     const publication = await questionPayload(row.payload_json, row.payload_sha256);
     const latest =
       row.last_event_id === row.event_id
@@ -271,14 +369,7 @@ export async function loadProblemQuestions(
         unavailable();
         continue;
       }
-      // Heartbeat renewal is operational, not scientific publication. It may
-      // extend this verified holder's term; it cannot invent another holder.
-      const renewed =
-        row.lease_holder === latest.leased_by &&
-        row.lease_deadline !== null &&
-        Number.isFinite(Date.parse(row.lease_deadline)) &&
-        Date.parse(row.lease_deadline) >= Date.parse(latest.leased_until);
-      leasedUntil = renewed ? row.lease_deadline : latest.leased_until;
+      leasedUntil = latest.leased_until;
       leasedBy = latest.leased_by;
       status = "leased";
     } else if (row.last_type !== "question.asked" || row.last_event_id !== row.event_id) {
@@ -305,12 +396,20 @@ export async function loadProblemQuestions(
     };
 
     const parsed = QuestionItemSchema.safeParse(item);
-    if (parsed.success && (options.status === undefined || options.status === parsed.data.status)) {
+    if (
+      parsed.success &&
+      (requestedStatus === undefined || requestedStatus === parsed.data.status)
+    ) {
       questions.push(parsed.data);
+      if (target !== undefined) page.target_status = "found";
     } else if (!parsed.success) unavailable();
   }
 
-  return { questions, omitted, problem };
+  if (questions.some((question) => question.status === "leased"))
+    omitted.push(
+      "Lease state reflects the recorded event at this snapshot; heartbeat renewals and current availability are not implied.",
+    );
+  return { questions, omitted, problem, ...page };
 }
 
 /** Render Diptych Markdown face: GET /p/:id/questions.md */
@@ -330,7 +429,7 @@ export function renderQuestionsMarkdown(
     parts.push(
       omitted.length > 0
         ? "No readable questions are available in this bounded view."
-        : "No questions recorded on this problem yet.",
+        : "No readable questions match this selected view.",
     );
     if (omitted.length > 0) {
       parts.push("");
@@ -412,7 +511,7 @@ export function renderQuestionsHtmlFragment(
       `  <p class="asimp-empty">${
         omitted.length > 0
           ? "No readable questions are available in this bounded view."
-          : "No questions recorded on this problem yet."
+          : "No readable questions match this selected view."
       }</p>`,
     );
     if (omitted.length > 0) {

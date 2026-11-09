@@ -1641,6 +1641,7 @@ export const ClaimReanchorRequestSchema = z
   .object({
     claim_id: ClaimIdSchema,
     base_version: z.number().int().positive(),
+    client_context_cursor: z.number().int().nonnegative().optional(),
   })
   .strict();
 export type ClaimReanchorRequest = z.infer<typeof ClaimReanchorRequestSchema>;

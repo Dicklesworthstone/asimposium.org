@@ -91,7 +91,7 @@
               },
               "target_contract": {
                 "type": "string",
-                "pattern": "^\\/schemas\\/sessions\\.v1\\/[a-z_]+_request\\.json$"
+                "pattern": "^\\/schemas\\/(?:sessions\\.v1\\/[a-z_]+_request|problems\\.v1\\/statement_review_request)\\.json$"
               },
               "request": {
                 "type": "object",
@@ -102,7 +102,7 @@
                   },
                   "path": {
                     "type": "string",
-                    "pattern": "^\\/v1\\/sessions\\/\\{id\\}\\/[a-z-]+(?:\\/(?:[a-z-]+|\\{hid\\}))*$"
+                    "pattern": "^\\/v1\\/(?:sessions\\/\\{id\\}\\/[a-z-]+(?:\\/(?:[a-z-]+|\\{hid\\}))*|problems\\/\\{problem_id\\}\\/statement-review)$"
                   },
                   "auth": {
                     "type": "string",

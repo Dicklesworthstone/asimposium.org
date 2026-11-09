@@ -999,6 +999,13 @@ await runLocalWorkerJourney(async (context) => {
       reason: "The author is correcting the stated scope of this earlier work product.",
     };
     const key = `standing-notice-${kind}-withdrawal`;
+    const beforeWithdrawal = ClaimFaceResponseSchema.parse(
+      await call(`/p/${problemId}/claims/${claimId}@1.json`),
+    );
+    const beforeItem = beforeWithdrawal.items.find((item) => item.id === objectId);
+    assert.ok(beforeItem, "the original scientific input is visible before correction");
+    const beforeBody = JSON.parse(beforeItem.body);
+    assert.equal(beforeBody.scientific_status, undefined);
     const correction = await call(path, body, reviewerB, 200, key);
     assert.deepEqual(
       await call(path, body, reviewerB, 200, key),
@@ -1039,6 +1046,48 @@ await runLocalWorkerJourney(async (context) => {
       kind === "review" ? "reduced-to" : "disputed",
       "withdrawing an input does not erase a negative finding or settle a reduction",
     );
+    const historical = ClaimFaceResponseSchema.parse(
+      await call(`/p/${problemId}/claims/${claimId}@1.json?through=${beforeWithdrawal.cursor}`),
+    );
+    assert.deepEqual(
+      JSON.parse(historical.items.find((item) => item.id === objectId).body),
+      beforeBody,
+      "an earlier scientific cut excludes the later correction",
+    );
+    const retained = face.items.find((item) => item.id === objectId);
+    assert.ok(retained, "a scientific withdrawal retains the original public record");
+    const retainedBody = JSON.parse(retained.body);
+    const status = retainedBody.scientific_status;
+    assert.equal(status.withdrawal, "withdrawn");
+    assert.equal(status.positive_authority, "removed");
+    assert.equal(status.withdrawal_event.id, correction.event_id);
+    assert.equal(status.withdrawal_event.seq, correction.seq);
+    assert.equal(status.withdrawal_event.reason, body.reason);
+    assert.equal(retainedBody.body_md, beforeBody.body_md);
+    assert.match(retained.why_included, /withdrawn public record/);
+    const window = await call(status.withdrawal_event.read_url);
+    assert.equal(window.events.length, 1);
+    assert.equal(window.events[0].event.id, correction.event_id);
+    assert.equal(`sha256:${window.events[0].event.payload_sha256}`, status.withdrawal_event.digest);
+    for (const profile of ["claim", "review"]) {
+      const query = new URLSearchParams({ profile, target: `${claimId}@1`, max_tokens: "8000" });
+      const pack = PackResponseSchema.parse(
+        await call(`${reviewerSessionPathC}/pack?${query}`, undefined, reviewerC),
+      );
+      const item = pack.items.find((entry) => entry.id === objectId);
+      assert.ok(item, `${profile} pack keeps the corrected ${kind} as explicit history`);
+      assert.equal(item.untrusted, true);
+      assert.deepEqual(JSON.parse(item.body).scientific_status, status);
+    }
+    const focused = ClaimFaceResponseSchema.parse(
+      await call(`/p/${problemId}/${kind === "review" ? "reviews" : "evidence"}/${objectId}.json`),
+    );
+    assert.deepEqual(
+      JSON.parse(focused.items.find((item) => item.id === objectId).body).scientific_status,
+      status,
+      "the focused public record has the same honest correction status",
+    );
+    console.log(JSON.stringify({ stage: "scientific-withdrawal-read", kind, status: "pass" }));
   }
 
   // An author concession acknowledges exact counterevidence, rather than

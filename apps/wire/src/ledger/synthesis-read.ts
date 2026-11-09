@@ -1,6 +1,7 @@
 import type { SynthesisItem } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
+import { synthesisMaterialEventSql } from "./synthesis-events.ts";
 import type { SynthesisAnchorSource } from "./synthesis-references.ts";
 
 export const SYNTHESIS_READ_LIMIT = 200;
@@ -11,6 +12,7 @@ export const SYNTHESIS_READ_BYTES = 6 * 1024 * 1024;
 
 export interface SynthesisReadOptions {
   readonly through?: number;
+  readonly before?: number;
   readonly limit?: number;
   readonly synthesisId?: string;
 }
@@ -18,6 +20,8 @@ export interface SynthesisReadOptions {
 export interface SynthesisReadPage {
   readonly found: boolean;
   readonly cursor: number;
+  readonly unlisted: boolean;
+  readonly nextBefore: number | null;
   readonly items: readonly {
     synthesis: SynthesisItem;
     materialEventsSince: number;
@@ -40,7 +44,7 @@ export class SynthesisReadError extends Error {
  * without transferring its body, and the whole page has a UTF-8 byte ceiling. */
 export const SYNTHESIS_READ_SQL = `
 WITH scope AS (
-  SELECT id, public_seq, COALESCE(?, public_seq) AS cursor
+  SELECT id, public_seq, unlisted, COALESCE(?, public_seq) AS cursor
   FROM problems WHERE id = ? AND status <> 'private-draft'
     AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}
     AND NOT ${hiddenByContentControlSql("problems.id", "problems.id")}
@@ -54,6 +58,7 @@ WITH scope AS (
   WHERE e.seq <= p.cursor AND p.cursor <= p.public_seq
     AND e.object_kind = 'synthesis' AND e.type = 'synthesis.created'
     AND (? IS NULL OR e.object_id = ?)
+    AND (? IS NULL OR e.seq < ?)
   ORDER BY e.seq DESC LIMIT ?
 ), sources AS (
   SELECT e.*, c.payload_json,
@@ -69,12 +74,12 @@ WITH scope AS (
       OVER (ORDER BY seq DESC ROWS UNBOUNDED PRECEDING) AS page_bytes
   FROM sources
 )
-SELECT p.id AS problem_id, p.public_seq, p.cursor,
+SELECT p.id AS problem_id, p.public_seq, p.cursor, p.unlisted,
   e.id AS event_id, e.object_id AS synthesis_id, e.object_version,
   e.seq, e.created_at, e.payload_sha256, e.publications, e.ordinal,
   e.actor_fellow_id AS fellow_id, e.actor_sponsor_id AS sponsor_id,
   e.actor_session_id AS session_id, e.model_string_self_declared AS declared_model,
-  e.harness, e.available,
+  e.harness, e.available, e.body_bytes,
   CASE WHEN e.available = 1 AND e.page_bytes > ? THEN 1 ELSE 0 END AS byte_limit,
   CASE WHEN e.ordinal <= ? AND e.available = 1 AND e.page_bytes <= ?
     THEN e.payload_json END AS payload_json,
@@ -83,7 +88,7 @@ SELECT p.id AS problem_id, p.public_seq, p.cursor,
     THEN (SELECT COUNT(*) FROM events newer
       WHERE newer.problem_id = p.id AND newer.seq <= p.cursor
         AND newer.seq > json_extract(e.payload_json, '$.covers_through')
-        AND newer.object_kind IN ('claim','hypothesis','review','evidence','dead_end','conflict','gap'))
+        AND ${synthesisMaterialEventSql("newer")})
     ELSE 0 END AS material_events_since
 FROM scope p LEFT JOIN budgeted e ON 1
 ORDER BY e.seq DESC`;
@@ -119,6 +124,11 @@ export async function readSynthesisPage(
     problemId.includes("\0") ||
     !Number.isSafeInteger(requestedLimit) ||
     (options.through !== undefined && !sequence(options.through)) ||
+    (options.before !== undefined &&
+      (!sequence(options.before, 1) ||
+        options.through === undefined ||
+        options.before > options.through ||
+        options.synthesisId !== undefined)) ||
     (options.synthesisId !== undefined &&
       (!text(options.synthesisId, 128) || options.synthesisId.includes("\0")))
   )
@@ -136,6 +146,8 @@ export async function readSynthesisPage(
       problemId,
       options.synthesisId ?? null,
       options.synthesisId ?? null,
+      options.before ?? null,
+      options.before ?? null,
       limit + 1,
       SYNTHESIS_READ_BYTES,
       limit,
@@ -148,20 +160,41 @@ export async function readSynthesisPage(
     throw new SynthesisReadError("SOURCE_UNAVAILABLE");
   const rows = result.results;
   const head = rows[0];
-  if (!head) return { found: false, cursor: 0, items: [], omitted: ["problem not found"] };
-  if (head.problem_id !== problemId || !sequence(head.public_seq) || !sequence(head.cursor))
+  if (!head)
+    return {
+      found: false,
+      cursor: 0,
+      unlisted: false,
+      nextBefore: null,
+      items: [],
+      omitted: ["problem not found"],
+    };
+  if (
+    head.problem_id !== problemId ||
+    !sequence(head.public_seq) ||
+    !sequence(head.cursor) ||
+    (head.unlisted !== 0 && head.unlisted !== 1)
+  )
     throw new SynthesisReadError("SOURCE_UNAVAILABLE");
   if (head.cursor > head.public_seq) throw new SynthesisReadError("CURSOR_INVALID");
   if (options.through !== undefined && head.cursor !== options.through)
     throw new SynthesisReadError("SOURCE_UNAVAILABLE");
   if (head.event_id === null) {
     if (rows.length !== 1) throw new SynthesisReadError("SOURCE_UNAVAILABLE");
-    return { found: true, cursor: head.cursor, items: [], omitted: [] };
+    return {
+      found: true,
+      cursor: head.cursor,
+      unlisted: Boolean(head.unlisted),
+      nextBefore: null,
+      items: [],
+      omitted: [],
+    };
   }
   const omitted = new Set<string>();
-  if (rows.length > limit) omitted.add("page_limit");
   const items: SynthesisReadPage["items"][number][] = [];
-  let previous: number | undefined;
+  let previous = options.before;
+  let scanned: number | null = null;
+  let nextBefore: number | null = null;
   const seen = new Set<string>();
   for (const row of rows.slice(0, limit)) {
     if (
@@ -176,7 +209,21 @@ export async function readSynthesisPage(
       (options.synthesisId !== undefined && row.synthesis_id !== options.synthesisId)
     )
       throw new SynthesisReadError("SOURCE_UNAVAILABLE");
+    // A complete valid source that does not fit the remaining page budget is
+    // retried on the next page. Never consume it merely because earlier bodies
+    // filled this page. Individually oversized sources are withheld and advance.
+    if (
+      row.byte_limit === 1 &&
+      sequence(row.body_bytes, 1) &&
+      row.body_bytes <= SYNTHESIS_READ_BYTES &&
+      scanned !== null
+    ) {
+      omitted.add("byte_limit");
+      nextBefore = scanned;
+      break;
+    }
     previous = row.seq;
+    scanned = row.seq;
     seen.add(row.synthesis_id);
     if (row.byte_limit === 1) omitted.add("byte_limit");
     if (
@@ -266,5 +313,15 @@ export async function readSynthesisPage(
       },
     });
   }
-  return { found: true, cursor: head.cursor, items, omitted: [...omitted] };
+  if (nextBefore === null && rows.length > limit && options.synthesisId === undefined)
+    nextBefore = scanned;
+  if (nextBefore !== null) omitted.add("page_limit");
+  return {
+    found: true,
+    cursor: head.cursor,
+    unlisted: Boolean(head.unlisted),
+    nextBefore,
+    items,
+    omitted: [...omitted],
+  };
 }

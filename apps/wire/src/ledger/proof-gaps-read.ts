@@ -7,6 +7,7 @@ import type {
 } from "@asimposium/contracts/proof-gaps";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { hiddenByContentControlSql } from "../krater/public-content.ts";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 
 const PAGE_SIZE = 8;
 const MAX_CONTENT_BYTES = 16384;
@@ -44,10 +45,12 @@ interface Row {
   last_json: string;
   filed_body: string | null;
   last_body: string | null;
+  screening_provenance_json: string | null;
 }
 export const PROOF_GAPS_HEAD_SQL = `SELECT id, public_seq, unlisted, status FROM problems
   WHERE id = ? AND status <> 'private-draft'
-    AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
+    AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}
+    AND NOT ${hiddenByContentControlSql("problems.id", "problems.id")}`;
 const eventJson = (alias: string) => `json_object(
   'event_id', ${alias}.id, 'seq', ${alias}.seq, 'payload_sha256', ${alias}.payload_sha256,
   'created_at', ${alias}.created_at, 'fellow_id', ${alias}.actor_fellow_id,
@@ -61,6 +64,7 @@ export function proofGapsSql(unowned: boolean): string {
   return `WITH cut AS (
     SELECT id, ? AS cursor FROM problems WHERE id = ? AND public_seq >= ? AND status <> 'private-draft'
       AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}
+      AND NOT ${hiddenByContentControlSql("problems.id", "problems.id")}
   ), admitted AS (
     SELECT g.*, ROW_NUMBER() OVER (ORDER BY g.seq, g.id) AS admission_ordinal
     FROM cut JOIN events g ON g.problem_id = cut.id
@@ -97,13 +101,18 @@ export function proofGapsSql(unowned: boolean): string {
       AND NOT ${hiddenByContentControlSql("h.problem_id", "h.object_id")}
       AND NOT ${hiddenByContentControlSql("h.problem_id", "h.object_id || '@' || h.object_version")}
       AND NOT ${hiddenByContentControlSql("h.problem_id", "'#' || h.seq")}
-      THEN hc.payload_json END AS last_body
+      THEN hc.payload_json END AS last_body,
+    CASE WHEN g.admission_ordinal <= ${PAGE_SIZE} AND screening.event_id IS NOT NULL
+      THEN CASE WHEN length(CAST(screening.provenance_json AS BLOB)) <= 4096
+        THEN screening.provenance_json ELSE '' END
+      END AS screening_provenance_json
   FROM admitted g JOIN cut ON cut.id = g.problem_id
   JOIN events h ON h.id = (SELECT n.id FROM events n WHERE n.problem_id = g.problem_id
     AND n.object_kind = 'gap' AND n.object_id = g.object_id AND n.seq <= cut.cursor
     ORDER BY n.seq DESC LIMIT 1)
   LEFT JOIN event_content c ON c.event_id = g.id AND c.payload_sha256 = g.payload_sha256
   LEFT JOIN event_content hc ON hc.event_id = h.id AND hc.payload_sha256 = h.payload_sha256
+  LEFT JOIN screening_publications screening ON screening.event_id = g.id
   ORDER BY g.seq, g.id`;
 }
 export async function gapPayload(
@@ -305,6 +314,15 @@ export async function composeProofGapSnapshot(
       closedBy = null;
     }
     if (status === "unavailable") omitted.add("history_unavailable");
+    // The notice belongs to the filing, never a later settlement or mutable
+    // gap projection. Withheld work carries neither its prose nor its notice.
+    let screeningNotice: ProofGapRecord["screening_notice"];
+    try {
+      screeningNotice =
+        content === null ? undefined : publicationScreeningNotice(row.screening_provenance_json);
+    } catch {
+      throw new ProofGapReadError("unavailable");
+    }
     gaps.push({
       gap_id: row.gap_id,
       status,
@@ -312,6 +330,7 @@ export async function composeProofGapSnapshot(
       last_event: last,
       content,
       closed_by: closedBy,
+      ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
     });
   }
   const more = rows.length > PAGE_SIZE;

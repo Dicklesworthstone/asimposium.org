@@ -5,8 +5,6 @@ import {
   AreaDetailResponseSchema,
   type AreasIndexResponse,
   AreasIndexResponseSchema,
-  type CitationsListResponse,
-  CitationsListResponseSchema,
   ClaimFaceQuerySchema,
   type ClaimFaceResponse,
   ClaimFaceResponseSchema,
@@ -41,6 +39,25 @@ import {
   SearchResponseSchema,
 } from "@asimposium/contracts";
 import {
+  CitationReadQuerySchema,
+  citationMatchesQuery,
+  citationPath,
+  type CitationsListResponse,
+  CitationsListResponseSchema,
+  citationsListMatchesQuery,
+  citationsListPath,
+  PublicCitationTargetSchema,
+  type SingleCitationResponse,
+  SingleCitationResponseSchema,
+} from "@asimposium/contracts/citations";
+import {
+  ClaimsListQuerySchema,
+  type ClaimsListResponse,
+  ClaimsListResponseSchema,
+  claimsListMatchesQuery,
+  claimsListPath,
+} from "@asimposium/contracts/claims-list";
+import {
   HypothesesQuerySchema,
   type HypothesesResponse,
   HypothesesResponseSchema,
@@ -56,6 +73,7 @@ import {
   ReviewQueueResponseSchema,
 } from "@asimposium/contracts/review-queue";
 import { deadEndsMatchView } from "./dead-end-view";
+import { parseCitationViewQuery } from "./citation-view";
 import { eventHistoryMatchesQuery, parseEventHistoryQuery } from "./event-history";
 import { publicReadWatch } from "./public-watch-view";
 import { parsePublicRecord, type PublicRecord, type PublicRecordTarget } from "./public-record";
@@ -65,6 +83,7 @@ import { configuredStoaOrigin } from "./stoa";
 
 export const PUBLIC_LEDGER_TIMEOUT_MS = 3_000;
 export const PUBLIC_LEDGER_MAX_BYTES = 1024 * 1024;
+const PUBLIC_LEDGER_HARD_MAX_BYTES = 8 * 1024 * 1024;
 const PUBLIC_READ_USER_AGENT =
   "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
 
@@ -96,9 +115,13 @@ export async function readPublic<T>(
   revalidate: number,
   missingCode?: string,
   missingCursorCode?: "CURSOR_INVALID",
+  maxBytes = PUBLIC_LEDGER_MAX_BYTES,
 ): Promise<PublicRead<T>> {
   if (origin === undefined || !isTrustedStoaOrigin(origin)) {
     return { state: "unavailable", reason: "configuration" };
+  }
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > PUBLIC_LEDGER_HARD_MAX_BYTES) {
+    return { state: "unavailable", reason: "invalid_response" };
   }
   const controller = new AbortController();
   let expired = false;
@@ -144,7 +167,7 @@ export async function readPublic<T>(
       return { state: "unavailable", reason: "http" };
     }
     const length = response.headers.get("content-length");
-    if (length !== null && /^\d+$/.test(length) && Number(length) > PUBLIC_LEDGER_MAX_BYTES) {
+    if (length !== null && /^\d+$/.test(length) && Number(length) > maxBytes) {
       void response.body?.cancel().catch(() => undefined);
       return { state: "unavailable", reason: "oversize" };
     }
@@ -157,7 +180,7 @@ export async function readPublic<T>(
         if (expired) return { state: "unavailable", reason: "timeout" };
         if (chunk.done) break;
         size += chunk.value.byteLength;
-        if (size > PUBLIC_LEDGER_MAX_BYTES) {
+        if (size > maxBytes) {
           void reader.cancel().catch(() => undefined);
           return { state: "unavailable", reason: "oversize" };
         }
@@ -336,6 +359,30 @@ export async function stoaFetchClaimFace(
     return { state: "unavailable", reason: "invalid_response" };
   }
   return result;
+}
+
+/** Complete claim browsing uses bounded pages at one immutable ledger cut.
+ * Re-read current content controls even when the requested cut is historical. */
+export async function stoaFetchClaimsList(
+  problemId: string,
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
+): Promise<PublicRead<ClaimsListResponse>> {
+  const parsed = ClaimsListQuerySchema.safeParse(query);
+  if (!parsed.success || !PublicLedgerProblemIdSchema.safeParse(problemId).success) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
+  const result = await readPublic(
+    claimsListPath(problemId, "json", parsed.data),
+    stoaOrigin,
+    ClaimsListResponseSchema,
+    0,
+    "PROBLEM_NOT_FOUND",
+  );
+  if (result.state !== "ok") return result;
+  return claimsListMatchesQuery(problemId, parsed.data, result.data)
+    ? result
+    : { state: "unavailable", reason: "invalid_response" };
 }
 
 /** Public hypotheses preserve the requested ledger cut and continuation. */
@@ -688,15 +735,41 @@ export async function stoaFetchCommentary(
 export async function stoaFetchCitations(
   problemId: string,
   stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
 ): Promise<PublicRead<CitationsListResponse>> {
-  if (!PublicLedgerProblemIdSchema.safeParse(problemId).success) {
+  const parsed = parseCitationViewQuery(query);
+  if (typeof problemId !== "string" || problemId.trim() !== problemId ||
+      !PublicLedgerProblemIdSchema.safeParse(problemId).success || parsed === null) {
     return { state: "unavailable", reason: "invalid_response" };
   }
-  return readPublic(
-    `/p/${encodeURIComponent(problemId)}/citations.json`,
-    stoaOrigin,
-    CitationsListResponseSchema,
-    0,
-    "PROBLEM_NOT_FOUND",
+  const result = await readPublic(
+    citationsListPath(problemId, "json", parsed), stoaOrigin, CitationsListResponseSchema,
+    0, "CITATION_NOT_FOUND", "CURSOR_INVALID", 8 * 1024 * 1024,
   );
+  if (result.state !== "ok") return result;
+  return citationsListMatchesQuery(problemId, parsed, result.data)
+    ? result : { state: "unavailable", reason: "invalid_response" };
+}
+
+/** Exact citation/version reads never float to a different source. Current
+ * visibility is consulted even when the publication snapshot is pinned. */
+export async function stoaFetchCitation(
+  problemId: string,
+  target: string,
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
+): Promise<PublicRead<SingleCitationResponse>> {
+  const parsed = CitationReadQuerySchema.safeParse(query);
+  if (typeof problemId !== "string" || problemId.trim() !== problemId ||
+      !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
+      typeof target !== "string" || target.trim() !== target ||
+      !PublicCitationTargetSchema.safeParse(target).success || !parsed.success)
+    return { state: "unavailable", reason: "invalid_response" };
+  const result = await readPublic(
+    citationPath(problemId, target, "json", parsed.data), stoaOrigin, SingleCitationResponseSchema,
+    0, "CITATION_NOT_FOUND", "CURSOR_INVALID", 8 * 1024 * 1024,
+  );
+  if (result.state !== "ok") return result;
+  return citationMatchesQuery(problemId, target, parsed.data, result.data)
+    ? result : { state: "unavailable", reason: "invalid_response" };
 }

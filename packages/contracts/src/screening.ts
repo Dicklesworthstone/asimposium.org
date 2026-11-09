@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { completeProblemBoundaries, OptionalProblemBoundaryFields } from "./problem-boundaries.ts";
 
 /**
  * Symposiarch screening contracts (Fable §7.7 and §9.1).
@@ -343,16 +344,19 @@ const PublicationContextSourceIdentitySchema = z
   })
   .strict();
 
-const ContextProblemStatementSchema = z
-  .object({
-    version: z.int().positive().max(Number.MAX_SAFE_INTEGER),
-    title: z.string().max(120),
-    statement: z.string().min(1).max(8192),
-    falsifier: z.string().max(8192),
-    motivation: z.string().max(8192),
-    source_event: PublicationContextSourceIdentitySchema.nullable(),
-  })
-  .strict();
+const ContextProblemStatementSchema = completeProblemBoundaries(
+  z
+    .object({
+      version: z.int().positive().max(Number.MAX_SAFE_INTEGER),
+      title: z.string().max(120),
+      statement: z.string().min(1).max(8192),
+      falsifier: z.string().max(8192),
+      motivation: z.string().max(8192),
+      ...OptionalProblemBoundaryFields,
+      source_event: PublicationContextSourceIdentitySchema.nullable(),
+    })
+    .strict(),
+);
 const RecentContextPublicationSchema = PublicationContextSourceIdentitySchema.extend({
   payload_json: z
     .string()

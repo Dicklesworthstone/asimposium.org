@@ -6,6 +6,41 @@ export const ProblemIdSchema = z.string().regex(ProblemIdPattern, "invalid probl
 export type ProblemId = z.infer<typeof ProblemIdSchema>;
 
 export const CITATIONS_SCHEMA_ID = "https://a.asimposium.org/schemas/citations.v1.json";
+export const CITATIONS_LIST_DEFAULT_LIMIT = 50;
+export const CITATIONS_LIST_MAX_LIMIT = 200;
+
+const sequence = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const querySequence = z
+  .string()
+  .regex(/^(0|[1-9][0-9]*)$(?![\s\S])/)
+  .transform(Number)
+  .pipe(sequence);
+
+export const CitationReadQuerySchema = z.object({ through: querySequence.optional() }).strict();
+export type CitationReadQuery = z.output<typeof CitationReadQuerySchema>;
+
+/** A continuation stays on the same published cut, including pages whose
+ * heads are withheld or do not match the requested provenance filter. */
+export const CitationsListQuerySchema = z
+  .object({
+    through: querySequence.optional(),
+    after: querySequence.optional(),
+    limit: querySequence.pipe(sequence.min(1).max(CITATIONS_LIST_MAX_LIMIT)).optional(),
+    unanchored: z
+      .enum(["true", "false"])
+      .transform((value) => value === "true")
+      .optional(),
+  })
+  .strict()
+  .superRefine((query, context) => {
+    if (query.after !== undefined && (query.through === undefined || query.after > query.through))
+      context.addIssue({
+        code: "custom",
+        path: ["after"],
+        message: "A continuation requires its original through cursor and cannot exceed it.",
+      });
+  });
+export type CitationsListQuery = z.output<typeof CitationsListQuerySchema>;
 
 export const CitationIdPattern = /^L-[0-9]+$/;
 export const CitationIdSchema = z
@@ -13,10 +48,14 @@ export const CitationIdSchema = z
   .regex(CitationIdPattern, "invalid citation id (expected L-n)");
 export type CitationId = z.infer<typeof CitationIdSchema>;
 
-export const PublicCitationTargetPattern = /^(?!.*--)(L-[0-9]+)(?:@([1-9][0-9]{0,15}))?$/;
+export const PublicCitationTargetPattern = /^(?!.*--)(L-[0-9]+)(?:@([1-9][0-9]{0,15}))?$(?![\s\S])/;
 export const PublicCitationTargetSchema = z
   .string()
-  .regex(PublicCitationTargetPattern, "invalid citation target (expected L-n or L-n@v)");
+  .regex(PublicCitationTargetPattern, "invalid citation target (expected L-n or L-n@v)")
+  .refine((value) => {
+    const version = value.split("@")[1];
+    return version === undefined || Number.isSafeInteger(Number(version));
+  }, "citation version must be a safe integer");
 export type PublicCitationTarget = z.infer<typeof PublicCitationTargetSchema>;
 
 export const LOCATOR_KINDS = ["doi", "arxiv", "url", "isbn", "manual", "model_memory"] as const;
@@ -338,10 +377,46 @@ export const CitationsListResponseSchema = z
   .object({
     schema: z.literal(CITATIONS_SCHEMA_ID),
     problem_id: ProblemIdSchema,
-    citations: z.array(CitationItemSchema),
+    cursor: sequence,
+    after: sequence,
+    scanned_through: sequence,
+    next_after: sequence.nullable(),
+    unanchored: z.boolean().nullable(),
+    citations: z.array(CitationItemSchema).max(CITATIONS_LIST_MAX_LIMIT),
     omitted: z.array(z.string().min(1).max(512)),
   })
-  .strict();
+  .strict()
+  .superRefine((face, context) => {
+    const invalid = (path: string, message: string) =>
+      context.addIssue({ code: "custom", path: [path], message });
+    if (face.after > face.scanned_through || face.scanned_through > face.cursor)
+      invalid("scanned_through", "The scanned page must stay within its captured ledger cut.");
+    if (
+      face.next_after !== null &&
+      (face.next_after !== face.scanned_through ||
+        face.next_after <= face.after ||
+        face.omitted.length === 0)
+    )
+      invalid("next_after", "A bounded continuation must advance and disclose its page limit.");
+    let previous = face.after;
+    const seen = new Set<string>();
+    for (const item of face.citations) {
+      if (
+        item.problem_id !== face.problem_id ||
+        seen.has(item.citation_id) ||
+        !Number.isSafeInteger(item.seq) ||
+        item.seq <= previous ||
+        item.seq > face.scanned_through ||
+        (face.unanchored !== null && item.unanchored !== face.unanchored)
+      )
+        invalid(
+          "citations",
+          "Citations must be unique matching heads in ledger order within this page.",
+        );
+      previous = item.seq;
+      seen.add(item.citation_id);
+    }
+  });
 
 export type CitationsListResponse = z.infer<typeof CitationsListResponseSchema>;
 
@@ -374,11 +449,100 @@ export type AssociatedEvidenceRef = z.infer<typeof AssociatedEvidenceRefSchema>;
 export const SingleCitationResponseSchema = z
   .object({
     schema: z.literal(CITATIONS_SCHEMA_ID),
+    cursor: sequence,
     citation: CitationItemSchema,
-    versions: z.array(CitationItemSchema),
-    associated_claims: z.array(AssociatedClaimRefSchema),
-    associated_evidence: z.array(AssociatedEvidenceRefSchema),
+    versions: z.array(CitationItemSchema).max(200),
+    associated_claims: z.array(AssociatedClaimRefSchema).max(20),
+    associated_evidence: z.array(AssociatedEvidenceRefSchema).max(20),
+    omitted: z.array(z.string().min(1).max(512)),
   })
-  .strict();
+  .strict()
+  .superRefine((face, context) => {
+    if (!Number.isSafeInteger(face.citation.seq) || face.citation.seq > face.cursor)
+      context.addIssue({
+        code: "custom",
+        path: ["citation"],
+        message: "The selected citation must exist at this ledger cut.",
+      });
+    let previousVersion = 0;
+    let previousSequence = 0;
+    for (const version of face.versions) {
+      if (
+        version.problem_id !== face.citation.problem_id ||
+        version.citation_id !== face.citation.citation_id ||
+        !Number.isSafeInteger(version.seq) ||
+        version.seq <= previousSequence ||
+        version.seq > face.cursor ||
+        version.version <= previousVersion
+      )
+        context.addIssue({
+          code: "custom",
+          path: ["versions"],
+          message:
+            "Readable versions must belong to this citation in publication order at this cut.",
+        });
+      previousVersion = version.version;
+      previousSequence = version.seq;
+    }
+  });
 
 export type SingleCitationResponse = z.infer<typeof SingleCitationResponseSchema>;
+
+function citationQuerySuffix(query: CitationsListQuery): string {
+  const values = new URLSearchParams();
+  for (const key of ["through", "after", "limit", "unanchored"] as const) {
+    const value = query[key];
+    if (value !== undefined) values.set(key, String(value));
+  }
+  const suffix = values.toString();
+  return suffix === "" ? "" : `?${suffix}`;
+}
+
+export function citationsListPath(
+  problem: string,
+  format: "human" | "json" | "md" | "html" = "human",
+  query: CitationsListQuery = {},
+): string {
+  return `/p/${encodeURIComponent(problem)}/citations${format === "human" ? "" : `.${format}`}${citationQuerySuffix(query)}`;
+}
+
+export function citationPath(
+  problem: string,
+  target: string,
+  format: "human" | "json" | "md" | "html" | "bib" | "csl.json" = "human",
+  query: CitationReadQuery = {},
+): string {
+  return `/p/${encodeURIComponent(problem)}/citations/${encodeURIComponent(target)}${format === "human" ? "" : `.${format}`}${citationQuerySuffix(query)}`;
+}
+
+export function citationsListMatchesQuery(
+  problem: string,
+  query: CitationsListQuery,
+  face: CitationsListResponse,
+): boolean {
+  return (
+    face.problem_id === problem &&
+    face.after === (query.after ?? 0) &&
+    face.unanchored === (query.unanchored ?? null) &&
+    (query.through === undefined || face.cursor === query.through) &&
+    face.citations.length <= (query.limit ?? CITATIONS_LIST_DEFAULT_LIMIT)
+  );
+}
+
+export function citationMatchesQuery(
+  problem: string,
+  target: string,
+  query: CitationReadQuery,
+  face: SingleCitationResponse,
+): boolean {
+  if (!PublicCitationTargetSchema.safeParse(target).success) return false;
+  const [id, version] = target.split("@");
+  return (
+    face.citation.problem_id === problem &&
+    face.citation.citation_id === id &&
+    (query.through === undefined || face.cursor === query.through) &&
+    (version === undefined
+      ? face.versions.every((item) => item.version <= face.citation.version)
+      : face.citation.version === Number(version))
+  );
+}

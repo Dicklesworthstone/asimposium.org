@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test";
-import { renderToStaticMarkup } from "react-dom/server";
 import type { SponsorProblemGovernanceResponse } from "@asimposium/contracts";
+import { renderToStaticMarkup } from "react-dom/server";
 import type { StoaCall } from "../../lib/stoa";
 import { accessProblem, accessSponsor, accessWorkspace } from "../fixtures/problem-governance";
 
@@ -19,18 +19,23 @@ beforeAll(async () => {
   realGovernance = { ...(await import("../../lib/problem-governance")) };
   realAuth = { ...(await import("../../auth")) };
   realNavigation = { ...(await import("next/navigation")) };
-  mock.module("@/auth", () => ({ ...realAuth,
-    auth: async () => identity === null ? null : { user: { id: identity } },
+  mock.module("@/auth", () => ({
+    ...realAuth,
+    auth: async () => (identity === null ? null : { user: { id: identity } }),
     signIn: async () => {},
   }));
-  mock.module("@/lib/problem-governance", () => ({ ...realGovernance,
+  mock.module("@/lib/problem-governance", () => ({
+    ...realGovernance,
     stoaProblemGovernance: async (...args: unknown[]) => {
       reads.push(args);
       if (failRead) throw new Error("PRIVATE_GOVERNANCE_READ_FAILED");
       return readResult;
     },
   }));
-  mock.module("next/navigation", () => ({ ...realNavigation, useRouter: () => ({ refresh() {} }) }));
+  mock.module("next/navigation", () => ({
+    ...realNavigation,
+    useRouter: () => ({ refresh() {} }),
+  }));
   page = await import("../../app/console/problems/[problem]/access/page");
   cards = await import("../../app/console/problem-card");
 });
@@ -47,15 +52,31 @@ afterAll(() => {
 });
 
 async function render(problem = accessProblem, query: Record<string, string | string[]> = {}) {
-  return renderToStaticMarkup(await page.default({ params: Promise.resolve({ problem }), searchParams: Promise.resolve(query) }));
+  return renderToStaticMarkup(
+    await page.default({
+      params: Promise.resolve({ problem }),
+      searchParams: Promise.resolve(query),
+    }),
+  );
 }
 
 test("the private workspace renders actual admission, member roles and explicit bounded controls", async () => {
   const html = await render();
-  for (const marker of ["PRIVATE_ACCESS_TITLE", "PRIVATE_MEMBER_ALPHA", "PRIVATE_MEMBER_BETA",
-    "approval-required", "Current steward", "2 memberships", "contributor", "observer", "archived",
-    "Admit, update or remove one exact Fellow", "I confirm setting admission", "I confirm assigning",
-    "Assigning contributor does not reserve a writer slot"]) {
+  for (const marker of [
+    "PRIVATE_ACCESS_TITLE",
+    "PRIVATE_MEMBER_ALPHA",
+    "PRIVATE_MEMBER_BETA",
+    "approval-required",
+    "Current steward",
+    "2 memberships",
+    "contributor",
+    "observer",
+    "archived",
+    "Admit, update or remove one exact Fellow",
+    "I confirm setting admission",
+    "I confirm assigning",
+    "Assigning contributor does not reserve a writer slot",
+  ]) {
     expect(html).toContain(marker);
   }
   expect(html).toContain("&lt;script&gt;");
@@ -65,9 +86,13 @@ test("the private workspace renders actual admission, member roles and explicit 
   }
   expect(html).toContain("transfer sponsor stewardship");
   expect(html).toContain("Fellow&#x27;s credentials");
-  expect(html).toContain("Removing membership stops new scientific writes from this Fellow&#x27;s existing sessions");
+  expect(html).toContain(
+    "Removing membership stops new scientific writes from this Fellow&#x27;s existing sessions",
+  );
   expect(html).toContain("It does not terminate sessions or revoke credentials");
-  expect(html).toContain("An eligible Fellow may rejoin when admission is open, and owner/steward admission exceptions still apply");
+  expect(html).toContain(
+    "An eligible Fellow may rejoin when admission is open, and owner/steward admission exceptions still apply",
+  );
   expect(html).toContain("/console#directives-title");
   expect(reads).toEqual([[accessSponsor, accessProblem, {}]]);
   expect(page.dynamic).toBe("force-dynamic");
@@ -89,9 +114,13 @@ test("signed-out and noncanonical identities cannot load or render private membe
 
 test("malformed problem IDs and repeated, extra or oversized query parameters never initiate private IO", async () => {
   for (const [problem, query] of [
-    ["../private", {}], ["P-ACCESS\n", {}], [accessProblem, { after: "" }],
-    [accessProblem, { after: ["a", "b"] }], [accessProblem, { after: "a".repeat(129) }],
-    [accessProblem, { sponsor: "usr_fedcba0987654321" }], [accessProblem, { limit: "1000" }],
+    ["../private", {}],
+    ["P-ACCESS\n", {}],
+    [accessProblem, { after: "" }],
+    [accessProblem, { after: ["a", "b"] }],
+    [accessProblem, { after: "a".repeat(129) }],
+    [accessProblem, { sponsor: "usr_fedcba0987654321" }],
+    [accessProblem, { limit: "1000" }],
   ] as const) {
     const html = await render(problem, query as Record<string, string | string[]>);
     expect(html).toContain("Choose a problem from the sponsor console");
@@ -102,8 +131,10 @@ test("malformed problem IDs and repeated, extra or oversized query parameters ne
 
 test("denials and unavailable reads never present a stale roster or mutation forms", async () => {
   for (const result of [
-    { ok: false, reason: "refused", status: 404 }, { ok: false, reason: "refused", status: 403 },
-    { ok: false, reason: "unconfigured" }, { ok: false, reason: "unreachable" },
+    { ok: false, reason: "refused", status: 404 },
+    { ok: false, reason: "refused", status: 403 },
+    { ok: false, reason: "unconfigured" },
+    { ok: false, reason: "unreachable" },
   ] as const) {
     readResult = result;
     const html = await render();
@@ -118,13 +149,22 @@ test("denials and unavailable reads never present a stale roster or mutation for
 
 test("membership pagination states the full count and follows only the authoritative continuation", async () => {
   const members = Array.from({ length: 100 }, (_, index) => ({
-    fellow_id: `fellow-page-${String(index).padStart(3, "0")}`, name: `Member ${index}`,
-    role: "observer" as const, fellow_status: "active" as const, joined_at: "2026-10-26T12:00:00.000Z",
+    fellow_id: `fellow-page-${String(index).padStart(3, "0")}`,
+    name: `Member ${index}`,
+    role: "observer" as const,
+    fellow_status: "active" as const,
+    joined_at: "2026-10-26T12:00:00.000Z",
   }));
-  readResult = { ok: true, data: { ...accessWorkspace, members,
-    member_counts: { total: 101, observer: 101, contributor: 0, steward: 0 },
-    has_more: true, next_after: "fellow-page-099",
-  } };
+  readResult = {
+    ok: true,
+    data: {
+      ...accessWorkspace,
+      members,
+      member_counts: { total: 101, observer: 101, contributor: 0, steward: 0 },
+      has_more: true,
+      next_after: "fellow-page-099",
+    },
+  };
   const html = await render(accessProblem, { after: "fellow-before-page" });
   expect(html).toContain("101 memberships");
   expect(html).toContain("This page shows 100 after fellow-before-page");
@@ -135,30 +175,61 @@ test("membership pagination states the full count and follows only the authorita
 });
 
 test("closed workspaces disable mutations while archived admission and private access use truthful limits", async () => {
-  readResult = { ok: true, data: { ...accessWorkspace,
-    problem: { ...accessWorkspace.problem, status: "retired", admission_mode: "archived-read-only" },
-    authority: { ...accessWorkspace.authority, can_edit_access: false },
-  } };
+  readResult = {
+    ok: true,
+    data: {
+      ...accessWorkspace,
+      problem: {
+        ...accessWorkspace.problem,
+        status: "retired",
+        admission_mode: "archived-read-only",
+      },
+      authority: { ...accessWorkspace.authority, can_edit_access: false },
+    },
+  };
   const closed = await render();
   expect(closed).toContain("admission and membership changes are unavailable");
-  expect(closed.match(/<fieldset disabled=""/g)).toHaveLength(2);
-  expect(closed).toContain("Stops new session admission and new scientific publications, including from existing sessions");
-  expect(closed).toContain("Existing receipts remain recoverable; sessions and credentials are not terminated");
-  readResult = { ok: true, data: { ...accessWorkspace,
-    problem: { ...accessWorkspace.problem, status: "private-draft", unlisted: false },
-  } };
+  expect(closed.match(/<fieldset disabled=""/g)).toHaveLength(3);
+  expect(closed).toContain(
+    "Stops new session admission and new scientific publications, including from existing sessions",
+  );
+  expect(closed).toContain(
+    "Existing receipts remain recoverable; sessions and credentials are not terminated",
+  );
+  readResult = {
+    ok: true,
+    data: {
+      ...accessWorkspace,
+      problem: { ...accessWorkspace.problem, status: "private-draft", unlisted: false },
+    },
+  };
   const draft = await render();
-  expect(draft).toContain("Membership alone does not grant access to a private formulation or workshop");
+  expect(draft).toContain(
+    "Membership alone does not grant access to a private formulation or workshop",
+  );
   expect(draft).toContain("Publishing a listed draft changes approval-required admission to open");
 });
 
 test("both private and published console cards lead to their own access workspace", () => {
   const problems = ["private-draft", "active"].map((status, index) => ({
-    id: `${accessProblem}-${index}`, title: `Workspace ${index}`, status: status as "private-draft" | "active",
-    unlisted: true, created_by_fellow_id: "fellow-access-a", current_statement_version: 3,
-    created_at: "2026-10-25T12:00:00.000Z", updated_at: "2026-10-26T12:00:00.000Z",
+    id: `${accessProblem}-${index}`,
+    title: `Workspace ${index}`,
+    status: status as "private-draft" | "active",
+    unlisted: true,
+    created_by_fellow_id: "fellow-access-a",
+    current_statement_version: 3,
+    created_at: "2026-10-25T12:00:00.000Z",
+    updated_at: "2026-10-26T12:00:00.000Z",
   }));
-  const html = renderToStaticMarkup(<cards.ProblemManager fellows={[]} briefs={[]} configured problems={problems} />);
+  const html = renderToStaticMarkup(
+    <cards.ProblemManager
+      sponsorId={accessSponsor}
+      fellows={[]}
+      briefs={[]}
+      configured
+      problems={problems}
+    />,
+  );
   expect(html).toContain(`/console/problems/${accessProblem}-0/access`);
   expect(html).toContain(`/console/problems/${accessProblem}-1/access`);
   expect(html.match(/Manage admission and members/g)).toHaveLength(2);

@@ -28,6 +28,7 @@ import {
   scanFieldsForCredentials,
   secretShapedContentProblem,
 } from "../screening/credential-scan.ts";
+import { captureReportSource, ReportSourceUnavailableError } from "./report-detail.ts";
 import {
   type FiledReport,
   fileReport,
@@ -35,6 +36,7 @@ import {
   REPORTS_PER_SPONSOR_PER_DAY,
   ReportRateLimitedError,
 } from "./store.ts";
+import { resolveReportTarget } from "./target.ts";
 
 export { REPORTS_PER_SPONSOR_PER_DAY } from "./store.ts";
 
@@ -77,34 +79,6 @@ function reportBodyInvalid(detail: string): Response {
   );
 }
 
-/** The public object a report names, or undefined when it is not public on that problem. */
-async function publicTargetKind(
-  db: D1Database,
-  problemId: string,
-  target: string,
-): Promise<string | undefined> {
-  const visible = await db
-    .prepare(
-      "SELECT public_seq FROM problems WHERE id = ? AND status <> 'private-draft' AND public_seq > 0",
-    )
-    .bind(problemId)
-    .first<{ public_seq: number }>();
-  if (visible === null) return undefined;
-  if (target === "problem") return "problem";
-  const pin = /^(C-[0-9]+)@([1-9][0-9]{0,8})$/.exec(target);
-  const objectId = pin?.[1] ?? target;
-  const row = await db
-    .prepare(
-      `SELECT object_kind FROM events
-        WHERE problem_id = ? AND object_id = ? AND seq <= ?
-          ${pin === null ? "" : "AND object_version = ?"}
-        ORDER BY seq ASC LIMIT 1`,
-    )
-    .bind(problemId, objectId, visible.public_seq, ...(pin === null ? [] : [Number(pin[2])]))
-    .first<{ object_kind: string }>();
-  return row?.object_kind;
-}
-
 /** Who is reporting. The sponsor family is always derived from the
  * authenticated principal, never from the body. */
 export interface Reporter {
@@ -137,8 +111,8 @@ export async function fileReportRequest(
     });
   }
 
-  const targetKind = await publicTargetKind(db, parsed.problem_id, parsed.target);
-  if (targetKind === undefined) {
+  const target = await resolveReportTarget(db, parsed.problem_id, parsed.target);
+  if (target === undefined) {
     return privateNoStore(
       problem({
         status: 404,
@@ -155,19 +129,40 @@ export async function fileReportRequest(
 
   let filed: FiledReport;
   try {
+    const source = await captureReportSource(
+      db,
+      parsed.problem_id,
+      parsed.target,
+      target.targetKind,
+    );
     filed = await fileReport(db, {
       problemId: parsed.problem_id,
-      targetKind,
-      // A claim is reported (and hidden) as a whole, whatever version pin
-      // the reporter read: one target, one tally.
-      targetRef: targetKind === "claim" ? parsed.target.replace(/@[0-9]+$/, "") : parsed.target,
+      targetKind: target.targetKind,
+      targetRef: target.targetRef,
       reason: parsed.reason,
       note: parsed.note ?? null,
       reporterClass: reporter.reporterClass,
       reporterFellowId: reporter.reporterFellowId,
       reporterSponsorId: reporter.reporterSponsorId,
+      source,
+      requireSource: true,
     });
   } catch (error) {
+    if (error instanceof ReportSourceUnavailableError) {
+      return privateNoStore(
+        problem({
+          status: 404,
+          code: "REPORT_TARGET_NOT_FOUND",
+          title: "The report source is unavailable",
+          detail:
+            "The exact public publication could not be retained for operator review. No new report was recorded.",
+          fixHint:
+            "Reload the public object and report the exact available version shown on its face.",
+          rule: "P10",
+          extensions: { schema: REPORTS_SCHEMA, example: REPORT_EXAMPLE },
+        }),
+      );
+    }
     if (!(error instanceof ReportRateLimitedError)) throw error;
     const limited = problem({
       status: 429,

@@ -1,7 +1,11 @@
-import type { ScreeningPublicationContextInput } from "@asimposium/contracts";
+import {
+  ProblemGovernanceEventSchema,
+  type ProblemStatementBoundaries,
+  type ScreeningPublicationContextInput,
+} from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { validatedProblem } from "../http/envelope";
-import { hiddenByContentControlSql } from "../krater/public-content";
+import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content";
 
 /** Whole bodies only. A budget failure never becomes a candidate-only screen. */
 export const MAX_PUBLICATION_SCREENING_BODY_BYTES = 1048576;
@@ -22,7 +26,7 @@ export interface PublicationSourceIdentity {
 interface PublicationSource extends PublicationSourceIdentity {
   readonly payloadJson: string;
 }
-interface PublicationProblemStatement {
+interface PublicationProblemStatement extends Partial<ProblemStatementBoundaries> {
   readonly version: number;
   readonly title: string;
   readonly statement: string;
@@ -135,6 +139,43 @@ function frozenSource(row: SourceRow): PublicationSource {
   });
 }
 
+async function sourceFormulation(
+  source: PublicationSource,
+  type: string | null,
+  problemId: string,
+  version: number,
+) {
+  if ((await publicationSha256(source.payloadJson)) !== source.payloadDigest)
+    throw new PublicationContextUnavailableError();
+  let payload: unknown;
+  try {
+    payload = JSON.parse(source.payloadJson);
+  } catch {
+    throw new PublicationContextUnavailableError();
+  }
+  const parsed = ProblemGovernanceEventSchema.safeParse(payload);
+  if (
+    !parsed.success ||
+    parsed.data.problem.id !== problemId ||
+    parsed.data.problem.current_statement_version !== version ||
+    (type === "problem.admitted"
+      ? parsed.data.action !== "publish"
+      : type !== "problem.statement-revised" || parsed.data.action !== "revise-statement")
+  )
+    throw new PublicationContextUnavailableError();
+  return parsed.data.problem;
+}
+
+function boundaryFields(value: Partial<ProblemStatementBoundaries>) {
+  return value.scope === undefined
+    ? {}
+    : {
+        scope: value.scope,
+        out_of_scope: value.out_of_scope,
+        success_criteria: value.success_criteria,
+      };
+}
+
 /** Item faces require the scientific target's content, even when the child
  * publication itself has not been hidden. Claim targets keep their exact
  * recorded version; a later revision does not move a historical review.
@@ -229,6 +270,8 @@ interface ProblemRow {
   source_seq: number | null;
   source_digest: string | null;
   source_json: string | null;
+  source_type: string | null;
+  source_version: number | null;
 }
 
 /**
@@ -251,15 +294,16 @@ export async function readPublicationContext(
       CASE WHEN p.status <> 'private-draft' THEN v.falsifier END AS falsifier,
       CASE WHEN p.status <> 'private-draft' THEN v.motivation END AS motivation,
       e.id AS source_id, e.seq AS source_seq, e.payload_sha256 AS source_digest,
+      e.type AS source_type, e.object_version AS source_version,
       CASE WHEN c.redacted_at IS NULL AND c.payload_sha256 = e.payload_sha256
+        AND NOT ${eventContentHiddenSql("e")}
         AND length(CAST(c.payload_json AS BLOB)) <= ? THEN c.payload_json END AS source_json
       FROM problems p
       LEFT JOIN problem_statement_versions v ON v.problem_id = p.id
         AND v.version = p.current_statement_version AND p.status <> 'private-draft'
       LEFT JOIN events e ON e.id = (SELECT source.id FROM events source
-        WHERE source.problem_id = p.id AND source.object_kind = 'problem'
+        WHERE source.problem_id = p.id AND source.object_id = p.id AND source.object_kind = 'problem'
           AND source.type IN ('problem.admitted','problem.statement-revised')
-          AND source.object_version = p.current_statement_version
           AND source.seq <= p.public_seq AND p.status <> 'private-draft'
         ORDER BY source.seq DESC LIMIT 1)
       LEFT JOIN event_content c ON c.event_id = e.id
@@ -326,30 +370,31 @@ export async function readPublicationContext(
     }
   }
   let statementSource: PublicationSource | null = null;
+  let boundaries: Partial<ProblemStatementBoundaries> = {};
   if (problem.source_id !== null) {
+    if (problem.source_version !== problem.version) throw new PublicationContextUnavailableError();
     statementSource = frozenSource({
       id: problem.source_id,
       seq: problem.source_seq ?? 0,
       payload_sha256: problem.source_digest ?? "",
       payload_json: problem.source_json,
     });
-    if ((await publicationSha256(statementSource.payloadJson)) !== statementSource.payloadDigest)
-      throw new PublicationContextUnavailableError();
-    let source: unknown;
-    try {
-      source = JSON.parse(statementSource.payloadJson);
-    } catch {
-      throw new PublicationContextUnavailableError();
-    }
-    const formulation = (source as { problem?: Record<string, unknown> } | null)?.problem;
+    const formulation = await sourceFormulation(
+      statementSource,
+      problem.source_type,
+      problemId,
+      problem.version,
+    );
     if (
-      !formulation ||
-      formulation.current_statement_version !== problem.version ||
+      formulation.title !== problem.title ||
       formulation.statement !== problem.statement ||
       formulation.falsifier !== problem.falsifier ||
       formulation.motivation !== problem.motivation
     )
       throw new PublicationContextUnavailableError();
+    // Never infer these fields from a retained projection. Legacy sources
+    // without a bundle stay absent, and malformed bundles fail as a whole.
+    boundaries = boundaryFields(formulation);
   }
   let sameFellowHead: PublicationSourceIdentity | null = null;
   if (head) {
@@ -371,6 +416,7 @@ export async function readPublicationContext(
       statement: problem.statement,
       falsifier: problem.falsifier,
       motivation: problem.motivation,
+      ...boundaries,
       source: statementSource,
     }),
     sameFellowHead,
@@ -427,6 +473,7 @@ export function publicationContextDocument(context: PublicationBatchContext) {
             statement: snapshot.statement.statement,
             falsifier: snapshot.statement.falsifier,
             motivation: snapshot.statement.motivation,
+            ...boundaryFields(snapshot.statement),
             source_event:
               snapshot.statement.source === null ? null : source(snapshot.statement.source),
           },
@@ -509,7 +556,7 @@ export function publicationContextGuardSql(
         AND e.payload_sha256 = json_extract(expected.value, '$.payloadDigest')
         AND c.payload_json = json_extract(expected.value, '$.payloadJson') AND c.redacted_at IS NULL
         AND NOT EXISTS (SELECT 1 FROM scientific_withdrawals w WHERE w.source_event_id = e.id)
-        AND NOT ${hiddenByContentControlSql("e.problem_id", "e.object_id")}))`,
+        AND NOT ${eventContentHiddenSql("e")}))`,
       JSON.stringify(sourceRows),
       snapshot.problemId,
     );
@@ -598,24 +645,34 @@ export async function storedPublicationContextIsVisible(
   const statement = context.problem_statement;
   if (statement === null) return false;
   const source = statement.source_event;
+  if (source === null && statement.scope !== undefined) return false;
   const results = await db.batch([
     db
-      .prepare(`SELECT 1 AS available FROM problems p JOIN problem_statement_versions v ON v.problem_id = p.id
+      .prepare(`SELECT 1 AS available, e.id AS source_id, e.seq AS source_seq,
+      e.type AS source_type, e.payload_sha256 AS source_digest,
+      CASE WHEN length(CAST(c.payload_json AS BLOB)) <= ${MAX_PUBLICATION_HISTORY_BODY_BYTES}
+        THEN c.payload_json END AS source_json
+      FROM problems p JOIN problem_statement_versions v ON v.problem_id = p.id
+      LEFT JOIN events e ON e.id = ? AND e.problem_id = p.id
+        AND e.seq = ? AND e.payload_sha256 = ? AND e.seq <= p.public_seq
+        AND e.object_kind = 'problem' AND e.object_id = p.id AND e.object_version = v.version
+        AND e.type IN ('problem.admitted', 'problem.statement-revised')
+      LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
       WHERE p.id = ? AND p.status <> 'private-draft' AND v.version = ?
         AND v.statement = ? AND v.falsifier = ? AND v.motivation = ?
         AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
-        AND (? IS NULL OR EXISTS (SELECT 1 FROM events e JOIN event_content c ON c.event_id = e.id
-          AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
-          WHERE e.id = ? AND e.problem_id = p.id AND e.payload_sha256 = ? AND e.seq <= p.public_seq))`)
+        AND (? IS NULL OR (e.id IS NOT NULL AND c.redacted_at IS NULL
+          AND c.payload_json IS NOT NULL AND NOT ${eventContentHiddenSql("e")}))`)
       .bind(
+        source?.event_id ?? null,
+        source?.seq ?? null,
+        source?.payload_digest ?? null,
         context.problem_id,
         statement.version,
         statement.statement,
         statement.falsifier,
         statement.motivation,
         source?.event_id ?? null,
-        source?.event_id ?? null,
-        source?.payload_digest ?? null,
       ),
     // At most six direct source checks share this D1 read transaction. Keep
     // the public predicate flat: wrapping its target checks in two more
@@ -636,8 +693,38 @@ export async function storedPublicationContextIsVisible(
         ),
     ),
   ]);
-  return results.every(
-    (result) =>
-      result.success && (result.results[0] as { available?: unknown } | undefined)?.available === 1,
-  );
+  if (
+    !results.every(
+      (result) =>
+        result.success &&
+        (result.results[0] as { available?: unknown } | undefined)?.available === 1,
+    )
+  )
+    return false;
+  if (source === null) return true;
+  const row = results[0]?.results[0] as ProblemRow;
+  try {
+    const formulation = await sourceFormulation(
+      frozenSource({
+        id: row.source_id ?? "",
+        seq: row.source_seq ?? 0,
+        payload_sha256: row.source_digest ?? "",
+        payload_json: row.source_json,
+      }),
+      row.source_type,
+      context.problem_id,
+      statement.version,
+    );
+    return (
+      formulation.title === statement.title &&
+      formulation.statement === statement.statement &&
+      formulation.falsifier === statement.falsifier &&
+      formulation.motivation === statement.motivation &&
+      formulation.scope === statement.scope &&
+      formulation.out_of_scope === statement.out_of_scope &&
+      formulation.success_criteria === statement.success_criteria
+    );
+  } catch {
+    return false;
+  }
 }

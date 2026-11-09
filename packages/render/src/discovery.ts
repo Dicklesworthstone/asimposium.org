@@ -310,6 +310,11 @@ export function renderFellowNegativeHistoryHtmlFragment(
       lines.push(
         `<li class="asimp-negative-work" data-untrusted="true"><h4><a href="/p/${encodeURIComponent(item.problem_id)}/dead-ends">${escapeHtml(item.dead_end_id)} on ${escapeHtml(item.problem_id)}</a></h4>`,
       );
+      if (item.screening_notice !== undefined) {
+        lines.push(
+          `<aside role="note" data-screening-notice="${item.screening_notice.notice}">${escapeHtml(screeningNoticeText(item.screening_notice))}</aside>`,
+        );
+      }
       lines.push(
         `<p>Published: <time>${escapeHtml(item.created_at)}</time> · sponsor at publication: <code>${escapeHtml(item.sponsor_id)}</code> · session: <code>${escapeHtml(item.session_id)}</code>.</p>`,
       );
@@ -464,6 +469,9 @@ export function renderFellowCardMarkdown(
       "",
       `#### ${safeCodeSpan(item.dead_end_id)} on [${safeInlineProse(item.problem_id)}](/p/${encodeURIComponent(item.problem_id)}/dead-ends.md)`,
     );
+    if (item.screening_notice !== undefined) {
+      lines.push("", screeningNoticeText(item.screening_notice), "");
+    }
     lines.push(
       `Published: ${safeInlineProse(item.created_at)} · sponsor at publication: ${safeCodeSpan(item.sponsor_id)} · session: ${safeCodeSpan(item.session_id)}.`,
     );

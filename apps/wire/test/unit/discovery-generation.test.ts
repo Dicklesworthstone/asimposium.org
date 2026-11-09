@@ -237,6 +237,37 @@ describe("discovery generators (W1.6)", () => {
     expect(operation.responses["200"].content["application/json"].schema.$ref).toBe(
       "https://a.asimposium.org/schemas/sessions.v1.json#/properties/workshop_object_response",
     );
+    expect(
+      operation.parameters.find((parameter: { name: string }) => parameter.name === "version")
+        ?.schema,
+    ).toEqual({ type: "integer", minimum: 1 });
+  });
+
+  test("workshop directory advertises private bounded continuation without teaching POST a read query", () => {
+    const doc = JSON.parse(generateOpenApiDocument());
+    const path = doc.paths["/v1/sessions/{id}/workshop"];
+    expect(path.get.security).toEqual([{ bearerAuth: [] }]);
+    expect(path.get["x-asimposium-auth"]).toBe("fellow-bearer");
+    expect(path.get.responses["200"].content["application/json"].schema.$ref).toBe(
+      "https://a.asimposium.org/schemas/workshop-directory.v1.json#/properties/response",
+    );
+    const query = path.get.parameters.filter(
+      (parameter: { in: string }) => parameter.in === "query",
+    );
+    expect(query.map((parameter: { name: string }) => parameter.name)).toEqual([
+      "after",
+      "limit",
+      "state",
+    ]);
+    for (const parameter of query)
+      expect(parameter.schema.$ref).toBe(
+        `https://a.asimposium.org/schemas/workshop-directory.v1.json#/properties/query/properties/${parameter.name}`,
+      );
+    expect(query[0].description).toContain("refresh the first page");
+    expect(query[2].description).toContain("not a frozen snapshot");
+    expect(
+      path.post.parameters.filter((parameter: { in: string }) => parameter.in === "query"),
+    ).toEqual([]);
   });
 
   test("question, retraction and conflict discovery exposes mounted faces and resolving write contracts", () => {
@@ -265,6 +296,51 @@ describe("discovery generators (W1.6)", () => {
       expect(op?.requestBody.content["application/json"].schema.$ref).toBe(
         `https://a.asimposium.org/schemas/sessions.v1.json#/properties/${property}`,
       );
+    }
+  });
+
+  test("conflict and question discovery explains exact targets and snapshot continuation on every face", () => {
+    for (const agent of [DISCOVERY_ORIGINS.agent, "https://a-staging.asimposium.org"]) {
+      const doc = JSON.parse(generateOpenApiDocument({ ...DISCOVERY_ORIGINS, agent }));
+      for (const section of ["questions", "conflicts"]) {
+        const registered = listPublicSchemas().find((schema) => schema.id === section);
+        expect(registered).toBeDefined();
+        const query = JSON.parse(registered?.body ?? "{}").$defs?.query;
+        for (const [face, media] of [
+          ["json", "application/json"],
+          ["md", "text/markdown"],
+          ["html", "text/html"],
+        ]) {
+          const operation = doc.paths[`/p/{id}/${section}.${face}`].get;
+          const parameters = operation.parameters.filter(
+            (parameter: { in: string }) => parameter.in === "query",
+          );
+          expect(parameters.map((parameter: { name: string }) => parameter.name)).toEqual([
+            "through",
+            "after",
+            "limit",
+            "status",
+            "target",
+          ]);
+          for (const parameter of parameters) {
+            expect(parameter.required).toBe(false);
+            expect(parameter.schema.$ref).toBe(
+              `${agent}/schemas/${section}.v1.json#/$defs/query/properties/${parameter.name}`,
+            );
+            expect(query?.properties?.[parameter.name]).toBeDefined();
+          }
+          expect(parameters[1].description).toContain("Requires the original through cursor");
+          expect(parameters[2].description).toContain("defaults to 50");
+          expect(parameters[4].description).toContain("cannot be combined with after or status");
+          expect(operation.responses["200"].content[media as string]).toBeDefined();
+          expect(operation.responses["200"].headers["Content-Location"]).toBeDefined();
+          expect(operation.responses["200"].headers.Link).toBeDefined();
+          for (const status of ["304", "400", "404", "503"])
+            expect(operation.responses[status]).toBeDefined();
+          expect(operation.responses["503"].headers["Retry-After"]).toBeDefined();
+          expect(operation.security).toEqual([]);
+        }
+      }
     }
   });
 

@@ -106,10 +106,8 @@ test("preview preserves every published byte and refuses oversized or unpinned c
   for (const [changes, issue] of [
     [{ body_md: "x".repeat(8193) }, "body-too-long"],
     [{ closing_resolution: undefined }, "missing-declaration"],
-    [{ covers_through: researchSynthesis.seq }, "invalid-reference"],
     [{ anchors: [{ target_kind: "claim", target_id: "C-3", target_version: 1 }] }, "invalid-reference"],
     [{ anchors: [{ target_kind: "claim", target_id: "C-3", target_version: 2, target_seq: 3 }] }, "invalid-reference"],
-    [{ anchors: [{ target_kind: "claim", target_id: "C-3", target_version: 1, target_seq: 12 }] }, "invalid-reference"],
   ] as const) {
     globalThis.fetch = mock(async (url: string | URL | Request) => Response.json(
       String(url).endsWith("/governance") ? researchWorkspace : {
@@ -121,8 +119,13 @@ test("preview preserves every published byte and refuses oversized or unpinned c
   }
 });
 
-test("public synthesis responses cannot substitute another problem or publication", async () => {
-  for (const changed of [{ problem_id: "P-OTHER" }, { synthesis_id: "SYNTH-OTHER" }]) {
+test("public synthesis responses reject another publication or impossible canonical coverage", async () => {
+  for (const changed of [
+    { problem_id: "P-OTHER" },
+    { synthesis_id: "SYNTH-OTHER" },
+    { covers_through: researchSynthesis.seq },
+    { anchors: [{ target_kind: "claim", target_id: "C-3", target_version: 1, target_seq: 12 }] },
+  ] as const) {
     globalThis.fetch = mock(async (url: string | URL | Request) => Response.json(
       String(url).endsWith("/governance") ? researchWorkspace : {
         ...researchSynthesisResponse, synthesis: { ...researchSynthesis, ...changed },

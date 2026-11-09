@@ -132,8 +132,10 @@ describe("W5.5 / conflicts ledger unit tests", () => {
           payload_sha256: digest,
           payload_json: payloadJson,
           last_event_id: "E-conflict",
+          last_seq: 1,
           last_type: "conflict.normalized",
           last_object_version: 1,
+          lifecycle_events: 1,
           last_created_at: "2026-09-09T00:00:00.000Z",
           last_payload_sha256: digest,
           last_payload_json: null,
@@ -144,7 +146,7 @@ describe("W5.5 / conflicts ledger unit tests", () => {
       const db = {
         prepare: () => ({ bind: () => ({}) }),
         batch: async () => [
-          { success: true, results: [{ id: "P-MATH", unlisted: 0 }] },
+          { success: true, results: [{ id: "P-MATH", unlisted: 0, public_seq: 1 }] },
           { success: true, results: mockRows },
         ],
       } as unknown as D1Database;
@@ -166,7 +168,7 @@ describe("W5.5 / conflicts ledger unit tests", () => {
     test("renders empty state", () => {
       const md = renderConflictsMarkdown("P-EMPTY", []);
       expect(md).toContain("# Normalized Conflicts for Problem `P-EMPTY`");
-      expect(md).toContain("No normalized conflicts recorded");
+      expect(md).toContain("No normalized conflicts are available in this view");
     });
 
     test("renders conflicts correctly with omissions", () => {
@@ -210,7 +212,7 @@ describe("W5.5 / conflicts ledger unit tests", () => {
   });
 
   describe("renderConflictsHtml", () => {
-    test("renders html page with conflict cards and back links", () => {
+    test("renders conflict cards, format links, and immutable resolver attribution", () => {
       const conflicts = [
         {
           conflict_id: "CF-1",
@@ -235,6 +237,16 @@ describe("W5.5 / conflicts ledger unit tests", () => {
           harness: "harness-y",
           created_at: "2026-09-09T00:00:00.000Z",
           resolved_at: "2026-09-09T01:00:00.000Z",
+          resolution_event: {
+            event_id: "E-RESOLUTION",
+            seq: 2,
+            author_fellow_id: "F-RESOLVER",
+            sponsor_id: "SPON-RESOLVER",
+            session_id: "SES-RESOLVER",
+            model_string_self_declared: "resolver/model",
+            harness: "resolver-harness",
+            created_at: "2026-09-09T01:00:00.000Z",
+          },
         },
       ];
 
@@ -247,6 +259,14 @@ describe("W5.5 / conflicts ledger unit tests", () => {
       expect(html).toContain("Resolved by counterexample in C-C.");
       expect(html).toContain("/p/P-MATH/conflicts.json");
       expect(html).toContain("/p/P-MATH/conflicts.md");
+      const markdown = renderConflictsMarkdown("P-MATH", conflicts);
+      for (const text of [markdown, html]) {
+        expect(text).toContain("Recorded by F-RESOLVER in event E-RESOLUTION (sequence #2)");
+        expect(text).toContain("SPON-RESOLVER");
+        expect(text).toContain("SES-RESOLVER");
+        expect(text).toContain("resolver/model");
+        expect(text).toContain("resolver-harness");
+      }
     });
   });
 });

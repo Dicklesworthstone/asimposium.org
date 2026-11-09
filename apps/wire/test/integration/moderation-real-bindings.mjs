@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { AdminReportDetailSchema } from "@asimposium/contracts";
 import { LOCAL_OPERATOR_ID, runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Symposiarch moderation plane (Fable §9.1 L1/L2, §7.7, §10.2) on real local
@@ -154,19 +155,76 @@ await runLocalWorkerJourney(
       await env.DB.prepare("DROP TRIGGER lane_fail_decision_notice").run();
     }
 
-    // Retrying completes exactly once; a second decision is refused.
+    // A failed receipt insert must also roll back the decision, audit, log
+    // and private notice. The key is not consumed by a rolled-back attempt.
+    const releaseCommand = {
+      case_id: held.case_id,
+      decision: "release",
+      reason: "Reviewed: ordinary arithmetic, odd wording.",
+    };
+    const releasePath = "/v1/operators/quarantine/decision";
+    const releaseKey = "moderation-release-receipt";
+    await env.DB.prepare(
+      `CREATE TRIGGER lane_fail_operator_receipt BEFORE INSERT ON operator_command_receipts
+       BEGIN SELECT RAISE(ABORT, 'planted receipt failure'); END`,
+    ).run();
+    try {
+      const unavailable = await operatorCall(
+        "POST",
+        releasePath,
+        "operator.quarantine.decide",
+        releaseCommand,
+        503,
+        releasePath,
+        releaseKey,
+      );
+      assert.equal(unavailable.code, "ENROLLMENT_UNAVAILABLE");
+      assert.deepEqual(await decisionEffects(), beforeFailedDecision);
+      assert.equal(
+        (await env.DB.prepare("SELECT COUNT(*) AS n FROM operator_command_receipts").first()).n,
+        0,
+      );
+    } finally {
+      await env.DB.prepare("DROP TRIGGER lane_fail_operator_receipt").run();
+    }
+
+    // Retrying completes exactly once; matching concurrent retries recover the
+    // original receipt, whereas a genuinely different decision remains refused.
     const released = await operatorCall(
       "POST",
-      "/v1/operators/quarantine/decision",
+      releasePath,
       "operator.quarantine.decide",
-      {
-        case_id: held.case_id,
-        decision: "release",
-        reason: "Reviewed: ordinary arithmetic, odd wording.",
-      },
+      releaseCommand,
+      200,
+      releasePath,
+      releaseKey,
     );
     assert.equal(released.decision, "release");
     assert.match(released.audit_event_id, /^OA-/);
+    for (const replay of await Promise.all(
+      Array.from({ length: 4 }, () =>
+        operatorCall(
+          "POST",
+          releasePath,
+          "operator.quarantine.decide",
+          releaseCommand,
+          200,
+          releasePath,
+          releaseKey,
+        ),
+      ),
+    ))
+      assert.deepEqual(replay, released);
+    const changedIntent = await operatorCall(
+      "POST",
+      releasePath,
+      "operator.quarantine.decide",
+      { ...releaseCommand, reason: "A different explanation must not reuse the accepted key." },
+      409,
+      releasePath,
+      releaseKey,
+    );
+    assert.equal(changedIntent.code, "IDEMPOTENCY_CONFLICT");
     const twice = await operatorCall(
       "POST",
       "/v1/operators/quarantine/decision",
@@ -336,11 +394,33 @@ await runLocalWorkerJourney(
     assert.equal(onTarget.length, 3, "one report per sponsor family");
     assert.ok(onTarget.every((entry) => entry.category === "injection"));
     assert.ok(!JSON.stringify(reports).includes("reading agents"), "notes stay private");
-    await operatorCall("POST", "/v1/operators/reports/resolution", "operator.reports.resolve", {
+    const reportResolutionPath = "/v1/operators/reports/resolution";
+    const reportResolutionCommand = {
       report_id: onTarget[0].report_id,
       resolution: "dismiss",
       reason: "Reviewed: ordinary arithmetic, not an injection.",
-    });
+    };
+    const resolvedReport = await operatorCall(
+      "POST",
+      reportResolutionPath,
+      "operator.reports.resolve",
+      reportResolutionCommand,
+      200,
+      reportResolutionPath,
+      "moderation-report-receipt",
+    );
+    assert.deepEqual(
+      await operatorCall(
+        "POST",
+        reportResolutionPath,
+        "operator.reports.resolve",
+        reportResolutionCommand,
+        200,
+        reportResolutionPath,
+        "moderation-report-receipt",
+      ),
+      resolvedReport,
+    );
     const control = await env.DB.prepare(
       "SELECT visibility, source FROM content_controls WHERE problem_id = ? AND target_ref = ? ORDER BY version DESC LIMIT 1",
     )
@@ -570,8 +650,171 @@ await runLocalWorkerJourney(
     );
     await call(`/p/${problem}/claims/${upheldTarget}.json`, undefined, undefined, 403);
 
+    // 7d. A report pins the selected publication, even when the author has
+    // already revised it. Operator-only readback survives later revisions and
+    // visibility holds; operatorCall verifies private, no-store on every read.
+    const SOURCE_ORIGINAL = "REPORT-SOURCE-ORIGINAL: for every natural n, n + 3 = 3 + n.";
+    const SOURCE_NOTE = "PRIVATE-REPORT-SOURCE-NOTE: inspect the originally reported version.";
+    const sourceClaim = await call(
+      `/v1/sessions/${session}/promote`,
+      promoteBody(SOURCE_ORIGINAL),
+      author,
+      201,
+    );
+    const reviseSource = (version) =>
+      call(
+        `/v1/sessions/${session}/revise`,
+        {
+          claim_id: sourceClaim.claim_id,
+          base_version: version - 1,
+          kind: "conjecture",
+          statement: `REPORT-SOURCE-NEWER-${version}: for natural n, n + ${version + 2} = ${version + 2} + n.`,
+          falsifier: "A natural number contradicting the stated additive identity.",
+        },
+        author,
+        201,
+      );
+    await reviseSource(2);
+    const sourceReport = await report(reporterC, 201, {
+      target: `${sourceClaim.claim_id}@1`,
+      reason: "integrity",
+      note: SOURCE_NOTE,
+    });
+    await reviseSource(3);
+    const controlPublished = (targetRef, kind, action) =>
+      operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+        target_id: `${problem}/${targetRef}`,
+        target_kind: kind,
+        action,
+        reason: "Reviewed the reported immutable publication.",
+      });
+    const reportDetail = async (reportId) =>
+      AdminReportDetailSchema.parse(
+        await operatorCall(
+          "GET",
+          `/v1/operators/reports/${reportId}`,
+          "operator.reports.read",
+          undefined,
+          200,
+          "/v1/operators/reports/:reportId",
+        ),
+      );
+    await controlPublished(sourceClaim.claim_id, "claim", "hide");
+    await call(`/p/${problem}/claims/${sourceClaim.claim_id}@1.json`, undefined, undefined, 403);
+    const retained = await reportDetail(sourceReport.report_id);
+    assert.equal(retained.note, SOURCE_NOTE);
+    assert.equal(
+      retained.target_ref,
+      sourceClaim.claim_id,
+      "visibility control covers the whole claim",
+    );
+    assert.equal(retained.source.state, "available");
+    assert.equal(retained.source.binding, "requested-version");
+    assert.equal(retained.source.requested_target, `${sourceClaim.claim_id}@1`);
+    assert.equal(retained.source.object_version, 1);
+    assert.equal(retained.source.seq, sourceClaim.seq);
+    assert.equal(JSON.parse(retained.source.payload_json).statement, SOURCE_ORIGINAL);
+    assert.equal(
+      createHash("sha256").update(retained.source.payload_json).digest("hex"),
+      retained.source.payload_sha256,
+    );
+    assert.ok(!JSON.stringify(retained).includes("REPORT-SOURCE-NEWER"));
+    const sameReport = await report(reporterC2, 200, {
+      target: `${sourceClaim.claim_id}@3`,
+      reason: "privacy",
+      note: "A retry cannot replace the source.",
+    });
+    assert.equal(sameReport.report_id, sourceReport.report_id);
+    assert.deepEqual(await reportDetail(sourceReport.report_id), retained);
+    for (const token of [undefined, reporterC]) {
+      const refused = await call(
+        `/v1/operators/reports/${sourceReport.report_id}`,
+        undefined,
+        token,
+        403,
+      );
+      assert.equal(refused.code, "WRONG_PRINCIPAL");
+      assert.ok(!JSON.stringify(refused).includes(SOURCE_NOTE));
+    }
+    const privateQueue = await operatorCall(
+      "GET",
+      "/v1/operators/reports",
+      "operator.reports.list",
+    );
+    assert.ok(!JSON.stringify(privateQueue).includes(SOURCE_NOTE));
+    assert.ok(!JSON.stringify(privateQueue).includes(SOURCE_ORIGINAL));
+    await resolve(sourceReport.report_id, "dismiss", "Reviewed the exact original publication.");
+    assert.equal((await reportDetail(sourceReport.report_id)).report.status, "dismissed");
+    await controlPublished(sourceClaim.claim_id, "claim", "restore");
+
+    // 7e. The same moderation workflow protects a published hypothesis.
+    // Three accountable sponsors hide it; dismissal restores its original
+    // bytes, and a direct operator hide/restore uses the same current controls.
+    const HYPOTHESIS_BODY =
+      "REPORT-HYPOTHESIS-SOURCE: check each finite additive instance explicitly.";
+    const hypothesis = await call(
+      `/v1/sessions/${session}/hypotheses`,
+      {
+        route: "Enumerate the finite additive instances.",
+        mechanism: "Compare each computed sum with the stated natural number.",
+        falsifier: "An enumerated sum disagrees with the corresponding natural number.",
+        origin: "proposed",
+        body_md: HYPOTHESIS_BODY,
+      },
+      author,
+      201,
+    );
+    const hypothesisFace = () => call(`/p/${problem}/hypotheses.json`);
+    assert.ok(JSON.stringify(await hypothesisFace()).includes(HYPOTHESIS_BODY));
+    const hypothesisReports = [];
+    for (const [index, token] of [reporterC, reporterD, reviewer].entries()) {
+      const accepted = await report(token, 201, {
+        target: hypothesis.hypothesis_id,
+        reason: "privacy",
+        note: SOURCE_NOTE,
+      });
+      assert.equal(accepted.target_hidden, index === 2);
+      hypothesisReports.push(accepted);
+    }
+    const hiddenHypothesis = await hypothesisFace();
+    assert.ok(!JSON.stringify(hiddenHypothesis).includes(HYPOTHESIS_BODY));
+    assert.deepEqual(await latestControl(hypothesis.hypothesis_id), {
+      visibility: "hidden",
+      source: "community-reports",
+    });
+    const hypothesisDetail = await reportDetail(hypothesisReports[0].report_id);
+    assert.equal(hypothesisDetail.source.state, "available");
+    assert.equal(hypothesisDetail.source.object_id, hypothesis.hypothesis_id);
+    assert.equal(hypothesisDetail.source.binding, "captured-at-filing");
+    assert.equal(JSON.parse(hypothesisDetail.source.payload_json).body_md, HYPOTHESIS_BODY);
+    await resolve(hypothesisReports[0].report_id, "dismiss", "Reviewed the hypothesis disclosure.");
+    assert.ok(
+      (await reportStates(hypothesis.hypothesis_id)).every((row) => row.status === "dismissed"),
+    );
+    assert.ok(JSON.stringify(await hypothesisFace()).includes(HYPOTHESIS_BODY));
+    const beforeHypothesisControl = await events();
+    await controlPublished(hypothesis.hypothesis_id, "hypothesis", "hide");
+    assert.ok(!JSON.stringify(await hypothesisFace()).includes(HYPOTHESIS_BODY));
+    await controlPublished(hypothesis.hypothesis_id, "hypothesis", "restore");
+    assert.ok(JSON.stringify(await hypothesisFace()).includes(HYPOTHESIS_BODY));
+    assert.equal(
+      await events(),
+      beforeHypothesisControl,
+      "visibility decisions preserve scientific history",
+    );
+    assert.ok(!JSON.stringify(await call("/moderation/log.json")).includes(SOURCE_NOTE));
+    console.log(
+      JSON.stringify({
+        stage: "reported-publication-readback",
+        requested_version_retained: true,
+        private_no_store: true,
+        non_claim_report_quorum: true,
+        operator_restoration: true,
+      }),
+    );
+
     // 8. Operator hide/restore, audited; a no-op transition is refused.
-    const hide = (action, expected = 200) =>
+    const hide = (action, expected = 200, idempotencyKey) =>
       operatorCall(
         "POST",
         "/v1/operators/content-control",
@@ -583,10 +826,40 @@ await runLocalWorkerJourney(
           reason: "Operator review of a reported claim.",
         },
         expected,
+        "/v1/operators/content-control",
+        idempotencyKey,
       );
-    await hide("hide");
+    const hiddenReceipt = await hide("hide", 200, "moderation-hide-receipt");
     assert.equal((await hide("hide", 409)).code, "MODERATION_STATE_CONFLICT");
     await hide("restore");
+    const controlsAfterRestore = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM content_controls",
+    ).first();
+    assert.deepEqual(await hide("hide", 200, "moderation-hide-receipt"), hiddenReceipt);
+    assert.deepEqual(
+      await env.DB.prepare("SELECT COUNT(*) AS n FROM content_controls").first(),
+      controlsAfterRestore,
+    );
+    assert.equal(
+      (
+        await env.DB.prepare(`SELECT visibility FROM content_controls
+      WHERE problem_id = ? AND target_ref = ? ORDER BY version DESC LIMIT 1`)
+          .bind(problem, target)
+          .first()
+      ).visibility,
+      "visible",
+    );
+    await claimFace(200);
+    const crossRouteReplay = await operatorCall(
+      "POST",
+      releasePath,
+      "operator.quarantine.decide",
+      releaseCommand,
+      409,
+      releasePath,
+      "moderation-hide-receipt",
+    );
+    assert.equal(crossRouteReplay.code, "IDEMPOTENCY_CONFLICT");
 
     // A whole problem can be hidden pending review, then restored.
     const problemControl = (action) =>
@@ -608,7 +881,7 @@ await runLocalWorkerJourney(
     );
     await problemControl("restore");
     await call(`/p/${problem}.json`, undefined, undefined, 200);
-    // Controls address only what faces enforce: a non-claim object is refused.
+    // Controls require a real public source; an invented identifier is refused.
     const unenforced = await operatorCall(
       "POST",
       "/v1/operators/content-control",
@@ -617,7 +890,7 @@ await runLocalWorkerJourney(
         target_id: `${problem}/H-NOPE`,
         target_kind: "hypothesis",
         action: "hide",
-        reason: "Attempt to hide an object kind faces do not enforce.",
+        reason: "Attempt to hide an unpublished hypothesis identifier.",
       },
       404,
     );
@@ -1333,6 +1606,6 @@ console.log(
     kind: "moderation-real-bindings",
     status: "pass",
     boundary:
-      "real local Workerd/D1; atomic decision/posture notices and reviewed sponsor suspension with injected rollback, concurrent replay, credential/Fellow/enrollment/transfer cascade, signed mutation guards, private diagnosis/export, preserved public history, hold->case->release/reject, reports dedupe + 3-sponsor hide, independent category decisions and upheld-content retention, audit, public log; fixture screener",
+      "real local Workerd/D1; atomic decision/posture notices and reviewed sponsor suspension with injected rollback, concurrent replay, credential/Fellow/enrollment/transfer cascade, signed mutation guards, private diagnosis/export, preserved public history, hold->case->release/reject, exact reported-version readback after revision/hide with private no-store, reports dedupe + 3-sponsor claim/hypothesis hide, independent category decisions and upheld-content retention, operator restoration, audit, public log; fixture screener",
   }),
 );

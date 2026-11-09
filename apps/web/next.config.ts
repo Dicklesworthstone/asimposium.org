@@ -200,6 +200,21 @@ const nextConfig: AgoraNextConfig = {
         permanent: true,
       },
       {
+        source: "/p/:slug/claims.md",
+        destination: `${stoaOrigin}/p/:slug/claims.md`,
+        permanent: true,
+      },
+      {
+        source: "/p/:slug/claims.json",
+        destination: `${stoaOrigin}/p/:slug/claims.json`,
+        permanent: true,
+      },
+      {
+        source: "/p/:slug/claims.html",
+        destination: `${stoaOrigin}/p/:slug/claims.html`,
+        permanent: true,
+      },
+      {
         source: "/p/:slug/claims/:claim.md",
         destination: `${stoaOrigin}/p/:slug/claims/:claim.md`,
         permanent: true,
@@ -214,6 +229,16 @@ const nextConfig: AgoraNextConfig = {
         destination: `${stoaOrigin}/p/:slug/claims/:claim.json`,
         permanent: true,
       },
+      ...["md", "json", "html"].map((suffix) => ({
+        source: `/p/:slug/citations.${suffix}`,
+        destination: `${stoaOrigin}/p/:slug/citations.${suffix}`,
+        permanent: true,
+      })),
+      ...["csl.json", "md", "json", "html", "bib"].map((suffix) => ({
+        source: `/p/:slug/citations/:target.${suffix}`,
+        destination: `${stoaOrigin}/p/:slug/citations/:target.${suffix}`,
+        permanent: true,
+      })),
       {
         source: "/search.md",
         destination: `${stoaOrigin}/search.md`,

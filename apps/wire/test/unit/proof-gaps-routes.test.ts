@@ -14,6 +14,7 @@ async function fixture() {
       object_version INTEGER,payload_sha256 TEXT,created_at TEXT,actor_fellow_id TEXT,actor_sponsor_id TEXT,
       actor_session_id TEXT,model_string_self_declared TEXT,harness TEXT);
     CREATE TABLE event_content(event_id TEXT,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
+    CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY,provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,visibility TEXT,version INTEGER);
     INSERT INTO problems VALUES('P-DEMO',2,'active',0);`);
   const payload = JSON.stringify({
@@ -126,6 +127,31 @@ test("redaction invalidates old gap ETags without changing the public cursor", a
     const after = await f.read("/p/P-DEMO/gaps.json", { headers: { "if-none-match": etag } });
     expect(after.status).toBe(200);
     expect(((await after.json()) as any).gaps[0].content).toBeNull();
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("malformed and oversized filing receipts cannot expose apparently unqualified obligations", async () => {
+  const f = await fixture();
+  try {
+    f.sqlite.query("INSERT INTO screening_publications VALUES('EV-2',?)").run("{}");
+    for (const receipt of ["{}", "PRIVATE_DETECTOR_CANARY".repeat(300)]) {
+      f.sqlite.query("UPDATE screening_publications SET provenance_json=?").run(receipt);
+      for (const suffix of ["json", "md", "html"]) {
+        const response = await f.read(`/p/P-DEMO/gaps.${suffix}?through=2&target=G-2`);
+        expect(response.status).toBe(500);
+        const text = await response.text();
+        expect(text).not.toContain("Check the bound");
+        expect(text).not.toContain("PRIVATE_DETECTOR_CANARY");
+      }
+    }
+    f.sqlite.exec("UPDATE event_content SET redacted_at='2026-09-02T00:00:00.000Z'");
+    const response = await f.read("/p/P-DEMO/gaps.json?through=2&target=G-2");
+    expect(response.status).toBe(200);
+    const face = ProofGapsResponseSchema.parse(await response.json());
+    expect(face.gaps[0]?.content).toBeNull();
+    expect(face.gaps[0]?.screening_notice).toBeUndefined();
   } finally {
     f.sqlite.close();
   }

@@ -4,7 +4,11 @@ import assert from "node:assert/strict";
 import { getMoveTemplate, type HelloAssignment, type MoveTemplate } from "@asimposium/contracts";
 import type { ReviewQueueItem, ReviewQueueResponse } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
-import type { FellowCredentialBinding } from "../../src/enrollment/service.ts";
+import {
+  authorizeFellowWrite,
+  type FellowCredentialBinding,
+} from "../../src/enrollment/service.ts";
+import { selectRecordDeadEndMove } from "../../src/mega-commands/dead-end-moves.ts";
 import {
   LedgerMovesProvider,
   type LiveMovesDependencies,
@@ -267,6 +271,52 @@ test("observer with review scope gets review work but not new-claim promotion", 
     f.sqlite.close();
   }
 });
+test("central observer authority feeds evidence and dead-end work into next and triage", async () => {
+  const f = fixture();
+  try {
+    f.sqlite.exec("UPDATE problem_memberships SET role='observer'");
+    const provider = new LedgerMovesProvider({
+      ...f.dependencies,
+      authorize: authorizeFellowWrite,
+      templateFor: getMoveTemplate,
+      loadQueue: async () => page("P-DEMO", [item("P-DEMO", { need: "falsification-attempt" })]),
+      deadEnds: { load: selectRecordDeadEndMove },
+    });
+    const request = { ...next(f.db), role: "observer" as const };
+    const result = await provider.nextMoves(request);
+    assert.equal(result.degraded, false);
+    assert.equal(result.effectivePermissions?.promote, false);
+    assert.equal(result.effectivePermissions?.evidence, true);
+    assert.equal(result.effectivePermissions?.dead_end, true);
+    assert.equal(result.primaryMove?.move, "add-refuter");
+    const refuterTemplate = getMoveTemplate("add-refuter");
+    assert.ok(refuterTemplate.availability === "available");
+    assert.deepEqual(result.primaryMove?.contract.request, refuterTemplate.request);
+    assert.deepEqual(
+      result.alternatives.map((move) => move.move),
+      ["record-dead-end"],
+    );
+    const triage = await provider.triageMove({
+      db: f.db,
+      credential,
+      fellowId: credential.fellowId,
+      assignments: [{ ...assignment("P-DEMO"), role: "observer" }],
+    });
+    assert.deepEqual(triage.move, result.primaryMove);
+
+    const reviewOnly = await provider.nextMoves({
+      ...request,
+      credential: { ...credential, grantedScopes: ["review"] },
+      effectivePermissions: { promote: true, evidence: true, dead_end: true },
+    });
+    assert.equal(reviewOnly.primaryMove, null);
+    assert.deepEqual(reviewOnly.alternatives, []);
+    assert.equal(reviewOnly.effectivePermissions?.evidence, false);
+    assert.equal(reviewOnly.effectivePermissions?.dead_end, false);
+  } finally {
+    f.sqlite.close();
+  }
+});
 test("central admission refusal prevents all membership and queue reads", async () => {
   const f = fixture();
   try {
@@ -494,6 +544,59 @@ test("an observer cannot receive the first-claim promotion move", async () => {
     const result = await new LedgerMovesProvider(f.dependencies).nextMoves(next(f.db));
     assert.equal(result.primaryMove, null);
     assert.equal(result.effectivePermissions?.promote, false);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("next and triage select statement review for review-only observers while the claims board is locked", async () => {
+  const f = fixture();
+  try {
+    f.sqlite.exec("UPDATE problems SET status='sharpening',public_seq=0");
+    f.sqlite.exec("UPDATE problem_memberships SET role='observer'");
+    const reviewCredential = {
+      ...credential,
+      grantedScopes: ["review"],
+    } as FellowCredentialBinding;
+    let selections = 0;
+    const provider = new LedgerMovesProvider({
+      ...f.dependencies,
+      sharpen: {
+        async load(_db, problem, cursor, viewer) {
+          selections++;
+          assert.equal(viewer?.fellowId, credential.fellowId);
+          assert.equal(viewer?.sponsorId, credential.sponsorId);
+          return {
+            move: {
+              move: "sharpen-statement",
+              why: "Inspect the exact current formulation before deciding a verdict.",
+              refs: [problem, "S@1"],
+              contract: {
+                ...getMoveTemplate("sharpen-statement"),
+                preparation: { problem_id: problem, captured_cursor: cursor },
+              },
+            },
+            degraded: false,
+          };
+        },
+      },
+    });
+    const result = await provider.nextMoves(next(f.db, reviewCredential));
+    assert.equal(result.primaryMove?.move, "sharpen-statement");
+    assert.equal(result.effectivePermissions?.review, true);
+    assert.equal(result.effectivePermissions?.promote, false);
+    assert.deepEqual(result.alternatives, []);
+    assert.equal(f.queueReads(), 0);
+    const triage = await provider.triageMove({
+      db: f.db,
+      credential: reviewCredential,
+      fellowId: reviewCredential.fellowId,
+      assignments: [assignment("P-DEMO")],
+    });
+    assert.equal(triage.move?.move, "sharpen-statement");
+    const denied = await provider.nextMoves(next(f.db, { ...reviewCredential, grantedScopes: [] }));
+    assert.equal(denied.primaryMove, null);
+    assert.equal(selections, 3);
   } finally {
     f.sqlite.close();
   }

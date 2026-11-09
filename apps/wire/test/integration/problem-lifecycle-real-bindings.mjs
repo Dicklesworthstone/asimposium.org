@@ -370,7 +370,15 @@ export async function runLocalWorkerJourney(journey, options = {}) {
     }
 
     // An operator-signed call as the allowlisted local operator.
-    const operatorCall = (method, path, action, body, expected = 200, route = path) =>
+    const operatorCall = (
+      method,
+      path,
+      action,
+      body,
+      expected = 200,
+      route = path,
+      idempotencyKey,
+    ) =>
       sponsorCall(
         LOCAL_OPERATOR_ID,
         method,
@@ -379,7 +387,7 @@ export async function runLocalWorkerJourney(journey, options = {}) {
         body,
         expected,
         route,
-        undefined,
+        idempotencyKey,
         "operator",
       );
 

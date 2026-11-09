@@ -52,6 +52,8 @@ describe("W5.8a dead-ends unit tests", () => {
       { ...valid, redacted_at: "2026-09-09T01:00:00.000Z" },
       { ...valid, payload_sha256: "0".repeat(64) },
       { ...valid, author_fellow_id: null },
+      { ...valid, screening_provenance: "{}" },
+      { ...valid, screening_provenance: "{" },
       rowFor("{"),
       rowFor("null"),
       rowFor("[]"),

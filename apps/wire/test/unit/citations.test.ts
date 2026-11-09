@@ -2,13 +2,16 @@ import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
+  CITATIONS_SCHEMA_ID,
   type CitationItem,
   CitationsListResponseSchema,
   type RecordCitationRequest,
+  RecordCitationRequestSchema,
   SingleCitationResponseSchema,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { Env } from "../../src/env.ts";
+import { CitationReadError } from "../../src/ledger/citation-read";
 import {
   bibtexForCitation,
   computeCitationCanonicalAndHash,
@@ -615,7 +618,230 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
         const result = await loadProblemCitations(fixture.db, "P-MATH");
         expect(result.citations).toHaveLength(0);
         expect(result.omitted.join(" ")).toContain("unavailable");
+        await expect(loadSingleCitation(fixture.db, "P-MATH", "L-1")).rejects.toEqual(
+          new CitationReadError("CONTENT_UNAVAILABLE"),
+        );
+      } finally {
+        fixture.sqlite.close();
+      }
+    });
+    test("continuations reach every selected head at the original cut after later corrections", async () => {
+      const fixture = citationDatabase();
+      try {
+        for (let index = 1; index <= 52; index++)
+          await fixture.seed(sampleCitation({ citation_id: `L-${index}`, seq: index }));
+        await fixture.seed(
+          sampleCitation({ version: 2, seq: 60, title: "Corrected first source" }),
+        );
+        const first = await loadProblemCitations(fixture.db, "P-MATH");
+        expect(first.problem).toEqual({ id: "P-MATH", unlisted: 0 });
+        expect(first.cursor).toBe(100);
+        expect(first.after).toBe(0);
+        expect(first.scanned_through).toBe(51);
+        expect(first.next_after).toBe(51);
+        expect(first.citations).toHaveLength(50);
+        expect(first.citations[0]?.citation_id).toBe("L-2");
+        expect(first.citations.at(-1)?.citation_id).toBe("L-51");
+        const { problem: _scope, ...face } = first;
+        expect(
+          CitationsListResponseSchema.safeParse({
+            schema: CITATIONS_SCHEMA_ID,
+            problem_id: "P-MATH",
+            ...face,
+          }).success,
+        ).toBe(true);
+
+        await fixture.seed(
+          sampleCitation({ citation_id: "L-52", version: 2, seq: 101, title: "Later correction" }),
+        );
+        await fixture.seed(
+          sampleCitation({ citation_id: "L-53", seq: 102, title: "Later publication" }),
+        );
+        fixture.sqlite.query("UPDATE problems SET public_seq=102 WHERE id='P-MATH'").run();
+        const second = await loadProblemCitations(fixture.db, "P-MATH", {
+          through: first.cursor,
+          after: first.next_after ?? 0,
+        });
+        expect(second.citations.map((item) => [item.citation_id, item.version, item.seq])).toEqual([
+          ["L-52", 1, 52],
+          ["L-1", 2, 60],
+        ]);
+        expect(second.cursor).toBe(100);
+        expect(second.scanned_through).toBe(100);
+        expect(second.next_after).toBeNull();
+        expect(
+          new Set([...first.citations, ...second.citations].map((item) => item.citation_id)).size,
+        ).toBe(52);
+        const fresh = await loadProblemCitations(fixture.db, "P-MATH", { limit: 200 });
+        expect(fresh.citations.at(-2)?.version).toBe(2);
+        expect(fresh.citations.at(-1)?.citation_id).toBe("L-53");
+      } finally {
+        fixture.sqlite.close();
+      }
+    });
+    test("withheld and filtered heads advance empty pages without reviving older versions", async () => {
+      const fixture = citationDatabase();
+      try {
+        await fixture.seed(sampleCitation({ seq: 1 }));
+        await fixture.seed(sampleCitation({ version: 2, seq: 2, title: "WITHHELD_HEAD_CANARY" }));
+        await fixture.seed(sampleCitation({ citation_id: "L-2", seq: 3 }));
+        await fixture.seed(
+          sampleCitation({
+            citation_id: "L-3",
+            seq: 4,
+            unanchored: true,
+            locator_kind: "model_memory",
+            locator: null,
+            canonical_locator: null,
+            retrieved_at: null,
+            source_provenance: "model_memory",
+          }),
+        );
+        fixture.sqlite.exec("INSERT INTO content_controls VALUES('P-MATH','L-1@2','hidden',1)");
+        const first = await loadProblemCitations(fixture.db, "P-MATH", {
+          limit: 1,
+          unanchored: true,
+        });
+        expect(first.citations).toEqual([]);
+        expect(first.next_after).toBe(2);
+        expect(first.omitted.join(" ")).toContain("unavailable");
+        const second = await loadProblemCitations(fixture.db, "P-MATH", {
+          through: first.cursor,
+          after: first.next_after ?? 0,
+          limit: 1,
+          unanchored: true,
+        });
+        expect(second.citations).toEqual([]);
+        expect(second.next_after).toBe(3);
+        expect(second.omitted.join(" ")).toContain("filter");
+        const third = await loadProblemCitations(fixture.db, "P-MATH", {
+          through: first.cursor,
+          after: second.next_after ?? 0,
+          limit: 1,
+          unanchored: true,
+        });
+        expect(third.citations.map((item) => item.citation_id)).toEqual(["L-3"]);
+        expect(third.next_after).toBeNull();
+        expect(third.scanned_through).toBe(first.cursor);
         expect(await loadSingleCitation(fixture.db, "P-MATH", "L-1")).toBeNull();
+        expect((await loadSingleCitation(fixture.db, "P-MATH", "L-1@1"))?.citation.version).toBe(1);
+        expect(JSON.stringify([first, second, third])).not.toContain("WITHHELD_HEAD_CANARY");
+      } finally {
+        fixture.sqlite.close();
+      }
+    });
+    test("exact versions beyond the history window remain readable with bounded history disclosures", async () => {
+      const fixture = citationDatabase();
+      try {
+        fixture.sqlite.query("UPDATE problems SET public_seq=300 WHERE id='P-MATH'").run();
+        for (let version = 1; version <= 205; version++)
+          await fixture.seed(
+            sampleCitation({ version, seq: version, title: `Published source version ${version}` }),
+          );
+        for (const [target, version] of [
+          ["L-1", 205],
+          ["L-1@204", 204],
+        ] as const) {
+          const exact = await loadSingleCitation(fixture.db, "P-MATH", target);
+          expect(exact?.citation.version).toBe(version);
+          expect(exact?.cursor).toBe(300);
+          expect(exact?.versions).toHaveLength(200);
+          expect(exact?.omitted.join(" ")).toContain("bounded to 200");
+          expect(exact?.problem).toEqual({ id: "P-MATH", unlisted: 0 });
+          const { problem: _scope, ...face } = exact ?? {};
+          expect(
+            SingleCitationResponseSchema.safeParse({ schema: CITATIONS_SCHEMA_ID, ...face })
+              .success,
+          ).toBe(true);
+        }
+        expect(
+          (await loadSingleCitation(fixture.db, "P-MATH", "L-1", { through: 201 }))?.citation
+            .version,
+        ).toBe(201);
+        fixture.sqlite.exec("INSERT INTO content_controls VALUES('P-MATH','L-1@205','hidden',1)");
+        expect(await loadSingleCitation(fixture.db, "P-MATH", "L-1")).toBeNull();
+        expect((await loadSingleCitation(fixture.db, "P-MATH", "L-1@204"))?.citation.version).toBe(
+          204,
+        );
+        fixture.sqlite.exec("INSERT INTO content_controls VALUES('P-MATH','L-1@205','visible',2)");
+        fixture.sqlite
+          .query("UPDATE event_content SET payload_json='{}' WHERE event_id='P-MATH-205'")
+          .run();
+        await expect(loadSingleCitation(fixture.db, "P-MATH", "L-1")).rejects.toEqual(
+          new CitationReadError("CONTENT_UNAVAILABLE"),
+        );
+        expect((await loadProblemCitations(fixture.db, "P-MATH")).citations).toEqual([]);
+      } finally {
+        fixture.sqlite.close();
+      }
+    });
+    test("the source-byte limit continues before the first whole record that exceeds it", async () => {
+      const fixture = citationDatabase();
+      try {
+        const authors = Array.from(
+          { length: 64 },
+          (_, index) => `${String(index).padStart(2, "0")}${"文".repeat(198)}`,
+        );
+        const largeMetadata = { authors, title: "書誌".repeat(500), excerpt: "資料".repeat(500) };
+        expect(
+          RecordCitationRequestSchema.safeParse({ ...validDoiRequest, ...largeMetadata }).success,
+        ).toBe(true);
+        for (let index = 1; index <= 100; index++)
+          await fixture.seed(
+            sampleCitation({ citation_id: `L-${index}`, seq: index, ...largeMetadata }),
+          );
+        const first = await loadProblemCitations(fixture.db, "P-MATH", { limit: 200 });
+        expect(first.citations.length).toBeGreaterThan(1);
+        expect(first.citations.length).toBeLessThan(100);
+        expect(first.omitted.join(" ")).toContain("source-byte budget");
+        expect(first.next_after).toBe(first.citations.at(-1)?.seq ?? -1);
+        const second = await loadProblemCitations(fixture.db, "P-MATH", {
+          limit: 200,
+          through: first.cursor,
+          after: first.next_after ?? 0,
+        });
+        expect(second.citations[0]?.seq).toBe((first.next_after ?? 0) + 1);
+        expect(second.next_after).toBeNull();
+        expect([...first.citations, ...second.citations].map((item) => item.citation_id)).toEqual(
+          Array.from({ length: 100 }, (_, index) => `L-${index + 1}`),
+        );
+        const exact = await loadSingleCitation(fixture.db, "P-MATH", "L-80@1");
+        expect(exact?.citation.authors).toEqual(authors);
+        fixture.sqlite.query("UPDATE problems SET public_seq=200 WHERE id='P-MATH'").run();
+        for (let version = 2; version <= 50; version++)
+          await fixture.seed(sampleCitation({ version, seq: version + 100, ...largeMetadata }));
+        const deep = await loadSingleCitation(fixture.db, "P-MATH", "L-1");
+        expect(deep?.citation.version).toBe(50);
+        expect(deep?.citation.authors).toEqual(authors);
+        expect(deep?.versions.length).toBeLessThan(50);
+        expect(deep?.omitted.join(" ")).toContain("history source-byte budget");
+      } finally {
+        fixture.sqlite.close();
+      }
+    });
+    test("invalid continuation bounds and future cuts are refused instead of silently clamped", async () => {
+      const fixture = citationDatabase();
+      try {
+        await fixture.seed(sampleCitation());
+        for (const query of [
+          { after: 0 },
+          { after: 3, through: 2 },
+          { through: 101 },
+          { limit: 201 },
+          { limit: 1.5 },
+          { through: -1 },
+        ])
+          await expect(loadProblemCitations(fixture.db, "P-MATH", query)).rejects.toEqual(
+            new CitationReadError("CURSOR_INVALID"),
+          );
+        await expect(
+          loadSingleCitation(fixture.db, "P-MATH", "L-1", { through: 101 }),
+        ).rejects.toEqual(new CitationReadError("CURSOR_INVALID"));
+        expect(
+          (await loadProblemCitations(fixture.db, "P-MATH", { through: 0 })).citations,
+        ).toEqual([]);
+        expect(await loadSingleCitation(fixture.db, "P-MATH", "L-1@1", { through: 0 })).toBeNull();
+        expect(await loadSingleCitation(fixture.db, "P-MATH", "L-1@1\n")).toBeNull();
       } finally {
         fixture.sqlite.close();
       }
@@ -784,6 +1010,54 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
         expect(await second.text()).toBe("");
       });
     });
+    test("old exact validators cannot conceal source corruption or turn failed reads into empty success", async () => {
+      await withPublicCitation(async (fixture, env) => {
+        const representations = new Map<string, { body: string; etag: string }>();
+        for (const format of ["json", "md", "html", "bib", "csl.json"]) {
+          const path = `${publicUrl}/citations/L-1@1.${format}?through=10`;
+          const response = await app.request(path, {}, env);
+          expect(response.status).toBe(200);
+          const etag = response.headers.get("etag");
+          expect(etag).toBeTruthy();
+          representations.set(path, { body: await response.text(), etag: etag ?? "" });
+        }
+        const source = fixture.sqlite
+          .query("SELECT payload_json FROM event_content WHERE event_id='P-CITATIONS-2'")
+          .get() as { payload_json: string };
+        fixture.sqlite
+          .query(
+            "UPDATE event_content SET payload_json=payload_json || ' ' WHERE event_id='P-CITATIONS-2'",
+          )
+          .run();
+        for (const [path, original] of representations) {
+          for (const method of ["GET", "HEAD"]) {
+            const response = await app.request(
+              path,
+              { method, headers: { "if-none-match": original.etag } },
+              env,
+            );
+            expect(response.status).toBe(503);
+            expect(response.headers.get("cache-control")).toBe("private, no-store");
+            expect(response.headers.get("retry-after")).toBeTruthy();
+            expect(response.headers.get("etag")).toBeNull();
+            const body = await response.text();
+            if (method === "HEAD") expect(body).toBe("");
+            else expect(JSON.parse(body).code).toBe("INTERNAL_ERROR");
+            expect(body).not.toContain("Bounded gaps between primes");
+            expect(body).not.toContain("PRIVATE_PROJECTION_CANARY");
+          }
+        }
+        fixture.sqlite
+          .query("UPDATE event_content SET payload_json=? WHERE event_id='P-CITATIONS-2'")
+          .run(source.payload_json);
+        for (const [path, original] of representations) {
+          const response = await app.request(path, {}, env);
+          expect(response.status).toBe(200);
+          expect(await response.text()).toBe(original.body);
+          expect(response.headers.get("etag")).toBe(original.etag);
+        }
+      });
+    });
     test("readLedgerPackSection populates exact-version literature candidates", async () => {
       await withPublicCitation(async (fixture) => {
         const section = await readLedgerPackSection(fixture.db, "P-CITATIONS", 10, "literature");
@@ -920,15 +1194,14 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
           },
           env,
         );
-        // This subrouter fixture has no application's outer problem-hide
-        // middleware. Its reader withholds every citation, not the problem ID.
-        expect(list.status).toBe(200);
-        expect(list.headers.get("etag")).not.toBe(etag);
+        // Collection scope is checked by the reader before accepting an old
+        // validator, even without the application's outer hide middleware.
+        expect(list.status).toBe(404);
+        expect(list.headers.get("cache-control")).toBe("private, no-store");
+        expect(list.headers.get("etag")).toBeNull();
         const hidden = await list.text();
         expect(hidden).not.toContain("Bounded gaps between primes");
         expect(hidden).not.toContain("PRIVATE_PROJECTION_CANARY");
-        const data = CitationsListResponseSchema.parse(JSON.parse(hidden));
-        expect(data.citations).toHaveLength(0);
         for (const url of historical.keys()) {
           const response = await app.request(url, {}, env);
           expect(response.status).toBe(404);

@@ -5,10 +5,17 @@ import { createHash } from "node:crypto";
 import { NextMoveCandidateSchema, ProblemGovernanceEventSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
+  filterMovesByPermissions,
+  isStatementReviewMove,
+} from "../../src/mega-commands/move-permissions.ts";
+import {
   REANCHOR_CANDIDATE_LIMIT,
   selectReanchorMove,
 } from "../../src/mega-commands/reanchor-moves.ts";
-import { selectSharpenStatementMove } from "../../src/mega-commands/sharpen-moves.ts";
+import {
+  type SharpenMoveViewer,
+  selectSharpenStatementMove,
+} from "../../src/mega-commands/sharpen-moves.ts";
 
 const PROBLEM = "P-ANCHOR";
 const AUTHOR = "F-AUTHOR";
@@ -22,7 +29,8 @@ function fixture() {
   const sql = new Database(":memory:");
   sql.exec(`
     CREATE TABLE problems(id TEXT PRIMARY KEY, status TEXT, public_seq INTEGER,
-      current_statement_version INTEGER, unlisted INTEGER, admission_mode TEXT);
+      current_statement_version INTEGER, unlisted INTEGER, admission_mode TEXT,
+      sponsor_id TEXT, created_by_fellow_id TEXT);
     CREATE TABLE events(id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, type TEXT,
       object_kind TEXT, object_id TEXT, object_version INTEGER, payload_sha256 TEXT,
       actor_fellow_id TEXT, actor_sponsor_id TEXT, created_at TEXT);
@@ -36,10 +44,12 @@ function fixture() {
       editor_fellow_id TEXT, content_digest TEXT, statement TEXT);
     CREATE TABLE problem_statement_versions(problem_id TEXT, version INTEGER,
       statement TEXT, falsifier TEXT);
+    CREATE TABLE problem_statement_reviews(problem_id TEXT, version INTEGER,
+      reviewer_fellow_id TEXT, PRIMARY KEY(problem_id, version, reviewer_fellow_id));
     CREATE TABLE retractions(problem_id TEXT, retraction_id TEXT, seq INTEGER,
       target_object TEXT, author_fellow_id TEXT);
     CREATE TABLE scientific_withdrawals(source_event_id TEXT);
-    INSERT INTO problems VALUES ('P-ANCHOR','active',0,1,0,'open');
+    INSERT INTO problems VALUES ('P-ANCHOR','active',0,1,0,'open','usr_author','F-AUTHOR');
   `);
   const payloads = new Map<string, Record<string, unknown>>();
   const event = (
@@ -197,7 +207,8 @@ function fixture() {
     replace,
     cursor,
     next: (cut = cursor(), fellow = AUTHOR) => selectReanchorMove(db, PROBLEM, fellow, cut),
-    sharpen: (cut = cursor()) => selectSharpenStatementMove(db, PROBLEM, cut),
+    sharpen: (cut = cursor(), viewer?: SharpenMoveViewer) =>
+      selectSharpenStatementMove(db, PROBLEM, cut, viewer),
     setAfterRead: (run?: (query: string) => void) => {
       afterRead = run;
     },
@@ -223,7 +234,11 @@ test("re-anchor preserves a usable exact claim/statement recommendation without 
     const move = NextMoveCandidateSchema.parse(result.move);
     assert.equal(result.degraded, false);
     assert.deepEqual(move.refs, [PROBLEM, "C-1@1", "S@2"]);
-    assert.deepEqual(move.contract.prefilled_hints, { claim_id: "C-1", base_version: 1 });
+    assert.deepEqual(move.contract.prefilled_hints, {
+      claim_id: "C-1",
+      base_version: 1,
+      client_context_cursor: f.cursor(),
+    });
     assert.deepEqual((move.contract.preparation as Record<string, unknown>).read_first, {
       method: "GET",
       path: `/p/${PROBLEM}.md`,
@@ -323,10 +338,102 @@ test("sharpening reads the verified published formulation and keeps its body unt
     assert.deepEqual(move.refs, [PROBLEM, "S@2"]);
     assert.deepEqual((move.contract.preparation as Record<string, unknown>).read_first, {
       method: "GET",
-      path: `/p/${PROBLEM}.md`,
+      path: `/p/${PROBLEM}/statements/2.md?through=3`,
     });
     assert.ok(!JSON.stringify(move).includes(CANARY));
   }));
+
+const independentReviewer: SharpenMoveViewer = {
+  fellowId: "F-REVIEWER",
+  sponsorId: "usr_reviewer",
+  review: true,
+  workshopPush: true,
+};
+
+test("independent statement review is executable with review authority and no claim promotion", () =>
+  run(async (f) => {
+    f.sql.query("UPDATE problems SET status='sharpening' WHERE id=?").run(PROBLEM);
+    const result = await f.sharpen(f.cursor(), independentReviewer);
+    const move = NextMoveCandidateSchema.parse(result.move);
+    assert.equal(result.degraded, false);
+    assert.ok(isStatementReviewMove(move));
+    assert.deepEqual(move.contract.prefilled_hints, {
+      statement_version: 2,
+      client_context_cursor: 3,
+    });
+    assert.ok(!Object.hasOwn(move.contract.prefilled_hints as object, "verdict"));
+    assert.ok(!Object.hasOwn(move.contract.prefilled_hints as object, "basis"));
+    const permissions = {
+      session_open: true,
+      workshop_push: true,
+      promote: false,
+      review: true,
+    };
+    assert.deepEqual(filterMovesByPermissions([move], permissions), [move]);
+    assert.deepEqual(filterMovesByPermissions([move], { ...permissions, review: false }), []);
+    assert.deepEqual(filterMovesByPermissions([move], permissions, true), []);
+  }));
+
+for (const restriction of ["author", "same-sponsor", "missing-review-scope", "already-reviewed"])
+  test(`statement sharpening offers private preparation for ${restriction}, without a review action`, () =>
+    run(async (f) => {
+      f.sql.query("UPDATE problems SET status='sharpening' WHERE id=?").run(PROBLEM);
+      const viewer = {
+        ...independentReviewer,
+        ...(restriction === "author" ? { fellowId: AUTHOR } : {}),
+        ...(restriction === "same-sponsor" ? { sponsorId: "usr_author" } : {}),
+        ...(restriction === "missing-review-scope" ? { review: false } : {}),
+      };
+      if (restriction === "already-reviewed")
+        f.sql
+          .query("INSERT INTO problem_statement_reviews VALUES (?,2,?)")
+          .run(PROBLEM, viewer.fellowId);
+      const result = await f.sharpen(f.cursor(), viewer);
+      const move = NextMoveCandidateSchema.parse(result.move);
+      assert.equal(result.degraded, false);
+      assert.equal(isStatementReviewMove(move), false);
+      assert.deepEqual(move.contract.prefilled_hints, { type: "scratch" });
+      assert.equal((move.contract.request as { path: string }).path, "/v1/sessions/{id}/workshop");
+      const permissions = {
+        session_open: true,
+        workshop_push: true,
+        promote: false,
+        review: viewer.review,
+      };
+      assert.deepEqual(filterMovesByPermissions([move], permissions, true), [move]);
+      assert.deepEqual(
+        filterMovesByPermissions([move], { ...permissions, workshop_push: false }),
+        [],
+      );
+      assert.deepEqual(await f.sharpen(f.cursor(), { ...viewer, workshopPush: false }), {
+        move: null,
+        degraded: false,
+      });
+    }));
+
+for (const change of ["review", "sponsor"])
+  test(`a concurrent ${change} invalidates statement-review eligibility before a move is returned`, () =>
+    run(async (f) => {
+      f.sql.query("UPDATE problems SET status='sharpening' WHERE id=?").run(PROBLEM);
+      let changed = false;
+      f.setAfterRead((query) => {
+        if (changed || !query.includes("AS already_reviewed")) return;
+        changed = true;
+        if (change === "review")
+          f.sql
+            .query("INSERT INTO problem_statement_reviews VALUES (?,2,?)")
+            .run(PROBLEM, independentReviewer.fellowId);
+        else
+          f.sql
+            .query("UPDATE problems SET sponsor_id=? WHERE id=?")
+            .run(independentReviewer.sponsorId, PROBLEM);
+      });
+      assert.deepEqual(await f.sharpen(f.cursor(), independentReviewer), {
+        move: null,
+        degraded: true,
+      });
+      assert.ok(changed);
+    }));
 
 for (const damage of ["hidden", "redacted", "missing", "digest-mismatch", "stale-cut"])
   test(`sharpening refuses ${damage} formulation authority`, () =>

@@ -97,6 +97,26 @@ test("unrelated and different-version obligations are not borrowed", () => {
   assert.equal(section.summary.relevant_records, 1);
 });
 
+test("claim and review obligation metadata preserves warnings outside authored prose", () => {
+  const warning = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  } as const;
+  const record = { ...gap(4), screening_notice: warning };
+  const candidate = fixture([record]).read().candidates[0]!;
+  assert.deepEqual(candidate.screening_notice, warning);
+  assert.ok(!candidate.body.includes("screening_notice"));
+  assert.ok(candidate.body.includes(record.content!.obligation));
+  record.content = null;
+  assert.deepEqual(fixture([record]).read().candidates, []);
+  const malformed = {
+    ...gap(4),
+    screening_notice: { ...warning, private_detail: "PRIVATE_CANARY" },
+  };
+  assert.throws(() => fixture([malformed]).read());
+});
+
 for (const status of ["open", "unavailable", "closed-by", "withdrawn"] as const) {
   test(`${status} is lifecycle metadata, never proof or a scientific status`, () => {
     const section = fixture([gap(4, "C-3@1", status)]).read();

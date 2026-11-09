@@ -365,6 +365,18 @@ const ProblemFaceItemSchema = z.discriminatedUnion("kind", [
     kind: z.literal("problem-motivation"),
     id: z.string().regex(/^S@[1-9][0-9]{0,15}-motivation$/),
   }),
+  FaceItemSchema.extend({
+    kind: z.literal("problem-scope"),
+    id: z.string().regex(/^S@[1-9][0-9]{0,15}-scope$/),
+  }),
+  FaceItemSchema.extend({
+    kind: z.literal("problem-out-of-scope"),
+    id: z.string().regex(/^S@[1-9][0-9]{0,15}-out-of-scope$/),
+  }),
+  FaceItemSchema.extend({
+    kind: z.literal("problem-success-criteria"),
+    id: z.string().regex(/^S@[1-9][0-9]{0,15}-success-criteria$/),
+  }),
 ]);
 
 const ACTION_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;

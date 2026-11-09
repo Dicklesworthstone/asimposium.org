@@ -1,11 +1,45 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0130_session_opened_public_cursor.sql`.
+schema through `0135_report_source_pins.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
 deployed `0009_device_flow.sql` in `0010_device_flow_hardening.sql`.
+
+Migration `0135_report_source_pins.sql` retains the exact public event, digest,
+and requested target captured when a report is first filed. Whole-object report
+deduplication never changes that source. The binding is immutable; admission
+rechecks public scope and retained source content in the report transaction.
+Historical reports remain unpinned instead of guessing their original version.
+Apply it before the matching Worker report intake and private operator reader.
+
+Migration `0134_sponsor_brief_commands.sql` adds optimistic versions to private
+sponsor briefs and 24-hour metadata-only save/withdraw receipts. Each receipt
+commits with its guarded effect; uncertain retries recover the original result
+without restoring a later-edited, withdrawn or adopted brief. Apply it before
+the matching Worker. Existing briefs begin at version 1.
+
+Migration `0133_operator_command_receipts.sql` binds each accepted quarantine,
+report, or visibility command to its operator, hashed replay key, canonical
+intent digest, and immutable audit receipt. The receipt commits with all effects;
+retries recover the original outcome without reapplying a later-reversed control.
+Reasons and held content are not copied into this receipt store. Apply it before
+the matching Worker; operator mutations fail closed without it.
+
+Migration `0132_private_fork_erasure.sql` allows a never-published fork to erase
+its private content while retaining the empty, ownerless identity required by
+the public parent's committed fork history. It preserves the existing erasure
+journal and scrub, and prevents a lineage foreign key from rolling deletion
+back. Apply it with `0131` before the matching Worker.
+
+Migration `0131_problem_statement_boundaries.sql` retains authored scope,
+out-of-scope exclusions, and success criteria on each exact problem statement
+version and private sponsor brief. Historical rows retain NULL for the complete
+bundle. Published versions remain immutable, and the existing journaled private
+draft erasure removes the entire statement row. Apply this migration before the
+matching Worker, whose publication guards, canonical reads, and account exports
+use these columns.
 
 Migration `0130_session_opened_public_cursor.sql` records the ledger cut captured
 when a session opens, including implicit sessions. Its immutable cursor lets

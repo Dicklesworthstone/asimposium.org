@@ -411,6 +411,22 @@ test("withdrawing the gap between admission and target reads suppresses the reco
     f.close();
   }
 });
+
+test("a whole-problem control appearing after gap admission removes the recommendation", async () => {
+  for (const target of ["problem", "P-DEMO"]) {
+    const f = fixture();
+    try {
+      await f.claim();
+      await f.gap();
+      f.beforeTarget(() =>
+        f.sql.query("INSERT INTO content_controls VALUES('P-DEMO',?,1,'hidden')").run(target),
+      );
+      assert.equal((await f.read()).move, null);
+    } finally {
+      f.close();
+    }
+  }
+});
 test("filtered first pages advance at the same snapshot and find later readable work", async () => {
   const f = fixture();
   try {

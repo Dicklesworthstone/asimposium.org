@@ -37,11 +37,15 @@ import rubricsSchemaModule from "../generated/rubrics.schema.json" with { type: 
 import screeningSchemaModule from "../generated/screening.schema.json" with { type: "json" };
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "json" };
 import synthesesSchemaModule from "../generated/syntheses.schema.json" with { type: "json" };
+import workshopDirectorySchemaModule from "../generated/workshop-directory.schema.json" with {
+  type: "json",
+};
 import { generateSponsorDataExportSchema } from "./account-export.ts";
-import { generateSponsorSuspensionsSchema } from "./admin.ts";
+import { generateAdminReportDetailSchema, generateSponsorSuspensionsSchema } from "./admin.ts";
 import { generateScreeningAppealsSchema } from "./appeals.ts";
 import { generateArtifactPublicationsSchema } from "./artifact-publications.ts";
 import { generateArtifactUploadsSchema } from "./artifact-uploads.ts";
+import { generateClaimsListSchema } from "./claims-list.ts";
 import { generateCommentarySchema } from "./commentary.ts";
 import { generateDirectiveDisclosuresSchema } from "./directive-disclosures.ts";
 import { generateDiscriminationSchema } from "./discrimination.ts";
@@ -53,13 +57,16 @@ import { generateProofGapsSchema } from "./proof-gaps-schema.ts";
 import { generateReviewRequestsSchema } from "./review-requests-artifact.ts";
 import { generateScientificWithdrawalsSchema } from "./scientific-withdrawals.ts";
 import { generateSponsorFollowsSchema } from "./sponsor-follows.ts";
+import { generateStatementsSchema } from "./statements.ts";
 import { generateWorkshopSearchSchema } from "./workshop-search.ts";
 
 /** Deliberate, closed inventory of source-generated schemas without file copies. */
 export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "account-export",
+  "admin-report-detail",
   "artifact-publications",
   "artifact-uploads",
+  "claims-list",
   "commentary",
   "directive-disclosures",
   "discrimination",
@@ -73,14 +80,17 @@ export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "screening-appeals",
   "sponsor-follows",
   "sponsor-suspensions",
+  "statements",
   "workshop-search",
 ] as const);
 
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "account-export",
+  "admin-report-detail",
   "artifact-publications",
   "artifact-uploads",
   "citations",
+  "claims-list",
   "commentary",
   "conflicts",
   "dead-ends",
@@ -114,7 +124,9 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "sessions",
   "sponsor-follows",
   "sponsor-suspensions",
+  "statements",
   "syntheses",
+  "workshop-directory",
   "workshop-search",
 ] as const);
 
@@ -176,6 +188,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     body: generateSponsorDataExportSchema(),
   }),
   Object.freeze({
+    id: "admin-report-detail",
+    served_at: "/schemas/admin-report-detail.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateAdminReportDetailSchema(),
+  }),
+  Object.freeze({
     id: "artifact-publications",
     served_at: "/schemas/artifact-publications.v1.json",
     media_type: "application/schema+json; charset=utf-8",
@@ -192,6 +210,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/citations.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: canonicalSchemaText(citationsSchemaModule, "generated/citations.schema.json"),
+  }),
+  Object.freeze({
+    id: "claims-list",
+    served_at: "/schemas/claims-list.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateClaimsListSchema(),
   }),
   Object.freeze({
     id: "commentary",
@@ -396,10 +420,25 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     body: generateSponsorSuspensionsSchema(),
   }),
   Object.freeze({
+    id: "statements",
+    served_at: "/schemas/statements.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateStatementsSchema(),
+  }),
+  Object.freeze({
     id: "syntheses",
     served_at: "/schemas/syntheses.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: canonicalSchemaText(synthesesSchemaModule, "generated/syntheses.schema.json"),
+  }),
+  Object.freeze({
+    id: "workshop-directory",
+    served_at: "/schemas/workshop-directory.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: canonicalSchemaText(
+      workshopDirectorySchemaModule,
+      "generated/workshop-directory.schema.json",
+    ),
   }),
   Object.freeze({
     id: "workshop-search",

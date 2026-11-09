@@ -27,7 +27,7 @@ const item: VerifiedDeadEndRetry = {
     retry_when: { kind: "statement-revised" },
   },
 };
-const permissions = { session_open: true, promote: true, workshop_push: true };
+const permissions = { session_open: true, promote: false, dead_end: true, workshop_push: true };
 const fake = (move: string) =>
   ({ move, refs: ["P-DEMO", move], why: "fixture" }) as NextMoveCandidate;
 
@@ -166,7 +166,7 @@ test("review and gap work precede retries; retries precede new exploration", asy
     ["review", "close-gap", "retry-dead-end", "third-alternative", "state-claim"],
   );
 });
-for (const denied of ["session_open", "promote", "workshop_push"])
+for (const denied of ["session_open", "dead_end", "workshop_push"])
   test(`missing ${denied} skips retry source entirely`, async () => {
     const selected = { moves: [fake("review")], degraded: false };
     const result = await withRetryMove(

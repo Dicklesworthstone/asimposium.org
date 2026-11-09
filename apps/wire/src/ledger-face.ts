@@ -1,10 +1,6 @@
 import {
-  CITATIONS_SCHEMA_ID,
-  CitationsListResponseSchema,
   ClaimFaceQuerySchema,
   ClaimFaceResponseSchema,
-  CONFLICTS_SCHEMA_ID,
-  ConflictsListResponseSchema,
   DEAD_ENDS_SCHEMA_ID,
   DeadEndsListResponseSchema,
   EnrollmentDeclaredRuntimeSchema,
@@ -19,25 +15,21 @@ import {
   PublicClaimStateSchema,
   PublicClaimTargetSchema,
   PublicLedgerProblemIdSchema,
-  QUESTIONS_SCHEMA_ID,
-  QuestionsListResponseSchema,
   RETRACTIONS_SCHEMA_ID,
   RetractionsListResponseSchema,
-  type ScreeningPublicationNotice,
-  SingleCitationResponseSchema,
   SYNTHESES_SCHEMA_ID,
 } from "@asimposium/contracts";
+import {
+  CLAIMS_LIST_SCHEMA_ID,
+  ClaimsListQuerySchema,
+  claimsListPath,
+} from "@asimposium/contracts/claims-list";
 import { FormalRecordsQuerySchema } from "@asimposium/contracts/formal-records";
 import {
   type ComposedPack,
   composePack,
-  escapeHtml,
-  type Fence,
-  fenceFor,
   neutralizeUntrustedBody,
-  type PackActionCandidate,
   type PackCandidate,
-  type PreparedProjection,
   type Projection,
   type RenderedFace,
   renderAllFaces,
@@ -46,9 +38,8 @@ import {
   renderPublicProblemMovesHtml,
   renderPublicProblemMovesMarkdown,
   safeCodeSpan,
-  safeInlineProse,
-  screeningNoticeText,
 } from "@asimposium/render";
+import { renderClaimsListHtml, renderClaimsListMarkdown } from "@asimposium/render/claims-list";
 import {
   renderFormalRecordsHtml,
   renderFormalRecordsMarkdown,
@@ -64,21 +55,9 @@ import {
   hiddenByContentControlSql,
   PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL,
 } from "./krater/public-content";
-import {
-  bibtexForCitation,
-  cslForCitation,
-  loadProblemCitations,
-  loadSingleCitation,
-  renderCitationsHtml,
-  renderCitationsMarkdown,
-  renderSingleCitationHtml,
-  renderSingleCitationMarkdown,
-} from "./ledger/citations";
-import {
-  loadProblemConflicts,
-  renderConflictsHtml,
-  renderConflictsMarkdown,
-} from "./ledger/conflicts";
+import { handleCitationsList, handleSingleCitation } from "./ledger/citations-http.ts";
+import { ClaimsListReadError, loadClaimsList } from "./ledger/claims-list-read";
+import { handleConflictsList } from "./ledger/conflicts-http.ts";
 import {
   loadProblemDeadEnds,
   MAX_DEAD_ENDS_PER_PAGE,
@@ -92,25 +71,20 @@ import { loadFormalRecordResource } from "./ledger/formal-records-service";
 import { loadHypothesisEvidenceItem } from "./ledger/hypothesis-evidence-read";
 import { readPublishedProblemFormulation } from "./ledger/problem-formulation-read.ts";
 import { readPublishedProblemResolution } from "./ledger/problem-resolution-read.ts";
-import {
-  loadProblemQuestions,
-  renderQuestionsHtmlFragment,
-  renderQuestionsMarkdown,
-} from "./ledger/questions";
+import { ProofGapReadError } from "./ledger/proof-gaps-read.ts";
+import { handleQuestionsList } from "./ledger/questions-http.ts";
 import {
   loadProblemRetractions,
   renderRetractionsHtmlFragment,
   renderRetractionsMarkdown,
 } from "./ledger/retractions";
 import { checkedScientificPayload, ScientificInputError } from "./ledger/scientific-checks";
-import { readScientificDispositions } from "./ledger/scientific-disposition.ts";
+import { legacyStatementRedirect } from "./ledger/statements-router.ts";
+import { handleSynthesesList } from "./ledger/syntheses-list-http.ts";
 import {
-  loadProblemSyntheses,
   loadSingleSynthesis,
   renderSingleSynthesisHtmlFragment,
   renderSingleSynthesisMarkdown,
-  renderSynthesesHtmlFragment,
-  renderSynthesesMarkdown,
 } from "./ledger/synthesis";
 import { loadPublicProblemMoves } from "./mega-commands/public-moves";
 import {
@@ -293,6 +267,42 @@ async function currentPublishedFormulation(db: Env["DB"], snapshot: ProblemDiges
           : { screening_notice: publication.screening_notice }),
       }
     : null;
+}
+
+function formulationCandidates(
+  formulation: Awaited<ReturnType<typeof currentPublishedFormulation>>,
+  stablePrefix: number,
+): PackCandidate[] {
+  if (formulation === null) return [];
+  const candidates: PackCandidate[] = [];
+  for (const [field, suffix] of [
+    ["title", "title"],
+    ["statement", "statement"],
+    ["falsifier", "falsifier"],
+    ["motivation", "motivation"],
+    ["scope", "scope"],
+    ["out_of_scope", "out-of-scope"],
+    ["success_criteria", "success-criteria"],
+  ] as const) {
+    const body = formulation[field];
+    // Historical formulations without the authored bundle stay absent. All
+    // present fields are whole candidates under the same immutable version.
+    if (body === undefined) continue;
+    candidates.push({
+      kind: `problem-${suffix}`,
+      id: `S@${formulation.current_statement_version}-${suffix}`,
+      scope: "ledger",
+      tokens: 1,
+      untrusted: true,
+      body,
+      ...(formulation.screening_notice === undefined
+        ? {}
+        : { screening_notice: formulation.screening_notice }),
+      why_included: `current problem ${field} at statement version S@${formulation.current_statement_version}`,
+      stable_prefix: stablePrefix + candidates.length,
+    });
+  }
+  return candidates;
 }
 
 interface StatementReviewRow {
@@ -751,22 +761,7 @@ async function loadProblemFace(
     })),
   ];
   const driftNotice = projectionDriftNotice(first.projection_drift_cursor);
-  const formulationItems =
-    formulation === null
-      ? []
-      : (["title", "statement", "falsifier", "motivation"] as const).map((field, rank) => ({
-          kind: `problem-${field}`,
-          id: `S@${formulation.current_statement_version}-${field}`,
-          scope: "ledger" as const,
-          tokens: 1,
-          untrusted: true,
-          body: formulation[field],
-          ...(formulation.screening_notice === undefined
-            ? {}
-            : { screening_notice: formulation.screening_notice }),
-          why_included: `current problem ${field} at statement version S@${formulation.current_statement_version}`,
-          stable_prefix: rank + headerCandidates.length,
-        }));
+  const formulationItems = formulationCandidates(formulation, headerCandidates.length);
   const candidateTruncated = rows.length > PROBLEM_DIGEST_CANDIDATE_LIMIT;
   const composed = composePack({
     schema: "asimposium.problem-face.v1",
@@ -779,9 +774,9 @@ async function loadProblemFace(
     candidates: [
       ...headerCandidates,
       ...formulationItems,
-      ...reviews.candidates.map((candidate) => ({
+      ...reviews.candidates.map((candidate, index) => ({
         ...candidate,
-        stable_prefix: candidate.stable_prefix + headerCandidates.length,
+        stable_prefix: index + formulationItems.length + headerCandidates.length,
       })),
       ...claims.slice(0, PROBLEM_DIGEST_CANDIDATE_LIMIT).map((claim, index) => ({
         kind: "claim",
@@ -794,7 +789,8 @@ async function loadProblemFace(
           ? { screening_notice: screeningNotices.get(claim.seq)! }
           : {}),
         why_included: "a public claim on this problem in ledger sequence order",
-        stable_prefix: index + 4 + reviews.candidates.length + headerCandidates.length,
+        stable_prefix:
+          index + formulationItems.length + reviews.candidates.length + headerCandidates.length,
       })),
     ],
     action_candidates: [
@@ -1008,22 +1004,7 @@ async function loadProblemFullFace(
     })),
   ];
   const driftNotice = projectionDriftNotice(first.projection_drift_cursor);
-  const formulationItems =
-    formulation === null
-      ? []
-      : (["title", "statement", "falsifier", "motivation"] as const).map((field, rank) => ({
-          kind: `problem-${field}`,
-          id: `S@${formulation.current_statement_version}-${field}`,
-          scope: "ledger" as const,
-          tokens: 1,
-          untrusted: true,
-          body: formulation[field],
-          ...(formulation.screening_notice === undefined
-            ? {}
-            : { screening_notice: formulation.screening_notice }),
-          why_included: `current problem ${field} at statement version S@${formulation.current_statement_version}`,
-          stable_prefix: rank + headerCandidates.length,
-        }));
+  const formulationItems = formulationCandidates(formulation, headerCandidates.length);
 
   const composed = composePack({
     schema: "asimposium.problem-face.v1",
@@ -1036,9 +1017,9 @@ async function loadProblemFullFace(
     candidates: [
       ...headerCandidates,
       ...formulationItems,
-      ...reviews.candidates.map((candidate) => ({
+      ...reviews.candidates.map((candidate, index) => ({
         ...candidate,
-        stable_prefix: candidate.stable_prefix + headerCandidates.length,
+        stable_prefix: index + formulationItems.length + headerCandidates.length,
       })),
       ...claims.map((claim, index) => ({
         kind: "claim",
@@ -1051,7 +1032,8 @@ async function loadProblemFullFace(
           ? { screening_notice: screeningNotices.get(claim.seq)! }
           : {}),
         why_included: "a public claim on this problem in ledger sequence order",
-        stable_prefix: index + 4 + reviews.candidates.length + headerCandidates.length,
+        stable_prefix:
+          index + formulationItems.length + reviews.candidates.length + headerCandidates.length,
       })),
     ],
     action_candidates: [
@@ -1125,165 +1107,6 @@ async function loadProblemFullFace(
   );
   const rendered = renderProjection(projection, "md");
   return { body: rendered.body, unlisted, formulationUnavailable: formulation === null };
-}
-
-interface ProblemClaimRow {
-  readonly id: string;
-  readonly statement: string;
-  readonly source_seq: number;
-  readonly created_at: string;
-}
-
-interface ProblemClaimSummary {
-  readonly screening_notice?: ScreeningPublicationNotice;
-  readonly id: string;
-  readonly statement: string;
-  readonly source_seq: number;
-  readonly created_at: string;
-  readonly stale: boolean;
-}
-
-async function loadProblemClaims(
-  db: Env["DB"],
-  problemId: string,
-): Promise<{
-  claims: ProblemClaimSummary[];
-  /** Claims in range whose content is unavailable (withdrawn, redacted, hidden). */
-  unavailable: number;
-  cursor: number;
-  unlisted: boolean;
-} | null> {
-  if (!PublicLedgerProblemIdSchema.safeParse(problemId).success) return null;
-  const problem = await db
-    .prepare(
-      "SELECT id, public_seq, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-    .bind(problemId)
-    .first<{ id: string; public_seq: number; unlisted: number }>();
-  if (!problem) return null;
-
-  // The board obeys the same read-side law as every claim face: a withdrawn,
-  // redacted or content-controlled (hidden) claim is unavailable, so it is
-  // counted, never served.
-  const rows = await db
-    .prepare(`
-      SELECT claims.id, claims.statement, claims.source_seq, claims.created_at,
-        CASE WHEN ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} THEN 1 ELSE 0 END AS available
-      FROM claims
-      WHERE claims.problem_id = ? AND claims.source_seq <= ?
-      ORDER BY claims.source_seq ASC, claims.id ASC
-      LIMIT 200
-    `)
-    .bind(problemId, problem.public_seq)
-    .all<ProblemClaimRow & { available: number }>();
-
-  let unavailable = (rows.results ?? []).filter((row) => row.available !== 1).length;
-  // Match the bounded source-sequence selection at the same public cut. The
-  // scientific reader assesses immutable premise pins, while cp.stale can
-  // lag a premise revision or a current content control indefinitely.
-  const dispositions = await readScientificDispositions(db, problemId, problem.public_seq, 200);
-  const screeningNotices = await readPublicationNotices(
-    db,
-    problemId,
-    rows.results.filter((row) => row.available === 1).map((row) => row.source_seq),
-  );
-  const claims: ProblemClaimSummary[] = (rows.results ?? [])
-    .filter((row) => row.available === 1)
-    .flatMap((row) => {
-      const standing = dispositions.get(row.id);
-      // A mutable head can advance beyond the captured cut between reads.
-      // Missing scientific authority must not become a fresh-looking card.
-      if (standing === undefined) {
-        unavailable++;
-        return [];
-      }
-      return [
-        {
-          id: row.id,
-          statement: row.statement,
-          source_seq: row.source_seq,
-          created_at: canonicalizeIndexTimestamp(row.created_at),
-          stale: standing.stale,
-          ...(screeningNotices.has(row.source_seq)
-            ? { screening_notice: screeningNotices.get(row.source_seq)! }
-            : {}),
-        },
-      ];
-    });
-
-  return {
-    claims,
-    unavailable,
-    cursor: problem.public_seq,
-    unlisted: problem.unlisted === 1,
-  };
-}
-
-function renderProblemClaimsMarkdown(
-  problemId: string,
-  claims: readonly ProblemClaimSummary[],
-  omitted: readonly string[],
-  cursor: number,
-): string {
-  const lines: string[] = [
-    `<!-- asimp face=md schema=asimposium.claims-list.v1 problem=${problemId} cursor=${cursor} -->`,
-    "",
-    `# Claims — ${problemId}`,
-    "",
-    "> Public claims on this problem in ledger sequence order.",
-    "",
-  ];
-  if (claims.length === 0) {
-    lines.push("No public claims recorded on this problem yet.", "");
-  } else {
-    for (const c of claims) {
-      lines.push(`## ${c.id} (seq ${c.source_seq})${c.stale ? " [stale]" : ""}`);
-      lines.push(`- **Statement**: ${safeInlineProse(c.statement)}`);
-      lines.push(`- **Created**: ${c.created_at}`);
-      if (c.screening_notice !== undefined)
-        lines.push(`- **Screening notice**: ${screeningNoticeText(c.screening_notice)}`);
-      lines.push(
-        `- [View claim](/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(c.id)}.md) · [JSON](/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(c.id)}.json)`,
-      );
-      lines.push("");
-    }
-  }
-  if (omitted.length > 0) {
-    lines.push(`omitted: ${omitted.join("; ")}`, "");
-  }
-  return lines.join("\n");
-}
-
-function renderProblemClaimsHtmlFragment(
-  problemId: string,
-  claims: readonly ProblemClaimSummary[],
-  omitted: readonly string[],
-): string {
-  const lines: string[] = [
-    `<section class="claims-list" data-problem="${escapeHtml(problemId)}">`,
-    `<h2>Claims — ${escapeHtml(problemId)}</h2>`,
-    `<p class="description">Public claims on this problem in ledger sequence order.</p>`,
-  ];
-  if (claims.length === 0) {
-    lines.push("<p>No public claims recorded on this problem yet.</p>");
-  } else {
-    for (const c of claims) {
-      lines.push(
-        `<article class="claim-item" data-id="${escapeHtml(c.id)}">` +
-          `<h3><a href="/p/${escapeHtml(problemId)}/claims/${escapeHtml(c.id)}">${escapeHtml(c.id)}</a> (seq ${c.source_seq})${c.stale ? ' <span class="badge-stale">stale</span>' : ""}</h3>` +
-          `<p>${escapeHtml(c.statement)}</p>` +
-          (c.screening_notice === undefined
-            ? ""
-            : `<aside role="note">${escapeHtml(screeningNoticeText(c.screening_notice))}</aside>`) +
-          `</article>`,
-      );
-    }
-  }
-  if (omitted.length > 0) {
-    lines.push(`<p class="omitted">Omitted: ${escapeHtml(omitted.join("; "))}</p>`);
-  }
-  lines.push("</section>");
-  return lines.join("\n");
 }
 
 function escapeToonField(val: string): string {
@@ -1396,6 +1219,7 @@ async function loadClaimFace(
     WITH cut AS (
       SELECT id, public_seq, unlisted, COALESCE(?, public_seq) AS cursor
       FROM problems WHERE id = ? AND status != 'private-draft'
+        AND NOT ${hiddenByContentControlSql("problems.id", "problems.id")}
     )
     SELECT p.cursor, p.public_seq, p.unlisted,
       (SELECT e.object_version FROM events e WHERE e.problem_id = p.id
@@ -1427,14 +1251,21 @@ async function loadClaimFace(
   if (head.cursor > head.public_seq) return "cursor_ahead";
   if (head.version === null || head.latest_version === null) return null;
   const target = `${claimId}@${head.version}`;
-  const { section, fold } = await readPublicClaimSnapshot(
+  const snapshot = await readPublicClaimSnapshot(
     db,
     problemId,
     head.cursor,
     claimId as string,
     head.version,
     focus,
-  );
+  ).catch((error: unknown) => {
+    // Current whole-problem visibility can change after the initial head read.
+    // The shared obligation snapshot then has no public scope, not broken science.
+    if (error instanceof ProofGapReadError && error.code === "not-found") return null;
+    throw error;
+  });
+  if (snapshot === null) return null;
+  const { section, fold } = snapshot;
   if (fold.currentVersion !== head.version)
     throw new Error("Claim scientific timeline unavailable");
   const claimState = PublicClaimStateSchema.parse({
@@ -2415,62 +2246,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   });
 
   // --- W5.8d Questions Diptych faces ---
-  app.on(["GET", "HEAD"], "/p/:id/questions.json", async (c) => {
-    const problemId = c.req.param("id");
-    const { questions, omitted, problem } = await loadProblemQuestions(c.env.DB, problemId);
-    if (!problem) return problemNotFound(c.req.method);
-    const body = JSON.stringify(
-      QuestionsListResponseSchema.parse({
-        schema: QUESTIONS_SCHEMA_ID,
-        problem_id: problemId,
-        questions,
-        omitted,
-      }),
-      null,
-      2,
-    );
-    const etag = await strongEtag("json", body);
-    const headers = {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
-
-  app.on(["GET", "HEAD"], "/p/:id/questions.md", async (c) => {
-    const problemId = c.req.param("id");
-    const { questions, omitted, problem } = await loadProblemQuestions(c.env.DB, problemId);
-    if (!problem) return problemNotFound(c.req.method);
-    const body = renderQuestionsMarkdown(problemId, questions, omitted);
-    const etag = await strongEtag("markdown", body);
-    const headers = {
-      "content-type": "text/markdown; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
-
-  app.on(["GET", "HEAD"], "/p/:id/questions.html", async (c) => {
-    const problemId = c.req.param("id");
-    const { questions, omitted, problem } = await loadProblemQuestions(c.env.DB, problemId);
-    if (!problem) return problemNotFound(c.req.method);
-    const body = renderQuestionsHtmlFragment(problemId, questions, omitted);
-    const etag = await strongEtag("html", body);
-    const headers = {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
+  for (const format of ["json", "md", "html"] as const)
+    app.on(["GET", "HEAD"], `/p/:id/questions.${format}`, (c) => handleQuestionsList(c, format));
 
   // --- W5.8d Retractions Diptych faces ---
   app.on(["GET", "HEAD"], "/p/:id/retractions.json", async (c) => {
@@ -2530,163 +2307,11 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
   });
 
-  app.on(["GET", "HEAD"], "/p/:id/conflicts.json", async (c) => {
-    const problemId = c.req.param("id");
-    const statusParam = c.req.query("status");
-    const limitParam = c.req.query("limit");
-    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const { conflicts, omitted, problem } = await loadProblemConflicts(c.env.DB, problemId, {
-      status: statusParam,
-      limit: Number.isFinite(limit) ? limit : undefined,
-    });
-    if (!problem) return problemNotFound(c.req.method);
-    const body = JSON.stringify(
-      ConflictsListResponseSchema.parse({
-        schema: CONFLICTS_SCHEMA_ID,
-        problem_id: problemId,
-        conflicts,
-        omitted,
-      }),
-      null,
-      2,
-    );
-    const etag = await strongEtag("json", body);
-    const headers = {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
+  for (const format of ["json", "md", "html"] as const)
+    app.on(["GET", "HEAD"], `/p/:id/conflicts.${format}`, (c) => handleConflictsList(c, format));
 
-  app.on(["GET", "HEAD"], "/p/:id/conflicts.md", async (c) => {
-    const problemId = c.req.param("id");
-    const statusParam = c.req.query("status");
-    const limitParam = c.req.query("limit");
-    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const { conflicts, omitted, problem } = await loadProblemConflicts(c.env.DB, problemId, {
-      status: statusParam,
-      limit: Number.isFinite(limit) ? limit : undefined,
-    });
-    if (!problem) return problemNotFound(c.req.method);
-    const body = renderConflictsMarkdown(problemId, conflicts, omitted);
-    const etag = await strongEtag("markdown", body);
-    const headers = {
-      "content-type": "text/markdown; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
-
-  app.on(["GET", "HEAD"], "/p/:id/conflicts.html", async (c) => {
-    const problemId = c.req.param("id");
-    const statusParam = c.req.query("status");
-    const limitParam = c.req.query("limit");
-    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const { conflicts, omitted, problem } = await loadProblemConflicts(c.env.DB, problemId, {
-      status: statusParam,
-      limit: Number.isFinite(limit) ? limit : undefined,
-    });
-    if (!problem) return problemNotFound(c.req.method);
-    const body = renderConflictsHtml(problemId, conflicts, omitted);
-    const etag = await strongEtag("html", body);
-    const headers = {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
-
-  app.on(["GET", "HEAD"], "/p/:id/syntheses.json", async (c) => {
-    const problemId = c.req.param("id");
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
-    if (!problem) return problemNotFound(c.req.method);
-
-    const limitParam = c.req.query("limit");
-    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const { syntheses, omitted } = await loadProblemSyntheses(c.env.DB, problemId, {
-      limit: Number.isFinite(limit) ? limit : undefined,
-    });
-    const body = JSON.stringify({
-      schema: SYNTHESES_SCHEMA_ID,
-      problem_id: problemId,
-      syntheses,
-      omitted,
-    });
-    const etag = await strongEtag("json", body);
-    const headers = {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
-
-  app.on(["GET", "HEAD"], "/p/:id/syntheses.md", async (c) => {
-    const problemId = c.req.param("id");
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
-    if (!problem) return problemNotFound(c.req.method);
-
-    const limitParam = c.req.query("limit");
-    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const { syntheses, omitted } = await loadProblemSyntheses(c.env.DB, problemId, {
-      limit: Number.isFinite(limit) ? limit : undefined,
-    });
-    const body = renderSynthesesMarkdown(problemId, syntheses, omitted);
-    const etag = await strongEtag("markdown", body);
-    const headers = {
-      "content-type": "text/markdown; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
-
-  app.on(["GET", "HEAD"], "/p/:id/syntheses.html", async (c) => {
-    const problemId = c.req.param("id");
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
-    if (!problem) return problemNotFound(c.req.method);
-
-    const limitParam = c.req.query("limit");
-    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const { syntheses, omitted } = await loadProblemSyntheses(c.env.DB, problemId, {
-      limit: Number.isFinite(limit) ? limit : undefined,
-    });
-    const body = renderSynthesesHtmlFragment(problemId, syntheses, omitted);
-    const etag = await strongEtag("html", body);
-    const headers = {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
+  for (const format of ["json", "md", "html"] as const)
+    app.on(["GET", "HEAD"], `/p/:id/syntheses.${format}`, (c) => handleSynthesesList(c, format));
 
   app.on(["GET", "HEAD"], "/p/:id/syntheses/:target", async (c) => {
     const problemId = c.req.param("id");
@@ -2762,236 +2387,13 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
   // --- Citations / Literature faces (W5.8c / Rule A1 Diptych) ---
 
-  const handleCitationsListJson = async (c: Context<{ Bindings: Env }>) => {
-    const problemId = c.req.param("id");
-    if (!problemId) return problemNotFound(c.req.method);
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
-    if (!problem) return problemNotFound(c.req.method);
-
-    const limitParam = c.req.query("limit");
-    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const throughParam = c.req.query("through");
-    const through = throughParam ? parseInt(throughParam, 10) : undefined;
-    const unanchoredParam = c.req.query("unanchored");
-    const unanchored =
-      unanchoredParam === "true" ? true : unanchoredParam === "false" ? false : undefined;
-
-    const { citations, omitted } = await loadProblemCitations(c.env.DB, problemId, {
-      limit: Number.isFinite(limit) ? limit : undefined,
-      through: Number.isFinite(through) ? through : undefined,
-      unanchored,
-    });
-
-    const body = JSON.stringify(
-      CitationsListResponseSchema.parse({
-        schema: CITATIONS_SCHEMA_ID,
-        problem_id: problemId,
-        citations,
-        omitted,
-      }),
-      null,
-      2,
-    );
-    const etag = await strongEtag("json", body);
-    const headers = {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  };
-
-  const handleCitationsListMd = async (c: Context<{ Bindings: Env }>) => {
-    const problemId = c.req.param("id");
-    if (!problemId) return problemNotFound(c.req.method);
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
-    if (!problem) return problemNotFound(c.req.method);
-
-    const limitParam = c.req.query("limit");
-    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const throughParam = c.req.query("through");
-    const through = throughParam ? parseInt(throughParam, 10) : undefined;
-    const unanchoredParam = c.req.query("unanchored");
-    const unanchored =
-      unanchoredParam === "true" ? true : unanchoredParam === "false" ? false : undefined;
-
-    const { citations, omitted } = await loadProblemCitations(c.env.DB, problemId, {
-      limit: Number.isFinite(limit) ? limit : undefined,
-      through: Number.isFinite(through) ? through : undefined,
-      unanchored,
-    });
-
-    const body = renderCitationsMarkdown(problemId, citations, omitted);
-    const etag = await strongEtag("markdown", body);
-    const headers = {
-      "content-type": "text/markdown; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  };
-
-  const handleCitationsListHtml = async (c: Context<{ Bindings: Env }>) => {
-    const problemId = c.req.param("id");
-    if (!problemId) return problemNotFound(c.req.method);
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
-    if (!problem) return problemNotFound(c.req.method);
-
-    const limitParam = c.req.query("limit");
-    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const throughParam = c.req.query("through");
-    const through = throughParam ? parseInt(throughParam, 10) : undefined;
-    const unanchoredParam = c.req.query("unanchored");
-    const unanchored =
-      unanchoredParam === "true" ? true : unanchoredParam === "false" ? false : undefined;
-
-    const { citations, omitted } = await loadProblemCitations(c.env.DB, problemId, {
-      limit: Number.isFinite(limit) ? limit : undefined,
-      through: Number.isFinite(through) ? through : undefined,
-      unanchored,
-    });
-
-    const body = renderCitationsHtml(problemId, citations, omitted);
-    const etag = await strongEtag("html", body);
-    const headers = {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  };
-
-  app.on(["GET", "HEAD"], "/p/:id/citations.json", handleCitationsListJson);
-  app.on(["GET", "HEAD"], "/p/:id/literature.json", handleCitationsListJson);
-
-  app.on(["GET", "HEAD"], "/p/:id/citations.md", handleCitationsListMd);
-  app.on(["GET", "HEAD"], "/p/:id/literature.md", handleCitationsListMd);
-
-  app.on(["GET", "HEAD"], "/p/:id/citations.html", handleCitationsListHtml);
-  app.on(["GET", "HEAD"], "/p/:id/literature.html", handleCitationsListHtml);
-
-  // Single citation faces (.json, .md, .html, .bib, .csl.json)
-  app.on(["GET", "HEAD"], "/p/:id/citations/:target", async (c) => {
-    const problemId = c.req.param("id");
-    const targetWithSuffix = c.req.param("target");
-    if (!problemId || !targetWithSuffix) return problemNotFound(c.req.method);
-
-    let target = targetWithSuffix;
-    let format: "json" | "md" | "html" | "bib" | "csl.json" = "html";
-
-    if (targetWithSuffix.endsWith(".csl.json")) {
-      target = targetWithSuffix.slice(0, -".csl.json".length);
-      format = "csl.json";
-    } else if (targetWithSuffix.endsWith(".json")) {
-      target = targetWithSuffix.slice(0, -".json".length);
-      format = "json";
-    } else if (targetWithSuffix.endsWith(".md")) {
-      target = targetWithSuffix.slice(0, -".md".length);
-      format = "md";
-    } else if (targetWithSuffix.endsWith(".html")) {
-      target = targetWithSuffix.slice(0, -".html".length);
-      format = "html";
-    } else if (targetWithSuffix.endsWith(".bib")) {
-      target = targetWithSuffix.slice(0, -".bib".length);
-      format = "bib";
-    }
-
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
-    if (!problem) return problemNotFound(c.req.method);
-
-    const throughParam = c.req.query("through");
-    const through = throughParam ? parseInt(throughParam, 10) : undefined;
-
-    const result = await loadSingleCitation(c.env.DB, problemId, target, {
-      through: Number.isFinite(through) ? through : undefined,
-    });
-
-    if (!result) {
-      const refusal = problemDocument({
-        status: 404,
-        code: "CITATION_NOT_FOUND",
-        title: "Citation not found",
-        detail: `No citation matching '${target}' was found on problem '${problemId}'.`,
-        fixHint: `Check GET /p/${problemId}/citations.json for recorded citation IDs.`,
-        rule: "A5",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/ledger.v1.json",
-          example: { method: "GET", path: `/p/${problemId}/citations.json` },
-        },
-      });
-      return c.req.method === "HEAD"
-        ? new Response(null, { status: refusal.status, headers: refusal.headers })
-        : refusal;
-    }
-
-    let body: string;
-    let contentType: string;
-    let etagKind: "json" | "markdown" | "html";
-
-    if (format === "json") {
-      body = JSON.stringify(
-        SingleCitationResponseSchema.parse({
-          schema: CITATIONS_SCHEMA_ID,
-          citation: result.citation,
-          versions: result.versions,
-          associated_claims: result.associated_claims,
-          associated_evidence: result.associated_evidence,
-        }),
-        null,
-        2,
+  for (const format of ["json", "md", "html"] as const) {
+    for (const collection of ["citations", "literature"] as const)
+      app.on(["GET", "HEAD"], `/p/:id/${collection}.${format}`, (c) =>
+        handleCitationsList(c, format),
       );
-      contentType = "application/json; charset=utf-8";
-      etagKind = "json";
-    } else if (format === "csl.json") {
-      body = JSON.stringify(cslForCitation(result.citation), null, 2);
-      contentType = "application/vnd.citationstyles.csl+json; charset=utf-8";
-      etagKind = "json";
-    } else if (format === "bib") {
-      body = bibtexForCitation(result.citation);
-      contentType = "application/x-bibtex; charset=utf-8";
-      etagKind = "markdown";
-    } else if (format === "md") {
-      body = renderSingleCitationMarkdown(problemId, result);
-      contentType = "text/markdown; charset=utf-8";
-      etagKind = "markdown";
-    } else {
-      body = renderSingleCitationHtml(problemId, result);
-      contentType = "text/html; charset=utf-8";
-      etagKind = "html";
-    }
-
-    const etag = await strongEtag(etagKind, body);
-    const headers = {
-      "content-type": contentType,
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
+  }
+  app.on(["GET", "HEAD"], "/p/:id/citations/:target", handleSingleCitation);
 
   // W6.1 public problem digest faces. Both suffixes are composed from one
   // Projection and pass through @asimposium/render's shared preparation and
@@ -3147,67 +2549,73 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   ) {
     const problemId = c.req.param("id");
     if (!problemId) return problemNotFound(c.req.method);
-    const result = await loadProblemClaims(c.env.DB, problemId);
-    if (!result) return problemNotFound(c.req.method);
-
+    const params = new URL(c.req.url).searchParams;
+    const query = ClaimsListQuerySchema.safeParse(Object.fromEntries(params));
+    const invalid = () => {
+      const response = problemDocument({
+        status: 400,
+        code: "CURSOR_INVALID",
+        title: "Invalid claims collection cursor",
+        detail:
+          "Use one canonical non-negative through cursor and one after cursor; after cannot exceed through or the public cursor. Other query keys are not supported.",
+        fixHint:
+          "Start with /p/<problem-id>/claims.json, then follow next_after while preserving the returned cursor as through.",
+        rule: "A5",
+        extensions: {
+          schema: CLAIMS_LIST_SCHEMA_ID,
+          example: { path: "/p/P-EXAMPLE/claims.json?through=20&after=8" },
+        },
+      });
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: response.status, headers: response.headers })
+        : response;
+    };
+    if (!query.success || [...params.keys()].some((key) => params.getAll(key).length !== 1))
+      return invalid();
+    let result: Awaited<ReturnType<typeof loadClaimsList>>;
+    try {
+      result = await loadClaimsList(c.env.DB, problemId, query.data);
+    } catch (error) {
+      if (error instanceof ClaimsListReadError) {
+        if (error.code === "not-found") return problemNotFound(c.req.method);
+        if (error.code === "query") return invalid();
+      }
+      throw error;
+    }
     const accept = c.req.header("accept") ?? "";
     const format =
       forceFormat ??
       (accept.includes("application/json") ? "json" : accept.includes("text/html") ? "html" : "md");
-
-    const omitted: string[] = ["only published claims are included in this ledger view"];
-    if (result.unavailable > 0) {
-      omitted.push(
-        `${result.unavailable} claim(s) whose content is unavailable (withdrawn, redacted or hidden) are not shown`,
-      );
-    }
-
-    if (format === "json") {
-      const body = JSON.stringify(
-        {
-          schema: "https://a.asimposium.org/schemas/claims-list.v1.json",
-          problem_id: problemId,
-          count: result.claims.length,
-          claims: result.claims,
-          omitted,
-        },
-        null,
-        2,
-      );
-      const etag = await strongEtag("json", body);
-      const headers = {
-        "content-type": "application/json; charset=utf-8",
-        "cache-control": "public, max-age=0, must-revalidate",
-        vary: "Accept, Accept-Encoding",
-        ...indexingHeaders(result.unlisted),
-        etag,
-      };
-      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
-        return c.body(null, 304, headers);
-      return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-    }
-
-    if (format === "html") {
-      const body = renderProblemClaimsHtmlFragment(problemId, result.claims, omitted);
-      const etag = await strongEtag("html", body);
-      const headers = {
-        "content-type": "text/html; charset=utf-8",
-        "cache-control": "public, max-age=0, must-revalidate",
-        vary: "Accept, Accept-Encoding",
-        ...indexingHeaders(result.unlisted),
-        etag,
-      };
-      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
-        return c.body(null, 304, headers);
-      return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-    }
-
-    const body = renderProblemClaimsMarkdown(problemId, result.claims, omitted, result.cursor);
-    const etag = await strongEtag("markdown", body);
+    const face = result.face;
+    const body =
+      format === "json"
+        ? JSON.stringify(face, null, 2)
+        : format === "html"
+          ? renderClaimsListHtml(face)
+          : renderClaimsListMarkdown(face);
+    if (new TextEncoder().encode(body).length > 1024 * 1024)
+      throw new ClaimsListReadError("unavailable");
+    const etag = await strongEtag(format, body);
+    const path = (after = face.after) =>
+      claimsListPath(problemId, format, { through: face.cursor, after });
     const headers = {
-      "content-type": "text/markdown; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
+      "content-type":
+        format === "json"
+          ? "application/json; charset=utf-8"
+          : format === "html"
+            ? "text/html; charset=utf-8"
+            : "text/markdown; charset=utf-8",
+      "cache-control": result.unlisted ? "private, no-store" : "public, max-age=0, must-revalidate",
       vary: "Accept, Accept-Encoding",
+      "x-content-type-options": "nosniff",
+      "content-location": path(),
+      link: `</schemas/claims-list.v1.json>; rel="describedby"; type="application/schema+json", <${path()}>; rel="canonical"${face.next_after === null ? "" : `, <${path(face.next_after)}>; rel="next"`}`,
+      ...(format === "html"
+        ? {
+            "content-security-policy":
+              "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+          }
+        : {}),
       ...indexingHeaders(result.unlisted),
       etag,
     };
@@ -3223,6 +2631,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   // W6.1 public problem digest faces.
   app.on(["GET", "HEAD"], "/p/:id{[^/]+\\.json$}", async (c) => {
     const problemId = c.req.param("id").slice(0, -".json".length);
+    const statementRedirect = legacyStatementRedirect(c.req.raw, problemId, "json");
+    if (statementRedirect) return statementRedirect;
     const faces = await loadProblemFace(c.env.DB, problemId);
     if (faces === null) return problemNotFound(c.req.method);
     const etag = await strongEtag("json", faces.json.body);
@@ -3243,6 +2653,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
   app.on(["GET", "HEAD"], "/p/:id{[^/]+\\.md$}", async (c) => {
     const problemId = c.req.param("id").slice(0, -".md".length);
+    const statementRedirect = legacyStatementRedirect(c.req.raw, problemId, "md");
+    if (statementRedirect) return statementRedirect;
     const faces = await loadProblemFace(c.env.DB, problemId);
     if (faces === null) return problemNotFound(c.req.method);
     const etag = await strongEtag("markdown", faces.markdown.body);

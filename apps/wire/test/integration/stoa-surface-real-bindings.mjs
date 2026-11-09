@@ -894,7 +894,15 @@ await runLocalWorkerJourney(
     assert.equal(lonerNext.viewer.role, "none");
     assert.deepEqual(
       lonerNext.viewer.effective_permissions,
-      { read: true, session_open: true, workshop_push: false, promote: false, review: false },
+      {
+        read: true,
+        session_open: true,
+        workshop_push: false,
+        promote: false,
+        evidence: false,
+        dead_end: false,
+        review: false,
+      },
       "a non-member may join by opening a session and holds no write affordance yet",
     );
     assert.equal(lonerNext.primary_move, null);

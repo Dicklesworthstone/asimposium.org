@@ -22,6 +22,9 @@ export interface PublishedProblemFormulation {
     | "statement"
     | "falsifier"
     | "motivation"
+    | "scope"
+    | "out_of_scope"
+    | "success_criteria"
     | "updated_at"
   >;
   readonly source_fellow_id: string;
@@ -33,7 +36,7 @@ export interface PublishedProblemFormulation {
   };
 }
 
-interface FormulationRow extends CitationContentRow {
+export interface FormulationRow extends CitationContentRow {
   screening_provenance?: string | null;
   id: string;
   type: string;
@@ -137,12 +140,19 @@ export async function readPublishedProblemFormulations(
   return formulations;
 }
 
-async function verifyPublishedProblemFormulation(
+export async function verifyPublishedProblemFormulation(
   problemId: string,
   through: number,
   row: FormulationRow,
 ): Promise<PublishedProblemFormulation | undefined> {
-  if (row.seq > through || row.object_id !== problemId) return undefined;
+  if (
+    row.seq > through ||
+    row.object_id !== problemId ||
+    !Number.isSafeInteger(row.object_version) ||
+    row.object_version < 1 ||
+    !["problem.admitted", "problem.statement-revised"].includes(row.type)
+  )
+    return undefined;
   const payload = await verifiedCitationContent(problemId, row, PUBLIC_EVENT_CONTENT_MAX_BYTES);
   const parsed = ProblemGovernanceEventSchema.safeParse(payload);
   if (
@@ -166,6 +176,13 @@ async function verifyPublishedProblemFormulation(
       statement: event.problem.statement,
       falsifier: event.problem.falsifier,
       motivation: event.problem.motivation,
+      ...(event.problem.scope === undefined
+        ? {}
+        : {
+            scope: event.problem.scope,
+            out_of_scope: event.problem.out_of_scope,
+            success_criteria: event.problem.success_criteria,
+          }),
       updated_at: event.problem.updated_at,
     },
     source_fellow_id: event.source_fellow_id,

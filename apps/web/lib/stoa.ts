@@ -1,6 +1,10 @@
 import "server-only";
 
 import {
+  ADMIN_REPORT_DETAIL_MAX_RESPONSE_BYTES,
+  type AdminReportDetail,
+  AdminReportDetailSchema,
+  AdminReportIdSchema,
   SPONSOR_INBOX_MAX_RESPONSE_BYTES,
   type SponsorInboxRequest,
   SponsorInboxRequestSchema,
@@ -93,6 +97,11 @@ import {
   ReportResponseSchema,
   type SaveProblemBriefRequest,
   SaveProblemBriefRequestSchema,
+  SaveProblemBriefResponseSchema,
+  type WithdrawProblemBriefRequest,
+  WithdrawProblemBriefRequestSchema,
+  type WithdrawProblemBriefResponse,
+  WithdrawProblemBriefResponseSchema,
   ScreeningPromotionDeniedResponseSchema,
   ScreeningPromotionHoldResponseSchema,
   type ScreeningPromotionPolicyResponse,
@@ -149,7 +158,6 @@ import {
   type SponsorProblemBrief,
   type SponsorProblemBriefListResponse,
   SponsorProblemBriefListResponseSchema,
-  SponsorProblemBriefSchema,
   type SponsorProblemListResponse,
   SponsorProblemListResponseSchema,
   type SponsorProposalListResponse,
@@ -225,6 +233,7 @@ const ROUTE_OPERATOR_QUARANTINE = "/v1/operators/quarantine";
 const ROUTE_OPERATOR_QUARANTINE_CASE = "/v1/operators/quarantine/:caseId";
 const ROUTE_OPERATOR_QUARANTINE_DECISION = "/v1/operators/quarantine/decision";
 const ROUTE_OPERATOR_REPORTS = "/v1/operators/reports";
+const ROUTE_OPERATOR_REPORT_DETAIL = "/v1/operators/reports/:reportId";
 const ROUTE_OPERATOR_REPORTS_RESOLUTION = "/v1/operators/reports/resolution";
 const ROUTE_OPERATOR_CONTENT_CONTROL = "/v1/operators/content-control";
 const ROUTE_OPERATOR_AREA_RENAME = "/v1/operators/areas/rename";
@@ -255,6 +264,7 @@ const ACTION_OPERATOR_QUARANTINE_LIST = "operator.quarantine.list";
 const ACTION_OPERATOR_QUARANTINE_READ = "operator.quarantine.read";
 const ACTION_OPERATOR_QUARANTINE_DECIDE = "operator.quarantine.decide";
 const ACTION_OPERATOR_REPORTS_LIST = "operator.reports.list";
+const ACTION_OPERATOR_REPORT_READ = "operator.reports.read";
 const ACTION_OPERATOR_REPORTS_RESOLVE = "operator.reports.resolve";
 const ACTION_OPERATOR_CONTENT_CONTROL = "operator.content.control";
 const ACTION_OPERATOR_AREA_RENAME = "operator.area.rename";
@@ -1050,7 +1060,45 @@ export function stoaSaveProblemBrief(
     principalId,
     body: JSON.stringify(command),
     idempotencyKey,
-    parse: (value) => SponsorProblemBriefSchema.parse((value as { brief?: unknown } | null)?.brief),
+    parse: (value) => {
+      const { brief } = SaveProblemBriefResponseSchema.parse(value);
+      if (brief.sponsor_id !== principalId || brief.status !== "active" ||
+          (command.id !== undefined && brief.id !== command.id) ||
+          brief.version !== (command.expected_version ?? 0) + 1) {
+        throw new TypeError("The saved brief receipt does not match its command.");
+      }
+      return brief;
+    },
+  });
+}
+
+/** Withdraw the exact reviewed private brief; keep the body and key on retry. */
+export function stoaWithdrawProblemBrief(
+  principalId: string,
+  briefId: string,
+  request: WithdrawProblemBriefRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<WithdrawProblemBriefResponse>> {
+  const command = WithdrawProblemBriefRequestSchema.parse(request);
+  if (typeof briefId !== "string" || briefId.length < 1 || briefId.length > 128) {
+    return Promise.resolve({ ok: false, reason: "refused", status: 400, problemCode: "PROBLEM_BRIEF_BODY_INVALID" });
+  }
+  const path = `${ROUTE_SPONSOR_PROBLEM_BRIEFS}/${encodeURIComponent(briefId)}/withdraw`;
+  return callStoa({
+    method: "POST",
+    route: path,
+    path,
+    action: "withdraw-problem-brief",
+    principalId,
+    body: JSON.stringify(command),
+    idempotencyKey,
+    parse: (value) => {
+      const receipt = WithdrawProblemBriefResponseSchema.parse(value);
+      if (receipt.id !== briefId || receipt.version !== command.expected_version + 1) {
+        throw new TypeError("The withdrawal receipt does not match its command.");
+      }
+      return receipt;
+    },
   });
 }
 
@@ -1157,11 +1205,14 @@ export function stoaSetProblemWriterCap(
     body: JSON.stringify(action),
     idempotencyKey,
     parse: (value) => {
-      const problem = (value as { problem?: unknown } | null)?.problem;
-      const receipt = ProblemDetailSchema.pick({ id: true, writer_cap: true, updated_at: true })
-        .required({ writer_cap: true })
-        .strip()
-        .parse(problem);
+      const problem = (value as {
+        problem?: { id?: unknown; writer_cap?: unknown; updated_at?: unknown };
+      } | null)?.problem;
+      const receipt = {
+        id: ProblemDetailSchema.shape.id.parse(problem?.id),
+        writer_cap: ProblemDetailSchema.shape.writer_cap.unwrap().parse(problem?.writer_cap),
+        updated_at: ProblemDetailSchema.shape.updated_at.parse(problem?.updated_at),
+      };
       if (receipt.id !== command.problem_id || receipt.writer_cap !== command.limit) {
         throw new Error("The writer-cap receipt does not match this command.");
       }
@@ -1590,6 +1641,31 @@ export function stoaAdminReportsQueue(
     body: "",
     responseMaxBytes: MAX_STOA_OPERATOR_AUDIT_RESPONSE_BYTES,
     parse: (value) => AdminReportsQueueResponseSchema.parse(value),
+  });
+}
+
+/** One private allegation and its exact retained publication. */
+export function stoaAdminReportDetail(
+  operatorId: string,
+  reportId: string,
+): Promise<StoaCall<AdminReportDetail>> {
+  if (!AdminReportIdSchema.safeParse(reportId).success) {
+    return Promise.resolve({ ok: false, reason: "refused", status: 404 });
+  }
+  return callStoa({
+    method: "GET",
+    route: ROUTE_OPERATOR_REPORT_DETAIL,
+    path: "/v1/operators/reports/" + reportId,
+    action: ACTION_OPERATOR_REPORT_READ,
+    principalId: operatorId,
+    principalType: "operator",
+    body: "",
+    responseMaxBytes: ADMIN_REPORT_DETAIL_MAX_RESPONSE_BYTES,
+    parse: (value) => {
+      const detail = AdminReportDetailSchema.parse(value);
+      if (detail.report.report_id !== reportId) throw new Error("Report response does not match the requested report.");
+      return detail;
+    },
   });
 }
 

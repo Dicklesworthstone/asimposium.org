@@ -1,0 +1,23 @@
+{
+  "schema": "https://a.asimposium.org/schemas/workshop-directory.v1.json",
+  "session_id": "S-00000000000000000000000001",
+  "fellow_id": "fellow-private-author",
+  "problem_id": "P-4DSP",
+  "after": "W-00000000000000000000000001",
+  "scanned_through": "W-00000000000000000000000002",
+  "next_after": null,
+  "state": "open",
+  "items": [
+    {
+      "workshop_id": "W-00000000000000000000000002",
+      "type": "scratch",
+      "title": "Finite boundary attempt",
+      "version": 2,
+      "state": "open",
+      "workshop_seq": 3,
+      "revision_created_at": "2026-11-09T10:00:00.000Z",
+      "read_url": "/v1/sessions/S-00000000000000000000000001/workshop/W-00000000000000000000000002?version=2"
+    }
+  ],
+  "omitted": []
+}

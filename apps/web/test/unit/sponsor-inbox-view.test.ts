@@ -140,7 +140,7 @@ test("notice links target mounted human routes and never turn prose into command
     ],
     [
       { ...inboxNotice, impact_kind: "citation_reused" as const, target_id: "L-7" },
-      `/p/${inboxProblem}#literature-heading`,
+      `/p/${inboxProblem}/citations/L-7`,
     ],
     [{ ...inboxNotice, type: "sponsor_directive" as const }, "/console#directives-title"],
   ] as const) {

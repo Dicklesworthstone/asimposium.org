@@ -24,6 +24,7 @@ import {
   OpaqueProblemSchema,
   PackResponseSchema,
   ProblemDocumentSchema,
+  ProblemGovernanceEventSchema,
   ProblemNextResponseSchema,
   ProblemStatementReviewResponseSchema,
   PromoteResponseSchema,
@@ -53,6 +54,10 @@ import {
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
+import {
+  WorkshopDirectoryResponseSchema,
+  workshopDirectoryPath,
+} from "@asimposium/contracts/workshop-directory";
 import { protocolVersionPair } from "@asimposium/protocol";
 import type { ExecutionContext } from "@cloudflare/workers-types";
 import { createApp } from "../../src/app.ts";
@@ -108,6 +113,7 @@ import {
   readTargetClaimPack,
 } from "../../src/sessions/ledger-pack.ts";
 import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
+import { WORKSHOP_DIRECTORY_SQL } from "../../src/sessions/workshop-directory.ts";
 import { normHash, sha256Hex } from "../../src/split/policy.ts";
 import { migratedSqlite } from "../support/migrated-sqlite";
 import { syntheticScreeningObservation } from "../support/screening.ts";
@@ -304,7 +310,7 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
       expect(later.sequence).toBeGreaterThan(earlier.sequence);
       expect(pack.cursor).toBe(earlier.sequence);
       expect(pack.items.find((item) => item.id === "SYS-synthesis-staleness")?.body).toContain(
-        `synthesis covers through #${earlier.covers_through} — stale by 3 material events`,
+        `synthesis covers through #${earlier.covers_through} — stale by 4 material events`,
       );
       const current = PackResponseSchema.parse(
         await (await f.call(`${f.path}/pack?profile=${profile}&max_tokens=8000`)).json(),
@@ -315,6 +321,38 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
       );
     },
   );
+
+  test("synthesis context ignores an acquired scientific-object lease and follows gap settlement", async () => {
+    const f = await ledgerPackFixture();
+    const synthesis = SynthesizeResponseSchema.parse(
+      await f.post(`${f.path}/synthesize`, {
+        covers_through: Number(f.relation.seq),
+        body_md: "The current claim, proposed relation and unclosed proof gap are recorded.",
+        anchors: [{ target_kind: "claim", target_id: "C-1", target_version: 1 }],
+        omitted: [],
+        selection_policy: "Summarize the recorded research frontier at this cut.",
+      }),
+    );
+    await f.post(`${f.path}/leases`, {
+      object: "C-1",
+      objective: "Check the parity claim against its exact statement.",
+      deliverable: "A reviewed argument or counterexample.",
+      parallel_safe: false,
+    });
+    const check = async (count: number) => {
+      for (const profile of ["orient", "working"] as const) {
+        const response = await f.call(`${f.path}/pack?profile=${profile}&max_tokens=8000`);
+        expect(response.status, await response.clone().text()).toBe(200);
+        const pack = PackResponseSchema.parse(await response.json());
+        expect(pack.items.find((item) => item.id === "SYS-synthesis-staleness")?.body).toContain(
+          `synthesis covers through #${synthesis.covers_through} — stale by ${count} material events`,
+        );
+      }
+    };
+    await check(0);
+    await f.post(`${f.path}/gaps/close`, { gap_id: f.gap.gap_id, outcome: "withdrawn" });
+    await check(1);
+  });
 
   test("synthesis context uses committed metadata and never revives a hidden latest publication", async () => {
     const f = await ledgerPackFixture();
@@ -14319,6 +14357,295 @@ describe("committed promotion outbox nudge", () => {
     expect(closeReplay.status).toBe(200);
   });
 
+  test.each(["fellow-edit", "sponsor-discard"] as const)(
+    "resumed workshop edits recover from a %s committed during the CAS write",
+    async (winner) => {
+      const f = await fixture();
+      let key = 0;
+      const post = (path: string, body: unknown, idempotencyKey = `workshop-race-${++key}`) =>
+        f.call(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
+          body: JSON.stringify(body),
+        });
+      const open = async () => {
+        const response = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" });
+        expect(response.status, await response.clone().text()).toBe(201);
+        return SessionOpenResponseSchema.parse(await response.json()).session_id;
+      };
+      const origin = await open();
+      const created = await post(workshopDirectoryPath(origin), {
+        type: "scratch",
+        title: "Retained route",
+        body_md: "Original private work remains recoverable.",
+      });
+      expect(created.status).toBe(201);
+      const draft = WorkshopPushResponseSchema.parse(await created.json());
+      expect(
+        (await post(`/v1/sessions/${origin}/close`, { handback: "Resume the retained route." }))
+          .status,
+      ).toBe(201);
+      const path = workshopDirectoryPath(await open());
+      const sponsorRouter = createSessionRouter({
+        service: f.service,
+        replayProtector: f.replayProtector,
+        verifiedSponsor: async (request) => ({
+          principal: { type: "sponsor", sponsorId: f.binding.sponsorId },
+          rawBody: new Uint8Array(await request.arrayBuffer()),
+        }),
+      });
+      const snapshot = async () => ({
+        heads: (await f.db.prepare("SELECT * FROM workshop_objects ORDER BY workshop_id").all())
+          .results,
+        revisions: (
+          await f.db.prepare("SELECT * FROM workshop_revisions ORDER BY workshop_id, version").all()
+        ).results,
+        replays: (
+          await f.db
+            .prepare(
+              "SELECT * FROM session_write_replays ORDER BY scope, principal_scope, idempotency_key",
+            )
+            .all()
+        ).results,
+        events: (await f.db.prepare("SELECT * FROM events ORDER BY id").all()).results,
+        cursor: (await f.db.prepare("SELECT * FROM public_cursor").all()).results,
+      });
+      let committed: Awaited<ReturnType<typeof snapshot>> | undefined;
+      let overlap: (() => Promise<void>) | undefined = async () => {
+        const response =
+          winner === "fellow-edit"
+            ? await post(path, {
+                workshop_id: draft.workshop_id,
+                base_version: 1,
+                body_md: "The concurrent Fellow edit must survive.",
+              })
+            : await sponsorRouter.fetch(
+                new Request("https://a-staging.asimposium.org/v1/sponsors/workshop/action", {
+                  method: "POST",
+                  headers: {
+                    "content-type": "application/json",
+                    "idempotency-key": "sponsor-wins",
+                  },
+                  body: JSON.stringify({
+                    problem_id: "P-4DSP",
+                    fellow_id: f.binding.fellowId,
+                    workshop_id: draft.workshop_id,
+                    expected_workshop_version: 1,
+                    action: "discard",
+                  }),
+                }),
+                f.env,
+              );
+        expect(response.status, await response.clone().text()).toBe(201);
+        committed = await snapshot();
+      };
+      f.env.ARTIFACTS = {
+        put: async () => {
+          const interleave = overlap;
+          overlap = undefined;
+          await interleave?.();
+          return {};
+        },
+      } as never;
+      const edit = {
+        workshop_id: draft.workshop_id,
+        base_version: 1,
+        body_md: "Recovered private boundary calculation. ".repeat(40),
+      };
+      const refused = await post(path, edit, "stale-resumed-edit");
+      expect(overlap).toBeUndefined();
+      expect(committed).toBeDefined();
+      if (committed === undefined) throw new Error("Concurrent workshop action did not commit");
+      expect(refused.status, await refused.clone().text()).toBe(409);
+      expect(refused.headers.get("cache-control")).toBe("private, no-store");
+      expect(ContractProblemSchema.parse(await refused.json())).toMatchObject({
+        code: "WORKSHOP_VERSION_CONFLICT",
+        current_version: 2,
+        suggested_action: "refetch_and_reapply",
+        refetch_url: `${path}/${draft.workshop_id}`,
+        example: { workshop_id: draft.workshop_id, base_version: 2 },
+      });
+      // A losing edit owns neither a receipt nor a private revision. Its CAS
+      // write cannot replace the winning work-product binding or public state.
+      expect(await snapshot()).toEqual(committed);
+      expect((await post(path, edit, "stale-resumed-edit")).status).toBe(409);
+      expect(await snapshot()).toEqual(committed);
+      const read = await f.call(`${path}/${draft.workshop_id}`);
+      expect(read.status).toBe(200);
+      const winnerObject = WorkshopObjectResponseSchema.parse(await read.json()).object;
+      expect(winnerObject.current_version).toBe(2);
+      expect(winnerObject.state).toBe(winner === "fellow-edit" ? "open" : "discarded");
+      expect(winnerObject.body_md).toBe(
+        winner === "fellow-edit"
+          ? "The concurrent Fellow edit must survive."
+          : "Original private work remains recoverable.",
+      );
+      const recoveredEdit = {
+        ...edit,
+        base_version: winnerObject.current_version,
+        body_md: "Reapplied after reviewing the concurrent change.",
+      };
+      const recovered = await post(path, recoveredEdit, "reapplied-resumed-edit");
+      expect(recovered.status, await recovered.clone().text()).toBe(201);
+      const receipt = WorkshopPushResponseSchema.parse(await recovered.json());
+      expect(receipt.version).toBe(3);
+      const afterRecovery = await snapshot();
+      const replay = await post(path, recoveredEdit, "reapplied-resumed-edit");
+      expect(replay.status).toBe(200);
+      expect(await replay.json()).toEqual(receipt);
+      expect(await snapshot()).toEqual(afterRecovery);
+      const restored = WorkshopObjectResponseSchema.parse(
+        await (await f.call(`${path}/${draft.workshop_id}`)).json(),
+      ).object;
+      expect(restored).toMatchObject({ version: 3, state: "open", body_md: recoveredEdit.body_md });
+      const historical = WorkshopObjectResponseSchema.parse(
+        await (await f.call(`${path}/${draft.workshop_id}?version=1`)).json(),
+      ).object;
+      expect(historical.body_md).toBe("Original private work remains recoverable.");
+    },
+  );
+
+  test("workshop directory supports exact recovery, current filters, conditional HEAD and archived closed contexts", async () => {
+    const f = await fixture();
+    let key = 0;
+    const post = (path: string, body: unknown) =>
+      f.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `directory-${++key}` },
+        body: JSON.stringify(body),
+      });
+    const opened = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" });
+    const session = SessionOpenResponseSchema.parse(await opened.json()).session_id;
+    const drafts = [];
+    for (const title of ["Boundary attempt", "Retained counterexample"]) {
+      const pushed = await post(workshopDirectoryPath(session), {
+        type: "scratch",
+        title,
+        body_md: "PRIVATE_BODY_CANARY",
+        relates_to: [],
+      });
+      expect(pushed.status).toBe(201);
+      drafts.push(WorkshopPushResponseSchema.parse(await pushed.json()));
+    }
+    const url = workshopDirectoryPath(session, { limit: 1, state: "open" });
+    const response = await f.call(url);
+    expect(response.status, await response.clone().text()).toBe(200);
+    const first = WorkshopDirectoryResponseSchema.parse(await response.json());
+    expect(first.items).toHaveLength(1);
+    expect(first.next_after).not.toBeNull();
+    expect(response.headers.get("link")).toContain(`after=${first.next_after}&limit=1&state=open`);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    expect(JSON.stringify(first)).not.toContain("PRIVATE_BODY_CANARY");
+    const next = WorkshopDirectoryResponseSchema.parse(
+      await (
+        await f.call(
+          workshopDirectoryPath(session, { limit: 1, state: "open", after: first.next_after! }),
+        )
+      ).json(),
+    );
+    expect(new Set([...first.items, ...next.items].map((item) => item.workshop_id)).size).toBe(2);
+    expect(next.next_after).toBeNull();
+    const pinned = first.items[0]!.read_url;
+    const recovered = await f.call(pinned);
+    expect(recovered.status).toBe(200);
+    expect(WorkshopObjectResponseSchema.parse(await recovered.json()).object.body_md).toBe(
+      "PRIVATE_BODY_CANARY",
+    );
+    const conditional = await f.call(url, {
+      method: "HEAD",
+      headers: { "if-none-match": response.headers.get("etag")! },
+    });
+    expect(conditional.status).toBe(304);
+    expect(await conditional.text()).toBe("");
+    expect(conditional.headers.get("cache-control")).toBe("private, no-store");
+    for (const query of [
+      "?state=all",
+      "?limit=101",
+      "?limit=2%0A",
+      "?limit=1&limit=2",
+      "?fellow_id=foreign",
+    ]) {
+      const refused = await f.call(workshopDirectoryPath(session) + query);
+      expect(refused.status).toBe(400);
+      expect(ContractProblemSchema.parse(await refused.json()).code).toBe("SCHEMA_INVALID");
+    }
+    const closed = await post(`/v1/sessions/${session}/close`, {
+      handback: "Retain the exact drafts for later recovery.",
+      keep: drafts.map((item) => item.workshop_id),
+    });
+    expect(closed.status, await closed.clone().text()).toBe(201);
+    await f.db
+      .prepare("UPDATE problems SET admission_mode='archived-read-only' WHERE id='P-4DSP'")
+      .run();
+    const archived = await f.call(workshopDirectoryPath(session));
+    expect(archived.status, await archived.clone().text()).toBe(200);
+    expect(WorkshopDirectoryResponseSchema.parse(await archived.json()).items).toHaveLength(2);
+    expect((await f.call(pinned)).status).toBe(200);
+    // An updated resource grant also controls recovery of own historical work.
+    f.service.credentialBinding = async () => ({
+      ...f.binding,
+      grantedResources: { ...f.binding.grantedResources, problemBinding: "P-OTHER" },
+    });
+    for (const path of [workshopDirectoryPath(session), pinned]) {
+      const denied = await f.call(path);
+      expect(denied.status).toBe(404);
+      expect(ProblemDocumentSchema.parse(await denied.json()).code).toBe("WORKSHOP_NOT_FOUND");
+      expect(denied.headers.get("cache-control")).toBe("private, no-store");
+    }
+  });
+
+  test("workshop directory rechecks reduced credentials before bytes or conditional receipts and fails storage opaquely", async () => {
+    let afterRead: (() => void) | undefined;
+    let unavailable = false;
+    const f = await fixture({
+      afterRead: async (read) => {
+        if (read.kind === "all" && read.sql === WORKSHOP_DIRECTORY_SQL) afterRead?.();
+      },
+      beforeRead: async (read) => {
+        if (unavailable && read.sql === WORKSHOP_DIRECTORY_SQL)
+          throw new Error("SQL_DIAGNOSTIC_CANARY");
+      },
+    });
+    const opened = await f.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "directory-race-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json()).session_id;
+    const url = workshopDirectoryPath(session);
+    const first = await f.call(url);
+    expect(first.status).toBe(200);
+    const original = f.service.credentialBinding.bind(f.service);
+    afterRead = () => {
+      f.service.credentialBinding = async () => ({
+        ...f.binding,
+        grantedResources: { ...f.binding.grantedResources, problemBinding: "P-OTHER" },
+      });
+    };
+    const changed = await f.call(url, { headers: { "if-none-match": first.headers.get("etag")! } });
+    expect(changed.status).toBe(404);
+    expect(changed.headers.get("cache-control")).toBe("private, no-store");
+    f.service.credentialBinding = original;
+    afterRead = () => {
+      f.service.credentialBinding = async () => undefined;
+    };
+    const revoked = await f.call(url, {
+      method: "HEAD",
+      headers: { "if-none-match": first.headers.get("etag")! },
+    });
+    expect(revoked.status).toBe(401);
+    expect(await revoked.text()).toBe("");
+    expect(revoked.headers.get("cache-control")).toBe("private, no-store");
+    f.service.credentialBinding = original;
+    afterRead = undefined;
+    unavailable = true;
+    const failed = await f.call(url);
+    expect(failed.status).toBe(503);
+    expect(failed.headers.get("cache-control")).toBe("private, no-store");
+    expect(await failed.text()).not.toContain("SQL_DIAGNOSTIC_CANARY");
+  });
+
   test("PLANTED: working packs disclose workshop-head truncation at six rows (j9hw)", async () => {
     // The working-profile workshop query reads one row past the emitted five
     // purely to decide disclosure: five heads compose with no truncation
@@ -14400,6 +14727,12 @@ describe("committed promotion outbox nudge", () => {
     expect(packSixResponse.status).toBe(200);
     const packSixText = await packSixResponse.text();
     const packSix = PackResponseSchema.parse(JSON.parse(packSixText));
+    expect(packSix.next_actions).toContainEqual(
+      expect.objectContaining({
+        method: "GET",
+        url: workshopDirectoryPath(sixSession),
+      }),
+    );
     const headItems = packSix.items.filter((item) => item.kind === "workshop-head");
     expect(headItems).toHaveLength(5);
     expect(packSix.omitted).toContainEqual({
@@ -15148,32 +15481,31 @@ describe("committed promotion outbox nudge", () => {
           return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
         },
       });
-      const problem = await f.db
-        .prepare("SELECT title FROM problems WHERE id = 'P-4DSP'")
-        .first<{ title: string }>();
-      if (!problem) throw new Error("Missing fixture problem");
-      // The native session fixture starts at a seeded public formulation. Give
+      const title = "Parity of every integer and its square";
+      // The SQLite session fixture starts at a seeded public formulation. Give
       // both formulations real Krater envelopes so the mounted synthesis route
       // must screen the current version while retaining an older reference.
       const appendStatement = async (version: number, statement: string) => {
         const createdAt = new Date().toISOString();
-        const payloadJson = JSON.stringify({
-          action: version === 1 ? "publish" : "revise-statement",
-          acting_principal: { type: "sponsor", id: f.binding.sponsorId },
-          source_fellow_id: f.binding.fellowId,
-          previous_statement_version: version === 1 ? 1 : version - 1,
-          previous_status: version === 1 ? "private-draft" : "active",
-          problem: {
-            id: "P-4DSP",
-            title: problem.title,
-            status: "active",
-            current_statement_version: version,
-            statement,
-            falsifier: SESSION_FIXTURE_STATEMENT.falsifier,
-            motivation: SESSION_FIXTURE_STATEMENT.motivation,
-            updated_at: createdAt,
-          },
-        });
+        const payloadJson = JSON.stringify(
+          ProblemGovernanceEventSchema.parse({
+            action: version === 1 ? "publish" : "revise-statement",
+            acting_principal: { type: "sponsor", id: f.binding.sponsorId },
+            source_fellow_id: f.binding.fellowId,
+            previous_statement_version: version === 1 ? 1 : version - 1,
+            previous_status: version === 1 ? "private-draft" : "active",
+            problem: {
+              id: "P-4DSP",
+              title,
+              status: version === 1 ? "sharpening" : "active",
+              current_statement_version: version,
+              statement,
+              falsifier: SESSION_FIXTURE_STATEMENT.falsifier,
+              motivation: SESSION_FIXTURE_STATEMENT.motivation,
+              updated_at: createdAt,
+            },
+          }),
+        );
         const hash = await normHash(statement);
         return writeLedgerEvent(
           f.db,
@@ -15200,7 +15532,13 @@ describe("committed promotion outbox nudge", () => {
           {
             statementsAfterEvent: () =>
               version === 1
-                ? []
+                ? [
+                    f.db
+                      .prepare(
+                        "UPDATE problems SET title = ?, status = 'sharpening' WHERE id = 'P-4DSP'",
+                      )
+                      .bind(title),
+                  ]
                 : [
                     f.db
                       .prepare(`INSERT INTO problem_statement_versions
@@ -15586,13 +15924,11 @@ describe("committed promotion outbox nudge", () => {
             selection_policy: "One exact retained publication.",
           }),
         });
-        // Body/redaction changes invalidate the broad screening context first.
-        // Exact version/event controls reach the narrower transaction guard.
-        const contextChanged = mutation === "redact" || mutation === "corrupt-body";
-        expect(response.status, await response.clone().text()).toBe(contextChanged ? 409 : 422);
-        expect(((await response.json()) as { code: string }).code).toBe(
-          contextChanged ? "SCREENING_CONTEXT_STALE" : "SYNTHESIS_UNANCHORED",
-        );
+        // Every mutation changes this author's screened source history. The
+        // context guard now checks exact event/version controls as well as bytes,
+        // so it refuses before the narrower synthesis-anchor commit guard.
+        expect(response.status, await response.clone().text()).toBe(409);
+        expect(((await response.json()) as { code: string }).code).toBe("SCREENING_CONTEXT_STALE");
         expect(synthesisScreens).toBe(1);
         expect(await footprint()).toEqual(before);
       });

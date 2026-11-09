@@ -970,6 +970,9 @@ describe("ProblemPage Server Component", () => {
     expect(html).toContain("The finite result at version two.");
     expect(html).toContain("No external expert certification.");
     expect(html).toContain("/p/P-SP4D/syntheses/SYNTH-CLOSE.md");
+    expect(html).toContain('href="/p/P-SP4D/syntheses/SYNTH-CLOSE%401"');
+    expect(html).toContain('href="/p/P-SP4D/syntheses?through=42"');
+    expect(html).toContain('href="/p/P-SP4D/history"');
     expect(html).toContain("&lt;script&gt;unsafe()&lt;/script&gt;");
     expect(html).not.toContain("<script>unsafe()");
     expect(html).not.toContain("Current formulation");
@@ -1041,6 +1044,51 @@ describe("ProblemPage Server Component", () => {
     expect(empty).toContain("A simple path with n edges has n + 1 vertices.");
   });
 
+  test("ProblemPage renders the canonical versioned research boundaries without treating them as claims or resolution", async () => {
+    const legacy = JSON.parse(readFileSync(new URL(
+      "../../../../packages/contracts/test/fixtures/valid/ledger-problem-formulation.json",
+      import.meta.url,
+    ), "utf8"));
+    const boundaryItems = [
+      { kind: "problem-scope", id: "S@2-scope", body: "SCOPE_V2 Finite simple paths with $n \\geq 0$ edges." },
+      { kind: "problem-out-of-scope", id: "S@2-out-of-scope", body: "EXCLUSIONS_V2 Infinite paths. <script>boundaryAttack()</script>" },
+      { kind: "problem-success-criteria", id: "S@2-success-criteria", body: "CRITERIA_V2 Establish the count for every path in scope, or give a counterexample. <img src=x onerror=boundaryAttack()>" },
+    ].map((item) => ({
+      ...item, scope: "ledger", untrusted: true,
+      why_included: "current problem formulation at statement version S@2", neutralized: [],
+    }));
+    let face = { ...legacy, items: [...legacy.items, ...boundaryItems, ...MOCK_PROBLEM_FACE.items] };
+    setMockFetch(async () => Response.json(face));
+    expect(dataOf(await stoaFetchProblemFace(face.problem)).items)
+      .toEqual(face.items);
+    const props = { params: Promise.resolve({ slug: face.problem }) };
+    const html = renderToStaticMarkup(await ProblemPage(props));
+    for (const [label, id, marker] of [
+      ["Scope", "S@2-scope", "SCOPE_V2"],
+      ["Out of scope", "S@2-out-of-scope", "EXCLUSIONS_V2"],
+      ["Success criteria", "S@2-success-criteria", "CRITERIA_V2"],
+    ] as const) {
+      expect(html).toContain(`aria-label="${label}"`);
+      expect(html).toContain(id);
+      expect(html).toContain(marker);
+      expect(html).not.toContain(`/claims/${id}`);
+    }
+    expect(html).toContain('class="katex"');
+    expect(html).toContain("&lt;script&gt;boundaryAttack()&lt;/script&gt;");
+    expect(html).toContain("&lt;img src=x onerror=boundaryAttack()&gt;");
+    expect(html).not.toContain("<script>boundaryAttack()");
+    expect(html).not.toContain("<img src=x");
+    expect(html).toContain("Author-supplied formulation · untrusted data");
+    expect(html).toContain("2 public claims promoted");
+    expect(html).not.toContain("Recorded resolution");
+    face = { ...legacy, items: [...legacy.items, ...MOCK_PROBLEM_FACE.items] };
+    const historical = renderToStaticMarkup(await ProblemPage(props));
+    expect(historical).not.toContain('aria-label="Scope"');
+    expect(historical).not.toContain('aria-label="Out of scope"');
+    expect(historical).not.toContain('aria-label="Success criteria"');
+    expect(historical).not.toContain("CRITERIA_V2");
+  });
+
   test("ProblemPage renders commentary lane, citations, and single-team banner", async () => {
     const mockCommentary = {
       schema: COMMENTARY_SCHEMA_ID,
@@ -1069,6 +1117,7 @@ describe("ProblemPage Server Component", () => {
     const mockCitations = {
       schema: CITATIONS_SCHEMA_ID,
       problem_id: "P-SP4D",
+      cursor: 42, after: 0, scanned_through: 10, next_after: null, unanchored: null,
       citations: [
         {
           citation_id: "L-1",
@@ -1112,10 +1161,14 @@ describe("ProblemPage Server Component", () => {
       ),
     );
 
+    const literatureReads: string[] = [];
     setMockFetch(async (input) => {
       const url = String(input);
       if (url.includes("/commentary.json")) return Response.json(mockCommentary);
-      if (url.includes("/citations.json")) return Response.json(mockCitations);
+      if (url.includes("/citations.json")) {
+        literatureReads.push(url);
+        return Response.json(mockCitations);
+      }
       if (url.includes("/claims/")) return Response.json(claim);
       return Response.json(singleTeamFace);
     });
@@ -1147,8 +1200,31 @@ describe("ProblemPage Server Component", () => {
     expect(html.indexOf(notice)).toBeLessThan(html.indexOf("Foundations of Operator Algebras"));
     expect(html).toContain("Takesaki, M.");
     expect(html).toContain("1 literature citations");
+    expect(html).toContain("in this preview");
+    expect(html).toContain('href="/p/P-SP4D/citations/L-1%401?through=42"');
+    expect(html).toContain("Retrieved (Fellow-declared)");
+    expect(literatureReads).toEqual([`${PRODUCTION_STOA_ORIGIN}/p/P-SP4D/citations.json?through=42&limit=8`]);
     expect(html).toContain("/p/P-SP4D/citations.md");
     expect(html).toContain("/p/P-SP4D/citations.json");
+  });
+
+  test("problem literature preserves unavailable-source omissions instead of inventing an empty bibliography", async () => {
+    setMockFetch(async (input) => {
+      const url = String(input);
+      if (url.includes("/citations.json")) return Response.json({
+        schema: CITATIONS_SCHEMA_ID, problem_id: "P-SP4D", cursor: 42,
+        after: 0, scanned_through: 40, next_after: 40, unanchored: null,
+        citations: [], omitted: ["content_unavailable", "page_limit"],
+      });
+      if (url.includes("/commentary.json") || url.includes("/claims/")) return missingProblem();
+      return Response.json(MOCK_PROBLEM_FACE);
+    });
+    const html = renderToStaticMarkup(await ProblemPage({ params: Promise.resolve({ slug: "P-SP4D" }) }));
+    expect(html).toContain("No readable citations were returned in this preview");
+    expect(html).toContain("An omitted source is not evidence that no citation was registered");
+    expect(html).toContain("More citation publication positions remain");
+    expect(html).toContain('href="/p/P-SP4D/citations?through=42"');
+    expect(html).not.toContain("No literature citations have been registered");
   });
 
   test("commentary pagination keeps a bounded increasing public prefix and rejects crossed problem pages", async () => {
@@ -1252,6 +1328,7 @@ describe("ProblemPage Server Component", () => {
         return Response.json({
           schema: CITATIONS_SCHEMA_ID,
           problem_id: "P-SP4D",
+          cursor: 42, after: 0, scanned_through: 0, next_after: null, unanchored: null,
           citations: [],
           omitted: [],
         });
@@ -1334,6 +1411,7 @@ describe("ProblemPage Server Component", () => {
         return Response.json({
           schema: CITATIONS_SCHEMA_ID,
           problem_id: "P-SP4D",
+          cursor: 42, after: 0, scanned_through: 0, next_after: null, unanchored: null,
           citations: [],
           omitted: [],
         });
@@ -1353,8 +1431,8 @@ describe("ProblemPage Server Component", () => {
       expect(citeRes.data.citations).toEqual([]);
     }
 
-    setMockFetch(async () =>
-      Response.json({ status: 404, code: "PROBLEM_NOT_FOUND" }, { status: 404 }),
+    setMockFetch(async (input) =>
+      Response.json({ status: 404, code: String(input).includes("/citations.json") ? "CITATION_NOT_FOUND" : "PROBLEM_NOT_FOUND" }, { status: 404 }),
     );
     expect((await stoaFetchCommentary("P-NONEXISTENT")).state).toBe("not_found");
     expect((await stoaFetchCitations("P-NONEXISTENT")).state).toBe("not_found");

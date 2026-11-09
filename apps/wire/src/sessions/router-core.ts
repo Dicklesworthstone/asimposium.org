@@ -108,6 +108,12 @@ import {
 } from "@asimposium/contracts";
 import { eventTailCursor } from "@asimposium/contracts/event-tail";
 import {
+  WORKSHOP_DIRECTORY_MAX_RESPONSE_BYTES,
+  WORKSHOP_DIRECTORY_SCHEMA_ID,
+  WorkshopDirectoryQuerySchema,
+  workshopDirectoryPath,
+} from "@asimposium/contracts/workshop-directory";
+import {
   bucketizePackBudget,
   byteLength,
   composedPackToProjection,
@@ -213,10 +219,12 @@ import {
   loadProblemSyntheses,
   validateSynthesisAnchors,
 } from "../ledger/synthesis";
+import { synthesisMaterialEventSql } from "../ledger/synthesis-events.ts";
 import {
   isSynthesisReferenceChanged,
   synthesisAnchorGuards,
 } from "../ledger/synthesis-references.ts";
+import { isStatementReviewMove } from "../mega-commands/move-permissions.ts";
 import { isScreeningPostureChangedError } from "../moderation/posture";
 import { logRosterDiagnostic } from "../problems/roster";
 import { scanFieldsForCredentials, secretShapedContentProblem } from "../screening/credential-scan";
@@ -273,6 +281,11 @@ import {
 } from "./ledger-pack";
 import { readOrientationPack } from "./orientation-pack.ts";
 import {
+  type PrivateProblemPackSection,
+  privateProblemPackStillCurrent,
+  readPrivateProblemPack,
+} from "./private-problem-pack.ts";
+import {
   archivedProblemWriteProblem,
   isArchivedProblemWriteError,
 } from "./problem-archive-admission.ts";
@@ -312,6 +325,7 @@ import {
   SessionCloseWorkshopError,
   type SessionCloseWorkshopPlan,
   type SessionCloseWorkshopPromotion,
+  workshopRevisionSessionMatchesSql,
 } from "./session-close-workshop";
 import {
   type ClientStatementContext,
@@ -319,6 +333,7 @@ import {
   clientStatementContextGuard,
 } from "./statement-context";
 import { readWorkingMovesPack } from "./working-moves";
+import { readWorkshopDirectory, WorkshopDirectoryUnavailable } from "./workshop-directory.ts";
 import { logFellowWrite } from "./write-ops-log";
 
 /**
@@ -1431,7 +1446,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                          AND source.revision_json IS NULL AND source.type = w.type
                          AND source.ledger_intent_json IS w.ledger_intent_json
                          AND source.problem_id = w.problem_id AND source.fellow_id = w.fellow_id
-                         AND source.session_id = w.session_id
                          AND source.session_id = sessions.session_id
                          AND source.publication_json = ? AND w.publication_json = source.publication_json
                      )`
@@ -1735,6 +1749,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     db: Env["DB"],
     problemId: string,
     binding: FellowCredentialBinding,
+    access: { readonly readOnly?: boolean } = {},
   ): Promise<void> {
     const problem = await db
       .prepare(
@@ -1764,7 +1779,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     )
       throw new SessionProblemMissingError(problemId);
 
-    if (problem.admission_mode === "archived-read-only") {
+    if (problem.admission_mode === "archived-read-only" && !access.readOnly) {
       throw new ProblemArchivedError(problemId);
     }
 
@@ -2550,6 +2565,127 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }),
     );
 
+  app.use("/v1/sessions/:id/workshop", async (c, next) => {
+    await next();
+    if (c.req.method !== "GET" && c.req.method !== "HEAD") return;
+    c.res.headers.set("cache-control", "private, no-store");
+    c.res.headers.set("x-robots-tag", "noindex, nofollow");
+    if (c.req.method === "HEAD") {
+      c.res = new Response(null, { status: c.res.status, headers: c.res.headers });
+    }
+  });
+  app.get("/v1/sessions/:id/workshop", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return privateNoStore(auth.response);
+    const params = new URL(c.req.url).searchParams;
+    const repeated = new Set(params.keys()).size !== params.size;
+    const parsed = WorkshopDirectoryQuerySchema.safeParse(Object.fromEntries(params));
+    if (repeated || !parsed.success) {
+      return privateNoStore(
+        validatedProblem({
+          status: 400,
+          code: "SCHEMA_INVALID",
+          title: "Invalid workshop directory selection",
+          detail:
+            "Use only one after, limit or state value. The directory derives ownership and problem scope from your session.",
+          fixHint:
+            "Omit parameters to read all states, or use state=open|archived|discarded and limit=1..100. Follow next_after with the same state selection.",
+          rule: "A5",
+          extensions: {
+            schema: WORKSHOP_DIRECTORY_SCHEMA_ID,
+            example: {
+              method: "GET",
+              path: workshopDirectoryPath(c.req.param("id"), { limit: 20 }),
+            },
+          },
+        }),
+      );
+    }
+    try {
+      const ownedSession = () =>
+        c.env.DB.prepare("SELECT problem_id FROM sessions WHERE session_id = ? AND fellow_id = ?")
+          .bind(c.req.param("id"), auth.binding.fellowId)
+          .first<{ problem_id: string }>();
+      // Closed sessions are recovery contexts. A later owned session can also
+      // recover this Fellow's earlier retained work on the same problem.
+      const session = await ownedSession();
+      if (
+        session === null ||
+        (auth.binding.grantedResources.problemBinding !== undefined &&
+          auth.binding.grantedResources.problemBinding !== session.problem_id)
+      )
+        return workshopNotFound();
+      await requireSessionProblemAccess(c.env.DB, session.problem_id, auth.binding, {
+        readOnly: true,
+      });
+      const page = await readWorkshopDirectory(
+        c.env.DB,
+        {
+          sessionId: c.req.param("id"),
+          problemId: session.problem_id,
+          fellowId: auth.binding.fellowId,
+        },
+        parsed.data,
+      );
+      const body = JSON.stringify(page);
+      if (byteLength(body) > WORKSHOP_DIRECTORY_MAX_RESPONSE_BYTES)
+        throw new WorkshopDirectoryUnavailable();
+      const etag = `"${await sha256Text(body)}"`;
+      const current = await authenticate(c.req.raw);
+      if (!current.ok) return privateNoStore(current.response);
+      const currentSession = await ownedSession();
+      if (
+        current.binding.fellowId !== auth.binding.fellowId ||
+        currentSession?.problem_id !== session.problem_id ||
+        (current.binding.grantedResources.problemBinding !== undefined &&
+          current.binding.grantedResources.problemBinding !== session.problem_id)
+      )
+        return workshopNotFound();
+      await requireSessionProblemAccess(c.env.DB, session.problem_id, current.binding, {
+        readOnly: true,
+      });
+      const next =
+        page.next_after === null
+          ? null
+          : workshopDirectoryPath(c.req.param("id"), {
+              ...parsed.data,
+              after: page.next_after,
+            });
+      const headers = {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "private, no-store",
+        "x-robots-tag": "noindex, nofollow",
+        etag,
+        link: `<${WORKSHOP_DIRECTORY_SCHEMA_ID}>; rel="describedby"${next === null ? "" : `, <${next}>; rel="next"`}`,
+      };
+      if (
+        c.req
+          .header("if-none-match")
+          ?.split(",")
+          .some((value) => value.trim() === etag)
+      )
+        return new Response(null, { status: 304, headers });
+      return new Response(body, { status: 200, headers });
+    } catch (error) {
+      if (
+        error instanceof SessionProblemMissingError ||
+        error instanceof ProblemArchivedError ||
+        error instanceof AdmissionRequiredError
+      )
+        return workshopNotFound();
+      return privateNoStore(
+        validatedProblem({
+          status: 503,
+          code: "INTERNAL_ERROR",
+          title: "The private workshop directory is unavailable",
+          detail: "Current private metadata could not be read safely.",
+          fixHint: "Retry the same request without advancing its continuation.",
+          headers: { "retry-after": "5" },
+        }),
+      );
+    }
+  });
+
   app.use("/v1/sessions/:id/workshop/:workshopId", async (c, next) => {
     await next();
     c.res.headers.set("cache-control", "private, no-store");
@@ -2614,8 +2750,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       )
         .bind(c.req.param("id"), auth.binding.fellowId)
         .first<{ problem_id: string }>();
-      if (session === null) return workshopNotFound();
-      await requireSessionProblemAccess(c.env.DB, session.problem_id, auth.binding);
+      if (
+        session === null ||
+        (auth.binding.grantedResources.problemBinding !== undefined &&
+          auth.binding.grantedResources.problemBinding !== session.problem_id)
+      )
+        return workshopNotFound();
+      await requireSessionProblemAccess(c.env.DB, session.problem_id, auth.binding, {
+        readOnly: true,
+      });
       const head = await c.env.DB.prepare(
         `SELECT workshop_id, type, title, body_md, cas_hash, relates_to_json,
           workshop_seq, created_at, revision_json, publication_json, current_version, state, ledger_intent_json
@@ -2713,7 +2856,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // either private bytes or a conditional receipt after a pause/revocation.
       const current = await authenticate(c.req.raw);
       if (!current.ok) return privateNoStore(current.response);
-      await requireSessionProblemAccess(c.env.DB, session.problem_id, current.binding);
+      if (
+        current.binding.fellowId !== auth.binding.fellowId ||
+        (current.binding.grantedResources.problemBinding !== undefined &&
+          current.binding.grantedResources.problemBinding !== session.problem_id)
+      )
+        return workshopNotFound();
+      await requireSessionProblemAccess(c.env.DB, session.problem_id, current.binding, {
+        readOnly: true,
+      });
       const headers = {
         "content-type": "application/json; charset=utf-8",
         "cache-control": "private, no-store",
@@ -3491,7 +3642,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   // --- GET /v1/sessions/:id/pack -----------------------------------------
   app.get("/v1/sessions/:id/pack", async (c) => {
     const auth = await authenticate(c.req.raw);
-    if (!auth.ok) return auth.response;
+    if (!auth.ok) return privateNoStore(auth.response);
     const db = c.env.DB;
     const session = await packSessionOf(db, c.req.param("id"), auth.binding.fellowId);
     if (session instanceof Response) return session;
@@ -3562,6 +3713,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (requestedMaxTokens instanceof Response) return privateNoStore(requestedMaxTokens);
 
     const membership = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const packProblem = await db
+      .prepare("SELECT status, unlisted FROM problems WHERE id = ?")
+      .bind(session.problem_id)
+      .first<{ status: string; unlisted: number }>();
+    const isPrivateDraft = packProblem?.status === "private-draft";
     const currentCursor = await readCursor(db, session.problem_id);
     let cursor = currentCursor;
     let fullAfter = 0;
@@ -3633,6 +3789,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       since = parsedSince.data.since;
     }
     let promotionBudget: RateLimitBudget | undefined;
+    let privatePack: PrivateProblemPackSection | undefined;
+    const privatePackInput = {
+      db,
+      credential: auth.binding,
+      problemId: session.problem_id,
+      sessionId: session.session_id,
+      cursor,
+      profile,
+    };
     const packResponse = async (composed: ReturnType<typeof composePack>): Promise<Response> => {
       const rendered = renderProjection(composedPackToProjection(composed), "json");
       const body = rendered.body;
@@ -3661,6 +3826,29 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         "content-type": "application/json; charset=utf-8",
         etag,
       };
+      if (privatePack !== undefined) {
+        let current = false;
+        try {
+          current = await privateProblemPackStillCurrent(
+            privatePackInput,
+            privatePack.sourceWitness,
+          );
+        } catch {
+          // A failed authority/source read must not release private bytes or
+          // endorse an earlier cached response with a 304.
+        }
+        if (!current)
+          return privateNoStore(
+            validatedProblem({
+              status: 503,
+              code: "INTERNAL_ERROR",
+              title: "The private session context changed",
+              detail:
+                "The current private formulation and access could not be confirmed. No private pack was returned.",
+              fixHint: "Refetch this same pack URL before continuing the session.",
+            }),
+          );
+      }
       const ifNoneMatch = c.req.header("if-none-match");
       if (ifNoneMatch?.split(",").some((v) => v.trim() === etag)) {
         return new Response(null, { status: 304, headers });
@@ -3807,8 +3995,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ),
               {
                 reason: "budget_exceeded",
-                detail:
-                  "orientation-context: whole formulation or event records omitted; use the linked problem and complete event-tail reads before advancing a catch-up cursor",
+                detail: isPrivateDraft
+                  ? "private-formulation: whole formulation omitted; read the linked private problem detail before continuing preparation"
+                  : "orientation-context: whole formulation or event records omitted; use the linked problem and complete event-tail reads before advancing a catch-up cursor",
               },
             ],
           });
@@ -3974,6 +4163,61 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     });
     candidates.push(...directiveContext.candidates);
 
+    if (isPrivateDraft) {
+      try {
+        const section = await readPrivateProblemPack(privatePackInput);
+        if (section === null)
+          return privateNoStore(
+            validatedProblem({
+              status: 404,
+              code: "PROBLEM_NOT_FOUND",
+              title: "Private problem context is unavailable",
+              detail: "No accessible private formulation is available for this session.",
+              fixHint: "Read /v1/hello for current assignments and session recovery.",
+              rule: "A5",
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                example: { method: "GET", path: "/v1/hello" },
+              },
+            }),
+          );
+        privatePack = section;
+      } catch {
+        return privateNoStore(
+          validatedProblem({
+            status: 503,
+            code: "INTERNAL_ERROR",
+            title: "The private session context is unavailable",
+            detail: "The private formulation and retained work could not be read safely.",
+            fixHint: "Retry this same pack URL before continuing the session.",
+          }),
+        );
+      }
+      if (["hello", "orient", "working", "digest"].includes(profile))
+        return composePackResponse({
+          schema: "asimposium.pack.v1",
+          session: session.session_id,
+          problem: session.problem_id,
+          profile,
+          cursor,
+          requested_max_tokens: requestedMaxTokens,
+          viewer: {
+            audience: "session",
+            membership: privatePack.membership,
+            effective_permissions: privatePack.effectivePermissions,
+          },
+          candidates: [...candidates, ...privatePack.candidates],
+          action_candidates: [...directiveContext.actions, ...privatePack.actions],
+          omitted: [
+            ...privatePack.omitted,
+            ...(directiveContext.omitted === null
+              ? []
+              : [{ reason: "candidate_limit", detail: directiveContext.omitted }]),
+          ],
+          degraded: [],
+        });
+    }
+
     if (profile === "digest") {
       const digest = await readDigestPack({
         db,
@@ -4046,7 +4290,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           scope: "system",
           tokens: 1,
           untrusted: false,
-          body: `No claims on ${session.problem_id} yet. The board is open.`,
+          body: isPrivateDraft
+            ? "This unpublished private draft has no public claims. Continue private workshop preparation; publication is a sponsor action."
+            : packProblem?.status === "sharpening"
+              ? "The claims board is locked until a non-proposer statement-clear review is recorded."
+              : `No claims on ${session.problem_id} yet. The board is open.`,
           why_included: "state the current public ledger baseline",
           stable_prefix: 10,
         });
@@ -4259,9 +4507,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         } else {
           const materialEvents = await db
             .prepare(
-              `SELECT COUNT(*) AS count FROM events
-               WHERE problem_id = ? AND seq > ? AND seq <= ?
-                 AND object_kind IN ('claim', 'hypothesis', 'review', 'evidence', 'dead_end', 'conflict', 'gap')`,
+              `SELECT COUNT(*) AS count FROM events e
+               WHERE e.problem_id = ? AND e.seq > ? AND e.seq <= ?
+                 AND ${synthesisMaterialEventSql("e")}`,
             )
             .bind(session.problem_id, latestSynthesis.covers_through, cursor)
             .first<{ count: number }>();
@@ -4400,8 +4648,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const authorizationTarget = {
       kind: "existing-problem" as const,
       problemId: session.problem_id,
-      publication: "published" as const,
-      unlisted: false,
+      publication: isPrivateDraft ? ("private-draft" as const) : ("published" as const),
+      unlisted: packProblem?.unlisted === 1,
       membershipRole: membership,
     };
     const authorizationEventsRecorded = await credentialEventsRecorded(
@@ -4425,6 +4673,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       actionPermissions.push("workshop:write");
     }
     if (
+      packProblem?.status !== "sharpening" &&
       authorizeFellowWrite({
         effect: "promote",
         credential: auth.binding,
@@ -4471,11 +4720,33 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 }).decision === "allow",
               workshop_push: actionPermissions.includes("workshop:write"),
               promote: actionPermissions.includes("promote:write"),
+              evidence:
+                authorizeFellowWrite({
+                  effect: "promote",
+                  credential: auth.binding,
+                  target: { ...authorizationTarget, action: "evidence" },
+                  usage: authorizationUsage,
+                  now: authorizationObservedAt,
+                }).decision === "allow",
+              dead_end:
+                authorizeFellowWrite({
+                  effect: "promote",
+                  credential: auth.binding,
+                  target: { ...authorizationTarget, action: "dead-end" },
+                  usage: authorizationUsage,
+                  now: authorizationObservedAt,
+                }).decision === "allow",
               review: reviewAllowed,
             },
           })
         : { candidates: [], omitted: [], primaryMove: null, degraded: false };
     candidates.push(...workingMoves.candidates);
+    if (
+      reviewAllowed &&
+      workingMoves.primaryMove !== null &&
+      isStatementReviewMove(workingMoves.primaryMove)
+    )
+      actionPermissions.push("review:write");
     const firstReviewTarget =
       profile === "working"
         ? workingMoves.primaryMove?.move === "review"
@@ -4515,6 +4786,28 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       action_candidates: [
         ...orientation.actions,
         ...directiveContext.actions,
+        ...(workingMoves.primaryMove !== null && isStatementReviewMove(workingMoves.primaryMove)
+          ? [
+              {
+                method: "POST" as const,
+                url: `/v1/problems/${session.problem_id}/statement-review`,
+                why: "Submit your own verdict and basis for the exact formulation using the statement-review contract and session pin in the selected move.",
+                public_read: false,
+                requires: ["review:write"],
+              },
+            ]
+          : []),
+        ...(profile === "working"
+          ? [
+              {
+                method: "GET" as const,
+                url: workshopDirectoryPath(session.session_id),
+                why: "Find all your retained workshop drafts on this problem, including earlier sessions and archived work. Follow each exact revision read_url to resume it; refresh the first page for new drafts or changed states.",
+                public_read: false,
+                requires: ["workshop:read"],
+              },
+            ]
+          : []),
         ...(deadEndSection.candidates.some((item) => item.scope === "ledger") ||
         deadEndSection.omitted.length > 0
           ? [
@@ -4777,30 +5070,31 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         }>();
       if (head === null) return workshopNotFound();
 
-      if (head.current_version !== reviseData.base_version) {
-        return validatedProblem({
-          status: 409,
-          code: "WORKSHOP_VERSION_CONFLICT",
-          title: "The workshop object base version is stale",
-          detail: `Workshop object ${head.workshop_id} is at version ${head.current_version}; the revision was based on ${reviseData.base_version}.`,
-          fixHint:
-            "Refetch the current workshop object version with GET /v1/sessions/:id/workshop/:workshop_id and reapply your edit.",
-          rule: "A5",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            current_version: head.current_version,
-            suggested_action: "refetch_and_reapply",
-            refetch_url: `/v1/sessions/${session.session_id}/workshop/${head.workshop_id}`,
-            example: {
-              workshop_id: head.workshop_id,
-              base_version: head.current_version,
-              type: head.type,
-              title: head.title,
-              body_md: "<new text>",
+      const versionConflict = (currentVersion: number) =>
+        privateNoStore(
+          validatedProblem({
+            status: 409,
+            code: "WORKSHOP_VERSION_CONFLICT",
+            title: "The workshop object base version is stale",
+            detail: `Workshop object ${head.workshop_id} is at version ${currentVersion}; the revision was based on ${reviseData.base_version}.`,
+            fixHint:
+              "Refetch the current workshop object version with GET /v1/sessions/:id/workshop/:workshop_id and reapply your edit.",
+            rule: "A5",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              current_version: currentVersion,
+              suggested_action: "refetch_and_reapply",
+              refetch_url: `/v1/sessions/${session.session_id}/workshop/${head.workshop_id}`,
+              example: {
+                workshop_id: head.workshop_id,
+                base_version: currentVersion,
+                body_md: "<new text>",
+              },
             },
-          },
-        });
-      }
+          }),
+        );
+      if (head.current_version !== reviseData.base_version)
+        return versionConflict(head.current_version);
 
       const effectiveType = reviseData.type ?? head.type;
       if (
@@ -4939,6 +5233,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                          AND closed_at IS NULL
                      )
                        AND EXISTS (
+                         SELECT 1 FROM workshop_objects
+                         WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ?
+                           AND current_version = ?
+                       )
+                       AND EXISTS (
                          SELECT 1 FROM fellow_tokens
                          WHERE credential_id = ? AND revoked_at IS NULL
                        )
@@ -4955,6 +5254,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                     session.session_id,
                     auth.binding.fellowId,
                     session.problem_id,
+                    head.workshop_id,
+                    session.problem_id,
+                    auth.binding.fellowId,
+                    head.current_version,
                     auth.binding.credentialId,
                   ),
                 db
@@ -5044,6 +5347,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         if (error instanceof ReplayClaimNotCommittedError) {
           const current = await openSessionOf(db, sessionId, auth.binding.fellowId);
           if (current instanceof Response) return current;
+          // The CAS body write and replay sealing both await. A sponsor action
+          // or another edit may win meanwhile. The batch elects a receipt only
+          // while the captured draft version still matches, so a losing edit
+          // has no private revision or replay to mistake for a committed edit.
+          const retained = await db
+            .prepare(
+              `SELECT current_version FROM workshop_objects
+               WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ?`,
+            )
+            .bind(head.workshop_id, session.problem_id, auth.binding.fellowId)
+            .first<{ current_version: number }>();
+          if (!retained) return workshopNotFound();
+          if (retained.current_version !== reviseData.base_version)
+            return versionConflict(retained.current_version);
           return writeRefusedProblem();
         }
         throw error;
@@ -5420,7 +5737,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         detail:
           kind === "changed"
             ? "The selected private version changed. No scientific checkpoint was published."
-            : "The selection must be an open matching typed research draft owned by this session and Fellow.",
+            : "The selection must be an open matching research draft owned by this Fellow on the session's problem.",
         fixHint:
           "Refetch your workshop object, save the exact typed publication or replacement, then retry with its expected_workshop_version and a new Idempotency-Key.",
         rule: "A5",
@@ -5437,6 +5754,26 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     );
   }
 
+  function workshopPublicationSourceSql(head: string, source: string): string {
+    return `${source}.workshop_id = ${head}.workshop_id AND ${source}.version = ${head}.current_version
+      AND ${source}.problem_id = ${head}.problem_id AND ${source}.fellow_id = ${head}.fellow_id
+      AND ${source}.type = ${head}.type
+      AND ${source}.ledger_intent_json IS ${head}.ledger_intent_json
+      AND ${source}.publication_json IS ${head}.publication_json
+      AND ${source}.revision_json IS ${head}.revision_json
+      AND ${workshopRevisionSessionMatchesSql(head, source)}`;
+  }
+
+  function workshopPromotionSourceSql(head: string, publishing: string): string {
+    // Content-bearing convenience claims can create an untyped head without
+    // a saved revision. That established path belongs to its creating session;
+    // resuming work or publishing saved content requires its exact source.
+    return `((${head}.session_id = ${publishing}.session_id
+        AND ${head}.publication_json IS NULL AND ${head}.revision_json IS NULL)
+      OR EXISTS (SELECT 1 FROM workshop_revisions source
+        WHERE ${workshopPublicationSourceSql(head, "source")}))`;
+  }
+
   /** Read only typed publication fields, never working notes. Both ordinary
    * and batch publication use this immutable source and its current head CAS. */
   async function readOwnedWorkshopPublication(
@@ -5447,6 +5784,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   ) {
     const row = await db
       .prepare(`SELECT w.workshop_id, w.current_version, w.state, w.type,
+      w.session_id AS origin_session_id,
       w.publication_json, w.revision_json, w.ledger_intent_json,
       source.publication_json AS source_publication_json,
       source.revision_json AS source_revision_json,
@@ -5456,11 +5794,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       FROM workshop_objects w LEFT JOIN workshop_revisions source
         ON source.workshop_id=w.workshop_id AND source.version=w.current_version
         AND source.problem_id=w.problem_id AND source.fellow_id=w.fellow_id
-        AND source.session_id=w.session_id
-      WHERE w.workshop_id=? AND w.session_id=? AND w.problem_id=? AND w.fellow_id=?`)
+        AND ${workshopRevisionSessionMatchesSql("w", "source")}
+      WHERE w.workshop_id=? AND EXISTS (SELECT 1 FROM sessions publishing
+        WHERE publishing.session_id=? AND publishing.problem_id=w.problem_id
+          AND publishing.fellow_id=w.fellow_id)
+        AND w.problem_id=? AND w.fellow_id=?`)
       .bind(request.workshop_id, session.session_id, session.problem_id, fellowId)
       .first<{
         workshop_id: string;
+        origin_session_id: string;
         current_version: number;
         state: string;
         type: string;
@@ -5500,8 +5842,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const ownedWorkshop = { workshop_id: row.workshop_id, current_version: row.current_version };
     // The established content-bearing form remains available for untyped WIP.
     // Once a typed publication exists, a promote action cannot rewrite it.
-    if (row.publication_json === null && row.revision_json === null && "kind" in request)
+    if (row.publication_json === null && row.revision_json === null && "kind" in request) {
+      if (
+        row.origin_session_id !== session.session_id &&
+        (row.source_version !== row.current_version ||
+          row.source_type !== row.type ||
+          row.source_publication_json !== null ||
+          row.source_revision_json !== null ||
+          row.source_ledger_intent_json !== row.ledger_intent_json)
+      )
+        return workshopPublicationProblem("invalid", request.workshop_id, row.current_version);
       return { data: request as DirectClaimRequest, ownedWorkshop, workshopPublication: undefined };
+    }
     try {
       const publication = ClaimPublicationDraftSchema.safeParse(
         JSON.parse(row.publication_json ?? "null"),
@@ -5515,6 +5867,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         row.revision_json !== null ||
         !publication.success ||
         row.source_version !== row.current_version ||
+        row.source_type !== row.type ||
         row.publication_json !== row.source_publication_json ||
         row.revision_json !== row.source_revision_json ||
         row.ledger_intent_json !== row.source_ledger_intent_json ||
@@ -5615,6 +5968,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         row.type !== "claim-draft" ||
         row.publication_json !== null ||
         row.source_version !== row.current_version ||
+        row.source_type !== row.type ||
         row.revision_json !== row.source_revision_json ||
         row.publication_json !== row.source_publication_json ||
         row.ledger_intent_json !== row.source_ledger_intent_json ||
@@ -6098,13 +6452,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                                sponsorActing
                                  ? `AND EXISTS (
                                SELECT 1 FROM workshop_revisions source
-                               WHERE source.workshop_id = w.workshop_id AND source.version = w.current_version
+                               WHERE ${workshopPublicationSourceSql("w", "source")}
                                  AND source.session_id = sessions.session_id
-                                 AND source.publication_json = w.publication_json
                              )`
-                                 : "AND w.session_id = sessions.session_id"
+                                 : `AND ${workshopPromotionSourceSql("w", "sessions")}`
 }
-                             AND w.fellow_id = sessions.fellow_id AND w.current_version = ?
+                             AND w.fellow_id = sessions.fellow_id AND w.problem_id = sessions.problem_id
+                             AND w.current_version = ?
                              ${sponsorActing ? "AND w.state = 'open' AND w.revision_json IS NULL" : ""}
                          )
                      ) THEN ? ELSE NULL END,
@@ -7098,20 +7452,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                              : `AND EXISTS (
                            SELECT 1 FROM workshop_objects w
                            WHERE w.workshop_id = ?
-                             ${
-                               sponsorActing
-                                 ? `AND EXISTS (
+                             AND EXISTS (
                                SELECT 1 FROM workshop_revisions source
-                               WHERE source.workshop_id = w.workshop_id AND source.version = w.current_version
-                                 AND source.session_id = sessions.session_id
-                                 AND source.fellow_id = sessions.fellow_id AND source.problem_id = sessions.problem_id
-                                 AND source.revision_json = w.revision_json
-                                 AND source.ledger_intent_json IS w.ledger_intent_json
+                               WHERE ${workshopPublicationSourceSql("w", "source")}
+                                 ${sponsorActing ? "AND source.session_id = sessions.session_id" : ""}
                                  AND source.publication_json IS NULL AND w.publication_json IS NULL
                                  AND source.type = 'claim-draft' AND w.type = 'claim-draft'
-                             )`
-                                 : "AND w.session_id = sessions.session_id"
-}
+                             )
                              AND w.fellow_id = sessions.fellow_id AND w.problem_id = sessions.problem_id
                              AND w.current_version = ? AND w.state = ? AND w.revision_json = ?
                          )`
@@ -7354,15 +7701,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         const current = await db
           .prepare(
             `SELECT current_version, state, revision_json FROM workshop_objects
-             WHERE workshop_id = ? ${sponsorActing ? "" : "AND session_id = ?"}
+             WHERE workshop_id = ?
                AND fellow_id = ? AND problem_id = ?`,
           )
-          .bind(
-            input.workshopSource.workshop_id,
-            ...(sponsorActing ? [] : [session.session_id]),
-            auth.binding.fellowId,
-            session.problem_id,
-          )
+          .bind(input.workshopSource.workshop_id, auth.binding.fellowId, session.problem_id)
           .first<{ current_version: number; state: string; revision_json: string | null }>();
         if (
           isSessionCloseWorkshopChanged(error) ||
@@ -7609,11 +7951,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         code: "REANCHOR_BODY_INVALID",
         title: "Invalid claim reanchor request body",
         detail: "The request body did not match the claim reanchor contract.",
-        fixHint: "Provide claim_id and base_version.",
+        fixHint:
+          "Provide claim_id and base_version; send client_context_cursor from your fresh read when the statement has revised.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: { claim_id: "C-1", base_version: 1 },
+          example: { claim_id: "C-1", base_version: 1, client_context_cursor: 41 },
         },
       });
     }
@@ -7638,6 +7981,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
+
+    const statementContext = publicationStatementContext(
+      c,
+      parsed.data,
+      session.opened_public_cursor,
+    );
+    const contextRefusal = await clientStatementContextConflict(
+      db,
+      session.problem_id,
+      statementContext,
+    );
+    if (contextRefusal) return contextRefusal;
 
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const decision = authorizeFellowWrite({
@@ -7832,6 +8187,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           kraterIdempotencyKey,
           credentialId: auth.binding.credentialId,
           session,
+          statementContext,
           responseFor: () =>
             ClaimReanchorResponseSchema.parse({
               reanchored: true,
@@ -7870,6 +8226,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       } catch (replayError) {
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
       }
+      const contextRefusal = await clientStatementContextConflict(
+        db,
+        session.problem_id,
+        statementContext,
+      );
+      if (contextRefusal) return contextRefusal;
       if (error instanceof KraterLedgerPreconditionError) {
         return validatedProblem({
           status: 409,
@@ -10346,7 +10708,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         workshop === undefined
           ? ""
           : `AND EXISTS (SELECT 1 FROM workshop_objects w
-        WHERE w.workshop_id = ? AND w.problem_id = p.id AND w.session_id = ?
+        WHERE w.workshop_id = ? AND w.problem_id = p.id
+          AND EXISTS (SELECT 1 FROM sessions publishing WHERE publishing.session_id = ?
+            AND publishing.problem_id = w.problem_id AND publishing.fellow_id = w.fellow_id
+            AND publishing.closed_at IS NULL)
+          AND EXISTS (SELECT 1 FROM workshop_revisions source
+            WHERE ${workshopPublicationSourceSql("w", "source")})
           AND w.fellow_id = ? AND w.current_version = ? AND w.state = ? AND w.revision_json = ?)`
       }`;
     const bindings = [
@@ -10509,8 +10876,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (ownedWorkshop === undefined) {
         const row = await db
           .prepare(`SELECT workshop_id, current_version FROM workshop_objects
-            WHERE workshop_id = ? AND session_id = ? AND fellow_id = ? AND problem_id = ?`)
-          .bind(data.workshop_id, session.session_id, auth.binding.fellowId, session.problem_id)
+            WHERE workshop_id = ? AND fellow_id = ? AND problem_id = ?`)
+          .bind(data.workshop_id, auth.binding.fellowId, session.problem_id)
           .first<{ workshop_id: string; current_version: number }>();
         if (!row) return privateNoStore(workshopNotFound());
         ownedWorkshop = row;
@@ -10554,7 +10921,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ownedWorkshop === undefined
           ? ""
           : `AND EXISTS (SELECT 1 FROM workshop_objects w
-        WHERE w.workshop_id = ? AND w.problem_id = p.id AND w.session_id = ?
+        WHERE w.workshop_id = ? AND w.problem_id = p.id
+          AND EXISTS (SELECT 1 FROM sessions publishing WHERE publishing.session_id = ?
+            AND publishing.problem_id = w.problem_id AND publishing.fellow_id = w.fellow_id
+            AND publishing.closed_at IS NULL AND ${workshopPromotionSourceSql("w", "publishing")})
           AND w.fellow_id = ? AND w.current_version = ?)`
       }`;
     const bindings = [
@@ -19220,16 +19590,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (parsed.data.workshop_id !== undefined) {
       const row = await db
         .prepare(
-          "SELECT workshop_id, current_version FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
+          "SELECT workshop_id, current_version FROM workshop_objects WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ?",
         )
-        .bind(parsed.data.workshop_id, session.session_id, auth.binding.fellowId)
+        .bind(parsed.data.workshop_id, session.problem_id, auth.binding.fellowId)
         .first<{ workshop_id: string; current_version: number }>();
       if (!row) {
         return validatedProblem({
           status: 404,
           code: "WORKSHOP_OBJECT_NOT_FOUND",
-          title: "No such workshop object in this session",
-          detail: "The workshop id is not one this session and Fellow own.",
+          title: "No such workshop object on this problem",
+          detail: "The workshop id is not one this Fellow owns on the session's problem.",
           fixHint: "Promote an id from your own workshop (see your pack's workshop-heads).",
           rule: "A5",
           extensions: {
@@ -21138,11 +21508,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           if (parsedClaim.data.workshop_id !== undefined) {
             const row = await db
               .prepare(
-                "SELECT workshop_id, current_version FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
+                "SELECT workshop_id, current_version FROM workshop_objects WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ?",
               )
               .bind(
                 parsedClaim.data.workshop_id,
-                sessionResult.session.session_id,
+                sessionResult.session.problem_id,
                 auth.binding.fellowId,
               )
               .first<{ workshop_id: string; current_version: number }>();
@@ -21150,8 +21520,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               return validatedProblem({
                 status: 404,
                 code: "WORKSHOP_OBJECT_NOT_FOUND",
-                title: "No such workshop object in this session",
-                detail: `The workshop id in member ${member.tempId} is not one this session and Fellow own.`,
+                title: "No such workshop object on this problem",
+                detail: `The workshop id in member ${member.tempId} is not one this Fellow owns on the session's problem.`,
                 fixHint: "Promote an id from your own workshop.",
                 rule: "A5",
                 extensions: {

@@ -47,6 +47,7 @@ async function freePort() {
 export async function startLocalTarget({
   sponsorRateLimit = "100",
   injectPromoteRefusal = true,
+  operatorPrincipalIds = [],
 } = {}) {
   const port = await freePort();
   const origin = `http://127.0.0.1:${port}`;
@@ -88,6 +89,7 @@ export async function startLocalTarget({
             STOA_ORIGIN: origin,
             AGORA_ORIGIN: "https://staging.asimposium.org",
             SPONSOR_PROMOTION_RATE_LIMIT: sponsorRateLimit,
+            OPERATOR_PRINCIPAL_IDS: operatorPrincipalIds.join(","),
             ENROLLMENT_REPLAY_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString(
               "base64url",
             ),

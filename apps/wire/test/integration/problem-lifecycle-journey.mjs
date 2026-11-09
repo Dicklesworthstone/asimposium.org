@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   EnrollmentProblemBindingSchema,
+  FellowProblemBriefListResponseSchema,
+  FellowProblemBriefReadResponseSchema,
+  fellowProblemBriefReadUrl,
   ProblemAccessActionReceiptSchema,
+  ProblemDetailSchema,
   ProblemIdSchema,
   ProblemPublicationResponseSchema,
   PublicLedgerProblemIdSchema,
@@ -93,6 +97,14 @@ export async function problemLifecycleJourney({
   // another sponsor's known brief ID. Compare hashes without logging drafts.
   await refuseBriefEdit(sponsorB, savedBrief.brief.id, "Cross-sponsor overwrite attempt");
   const fellowA = await call("/v1/hello", undefined, fellowA1Token);
+  assert.ok(fellowA.next_actions.some((action) => action.url.endsWith("/v1/problem-briefs")));
+  const unassignedBriefs = FellowProblemBriefListResponseSchema.parse(
+    await call("/v1/problem-briefs", undefined, fellowA1Token),
+  );
+  assert.equal(
+    unassignedBriefs.briefs.some((brief) => brief.id === savedBrief.brief.id),
+    false,
+  );
   const editedBrief = await sponsorCall(
     sponsorA,
     "POST",
@@ -101,6 +113,7 @@ export async function problemLifecycleJourney({
     {
       ...briefPayload,
       id: savedBrief.brief.id,
+      expected_version: savedBrief.brief.version,
       title: "Assigned modular-cycle brief",
       assigned_fellow_id: fellowA.fellow.fellow_id,
     },
@@ -113,6 +126,38 @@ export async function problemLifecycleJourney({
   assert.equal(storedEditedBrief.assigned_fellow_id, fellowA.fellow.fellow_id);
   assert.ok(storedEditedBrief.title === "Assigned modular-cycle brief");
   assert.ok(editedBrief.brief.title === storedEditedBrief.title);
+
+  // The Fellow follows the server-authored read rather than receiving copied
+  // private intent out of band. Another sponsor's Fellow cannot read it.
+  const assignedBriefs = FellowProblemBriefListResponseSchema.parse(
+    await call("/v1/problem-briefs", undefined, fellowA1Token),
+  );
+  assert.deepEqual(
+    assignedBriefs.briefs.map((brief) => brief.id),
+    [savedBrief.brief.id],
+  );
+  assert.deepEqual(assignedBriefs.omitted, []);
+  assert.equal(JSON.stringify(assignedBriefs).includes(briefPayload.statement), false);
+  const assignedReadUrl = assignedBriefs.briefs[0].read_url;
+  const assignedDetail = FellowProblemBriefReadResponseSchema.parse(
+    await call(assignedReadUrl, undefined, fellowA1Token),
+  );
+  assert.deepEqual(assignedDetail.brief, editedBrief.brief);
+  assert.equal(assignedDetail.next_actions[0]?.url, "/v1/problems");
+  const unknownBrief = await call(
+    fellowProblemBriefReadUrl("brief-absent"),
+    undefined,
+    fellowB1Token,
+    404,
+  );
+  assert.deepEqual(await call(assignedReadUrl, undefined, fellowB1Token, 404), unknownBrief);
+  const privateResponse = await worker.fetch(`${origin}${assignedReadUrl}`, {
+    headers: { "User-Agent": userAgent, authorization: `Bearer ${fellowA1Token}` },
+  });
+  assert.equal(privateResponse.status, 200);
+  assert.equal(privateResponse.headers.get("cache-control"), "private, no-store");
+  await privateResponse.arrayBuffer();
+  await call(assignedReadUrl, undefined, undefined, 401);
 
   const briefList = await sponsorCall(
     sponsorA,
@@ -138,7 +183,7 @@ export async function problemLifecycleJourney({
     "POST",
     `/v1/sponsors/problem-briefs/${withdrawableBrief.brief.id}/withdraw`,
     "withdraw-problem-brief",
-    {},
+    { expected_version: withdrawableBrief.brief.version },
     200,
   );
   assert.equal(withdrawRes.withdrawn, true);
@@ -147,6 +192,7 @@ export async function problemLifecycleJourney({
   // --- Step 2: Problem Proposal & Private Draft ---
   const proposalPayload = {
     brief_id: savedBrief.brief.id,
+    expected_brief_version: savedBrief.brief.version,
     title: "Collatz Modular Cycle Bounds",
     statement: "Every non-trivial cycle in the 3x+1 mapping modulo 2^k has length bounded by k.",
     falsifier: "A cycle modulo 2^k with length strictly exceeding k.",
@@ -179,6 +225,14 @@ export async function problemLifecycleJourney({
   assert.equal(proposed.problem.title, proposalPayload.title);
   assert.equal(proposed.problem.status, "private-draft");
   assert.equal(proposed.problem.current_statement_version, 1);
+  await call(assignedReadUrl, undefined, fellowA1Token, 404);
+  const afterAdoption = FellowProblemBriefListResponseSchema.parse(
+    await call("/v1/problem-briefs", undefined, fellowA1Token),
+  );
+  assert.equal(
+    afterAdoption.briefs.some((brief) => brief.id === savedBrief.brief.id),
+    false,
+  );
   await refuseBriefEdit(sponsorA, savedBrief.brief.id, "Edit after adoption");
   console.log(
     JSON.stringify({
@@ -257,7 +311,7 @@ export async function problemLifecycleJourney({
     );
     assert.deepEqual(await privateState(), beforePrivateRefusals);
   }
-  async function boundFellow(name, actor, binding) {
+  async function boundFellow(name, actor, binding, grants = {}) {
     const minted = await sponsorCall(
       actor,
       "POST",
@@ -266,6 +320,7 @@ export async function problemLifecycleJourney({
       {
         requested_scopes: ["review"],
         problem_binding: binding,
+        ...grants,
       },
       201,
     );
@@ -296,6 +351,30 @@ export async function problemLifecycleJourney({
     );
     return (await call("/v1/fellows/flow", { flow_handle: claimed.flow_handle })).token;
   }
+  const boundProposer = await boundFellow("fellow-a-bound-proposer", sponsorA, problemId, {
+    requested_scopes: ["propose-problems"],
+  });
+  const beforeRejectedProposals = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM problems",
+  ).first();
+  const boundProposalRefusal = await call(
+    "/v1/problems",
+    { ...proposalPayload, brief_id: undefined, expected_brief_version: undefined },
+    boundProposer,
+    403,
+  );
+  assert.equal(boundProposalRefusal.code, "WRITE_REFUSED");
+  assert.deepEqual(
+    await env.DB.prepare("SELECT COUNT(*) AS n FROM problems").first(),
+    beforeRejectedProposals,
+  );
+  await call("/v1/problem-briefs", undefined, boundProposer, 401);
+  assert.equal(
+    (await call("/v1/hello", undefined, boundProposer)).next_actions.some((action) =>
+      action.url.endsWith("/v1/problem-briefs"),
+    ),
+    false,
+  );
   const boundPeer = await boundFellow("fellow-a-bound-peer", sponsorA, problemId);
   const foreignBound = await boundFellow("fellow-b-bound-peer", sponsorB, problemId);
   const wrongTarget = await boundFellow("fellow-a-other-binding", sponsorA, "P-OTHER");
@@ -749,9 +828,7 @@ export async function problemLifecycleJourney({
   assert.equal(driftedClaimRow.statement_version, 1);
   assert.equal(driftedClaimRow.statement_drift, 1);
 
-  const problemRow = await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
-    .bind(problemId)
-    .first();
+  const problemRow = ProblemDetailSchema.parse((await call(`/v1/problems/${problemId}`)).problem);
 
   // Review on drifted claim is refused (P9)
   const driftedReview = await call(
@@ -814,12 +891,20 @@ export async function problemLifecycleJourney({
 
   await refuseClaimWrite(
     `/v1/sessions/${sessionB1.session_id}/reanchor`,
-    { claim_id: promotedClaim.claim_id, base_version: 1 },
+    {
+      claim_id: promotedClaim.claim_id,
+      base_version: 1,
+      client_context_cursor: problemRow.public_seq,
+    },
     fellowB1Token,
   );
   await refuseClaimWrite(
     `/v1/sessions/${sessionB1.session_id}/reanchor`,
-    { claim_id: promotedClaim.claim_id, base_version: 1 },
+    {
+      claim_id: promotedClaim.claim_id,
+      base_version: 1,
+      client_context_cursor: problemRow.public_seq,
+    },
     fellowB1Token,
   );
 
@@ -829,6 +914,7 @@ export async function problemLifecycleJourney({
     {
       claim_id: promotedClaim.claim_id,
       base_version: 1,
+      client_context_cursor: problemRow.public_seq,
     },
     fellowA1Token,
     200,
@@ -1136,7 +1222,11 @@ export async function problemLifecycleJourney({
   );
   await refuseClaimWrite(
     `/v1/sessions/${sessionA1.session_id}/reanchor`,
-    { claim_id: promotedClaim.claim_id, base_version: 1 },
+    {
+      claim_id: promotedClaim.claim_id,
+      base_version: 1,
+      client_context_cursor: problemRow.public_seq,
+    },
     fellowA1Token,
     "CLAIMS_BOARD_LOCKED",
   );
@@ -1264,7 +1354,11 @@ export async function problemLifecycleJourney({
       name: "proposal",
       path: "/v1/problems",
       token: fellowA1Token,
-      payload: { ...boundaryProposal, brief_id: boundaryBrief.brief.id },
+      payload: {
+        ...boundaryProposal,
+        brief_id: boundaryBrief.brief.id,
+        expected_brief_version: boundaryBrief.brief.version,
+      },
       malformedCode: "PROBLEM_PROPOSE_BODY_INVALID",
       acceptedStatus: 201,
     },

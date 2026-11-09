@@ -1,5 +1,6 @@
 import type { DeadEndRetryWhen, RecordDeadEndRequest } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 
 /** Discovery reads the existing firing index; it never fires a trigger or
  * changes the negative result. Prose and projection reasons are not predicates. */
@@ -87,15 +88,23 @@ export async function verifiedRetryPayload(text: string | null, expected: string
     return null;
   }
 }
-export const RETRY_HEAD_SQL = `SELECT public_seq AS cursor FROM problems WHERE id = ?
-  AND unlisted = 0 AND status IN ('active','dormant','under-result-review')`;
+export const RETRY_HEAD_SQL = `SELECT p.public_seq AS cursor FROM problems p WHERE p.id = ?
+  AND p.unlisted = 0 AND p.status IN ('active','dormant','under-result-review')
+  AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
+  AND NOT ${hiddenByContentControlSql("p.id", "p.id")}`;
 export const RETRY_PAGE_SQL = `SELECT d.problem_id, d.dead_end_id, t.trigger_kind,
   source.id AS source_event_id, source.seq AS source_seq, source.payload_sha256 AS source_digest,
-  CASE WHEN length(CAST(sc.payload_json AS BLOB)) <= ${RETRY_MAX_BODY_BYTES} THEN sc.payload_json END AS source_json,
+  CASE WHEN length(CAST(sc.payload_json AS BLOB)) <= ${RETRY_MAX_BODY_BYTES}
+    AND NOT ${eventContentHiddenSql("source")}
+    AND NOT ${hiddenByContentControlSql("p.id", "p.id")}
+    THEN sc.payload_json END AS source_json,
   source.actor_fellow_id AS author_fellow_id,
   e.id AS event_id, e.seq, e.type AS event_type, e.object_kind, e.object_id, e.object_version,
   e.actor_sponsor_id AS sponsor_id, e.payload_sha256,
-  CASE WHEN length(CAST(ec.payload_json AS BLOB)) <= ${RETRY_MAX_BODY_BYTES} THEN ec.payload_json END AS payload_json
+  CASE WHEN length(CAST(ec.payload_json AS BLOB)) <= ${RETRY_MAX_BODY_BYTES}
+    AND NOT ${eventContentHiddenSql("e")}
+    AND NOT ${hiddenByContentControlSql("p.id", "p.id")}
+    THEN ec.payload_json END AS payload_json
 FROM dead_end_fired_triggers t
 JOIN dead_ends d ON d.problem_id = t.problem_id AND d.dead_end_id = t.dead_end_id
 JOIN events source ON source.problem_id = d.problem_id AND source.object_id = d.dead_end_id
@@ -120,6 +129,8 @@ JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha25
 JOIN problems p ON p.id = e.problem_id AND p.unlisted = 0
   AND p.status IN ('active','dormant','under-result-review')
 WHERE e.payload_sha256 = json_extract(pin.value,'$.digest') AND e.seq <= ?
+  AND NOT ${eventContentHiddenSql("e")}
+  AND NOT ${hiddenByContentControlSql("p.id", "p.id")}
   AND EXISTS (SELECT 1 FROM dead_ends d WHERE d.problem_id = e.problem_id
     AND d.dead_end_id = ? AND d.superseded_by IS NULL)`;
 

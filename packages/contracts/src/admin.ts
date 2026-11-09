@@ -302,6 +302,81 @@ export const AdminReportsQueueResponseSchema = z
   .strict();
 export type AdminReportsQueueResponse = z.infer<typeof AdminReportsQueueResponseSchema>;
 
+export const ADMIN_REPORT_DETAIL_SCHEMA_ID =
+  "https://a.asimposium.org/schemas/admin-report-detail.v1.json";
+export const ADMIN_REPORT_SOURCE_MAX_BYTES = 512 * 1024;
+export const ADMIN_REPORT_DETAIL_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+export const AdminReportIdSchema = z
+  .string()
+  .length(29)
+  .regex(/^RP-[0-9A-HJKMNP-TV-Z]{26}$/);
+
+/** Exact private readback, separate from the bounded, body-free queue. */
+export const AdminReportSourceSchema = z.discriminatedUnion("state", [
+  z
+    .object({
+      state: z.literal("available"),
+      binding: z.enum(["requested-version", "captured-at-filing"]),
+      requested_target: z.string().min(1).max(128),
+      event_id: z.string().min(1).max(128),
+      seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      event_type: z.string().min(1).max(128),
+      object_id: z.string().min(1).max(128),
+      object_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      created_at: z.string().datetime({ offset: true }).max(40),
+      payload_sha256: z
+        .string()
+        .length(64)
+        .regex(/^[a-f0-9]{64}$/),
+      fellow_id: z.string().min(1).max(128).nullable(),
+      sponsor_id: z.string().min(1).max(128).nullable(),
+      session_id: z.string().min(1).max(128).nullable(),
+      model_self_declared: z.string().min(1).max(1024).nullable(),
+      harness_self_declared: z.string().min(1).max(1024).nullable(),
+      /** Original digest-checked event bytes, rendered only as inert text. */
+      payload_json: z.string().min(2).max(ADMIN_REPORT_SOURCE_MAX_BYTES),
+    })
+    .strict(),
+  z
+    .object({
+      state: z.literal("unavailable"),
+      reason: z.enum([
+        "not-pinned",
+        "not-public",
+        "missing",
+        "redacted",
+        "integrity-failed",
+        "too-large",
+      ]),
+    })
+    .strict(),
+]);
+export type AdminReportSource = z.infer<typeof AdminReportSourceSchema>;
+
+export const AdminReportDetailSchema = z
+  .object({
+    report: AdminReportItemSchema.extend({ report_id: AdminReportIdSchema }).strict(),
+    problem_id: z.string().min(1).max(128),
+    target_ref: z.string().min(1).max(128),
+    note: z.string().max(500).nullable(),
+    source: AdminReportSourceSchema,
+    resolved_at: z.string().datetime({ offset: true }).max(40).nullable(),
+    resolution_reason: z.string().max(1000).nullable(),
+  })
+  .strict();
+export type AdminReportDetail = z.infer<typeof AdminReportDetailSchema>;
+
+export function generateAdminReportDetailSchema(): string {
+  return `${JSON.stringify(
+    {
+      $id: ADMIN_REPORT_DETAIL_SCHEMA_ID,
+      ...z.toJSONSchema(AdminReportDetailSchema),
+    },
+    null,
+    2,
+  )}\n`;
+}
+
 export const AdminReportResolutionRequestSchema = z
   .object({
     report_id: z.string().min(1).max(128),

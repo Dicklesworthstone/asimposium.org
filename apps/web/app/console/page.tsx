@@ -193,6 +193,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   let fellows: readonly SponsorFellowSummary[] = [];
   let directives: readonly SponsorDirectiveReceipt[] = [];
   let briefs: readonly SponsorProblemBrief[] = [];
+  let briefsLoaded = false;
   let sponsorProblems: readonly SponsorProblemSummary[] = [];
   let transfers: SponsorFellowTransferListResponse = { incoming: [], outgoing: [] };
   let transfersLoaded = false;
@@ -238,7 +239,10 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
       rebinds = rebindResult.data.rebinds;
       rebindsLoaded = true;
     }
-    if (briefResult.ok) briefs = briefResult.data.briefs;
+    if (briefResult.ok) {
+      briefs = briefResult.data.briefs;
+      briefsLoaded = true;
+    }
     if (transferResult.ok) {
       transfers = transferResult.data;
       transfersLoaded = true;
@@ -541,8 +545,11 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             Problems you govern
           </h2>
           <ProblemManager
+            key={sponsorId ?? "unconfigured"}
+            sponsorId={sponsorId ?? ""}
             fellows={fellows}
             briefs={briefs}
+            briefsLoaded={briefsLoaded}
             problems={sponsorProblems}
             configured={configured && writesConfigured}
           />

@@ -375,7 +375,7 @@ export async function withFrictionMove(
     !source ||
     !permissions.session_open ||
     !permissions.workshop_push ||
-    !permissions.promote ||
+    !permissions.evidence ||
     items.length === 0
   )
     return selected;

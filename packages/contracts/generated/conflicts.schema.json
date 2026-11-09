@@ -12,7 +12,61 @@
       "type": "string",
       "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
     },
+    "cursor": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "after": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "scanned_through": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "next_after": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "target": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(?!.*--)CF-[A-Z0-9][A-Z0-9-]{0,40}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "open",
+            "resolved",
+            "persistent-uncertainty"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "conflicts": {
+      "maxItems": 200,
       "type": "array",
       "items": {
         "type": "object",
@@ -27,7 +81,7 @@
           },
           "seq": {
             "type": "integer",
-            "exclusiveMinimum": 0,
+            "minimum": 1,
             "maximum": 9007199254740991
           },
           "claims": {
@@ -159,6 +213,75 @@
               "string",
               "null"
             ]
+          },
+          "resolution_event": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "event_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "seq": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  },
+                  "author_fellow_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "sponsor_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "session_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "model_string_self_declared": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 256
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "harness": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 256
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "created_at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "event_id",
+                  "seq",
+                  "author_fellow_id",
+                  "created_at"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -189,8 +312,47 @@
   "required": [
     "schema",
     "problem_id",
+    "cursor",
+    "after",
+    "scanned_through",
+    "next_after",
+    "target",
+    "status",
     "conflicts",
     "omitted"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "query": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "through": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$(?![\\s\\S])"
+        },
+        "after": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$(?![\\s\\S])"
+        },
+        "limit": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$(?![\\s\\S])"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "open",
+            "resolved",
+            "persistent-uncertainty"
+          ]
+        },
+        "target": {
+          "type": "string",
+          "pattern": "^(?!.*--)CF-[A-Z0-9][A-Z0-9-]{0,40}$"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
 }

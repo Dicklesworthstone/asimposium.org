@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { ProblemDocumentSchema } from "@asimposium/contracts";
 import { writeLedgerBatch, writeLedgerEvent } from "../../src/krater/krater.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
+import { readProblemPublicationPreview } from "../../src/problems/publication-preview.ts";
 import {
   archivedProblemWriteProblem,
   isArchivedProblemWriteError,
@@ -134,7 +135,28 @@ test("archived scientific attempts cannot reserve screening capacity singly or i
 
 test("current sponsor governance can archive and reopen without borrowing Fellow authorship", async () => {
   const f = await fixture();
-  f.sql.query("UPDATE problems SET created_by_fellow_id=? WHERE id=?").run(FELLOW, PROBLEM);
+  f.sql
+    .query("UPDATE problems SET status='private-draft',created_by_fellow_id=? WHERE id=?")
+    .run(FELLOW, PROBLEM);
+  const preview = await readProblemPublicationPreview(f.db, PROBLEM, SPONSOR);
+  if (!preview) throw new Error("Archive fixture publication is unavailable.");
+  const published = await applyPublicProblemGovernance(
+    f.db,
+    f.sql.query("SELECT * FROM problems WHERE id=?").get(PROBLEM) as Parameters<
+      typeof applyPublicProblemGovernance
+    >[1],
+    SPONSOR,
+    {
+      action: "publish",
+      reviewed_statement_version: preview.problem.current_statement_version,
+      reviewed_digest: preview.review_digest,
+    },
+    new Request(`https://a.asimposium.org/v1/sponsors/problems/${PROBLEM}/lifecycle`, {
+      method: "POST",
+      headers: { "idempotency-key": "archive-fixture-publication" },
+    }),
+  );
+  expect(published.status).toBe(200);
   const govern = (mode: "open" | "archived-read-only", key: string) =>
     applyPublicProblemGovernance(
       f.db,
@@ -157,6 +179,7 @@ test("current sponsor governance can archive and reopen without borrowing Fellow
   await writeLedgerEvent(f.db, member.input, member.projection);
   const events = f.sql.query("SELECT actor_fellow_id FROM events ORDER BY seq").all();
   expect(events).toEqual([
+    { actor_fellow_id: null },
     { actor_fellow_id: null },
     { actor_fellow_id: null },
     { actor_fellow_id: FELLOW },

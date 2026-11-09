@@ -905,6 +905,19 @@ describe("apex markdown redirect origin", () => {
           permanent: true,
         });
       }
+      for (const suffix of ["md", "json", "html"]) {
+        const source = `/p/:slug/citations.${suffix}`;
+        expect(redirects.find((redirect) => redirect.source === source)).toEqual({
+          source, destination: `https://a-staging.asimposium.org${source}`, permanent: true,
+        });
+      }
+      for (const suffix of ["md", "json", "html", "bib", "csl.json"]) {
+        const source = `/p/:slug/citations/:target.${suffix}`;
+        expect(redirects.find((redirect) => redirect.source === source)).toEqual({
+          source, destination: `https://a-staging.asimposium.org${source}`, permanent: true,
+        });
+      }
+      expect(redirects.some(({ source }) => source === "/p/:slug/citations" || source === "/p/:slug/citations/:target")).toBe(false);
       expect(
         redirects
           .filter(

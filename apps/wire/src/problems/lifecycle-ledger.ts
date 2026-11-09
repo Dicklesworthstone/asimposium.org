@@ -59,6 +59,7 @@ import {
   type ProblemAccessAction,
   problemAccessActionReceipt,
 } from "./access-actions.ts";
+import { problemBoundariesRequired, problemBoundaryFields } from "./boundaries.ts";
 import {
   loadProblemPublicationSnapshot,
   type ProblemPublicationSnapshot,
@@ -223,15 +224,17 @@ export async function governanceTargetRefusal(
   }
   if (action.action === "manage-steward") {
     const target = await db
-      .prepare("SELECT 1 FROM sponsors WHERE sponsor_id = ?")
-      .bind(action.target_sponsor_id)
+      .prepare(`SELECT 1 FROM sponsors WHERE sponsor_id = ? AND (? = 'remove' OR (
+        tombstoned_at IS NULL AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events
+          WHERE sponsor_id = sponsors.sponsor_id)))`)
+      .bind(action.target_sponsor_id, action.operation)
       .first();
     if (!target) {
       return refusal(
         "WRITE_REFUSED",
         422,
-        "The target sponsor is not known to this site.",
-        "Name a sponsor who has signed in to ASImposium.",
+        "The target sponsor is not available for this stewardship action.",
+        "Name an active sponsor who has signed in to ASImposium; an existing inactive steward may still be removed.",
       );
     }
   }
@@ -293,8 +296,19 @@ export async function applyPublicProblemGovernance(
       FROM idempotency i LEFT JOIN events e ON e.id = i.event_id
       LEFT JOIN event_content c ON c.event_id = e.id
       WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.created_at > ?
+      ${
+        action.action === "manage-steward"
+          ? `AND EXISTS (SELECT 1 FROM sponsors WHERE sponsor_id = ? AND tombstoned_at IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events WHERE sponsor_id = ?)`
+          : ""
+      }
     `)
-      .bind(problem.id, scopedKey, cutoff)
+      .bind(
+        problem.id,
+        scopedKey,
+        cutoff,
+        ...(action.action === "manage-steward" ? [sponsorId, sponsorId] : []),
+      )
       .first<{
         request_digest: string;
         event_id: string;
@@ -335,10 +349,18 @@ export async function applyPublicProblemGovernance(
         ? { action: event.action, mode: event.problem.admission_mode }
         : event.action === "manage-member"
           ? event
-          : undefined;
+          : event.action === "manage-steward" && action.action === "manage-steward"
+            ? action
+            : undefined;
     return Response.json(
       {
-        problem: responseProblem,
+        // A transfer may revoke the acting sponsor's authority. Its own
+        // historical command remains recoverable without returning any
+        // formulation or newly governed workspace content.
+        problem:
+          event.action === "manage-steward"
+            ? { id: problem.id, updated_at: event.problem.updated_at }
+            : responseProblem,
         ...(accessAction
           ? {
               governance_action: problemAccessActionReceipt(
@@ -358,6 +380,10 @@ export async function applyPublicProblemGovernance(
 
   const previous = await replay();
   if (previous) return previous;
+  // A concurrent identical transfer can remove this actor after the first
+  // receipt lookup. Its completed command wins over later mutable refusals.
+  const currentStateRefusal = async (response: Response): Promise<Response> =>
+    action.action === "manage-steward" ? ((await replay()) ?? response) : response;
   const publishing = action.action === "publish";
   const revising = action.action === "revise-statement";
   let reviewedPublication: ProblemPublicationSnapshot | undefined;
@@ -430,11 +456,13 @@ export async function applyPublicProblemGovernance(
     )
   ) {
     if (problem.status === "retired" || problem.status === "resolved") {
-      return refusal(
-        "WRITE_REFUSED",
-        422,
-        "Cannot modify a closed problem.",
-        "Fork the problem if you want to explore an alternate formulation.",
+      return currentStateRefusal(
+        refusal(
+          "WRITE_REFUSED",
+          422,
+          "Cannot modify a closed problem.",
+          "Fork the problem if you want to explore an alternate formulation.",
+        ),
       );
     }
   }
@@ -445,7 +473,7 @@ export async function applyPublicProblemGovernance(
     .bind(problem.id, sponsorId)
     .first();
   if (!steward && problem.sponsor_id !== sponsorId) {
-    return problemGovernanceRefused();
+    return currentStateRefusal(problemGovernanceRefused());
   }
 
   if (publishing) {
@@ -494,7 +522,7 @@ export async function applyPublicProblemGovernance(
   }
 
   const targetRefused = await governanceTargetRefusal(db, action, sponsorId);
-  if (targetRefused) return targetRefused;
+  if (targetRefused) return currentStateRefusal(targetRefused);
 
   // 0a5p: the count below can be stale under concurrent removes, so the
   // ledger precondition also requires another steward to remain.
@@ -509,11 +537,13 @@ export async function applyPublicProblemGovernance(
       (stewardCount?.count ?? 1) <= 1 &&
       (action.target_sponsor_id === sponsorId || action.target_sponsor_id === problem.sponsor_id)
     ) {
-      return refusal(
-        "WRITE_REFUSED",
-        422,
-        "Cannot remove the sole steward of a problem.",
-        "Add another steward before removing this one.",
+      return currentStateRefusal(
+        refusal(
+          "WRITE_REFUSED",
+          422,
+          "Cannot remove the sole steward of a problem.",
+          "Add another steward before removing this one.",
+        ),
       );
     }
   }
@@ -538,6 +568,14 @@ export async function applyPublicProblemGovernance(
     // global public-change counter. The transaction below freezes this head.
     parentCursor = problem.public_seq;
     lineageGuard = lineageFormulationGuard(forkSource, false);
+    if (
+      forkSource.problem.scope !== undefined &&
+      action.scope === undefined &&
+      (["statement", "falsifier", "motivation"] as const).some(
+        (field) => action[field] !== undefined && action[field] !== forkSource?.problem[field],
+      )
+    )
+      return problemBoundariesRequired();
     forkedProblemId = `P-${crypto.randomUUID().replaceAll("-", "").slice(0, 26).toUpperCase()}`;
   }
 
@@ -619,6 +657,36 @@ export async function applyPublicProblemGovernance(
     resultDisclosureLineage = disclosure.lineage_digest;
   }
 
+  if (revising && action.scope === undefined) {
+    const previousBoundaries = await db
+      .prepare("SELECT scope FROM problem_statement_versions WHERE problem_id = ? AND version = ?")
+      .bind(problem.id, problem.current_statement_version)
+      .first<{ scope: string | null }>();
+    if (previousBoundaries?.scope != null) return problemBoundariesRequired();
+  }
+
+  // Ordinary governance records carry the whole current formulation. Read its
+  // verified publication, never retained projections that may contain lawfully
+  // withdrawn bytes. Replay above remains the exact already committed outcome.
+  const copiesCurrentFormulation = !revising && !publishing && !resolution && !forkSource;
+  const currentFormulation = copiesCurrentFormulation
+    ? await readPublishedProblemFormulation(db, problem.id, problem.public_seq)
+    : undefined;
+  if (
+    copiesCurrentFormulation &&
+    (currentFormulation === undefined ||
+      currentFormulation.problem.current_statement_version !== problem.current_statement_version)
+  )
+    return refusal(
+      "OBJECT_VERSION_CONFLICT",
+      409,
+      "This governance action cannot copy an unavailable current problem formulation.",
+      "Read the current public problem. Restore availability through the appropriate content-control process, or deliberately author a complete new statement version before retrying.",
+    );
+  const currentFormulationGuard = currentFormulation
+    ? lineageFormulationGuard(currentFormulation, false)
+    : undefined;
+
   const formulation = revising
     ? action
     : resolution
@@ -630,23 +698,11 @@ export async function applyPublicProblemGovernance(
               statement: reviewedPublication.row.statement,
               falsifier: reviewedPublication.row.falsifier,
               motivation: reviewedPublication.row.motivation,
+              ...problemBoundaryFields(reviewedPublication.row),
               created_at: reviewedPublication.row.statement_created_at,
               steward_accepted_by: reviewedPublication.row.statement_steward,
             }
-          : await db
-              .prepare(`
-    SELECT statement, falsifier, motivation, created_at, steward_accepted_by
-    FROM problem_statement_versions
-    WHERE problem_id = ? AND version = ?
-  `)
-              .bind(problem.id, problem.current_statement_version)
-              .first<{
-                statement: string;
-                falsifier: string;
-                motivation: string;
-                created_at: string;
-                steward_accepted_by: string | null;
-              }>();
+          : currentFormulation?.problem;
 
   // 5oyj: the governance state publication leaves behind (the writes below:
   // the publishing sponsor joins the stewards if absent, and a listed
@@ -706,7 +762,11 @@ export async function applyPublicProblemGovernance(
     previous_statement_version: problem.current_statement_version,
     problem: {
       id: problem.id,
-      title: resolution?.formulation.title ?? problem.title,
+      title:
+        resolution?.formulation.title ??
+        forkSource?.problem.title ??
+        currentFormulation?.problem.title ??
+        problem.title,
       status: publishing
         ? "sharpening"
         : action.action === "enter-result-review"
@@ -720,6 +780,7 @@ export async function applyPublicProblemGovernance(
       statement: formulation?.statement,
       falsifier: formulation?.falsifier,
       motivation: formulation?.motivation,
+      ...problemBoundaryFields(formulation),
       ...(action.action === "retire" ? { resolution_summary: action.reason } : {}),
       ...(resolution
         ? {
@@ -884,6 +945,7 @@ export async function applyPublicProblemGovernance(
         AND EXISTS (SELECT 1 FROM public_cursor WHERE singleton = 1 AND cursor < 9007199254740991)
         ${action.action === "fork" ? "AND (SELECT MAX(seq) FROM events WHERE problem_id = ?) = ?" : ""}
         ${lineageGuard?.sql ?? ""}
+        ${currentFormulationGuard?.sql ?? ""}
         ${publishing ? "AND created_by_fellow_id = ? AND EXISTS (SELECT 1 FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active')" : ""}
         ${publicationGuard?.sql ?? ""}
         ${
@@ -898,6 +960,17 @@ export async function applyPublicProblemGovernance(
           removingSteward
             ? `AND (NOT EXISTS (SELECT 1 FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?)
                OR (SELECT COUNT(*) FROM problem_stewards WHERE problem_id = ?) > 1)`
+            : ""
+        }
+        ${
+          action.action === "manage-steward" && action.expected_stewardship_version !== undefined
+            ? "AND stewardship_version = ?"
+            : ""
+        }
+        ${
+          action.action === "manage-steward" && action.operation !== "remove"
+            ? `AND EXISTS (SELECT 1 FROM sponsors WHERE sponsor_id = ? AND tombstoned_at IS NULL)
+             AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events WHERE sponsor_id = ?)`
             : ""
         }
         ${
@@ -937,6 +1010,7 @@ export async function applyPublicProblemGovernance(
           problem.title,
           ...(action.action === "fork" ? [problem.id, parentCursor] : []),
           ...(lineageGuard?.bindings ?? []),
+          ...(currentFormulationGuard?.bindings ?? []),
           ...(publishing && problem.created_by_fellow_id
             ? [problem.created_by_fellow_id, problem.created_by_fellow_id]
             : []),
@@ -947,6 +1021,13 @@ export async function applyPublicProblemGovernance(
             ? [sponsorId, sponsorId]
             : []),
           ...(removingSteward ? [problem.id, removedSteward, problem.id] : []),
+          ...(action.action === "manage-steward" &&
+          action.expected_stewardship_version !== undefined
+            ? [action.expected_stewardship_version]
+            : []),
+          ...(action.action === "manage-steward" && action.operation !== "remove"
+            ? [action.target_sponsor_id, action.target_sponsor_id]
+            : []),
           ...(publishing
             ? [
                 problem.admission_mode ?? null,
@@ -1000,8 +1081,9 @@ export async function applyPublicProblemGovernance(
               db
                 .prepare(`
                   INSERT INTO problem_statement_versions
-                    (problem_id, version, statement, norm_hash, falsifier, motivation, steward_accepted_by, created_at)
-                  SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
+                    (problem_id, version, statement, norm_hash, falsifier, motivation,
+                     scope, out_of_scope, success_criteria, steward_accepted_by, created_at)
+                  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
                 `)
                 .bind(
                   problem.id,
@@ -1010,6 +1092,9 @@ export async function applyPublicProblemGovernance(
                   statementHash,
                   next.falsifier,
                   next.motivation,
+                  next.scope ?? null,
+                  next.out_of_scope ?? null,
+                  next.success_criteria ?? null,
                   sponsorId,
                   now,
                   eventId,
@@ -1160,6 +1245,9 @@ export async function applyPublicProblemGovernance(
             const forkStatement = action.statement ?? formulation?.statement ?? "";
             const forkFalsifier = action.falsifier ?? formulation?.falsifier ?? "";
             const forkMotivation = action.motivation ?? formulation?.motivation ?? "";
+            const forkBoundaries = problemBoundaryFields(
+              action.scope === undefined ? formulation : action,
+            );
             const forkHash = `sha256:${await normHash(forkStatement)}`;
             const genesis = await genesisChainDigest(forkedProblemId);
 
@@ -1191,8 +1279,8 @@ export async function applyPublicProblemGovernance(
                 .prepare(`
                   INSERT INTO problem_statement_versions (
                     problem_id, version, statement, norm_hash, falsifier, motivation,
-                    steward_accepted_by, created_at
-                  ) SELECT ?, 1, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
+                    scope, out_of_scope, success_criteria, steward_accepted_by, created_at
+                  ) SELECT ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
                 `)
                 .bind(
                   forkedProblemId,
@@ -1200,6 +1288,9 @@ export async function applyPublicProblemGovernance(
                   forkHash,
                   forkFalsifier,
                   forkMotivation,
+                  forkBoundaries.scope ?? null,
+                  forkBoundaries.out_of_scope ?? null,
+                  forkBoundaries.success_criteria ?? null,
                   sponsorId,
                   now,
                   eventId,

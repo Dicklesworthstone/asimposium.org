@@ -113,9 +113,11 @@ import {
   sponsorOwnsFellow,
   sponsorPostures,
 } from "../moderation/posture.ts";
+import { operatorReportDetail } from "../moderation/report-detail.ts";
 import { fileReportRequest } from "../moderation/router.ts";
 import { problemSlowModeHttp } from "../moderation/slow-mode-http.ts";
 import { sponsorSuspensionHttp } from "../moderation/sponsor-suspension-http.ts";
+import { fellowMayReadAssignedBriefs } from "../problems/fellow-briefs.ts";
 import { rebuildSearchIndex, searchIndexHealth } from "../search/index-health";
 import { getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
 import { AccountExportError, readSponsorDataExportPage } from "./account-export.ts";
@@ -1547,6 +1549,16 @@ export async function buildHelloResponse(input: {
           ? "Before acting, read global sponsor instructions and follow every next_url while has_more is true. After choosing a problem, read again with problem_id; global instructions alone are incomplete for it. ACK does not withdraw instructions."
           : "Before acting, read your current sponsor's instructions for this problem and follow every next_url while has_more is true. Acknowledgment confirms receipt; it does not withdraw instructions.",
     },
+    ...(fellowMayReadAssignedBriefs(binding, Date.now())
+      ? [
+          {
+            action: "read" as const,
+            url: `${service.stoaOrigin}/v1/problem-briefs`,
+            reason:
+              "Read private research briefs explicitly assigned to you by your current sponsor. Follow read_url for the complete intent, then draft your own formulation; a brief is not a public problem or scientific evidence.",
+          },
+        ]
+      : []),
     ...(binding.fellowStatus === "active"
       ? [
           {
@@ -2857,10 +2869,13 @@ function mountSponsorRoutes(app: Hono<{ Bindings: Env }>, options: EnrollmentRou
         );
       }
       if (options.db === undefined) return operatorControlUnavailableResponse();
+      const replay = idempotencyOptions(c.req.raw);
+      if (replay instanceof Response) return replay;
       return await operatorQuarantineDecision(
         options.db,
         authenticated.principal.operatorId,
         parsed.data,
+        replay.idempotencyKey,
       );
     } catch (err) {
       if (
@@ -2896,6 +2911,32 @@ function mountSponsorRoutes(app: Hono<{ Bindings: Env }>, options: EnrollmentRou
       return await operatorReportsQueue(options.db);
     } catch {
       return enrollmentUnavailableResponse();
+    }
+  });
+
+  app.get("/v1/operators/reports/:reportId", async (c) => {
+    const privateResponse = (response: Response): Response => {
+      response.headers.set("cache-control", "private, no-store");
+      response.headers.set("x-robots-tag", "noindex, nofollow");
+      return response;
+    };
+    if (hasQuery(c.req.raw)) {
+      return privateResponse(
+        sponsorPathOnlyResponse(c.req.raw, `/v1/operators/reports/RP-${"0".repeat(26)}`),
+      );
+    }
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/reports/:reportId",
+      "operator.reports.read",
+    );
+    if (authenticated instanceof Response) return privateResponse(authenticated);
+    if (options.db === undefined) return privateResponse(operatorControlUnavailableResponse());
+    try {
+      return privateResponse(await operatorReportDetail(options.db, c.req.param("reportId")));
+    } catch {
+      return privateResponse(enrollmentUnavailableResponse());
     }
   });
 
@@ -2939,10 +2980,13 @@ function mountSponsorRoutes(app: Hono<{ Bindings: Env }>, options: EnrollmentRou
         );
       }
       if (options.db === undefined) return operatorControlUnavailableResponse();
+      const replay = idempotencyOptions(c.req.raw);
+      if (replay instanceof Response) return replay;
       return await operatorReportResolution(
         options.db,
         authenticated.principal.operatorId,
         parsed.data,
+        replay.idempotencyKey,
       );
     } catch (err) {
       if (
@@ -3003,6 +3047,8 @@ function mountSponsorRoutes(app: Hono<{ Bindings: Env }>, options: EnrollmentRou
         );
       }
       if (options.db === undefined) return operatorControlUnavailableResponse();
+      const replay = idempotencyOptions(c.req.raw);
+      if (replay instanceof Response) return replay;
       // A legacy generic ban action teaches the dedicated reviewed suspension
       // command; it cannot bypass that command's recent-auth and replay law.
       return (
@@ -3010,6 +3056,7 @@ function mountSponsorRoutes(app: Hono<{ Bindings: Env }>, options: EnrollmentRou
           options.db,
           authenticated.principal.operatorId,
           parsed.data,
+          replay.idempotencyKey,
         )) ?? operatorControlUnavailableResponse()
       );
     } catch (err) {

@@ -25,7 +25,7 @@ const PRIVATE_BODY = "PRIVATE_EXPORT_FULL_BODY: ".repeat(120);
 
 // SQL and storage fault unit tests. The separate Workerd journey exercises
 // the mounted signed route with genuine D1/R2 bindings.
-function fixture() {
+function fixture(boundaries?: { scope: string; out_of_scope: string; success_criteria: string }) {
   const sql = new Database(":memory:", { strict: true });
   const root = resolve(import.meta.dir, "../../../../db/migrations");
   for (const name of readdirSync(root)
@@ -51,9 +51,15 @@ function fixture() {
     VALUES('P-EXPORT','private-draft',?,'Private formulation',?,?)`)
     .run(SPONSOR, NOW, NOW);
   sql
-    .query(`INSERT INTO problem_statement_versions(problem_id,version,statement,norm_hash,falsifier,motivation,created_at)
-    VALUES('P-EXPORT',1,'Private exact formulation','hash','Private failure condition','Private motivation',?)`)
-    .run(NOW);
+    .query(`INSERT INTO problem_statement_versions(problem_id,version,statement,norm_hash,falsifier,motivation,
+      scope,out_of_scope,success_criteria,created_at)
+    VALUES('P-EXPORT',1,'Private exact formulation','hash','Private failure condition','Private motivation',?,?,?,?)`)
+    .run(
+      boundaries?.scope ?? null,
+      boundaries?.out_of_scope ?? null,
+      boundaries?.success_criteria ?? null,
+      NOW,
+    );
   sql
     .query(`INSERT INTO sessions(session_id,fellow_id,problem_id,intent,opened_at,last_heartbeat_at,idle_close_at)
     VALUES(?,?,'P-EXPORT','explore',?,?,?)`)
@@ -157,11 +163,52 @@ test("all entitled work and immutable versions export with complete CAS bodies, 
     }
     const text = JSON.stringify(pages);
     expect(text).toContain("Private exact formulation");
+    const legacyStatement = pages.find((page) => page.section === "private_statements")?.records[0];
+    assert.ok(legacyStatement);
+    expect(legacyStatement.data).not.toHaveProperty("scope");
     expect(text).not.toContain("other-vector");
     expect(text).not.toContain("cas_hash");
     const outsider = JSON.stringify(await all(f, OTHER));
     expect(outsider).not.toContain(PRIVATE_BODY);
     expect(outsider).not.toContain("Private exact formulation");
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("authored boundaries remain portable in private statements and briefs without crossing accounts", async () => {
+  const boundaries = {
+    scope: "  PRIVATE_SCOPE: finite paths, including the empty path.\n",
+    out_of_scope: "PRIVATE_EXCLUSION: infinite graphs and multigraphs.",
+    success_criteria:
+      "PRIVATE_SUCCESS: prove the exact finite vertex count, with the empty case explicit.",
+  };
+  const f = fixture(boundaries);
+  try {
+    f.sql
+      .query(`INSERT INTO sponsor_problem_briefs
+      (id,sponsor_id,title,statement,falsifier,motivation,scope,out_of_scope,success_criteria,created_at,updated_at)
+      VALUES('PB-EXPORT',?,'Private brief','Finite path statement','A failing path','Understand finite paths',?,?,?,?,?)`)
+      .run(
+        SPONSOR,
+        boundaries.scope,
+        boundaries.out_of_scope,
+        boundaries.success_criteria,
+        NOW,
+        NOW,
+      );
+    const pages = await all(f);
+    const records = pages
+      .flatMap((page) => page.records)
+      .filter((record) => record.kind === "private_statements" || record.kind === "briefs");
+    expect(records).toHaveLength(2);
+    for (const record of records) {
+      expect(record.data.scope).toBe(boundaries.scope);
+      expect(record.data.out_of_scope).toBe(boundaries.out_of_scope);
+      expect(record.data.success_criteria).toBe(boundaries.success_criteria);
+    }
+    const other = JSON.stringify(await all(f, OTHER));
+    for (const value of Object.values(boundaries)) expect(other).not.toContain(value.trim());
   } finally {
     f.sql.close();
   }

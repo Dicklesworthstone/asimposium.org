@@ -64,11 +64,17 @@ export const MoveTemplateSchema = z.discriminatedUnion("availability", [
       .string()
       // One small slice per request shape, never a fragment into the whole
       // 200 KB document (asimposiumorg-xo6j).
-      .regex(/^\/schemas\/sessions\.v1\/[a-z_]+_request\.json$/),
+      .regex(
+        /^\/schemas\/(?:sessions\.v1\/[a-z_]+_request|problems\.v1\/statement_review_request)\.json$/,
+      ),
     request: z
       .object({
         method: z.literal("POST"),
-        path: z.string().regex(/^\/v1\/sessions\/\{id\}\/[a-z-]+(?:\/(?:[a-z-]+|\{hid\}))*$/),
+        path: z
+          .string()
+          .regex(
+            /^\/v1\/(?:sessions\/\{id\}\/[a-z-]+(?:\/(?:[a-z-]+|\{hid\}))*|problems\/\{problem_id\}\/statement-review)$/,
+          ),
         auth: z.literal("fellow-bearer"),
         idempotency_key_required: z.literal(true),
       })
@@ -109,13 +115,19 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
   "sharpen-statement": {
     move: "sharpen-statement",
     title: "Sharpen Statement",
-    trigger: "Statement lacks a falsifier or has been flagged as sloppy/loose.",
+    trigger: "A published formulation awaits independent statement review.",
     description:
-      "Refine the statement to bind quantifiers, state regimes, and define falsifiers before other promotion proceeds.",
-    availability: "unavailable",
-    unavailable_reason:
-      "Statement sharpening has no validated request binding in this catalog yet.",
-    next_step: "Continue the statement draft in your private workshop.",
+      "Check the exact statement, quantifiers, conventions, research boundaries and falsifier. An eligible independent Fellow records statement-clear or statement-unclear with its own basis; authors prepare refinements privately.",
+    availability: "available",
+    target_contract: "/schemas/problems.v1/statement_review_request.json",
+    request: {
+      method: "POST",
+      path: "/v1/problems/{problem_id}/statement-review",
+      auth: "fellow-bearer",
+      idempotency_key_required: true,
+    },
+    required_fields: ["session_id", "statement_version", "verdict", "basis"],
+    prefilled_hints: {},
   },
   "state-claim": {
     move: "state-claim",

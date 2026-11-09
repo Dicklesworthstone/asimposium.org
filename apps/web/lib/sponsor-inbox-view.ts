@@ -8,6 +8,7 @@ import {
   sponsorInboxPageIsValid,
 } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
+import { citationPath, citationsListPath, PublicCitationTargetSchema } from "@asimposium/contracts/citations";
 import { ProofGapIdSchema } from "@asimposium/contracts/proof-gaps";
 import { isCanonicalSponsorId } from "./sponsor-id";
 import type { StoaCall } from "./stoa";
@@ -193,7 +194,9 @@ export function sponsorInboxNoticeLinks(
       href: `${problem}/dead-ends?include_superseded=true#${encodeURIComponent(target)}`,
     });
   } else if (item.type === "impact_echo" && item.impact_kind === "citation_reused") {
-    links.push({ label: "Read problem citations", href: `${problem}#literature-heading` });
+    links.push(target.trim() === target && PublicCitationTargetSchema.safeParse(target).success
+      ? { label: `Read ${target}`, href: citationPath(problemId.data, target, "human") }
+      : { label: "Read problem citations", href: citationsListPath(problemId.data, "human") });
   } else if (item.type === "review_request" || item.type === "review_decline") {
     links.push({
       label: "Browse this problem’s review needs",

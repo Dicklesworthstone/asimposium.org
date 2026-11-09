@@ -67,6 +67,7 @@ import { createCheckpointFaceRoutes } from "./krater/checkpoint-face.ts";
 import { hiddenByContentControlSql } from "./krater/public-content";
 import { createEventTailRoutes } from "./ledger/event-tail-router";
 import { createHypothesesRoutes } from "./ledger/hypotheses-router";
+import { createStatementRoutes } from "./ledger/statements-router.ts";
 import { createLedgerFaceRoutes } from "./ledger-face";
 import type { MegaCommandsMoveProvider } from "./mega-commands/provider";
 import { loadPublicMoves } from "./mega-commands/public-moves";
@@ -564,7 +565,8 @@ function isEnrollmentPath(pathname: string): boolean {
       (rawSegments.length === 4 &&
         staticSlotEquals(rawSegments[0], "v1") &&
         staticSlotEquals(rawSegments[1], "operators") &&
-        staticSlotEquals(rawSegments[2], "quarantine") &&
+        (staticSlotEquals(rawSegments[2], "quarantine") ||
+          staticSlotEquals(rawSegments[2], "reports")) &&
         rawSegments[3] !== "") ||
       // W2.6 ops:projection-rebuild dry run and repair.
       (rawSegments.length === 5 &&
@@ -651,7 +653,7 @@ function isEnrollmentPath(pathname: string): boolean {
     (segments.length === 4 &&
       segments[0] === "v1" &&
       segments[1] === "operators" &&
-      segments[2] === "quarantine" &&
+      (segments[2] === "quarantine" || segments[2] === "reports") &&
       finalSegment !== undefined &&
       finalSegment !== "" &&
       !finalSegment.includes("/")) ||
@@ -715,6 +717,7 @@ function isEnrollmentPath(pathname: string): boolean {
 }
 
 function isProblemPath(pathname: string): boolean {
+  if (pathname === "/v1/problem-briefs" || pathname === "/v1/problem-briefs/read") return true;
   if (/^\/v1\/problems\/[^/]+\/statement-review$/.test(pathname)) return false;
   // Follows belong to the inbox router (W6.3); claiming them here made
   // /v1/problems/:id/follow unreachable (ROUTE_NOT_FOUND).
@@ -732,7 +735,11 @@ function isProblemPath(pathname: string): boolean {
   }
   if (pathname === "/v1/sponsors/problems") return true;
   if (/^\/v1\/sponsors\/problems\/[^/]+\/publication-preview$/.test(pathname)) return true;
-  if (/^\/v1\/sponsors\/problems\/[^/]+\/governance(?:\/after\/[^/]+)?$/.test(pathname))
+  if (
+    /^\/v1\/sponsors\/problems\/[^/]+\/governance(?:\/after\/[^/]+)?(?:\/stewards\/after\/[^/]+)?$/.test(
+      pathname,
+    )
+  )
     return true;
   // Sponsor deletion of an own private draft (W2.8); previously unowned.
   if (/^\/v1\/sponsors\/problems\/[^/]+$/.test(pathname)) return true;
@@ -1473,6 +1480,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // Exact contracted hypothesis routes validate their own IDs and queries.
   // Mount before the broad legacy digest/quarantine matcher can consume them.
   app.route("/", createHypothesesRoutes());
+  app.route("/", createStatementRoutes());
 
   // Let only contracted problem and exact-claim faces reach D1. The digest's
   // regex parameter can consume slashes, so unknown nested paths must be

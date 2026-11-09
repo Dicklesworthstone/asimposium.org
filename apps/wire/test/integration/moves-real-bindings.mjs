@@ -633,6 +633,293 @@ await runLocalWorkerJourney(async (context) => {
     "an author is not sent to self-review",
   );
 
+  // P11 forbids new exact duplicates, but revision can legitimately release
+  // an old statement for another claim. Historical matching text must not
+  // become an equivalence recommendation between distinct current heads.
+  const duplicateAuthor = await enroll("moves-history-author", "usr_moves_history");
+  const historyReviewer = await enroll("moves-history-reviewer", "usr_moves_history_reviewer");
+  const historyProblem = (
+    await call(
+      "/v1/problems",
+      {
+        title: "Current statements after revision",
+        statement: "The squares of the integers zero and two are even.",
+        falsifier: "Either zero squared or two squared is odd.",
+        motivation: "Keep duplicate discovery attached to current readable publications.",
+        areas: ["number-theory"],
+      },
+      duplicateAuthor,
+      201,
+    )
+  ).problem.id;
+  await sponsorCall(
+    "usr_moves_history",
+    "POST",
+    `/v1/sponsors/problems/${historyProblem}/lifecycle`,
+    "problem-lifecycle",
+    { action: "publish" },
+  );
+  const historyReviewSession = (
+    await call(
+      "/v1/sessions",
+      { problem_id: historyProblem, intent: "review" },
+      historyReviewer,
+      201,
+    )
+  ).session_id;
+  await call(
+    `/v1/problems/${historyProblem}/statement-review`,
+    {
+      session_id: historyReviewSession,
+      statement_version: 1,
+      verdict: "statement-clear",
+      basis: "The two integers, parity predicate and counterexample are explicit.",
+    },
+    historyReviewer,
+  );
+  const historySession = (
+    await call(
+      "/v1/sessions",
+      { problem_id: historyProblem, intent: "prove" },
+      duplicateAuthor,
+      201,
+    )
+  ).session_id;
+  const historyPath = `/v1/sessions/${historySession}`;
+  const historyDraft = await call(
+    `${historyPath}/workshop`,
+    { type: "claim-draft", title: "Current parity statement", body_md: "Private preparation." },
+    duplicateAuthor,
+    201,
+  );
+  const historyBody = {
+    workshop_id: historyDraft.workshop_id,
+    kind: "conjecture",
+    statement: "Zero squared is even.",
+    falsifier: "Zero squared is odd.",
+  };
+  const firstHistory = await call(`${historyPath}/promote`, historyBody, duplicateAuthor, 201);
+  const deniedDuplicate = await call(`${historyPath}/promote`, historyBody, duplicateAuthor, 409);
+  assert.equal(deniedDuplicate.code, "DUPLICATE_CLAIM", "modern writes preserve P11 admission");
+  await call(
+    `${historyPath}/revise`,
+    {
+      claim_id: firstHistory.claim_id,
+      base_version: 1,
+      kind: "conjecture",
+      statement: "Two squared is even.",
+      falsifier: "Two squared is odd.",
+      depends_on: [],
+    },
+    duplicateAuthor,
+    201,
+  );
+  const replacementDraft = await call(
+    `${historyPath}/workshop`,
+    { type: "claim-draft", title: "Separate zero claim", body_md: "Private preparation." },
+    duplicateAuthor,
+    201,
+  );
+  const secondHistory = await call(
+    `${historyPath}/promote`,
+    { ...historyBody, workshop_id: replacementDraft.workshop_id },
+    duplicateAuthor,
+    201,
+  );
+  assert.notEqual(firstHistory.claim_id, secondHistory.claim_id);
+  const currentHeads = await call(`/v1/p/${historyProblem}/next`, undefined, duplicateAuthor);
+  assert.equal(currentHeads.degraded, false, "the current-head scan runs against real D1");
+  assert.ok(
+    !moveNames(currentHeads).includes("collapse-duplicate"),
+    "matching obsolete text cannot merge distinct current statements",
+  );
+  const revisedEvent = await env.DB.prepare(
+    "SELECT id FROM events WHERE problem_id=? AND object_id=? AND type='claim.revised' AND object_version=2",
+  )
+    .bind(historyProblem, firstHistory.claim_id)
+    .first();
+  await fixtures.redactPublicContent(revisedEvent.id);
+  const withheldHead = await call(`/v1/p/${historyProblem}/next`, undefined, duplicateAuthor);
+  assert.equal(withheldHead.degraded, true, "unavailable current content is an explicit boundary");
+  assert.ok(
+    !moveNames(withheldHead).includes("collapse-duplicate"),
+    "withholding the revision cannot revive its duplicate-looking predecessor",
+  );
+
+  // Overflow capacity remains useful: a real capped join receives evidence
+  // and negative-result work, executes those contracts, and cannot publish a
+  // new claim. Separate actors/problem avoid inheriting another journey's
+  // open sessions, scientific state or writer permissions.
+  const observerOwner = "usr_observer_moves_owner";
+  const observerAuthor = await enroll("observer-moves-author", observerOwner);
+  const observerReviewer = await enroll("observer-moves-reviewer", "usr_observer_moves_reviewer");
+  const observer = await enroll("observer-moves-reader", "usr_observer_moves_reader");
+  const observerProblem = (
+    await call(
+      "/v1/problems",
+      {
+        title: "Observer additive identity investigation",
+        statement: "Every integer n in the range 0..8 satisfies n + 0 = n.",
+        falsifier: "An integer n in 0..8 for which n + 0 differs from n.",
+        motivation: "Exercise useful scientific contributions from overflow observers.",
+        areas: ["number-theory"],
+      },
+      observerAuthor,
+      201,
+    )
+  ).problem.id;
+  await sponsorCall(
+    observerOwner,
+    "POST",
+    `/v1/sponsors/problems/${observerProblem}/lifecycle`,
+    "problem-lifecycle",
+    { action: "publish" },
+  );
+  const observerAuthorSession = (
+    await call(
+      "/v1/sessions",
+      { problem_id: observerProblem, intent: "prove" },
+      observerAuthor,
+      201,
+    )
+  ).session_id;
+  await sponsorCall(
+    observerOwner,
+    "POST",
+    `/v1/sponsors/problems/${observerProblem}/lifecycle`,
+    "problem-lifecycle",
+    { action: "set-writer-cap", writer_cap: 1 },
+  );
+  const observerReviewSession = (
+    await call(
+      "/v1/sessions",
+      { problem_id: observerProblem, intent: "review" },
+      observerReviewer,
+      201,
+    )
+  ).session_id;
+  await call(
+    `/v1/problems/${observerProblem}/statement-review`,
+    {
+      session_id: observerReviewSession,
+      statement_version: 1,
+      verdict: "statement-clear",
+      basis: "Finite integer range and exact equality.",
+    },
+    observerReviewer,
+  );
+  const observerClaimDraft = await call(
+    `/v1/sessions/${observerAuthorSession}/workshop`,
+    { type: "claim-draft", title: "Additive identity", body_md: "Private argument draft." },
+    observerAuthor,
+    201,
+  );
+  const observerClaim = await call(
+    `/v1/sessions/${observerAuthorSession}/promote`,
+    {
+      workshop_id: observerClaimDraft.workshop_id,
+      kind: "conjecture",
+      statement: "Eight plus zero is eight.",
+      falsifier: "Eight plus zero differs from eight.",
+      scientific_provenance: { model_family_self_declared: "gpt" },
+    },
+    observerAuthor,
+    201,
+  );
+  await call(
+    `/v1/sessions/${observerReviewSession}/review`,
+    {
+      target_claim_id: observerClaim.claim_id,
+      target_version: 1,
+      verdict: "confirm",
+      basis: "Integer addition gives eight when zero is added to eight.",
+      capable_of_failure: "The evaluated sum differing from eight.",
+      scientific_provenance: {
+        model_family_self_declared: "claude",
+        method: { category: "deductive", procedure: "Evaluate the integer sum.", evidence: [] },
+      },
+      body_md: "The two sides agree under integer addition.",
+    },
+    observerReviewer,
+    201,
+  );
+  const observerSession = (
+    await call("/v1/sessions", { problem_id: observerProblem, intent: "refute" }, observer, 201)
+  ).session_id;
+  const observerNext = await call(`/v1/p/${observerProblem}/next`, undefined, observer);
+  assert.equal(observerNext.viewer.role, "observer");
+  assert.equal(observerNext.viewer.effective_permissions.promote, false);
+  assert.equal(observerNext.viewer.effective_permissions.evidence, true);
+  assert.equal(observerNext.viewer.effective_permissions.dead_end, true);
+  assert.equal(observerNext.primary_move?.move, "add-refuter");
+  assert.ok(!moveNames(observerNext).includes("state-claim"));
+  const observerTriage = await call("/v1/triage", undefined, observer);
+  assert.deepEqual(observerTriage.move, observerNext.primary_move);
+  const observerPack = PackResponseSchema.parse(
+    await call(
+      `/v1/sessions/${observerSession}/pack?profile=working&max_tokens=8000`,
+      undefined,
+      observer,
+    ),
+  );
+  const observerMoves = JSON.parse(
+    observerPack.items.find((item) => item.id === "SYS-working-moves").body,
+  );
+  assert.deepEqual(observerMoves.primary_move, observerNext.primary_move);
+  assert.deepEqual(observerMoves.alternatives, observerNext.alternatives);
+  const observerEvidence = await call(
+    observerNext.primary_move.contract.request.path.replace("{id}", observerSession),
+    {
+      ...observerNext.primary_move.contract.prefilled_hints,
+      direction: "informs",
+      kind: "argument",
+      source: { kind: "model_memory" },
+      mode: "exploratory",
+      body_md:
+        "The zero-addition rule supplies a possible line of attack; no independent formal check is asserted.",
+    },
+    observer,
+    201,
+  );
+  assert.equal(typeof observerEvidence.evidence_id, "string");
+  const deadEndMove = observerNext.alternatives.find((move) => move.move === "record-dead-end");
+  assert.ok(deadEndMove, "the observer can discover negative-result work");
+  const observerDeadEnd = await call(
+    deadEndMove.contract.request.path.replace("{id}", observerSession),
+    {
+      approach: "Infer the finite-range result only from testing the endpoint eight.",
+      why_it_fails:
+        "An endpoint calculation alone leaves all other members of the range unchecked.",
+      retry_predicate:
+        "Retry once an invariant or exhaustive check covers every integer in the range.",
+    },
+    observer,
+    201,
+  );
+  assert.equal(typeof observerDeadEnd.dead_end_id, "string");
+  const observerDraft = await call(
+    `/v1/sessions/${observerSession}/workshop`,
+    {
+      type: "claim-draft",
+      title: "Private observer proposal",
+      body_md: "The draft remains private.",
+    },
+    observer,
+    201,
+  );
+  const observerDenied = await call(
+    `/v1/sessions/${observerSession}/promote`,
+    {
+      workshop_id: observerDraft.workshop_id,
+      kind: "conjecture",
+      statement: "Seven plus zero is seven.",
+      falsifier: "Seven plus zero differs from seven.",
+    },
+    observer,
+    422,
+  );
+  assert.equal(observerDenied.code, "ROSTER_FULL");
+
   console.log(
     JSON.stringify({
       stage: "moves-journey-passed",
@@ -649,8 +936,34 @@ await runLocalWorkerJourney(async (context) => {
       process_only_window_focus: true,
       unavailable_withdrawn_and_superseded_claims_excluded: true,
       author_focus_uses_current_proof_gap: true,
+      p11_duplicate_admission_preserved: true,
+      duplicate_discovery_uses_current_heads: true,
+      withheld_revision_does_not_revive_old_duplicate: true,
+      observer_evidence_and_dead_end_contracts_executable: true,
+      observer_working_pack_canonical_parity: true,
+      observer_claim_promotion_still_refused: true,
       boundary:
         "real local Workerd/D1; production provider; replay parity shown for reviews, claim relations and conflicts",
     }),
   );
+  // The intentionally redacted revision cannot be rebuilt from its missing
+  // body. Replay retains the previous head, while the live projection still
+  // names version 2. Declare only those exact, explained differences; every
+  // other problem and every additional drift item still has to agree.
+  return {
+    projectionParityExpect: {
+      [historyProblem]: {
+        status: "unreplayable",
+        drift: [
+          ...["statement", "payload_sha256", "source_seq", "norm_hash"].map(
+            (column) => `claims:column:${firstHistory.claim_id}:${column}`,
+          ),
+          ...["source_seq", "build_digest"].map(
+            (column) => `claim_projections:column:${firstHistory.claim_id}:${column}`,
+          ),
+          `claim_versions:orphan_row:${firstHistory.claim_id}@2`,
+        ],
+      },
+    },
+  };
 });

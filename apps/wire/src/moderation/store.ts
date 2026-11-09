@@ -15,10 +15,21 @@
  *   content, matched patterns, reporter identity, or an accusation.
  */
 
-import type { ScreeningPublicationContextInput } from "@asimposium/contracts";
+import {
+  MODERATION_CONTROL_KINDS,
+  type ScreeningPublicationContextInput,
+} from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { inboxNoticeStatement } from "../inbox/notice-write.ts";
+import { type OperatorCommand, operatorReceiptStatements } from "./operator-command.ts";
+import {
+  REPORT_SOURCE_PIN_AVAILABLE_SQL,
+  type ReportSourcePin,
+  ReportSourceUnavailableError,
+  reportSourcePinBindings,
+} from "./report-detail.ts";
 import { screeningCaseReleasedSql } from "./screening-release.ts";
+import { type ModerationTargetGuard, moderationTargetGuard } from "./target.ts";
 
 /** Independent sponsors whose reports hide a target pending review (§9.1 L2). */
 export const COMMUNITY_HIDE_THRESHOLD = 3;
@@ -337,6 +348,7 @@ export async function decideScreeningCase(
   db: D1Database,
   operatorId: string,
   input: { readonly caseId: string; readonly decision: CaseDecision; readonly reason: string },
+  command?: OperatorCommand,
 ): Promise<
   | { readonly ok: true; readonly auditEventId: string; readonly decidedAt: string }
   | { readonly ok: false; readonly reason: "not-found" | "not-pending" }
@@ -415,6 +427,7 @@ export async function decideScreeningCase(
       },
       audited,
     ),
+    ...operatorReceiptStatements(db, command, auditEventId, decidedAt),
   ]);
   if ((update?.meta.changes ?? 0) !== 1) return { ok: false, reason: "not-pending" };
   return { ok: true, auditEventId, decidedAt };
@@ -522,48 +535,81 @@ export async function applyOperatorControl(
     readonly targetRef: string;
     readonly visibility: "hidden" | "visible";
     readonly reason: string;
+    /** Mounted fresh commands revalidate publication authority in this batch. */
+    readonly targetGuard?: ModerationTargetGuard;
   },
+  command?: OperatorCommand,
 ): Promise<
   | { readonly ok: true; readonly auditEventId: string; readonly appliedAt: string }
   | { readonly ok: false; readonly reason: "unchanged" }
 > {
+  const targetGuard = input.targetGuard ?? { sql: "1", bindings: [] };
   const current = await currentContentControl(db, input.problemId, input.targetRef);
   const currentVisibility = current?.visibility ?? "visible";
   if (currentVisibility === input.visibility) return { ok: false, reason: "unchanged" };
   const appliedAt = new Date().toISOString();
   const auditEventId = mintModerationId("OA");
   const controlId = mintModerationId("CC");
-  await db.batch([
-    contentControlStatement(db, {
-      controlId,
-      problemId: input.problemId,
-      targetKind: input.targetKind,
-      targetRef: input.targetRef,
-      visibility: input.visibility,
-      source: "operator",
-      reasonCategory: "operator-review",
-      actor: operatorId,
-      reason: input.reason,
-      createdAt: appliedAt,
-    }),
-    operatorAuditStatement(db, {
-      eventId: auditEventId,
-      operatorId,
-      action: input.visibility === "hidden" ? "content.hide" : "content.restore",
-      targetId: `${input.problemId}/${input.targetRef}`.slice(0, 128),
-      reason: input.reason,
-      before: await stateDigest({ target: input.targetRef, visibility: currentVisibility }),
-      after: await stateDigest({ target: input.targetRef, visibility: input.visibility }),
-      createdAt: appliedAt,
-    }),
-    moderationLogStatement(db, {
-      action: input.visibility === "hidden" ? "hidden" : "restored",
-      category: "operator-review",
-      subject: input.targetKind === "problem" ? "problem" : "ledger-object",
-      problemId: input.problemId,
-      createdAt: appliedAt,
-    }),
+  const controlled = {
+    sql: "EXISTS (SELECT 1 FROM content_controls WHERE control_id = ?)",
+    bindings: [controlId],
+  };
+  const [control] = await db.batch([
+    contentControlStatement(
+      db,
+      {
+        controlId,
+        problemId: input.problemId,
+        targetKind: input.targetKind,
+        targetRef: input.targetRef,
+        visibility: input.visibility,
+        source: "operator",
+        reasonCategory: "operator-review",
+        actor: operatorId,
+        reason: input.reason,
+        createdAt: appliedAt,
+      },
+      {
+        // A stale pre-read must not overwrite another operator's newer decision.
+        sql: `COALESCE((SELECT control_id FROM content_controls
+        WHERE problem_id = ? AND target_ref = ? ORDER BY version DESC LIMIT 1), '') = ?
+        AND (${targetGuard.sql})`,
+        bindings: [
+          input.problemId,
+          input.targetRef,
+          current?.control_id ?? "",
+          ...targetGuard.bindings,
+        ],
+      },
+    ),
+    operatorAuditStatement(
+      db,
+      {
+        eventId: auditEventId,
+        operatorId,
+        action: input.visibility === "hidden" ? "content.hide" : "content.restore",
+        targetId: `${input.problemId}/${input.targetRef}`.slice(0, 128),
+        reason: input.reason,
+        before: await stateDigest({ target: input.targetRef, visibility: currentVisibility }),
+        after: await stateDigest({ target: input.targetRef, visibility: input.visibility }),
+        createdAt: appliedAt,
+      },
+      controlled,
+    ),
+    moderationLogStatement(
+      db,
+      {
+        action: input.visibility === "hidden" ? "hidden" : "restored",
+        category: "operator-review",
+        subject: input.targetKind === "problem" ? "problem" : "ledger-object",
+        problemId: input.problemId,
+        createdAt: appliedAt,
+      },
+      controlled,
+    ),
+    ...operatorReceiptStatements(db, command, auditEventId, appliedAt),
   ]);
+  if ((control?.meta.changes ?? 0) !== 1) return { ok: false, reason: "unchanged" };
   return { ok: true, auditEventId, appliedAt };
 }
 
@@ -580,6 +626,9 @@ export interface ReportInput {
   readonly reporterClass: "fellow" | "sponsor";
   readonly reporterFellowId: string | null;
   readonly reporterSponsorId: string;
+  readonly source?: ReportSourcePin;
+  /** HTTP intake requires a source; legacy/internal fixtures may have no pin. */
+  readonly requireSource?: boolean;
 }
 
 export interface FiledReport {
@@ -595,14 +644,22 @@ export interface FiledReport {
  * reach COMMUNITY_HIDE_THRESHOLD independent sponsors, the target is hidden
  * pending trained review (never convicted) in the same transaction.
  */
-/** Target kinds whose visibility public faces enforce (claims by id, whole problems). */
-export const HIDEABLE_TARGET_KINDS: ReadonlySet<string> = new Set(["problem", "claim"]);
+/** The same publication kinds are controllable through reports and operators. */
+export const HIDEABLE_TARGET_KINDS = MODERATION_CONTROL_KINDS;
 
 export async function fileReport(db: D1Database, input: ReportInput): Promise<FiledReport> {
   const reportId = mintModerationId("RP");
   const createdAt = new Date().toISOString();
   const windowStart = new Date(Date.parse(createdAt) - REPORT_WINDOW_MS).toISOString();
   const controlId = mintModerationId("CC");
+  const sourceGuard =
+    input.source === undefined
+      ? input.requireSource
+        ? "0"
+        : "1"
+      : REPORT_SOURCE_PIN_AVAILABLE_SQL;
+  const sourceBindings =
+    input.source === undefined ? [] : reportSourcePinBindings({ ...input, source: input.source });
   // The auto-hide fires only on the insert that crosses the threshold, only
   // while the target is not already hidden, and never over an operator's
   // explicit restore (an operator decision outranks report volume).
@@ -629,10 +686,12 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
       .prepare(
         `INSERT INTO reports
            (report_id, problem_id, target_kind, target_ref, reason, note, reporter_class,
-            reporter_fellow_id, reporter_sponsor_id, status, created_at)
-         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?
+            reporter_fellow_id, reporter_sponsor_id, status, created_at,
+            source_event_id, source_digest, source_ref)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?
          WHERE (SELECT COUNT(*) FROM reports
                   WHERE reporter_sponsor_id = ? AND created_at > ?) < ?
+           AND ${sourceGuard}
          ON CONFLICT (problem_id, target_ref, reporter_sponsor_id) DO NOTHING
          RETURNING report_id`,
       )
@@ -647,9 +706,13 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
         input.reporterFellowId,
         input.reporterSponsorId,
         createdAt,
+        input.source?.eventId ?? null,
+        input.source?.digest ?? null,
+        input.source?.requestedRef ?? null,
         input.reporterSponsorId,
         windowStart,
         REPORTS_PER_SPONSOR_PER_DAY,
+        ...sourceBindings,
       ),
     db
       .prepare(
@@ -706,7 +769,16 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
   // insert is either a previously accepted sponsor/target (which must still
   // replay at the cap) or an admission refused without any visibility/log side
   // effects. The latter cannot be mistaken for an accepted report.
-  if (existing === null) throw new ReportRateLimitedError();
+  if (existing === null) {
+    if (input.requireSource || input.source !== undefined) {
+      const sourceStillAvailable = await db
+        .prepare(`SELECT 1 AS available WHERE ${sourceGuard}`)
+        .bind(...sourceBindings)
+        .first<{ available: number }>();
+      if (sourceStillAvailable?.available !== 1) throw new ReportSourceUnavailableError();
+    }
+    throw new ReportRateLimitedError();
+  }
   return {
     reportId: existing.report_id,
     deduplicated: true,
@@ -760,6 +832,7 @@ export async function resolveReport(
     readonly resolution: "dismiss" | "uphold";
     readonly reason: string;
   },
+  command?: OperatorCommand,
 ): Promise<
   | { readonly ok: true; readonly auditEventId: string; readonly resolvedAt: string }
   | { readonly ok: false; readonly reason: "not-found" | "not-pending" }
@@ -866,6 +939,16 @@ export async function resolveReport(
   // Evaluate the latest control and remaining reports INSIDE this transaction:
   // a later operator hold or new report must not be undone by a stale pre-read.
   if (HIDEABLE_TARGET_KINDS.has(report.target_kind)) {
+    // Resolving an allegation is distinct from changing visibility. Even a
+    // legacy unpinned report cannot hide/restore another kind sharing its id.
+    const targetGuard = moderationTargetGuard(
+      {
+        problemId: report.problem_id,
+        targetKind: report.target_kind,
+        targetRef: report.target_ref,
+      },
+      { requirePublication: false },
+    );
     const controlId = mintModerationId("CC");
     const visibility = status === "upheld" ? "hidden" : "visible";
     const latestControl = `c.problem_id = ? AND c.target_ref = ?
@@ -897,12 +980,13 @@ export async function resolveReport(
           createdAt: resolvedAt,
         },
         {
-          sql: `${audited.sql} AND ${mayChange}`,
+          sql: `${audited.sql} AND ${mayChange} AND (${targetGuard.sql})`,
           bindings: [
             ...audited.bindings,
             report.problem_id,
             report.target_ref,
             ...(status === "dismissed" ? [report.problem_id, report.target_ref] : []),
+            ...targetGuard.bindings,
           ],
         },
       ),
@@ -923,6 +1007,7 @@ export async function resolveReport(
       ),
     );
   }
+  statements.push(...operatorReceiptStatements(db, command, auditEventId, resolvedAt));
   const [update] = await db.batch(statements);
   if ((update?.meta.changes ?? 0) !== 1) return { ok: false, reason: "not-pending" };
   return { ok: true, auditEventId, resolvedAt };

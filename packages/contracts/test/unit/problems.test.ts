@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import Ajv2020 from "ajv/dist/2020";
 import {
   ClaimReanchorRequestSchema,
+  FellowProblemBriefReadResponseSchema,
   ProblemClosingSynthesisSchema,
   ProblemDormancyEventSchema,
   ProblemFamousGuardrailSchema,
@@ -17,7 +18,11 @@ import {
   ProblemStatementVersionSchema,
   ProblemStatusSchema,
   ProposeProblemRequestSchema,
+  SaveProblemBriefRequestSchema,
+  SaveProblemBriefResponseSchema,
   SponsorProblemBriefSchema,
+  WithdrawProblemBriefRequestSchema,
+  WithdrawProblemBriefResponseSchema,
 } from "../../src/problems.ts";
 
 test("dormancy records only the explicit platform clock transition", () => {
@@ -384,6 +389,7 @@ test("W5.1 Sponsor problem brief enforces fields and status", () => {
   const validBrief = {
     id: "brief-goldbach-1",
     sponsor_id: "usr_01h7abc",
+    version: 1,
     assigned_fellow_id: "fel_01h7xyz",
     title: "Goldbach Conjecture Investigation",
     statement: "Every even integer greater than 2 is sum of two primes.",
@@ -398,6 +404,190 @@ test("W5.1 Sponsor problem brief enforces fields and status", () => {
   expect(SponsorProblemBriefSchema.safeParse({ ...validBrief, status: "invalid" }).success).toBe(
     false,
   );
+});
+
+test("brief saves distinguish new intent from an edit pinned to an existing version", () => {
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true, validateFormats: false }).compile(
+    schema.properties.save_brief_request,
+  );
+  const edit = JSON.parse(
+    readFileSync(new URL("../fixtures/valid/problems-brief-edit.json", import.meta.url), "utf8"),
+  );
+  const invalidEdit = JSON.parse(
+    readFileSync(new URL("../fixtures/invalid/problems-brief-edit.json", import.meta.url), "utf8"),
+  );
+  expect(SaveProblemBriefRequestSchema.parse(edit)).toEqual(edit);
+  expect(published(edit)).toBe(true);
+
+  // Target/version pairing is a Zod cross-field refinement. JSON Schema also
+  // enforces the field types and strict request shape tested below.
+  const missingTarget = SaveProblemBriefRequestSchema.safeParse(invalidEdit);
+  expect(missingTarget.success).toBe(false);
+  if (missingTarget.success) throw new Error("An edit must identify its existing brief.");
+  expect(missingTarget.error.issues.map((issue) => issue.path)).toEqual([["expected_version"]]);
+  expect(SaveProblemBriefRequestSchema.safeParse({ ...invalidEdit, id: edit.id }).success).toBe(
+    true,
+  );
+
+  const { id, expected_version: _expectedVersion, ...create } = edit;
+  for (const request of [create, { ...create, id }, { ...edit, assigned_fellow_id: "FEL-BRIEF" }]) {
+    expect(SaveProblemBriefRequestSchema.safeParse(request).success).toBe(true);
+    expect(published(request)).toBe(true);
+  }
+  for (const expected_version of [1, Number.MAX_SAFE_INTEGER]) {
+    expect(SaveProblemBriefRequestSchema.safeParse({ ...edit, expected_version }).success).toBe(
+      true,
+    );
+    expect(published({ ...edit, expected_version })).toBe(true);
+  }
+  for (const expected_version of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "2", null]) {
+    expect(SaveProblemBriefRequestSchema.safeParse({ ...edit, expected_version }).success).toBe(
+      false,
+    );
+    expect(published({ ...edit, expected_version })).toBe(false);
+  }
+  for (const patch of [{ sponsor_id: "usr_other" }, { version: 3 }, { status: "active" }]) {
+    expect(SaveProblemBriefRequestSchema.safeParse({ ...edit, ...patch }).success).toBe(false);
+    expect(published({ ...edit, ...patch })).toBe(false);
+  }
+});
+
+test("brief save receipts require a complete versioned brief and reject extra authority", () => {
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true, validateFormats: false }).compile(
+    schema.properties.save_brief_response,
+  );
+  const { brief } = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/valid/problems-fellow-brief-read.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  const saved = { brief: { ...brief, version: 3 } };
+  expect(SaveProblemBriefResponseSchema.parse(saved)).toEqual(saved);
+  expect(published(saved)).toBe(true);
+  for (const version of [undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "3", null]) {
+    const response = { brief: { ...brief, version } };
+    expect(SaveProblemBriefResponseSchema.safeParse(response).success).toBe(false);
+    expect(published(response)).toBe(false);
+  }
+  for (const response of [
+    { ...saved, token: "invented-authority" },
+    { brief: { ...saved.brief, expected_version: 2 } },
+    { brief: { ...saved.brief, sponsor_id: "invalid" } },
+  ]) {
+    expect(SaveProblemBriefResponseSchema.safeParse(response).success).toBe(false);
+    expect(published(response)).toBe(false);
+  }
+});
+
+test("brief withdrawal pins the observed version and returns an explicit versioned receipt", () => {
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
+  const ajv = new Ajv2020({ strict: true, validateFormats: false });
+  const requestSchema = ajv.compile(schema.properties.withdraw_brief_request);
+  const responseSchema = ajv.compile(schema.properties.withdraw_brief_response);
+  const request = { expected_version: 2 };
+  const response = { withdrawn: true as const, id: "brief-example", version: 3 };
+  expect(WithdrawProblemBriefRequestSchema.parse(request)).toEqual(request);
+  expect(requestSchema(request)).toBe(true);
+  expect(WithdrawProblemBriefResponseSchema.parse(response)).toEqual(response);
+  expect(responseSchema(response)).toBe(true);
+  for (const version of [undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "2", null]) {
+    const invalidRequest = { expected_version: version };
+    const invalidResponse = { ...response, version };
+    expect(WithdrawProblemBriefRequestSchema.safeParse(invalidRequest).success).toBe(false);
+    expect(requestSchema(invalidRequest)).toBe(false);
+    expect(WithdrawProblemBriefResponseSchema.safeParse(invalidResponse).success).toBe(false);
+    expect(responseSchema(invalidResponse)).toBe(false);
+  }
+  for (const invalidRequest of [
+    { ...request, id: "brief-other" },
+    { ...request, sponsor_id: "usr_other" },
+    { ...request, withdrawn: true },
+  ]) {
+    expect(WithdrawProblemBriefRequestSchema.safeParse(invalidRequest).success).toBe(false);
+    expect(requestSchema(invalidRequest)).toBe(false);
+  }
+  for (const invalidResponse of [
+    { ...response, withdrawn: false },
+    { ...response, id: "" },
+    { ...response, expected_version: 2 },
+  ]) {
+    expect(WithdrawProblemBriefResponseSchema.safeParse(invalidResponse).success).toBe(false);
+    expect(responseSchema(invalidResponse)).toBe(false);
+  }
+});
+
+test("the invalid Fellow brief fixture rejects withdrawn intent rather than missing version", () => {
+  const withdrawn = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/invalid/problems-fellow-brief-read.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  expect(SponsorProblemBriefSchema.safeParse(withdrawn.brief).success).toBe(true);
+  const result = FellowProblemBriefReadResponseSchema.safeParse(withdrawn);
+  expect(result.success).toBe(false);
+  if (result.success) throw new Error("Fellows must not receive a withdrawn brief.");
+  expect(result.error.issues.map((issue) => issue.path)).toEqual([["brief", "status"]]);
+  const active = { ...withdrawn, brief: { ...withdrawn.brief, status: "active" } };
+  expect(FellowProblemBriefReadResponseSchema.safeParse(active).success).toBe(true);
+});
+
+test("brief adoption requires the exact version pin in the proposal contract", () => {
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.propose_request);
+  for (const directory of ["valid", "invalid"] as const) {
+    const proposal = JSON.parse(
+      readFileSync(
+        new URL(`../fixtures/${directory}/problems-proposal-from-brief.json`, import.meta.url),
+        "utf8",
+      ),
+    );
+    expect(ProposeProblemRequestSchema.safeParse(proposal).success).toBe(directory === "valid");
+    expect(published(proposal)).toBe(directory === "valid");
+  }
+  const valid = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/valid/problems-proposal-from-brief.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  for (const missing of ["brief_id", "expected_brief_version"]) {
+    const partial = { ...valid };
+    delete partial[missing];
+    expect(ProposeProblemRequestSchema.safeParse(partial).success).toBe(false);
+  }
+  for (const version of [-1, 1.5, "2", null, Number.MAX_SAFE_INTEGER + 1]) {
+    const invalid = { ...valid, expected_brief_version: version };
+    expect(ProposeProblemRequestSchema.safeParse(invalid).success).toBe(false);
+    expect(published(invalid)).toBe(false);
+  }
+});
+
+test("Fellow brief action prefill pins the exact returned intent without drafting its scientific content", () => {
+  const read = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/valid/problems-fellow-brief-read.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  expect(FellowProblemBriefReadResponseSchema.safeParse(read).success).toBe(true);
+  expect(Object.keys(read.next_actions[0].body_prefill)).toEqual([
+    "brief_id",
+    "expected_brief_version",
+  ]);
+  read.next_actions[0].body_prefill.expected_brief_version += 1;
+  expect(FellowProblemBriefReadResponseSchema.safeParse(read).success).toBe(false);
 });
 
 test("W5.1 Fellow propose problem request validates inputs", () => {
@@ -506,6 +696,16 @@ test("W5.1 Claim reanchor request validates claim_id and base_version", () => {
       base_version: 0,
     }).success,
   ).toBe(false);
+});
+
+test("re-anchor accepts an explicit observed statement cursor without requiring it on legacy requests", () => {
+  const request = { claim_id: "C-1", base_version: 2, client_context_cursor: 41 };
+  expect(ClaimReanchorRequestSchema.parse(request)).toEqual(request);
+  for (const cursor of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "41", null]) {
+    expect(
+      ClaimReanchorRequestSchema.safeParse({ ...request, client_context_cursor: cursor }).success,
+    ).toBe(false);
+  }
 });
 
 test("W5.1 Problem statement review contracts validate verdict and basis", () => {

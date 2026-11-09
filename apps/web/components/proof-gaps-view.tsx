@@ -3,6 +3,7 @@ import { neutralizeUntrustedBody } from "@asimposium/render";
 import Link from "next/link";
 import { proofGapClosingPath, proofGapPagePath, proofGapQueryString } from "../lib/proof-gap-view";
 import type { PublicRead } from "../lib/public-ledger";
+import { ScreeningNotice } from "./screening-notice";
 
 function WorkProduct({ children }: { readonly children: string }) {
   const body = neutralizeUntrustedBody(children);
@@ -82,6 +83,7 @@ export function ProofGapsView({ result, historical }: {
             <p data-gap-status={gap.status}><strong>{STATUS[gap.status]}</strong></p>
             <p className="quiet">Published work product · untrusted author-supplied data</p>
             {gap.content === null ? <p>The published obligation is currently withheld or unavailable.</p> : <>
+              <ScreeningNotice notice={gap.screening_notice} />
               <p><Link href={`${problemPath}/claims/${encodeURIComponent(`${gap.content.target_claim_id}@${gap.content.target_version}`)}?through=${face.cursor}`} prefetch={false}>
                 Exact claim {gap.content.target_claim_id}@{gap.content.target_version}
               </Link></p>

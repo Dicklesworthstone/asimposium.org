@@ -63,6 +63,7 @@ test("a schema-valid preview for another problem or principal is refused", async
     { ...publicationPreview, acting_sponsor_id: "usr_fedcba0987654321" },
     { ...publicationPreview, problem: { ...publicationPreview.problem, id: "P-OTHER" } },
     { ...publicationPreview, problem: { ...publicationPreview.problem, status: "active" } },
+    { ...publicationPreview, problem: { ...publicationPreview.problem, scope: undefined } },
     { ...publicationPreview, private_directive: "UNRELATED_PRIVATE_BYTES" },
   ]) {
     response = candidate;

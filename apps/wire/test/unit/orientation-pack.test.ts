@@ -1,10 +1,14 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { ProblemDetailSchema } from "@asimposium/contracts";
+import { ProblemDetailSchema, type ProblemStatementBoundaries } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { EnrollmentService } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { readPublicEventTail } from "../../src/ledger/event-tail-read.ts";
+import {
+  readPublishedProblemFormulation,
+  readPublishedProblemFormulations,
+} from "../../src/ledger/problem-formulation-read.ts";
 import { createProblemRouter } from "../../src/problems/router.ts";
 import {
   type OrientationPackSection,
@@ -15,8 +19,13 @@ const AT = "2026-09-24T00:00:00.000Z";
 const STATEMENT = "For every integer n, n squared and n have the same parity.";
 const FALSIFIER = "An integer whose square has different parity from the integer.";
 const MOTIVATION = "Check both residue classes modulo two.";
+const BOUNDARIES = {
+  scope: "  Integers, including negative values.\nRetain this exact spacing.  ",
+  out_of_scope: "Real and complex non-integers are outside this problem.",
+  success_criteria: "A proof covering both residue classes modulo two.",
+} satisfies ProblemStatementBoundaries;
 
-function formulation(version = 1) {
+function formulation(version = 1, boundaries?: ProblemStatementBoundaries) {
   return {
     action: version === 1 ? "publish" : "revise-statement",
     acting_principal: { type: "sponsor", id: "usr_pack_owner" },
@@ -30,6 +39,7 @@ function formulation(version = 1) {
       statement: version === 1 ? STATEMENT : "The strengthened parity formulation.",
       falsifier: FALSIFIER,
       motivation: MOTIVATION,
+      ...boundaries,
       status: "sharpening",
       updated_at: AT,
     },
@@ -38,7 +48,7 @@ function formulation(version = 1) {
 
 // The actual selector SQL runs against SQLite. This adapter supplies only the
 // read interface D1 exposes; the HTTP integration lane also uses real Workerd/D1.
-async function fixture() {
+async function fixture(boundaries?: ProblemStatementBoundaries) {
   const sql = new Database(":memory:");
   sql.exec(`
     CREATE TABLE problems (
@@ -64,13 +74,15 @@ async function fixture() {
     );
     CREATE TABLE workshop_objects (body TEXT);
     CREATE TABLE problem_statement_versions (
-      problem_id TEXT, version INTEGER, statement TEXT, falsifier TEXT, motivation TEXT
+      problem_id TEXT, version INTEGER, statement TEXT, falsifier TEXT, motivation TEXT,
+      scope TEXT, out_of_scope TEXT, success_criteria TEXT
     );
     CREATE TABLE problem_stewards (problem_id TEXT, sponsor_id TEXT, created_at TEXT);
     INSERT INTO problems (id, public_seq, status, unlisted) VALUES ('P-DEMO', 0, 'active', 0);
     INSERT INTO workshop_objects VALUES ('PRIVATE-WORKSHOP-CANARY');
     INSERT INTO problem_statement_versions VALUES (
-      'P-DEMO', 1, 'UNCOMMITTED-FORMULATION-CANARY', 'UNCOMMITTED-FALSIFIER', 'UNCOMMITTED-MOTIVATION'
+      'P-DEMO', 1, 'UNCOMMITTED-FORMULATION-CANARY', 'UNCOMMITTED-FALSIFIER', 'UNCOMMITTED-MOTIVATION',
+      'UNCOMMITTED-SCOPE', 'UNCOMMITTED-EXCLUSIONS', 'UNCOMMITTED-SUCCESS'
     );
   `);
   const queries: string[] = [];
@@ -128,7 +140,7 @@ async function fixture() {
         .run(version);
     }
   }
-  await append("problem.admitted", "problem", formulation());
+  await append("problem.admitted", "problem", formulation(1, boundaries));
   return {
     sql,
     db,
@@ -164,6 +176,140 @@ async function publicDetail(db: D1Database): Promise<Response> {
 }
 
 describe("cursor-aware orientation context", () => {
+  test("versioned boundaries retain exact publication bytes across singleton, page, pack and complete reads", async () => {
+    const f = await fixture(BOUNDARIES);
+    try {
+      const next = {
+        scope: "Only positive integers.",
+        out_of_scope: "Zero and negative integers are excluded from this revision.",
+        success_criteria: "An explicit proof for each positive integer.",
+      };
+      await f.append("problem.statement-revised", "problem", formulation(2, next), 2);
+      for (const [cursor, expected] of [
+        [1, BOUNDARIES],
+        [2, next],
+      ] as const) {
+        const single = await readPublishedProblemFormulation(f.db, "P-DEMO", cursor);
+        const page = await readPublishedProblemFormulations(f.db, [
+          { problem_id: "P-DEMO", through: cursor },
+        ]);
+        expect(single?.problem).toMatchObject(expected);
+        expect(page.get("P-DEMO")).toEqual(single);
+        const pack = await readOrientationPack(f.db, "P-DEMO", cursor);
+        expect(statement(pack)).toMatchObject({ ...expected, statement_version: cursor });
+        expect(JSON.stringify(pack)).not.toContain("UNCOMMITTED-");
+      }
+      const detail = await publicDetail(f.db);
+      expect(detail.status).toBe(200);
+      expect(((await detail.json()) as { problem: unknown }).problem).toMatchObject(next);
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test("legacy formulation boundaries stay absent even after a later version declares them", async () => {
+    const f = await fixture();
+    try {
+      await f.append("problem.statement-revised", "problem", formulation(2, BOUNDARIES), 2);
+      const legacy = await readPublishedProblemFormulation(f.db, "P-DEMO", 1);
+      const historical = statement(await readOrientationPack(f.db, "P-DEMO", 1));
+      for (const field of ["scope", "out_of_scope", "success_criteria"]) {
+        expect(legacy?.problem).not.toHaveProperty(field);
+        expect(historical).not.toHaveProperty(field);
+      }
+      expect(JSON.stringify(historical)).not.toContain("UNCOMMITTED-");
+      expect(statement(await readOrientationPack(f.db, "P-DEMO", 2))).toMatchObject(BOUNDARIES);
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test("invalid current boundary bundles cannot fall back to older formulation bytes", async () => {
+    for (const invalid of [
+      { scope: "Partial scope" },
+      { ...BOUNDARIES, scope: " \n " },
+      { ...BOUNDARIES, out_of_scope: null },
+      { ...BOUNDARIES, success_criteria: "x".repeat(4097) },
+    ]) {
+      const f = await fixture(BOUNDARIES);
+      try {
+        const next = formulation(2);
+        await f.append(
+          "problem.statement-revised",
+          "problem",
+          {
+            ...next,
+            problem: { ...next.problem, ...invalid },
+          },
+          2,
+        );
+        expect(await readPublishedProblemFormulation(f.db, "P-DEMO", 2)).toBeUndefined();
+        expect(
+          (await readPublishedProblemFormulations(f.db, [{ problem_id: "P-DEMO", through: 2 }]))
+            .size,
+        ).toBe(0);
+        const pack = await readOrientationPack(f.db, "P-DEMO", 2);
+        expect(statement(pack)).toBeUndefined();
+        expect(JSON.stringify(pack)).not.toContain(BOUNDARIES.success_criteria);
+      } finally {
+        f.sql.close();
+      }
+    }
+  });
+
+  test("current controls and source integrity protect historical boundary bundles as a whole", async () => {
+    for (const mutation of [
+      "INSERT INTO content_controls VALUES ('P-DEMO', 'problem', 'hidden', 1)",
+      "INSERT INTO content_controls VALUES ('P-DEMO', 'P-DEMO', 'hidden', 1)",
+      "INSERT INTO content_controls VALUES ('P-DEMO', 'P-DEMO@1', 'hidden', 1)",
+      "INSERT INTO content_controls VALUES ('P-DEMO', '#1', 'hidden', 1)",
+      "UPDATE event_content SET redacted_at = '2026-09-25' WHERE event_id = 'E-1'",
+      "UPDATE event_content SET payload_json = replace(payload_json, 'negative', 'positive') WHERE event_id = 'E-1'",
+    ]) {
+      const f = await fixture(BOUNDARIES);
+      try {
+        await f.append("problem.statement-revised", "problem", formulation(2, BOUNDARIES), 2);
+        f.sql.exec(mutation);
+        expect(await readPublishedProblemFormulation(f.db, "P-DEMO", 1)).toBeUndefined();
+        const pack = await readOrientationPack(f.db, "P-DEMO", 1);
+        expect(statement(pack)).toBeUndefined();
+        expect(JSON.stringify(pack)).not.toContain(BOUNDARIES.success_criteria);
+        if (mutation.startsWith("INSERT")) {
+          f.sql.exec("UPDATE content_controls SET visibility = 'visible', version = 2");
+          expect(statement(await readOrientationPack(f.db, "P-DEMO", 1))).toMatchObject(BOUNDARIES);
+        }
+      } finally {
+        f.sql.close();
+      }
+    }
+  });
+
+  test("boundary bytes count toward whole-formulation pack limits while the complete read retains all fields", async () => {
+    const largeBoundaries = {
+      scope: "s".repeat(4096),
+      out_of_scope: "o".repeat(4096),
+      success_criteria: "c".repeat(4096),
+    };
+    const f = await fixture();
+    try {
+      const large = formulation(2, largeBoundaries);
+      large.problem.statement = "p".repeat(8192);
+      await f.append("problem.statement-revised", "problem", large, 2);
+      const pack = await readOrientationPack(f.db, "P-DEMO", 2);
+      expect(statement(pack)).toMatchObject({ content_omitted: "whole-formulation-size-limit" });
+      for (const field of ["statement", "scope", "out_of_scope", "success_criteria"])
+        expect(statement(pack)).not.toHaveProperty(field);
+      expect(pack.actions.some((action) => action.url === "/v1/problems/P-DEMO")).toBe(true);
+      const detail = await publicDetail(f.db);
+      expect(detail.status).toBe(200);
+      expect(((await detail.json()) as { problem: unknown }).problem).toMatchObject(
+        largeBoundaries,
+      );
+    } finally {
+      f.sql.close();
+    }
+  });
+
   test("a fresh pack carries the committed formulation and attribution, with no private projections", async () => {
     const f = await fixture();
     try {

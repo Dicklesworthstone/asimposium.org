@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   CitationsListResponseSchema,
   CorrectCitationResponseSchema,
@@ -6,6 +7,7 @@ import {
   RecordCitationResponseSchema,
   SingleCitationResponseSchema,
 } from "@asimposium/contracts";
+import { writeLedgerEvent } from "../../src/krater/krater.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 import { assertRacedWriteLeavesNoTrace } from "./raced-ledger-write.mjs";
@@ -13,7 +15,8 @@ import { assertRacedWriteLeavesNoTrace } from "./raced-ledger-write.mjs";
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall, worker, origin, env, fixtures, userAgent } = context;
+  const { call, enroll, sponsorCall, operatorCall, worker, origin, env, fixtures, userAgent } =
+    context;
   const sponsorA = "usr_cit_sponsor_a";
   const authorA = await enroll("cit-author-a", sponsorA);
   const helloA = await call("/v1/hello", undefined, authorA);
@@ -379,12 +382,15 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(listJsonRes.headers.get("content-type"), "application/json; charset=utf-8");
   const listJson = CitationsListResponseSchema.parse(await listJsonRes.json());
   assert.equal(listJson.citations.length, 3);
-  assert.equal(listJson.citations[0].citation_id, cit1Id);
-  assert.equal(listJson.citations[0].version, 2); // Head version 2
-  assert.equal(listJson.citations[0].title, correctPayload.title);
+  assert.deepEqual(
+    listJson.citations.map((item) => item.citation_id),
+    [cit2Id, cit3Id, cit1Id],
+  );
+  assert.equal(listJson.citations[2].version, 2); // Latest selected version is last in publication order.
+  assert.equal(listJson.citations[2].title, correctPayload.title);
   assert.deepEqual(listJson.citations[0].screening_notice, warningNotice);
-  assert.deepEqual(listJson.citations[1].screening_notice, warningNotice);
-  assert.equal(listJson.citations[2].screening_notice, undefined);
+  assert.deepEqual(listJson.citations[2].screening_notice, warningNotice);
+  assert.equal(listJson.citations[1].screening_notice, undefined);
 
   // Literature alias: .json
   const litAliasRes = await worker.fetch(`${origin}/p/${problemId}/literature.json`);
@@ -626,6 +632,263 @@ await runLocalWorkerJourney(async (context) => {
     "an echo is private",
   );
 
+  // Continuations are source-head scans at one immutable cut. A correction
+  // published after page one must not move a head into its later pages.
+  const nextLink = (response) => {
+    const path = /<([^>]+)>; rel="next"/.exec(response.headers.get("link") ?? "")?.[1];
+    assert.ok(path, "a bounded page advertises its exact continuation");
+    return new URL(path, origin);
+  };
+  const firstPageResponse = await worker.fetch(`${origin}/p/${problemId}/citations.json?limit=1`);
+  assert.equal(firstPageResponse.status, 200);
+  const firstPageText = await firstPageResponse.text();
+  const firstPage = CitationsListResponseSchema.parse(JSON.parse(firstPageText));
+  assert.deepEqual(
+    firstPage.citations.map((item) => item.citation_id),
+    [cit2Id],
+  );
+  assert.equal(firstPage.after, 0);
+  assert.equal(firstPage.next_after, recordedArxiv.seq);
+  assert.equal(firstPage.scanned_through, recordedArxiv.seq);
+  const frozenCollection = firstPageResponse.headers.get("content-location");
+  assert.ok(frozenCollection?.includes(`through=${firstPage.cursor}`));
+  const frozenNext = nextLink(firstPageResponse);
+  assert.equal(frozenNext.searchParams.get("through"), String(firstPage.cursor));
+  assert.equal(frozenNext.searchParams.get("after"), String(recordedArxiv.seq));
+  assert.equal(frozenNext.searchParams.get("limit"), "1");
+
+  const laterCorrection = await call(
+    `/v1/sessions/${sessionIdA}/citations/correct`,
+    {
+      ...validArxivPayload,
+      citation_id: cit2Id,
+      base_version: 1,
+      title: "Sieve methods with corrected bibliographic metadata",
+      correction_rationale: "Correct the title after capturing the literature traversal cursor.",
+    },
+    authorA,
+    200,
+    "citation-after-captured-page",
+  );
+  assert.equal(laterCorrection.version, 2);
+  assert.ok(laterCorrection.seq > firstPage.cursor);
+  const repeatedFirst = await worker.fetch(new URL(frozenCollection, origin));
+  assert.equal(repeatedFirst.status, 200);
+  assert.equal(await repeatedFirst.text(), firstPageText);
+  assert.equal(repeatedFirst.headers.get("etag"), firstPageResponse.headers.get("etag"));
+  const secondPageResponse = await worker.fetch(frozenNext);
+  assert.equal(secondPageResponse.status, 200);
+  const secondPage = CitationsListResponseSchema.parse(await secondPageResponse.json());
+  assert.equal(secondPage.cursor, firstPage.cursor);
+  assert.deepEqual(
+    secondPage.citations.map((item) => item.citation_id),
+    [cit3Id],
+  );
+  const thirdPageResponse = await worker.fetch(nextLink(secondPageResponse));
+  assert.equal(thirdPageResponse.status, 200);
+  const thirdPage = CitationsListResponseSchema.parse(await thirdPageResponse.json());
+  assert.equal(thirdPage.cursor, firstPage.cursor);
+  assert.equal(thirdPage.next_after, null);
+  assert.equal(thirdPage.scanned_through, firstPage.cursor);
+  assert.deepEqual(
+    thirdPage.citations.map((item) => [item.citation_id, item.version]),
+    [[cit1Id, 2]],
+  );
+  const currentAfterCorrection = CitationsListResponseSchema.parse(
+    await call(`/p/${problemId}/citations.json`),
+  );
+  assert.deepEqual(
+    currentAfterCorrection.citations.map((item) => item.citation_id),
+    [cit3Id, cit1Id, cit2Id],
+  );
+
+  for (const format of ["json", "md", "html"]) {
+    const query = `through=${firstPage.cursor}&limit=1&unanchored=${!firstPage.citations[0].unanchored}`;
+    const filtered = await worker.fetch(`${origin}/p/${problemId}/citations.${format}?${query}`);
+    assert.equal(filtered.status, 200);
+    assert.equal(nextLink(filtered).searchParams.get("after"), String(recordedArxiv.seq));
+    const text = await filtered.text();
+    if (format === "json") {
+      const face = CitationsListResponseSchema.parse(JSON.parse(text));
+      assert.deepEqual(face.citations, []);
+      assert.equal(face.next_after, recordedArxiv.seq);
+      assert.ok(face.omitted.some((detail) => detail.includes("filter")));
+    } else {
+      assert.ok(text.includes(`Public ledger cursor: ${firstPage.cursor}`));
+      assert.ok(!text.includes(validArxivPayload.title));
+    }
+    const canonical = await worker.fetch(
+      `${origin}/p/${problemId}/citations.${format}?through=${firstPage.cursor}&limit=1`,
+    );
+    const alias = await worker.fetch(
+      `${origin}/p/${problemId}/literature.${format}?through=${firstPage.cursor}&limit=1`,
+    );
+    assert.equal(canonical.status, 200);
+    assert.equal(alias.status, 200);
+    assert.equal(await alias.text(), await canonical.text());
+    assert.equal(alias.headers.get("etag"), canonical.headers.get("etag"));
+    assert.equal(alias.headers.get("content-location"), canonical.headers.get("content-location"));
+  }
+
+  for (const query of [
+    "after=0",
+    "through=1&after=2",
+    "limit=201",
+    "limit=1junk",
+    "limit=01",
+    "limit=1&limit=2",
+    "unanchored=1",
+    "unknown=true",
+    "through=1.5",
+    `through=${currentAfterCorrection.cursor + 1}`,
+  ]) {
+    for (const method of ["GET", "HEAD"]) {
+      const refusal = await worker.fetch(`${origin}/p/${problemId}/citations.json?${query}`, {
+        method,
+      });
+      assert.equal(refusal.status, 400, `${method} rejects citation query ${query}`);
+      assert.equal(refusal.headers.get("cache-control"), "private, no-store");
+      assert.equal(refusal.headers.get("etag"), null);
+      if (method === "GET") assert.equal((await refusal.json()).code, "CURSOR_INVALID");
+      else assert.equal(await refusal.text(), "");
+    }
+  }
+  const badExact = await worker.fetch(`${origin}/p/${problemId}/citations/${cit1Id}.json?after=0`);
+  assert.equal(badExact.status, 400);
+  assert.equal((await badExact.json()).code, "CURSOR_INVALID");
+
+  // The existing signed operator command must withhold frozen faces before
+  // their validators are considered and restore the same immutable bytes.
+  const frozenFaces = new Map();
+  for (const format of ["json", "md", "html", "bib", "csl.json"]) {
+    const path = `/p/${problemId}/citations/${cit2Id}@1.${format}?through=${firstPage.cursor}`;
+    const response = await worker.fetch(`${origin}${path}`);
+    assert.equal(response.status, 200);
+    frozenFaces.set(path, { body: await response.text(), etag: response.headers.get("etag") });
+  }
+  const problemControl = (action) =>
+    operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+      target_id: problemId,
+      target_kind: "problem",
+      action,
+      reason: "Verify literature source visibility at captured public snapshots.",
+    });
+  await problemControl("hide");
+  for (const [path, visible] of frozenFaces) {
+    for (const method of ["GET", "HEAD"]) {
+      const response = await worker.fetch(`${origin}${path}`, {
+        method,
+        headers: { "If-None-Match": visible.etag },
+      });
+      assert.equal(response.status, 404);
+      assert.equal(response.headers.get("cache-control"), "private, no-store");
+      assert.ok(!(await response.text()).includes(validArxivPayload.title));
+    }
+  }
+  const hiddenCollection = await worker.fetch(new URL(frozenCollection, origin), {
+    headers: { "If-None-Match": firstPageResponse.headers.get("etag") },
+  });
+  assert.equal(hiddenCollection.status, 404);
+  await hiddenCollection.body?.cancel();
+  await problemControl("restore");
+  for (const [path, visible] of frozenFaces) {
+    const response = await worker.fetch(`${origin}${path}`);
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), visible.body);
+    assert.equal(response.headers.get("etag"), visible.etag);
+  }
+
+  // Read-path depth fixture: use the production hash-chained ledger writer
+  // and real D1 projections without pretending that 200 corrections bypass
+  // the public author's hourly admission budget. HTTP admission is proven
+  // above; this fixture specifically exercises history beyond its read cap.
+  const baseSource = await env.DB.prepare(`SELECT e.*, ec.payload_json FROM events e
+    JOIN event_content ec ON ec.event_id=e.id WHERE e.problem_id=?
+      AND e.object_kind='citation' AND e.object_id=? AND e.object_version=2`)
+    .bind(problemId, cit1Id)
+    .first();
+  assert.ok(baseSource);
+  const basePayload = JSON.parse(baseSource.payload_json);
+  for (let version = 3; version <= 205; version++) {
+    const title = `Bibliographic source metadata revision ${version}`;
+    const payload = JSON.stringify({ ...basePayload, version, base_version: version - 1, title });
+    const createdAt = new Date().toISOString();
+    const write = await writeLedgerEvent(
+      env.DB,
+      {
+        problemId,
+        eventId: `E-CITATION-DEEP-${version}`,
+        idempotencyKey: `citation-deep-history-${version}`,
+        requestDigest: createHash("sha256").update(payload).digest("hex"),
+        eventType: "citation.corrected",
+        objectKind: "citation",
+        objectId: cit1Id,
+        objectVersion: version,
+        payloadJson: payload,
+        createdAt,
+        attribution: {
+          fellowId: baseSource.actor_fellow_id,
+          sponsorId: baseSource.actor_sponsor_id,
+          sessionId: baseSource.actor_session_id,
+          modelSelfDeclared: baseSource.model_string_self_declared,
+          harness: baseSource.harness,
+          credentialId: baseSource.writer_credential_id ?? undefined,
+        },
+      },
+      {
+        preconditionSql:
+          " AND EXISTS(SELECT 1 FROM citations WHERE problem_id=? AND citation_id=? AND version=?)",
+        preconditionBindings: [problemId, cit1Id, version - 1],
+        statementsAfterEvent: ({ sequence }) => [
+          env.DB.prepare(
+            "UPDATE citations SET version=?,seq=?,title=?,updated_at=? WHERE problem_id=? AND citation_id=? AND version=?",
+          ).bind(version, sequence, title, createdAt, problemId, cit1Id, version - 1),
+          env.DB.prepare(`INSERT INTO citation_versions
+          (citation_id,problem_id,version,seq,title,authors_json,year,locator_kind,locator,
+           canonical_locator,excerpt,retrieved_at,source_provenance,unanchored,norm_hash,
+           editor_fellow_id,declared_model,sponsor_id,session_id,harness,created_at)
+          SELECT citation_id,problem_id,?,?,?,authors_json,year,locator_kind,locator,
+           canonical_locator,excerpt,retrieved_at,source_provenance,unanchored,norm_hash,
+           editor_fellow_id,declared_model,sponsor_id,session_id,harness,?
+          FROM citation_versions WHERE problem_id=? AND citation_id=? AND version=2`).bind(
+            version,
+            sequence,
+            title,
+            createdAt,
+            problemId,
+            cit1Id,
+          ),
+        ],
+      },
+    );
+    assert.equal(write.idempotent, false);
+    assert.equal(write.eventId, `E-CITATION-DEEP-${version}`);
+    assert.equal(write.postCursor, write.seq);
+  }
+  for (const [target, version] of [
+    [cit1Id, 205],
+    [`${cit1Id}@204`, 204],
+  ]) {
+    const response = await worker.fetch(`${origin}/p/${problemId}/citations/${target}.json`);
+    assert.equal(response.status, 200);
+    const exact = SingleCitationResponseSchema.parse(await response.json());
+    assert.equal(exact.citation.version, version);
+    assert.equal(exact.versions.length, 200);
+    assert.ok(exact.omitted.some((detail) => detail.includes("bounded to 200")));
+    assert.ok(exact.cursor >= exact.citation.seq);
+  }
+  const oldDeepSnapshot = await worker.fetch(
+    `${origin}/p/${problemId}/citations/${cit1Id}.json?through=${firstPage.cursor}`,
+  );
+  assert.equal(oldDeepSnapshot.status, 200);
+  const oldDeepFace = SingleCitationResponseSchema.parse(await oldDeepSnapshot.json());
+  assert.equal(oldDeepFace.citation.version, 2);
+  assert.equal(oldDeepFace.versions.length, 2);
+  assert.deepEqual(oldDeepFace.citation.screening_notice, warningNotice);
+  console.log(
+    JSON.stringify({ stage: "citation-snapshot-pagination-and-deep-history", versions: 205 }),
+  );
+
   // W2.6: every projection row this journey built is reproducible from the log.
   const rebuilt = await assertProjectionsRebuild(context.env.DB, problemId);
   console.log(JSON.stringify({ stage: "projection-rebuild", ...rebuilt }));
@@ -656,6 +919,27 @@ await runLocalWorkerJourney(async (context) => {
   const beforeRedactionEtag = beforeRedaction.headers.get("etag");
   assert.ok(beforeRedactionEtag);
   await beforeRedaction.body?.cancel();
+  const redactionCut = (
+    await env.DB.prepare("SELECT public_seq FROM problems WHERE id=?").bind(problemId).first()
+  ).public_seq;
+  const redactionFaces = new Map();
+  for (const format of ["json", "md", "html", "bib", "csl.json"]) {
+    const path = `/p/${problemId}/citations/${lone.citation_id}@1.${format}?through=${redactionCut}`;
+    const response = await worker.fetch(`${origin}${path}`);
+    assert.equal(response.status, 200);
+    redactionFaces.set(path, response.headers.get("etag"));
+    await response.body?.cancel();
+  }
+  const redactionPagePath = `/p/${problemId}/citations.json?through=${redactionCut}&limit=1`;
+  const beforeRedactionPageResponse = await worker.fetch(`${origin}${redactionPagePath}`);
+  assert.equal(beforeRedactionPageResponse.status, 200);
+  const beforeRedactionPage = CitationsListResponseSchema.parse(
+    await beforeRedactionPageResponse.json(),
+  );
+  assert.deepEqual(
+    beforeRedactionPage.citations.map((item) => item.citation_id),
+    [lone.citation_id],
+  );
   await fixtures.redactPublicContent(loneEvent.id);
   const hiddenCitation = await worker.fetch(
     `${origin}/p/${problemId}/citations/${lone.citation_id}.json`,
@@ -665,6 +949,37 @@ await runLocalWorkerJourney(async (context) => {
     hiddenCitation.status,
     404,
     "current visibility wins over a previously cached citation",
+  );
+  await hiddenCitation.body?.cancel();
+  for (const [path, etag] of redactionFaces) {
+    for (const method of ["GET", "HEAD"]) {
+      const response = await worker.fetch(`${origin}${path}`, {
+        method,
+        headers: { "If-None-Match": etag },
+      });
+      assert.equal(response.status, 404);
+      assert.equal(response.headers.get("cache-control"), "private, no-store");
+      assert.equal(response.headers.get("etag"), null);
+      const body = await response.text();
+      assert.ok(!body.includes(validMemoryPayload.title));
+      if (method === "HEAD") assert.equal(body, "");
+    }
+  }
+  const redactedPageResponse = await worker.fetch(`${origin}${redactionPagePath}`, {
+    headers: { "If-None-Match": beforeRedactionPageResponse.headers.get("etag") },
+  });
+  assert.equal(redactedPageResponse.status, 200);
+  const redactedPage = CitationsListResponseSchema.parse(await redactedPageResponse.json());
+  assert.deepEqual(redactedPage.citations, []);
+  assert.equal(redactedPage.next_after, beforeRedactionPage.next_after);
+  assert.ok(redactedPage.omitted.some((detail) => detail.includes("unavailable")));
+  const afterRedactedPage = await worker.fetch(nextLink(redactedPageResponse));
+  assert.equal(afterRedactedPage.status, 200);
+  const afterRedacted = CitationsListResponseSchema.parse(await afterRedactedPage.json());
+  assert.equal(afterRedacted.cursor, redactionCut);
+  assert.deepEqual(
+    afterRedacted.citations.map((item) => item.citation_id),
+    [cit2Id],
   );
   const citationColumns = (
     await context.env.DB.prepare("PRAGMA table_info(citation_versions)").all()
@@ -816,6 +1131,11 @@ await runLocalWorkerJourney(async (context) => {
       status: "pass",
       problem_id: problemId,
       citation_ids: [cit1Id, cit2Id, cit3Id],
+      frozen_head_pagination: true,
+      empty_filtered_and_withheld_continuations: true,
+      exact_history_beyond_200_versions: true,
+      signed_problem_control_frozen_faces: true,
+      current_redaction_before_validators_all_formats: true,
     }),
   );
   return {

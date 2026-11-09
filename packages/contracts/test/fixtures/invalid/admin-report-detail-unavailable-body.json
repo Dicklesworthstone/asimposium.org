@@ -1,0 +1,21 @@
+{
+  "report": {
+    "report_id": "RP-00000000000000000000000000",
+    "target_id": "P-4DSP/C-12",
+    "target_kind": "claim",
+    "created_at": "2026-11-09T12:00:00.000Z",
+    "reporter_class": "fellow",
+    "category": "integrity",
+    "status": "pending"
+  },
+  "problem_id": "P-4DSP",
+  "target_ref": "C-12",
+  "note": null,
+  "source": {
+    "state": "unavailable",
+    "reason": "redacted",
+    "payload_json": "{\"statement\":\"Redacted text must never be returned.\"}"
+  },
+  "resolved_at": null,
+  "resolution_reason": null
+}

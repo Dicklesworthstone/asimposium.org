@@ -1,6 +1,7 @@
 import type { SynthesisAnchor } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
+import { SYNTHESIS_ANCHOR_EVENT_TYPES as ANCHOR_TYPES } from "./synthesis-events.ts";
 
 const MAX_ANCHORS = 1000;
 const MAX_SOURCE_BYTES = 512 * 1024;
@@ -25,25 +26,6 @@ export interface SynthesisValidationResult {
   /** Ephemeral source witnesses; never written into the public synthesis. */
   readonly sources: readonly SynthesisAnchorSource[];
 }
-
-const ANCHOR_TYPES = {
-  claim: ["claim.created", "claim.revised", "claim.reanchored"],
-  evidence: ["evidence.created"],
-  review: ["review.created"],
-  hypothesis: [
-    "hypothesis.created",
-    "hypothesis.killed",
-    "hypothesis.deferred",
-    "hypothesis.resumed",
-    "hypothesis.narrowed",
-    "hypothesis.superseded",
-  ],
-  "dead-end": ["dead_end.recorded"],
-  gap: ["gap.filed", "gap.closed-by", "gap.withdrawn"],
-  conflict: ["conflict.normalized", "conflict.resolved"],
-  citation: ["citation.recorded", "citation.corrected"],
-  statement: ["problem.admitted", "problem.statement-revised"],
-} as const;
 
 interface AnchorRow {
   anchor_index: number;

@@ -291,13 +291,13 @@ test("queue-empty and authority-filtered calls do not scan scientific bodies", a
       },
     };
     f.claim(1);
-    for (const denied of ["promote", "workshop_push", "session_open"]) {
+    for (const denied of ["evidence", "workshop_push", "session_open"]) {
       const result = await withFrictionMove(
         f.db,
         "P-DEMO",
         100,
         f.items,
-        { promote: true, workshop_push: true, session_open: true, [denied]: false },
+        { evidence: true, workshop_push: true, session_open: true, [denied]: false },
         { moves: [], degraded: false },
         source,
       );
@@ -321,7 +321,7 @@ test("source failure preserves useful recommendations and seeded work replaces o
     } as NextMoveCandidate;
     const other = { ...base, move: "review" as const };
     const selected = { moves: [base, other], degraded: false };
-    const permissions = { promote: true, workshop_push: true, session_open: true };
+    const permissions = { promote: false, evidence: true, workshop_push: true, session_open: true };
     const failed = await withFrictionMove(f.db, "P-DEMO", 100, f.items, permissions, selected, {
       load: async () => {
         throw new Error("PRIVATE-SQL");

@@ -31,7 +31,8 @@ export const HYPOTHESIS_LIFECYCLE_EVENTS = {
 
 /** Pin the canonical source and current head across a screening wait. The
  * immutable event history was validated by loadPublicHypothesisItem; the
- * transaction must still see exactly that history and visible source bytes. */
+ * transaction must still see exactly that history and visible source bytes.
+ * Known generic lease events coordinate work without advancing this head. */
 export function hypothesisHeadGuard(
   problemId: string,
   hypothesis: PublicHypothesis,
@@ -75,6 +76,7 @@ export function hypothesisHeadGuard(
           WHERE ${prefix}_later.problem_id = ${prefix}_source.problem_id
             AND ${prefix}_later.object_kind = 'hypothesis'
             AND ${prefix}_later.object_id = ${prefix}_source.object_id
+            AND ${prefix}_later.type NOT IN ('lease.acquired', 'lease.released', 'lease.challenged')
             AND ${prefix}_later.seq > ${prefix}_head.seq)
     )`,
     preconditionBindings: [

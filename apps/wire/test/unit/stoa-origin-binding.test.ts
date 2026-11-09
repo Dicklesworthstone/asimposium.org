@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  AdminContentControlResponseSchema,
   OperatorFellowCapAuditPageResponseSchema,
   OperatorFellowCapOverrideResponseSchema,
   PRODUCTION_STOA_ORIGIN,
@@ -630,6 +631,139 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
       },
     );
     expect(malformed.status).toBe(422);
+  });
+
+  test("moderation receipt replay requires current operator authorization and a valid key", async () => {
+    const { db, sqlite } = latestD1();
+    const problemId = "P-OPERATOR-REPLAY";
+    const createdAt = "2026-11-01T00:00:00.000Z";
+    sqlite
+      .prepare("INSERT INTO problems (id, created_at, updated_at) VALUES (?, ?, ?)")
+      .run(problemId, createdAt, createdAt);
+    const keypair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+      "sign",
+      "verify",
+    ])) as unknown as CryptoKeyPair;
+    const kid = "operator-receipt-ingress-test";
+    const allowedEnv = {
+      DB: db,
+      ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
+      STOA_ORIGIN: LOOPBACK,
+      AGORA_ORIGIN: STAGING_AGORA_ORIGIN,
+      SERVICE_ENVELOPE_KEYS: JSON.stringify([
+        {
+          kid,
+          publicKeyHex: toHex(
+            new Uint8Array(await crypto.subtle.exportKey("raw", keypair.publicKey)),
+          ),
+          notBefore: 0,
+        },
+      ]),
+      OPERATOR_PRINCIPAL_IDS: OPERATOR_ID,
+    };
+    const app = createApp();
+    const send = async (
+      route: string,
+      action: string,
+      body: unknown,
+      key: string | null,
+      env = allowedEnv,
+      principalType: "operator" | "sponsor" = "operator",
+    ) => {
+      const raw = JSON.stringify(body);
+      // Every attempt receives a fresh signed nonce. An authorization refusal
+      // must be about the current identity, not reuse of an old envelope.
+      const envelope = await mintServiceEnvelope({
+        privateKey: keypair.privateKey,
+        kid,
+        now: Math.floor(Date.now() / 1_000),
+        method: "POST",
+        route,
+        action,
+        principalId: OPERATOR_ID,
+        principalType,
+        body: raw,
+      });
+      const headers = new Headers(serviceEnvelopeHeaders(envelope));
+      headers.set("content-type", "application/json");
+      if (key !== null) headers.set("idempotency-key", key);
+      return app.fetch(
+        new Request(`https://a.asimposium.org${route}`, { method: "POST", headers, body: raw }),
+        env as never,
+        ctx,
+      );
+    };
+    const moderationCounts = () =>
+      sqlite
+        .prepare<{ controls: number; audit: number; log: number; receipts: number }, []>(
+          `SELECT (SELECT COUNT(*) FROM content_controls) AS controls,
+                  (SELECT COUNT(*) FROM operator_audit) AS audit,
+                  (SELECT COUNT(*) FROM moderation_log) AS log,
+                  (SELECT COUNT(*) FROM operator_command_receipts) AS receipts`,
+        )
+        .get();
+    const reason = "Reviewed by the operator on duty.";
+    const control = {
+      target_id: problemId,
+      target_kind: "problem",
+      action: "hide",
+      reason,
+    };
+    const controlRoute = "/v1/operators/content-control";
+    const controlAction = "operator.content.control";
+    for (const [route, action, body] of [
+      [
+        "/v1/operators/quarantine/decision",
+        "operator.quarantine.decide",
+        { case_id: "case-01", decision: "release", reason },
+      ],
+      [
+        "/v1/operators/reports/resolution",
+        "operator.reports.resolve",
+        { report_id: "report-01", resolution: "dismiss", reason },
+      ],
+      [controlRoute, controlAction, control],
+    ] as const) {
+      for (const key of [null, "invalid key", "k".repeat(161)]) {
+        const response = await send(route, action, body, key);
+        expect(response.status, route).toBe(400);
+        expect(response.headers.get("cache-control"), route).toBe("private, no-store");
+        expect(ProblemDocumentSchema.parse(await response.json()).code, route).toBe(
+          "IDEMPOTENCY_KEY_INVALID",
+        );
+        expect(moderationCounts(), route).toEqual({ controls: 0, audit: 0, log: 0, receipts: 0 });
+      }
+    }
+
+    const key = "operator-content-receipt";
+    const accepted = await send(controlRoute, controlAction, control, key);
+    expect(accepted.status).toBe(200);
+    expect(accepted.headers.get("cache-control")).toBe("private, no-store");
+    const receiptText = await accepted.text();
+    const receipt = AdminContentControlResponseSchema.parse(JSON.parse(receiptText));
+    expect(receipt).toMatchObject({ ok: true, target_id: problemId, action: "hide" });
+    expect(moderationCounts()).toEqual({ controls: 1, audit: 1, log: 1, receipts: 1 });
+
+    const revokedEnv = { ...allowedEnv, OPERATOR_PRINCIPAL_IDS: "usr_someone_else" };
+    for (const [env, principalType] of [
+      [revokedEnv, "operator"],
+      [allowedEnv, "sponsor"],
+    ] as const) {
+      const refused = await send(controlRoute, controlAction, control, key, env, principalType);
+      expect(refused.status).toBe(401);
+      expect(refused.headers.get("cache-control")).toBe("private, no-store");
+      const refusalText = await refused.text();
+      expect(ProblemDocumentSchema.parse(JSON.parse(refusalText)).code).toBe("UNAUTHORIZED");
+      expect(refusalText).not.toContain(receipt.audit_event_id);
+      expect(moderationCounts()).toEqual({ controls: 1, audit: 1, log: 1, receipts: 1 });
+    }
+
+    const replayed = await send(controlRoute, controlAction, control, key);
+    expect(replayed.status).toBe(200);
+    expect(replayed.headers.get("cache-control")).toBe("private, no-store");
+    expect(await replayed.text()).toBe(receiptText);
+    expect(moderationCounts()).toEqual({ controls: 1, audit: 1, log: 1, receipts: 1 });
+    sqlite.close();
   });
 
   test("a signed allowlisted operator reaches the D1 audit command, while a cache rebind denies the same identity", async () => {

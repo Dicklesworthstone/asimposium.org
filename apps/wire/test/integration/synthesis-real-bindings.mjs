@@ -32,13 +32,19 @@ await runLocalWorkerJourney(
     const reviewer = await enroll("synthesis-reviewer", sponsorB);
 
     // 1. Propose and publish problem
+    const formulation = {
+      statement: "Every positive integer greater than one has a prime factor.",
+      falsifier: "A positive integer greater than one with no prime factors.",
+      motivation: "Anchor verification and synthesis lifecycle validation.",
+      scope: "Existence of a prime factor for every integer greater than one.",
+      out_of_scope: "Efficient factorization and uniqueness of the prime decomposition.",
+      success_criteria: "An independently checked proof or a counterexample to existence.",
+    };
     const created = await call(
       "/v1/problems",
       {
         title: "Synthesis lifecycle problem",
-        statement: "Every positive integer greater than one has a prime factor.",
-        falsifier: "A positive integer greater than one with no prime factors.",
-        motivation: "Anchor verification and synthesis lifecycle validation.",
+        ...formulation,
         areas: ["number-theory"],
       },
       author,
@@ -266,6 +272,45 @@ await runLocalWorkerJourney(
     assert.equal(synthRows[1].synthesis_id, synth2.synthesis_id);
     assert.equal(synthRows[1].dropped_single_author_count, 1);
 
+    const assertSynthesisDrift = async (expected) => {
+      const exact = SingleSynthesisResponseSchema.parse(
+        await call(`/p/${problemId}/syntheses/${synth2.synthesis_id}.json`),
+      );
+      assert.deepEqual(exact.staleness, {
+        material_events_since: expected,
+        stale: expected > 0,
+      });
+      for (const profile of ["orient", "working"]) {
+        const pack = PackResponseSchema.parse(
+          await call(
+            `/v1/sessions/${sessionId}/pack?profile=${profile}&max_tokens=8000`,
+            undefined,
+            author,
+            200,
+          ),
+        );
+        assert.equal(
+          pack.items.find((item) => item.id === "SYS-synthesis-staleness")?.body,
+          `synthesis covers through #${synth2.covers_through} — stale by ${expected} material events\nSynthesis ${synth2.synthesis_id}, published at #${synth2.sequence}; pack cursor #${pack.cursor}.`,
+        );
+      }
+    };
+    await assertSynthesisDrift(0);
+    // The lease envelope carries object_kind=claim, but no scientific finding
+    // changed. Public and authenticated faces must agree that it adds no drift.
+    await call(
+      `/v1/sessions/${sessionId}/leases`,
+      {
+        object: claim1Id,
+        objective: "Check the exact prime-factor claim against its current formulation.",
+        deliverable: "An independently reviewable proof or counterexample.",
+        parallel_safe: false,
+      },
+      author,
+      201,
+    );
+    await assertSynthesisDrift(0);
+
     // Freeze the source, then advance both actual production writers. A later
     // event must neither invalidate an older anchor nor satisfy a future pin.
     const admission = await env.DB.prepare(
@@ -292,15 +337,19 @@ await runLocalWorkerJourney(
       author,
       201,
     );
+    await assertSynthesisDrift(1);
     await govern(
       {
         action: "revise-statement",
-        statement: "Every integer n greater than one has a prime divisor in the interval [2, n].",
-        falsifier: "An integer n greater than one without a prime divisor in [2, n].",
-        motivation: "Expose the finite search domain explicitly.",
+        ...formulation,
+        scope:
+          "Existence of a prime factor in the finite interval [2, n] for every integer n greater than one.",
       },
       "synthesis-statement-revision",
     );
+    // Statement prose, falsifier and motivation are byte-identical; the scope
+    // revision alone still makes the prior frozen synthesis another event old.
+    await assertSynthesisDrift(2);
 
     const failures = [];
     const check = (condition, label) => {
@@ -542,6 +591,46 @@ await runLocalWorkerJourney(
     });
     assert.equal(list304.status, 304);
 
+    // Bounded public navigation is executable in Workerd/D1, not merely a
+    // response annotation. Every continuation keeps the initial snapshot.
+    const pagedIds = [];
+    let before;
+    let pageCount = 0;
+    for (;;) {
+      const params = new URLSearchParams({ through: String(listData.cursor), limit: "1" });
+      if (before !== undefined) params.set("before", String(before));
+      const response = await worker.fetch(`${origin}/p/${problemId}/syntheses.json?${params}`, {
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(response.status, 200);
+      const page = SynthesesListResponseSchema.parse(await response.json());
+      assert.equal(page.cursor, listData.cursor);
+      assert.equal(page.before, before ?? null);
+      assert.ok(page.syntheses.length <= 1);
+      pagedIds.push(...page.syntheses.map((synthesis) => synthesis.synthesis_id));
+      pageCount++;
+      assert.ok(pageCount <= 100, "continuations must terminate");
+      if (page.next_before === null) break;
+      assert.ok(page.next_before < (before ?? listData.cursor + 1));
+      assert.ok(response.headers.get("link").includes('rel="next"'));
+      before = page.next_before;
+    }
+    const allAtCut = SynthesesListResponseSchema.parse(
+      await call(`/p/${problemId}/syntheses.json?through=${listData.cursor}&limit=200`),
+    );
+    assert.deepEqual(
+      pagedIds,
+      allAtCut.syntheses.map((synthesis) => synthesis.synthesis_id),
+    );
+    console.log(
+      JSON.stringify({
+        probe: "synthesis-snapshot-pagination",
+        pages: pageCount,
+        publications: pagedIds.length,
+        cursor: listData.cursor,
+      }),
+    );
+
     // 10b. Problem-level syntheses list: Markdown
     const listMdRes = await worker.fetch(`${origin}/p/${problemId}/syntheses.md`, {
       headers: { "User-Agent": userAgent },
@@ -680,15 +769,13 @@ await runLocalWorkerJourney(
       /synthesis covers through #\d+ — stale by \d+ material events/,
     );
     if (defaultStaleness) assert.deepEqual(defaultStaleness, stalenessItem);
-    const latest = listData.syntheses.reduce((head, item) =>
-      item.covers_through > head.covers_through ? item : head,
-    );
+    const latest = listData.syntheses.reduce((head, item) => (item.seq > head.seq ? item : head));
     const exactLatest = SingleSynthesisResponseSchema.parse(
       await call(`/p/${problemId}/syntheses/${latest.synthesis_id}.json`),
     );
     assert.equal(
       stalenessItem.body,
-      `synthesis covers through #${latest.covers_through} — stale by ${exactLatest.staleness.material_events_since} material events`,
+      `synthesis covers through #${latest.covers_through} — stale by ${exactLatest.staleness.material_events_since} material events\nSynthesis ${latest.synthesis_id}, published at #${latest.seq}; pack cursor #${fullOrient.cursor}.`,
     );
 
     // 12. Minority finding coverage: hypotheses and dead ends
@@ -768,7 +855,7 @@ await runLocalWorkerJourney(
     const reanchored = ClaimReanchorResponseSchema.parse(
       await call(
         `/v1/sessions/${sessionId}/reanchor`,
-        { claim_id: claim1Id, base_version: 2 },
+        { claim_id: claim1Id, base_version: 2, client_context_cursor: authorContext.cursor },
         author,
         200,
       ),
@@ -821,10 +908,20 @@ await runLocalWorkerJourney(
       omitted: ["The remaining claim and hypothesis are outside this summary."],
       selection_policy: "Preserve checks and failed approaches with the claim they contextualize.",
     };
+    // Re-anchoring is a real promotion attempt too. Keep the original
+    // Fellow's exhausted quota intact and publish the remaining independent
+    // retention subject under a freshly enrolled Fellow with unchanged caps.
+    const retainedWriter = await enroll("synthesis-retention-writer", sponsorA);
+    const retainedSession = await call(
+      "/v1/sessions",
+      { problem_id: problemId, intent: "explore" },
+      retainedWriter,
+      201,
+    );
     const retained = await call(
-      `/v1/sessions/${sessionId}/synthesize`,
+      `/v1/sessions/${retainedSession.session_id}/synthesize`,
       retainedBody,
-      author,
+      retainedWriter,
       201,
       "synthesis-review-and-dead-end",
     );
@@ -918,9 +1015,9 @@ await runLocalWorkerJourney(
     );
     assert.deepEqual(
       await call(
-        `/v1/sessions/${sessionId}/synthesize`,
+        `/v1/sessions/${retainedSession.session_id}/synthesize`,
         retainedBody,
-        author,
+        retainedWriter,
         200,
         "synthesis-review-and-dead-end",
       ),

@@ -173,6 +173,35 @@ test("malformed formal screening notices cannot become unqualified pack content"
   assert.equal(JSON.stringify(section).includes("PRIVATE_DETECTOR_CANARY"), false);
 });
 
+test("formal obligations preserve filing warnings and fail closed on malformed notices", async () => {
+  const page = gapPage();
+  page.face.gaps = [{ ...gap(), screening_notice: warning }];
+  const section = await readFormalGapSection(db, "P-DEMO", 100, deps({ gaps: async () => page }));
+  const obligation = section.candidates.find((candidate) => candidate.kind === "proof-gap");
+  assert.deepEqual(obligation?.screening_notice, warning);
+  assert.ok(!obligation?.body.includes("screening_notice"));
+  page.face.gaps[0]!.content = null;
+  page.face.gaps[0]!.status = "unavailable";
+  const hidden = await readFormalGapSection(db, "P-DEMO", 100, deps({ gaps: async () => page }));
+  assert.equal(
+    hidden.candidates.find((candidate) => candidate.kind === "proof-gap")?.screening_notice,
+    undefined,
+  );
+  assert.ok(!JSON.stringify(hidden).includes("GAP-OBLIGATION-SENTINEL"));
+  page.face.gaps = [
+    {
+      ...gap(),
+      screening_notice: { ...warning, private_detail: "PRIVATE_CANARY" } as typeof warning,
+    },
+  ];
+  const malformed = await readFormalGapSection(db, "P-DEMO", 100, deps({ gaps: async () => page }));
+  assert.equal(
+    malformed.candidates.some((candidate) => candidate.kind === "proof-gap"),
+    false,
+  );
+  assert.ok(!JSON.stringify(malformed).includes("PRIVATE_CANARY"));
+});
+
 test("formal pack contains whole artifacts and gaps with exact source and claim links", async () => {
   const section = await readFormalPack(db, "P-DEMO", 100, deps());
   assert.deepEqual(

@@ -429,7 +429,7 @@ await runLocalWorkerJourney(
     );
     const proposed = await call(
       "/v1/problems",
-      { ...proposal, brief_id: brief.brief.id },
+      { ...proposal, brief_id: brief.brief.id, expected_brief_version: brief.brief.version },
       token,
       201,
     );

@@ -22,6 +22,7 @@ import {
   type AdminReportResolutionRequest,
   AdminReportResolutionResponseSchema,
   AdminReportsQueueResponseSchema,
+  parseModerationControlTarget,
   ReportReasonSchema,
   SCREENING_DECISION_PATHS,
   SCREENING_PROVIDER_STATUSES,
@@ -33,6 +34,7 @@ import {
   screeningContextUnavailableProblem,
   storedPublicationContextIsVisible,
 } from "../screening/publication-context";
+import { type OperatorCommand, runOperatorCommand } from "./operator-command.ts";
 import {
   applyOperatorControl,
   decideScreeningCase,
@@ -43,6 +45,7 @@ import {
   resolveReport,
   type ScreeningCaseRow,
 } from "./store";
+import { moderationTargetGuard, resolveModerationTarget } from "./target.ts";
 
 const SCREENING_SCHEMA = "https://a.asimposium.org/schemas/screening.v1.json";
 const HEX64 = /^[a-f0-9]{64}$/;
@@ -62,9 +65,10 @@ function notFound(example: Record<string, unknown>): Response {
     status: 404,
     code: "MODERATION_TARGET_NOT_FOUND",
     title: "No such moderation target",
-    detail: "No case, report, problem or claim matches this id. Nothing was changed.",
+    detail:
+      "No case, report, problem or supported public object matches this id. Nothing was changed.",
     fixHint:
-      "Use an id from the operator queue or a public face. Content controls address P-… (the problem) or P-…/C-n (a claim); hide the problem to hide its other objects.",
+      "Use an id from the operator queue or a public face. Content controls address a published problem P-… or a supported whole scientific object P-…/object-id matching its kind. Omit @version suffixes; ambiguous or unpublished identities cannot be controlled.",
     rule: "A5",
     extensions: { schema: SCREENING_SCHEMA, example },
   });
@@ -159,29 +163,51 @@ export async function operatorQuarantineDecision(
   db: D1Database,
   operatorId: string,
   request: AdminQuarantineDecisionRequest,
+  idempotencyKey: string,
 ): Promise<Response> {
-  const result = await decideScreeningCase(db, operatorId, {
-    caseId: request.case_id,
-    decision: request.decision,
-    reason: request.reason,
-  });
-  if (!result.ok) {
-    return result.reason === "not-found"
-      ? notFound({ case_id: request.case_id, decision: request.decision, reason: request.reason })
-      : stateConflict("This case was already decided. Nothing was changed.", {
+  return runOperatorCommand(
+    db,
+    {
+      operatorId,
+      key: idempotencyKey,
+      operation: "quarantine",
+      request,
+      parseReceipt: (value) => AdminQuarantineDecisionResponseSchema.parse(value),
+      receipt: (auditEventId, decidedAt) =>
+        AdminQuarantineDecisionResponseSchema.parse({
+          ok: true,
           case_id: request.case_id,
           decision: request.decision,
+          audit_event_id: auditEventId,
+          decided_at: decidedAt,
+        }),
+    },
+    async (command) => {
+      const result = await decideScreeningCase(
+        db,
+        operatorId,
+        {
+          caseId: request.case_id,
+          decision: request.decision,
           reason: request.reason,
-        });
-  }
-  return privateJson(
-    AdminQuarantineDecisionResponseSchema.parse({
-      ok: true,
-      case_id: request.case_id,
-      decision: request.decision,
-      audit_event_id: result.auditEventId,
-      decided_at: result.decidedAt,
-    }),
+        },
+        command,
+      );
+      if (!result.ok) {
+        return result.reason === "not-found"
+          ? notFound({
+              case_id: request.case_id,
+              decision: request.decision,
+              reason: request.reason,
+            })
+          : stateConflict("This case was already decided. Nothing was changed.", {
+              case_id: request.case_id,
+              decision: request.decision,
+              reason: request.reason,
+            });
+      }
+      return privateJson(command.receipt(result.auditEventId, result.decidedAt));
+    },
   );
 }
 
@@ -207,30 +233,48 @@ export async function operatorReportResolution(
   db: D1Database,
   operatorId: string,
   request: AdminReportResolutionRequest,
+  idempotencyKey: string,
 ): Promise<Response> {
-  const result = await resolveReport(db, operatorId, {
-    reportId: request.report_id,
-    resolution: request.resolution,
-    reason: request.reason,
-  });
-  if (!result.ok) {
-    const example = {
-      report_id: request.report_id,
-      resolution: request.resolution,
-      reason: request.reason,
-    };
-    return result.reason === "not-found"
-      ? notFound(example)
-      : stateConflict("This report was already resolved. Nothing was changed.", example);
-  }
-  return privateJson(
-    AdminReportResolutionResponseSchema.parse({
-      ok: true,
-      report_id: request.report_id,
-      resolution: request.resolution,
-      audit_event_id: result.auditEventId,
-      resolved_at: result.resolvedAt,
-    }),
+  return runOperatorCommand(
+    db,
+    {
+      operatorId,
+      key: idempotencyKey,
+      operation: "report",
+      request,
+      parseReceipt: (value) => AdminReportResolutionResponseSchema.parse(value),
+      receipt: (auditEventId, resolvedAt) =>
+        AdminReportResolutionResponseSchema.parse({
+          ok: true,
+          report_id: request.report_id,
+          resolution: request.resolution,
+          audit_event_id: auditEventId,
+          resolved_at: resolvedAt,
+        }),
+    },
+    async (command) => {
+      const result = await resolveReport(
+        db,
+        operatorId,
+        {
+          reportId: request.report_id,
+          resolution: request.resolution,
+          reason: request.reason,
+        },
+        command,
+      );
+      if (!result.ok) {
+        const example = {
+          report_id: request.report_id,
+          resolution: request.resolution,
+          reason: request.reason,
+        };
+        return result.reason === "not-found"
+          ? notFound(example)
+          : stateConflict("This report was already resolved. Nothing was changed.", example);
+      }
+      return privateJson(command.receipt(result.auditEventId, result.resolvedAt));
+    },
   );
 }
 
@@ -244,7 +288,35 @@ export async function operatorContentControl(
   db: D1Database,
   operatorId: string,
   request: AdminContentControlRequest,
-): Promise<Response | undefined> {
+  idempotencyKey: string,
+): Promise<Response> {
+  return runOperatorCommand(
+    db,
+    {
+      operatorId,
+      key: idempotencyKey,
+      operation: "content-control",
+      request,
+      parseReceipt: (value) => AdminContentControlResponseSchema.parse(value),
+      receipt: (auditEventId, appliedAt) =>
+        AdminContentControlResponseSchema.parse({
+          ok: true,
+          target_id: request.target_id,
+          action: request.action,
+          audit_event_id: auditEventId,
+          applied_at: appliedAt,
+        }),
+    },
+    (command) => applyContentControlCommand(db, operatorId, request, command),
+  );
+}
+
+async function applyContentControlCommand(
+  db: D1Database,
+  operatorId: string,
+  request: AdminContentControlRequest,
+  command: OperatorCommand,
+): Promise<Response> {
   if (request.action === "ban_sponsor")
     return validatedProblem({
       status: 422,
@@ -266,55 +338,33 @@ export async function operatorContentControl(
     action: request.action,
     reason: request.reason,
   };
-  const match = /^(P-[A-Z0-9][A-Z0-9-]{1,30})(?:\/([A-Za-z0-9@-]{1,96}))?$/.exec(request.target_id);
-  const problemId = match?.[1];
-  if (problemId === undefined) return notFound(example);
-  const objectRef = match?.[2];
-  const problem = await db
-    .prepare("SELECT id FROM problems WHERE id = ?")
-    .bind(problemId)
-    .first<{ id: string }>();
-  if (problem === null) return notFound(example);
-  // Faces enforce visibility for a whole problem and for a claim (by claim
-  // id, every version). Other objects are hidden by hiding their problem; a
-  // control nothing would enforce is refused rather than recorded.
-  const claimId = objectRef?.replace(/@[0-9]+$/, "");
-  if (objectRef === undefined) {
-    if (request.target_kind !== "problem") return notFound(example);
-  } else {
-    if (request.target_kind !== "claim" || !/^C-[0-9]+$/.test(claimId ?? "")) {
-      return notFound(example);
-    }
-    const exists = await db
-      .prepare(
-        "SELECT object_kind FROM events WHERE problem_id = ? AND object_id = ? AND object_kind = 'claim' LIMIT 1",
-      )
-      .bind(problemId, claimId)
-      .first<{ object_kind: string }>();
-    if (exists === null) return notFound(example);
-  }
-  const result = await applyOperatorControl(db, operatorId, {
-    problemId,
-    targetKind: request.target_kind,
-    targetRef: claimId ?? "problem",
-    visibility: request.action === "hide" ? "hidden" : "visible",
-    reason: request.reason,
-  });
+  const parsed = parseModerationControlTarget(request.target_kind, request.target_id);
+  if (parsed === undefined) return notFound(example);
+  const target = await resolveModerationTarget(
+    db,
+    parsed.problemId,
+    parsed.targetRef,
+    parsed.targetKind,
+  );
+  if (target === undefined) return notFound(example);
+  const result = await applyOperatorControl(
+    db,
+    operatorId,
+    {
+      ...target,
+      targetGuard: moderationTargetGuard(target),
+      visibility: request.action === "hide" ? "hidden" : "visible",
+      reason: request.reason,
+    },
+    command,
+  );
   if (!result.ok) {
     return stateConflict(
-      `The target is already ${request.action === "hide" ? "hidden" : "visible"}. Nothing was changed.`,
+      "The target changed after it was read, or already has the requested visibility. Nothing was changed.",
       example,
     );
   }
-  return privateJson(
-    AdminContentControlResponseSchema.parse({
-      ok: true,
-      target_id: request.target_id,
-      action: request.action,
-      audit_event_id: result.auditEventId,
-      applied_at: result.appliedAt,
-    }),
-  );
+  return privateJson(command.receipt(result.auditEventId, result.appliedAt));
 }
 
 export async function operatorAuditHistory(db: D1Database): Promise<Response> {

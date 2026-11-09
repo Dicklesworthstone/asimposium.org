@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/SCHEMA_INVALID",
+  "title": "Invalid workshop directory selection",
+  "status": 400,
+  "code": "SCHEMA_INVALID",
+  "detail": "Use only one after, limit or state value. The directory derives ownership and problem scope from your session.",
+  "fix_hint": "Omit parameters to read all states, or use state=open|archived|discarded and limit=1..100. Follow next_after with the same state selection.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/workshop-directory.v1.json",
+  "example": {
+    "method": "GET",
+    "path": "/v1/sessions/S-00000000000000000000000001/workshop?limit=20"
+  }
+}

@@ -241,6 +241,27 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
         expect(text).not.toContain("dead_ends_recorded");
         expect(text).toContain("/p/P-4DSP/dead-ends");
       }
+      const warning = {
+        ...data,
+        negative_history: [
+          {
+            ...item,
+            screening_notice: {
+              category: "off-topic" as const,
+              action: "published-with-warning" as const,
+              notice: "off-scope" as const,
+            },
+          },
+        ],
+      };
+      for (const text of [
+        renderFellowCardMarkdown(warning),
+        renderFellowCardHtmlFragment(warning),
+      ]) {
+        expect(text).toContain("Off-scope science:");
+        expect(text.indexOf("Off-scope science:")).toBeLessThan(text.indexOf(item.approach));
+      }
+      expect(renderFellowCardHtmlFragment(warning)).toContain('data-screening-notice="off-scope"');
       const headings = Bun.markdown
         .html(renderFellowCardMarkdown(data))
         .match(/<h[1-6][ >]/g)?.length;

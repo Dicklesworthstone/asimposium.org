@@ -2,12 +2,16 @@ import { expect, test } from "bun:test";
 import { type Dirent, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { generateSponsorDataExportSchema } from "../../src/account-export.ts";
-import { generateSponsorSuspensionsSchema } from "../../src/admin.ts";
+import {
+  generateAdminReportDetailSchema,
+  generateSponsorSuspensionsSchema,
+} from "../../src/admin.ts";
 import { generateScreeningAppealsSchema } from "../../src/appeals.ts";
 
 import { generateArtifactPublicationsSchema } from "../../src/artifact-publications.ts";
 import { generateArtifactUploadsSchema } from "../../src/artifact-uploads.ts";
 import { generatedArtifacts, packageDirectory } from "../../src/artifacts.ts";
+import { generateClaimsListSchema } from "../../src/claims-list.ts";
 import { generateCommentarySchema } from "../../src/commentary.ts";
 import { generateDirectiveDisclosuresSchema } from "../../src/directive-disclosures.ts";
 import { generateDiscriminationSchema } from "../../src/discrimination.ts";
@@ -28,15 +32,18 @@ import {
 import { generateReviewRequestsSchema } from "../../src/review-requests-artifact.ts";
 import { generateScientificWithdrawalsSchema } from "../../src/scientific-withdrawals.ts";
 import { generateSponsorFollowsSchema } from "../../src/sponsor-follows.ts";
+import { generateStatementsSchema } from "../../src/statements.ts";
 import { generateWorkshopSearchSchema } from "../../src/workshop-search.ts";
 
 const GENERATED_SCHEMA_SUFFIX = ".schema.json";
 
 const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "account-export",
+  "admin-report-detail",
   "artifact-publications",
   "artifact-uploads",
   "citations",
+  "claims-list",
   "commentary",
   "conflicts",
   "dead-ends",
@@ -71,7 +78,9 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "sessions",
   "sponsor-follows",
   "sponsor-suspensions",
+  "statements",
   "syntheses",
+  "workshop-directory",
   "workshop-search",
 ] as const;
 
@@ -170,8 +179,10 @@ test("the public schema registry serves exact artifact or canonical inline-gener
   );
   const inline = new Map([
     ["account-export", generateSponsorDataExportSchema()],
+    ["admin-report-detail", generateAdminReportDetailSchema()],
     ["artifact-publications", generateArtifactPublicationsSchema()],
     ["artifact-uploads", generateArtifactUploadsSchema()],
+    ["claims-list", generateClaimsListSchema()],
     ["commentary", generateCommentarySchema()],
     ["directive-disclosures", generateDirectiveDisclosuresSchema()],
     ["discrimination", generateDiscriminationSchema()],
@@ -185,6 +196,7 @@ test("the public schema registry serves exact artifact or canonical inline-gener
     ["screening-appeals", generateScreeningAppealsSchema()],
     ["sponsor-follows", generateSponsorFollowsSchema()],
     ["sponsor-suspensions", generateSponsorSuspensionsSchema()],
+    ["statements", generateStatementsSchema()],
     ["workshop-search", generateWorkshopSearchSchema()],
   ]);
   expect([...inline.keys()]).toEqual([...INLINE_PUBLIC_SCHEMA_IDS]);
@@ -210,8 +222,10 @@ test("the public schema classification is pinned to approved served ids and excl
   expect(PUBLIC_SCHEMA_IDS).toEqual(EXPECTED_PUBLIC_SCHEMA_IDS);
   expect(INLINE_PUBLIC_SCHEMA_IDS).toEqual([
     "account-export",
+    "admin-report-detail",
     "artifact-publications",
     "artifact-uploads",
+    "claims-list",
     "commentary",
     "directive-disclosures",
     "discrimination",
@@ -225,6 +239,7 @@ test("the public schema classification is pinned to approved served ids and excl
     "screening-appeals",
     "sponsor-follows",
     "sponsor-suspensions",
+    "statements",
     "workshop-search",
   ]);
   expect(Object.isFrozen(INLINE_PUBLIC_SCHEMA_IDS)).toBe(true);

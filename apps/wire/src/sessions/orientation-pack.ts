@@ -46,7 +46,7 @@ async function readFormulation(
       {
         method: "GET",
         url: source,
-        why: "Read the complete current problem statement, falsifier and motivation; recheck its version before a statement-sensitive write.",
+        why: "Read the complete current problem formulation, including declared scope, exclusions and success criteria; recheck its version before a statement-sensitive write.",
         public_read: true,
       },
     ],
@@ -68,6 +68,13 @@ async function readFormulation(
       statement: event.problem.statement,
       falsifier: event.problem.falsifier,
       motivation: event.problem.motivation,
+      ...(event.problem.scope === undefined
+        ? {}
+        : {
+            scope: event.problem.scope,
+            out_of_scope: event.problem.out_of_scope,
+            success_criteria: event.problem.success_criteria,
+          }),
     });
     if (
       body.length > MAX_ITEM_CHARACTERS ||
@@ -88,8 +95,7 @@ async function readFormulation(
       stable_prefix: 2,
       body,
       ...(event.screening_notice === undefined ? {} : { screening_notice: event.screening_notice }),
-      why_included:
-        "the committed problem statement, falsifier and motivation at this pack's cursor",
+      why_included: "the complete committed problem formulation at this pack's cursor",
     });
   } catch {
     section.omitted.push({

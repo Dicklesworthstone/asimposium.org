@@ -13,6 +13,9 @@ import {
 import type { Env } from "../../src/env.ts";
 import { claimContentDigest } from "../../src/krater/claim-version.ts";
 import { sha256Hex, writeClaim } from "../../src/krater/krater.ts";
+import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
+import { readProblemPublicationPreview } from "../../src/problems/publication-preview.ts";
+import { normHash } from "../../src/split/policy.ts";
 import { migratedSqlite } from "./migrated-sqlite";
 
 export const DISCLOSURE_SPONSOR = "usr_disclosure_origin";
@@ -23,7 +26,7 @@ type Value = string | number | null;
 /** All shipped migrations and legal enrollment/ledger commands on SQLite.
  * This is a unit fixture, not a Workerd or real-binding integration proof. */
 export async function directiveDisclosureFixture(
-  options: { initialInstruction?: string; problemBound?: boolean } = {},
+  options: { initialInstruction?: string; problemBound?: boolean; publishProblem?: boolean } = {},
 ) {
   const sql = migratedSqlite({ strict: true });
   function prepare(query: string) {
@@ -97,6 +100,40 @@ export async function directiveDisclosureFixture(
   const binding = await service.credentialBinding(issued.token);
   if (!binding) throw new Error("Fixture Fellow is not bound.");
   const now = new Date().toISOString();
+  if (options.publishProblem) {
+    const formulation = "Establish the finite bound.";
+    sql
+      .query(`UPDATE problems SET status='private-draft', title='Disclosure review',
+      sponsor_id=?, created_by_fellow_id=? WHERE id=?`)
+      .run(DISCLOSURE_SPONSOR, binding.fellowId, DISCLOSURE_PROBLEM);
+    sql
+      .query(`INSERT INTO problem_statement_versions
+      (problem_id,version,statement,norm_hash,falsifier,motivation,created_at)
+      VALUES(?,1,?,?,'A member violating the bound.','An exact review target.',?)`)
+      .run(DISCLOSURE_PROBLEM, formulation, `sha256:${await normHash(formulation)}`, now);
+    const preview = await readProblemPublicationPreview(db, DISCLOSURE_PROBLEM, DISCLOSURE_SPONSOR);
+    const problem = await db
+      .prepare("SELECT * FROM problems WHERE id=?")
+      .bind(DISCLOSURE_PROBLEM)
+      .first<Parameters<typeof applyPublicProblemGovernance>[1]>();
+    if (!preview || !problem) throw new Error("Disclosure fixture publication is unavailable.");
+    const published = await applyPublicProblemGovernance(
+      db,
+      problem,
+      DISCLOSURE_SPONSOR,
+      {
+        action: "publish",
+        reviewed_statement_version: preview.problem.current_statement_version,
+        reviewed_digest: preview.review_digest,
+      },
+      new Request(`https://a.asimposium.org/v1/sponsors/problems/${DISCLOSURE_PROBLEM}/lifecycle`, {
+        method: "POST",
+        headers: { "idempotency-key": "disclosure-formulation-publication" },
+      }),
+    );
+    if (published.status !== 200)
+      throw new Error(`Disclosure fixture publication failed: ${await published.text()}`);
+  }
   const statement = "Every member of the stated finite set satisfies the bound.";
   const kind = "conjecture",
     falsifier = "An explicit member violating the bound.";

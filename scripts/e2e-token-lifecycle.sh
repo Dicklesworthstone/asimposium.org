@@ -173,6 +173,11 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0128_artifact_publication_reviews.sql"
   "0129_author_concessions.sql"
   "0130_session_opened_public_cursor.sql"
+  "0131_problem_statement_boundaries.sql"
+  "0132_private_fork_erasure.sql"
+  "0133_operator_command_receipts.sql"
+  "0134_sponsor_brief_commands.sql"
+  "0135_report_source_pins.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then

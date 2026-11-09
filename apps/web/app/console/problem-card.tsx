@@ -7,41 +7,37 @@ import type {
 } from "@asimposium/contracts";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMemo, useState, useTransition } from "react";
-import { briefRequestFromForm, saveProblemBrief } from "./problem-actions";
+import { useMemo, useState } from "react";
+import { EditableProblemBrief, ProblemBriefEditor } from "./problem-brief-editor";
 
 /**
- * Sponsor problem intent (Fable §6.2, ADR-7/22): a sponsor writes a private
- * brief and assigns it to one of its own Fellows; the Fellow adopts it by
- * proposing the exact formulation; the sponsor then publishes the adopted
- * draft through the Worker's lifecycle gate. Publication opens sharpening, and
- * claims unlock only after an independent statement review.
+ * Sponsor intent stays private until its assigned Fellow proposes a private
+ * draft. Publication remains the separate reviewed lifecycle action.
  */
 export function ProblemManager({
+  sponsorId,
   fellows,
   briefs,
+  briefsLoaded = true,
   problems,
   configured,
 }: {
+  readonly sponsorId: string;
   readonly fellows: readonly SponsorFellowSummary[];
   readonly briefs: readonly SponsorProblemBrief[];
+  readonly briefsLoaded?: boolean;
   readonly problems: readonly SponsorProblemSummary[];
   readonly configured: boolean;
 }) {
-  const active = useMemo(() => fellows.filter((fellow) => fellow.status === "active"), [fellows]);
   const names = useMemo(
     () => new Map(fellows.map((fellow) => [fellow.fellow_id, fellow.name] as const)),
     [fellows],
   );
-  const [title, setTitle] = useState("");
-  const [statement, setStatement] = useState("");
-  const [falsifier, setFalsifier] = useState("");
-  const [motivation, setMotivation] = useState("");
-  const [areas, setAreas] = useState("");
-  const [assignee, setAssignee] = useState(active[0]?.fellow_id ?? "");
   const [message, setMessage] = useState<string | null>(null);
-  const [pending, startTransition] = useTransition();
   const router = useRouter();
+  const [editingBriefs, setEditingBriefs] = useState<ReadonlyMap<string, SponsorProblemBrief>>(
+    () => new Map(),
+  );
 
   if (!configured) {
     return (
@@ -51,6 +47,14 @@ export function ProblemManager({
 
   const drafts = problems.filter((problem) => problem.status === "private-draft");
   const published = problems.filter((problem) => problem.status !== "private-draft");
+  const listed = new Set(briefs.map((brief) => brief.id));
+  // A refresh must not destroy an editor's unresolved command after a Fellow
+  // adopts its brief or another tab withdraws it. Close only after a receipt or
+  // the sponsor's explicit discard. The page keys this manager by sponsor.
+  const displayed = [
+    ...briefs,
+    ...[...editingBriefs.values()].filter((brief) => !listed.has(brief.id)),
+  ];
 
   return (
     <div>
@@ -59,101 +63,42 @@ export function ProblemManager({
         A brief is private. Your assigned Fellow adopts it by proposing the exact formulation; only
         then can you publish it.
       </p>
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          setMessage(null);
-          startTransition(async () => {
-            const request = await briefRequestFromForm({
-              title,
-              statement,
-              falsifier,
-              motivation,
-              areas,
-              assignedFellowId: assignee,
-            });
-            if (request === null) {
-              setMessage(
-                "The brief is incomplete. Give a title, statement, falsifier, motivation and at least one area slug.",
-              );
-              return;
-            }
-            const result = await saveProblemBrief(request, `console-brief-${crypto.randomUUID()}`);
-            setMessage(result.ok ? `Brief saved: ${result.value.title}.` : result.message);
-            if (result.ok) router.refresh();
-          });
-        }}
-      >
-        <label>
-          Title
-          <input value={title} maxLength={120} onChange={(event) => setTitle(event.target.value)} />
-        </label>
-        <label>
-          Statement
-          <textarea
-            value={statement}
-            rows={3}
-            maxLength={8192}
-            onChange={(event) => setStatement(event.target.value)}
-          />
-        </label>
-        <label>
-          Falsifier: what observation or construction would refute it?
-          <textarea
-            value={falsifier}
-            rows={2}
-            maxLength={8192}
-            onChange={(event) => setFalsifier(event.target.value)}
-          />
-        </label>
-        <label>
-          Motivation
-          <textarea
-            value={motivation}
-            rows={2}
-            maxLength={8192}
-            onChange={(event) => setMotivation(event.target.value)}
-          />
-        </label>
-        <label>
-          Areas (comma-separated slugs, e.g. number-theory)
-          <input value={areas} onChange={(event) => setAreas(event.target.value)} />
-        </label>
-        <label>
-          Assign to
-          <select value={assignee} onChange={(event) => setAssignee(event.target.value)}>
-            <option value="">No Fellow yet</option>
-            {active.map((fellow) => (
-              <option key={fellow.fellow_id} value={fellow.fellow_id}>
-                {fellow.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="btn-row">
-          <button className="btn-quiet" type="submit" disabled={pending}>
-            Save brief
-          </button>
-        </div>
-      </form>
+      <ProblemBriefEditor sponsorId={sponsorId} fellows={fellows} onCommitted={setMessage} />
 
       <h3>Briefs awaiting adoption</h3>
-      {briefs.length === 0 ? (
+      {!briefsLoaded ? (
+        <p role="status">
+          The current private brief list could not be loaded. Open editors and unconfirmed changes
+          have been retained.{" "}
+          <button className="btn-quiet" type="button" onClick={() => router.refresh()}>
+            Reload brief list
+          </button>
+        </p>
+      ) : null}
+      {displayed.length === 0 && briefsLoaded ? (
         <p className="quiet">No active briefs.</p>
-      ) : (
+      ) : displayed.length > 0 ? (
         <ul aria-label="Briefs awaiting adoption">
-          {briefs.map((brief) => (
-            <li key={brief.id}>
-              <strong>{brief.title}</strong>{" "}
-              <span className="quiet">
-                {brief.assigned_fellow_id === undefined
-                  ? "not assigned"
-                  : `assigned to ${names.get(brief.assigned_fellow_id) ?? brief.assigned_fellow_id}`}
-              </span>
-            </li>
+          {displayed.map((brief) => (
+            <EditableProblemBrief
+              key={brief.id}
+              sponsorId={sponsorId}
+              brief={brief}
+              fellows={fellows}
+              currentAvailable={briefsLoaded && listed.has(brief.id)}
+              onEditingChange={(editing) =>
+                setEditingBriefs((previous) => {
+                  const next = new Map(previous);
+                  if (editing) next.set(brief.id, brief);
+                  else next.delete(brief.id);
+                  return next;
+                })
+              }
+              onCommitted={setMessage}
+            />
           ))}
         </ul>
-      )}
+      ) : null}
 
       <h3>Adopted drafts</h3>
       {drafts.length === 0 ? (

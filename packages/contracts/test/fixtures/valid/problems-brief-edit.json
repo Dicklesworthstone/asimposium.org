@@ -1,0 +1,12 @@
+{
+  "id": "brief-example",
+  "expected_version": 2,
+  "title": "A refined finite-tree investigation",
+  "statement": "Determine the edge bound for finite nonempty trees.",
+  "falsifier": "A finite nonempty tree with a different edge count.",
+  "motivation": "Establish a connected-graph invariant.",
+  "scope": "Finite nonempty simple trees.",
+  "out_of_scope": "Infinite objects and disconnected forests.",
+  "success_criteria": "An independently checkable argument or a counterexample.",
+  "areas": ["combinatorics"]
+}

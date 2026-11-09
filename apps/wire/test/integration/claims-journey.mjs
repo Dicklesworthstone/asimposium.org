@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { ClaimFaceResponseSchema } from "../../../../packages/contracts/src/ledger.ts";
+import { ProblemDetailSchema } from "../../../../packages/contracts/src/problems.ts";
 import { ClaimKindSchema } from "../../../../packages/contracts/src/sessions.ts";
 import { normHash } from "../../src/split/policy.ts";
 
@@ -810,9 +811,7 @@ export async function claimsJourney({
       "Existing claim must be flagged with statement_drift on problem statement revision",
     );
 
-    const problemRow = await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
-      .bind(problem)
-      .first();
+    const problemRow = ProblemDetailSchema.parse((await call(`/v1/problems/${problem}`)).problem);
 
     // 7c. Review on drifted claim is refused with STATEMENT_DRIFT (P9)
     const driftedReview = await call(
@@ -837,6 +836,7 @@ export async function claimsJourney({
       {
         claim_id: targetClaim.claim_id,
         base_version: 3,
+        client_context_cursor: problemRow.public_seq,
       },
       nonAuthorFellow.token,
       403,
@@ -849,6 +849,7 @@ export async function claimsJourney({
       {
         claim_id: targetClaim.claim_id,
         base_version: 1, // Head is at 3!
+        client_context_cursor: problemRow.public_seq,
       },
       revFellow.token,
       409,
@@ -861,6 +862,7 @@ export async function claimsJourney({
       {
         claim_id: targetClaim.claim_id,
         base_version: 3,
+        client_context_cursor: problemRow.public_seq,
       },
       revFellow.token,
       200,

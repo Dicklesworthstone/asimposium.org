@@ -1,4 +1,5 @@
 import { ProblemResolutionRecordSchema } from "@asimposium/contracts";
+import { synthesesListPath } from "@asimposium/contracts/syntheses";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -10,6 +11,9 @@ import { ReportLink } from "@/components/report-panel";
 import { ShareCardPanel } from "@/components/share-card-panel";
 import { ScientificBody } from "@/components/scientific-body";
 import { ScreeningNotice } from "@/components/screening-notice";
+import { CitationOmissions, CitationSummary } from "@/components/citations-view";
+import { citationsListPath } from "@asimposium/contracts/citations";
+import { CITATIONS_PAGE_SIZE } from "@/lib/citation-view";
 import { claimBoardWatchTargets, loadClaimBoard } from "@/lib/claim-board";
 import {
   COMMENTARY_PAGE_SIZE,
@@ -24,6 +28,7 @@ import {
 } from "@/lib/public-ledger";
 import { buildProblemShareCardData } from "@/lib/share-card";
 import { SITE } from "@/lib/site";
+import { synthesisPagePath } from "@/lib/synthesis-view";
 
 interface ProblemPageProps {
   readonly params: Promise<{ readonly slug: string }>;
@@ -35,6 +40,9 @@ const FORMULATION_LABELS = {
   "problem-statement": "Statement",
   "problem-falsifier": "Falsifier",
   "problem-motivation": "Motivation",
+  "problem-scope": "Scope",
+  "problem-out-of-scope": "Out of scope",
+  "problem-success-criteria": "Success criteria",
 } as const;
 const RESOLUTION_LIMIT_LABELS = {
   verified: "Verified scope",
@@ -133,7 +141,7 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
       cursor: commentaryCursor ?? Number.NaN,
       limit: COMMENTARY_PAGE_SIZE,
     }),
-    stoaFetchCitations(face.problem, result.origin),
+    stoaFetchCitations(face.problem, result.origin, { through: String(face.cursor), limit: String(CITATIONS_PAGE_SIZE) }),
   ]);
 
   const isSingleTeam = face.omitted.some(
@@ -185,7 +193,7 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
             {citationsResult.state === "ok" && (
               <>
                 <span> · </span>
-                <span>{citationsResult.data.citations.length} literature citations</span>
+                <span>{citationsResult.data.citations.length} literature citations in this preview</span>
               </>
             )}
             {commentaryResult.state === "ok" && (
@@ -291,6 +299,11 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
                   published at ledger sequence {resolution.closing_synthesis.seq} and covers history
                   through sequence {resolution.closing_synthesis.covers_through}.
                 </p>
+                <p>
+                  <Link href={synthesisPagePath(face.problem, `${resolution.closing_synthesis.synthesis_id}@1`)} prefetch={false}>
+                    Read the complete closing synthesis, its sources and declared limits
+                  </Link>
+                </p>
               </>
             ) : (
               <p>The verified resolution details are unavailable in this bounded digest.</p>
@@ -323,7 +336,7 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
           </section>
         )}
 
-        <ProblemClaimsBoard rows={claimRows} cursor={face.cursor} />
+      <ProblemClaimsBoard rows={claimRows} cursor={face.cursor} problemId={slug} />
 
         <section aria-labelledby="history-heading">
           <h2 id="history-heading">Ledger history</h2>
@@ -332,11 +345,29 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
             retain current public visibility controls.
           </p>
           <p>
+            <Link href={`/p/${encodeURIComponent(face.problem)}/history`} prefetch={false}>
+              Read the statement history and exact formulations
+            </Link>
+          </p>
+          <p>
             <Link
               href={`/p/${encodeURIComponent(face.problem)}/events?since=0&limit=50&through=${face.cursor}`}
               prefetch={false}
             >
               Read the event history through this page’s ledger snapshot
+            </Link>
+          </p>
+        </section>
+
+        <section aria-labelledby="syntheses-heading">
+          <h2 id="syntheses-heading">Published research syntheses</h2>
+          <p>
+            Read digests of the research, their frozen ledger coverage, source anchors and declared
+            omissions. A published narrative does not establish scientific standing or resolution.
+          </p>
+          <p>
+            <Link href={synthesesListPath(face.problem, "human", { through: face.cursor })} prefetch={false}>
+              Browse syntheses at this ledger snapshot
             </Link>
           </p>
         </section>
@@ -373,6 +404,24 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
             and withdrawn obligations. A recorded settlement does not independently verify a proof.</p>
           <p><Link href={`/p/${encodeURIComponent(face.problem)}/gaps?through=${face.cursor}`} prefetch={false}>
             Read proof gaps at this ledger snapshot
+          </Link></p>
+        </section>
+
+        <section aria-labelledby="conflicts-heading">
+          <h2 id="conflicts-heading">Scientific disagreements</h2>
+          <p>Read the exact claim versions in conflict, the aligned definitions and scope,
+            proposed discriminating tests, and recorded resolutions or persistent uncertainty.</p>
+          <p><Link href={`/p/${encodeURIComponent(face.problem)}/conflicts?through=${face.cursor}`} prefetch={false}>
+            Inspect disagreements at this ledger snapshot
+          </Link></p>
+        </section>
+
+        <section aria-labelledby="questions-heading">
+          <h2 id="questions-heading">Research questions and answering work</h2>
+          <p>Inspect requests for scientific help, the claims or obligations they concern,
+            recorded coordination and submitted answers.</p>
+          <p><Link href={`/p/${encodeURIComponent(face.problem)}/questions?through=${face.cursor}`} prefetch={false}>
+            Read research questions at this ledger snapshot
           </Link></p>
         </section>
 
@@ -428,43 +477,36 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
         <section aria-labelledby="literature-heading">
           <h2 id="literature-heading">Literature and citations</h2>
           <p className="quiet">
-            Committed citations and literature references for this problem. Citations are pinned to
-            exact versions and do not create scientific truth (Rule P8/P9).
+            A preview of literature sources at this problem digest&apos;s ledger snapshot {face.cursor}.
+            Each citation links to its exact published version and declared source provenance.
           </p>
           {citationsResult.state === "ok" && citationsResult.data.citations.length > 0 ? (
             <ul className="citations-list">
               {citationsResult.data.citations.map((cite) => (
                 <li key={cite.citation_id} className="citation-item">
-                  <ScreeningNotice notice={cite.screening_notice} />
-                  <strong>{cite.title}</strong>
-                  {cite.authors && cite.authors.length > 0 && (
-                    <span> — {cite.authors.join(", ")}</span>
-                  )}
-                  {cite.year && <span> ({cite.year})</span>}
-                  {cite.canonical_locator && (
-                    <span>
-                      {" "}
-                      <code>
-                        {cite.locator_kind}: {cite.canonical_locator}
-                      </code>
-                    </span>
-                  )}
+                  <CitationSummary item={cite} cursor={citationsResult.data.cursor} />
                 </li>
               ))}
             </ul>
           ) : citationsResult.state === "ok" ? (
             <p className="quiet">
-              No literature citations have been registered on this problem yet.
+              {citationsResult.data.omitted.length > 0
+                ? "No readable citations were returned in this preview. The source reports omissions; this does not establish that no citations were registered."
+                : "No citations were returned at this problem digest's snapshot."}
             </p>
           ) : (
             <p className="quiet">Literature citations are temporarily unavailable.</p>
           )}
+          {citationsResult.state === "ok" && <CitationOmissions omitted={citationsResult.data.omitted} />}
+          <p><Link href={citationsListPath(face.problem, "human", { through: face.cursor })} prefetch={false}>
+            Browse literature, provenance and citation versions
+          </Link></p>
           <p className="quiet">
-            <a href={`${stoaOrigin}/p/${encodeURIComponent(face.problem)}/citations.json`}>
+            <a href={`${stoaOrigin}${citationsListPath(face.problem, "json", { through: face.cursor, limit: CITATIONS_PAGE_SIZE })}`}>
               Inspect literature citations (JSON)
             </a>{" "}
             ·{" "}
-            <a href={`${stoaOrigin}/p/${encodeURIComponent(face.problem)}/citations.md`}>
+            <a href={`${stoaOrigin}${citationsListPath(face.problem, "md", { through: face.cursor, limit: CITATIONS_PAGE_SIZE })}`}>
               Markdown
             </a>
           </p>

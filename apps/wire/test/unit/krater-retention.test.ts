@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import type { D1Database } from "@cloudflare/workers-types";
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
 import { retentionCredentialRevoker } from "../../src/enrollment/service.ts";
 import { type BackupBucket, backupProblem } from "../../src/krater/backup.ts";
@@ -20,11 +21,13 @@ import {
   createRetentionControlRecord,
   deletionSafeRestore,
   expireSecurityRecords,
+  findResurrectedTargets,
   hardDeletePrivateDraft,
   parseAndVerifyDeletionJournal,
   RetentionError,
   readDeletionJournalRecords,
   serializeDeletionJournal,
+  sponsorAccountDeletionStatements,
   validateScratchTarget,
   verifyRetentionControlRecord,
 } from "../../src/krater/retention.ts";
@@ -81,6 +84,35 @@ function freshDb() {
     sqlite.run(readFileSync(join(MIGRATIONS, f), "utf8"));
   }
   return { sqlite, db: localD1(sqlite) };
+}
+
+function seedBriefReceipt(
+  sqlite: Database,
+  sponsorId: string,
+  keyDigit: string,
+  expiresAt: number,
+) {
+  const createdAt = expiresAt - 24 * 60 * 60 * 1000;
+  sqlite.run(
+    "INSERT OR IGNORE INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)",
+    [sponsorId, createdAt, createdAt],
+  );
+  sqlite.run(
+    `INSERT INTO sponsor_brief_command_receipts
+      (sponsor_id,key_digest,operation,request_digest,brief_id,brief_version,
+       brief_created_at,brief_updated_at,created_at,expires_at)
+     VALUES (?, ?, 'save', ?, ?, 1, ?, ?, ?, ?)`,
+    [
+      sponsorId,
+      keyDigit.repeat(64),
+      "f".repeat(64),
+      `${sponsorId}-brief-${keyDigit}`,
+      NOW,
+      NOW,
+      createdAt,
+      expiresAt,
+    ],
+  );
 }
 
 function fakeBucket(): BackupBucket & { readonly writes: Map<string, string> } {
@@ -467,6 +499,26 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
   });
 
   describe("expireSecurityRecords", () => {
+    test("expires sponsor brief receipts at their millisecond boundary and keeps live receipts", async () => {
+      const { sqlite, db } = freshDb();
+      const nowMs = Date.parse(NOW);
+      seedBriefReceipt(sqlite, "usr_receipt_expiry", "a", nowMs - 1);
+      seedBriefReceipt(sqlite, "usr_receipt_expiry", "b", nowMs);
+      seedBriefReceipt(sqlite, "usr_receipt_expiry", "c", nowMs + 1);
+
+      const result = await expireSecurityRecords(db, { nowMs });
+      expect(result.expiredSponsorBriefReceipts).toBe(2);
+      expect(
+        sqlite.prepare("SELECT key_digest, expires_at FROM sponsor_brief_command_receipts").all(),
+      ).toEqual([{ key_digest: "c".repeat(64), expires_at: nowMs + 1 }]);
+
+      const later = await expireSecurityRecords(db, { nowMs: nowMs + 1 });
+      expect(later.expiredSponsorBriefReceipts).toBe(1);
+      expect(
+        sqlite.prepare("SELECT COUNT(*) AS n FROM sponsor_brief_command_receipts").get(),
+      ).toEqual({ n: 0 });
+    });
+
     test("cleans up expired nonces, lookup attempts, and device codes", async () => {
       const { sqlite, db } = freshDb();
       const nowMs = 1724112000000; // 2026-08-20T00:00:00.000Z
@@ -513,6 +565,177 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
         .prepare("SELECT COUNT(*) AS n FROM device_lookup_attempts")
         .get() as { n: number };
       expect(remainingLookups.n).toBe(1);
+    });
+  });
+
+  describe("sponsor brief receipt account erasure", () => {
+    test("account deletion removes only the intended sponsor's receipts and keeps the sponsor tombstone", async () => {
+      const { sqlite, db } = freshDb();
+      const nowMs = Date.parse(NOW);
+      const owner = "usr_receipt_deleted";
+      const other = "usr_receipt_retained";
+      seedBriefReceipt(sqlite, owner, "a", nowMs + 60_000);
+      seedBriefReceipt(sqlite, owner, "b", nowMs + 60_000);
+      // Identical key hashes in different sponsor scopes are independent.
+      seedBriefReceipt(sqlite, other, "a", nowMs + 60_000);
+      const retained = sqlite
+        .prepare("SELECT * FROM sponsor_brief_command_receipts WHERE sponsor_id = ?")
+        .all(other);
+
+      const results = await (db as D1Database).batch(
+        sponsorAccountDeletionStatements(db, owner, nowMs),
+      );
+      expect(results[0]?.meta.changes).toBe(1);
+      expect(
+        sqlite.prepare("SELECT tombstoned_at FROM sponsors WHERE sponsor_id = ?").get(owner),
+      ).toEqual({ tombstoned_at: nowMs });
+      expect(
+        sqlite.prepare("SELECT tombstoned_at FROM sponsors WHERE sponsor_id = ?").get(other),
+      ).toEqual({ tombstoned_at: null });
+      expect(
+        sqlite
+          .prepare("SELECT * FROM sponsor_brief_command_receipts WHERE sponsor_id = ?")
+          .all(owner),
+      ).toEqual([]);
+      expect(sqlite.prepare("SELECT * FROM sponsor_brief_command_receipts").all()).toEqual(
+        retained,
+      );
+    });
+
+    test("deletion journal replay erases restored receipts even when the sponsor is already tombstoned", async () => {
+      const { sqlite, db } = freshDb();
+      const nowMs = Date.parse(NOW);
+      const owner = "usr_receipt_restored";
+      const other = "usr_receipt_untouched";
+      seedBriefReceipt(sqlite, owner, "a", nowMs + 60_000);
+      sqlite.run("UPDATE sponsors SET tombstoned_at = ? WHERE sponsor_id = ?", [nowMs, owner]);
+      seedBriefReceipt(sqlite, other, "a", nowMs + 60_000);
+      const retained = sqlite
+        .prepare("SELECT * FROM sponsor_brief_command_receipts WHERE sponsor_id = ?")
+        .all(other);
+      const control = await createRetentionControlRecord({
+        action: "delete-account-private-data",
+        targetId: owner,
+        targetType: "user_private_data",
+        payload: { sponsor_id: owner, deleted_at: NOW },
+        issuedAt: NOW,
+      });
+      const keys = await journalKeys();
+      const journal = await serializeDeletionJournal([control], NOW, keys.signing);
+
+      const replay = await applyDeletionJournal({
+        db,
+        targetIdentifier: "scratch_brief_receipt_erasure",
+        deletionJournalNdjson: journal,
+        verifyKeys: keys.verify,
+      });
+      expect(replay.appliedControlsCount).toBe(1);
+      expect(sqlite.prepare("SELECT * FROM sponsor_brief_command_receipts").all()).toEqual(
+        retained,
+      );
+      expect(
+        sqlite.prepare("SELECT tombstoned_at FROM sponsors WHERE sponsor_id = ?").get(owner),
+      ).toEqual({ tombstoned_at: nowMs });
+      expect(await findResurrectedTargets(db, [control])).toEqual([]);
+    });
+  });
+
+  describe("restore action support", () => {
+    test.each(["journal replay", "problem restore"] as const)(
+      "%s refuses a signed unsupported action before any supported control or snapshot write",
+      async (operation) => {
+        const draftId = "P-DRAFT-BEFORE-UNSUPPORTED";
+        const publicId = "P-UNSUPPORTED-RESTORE";
+        const supported = await createRetentionControlRecord({
+          action: "delete-private-draft",
+          targetId: draftId,
+          targetType: "problem",
+          payload: { sponsor_id: "usr_sponsor_1" },
+          issuedAt: NOW,
+        });
+        const unsupported = await createRetentionControlRecord({
+          action: "unbind-private-cas",
+          targetId: "a".repeat(64),
+          targetType: "cas_artifact",
+          issuedAt: NOW,
+        });
+        // The supported mutation deliberately precedes the unsupported action:
+        // refusing only when replay reaches that action would be too late.
+        const controls = [supported, unsupported];
+        const keys = await journalKeys();
+        const signed = await serializeDeletionJournal(controls, NOW, keys.signing);
+        const verified = await parseAndVerifyDeletionJournal(signed, keys.verify);
+        expect(verified.valid).toBe(true);
+        if (verified.valid) expect(verified.records).toEqual(controls);
+
+        let snapshotNdjson = "";
+        if (operation === "problem restore") {
+          const origin = freshDb();
+          const bucket = fakeBucket();
+          await seedClaimProblem(origin.db, publicId, 2);
+          const backup = await backupProblem(origin.db, bucket, publicId, "title", DATE);
+          expect(backup).not.toBeNull();
+          snapshotNdjson = bucket.writes.get(backup?.key ?? "") ?? "";
+        }
+
+        const scratch = freshDb();
+        scratch.sqlite.run(
+          `INSERT INTO problems (id, public_seq, status, unlisted, sponsor_id, title, created_at, updated_at)
+           VALUES (?, 0, 'private-draft', 1, 'usr_sponsor_1', 'Retained on refused restore', ?, ?)`,
+          [draftId, NOW, NOW],
+        );
+        const changesBefore = scratch.sqlite.prepare("SELECT total_changes() AS n").get();
+        const restore = (deletionJournalNdjson: string) => {
+          const options = {
+            db: scratch.db,
+            targetIdentifier: "scratch_unsupported_action",
+            deletionJournalNdjson,
+            verifyKeys: keys.verify,
+          };
+          return operation === "journal replay"
+            ? applyDeletionJournal(options)
+            : deletionSafeRestore({ ...options, snapshotNdjson });
+        };
+
+        // Authenticity is still checked first; unsupported actions remain
+        // parseable and exportable, but cannot authorize a successful restore.
+        const unsigned = await serializeDeletionJournal(controls, NOW);
+        await expect(restore(unsigned)).rejects.toThrow(
+          "DELETION_JOURNAL_VERIFICATION_FAILED: journal is unsigned",
+        );
+        await expect(restore(signed)).rejects.toThrow(
+          "DELETION_CONTROL_UNSUPPORTED: this restore cannot replay or verify 'unbind-private-cas'",
+        );
+        expect(scratch.sqlite.prepare("SELECT total_changes() AS n").get()).toEqual(changesBefore);
+        expect(scratch.sqlite.prepare("SELECT id, title FROM problems").all()).toEqual([
+          { id: draftId, title: "Retained on refused restore" },
+        ]);
+        expect(scratch.sqlite.prepare("SELECT COUNT(*) AS n FROM events").get()).toEqual({ n: 0 });
+        expect(await readDeletionJournalRecords(scratch.db)).toEqual([]);
+      },
+    );
+
+    test("resurrection readback cannot clear a journal with an unsupported action", async () => {
+      const supported = await createRetentionControlRecord({
+        action: "delete-private-draft",
+        targetId: "P-READBACK-SUPPORTED",
+        targetType: "problem",
+        issuedAt: NOW,
+      });
+      const unsupported = await createRetentionControlRecord({
+        action: "unbind-private-cas",
+        targetId: "b".repeat(64),
+        targetType: "cas_artifact",
+        issuedAt: NOW,
+      });
+      const db = {
+        prepare() {
+          throw new Error("The complete action set must be checked before reading any target");
+        },
+      } as never;
+      await expect(findResurrectedTargets(db, [supported, unsupported])).rejects.toThrow(
+        "DELETION_CONTROL_UNSUPPORTED",
+      );
     });
   });
 

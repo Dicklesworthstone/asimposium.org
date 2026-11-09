@@ -105,6 +105,8 @@ export interface ExpireSecurityRecordsResult {
   readonly expiredNonces: number;
   readonly expiredLookupAttempts: number;
   readonly expiredDeviceCodes: number;
+  readonly expiredSponsorBriefReceipts: number;
+  readonly expiredProblemProposalReceipts: number;
 }
 
 /**
@@ -523,6 +525,12 @@ export function sponsorAccountDeletionStatements(
       .prepare(`UPDATE fellow_rebinds SET status = 'superseded'
       WHERE sponsor_id = ? AND status IN ('awaiting-claim', 'awaiting-approval', 'approved')`)
       .bind(sponsorId),
+    // Replay receipts are private account metadata, not permanent audit. This
+    // also runs when journal replay finds an already-tombstoned sponsor.
+    db.prepare("DELETE FROM sponsor_brief_command_receipts WHERE sponsor_id = ?").bind(sponsorId),
+    db
+      .prepare("DELETE FROM problem_proposal_command_receipts WHERE sponsor_id = ?")
+      .bind(sponsorId),
   ];
 }
 
@@ -741,7 +749,7 @@ export async function hardDeletePrivateDraft(
 
 /**
  * Sweeps and expires raw IP and security records on schedule without changing public ledger history.
- * Bounded cleanup of expired nonces, device lookups, and expired device-flow codes.
+ * Cleanup of expired nonces, device lookups, device-flow codes and brief receipts.
  */
 export async function expireSecurityRecords(
   db: D1Database,
@@ -759,6 +767,8 @@ export async function expireSecurityRecords(
     db.prepare("DELETE FROM auth_envelope_nonces WHERE expires_at <= ?").bind(nowSeconds),
     db.prepare("DELETE FROM device_lookup_attempts WHERE attempted_at <= ?").bind(lookupThreshold),
     db.prepare("DELETE FROM device_codes WHERE expires_at <= ?").bind(nowMs),
+    db.prepare("DELETE FROM sponsor_brief_command_receipts WHERE expires_at <= ?").bind(nowMs),
+    db.prepare("DELETE FROM problem_proposal_command_receipts WHERE expires_at <= ?").bind(nowMs),
     // enrollment_proposals is append-only (0011 enrollment_proposals_no_delete):
     // a DELETE here aborts the whole batch on real D1, so no nonce is ever
     // swept. Dead proposals stay as the sponsor's decision history.
@@ -770,6 +780,8 @@ export async function expireSecurityRecords(
     expiredNonces: (results[0]?.meta?.changes as number) ?? 0,
     expiredLookupAttempts: (results[1]?.meta?.changes as number) ?? 0,
     expiredDeviceCodes: (results[2]?.meta?.changes as number) ?? 0,
+    expiredSponsorBriefReceipts: (results[3]?.meta?.changes as number) ?? 0,
+    expiredProblemProposalReceipts: (results[4]?.meta?.changes as number) ?? 0,
   };
 }
 
@@ -783,11 +795,35 @@ export interface DeletionJournalReplay {
   readonly appliedControlsCount: number;
 }
 
+// A recognized, authentic journal action is not necessarily implemented by
+// this restore. Every action must explicitly support both replay and readback
+// before it can allow a scratch database to become serviceable.
+const RETENTION_CONTROL_REPLAY_SUPPORTED = {
+  "suspend-sponsor": true,
+  "delete-private-draft": true,
+  "revoke-credential": true,
+  "cancel-enrollment": true,
+  "cancel-transfer": true,
+  "delete-account-private-data": true,
+  "unbind-private-cas": false,
+} as const satisfies Record<RetentionControlAction, boolean>;
+
+function assertReplayableControls(records: readonly RetentionControlRecord[]): void {
+  for (const control of records) {
+    if (RETENTION_CONTROL_REPLAY_SUPPORTED[control.action] !== true) {
+      throw new KraterRestoreRefusedError(
+        `DELETION_CONTROL_UNSUPPORTED: this restore cannot replay or verify '${control.action}'`,
+      );
+    }
+  }
+}
+
 /** Targets a verified journal says are deleted but the database still serves. */
 export async function findResurrectedTargets(
   db: D1Database,
   records: readonly RetentionControlRecord[],
 ): Promise<string[]> {
+  assertReplayableControls(records);
   const resurrected: string[] = [];
   for (const control of records) {
     if (control.action === "suspend-sponsor") {
@@ -859,7 +895,7 @@ export async function findResurrectedTargets(
  * Verify a signed deletion journal, reapply every control to a restored
  * scratch database, and refuse cutover if any deleted target is still
  * serviceable. A missing, unsigned, tampered or unverifiable journal refuses
- * before any write.
+ * before any write, as does a verified journal containing an unsupported action.
  */
 export async function applyDeletionJournal(options: {
   readonly db: D1Database;
@@ -893,6 +929,9 @@ async function verifiedJournalRecords(
   if (!verified.valid) {
     throw new KraterRestoreRefusedError(`DELETION_JOURNAL_VERIFICATION_FAILED: ${verified.reason}`);
   }
+  // Preflight the complete authenticated journal before restoring a snapshot
+  // or applying even an earlier supported control from the same journal.
+  assertReplayableControls(verified.records);
   return verified.records;
 }
 
@@ -996,8 +1035,8 @@ async function replayControls(
  * Deletion-safe restore of one problem export into a validated scratch target.
  *
  * 1. Refuses a non-scratch target.
- * 2. Verifies the signed deletion journal BEFORE any write; a missing or
- *    unverifiable journal refuses (fail closed).
+ * 2. Verifies the signed deletion journal and support for every action BEFORE
+ *    any write; missing, unverifiable or unsupported controls refuse (fail closed).
  * 3. Refuses to restore a problem the journal records as a deleted draft.
  * 4. Restores the verified export, reapplies every journal control, and
  *    refuses cutover if any deleted target is still serviceable.

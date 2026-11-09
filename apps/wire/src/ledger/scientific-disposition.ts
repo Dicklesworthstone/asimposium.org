@@ -65,6 +65,16 @@ export interface ScientificRow {
   /** Server-derived disclosure coverage for this immutable claim version.
    * It is selected in the same database snapshot as the scientific timeline. */
   directive_disclosure?: string | null;
+  /** Explicitly bounded readers must reject the whole history on overflow.
+   * Missing bodies caused by this budget are not scientific withdrawals. */
+  scientific_budget_exceeded?: number;
+}
+
+export interface ScientificReadBudget {
+  readonly maxRows: number;
+  readonly maxPayloadBytes: number;
+  /** Counts both event payloads and returned claim-version statement copies. */
+  readonly maxTotalPayloadBytes: number;
 }
 
 /** One recorded review as the review-state facet sees it (Fable §6.6). */
@@ -153,15 +163,25 @@ export function prepareScientificDispositions(
   cursor: number,
   claimLimit: number,
   target?: { claimId: string; version: number },
+  budget?: ScientificReadBudget,
 ): D1PreparedStatement {
+  if (
+    budget !== undefined &&
+    ([budget.maxRows, budget.maxPayloadBytes, budget.maxTotalPayloadBytes].some(
+      (value) => !Number.isSafeInteger(value) || value < 1,
+    ) ||
+      budget.maxRows === Number.MAX_SAFE_INTEGER)
+  )
+    throw new RangeError(
+      "Scientific read budget requires positive safe integers and row lookahead.",
+    );
   // Both targeted and list reads select immutable events so a later mutable
   // head cannot erase a claim from the requested cursor.
   const selection =
     target === undefined
       ? CLAIM_HEADS_AT_CURSOR_SQL
       : "SELECT object_id AS id FROM events WHERE problem_id = ? AND seq <= ? AND object_id = ? AND type = 'claim.created' AND object_kind = 'claim' LIMIT 1";
-  return db
-    .prepare(`
+  const query = `
     WITH disclosure_cut(cursor) AS (VALUES (?)), selected_claims AS (
       ${selection}
     )
@@ -194,8 +214,18 @@ export function prepareScientificDispositions(
         AND cc.event_sha256 = e.payload_sha256 AND cc.problem_id = e.problem_id
         AND cc.claim_id = s.id) AS concession_event_id,
       ret.target_object AS retraction_target,
-      e.payload_sha256, c.payload_json, e.created_at, e.actor_fellow_id AS fellow_id,
-      e.actor_sponsor_id AS sponsor_id, v.content_digest, v.statement, x.direction,
+      e.payload_sha256, ${
+        budget === undefined
+          ? "c.payload_json"
+          : `e.problem_id AS scientific_problem_id,
+      length(CAST(c.payload_json AS BLOB)) AS scientific_payload_bytes`
+      }, e.created_at, e.actor_fellow_id AS fellow_id,
+      e.actor_sponsor_id AS sponsor_id, v.content_digest, ${
+        budget === undefined
+          ? "v.statement"
+          : `CASE WHEN c.event_id IS NOT NULL THEN length(CAST(v.statement AS BLOB)) END
+        AS scientific_statement_bytes`
+      }, x.direction,
       w.source_event_id AS withdrawn_event_id,
       CASE WHEN e.object_kind = 'claim' THEN ${directiveDisclosureStatusSql(
         "e.problem_id",
@@ -245,13 +275,48 @@ export function prepareScientificDispositions(
     WHERE e.problem_id = ? AND e.seq <= ?
       AND e.type IN ('claim.created', 'claim.revised', 'review.created', 'evidence.created', 'object.retracted')
     ORDER BY e.seq ASC
-  `)
+    ${budget === undefined ? "" : `LIMIT ${budget.maxRows + 1}`}
+  `;
+  // Select only bounded envelope/byte metadata first. No scientific body
+  // crosses D1 unless the complete selected history fits every limit. The
+  // lookahead row invalidates the whole history instead of hiding a late
+  // objection behind an apparently complete prefix. Ordinary callers keep
+  // the existing full-history query and fold unchanged.
+  const boundedQuery =
+    budget === undefined
+      ? query
+      : `WITH scientific_sources AS MATERIALIZED (${query}),
+    scientific_budget AS MATERIALIZED (
+      SELECT CASE WHEN COUNT(*) > ${budget.maxRows}
+        OR COALESCE(MAX(scientific_payload_bytes), 0) > ${budget.maxPayloadBytes}
+        OR COALESCE(MAX(scientific_statement_bytes), 0) > ${budget.maxPayloadBytes}
+        OR COALESCE(SUM(COALESCE(scientific_payload_bytes, 0)
+          + COALESCE(scientific_statement_bytes, 0)), 0) > ${budget.maxTotalPayloadBytes}
+        THEN 1 ELSE 0 END AS exceeded FROM scientific_sources
+    )
+    SELECT b.*, limits.exceeded AS scientific_budget_exceeded,
+      c.payload_json, v.statement
+    FROM scientific_sources b CROSS JOIN scientific_budget limits
+    LEFT JOIN event_content c ON c.event_id = b.event_id AND c.payload_sha256 = b.payload_sha256
+      AND c.redacted_at IS NULL AND b.scientific_payload_bytes IS NOT NULL AND limits.exceeded = 0
+    LEFT JOIN claim_versions v ON v.problem_id = b.scientific_problem_id
+      AND v.claim_id = b.claim_id AND v.version = b.object_version
+      AND b.scientific_statement_bytes IS NOT NULL AND limits.exceeded = 0
+    ORDER BY b.seq ASC`;
+  return db
+    .prepare(boundedQuery)
     .bind(cursor, problemId, cursor, target?.claimId ?? claimLimit, problemId, cursor);
 }
 
 export async function foldScientificRows(
   rows: readonly ScientificRow[],
 ): Promise<ScientificDisposition> {
+  if (
+    rows.some(
+      (row) => row.scientific_budget_exceeded !== undefined && row.scientific_budget_exceeded !== 0,
+    )
+  )
+    throw new ScientificInputError("Scientific history exceeds the read budget.");
   const contents = new Map<string, Record<string, unknown>>();
   const claims = new Map<number, ScientificClaim>();
   // Withdrawal needs immutable creation authorship even if the claim text is

@@ -43,6 +43,7 @@ import {
   type ScientificRow,
 } from "../ledger/scientific-disposition";
 import { readPublicationNotices } from "../screening/publication-notice.ts";
+import { claimInputStatuses } from "./claim-input-status.ts";
 import { composeClaimProofObligations } from "./claim-proof-obligations";
 import { readFormalGapSection, readGraveyardFrictionSection } from "./formal-pack";
 import { readKilledHypothesisPack } from "./killed-hypothesis-pack";
@@ -116,6 +117,7 @@ export async function readDeadEndPack(
   const candidates: PackCandidate[] = [];
   let oversized = false;
   for (const [index, item] of result.items.entries()) {
+    const { screening_notice: screeningNotice, ...publication } = item;
     const body = headlines
       ? {
           dead_end_id: item.dead_end_id,
@@ -129,7 +131,7 @@ export async function readDeadEndPack(
           harness: item.harness,
           source: `/p/${problemId}/dead-ends.json`,
         }
-      : item;
+      : publication;
     const encoded = JSON.stringify(body);
     if (encoded.length > 18000 || neutralizeUntrustedBody(encoded).text.length > 18000) {
       oversized = true;
@@ -142,6 +144,7 @@ export async function readDeadEndPack(
       untrusted: true,
       tokens: 1,
       body: encoded,
+      ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
       why_included: headlines
         ? "published failed approach; read the graveyard for its scope, failure and retry condition"
         : "published negative knowledge and recorded retry condition, not a claim that the condition has fired",
@@ -490,6 +493,7 @@ async function composeTargetClaimPack(
   ]);
   const scienceRows = results[4]?.results as DependencyScientificRow[] | undefined;
   if (scienceRows === undefined) throw new Error("Premise scientific snapshot unavailable");
+  const inputStatuses = await claimInputStatuses(scienceRows, problemId, target, through);
   const assessments = await composeDependencyAssessment(
     closureRows,
     closure,
@@ -566,6 +570,7 @@ async function composeTargetClaimPack(
       section.omitted.push({ reason: "candidate_limit", detail: `${target}:${kind}` });
     for (const [position, row] of rows.slice(0, LEDGER_PACK_CANDIDATE_LIMIT).entries()) {
       let body: string | null = null;
+      let why = `public record for ${problemId}#${target} at the pack cursor`;
       if (row.body !== null && row.payload_json !== null) {
         try {
           const payload = await checkedScientificPayload({
@@ -662,6 +667,22 @@ async function composeTargetClaimPack(
             projected.locator = provenance.locator ?? null;
             projected.excerpt = provenance.excerpt ?? null;
           }
+          if (kind === "claim-evidence" || kind === "claim-review") {
+            const status = inputStatuses.forRecord(
+              String(projected.event),
+              row.id,
+              kind === "claim-evidence" ? "evidence" : "review",
+              row.payload_sha256,
+            );
+            // Exception metadata must travel with the affected record. A
+            // neutral "not assessed" result adds no authority and needlessly
+            // displaces ordinary evidence/reviews from the bounded read window.
+            if (status.positive_authority !== "not-assessed") projected.scientific_status = status;
+            if (status.withdrawal === "withdrawn")
+              why = `withdrawn public record for ${problemId}#${target}; retained history without positive authority; adverse findings are not resolved by withdrawal`;
+            else if (status.positive_authority !== "not-assessed")
+              why = `retained public record for ${problemId}#${target}; current supporting authority is unavailable`;
+          }
           body = JSON.stringify(projected);
         } catch (error) {
           if (!(error instanceof ScientificInputError)) throw error;
@@ -685,7 +706,7 @@ async function composeTargetClaimPack(
           ...(screeningNotices.has(Number(JSON.parse(body).seq))
             ? { screening_notice: screeningNotices.get(Number(JSON.parse(body).seq))! }
             : {}),
-          why_included: `public record for ${problemId}#${target} at the pack cursor`,
+          why_included: why,
           stable_prefix: 3 + index * LEDGER_PACK_CANDIDATE_LIMIT + position,
         });
       }

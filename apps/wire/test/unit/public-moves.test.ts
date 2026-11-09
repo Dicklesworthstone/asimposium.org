@@ -490,10 +490,16 @@ test("canonical public formulation enables sharpening and is required for first-
   expect(sharpen?.primary_move?.move).toBe("sharpen-statement");
   expect(sharpen?.primary_move?.refs).toEqual(["P-SHARPEN", "S@1"]);
   expect(sharpen?.primary_move?.contract.preparation).toMatchObject({
-    read_first: { path: "/p/P-SHARPEN.md" },
+    read_first: { path: "/p/P-SHARPEN/statements/1.md?through=20" },
     captured_cursor: 20,
     statement_version: 1,
     statement_pin: statementPin,
+  });
+  expect(sharpen?.primary_move?.contract).toMatchObject({
+    availability: "available",
+    target_contract: "/schemas/problems.v1/statement_review_request.json",
+    request: { method: "POST", path: "/v1/problems/{problem_id}/statement-review" },
+    prefilled_hints: { statement_version: 1, client_context_cursor: 20 },
   });
   expect(sharpen?.degraded).toBe(false);
   expect(f.calls).toHaveLength(0);

@@ -21,7 +21,7 @@ import { loadProofGapMove } from "./gap-moves-service.ts";
 import { selectIdleCloseMove } from "./idle-close-moves.ts";
 import { selectKillOrStandMove } from "./kill-moves.ts";
 import { LedgerMovesProvider } from "./live-provider.ts";
-import { filterMovesByPermissions, PROMOTION_MOVE_KINDS } from "./move-permissions.ts";
+import { filterMovesByPermissions } from "./move-permissions.ts";
 import { selectReanchorMove } from "./reanchor-moves.ts";
 import { loadDeadEndRetryMove } from "./retry-moves-service.ts";
 import { selectSharpenStatementMove } from "./sharpen-moves.ts";
@@ -85,7 +85,15 @@ export function computeViewerPermissions(input: {
 }): Record<string, boolean> {
   const { fellowStatus, role, admissionMode = "open", problemBinding, problemId } = input;
   if (fellowStatus !== "active" || (problemBinding !== undefined && problemBinding !== problemId)) {
-    return { read: true, session_open: false, workshop_push: false, promote: false, review: false };
+    return {
+      read: true,
+      session_open: false,
+      workshop_push: false,
+      promote: false,
+      evidence: false,
+      dead_end: false,
+      review: false,
+    };
   }
   const isMember = role !== "none";
   return {
@@ -93,6 +101,8 @@ export function computeViewerPermissions(input: {
     session_open: isMember || admissionMode === "open",
     workshop_push: isMember,
     promote: isMember && role !== "observer",
+    evidence: isMember,
+    dead_end: isMember,
     review: isMember,
   };
 }
@@ -174,7 +184,17 @@ export class ContractFixtureMovesProvider implements MegaCommandsMoveProvider {
     const problemRef = candidate.refs.find((ref) => ref.startsWith("P-"));
     if (problemRef !== undefined) {
       const assignment = request.assignments.find((a) => a.problem_id === problemRef);
-      if (assignment?.role === "observer" && PROMOTION_MOVE_KINDS.has(candidate.move)) {
+      if (
+        assignment?.role === "observer" &&
+        filterMovesByPermissions(
+          [candidate],
+          computeViewerPermissions({
+            fellowStatus: "active",
+            role: "observer",
+            problemId: problemRef,
+          }),
+        ).length === 0
+      ) {
         return {
           move: null,
           degraded: false,

@@ -9,12 +9,13 @@ import {
   loadLedgerMoves,
   MOVE_QUEUE_MAX_PAGES,
   MOVE_REVIEW_HISTORY_SQL,
+  type MovePermissions,
   reviewTargetKey,
   selectLedgerMoves,
 } from "../../src/mega-commands/ledger-moves.ts";
 
 const viewer = { fellowId: "F-READER", sponsorId: "SP-READER" };
-const permissions = { session_open: true, promote: true, review: true };
+const permissions = { session_open: true, promote: true, evidence: true, review: true };
 function item(patch: Partial<ReviewQueueItem> = {}): ReviewQueueItem {
   return {
     problem_id: "P-DEMO",
@@ -54,7 +55,11 @@ function templateFor(move: "review" | "add-refuter"): MoveTemplate {
     prefilled_hints: move === "review" ? {} : { direction: "refutes" },
   };
 }
-function choose(items: ReviewQueueItem[], overrides = permissions, reviewed = new Set<string>()) {
+function choose(
+  items: ReviewQueueItem[],
+  overrides: MovePermissions = permissions,
+  reviewed = new Set<string>(),
+) {
   return selectLedgerMoves(items, viewer, overrides, reviewed, templateFor);
 }
 function queue(
@@ -143,6 +148,19 @@ test("review permission does not require permission to promote new claims", () =
     }).length,
     0,
   );
+});
+test("observer evidence authority supplies refutation work without claim or review permission", () => {
+  const selected = choose([item(), item({ need: "falsification-attempt", claim_id: "C-2" })], {
+    session_open: true,
+    promote: false,
+    evidence: true,
+    review: false,
+  });
+  assert.equal(selected.length, 1);
+  assert.equal(selected[0]?.move, "add-refuter");
+  const refuterTemplate = templateFor("add-refuter");
+  assert.ok(refuterTemplate.availability === "available");
+  assert.deepEqual(selected[0]?.contract.request, refuterTemplate.request);
 });
 test("authors may attempt falsification without manufacturing independent review credit", () => {
   const move = choose([

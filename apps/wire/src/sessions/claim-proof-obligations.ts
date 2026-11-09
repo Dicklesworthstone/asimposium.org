@@ -1,3 +1,4 @@
+import { ScreeningPublicationNoticeSchema } from "@asimposium/contracts";
 import type { ProofGapEvent } from "@asimposium/contracts/proof-gaps";
 import type { PackCandidate } from "@asimposium/render";
 import type { DependencyClosure } from "../ledger/claim-dependency-closure.ts";
@@ -183,6 +184,9 @@ export function composeClaimProofObligations(
       untrusted: true,
       tokens: 1,
       body,
+      ...(gap.screening_notice === undefined
+        ? {}
+        : { screening_notice: ScreeningPublicationNoticeSchema.parse(gap.screening_notice) }),
       stable_prefix: 5 + candidates.length,
       why_included:
         "recorded proof obligation on this exact statement or a verified pinned premise; settlement is not proof",

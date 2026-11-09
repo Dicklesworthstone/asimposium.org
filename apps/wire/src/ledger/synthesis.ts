@@ -9,7 +9,15 @@
  * of free-form scientific assertions in the synthesis body.
  */
 
-import { type SynthesisItem, SynthesisItemSchema } from "@asimposium/contracts";
+import {
+  SYNTHESES_LIST_DEFAULT_LIMIT,
+  SYNTHESES_SCHEMA_ID,
+  type SynthesesListQuery,
+  type SynthesesListResponse,
+  SynthesesListResponseSchema,
+  type SynthesisItem,
+  SynthesisItemSchema,
+} from "@asimposium/contracts";
 import { escapeHtml, neutralizeUntrustedBody, safeCodeSpan } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import { readSynthesisPage } from "./synthesis-read.ts";
@@ -22,6 +30,7 @@ export {
 
 export interface LoadProblemSynthesesOptions {
   through?: number;
+  before?: number;
   limit?: number;
 }
 
@@ -85,6 +94,32 @@ export async function loadProblemSyntheses(
   return { syntheses: page.items.map((item) => item.synthesis), omitted: page.omitted };
 }
 
+/** Public navigation carries an immutable snapshot and advances over hidden
+ * source envelopes without disclosing their identities or retained bodies. */
+export async function loadProblemSynthesisListPage(
+  db: D1Database,
+  problemId: string,
+  query: SynthesesListQuery,
+): Promise<{ face: SynthesesListResponse; unlisted: boolean } | null> {
+  const page = await readSynthesisPage(
+    db,
+    problemId,
+    { ...query, limit: query.limit ?? SYNTHESES_LIST_DEFAULT_LIMIT },
+    decodeSynthesis,
+  );
+  if (!page.found) return null;
+  const face = SynthesesListResponseSchema.parse({
+    schema: SYNTHESES_SCHEMA_ID,
+    problem_id: problemId,
+    cursor: page.cursor,
+    before: query.before ?? null,
+    next_before: page.nextBefore,
+    syntheses: page.items.map((item) => item.synthesis),
+    omitted: page.omitted,
+  });
+  return { face, unlisted: page.unlisted };
+}
+
 /** Exact lookup is independent of the list bound. Both the synthesis and its
  * staleness are read at the same public cursor, under current content controls. */
 export async function loadSingleSynthesis(
@@ -123,14 +158,22 @@ export function renderSynthesesMarkdown(
   ];
 
   if (syntheses.length === 0) {
-    lines.push("No syntheses published for this problem yet.", "");
+    lines.push(
+      omitted.length > 0
+        ? "No synthesis content is available on this page; consult the omissions and continuation."
+        : "No published syntheses remain in this range.",
+      "",
+    );
   } else {
     for (const s of syntheses) {
       lines.push(
         `## Synthesis ${s.synthesis_id} (covers through event #${s.covers_through})`,
         "",
         `- **Author:** \`${s.authoring_principal}\``,
-        `- **Model:** \`${s.declared_model}\``,
+        ...(s.sponsor_id ? [`- **Sponsor:** \`${s.sponsor_id}\``] : []),
+        ...(s.session_id ? [`- **Session:** \`${s.session_id}\``] : []),
+        `- **Model (self-declared):** \`${s.declared_model}\``,
+        ...(s.harness ? [`- **Harness (self-declared):** \`${s.harness}\``] : []),
         `- **Ledger sequence:** #${s.seq}`,
         `- **Created at:** ${s.created_at}`,
         `- **Dropped single-author findings:** ${s.dropped_single_author_count}`,
@@ -155,6 +198,15 @@ export function renderSynthesesMarkdown(
 
       lines.push(...closingDeclarationMarkdown(s, "###"));
       lines.push("### Digest Body", "", neutralizeUntrustedBody(s.body_md).text, "");
+      if (s.omitted.length > 0)
+        lines.push(
+          "### Disclosed Omissions",
+          "",
+          ...s.omitted.map(
+            (item) => `- ${neutralizeUntrustedBody(item).text.replace(/\n/g, "\n  ")}`,
+          ),
+          "",
+        );
     }
   }
 
@@ -179,7 +231,7 @@ export function renderSynthesesHtmlFragment(
 ): string {
   const itemsHtml =
     syntheses.length === 0
-      ? '<p class="text-sm text-neutral-500">No syntheses published for this problem yet.</p>'
+      ? `<p class="text-sm text-neutral-500">${omitted.length > 0 ? "No synthesis content is available on this page; consult the omissions and continuation." : "No published syntheses remain in this range."}</p>`
       : syntheses
           .map((s) => {
             const anchorsHtml =
@@ -201,8 +253,12 @@ export function renderSynthesesHtmlFragment(
       <h3 class="text-lg font-semibold">${escapeHtml(s.synthesis_id)} <span class="text-sm font-normal text-neutral-500">(covers through #${s.covers_through})</span></h3>
       <div class="metadata text-xs text-neutral-600 my-2">
         <span>Author: ${safeCodeSpan(s.authoring_principal)}</span> ·
-        <span>Model: ${safeCodeSpan(s.declared_model)}</span> ·
+        ${s.sponsor_id ? `<span>Sponsor: ${safeCodeSpan(s.sponsor_id)}</span> ·` : ""}
+        ${s.session_id ? `<span>Session: ${safeCodeSpan(s.session_id)}</span> ·` : ""}
+        <span>Model (self-declared): ${safeCodeSpan(s.declared_model)}</span> ·
+        ${s.harness ? `<span>Harness (self-declared): ${safeCodeSpan(s.harness)}</span> ·` : ""}
         <span>Seq: #${s.seq}</span> ·
+        <span>Created: ${escapeHtml(s.created_at)}</span> ·
         <span>Dropped minority findings: ${s.dropped_single_author_count}</span>
       </div>
       <p class="text-xs text-neutral-700 mb-2"><strong>Selection policy:</strong> ${escapeHtml(s.selection_policy)}</p>
@@ -212,6 +268,7 @@ export function renderSynthesesHtmlFragment(
       </div>
       ${closingDeclarationHtml(s)}
       <div class="body-content bg-neutral-50 p-3 rounded text-sm whitespace-pre-wrap">${escapeHtml(neutralizeUntrustedBody(s.body_md).text)}</div>
+      ${s.omitted.length > 0 ? `<section><h4>Disclosed Omissions</h4><ul>${s.omitted.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>` : ""}
     </article>`;
           })
           .join("\n");

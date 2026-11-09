@@ -6,7 +6,10 @@ import {
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { FellowCredentialBinding } from "../enrollment/service.ts";
-import { filterMovesByPermissions } from "../mega-commands/move-permissions.ts";
+import {
+  filterMovesByPermissions,
+  isStatementReviewMove,
+} from "../mega-commands/move-permissions.ts";
 import {
   type MegaCommandsMoveProvider,
   TruthfulProductionMovesProvider,
@@ -110,16 +113,35 @@ export async function readWorkingMovesPack(
     // Caller restrictions can only reduce the provider's current central
     // authorization; stale UI hints cannot create authority.
     const effectivePermissions = Object.fromEntries(
-      ["read", "session_open", "workshop_push", "promote", "review"].map((permission) => [
-        permission,
-        input.effectivePermissions[permission] === true &&
-          result.effectivePermissions?.[permission] === true,
-      ]),
+      ["read", "session_open", "workshop_push", "promote", "evidence", "dead_end", "review"].map(
+        (permission) => [
+          permission,
+          input.effectivePermissions[permission] === true &&
+            result.effectivePermissions?.[permission] === true,
+        ],
+      ),
     );
     const permitted = filterMovesByPermissions(
       rawMoves,
       effectivePermissions,
       input.promotionLimited,
+    ).map((move) =>
+      isStatementReviewMove(move)
+        ? {
+            ...move,
+            contract: {
+              ...move.contract,
+              request: {
+                ...(record(move.contract.request) ? move.contract.request : {}),
+                path: `/v1/problems/${encodeURIComponent(input.problemId)}/statement-review`,
+              },
+              prefilled_hints: {
+                ...(record(move.contract.prefilled_hints) ? move.contract.prefilled_hints : {}),
+                session_id: input.sessionId,
+              },
+            },
+          }
+        : move,
     );
     const primaryMove = permitted[0] ?? null;
     const alternatives = permitted.slice(1, 3);

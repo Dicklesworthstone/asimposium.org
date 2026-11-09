@@ -4,8 +4,18 @@ import { fileURLToPath } from "node:url";
 
 import { z } from "zod";
 import { BatchContractsSchema } from "./batch.ts";
-import { CITATIONS_SCHEMA_ID, CitationsListResponseSchema } from "./citations.ts";
-import { CONFLICTS_SCHEMA_ID, ConflictsListResponseSchema } from "./conflicts.ts";
+import {
+  CITATIONS_SCHEMA_ID,
+  CitationReadQuerySchema,
+  CitationsListQuerySchema,
+  CitationsListResponseSchema,
+  SingleCitationResponseSchema,
+} from "./citations.ts";
+import {
+  CONFLICTS_SCHEMA_ID,
+  ConflictsListQuerySchema,
+  ConflictsListResponseSchema,
+} from "./conflicts.ts";
 import { DEAD_ENDS_SCHEMA_ID, DeadEndsListResponseSchema } from "./dead-ends.ts";
 import { generateDirectivesSchema } from "./directives.ts";
 import {
@@ -146,7 +156,11 @@ import {
   PublicMovesQuerySchema,
   PublicProblemMovesSchema,
 } from "./public-moves.ts";
-import { QUESTIONS_SCHEMA_ID, QuestionsListResponseSchema } from "./questions.ts";
+import {
+  QUESTIONS_SCHEMA_ID,
+  QuestionsListQuerySchema,
+  QuestionsListResponseSchema,
+} from "./questions.ts";
 import { generateReadinessSchema } from "./readiness.ts";
 import { RETRACTIONS_SCHEMA_ID, RetractionsListResponseSchema } from "./retractions.ts";
 import { generatedReviewQueueArtifact } from "./review-queue-artifact.ts";
@@ -230,7 +244,13 @@ import {
   type WorkshopPushResponse,
   type WorkshopPushType,
 } from "./sessions.ts";
-import { SYNTHESES_SCHEMA_ID, SynthesesListResponseSchema } from "./syntheses.ts";
+import {
+  SingleSynthesisResponseSchema,
+  SYNTHESES_SCHEMA_ID,
+  SynthesesListQuerySchema,
+  SynthesesListResponseSchema,
+} from "./syntheses.ts";
+import { generateWorkshopDirectorySchema } from "./workshop-directory.ts";
 
 export interface GeneratedArtifact {
   readonly relativePath: string;
@@ -910,6 +930,15 @@ function generatedMovesTypes(): string {
 
 export function generatedArtifacts(): readonly GeneratedArtifact[] {
   return [
+    {
+      relativePath: "generated/workshop-directory.schema.json",
+      content: generateWorkshopDirectorySchema(),
+    },
+    {
+      relativePath: "generated/workshop-directory.types.ts",
+      content:
+        "// Generated from src/workshop-directory.ts. Do not edit.\nexport type { WorkshopDirectoryQuery, WorkshopDirectoryItem, WorkshopDirectoryResponse } from '../src/workshop-directory.ts';\n",
+    },
     generatedEventTailArtifact(),
     generatedReviewQueueArtifact(),
     { relativePath: "generated/directives.schema.json", content: generateDirectivesSchema() },
@@ -932,6 +961,9 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
         $id: QUESTIONS_SCHEMA_ID,
         title: "ASImposium public questions response",
         ...z.toJSONSchema(QuestionsListResponseSchema),
+        $defs: {
+          query: z.toJSONSchema(QuestionsListQuerySchema, { io: "input" }),
+        },
       }),
     },
     {
@@ -948,6 +980,9 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
         $id: CONFLICTS_SCHEMA_ID,
         title: "ASImposium public conflicts response",
         ...z.toJSONSchema(ConflictsListResponseSchema),
+        $defs: {
+          query: z.toJSONSchema(ConflictsListQuerySchema, { io: "input" }),
+        },
       }),
     },
     {
@@ -956,6 +991,10 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
         $id: SYNTHESES_SCHEMA_ID,
         title: "ASImposium public syntheses response",
         ...z.toJSONSchema(SynthesesListResponseSchema),
+        $defs: {
+          query: z.toJSONSchema(SynthesesListQuerySchema, { io: "input" }),
+          single: z.toJSONSchema(SingleSynthesisResponseSchema),
+        },
       }),
     },
     {
@@ -964,6 +1003,11 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
         $id: CITATIONS_SCHEMA_ID,
         title: "ASImposium public citations response",
         ...z.toJSONSchema(CitationsListResponseSchema),
+        $defs: {
+          query: z.toJSONSchema(CitationsListQuerySchema, { io: "input" }),
+          read_query: z.toJSONSchema(CitationReadQuerySchema, { io: "input" }),
+          single: z.toJSONSchema(SingleCitationResponseSchema),
+        },
       }),
     },
     {
@@ -1004,7 +1048,7 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
     {
       relativePath: "generated/problems.types.ts",
       content:
-        "// Generated from src/problems.ts. Do not edit.\nexport type { ProposeProblemRequest, SaveProblemBriefRequest, ProblemDetail, ProblemLifecycleActionRequest, ProblemPublicationPreview, ProblemPublicationResponse, ProblemResolutionResponse, ProblemResultReviewResponse, SponsorProblemGovernanceQuery, SponsorProblemGovernanceResponse, ProblemAccessActionReceipt, ProblemStatementReviewRequest, ProblemStatementReviewResponse } from '../src/problems.ts';\n",
+        "// Generated from src/problems.ts. Do not edit.\nexport type { ProposeProblemRequest, ProposeProblemResponse, SaveProblemBriefRequest, SaveProblemBriefResponse, WithdrawProblemBriefRequest, WithdrawProblemBriefResponse, FellowProblemBriefListQuery, FellowProblemBriefListResponse, FellowProblemBriefReadQuery, FellowProblemBriefReadResponse, ProblemDetail, ProblemLifecycleActionRequest, ProblemPublicationPreview, ProblemPublicationResponse, ProblemResolutionResponse, ProblemResultReviewResponse, SponsorProblemGovernanceQuery, SponsorProblemGovernanceResponse, ProblemAccessActionReceipt, ProblemStewardshipActionReceipt, ProblemGovernanceActionReceipt, ProblemStatementReviewRequest, ProblemStatementReviewResponse } from '../src/problems.ts';\n",
     },
     {
       relativePath: "generated/discovery.schema.json",

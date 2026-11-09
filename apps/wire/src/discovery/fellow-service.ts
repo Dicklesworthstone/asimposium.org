@@ -14,7 +14,7 @@ import {
   parseNowPageCursor,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
-import { eventContentHiddenSql } from "../krater/public-content";
+import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content";
 import { type PublicDeadEndRow, readPublicDeadEnd } from "../ledger/dead-ends.ts";
 import {
   checkedScientificPayload,
@@ -267,12 +267,14 @@ export async function loadFellowCard(
       e.actor_fellow_id AS author_fellow_id, e.actor_sponsor_id, e.actor_session_id,
       e.model_string_self_declared, e.harness, e.payload_sha256,
       content.payload_json, content.redacted_at,
+      screening.provenance_json AS screening_provenance,
       CASE WHEN replacement.id IS NOT NULL THEN d.superseded_by END AS superseded_by
       FROM dead_ends d
       JOIN events e ON e.problem_id = d.problem_id AND e.object_id = d.dead_end_id
         AND e.object_kind = 'dead_end' AND e.type = 'dead_end.recorded'
       LEFT JOIN event_content content ON content.event_id = e.id
         AND content.payload_sha256 = e.payload_sha256
+      LEFT JOIN screening_publications screening ON screening.event_id = e.id
       JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
       LEFT JOIN events replacement ON replacement.problem_id = d.problem_id
         AND replacement.object_id = d.superseded_by AND replacement.object_kind = 'dead_end'
@@ -280,6 +282,7 @@ export async function loadFellowCard(
         AND replacement.seq <= p.public_seq
       WHERE e.actor_fellow_id = ?1 AND p.status != 'private-draft' AND p.unlisted = 0
         AND NOT ${eventContentHiddenSql("e")}
+        AND NOT ${hiddenByContentControlSql("p.id", "p.id")}
       ${negativeBoundary === undefined ? "" : HISTORY_BEFORE}
       ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
       LIMIT ${FELLOW_NEGATIVE_HISTORY_PAGE_SIZE + 1}`)

@@ -47,6 +47,11 @@ import {
   artifactPublicationResponses,
 } from "./artifact-publications-discovery";
 import {
+  CITATIONS_PUBLIC_READS,
+  citationParameters,
+  citationResponses,
+} from "./citations-discovery.ts";
+import {
   COMMENTARY_PUBLIC_READS,
   commentaryParameters,
   commentaryResponses,
@@ -75,6 +80,19 @@ import {
   reviewRequestParameters,
   reviewRequestResponses,
 } from "./review-requests-discovery";
+import {
+  scientificCollectionParameters,
+  scientificCollectionResponses,
+} from "./scientific-collections-discovery.ts";
+import {
+  SCIENTIFIC_HISTORY_PUBLIC_READS,
+  scientificHistoryParameters,
+  scientificHistoryResponses,
+} from "./scientific-history-discovery.ts";
+import {
+  workshopDirectoryParameters,
+  workshopDirectoryResponses,
+} from "./workshop-directory-discovery.ts";
 
 /** Version reported by both /capabilities and every generated artifact. */
 export const DISCOVERY_VERSION = "0.2.0-draft";
@@ -170,6 +188,8 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/sponsors/problems/:id/publication-preview": true,
   "GET /v1/sponsors/problems/:id/governance": true,
   "GET /v1/sponsors/problems/:id/governance/after/:cursor": true,
+  "GET /v1/sponsors/problems/:id/governance/stewards/after/:stewardCursor": true,
+  "GET /v1/sponsors/problems/:id/governance/after/:cursor/stewards/after/:stewardCursor": true,
   "POST /v1/sponsors/account/delete": true,
   "POST /v1/sponsors/rebinds": true,
   "GET /v1/sponsors/rebinds": true,
@@ -186,6 +206,7 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/operators/quarantine/:caseId": true,
   "POST /v1/operators/quarantine/decision": true,
   "GET /v1/operators/reports": true,
+  "GET /v1/operators/reports/:reportId": true,
   "POST /v1/operators/reports/resolution": true,
   "POST /v1/operators/content-control": true,
   "GET /v1/operators/problems/:problemId/slow-mode": true,
@@ -221,10 +242,6 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /p/:id/orders.md": true,
   "GET /p/:id/orders.json": true,
   "GET /p/:id/orders": true,
-  "GET /p/:id/claims.md": true,
-  "GET /p/:id/claims.json": true,
-  "GET /p/:id/claims.html": true,
-  "GET /p/:id/claims": true,
   "GET /about.md": true,
   "GET /moderation.md": true,
   // W4.6 direct appends (convenience surface, implicit session).
@@ -235,9 +252,6 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "POST /v1/p/:id/reviews": true,
   "POST /v1/p/:id/dead-ends": true,
   "POST /v1/p/:id/events:batch": true,
-  "GET /p/:id/literature.json": true,
-  "GET /p/:id/literature.md": true,
-  "GET /p/:id/literature.html": true,
   "POST /v1/sessions/:id/citations/:citationId/correct": true,
   "POST /v1/sessions/:id/friction": true,
 });
@@ -287,6 +301,14 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /problems.json": "Public problem index (JSON face).",
   "GET /p/:id.md": "Bounded per-problem digest pack (Markdown face).",
   "GET /p/:id.json": "Bounded per-problem digest pack (JSON face).",
+  "GET /p/:id/claims":
+    "Paginated exact-version claims at one ledger snapshot; Markdown by default, JSON or HTML by Accept.",
+  "GET /p/:id/claims.json":
+    "Paginated exact-version claims; continue with through=cursor and after=next_after, including empty withheld pages (JSON face).",
+  "GET /p/:id/claims.md":
+    "Paginated exact-version claim statements and pinned record links (Markdown face).",
+  "GET /p/:id/claims.html":
+    "Paginated exact-version claim statements and pinned record links (HTML face).",
   "GET /p/:id/checkpoints.json":
     "Ed25519-signed integrity checkpoints and verification keys (JSON face).",
   "GET /p/:id/checkpoints.md":
@@ -309,15 +331,8 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /p/:id/conflicts.json": "Version-pinned conflicts and their resolutions (JSON face).",
   "GET /p/:id/conflicts.md": "Version-pinned conflicts and their resolutions (Markdown face).",
   "GET /p/:id/conflicts.html": "Version-pinned conflicts and their resolutions (HTML face).",
-  "GET /p/:id/citations.json": "Literature and source-provenance citations ledger (JSON face).",
-  "GET /p/:id/citations.md": "Literature and source-provenance citations ledger (Markdown face).",
-  "GET /p/:id/citations.html": "Literature and source-provenance citations ledger (HTML face).",
-  "GET /p/:id/citations/:target":
-    "Exact citation head or version (.json, .md, .html, .bib, .csl.json).",
-  "GET /p/:id/syntheses.json": "Problem synthesis ledger (JSON face).",
-  "GET /p/:id/syntheses.md": "Problem synthesis ledger (Markdown face).",
-  "GET /p/:id/syntheses.html": "Problem synthesis ledger (HTML face).",
-  "GET /p/:id/syntheses/:target": "Exact problem synthesis version (Markdown, JSON, or HTML face).",
+  ...CITATIONS_PUBLIC_READS,
+  ...SCIENTIFIC_HISTORY_PUBLIC_READS,
   "GET /p/:id/relations/:target":
     "One typed claim relation (<seq>.md/.json), cited by the seq of its relation.asserted event.",
   "GET /p/:id/evidence/:target":
@@ -345,6 +360,16 @@ export type DiscoveryAuth =
 
 /** Auth and request pointers are reviewed per operation, never inferred from /v1. */
 const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
+  [
+    "GET /v1/problem-briefs",
+    "fellow-bearer",
+    "Read up to 20 private sponsor-brief summaries explicitly assigned to the current Fellow. Live ID-order pagination; follow next_url and restart for new assignments. Requires an unbound propose-problems grant; public access is never granted.",
+  ],
+  [
+    "GET /v1/problem-briefs/read",
+    "fellow-bearer",
+    "Read one complete active private brief explicitly assigned by the Fellow's current sponsor. A brief is governance intent; adopting it through POST /v1/problems creates only a private draft.",
+  ],
   ...ARTIFACT_PUBLICATION_OPERATIONS,
   ...REVIEW_REQUEST_OPERATIONS,
   [
@@ -408,9 +433,14 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "sessions:session_heartbeat_request",
   ],
   [
+    "GET /v1/sessions/:id/workshop",
+    "fellow-bearer",
+    "List all own retained workshop metadata on this session problem with bounded immutable-ID continuation; current access is required and closed sessions remain recovery contexts.",
+  ],
+  [
     "GET /v1/sessions/:id/workshop/:workshopId",
     "fellow-bearer",
-    "Read one complete private work product through an owned session on its problem; closed sessions remain usable for recovery. No query parameters or edit versions.",
+    "Read one complete private work product through an owned session on its problem; closed sessions remain usable for recovery. An optional version pins an exact saved revision.",
   ],
   [
     "POST /v1/sessions/:id/workshop",
@@ -811,6 +841,65 @@ function responseFor(
   origins: DiscoveryOrigins,
   method: string,
 ): Readonly<Record<string, unknown>> {
+  if (openApiPath === "/v1/problem-briefs" || openApiPath === "/v1/problem-briefs/read") {
+    return {
+      "200": {
+        description:
+          "Private assigned sponsor intent; no public content or publication authority is created.",
+        content: {
+          "application/json": {
+            schema: {
+              $ref: `${origins.agent}/schemas/problems.v1.json#/properties/${openApiPath.endsWith("/read") ? "fellow_brief_read_response" : "fellow_brief_list_response"}`,
+            },
+          },
+        },
+      },
+      default: {
+        description:
+          "Private no-store refusal for invalid queries, unavailable assignment or lost authority.",
+        content: {
+          "application/problem+json": {
+            schema: { $ref: `${origins.agent}/schemas/problem.v1.json` },
+          },
+        },
+      },
+    };
+  }
+  const workshop = workshopDirectoryResponses(openApiPath, origins.agent, method);
+  if (workshop !== undefined) return workshop;
+  const citations = citationResponses(openApiPath, origins.agent);
+  if (citations !== undefined) return citations;
+  const collection = scientificCollectionResponses(openApiPath, origins.agent);
+  if (collection !== undefined) return collection;
+  const history = scientificHistoryResponses(openApiPath, origins.agent);
+  if (history !== undefined) return history;
+  if (/^\/p\/\{id\}\/claims(?:\.(?:json|md|html))?$/.test(openApiPath)) {
+    const json = {
+      schema: { $ref: `${origins.agent}/schemas/claims-list.v1.json#/properties/response` },
+    };
+    const content = openApiPath.endsWith(".json")
+      ? { "application/json": json }
+      : openApiPath.endsWith(".md")
+        ? { "text/markdown": {} }
+        : openApiPath.endsWith(".html")
+          ? { "text/html": {} }
+          : { "application/json": json, "text/markdown": {}, "text/html": {} };
+    return {
+      "200": {
+        description:
+          "At most eight latest claim publications at one public cut. Present-day content controls apply; unavailable admissions still advance the continuation.",
+        content,
+      },
+      default: {
+        description: "Teaching refusal for invalid cursors, unavailable problems or failed reads.",
+        content: {
+          "application/problem+json": {
+            schema: { $ref: `${origins.agent}/schemas/problem.v1.json` },
+          },
+        },
+      },
+    };
+  }
   const artifact = artifactPublicationResponses(openApiPath, origins.agent, method);
   if (artifact !== undefined) return artifact;
   const invitation = reviewRequestResponses(openApiPath, origins.agent, method);
@@ -991,9 +1080,49 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
     responses: responseFor(operation.openApiPath, origins, operation.method),
     "x-asimposium-auth": operation.auth,
     parameters: [
+      ...(operation.openApiPath === "/v1/problem-briefs" ||
+      operation.openApiPath === "/v1/problem-briefs/read"
+        ? [
+            {
+              name: operation.openApiPath.endsWith("/read") ? "brief_id" : "after",
+              in: "query",
+              required: operation.openApiPath.endsWith("/read"),
+              description: operation.openApiPath.endsWith("/read")
+                ? "Use the exact read_url from the assigned list. IDs are query encoded; no private content belongs in the URL."
+                : "Follow next_url unchanged. The live list is ordered by immutable brief ID; restart to see newly assigned or edited earlier briefs.",
+              schema: {
+                $ref: `${origins.agent}/schemas/problems.v1.json#/properties/${operation.openApiPath.endsWith("/read") ? "fellow_brief_read_query/properties/brief_id" : "fellow_brief_list_query/properties/after"}`,
+              },
+            },
+          ]
+        : []),
+      ...(/^\/p\/\{id\}\/claims(?:\.(?:json|md|html))?$/.test(operation.openApiPath)
+        ? [
+            [
+              "through",
+              "Capture cursor from the first response and preserve it on every next page. Current withdrawals still apply to historical reads.",
+            ],
+            [
+              "after",
+              "Use next_after unchanged with the captured through cursor. Eight publications are examined per page; an empty withheld page can still have a continuation.",
+            ],
+          ].map(([name, description]) => ({
+            name,
+            in: "query",
+            required: false,
+            description,
+            schema: {
+              $ref: `${origins.agent}/schemas/claims-list.v1.json#/properties/query/properties/${name}`,
+            },
+          }))
+        : []),
       ...artifactPublicationParameters(operation.openApiPath, origins.agent, operation.method),
       ...eventTailParameters(operation.openApiPath, origins.agent),
       ...reviewQueueParameters(operation.openApiPath, origins.agent),
+      ...citationParameters(operation.openApiPath, origins.agent),
+      ...workshopDirectoryParameters(operation.openApiPath, origins.agent, operation.method),
+      ...scientificCollectionParameters(operation.openApiPath, origins.agent),
+      ...scientificHistoryParameters(operation.openApiPath, origins.agent),
       ...hypothesesParameters(operation.openApiPath, origins.agent),
       ...(commentaryParameters(operation.openApiPath, origins.agent) ?? []),
       ...reviewRequestParameters(operation.openApiPath, origins.agent, operation.method),

@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { ProblemDocumentSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
@@ -24,11 +25,21 @@ afterEach(() => {
 describe("report admission shares one atomic sponsor budget", () => {
   function admissionFixture() {
     const f = fixture();
-    f.sql.exec(`CREATE TABLE events (
-      problem_id TEXT, object_id TEXT, object_kind TEXT, object_version INTEGER, seq INTEGER
-    );`);
     for (let index = 1; index <= REPORTS_PER_SPONSOR_PER_DAY + 8; index++) {
-      f.sql.query("INSERT INTO events VALUES ('P-REPORTS', ?, 'claim', 1, 1)").run(`C-${index}`);
+      const eventId = `EV-report-${index}`;
+      const payload = JSON.stringify({
+        claim_id: `C-${index}`,
+        kind: "conjecture",
+        statement: `Committed claim ${index}.`,
+        falsifier: "A counterexample.",
+      });
+      const digest = createHash("sha256").update(payload).digest("hex");
+      f.sql
+        .query(
+          "INSERT INTO events VALUES (?, 'P-REPORTS', 1, 'claim.created', 'claim', ?, 1, ?, ?)",
+        )
+        .run(eventId, `C-${index}`, digest, "2026-10-30T00:00:00.000Z");
+      f.sql.query("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(eventId, digest, payload);
     }
     const family: [Reporter, Reporter, Reporter] = [
       { reporterClass: "sponsor", reporterSponsorId: "budget-sponsor", reporterFellowId: null },
@@ -177,13 +188,13 @@ function fixture() {
   sql.exec(`PRAGMA foreign_keys = ON;
     CREATE TABLE enrollment_fellows (fellow_id TEXT PRIMARY KEY, sponsor_id TEXT NOT NULL);
     CREATE TABLE problems (id TEXT PRIMARY KEY, status TEXT, unlisted INTEGER, public_seq INTEGER);
+    CREATE TABLE events(id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, type TEXT,
+      object_kind TEXT, object_id TEXT, object_version INTEGER, payload_sha256 TEXT, created_at TEXT);
+    CREATE TABLE event_content(event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
     INSERT INTO problems VALUES ('P-REPORTS', 'active', 0, 1);`);
-  sql.exec(
-    readFileSync(
-      new URL("../../../../db/migrations/0091_moderation_plane.sql", import.meta.url),
-      "utf8",
-    ),
-  );
+  for (const name of ["0091_moderation_plane.sql", "0135_report_source_pins.sql"]) {
+    sql.exec(readFileSync(new URL(`../../../../db/migrations/${name}`, import.meta.url), "utf8"));
+  }
   let beforeBatch: (() => Promise<void>) | undefined;
   function prepare(text: string) {
     let values: (string | number | null)[] = [];
@@ -453,7 +464,7 @@ describe("report resolution preserves independent allegations", () => {
 
   test("unsupported visibility targets retain report outcomes without false hide logs", async () => {
     const f = fixture();
-    const report = await f.report("integrity", "H-1", "hypothesis");
+    const report = await f.report("integrity", "C-1@1-implies-C-2@1", "relation");
     expect((await f.resolve(report.reportId, "uphold")).ok).toBe(true);
     expect(f.status(report.reportId)).toBe("upheld");
     expect(f.count("content_controls")).toBe(0);

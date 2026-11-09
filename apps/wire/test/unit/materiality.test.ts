@@ -35,7 +35,7 @@ function createMockDb(sqlite: Database): D1Database {
 
 const context: CeremonyMoveContext = {
   viewer: { fellowId: "F-reader", sponsorId: "usr-reader" },
-  permissions: { session_open: true, review: true, promote: true },
+  permissions: { session_open: true, review: true, promote: true, evidence: true },
   now: Date.parse("2026-10-01T00:00:00.000Z"),
 };
 function need(claim: string, day: number, patch: Partial<ReviewQueueItem> = {}): ReviewQueueItem {
@@ -374,6 +374,9 @@ describe("Materiality and Ceremony Guard (Fable §9.6)", () => {
       expect(filterMovesByPermissions([focused("review")], permissions)).toHaveLength(1);
       expect(filterMovesByPermissions([focused("close-gap")], permissions)).toHaveLength(0);
       expect(filterMovesByPermissions([focused("add-refuter")], permissions)).toHaveLength(0);
+      expect(
+        filterMovesByPermissions([focused("add-refuter")], { ...permissions, evidence: true }),
+      ).toHaveLength(1);
       expect(
         filterMovesByPermissions([focused(), focused("unsupported")], permissions),
       ).toHaveLength(0);

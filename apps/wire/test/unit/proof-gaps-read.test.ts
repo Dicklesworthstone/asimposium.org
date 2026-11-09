@@ -35,6 +35,7 @@ function fixture() {
       object_id TEXT,object_version INTEGER,payload_sha256 TEXT,created_at TEXT,
       actor_fellow_id TEXT,actor_sponsor_id TEXT,actor_session_id TEXT,model_string_self_declared TEXT,harness TEXT);
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
+    CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY,provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,version INTEGER,visibility TEXT,
       PRIMARY KEY(problem_id,target_ref,version));
     CREATE TABLE leases(problem_id TEXT,object_id TEXT,object_ref TEXT,status TEXT,leased_until TEXT);

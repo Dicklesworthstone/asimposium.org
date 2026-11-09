@@ -20,6 +20,8 @@ const permissions = {
   session_open: true,
   workshop_push: true,
   promote: true,
+  evidence: true,
+  dead_end: true,
   review: true,
 };
 const input: WorkingMovesPackInput = {
@@ -101,6 +103,52 @@ test("working pack carries one canonical primary and two alternatives as one ind
   assert.equal(f.calls[0]?.fellowId, input.credential.fellowId);
 });
 
+test("a working statement-review move binds the owned session and exact problem without inventing a verdict", async () => {
+  const review = move("sharpen-statement");
+  review.refs = ["P-DEMO", "S@2"];
+  review.contract.prefilled_hints = { statement_version: 2, client_context_cursor: 50 };
+  const observerPermissions = { ...permissions, promote: false, evidence: false, dead_end: false };
+  const f = fixture({
+    primaryMove: review,
+    alternatives: [],
+    effectivePermissions: observerPermissions,
+  });
+  const section = await readWorkingMovesPack(
+    { ...input, role: "observer", effectivePermissions: observerPermissions },
+    f.provider,
+  );
+  assert.deepEqual(section.primaryMove?.contract.prefilled_hints, {
+    statement_version: 2,
+    client_context_cursor: 50,
+    session_id: input.sessionId,
+  });
+  assert.deepEqual(section.primaryMove?.contract.request, {
+    method: "POST",
+    path: "/v1/problems/P-DEMO/statement-review",
+    auth: "fellow-bearer",
+    idempotency_key_required: true,
+  });
+  assert.equal(
+    section.primaryMove?.contract.prefilled_hints &&
+      Object.hasOwn(section.primaryMove.contract.prefilled_hints as object, "verdict"),
+    false,
+  );
+  assert.deepEqual(
+    review.contract.prefilled_hints,
+    {
+      statement_version: 2,
+      client_context_cursor: 50,
+    },
+    "Binding the working pack must not mutate the shared canonical selection.",
+  );
+  const denied = await readWorkingMovesPack(
+    { ...input, effectivePermissions: { ...observerPermissions, review: false } },
+    f.provider,
+  );
+  assert.equal(denied.primaryMove, null);
+  assert.ok(denied.omitted.some((item) => item.reason === "moves_permission_filtered"));
+});
+
 test("working pack refuses mismatched cuts and mixed-cursor candidate contracts", async () => {
   for (const override of [
     { capturedCursor: 51 },
@@ -122,7 +170,7 @@ test("only permissions shared by the route and current central policy can author
   const f = fixture({
     primaryMove: move("review"),
     alternatives: [move("discriminate")],
-    effectivePermissions: { ...permissions, promote: false },
+    effectivePermissions: { ...permissions, promote: false, evidence: false },
   });
   const section = await readWorkingMovesPack(input, f.provider);
   assert.equal(section.primaryMove?.move, "review");
@@ -134,6 +182,37 @@ test("only permissions shared by the route and current central policy can author
   );
   assert.equal(denied.primaryMove, null);
   assert.equal(denied.candidates[0]?.kind, "standing-context");
+});
+
+test("working packs retain observer evidence and dead-end moves without granting claims", async () => {
+  const observer = { ...permissions, promote: false };
+  const f = fixture({
+    primaryMove: move("state-claim"),
+    alternatives: [move("add-refuter"), move("record-dead-end")],
+    effectivePermissions: observer,
+  });
+  const section = await readWorkingMovesPack(
+    { ...input, role: "observer", effectivePermissions: observer },
+    f.provider,
+  );
+  assert.equal(section.primaryMove?.move, "add-refuter");
+  assert.deepEqual(
+    section.alternatives.map((candidate) => candidate.move),
+    ["record-dead-end"],
+  );
+  assert.ok(section.omitted.some((item) => item.reason === "moves_permission_filtered"));
+  for (const source of ["route", "provider"] as const) {
+    const blocked = { ...observer, evidence: false, dead_end: false };
+    const limited = await readWorkingMovesPack(
+      { ...input, role: "observer", effectivePermissions: source === "route" ? blocked : observer },
+      fixture({
+        primaryMove: move("add-refuter"),
+        alternatives: [move("record-dead-end")],
+        effectivePermissions: source === "provider" ? blocked : observer,
+      }).provider,
+    );
+    assert.equal(limited.primaryMove, null, `${source} restrictions remain authoritative`);
+  }
 });
 
 test("public-write quota removes direct reviews while preserving a permitted private investigation", async () => {

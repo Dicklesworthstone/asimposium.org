@@ -5,8 +5,14 @@ import {
   LeaseAcquireResponseSchema,
   ScreeningPromotionDeniedResponseSchema,
   SessionCloseResponseSchema,
+  WorkshopObjectResponseSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
+import {
+  WorkshopDirectoryResponseSchema,
+  workshopDirectoryMatchesQuery,
+  workshopDirectoryPath,
+} from "@asimposium/contracts/workshop-directory";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Enrollment approval and classifier observations use the existing fixture seam.
@@ -207,7 +213,14 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
       "the intended screening boundary was reached",
     );
   };
-  const retainBytes = async (draft, before, action, state, eventId = null) => {
+  const retainBytes = async (
+    draft,
+    before,
+    action,
+    state,
+    eventId = null,
+    sessionAttribution = null,
+  ) => {
     const after = await history(draft);
     assert.equal(
       after.length,
@@ -241,8 +254,18 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
       "revision_json",
       "publication_json",
     ]) {
-      assert.equal(revision[field], original[field], `archive preserves ${field}`);
-      assert.equal(current[field], original[field], `head preserves ${field}`);
+      // A resumed action belongs to its current session; the head still
+      // names the originating session and every prior revision is unchanged.
+      const revisionValue =
+        field === "session_id" && sessionAttribution
+          ? sessionAttribution.actingSession
+          : original[field];
+      const headValue =
+        field === "session_id" && sessionAttribution
+          ? sessionAttribution.originSession
+          : original[field];
+      assert.equal(revision[field], revisionValue, `archive preserves ${field}`);
+      assert.equal(current[field], headValue, `head preserves ${field}`);
     }
     assert.match(revision.cas_hash, /^sha256:[a-f0-9]{64}$/);
     const key = `cas/sha256/${revision.cas_hash.slice("sha256:".length)}`;
@@ -331,7 +354,7 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
         1,
         "the same transaction supplied the exact durable search outbox witness",
       );
-      await retainBytes(item.draft, item.before, "archive", "archived", event.id);
+      await retainBytes(item.draft, item.before, "archive", "archived", event.id, item.sessions);
       const face = ClaimFaceResponseSchema.parse(
         await call(`/p/${problem}/claims/${event.object_id}@1.json`),
       );
@@ -897,6 +920,796 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
     ),
   );
   await assertReplay(failedSession, "close-after-review", finalRequest, finalClose);
+
+  // Retaining work is a usable handoff across sessions, not only storage.
+  // All writes below use the existing public commands and their normal
+  // credentials; private notes never become inferred publication text.
+  const sourceSession = await open();
+  const retainedPublication = publication(
+    "The product of two consecutive integers is divisible by two.",
+    "Consecutive integers with an odd product.",
+  );
+  const recoveredDraft = await push(sourceSession, retainedPublication, "Calculation to resume");
+  const resumedReplacement = {
+    claim_id: single.body.promoted[0],
+    base_version: 1,
+    kind: "conjecture",
+    statement: "For every integer k, the integer (2k + 1) squared minus one is divisible by eight.",
+    falsifier: "An integer k for which (2k + 1) squared minus one is not divisible by eight.",
+    depends_on: [],
+  };
+  const recoveredReplacement = await pushReplacement(sourceSession, resumedReplacement);
+  const closeDrafts = [
+    await push(
+      sourceSession,
+      publication(
+        "The sum of any two integers divisible by five is divisible by five.",
+        "Two integers divisible by five whose sum is not divisible by five.",
+      ),
+      "First retained close calculation",
+    ),
+    await push(
+      sourceSession,
+      publication(
+        "The difference of any two integers divisible by seven is divisible by seven.",
+        "Two integers divisible by seven whose difference is not divisible by seven.",
+      ),
+      "Second retained close calculation",
+    ),
+  ];
+  const keepAfterResume = await push(sourceSession, null, "Retain a second private handback");
+  const discardAfterResume = await push(sourceSession, null, "Discard after resumed review");
+  const revokedDraft = await push(
+    sourceSession,
+    publication(
+      "The additive inverse of an integer divisible by eleven is divisible by eleven.",
+      "An integer divisible by eleven whose additive inverse is not divisible by eleven.",
+    ),
+    "Retained publication requiring a current credential",
+  );
+  const recovered = [
+    recoveredDraft,
+    recoveredReplacement,
+    ...closeDrafts,
+    keepAfterResume,
+    discardAfterResume,
+    revokedDraft,
+  ];
+  const initialHistories = await Promise.all(recovered.map(history));
+  const beforeRetention = await publicState();
+  const retentionRequest = {
+    handback: "RETAINED_HANDBACK: recover the exact private calculations in the next session.",
+    keep: recovered.map((draft) => draft.workshop_id),
+  };
+  const retained = await attempt(sourceSession, "close-retain-for-next-session", retentionRequest);
+  assert.equal(retained.status, 201);
+  assert.deepEqual(retained.body.promoted, []);
+  assert.deepEqual(await publicState(), beforeRetention, "retention itself publishes nothing");
+  for (const [index, draft] of recovered.entries())
+    await retainBytes(draft, initialHistories[index], "keep", "open");
+  const sourceClosedState = await closeState(sourceSession);
+  const resumedSession = await open();
+  const resumedPath = `/v1/sessions/${resumedSession}`;
+  const sessions = { originSession: sourceSession, actingSession: resumedSession };
+  const recoveredRead = async (
+    session,
+    draft,
+    token = author,
+    status = 200,
+    version,
+    method = "GET",
+  ) => {
+    const response = await worker.fetch(
+      `${origin}/v1/sessions/${session}/workshop/${draft.workshop_id}${version === undefined ? "" : `?version=${version}`}`,
+      { method, headers: { "User-Agent": userAgent, authorization: `Bearer ${token}` } },
+    );
+    assert.equal(response.status, status);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    const body = await response.text();
+    if (method === "HEAD") {
+      assert.equal(body, "");
+      return null;
+    }
+    if (status !== 200) {
+      assert.ok(!body.includes(privateCanary));
+      return JSON.parse(body);
+    }
+    const read = WorkshopObjectResponseSchema.parse(JSON.parse(body));
+    assert.equal(read.problem_id, problem);
+    assert.equal(read.fellow_id, sourceClosedState.fellow_id);
+    assert.equal(read.object.body_md, privateBody);
+    assert.equal(read.body_sha256, createHash("sha256").update(privateBody).digest("hex"));
+    return read;
+  };
+  const directory = async (session, token = author, query = {}, status = 200, method = "GET") => {
+    const response = await worker.fetch(`${origin}${workshopDirectoryPath(session, query)}`, {
+      method,
+      headers: { "User-Agent": userAgent, authorization: `Bearer ${token}` },
+    });
+    assert.equal(response.status, status);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    const raw = await response.text();
+    assert.ok(
+      !raw.includes(privateCanary),
+      "the directory never contains private work-product bytes",
+    );
+    if (method === "HEAD") {
+      assert.equal(raw, "");
+      return { response, data: null, raw };
+    }
+    if (status !== 200) return { response, data: JSON.parse(raw), raw };
+    const data = WorkshopDirectoryResponseSchema.parse(JSON.parse(raw));
+    const scope = await one(
+      "SELECT fellow_id,problem_id FROM sessions WHERE session_id=?",
+      session,
+    );
+    assert.ok(
+      workshopDirectoryMatchesQuery(session, scope.problem_id, scope.fellow_id, query, data),
+    );
+    for (const item of data.items) {
+      for (const field of [
+        "body_md",
+        "cas_hash",
+        "relates_to",
+        "revision",
+        "publication",
+        "ledger_intent",
+      ])
+        assert.equal(Object.hasOwn(item, field), false, `${field} is not directory metadata`);
+    }
+    const next = /<([^>]+)>; rel="next"/.exec(response.headers.get("link") ?? "")?.[1];
+    if (data.next_after !== null) {
+      assert.equal(next, workshopDirectoryPath(session, { ...query, after: data.next_after }));
+      assert.ok(data.omitted.includes("page_limit"));
+    } else assert.equal(next, undefined);
+    return { response, data, raw };
+  };
+  const directoryPages = async (session, token = author, query = { limit: 2 }) => {
+    const pages = [];
+    let after = query.after;
+    for (let index = 0; index < 100; index++) {
+      const page = (
+        await directory(session, token, { ...query, ...(after === undefined ? {} : { after }) })
+      ).data;
+      pages.push(page);
+      if (page.next_after === null) return pages;
+      assert.ok(after === undefined || page.next_after > after);
+      after = page.next_after;
+    }
+    assert.fail("the bounded directory traversal must terminate");
+  };
+  const readDirectoryEntry = async (item, token = author) => {
+    const response = await worker.fetch(`${origin}${item.read_url}`, {
+      headers: { "User-Agent": userAgent, authorization: `Bearer ${token}` },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    const read = WorkshopObjectResponseSchema.parse(await response.json());
+    assert.equal(read.object.workshop_id, item.workshop_id);
+    assert.equal(read.object.version, item.version);
+    assert.equal(read.object.body_md, privateBody);
+    assert.equal(read.body_sha256, createHash("sha256").update(privateBody).digest("hex"));
+    return read;
+  };
+  for (const draft of recovered) {
+    assert.equal((await recoveredRead(resumedSession, draft)).object.current_version, 2);
+    assert.equal((await recoveredRead(resumedSession, draft, author, 200, 1)).object.version, 1);
+    assert.equal((await head(draft)).session_id, sourceSession);
+  }
+  const beforeDirectoryRecovery = await publicState();
+  const closedDirectory = (await directoryPages(sourceSession)).flatMap((page) => page.items);
+  const resumedDirectoryPages = await directoryPages(resumedSession);
+  const resumedDirectory = resumedDirectoryPages.flatMap((page) => page.items);
+  assert.ok(recovered.length > 5);
+  assert.ok(resumedDirectoryPages.length > 1);
+  const savedIds = (
+    await rows(
+      `SELECT w.workshop_id FROM workshop_objects w
+    JOIN workshop_revisions r ON r.workshop_id=w.workshop_id AND r.version=w.current_version
+    WHERE w.problem_id=? AND w.fellow_id=? ORDER BY w.workshop_id COLLATE BINARY`,
+      problem,
+      sourceClosedState.fellow_id,
+    )
+  ).map((row) => row.workshop_id);
+  assert.deepEqual(
+    resumedDirectory.map((item) => item.workshop_id),
+    savedIds,
+  );
+  assert.deepEqual(
+    closedDirectory.map((item) => item.workshop_id),
+    savedIds,
+  );
+  for (const draft of recovered) {
+    const item = resumedDirectory.find((item) => item.workshop_id === draft.workshop_id);
+    assert.ok(item, "retained drafts remain discoverable after their creating session closes");
+    assert.equal(item.version, 2);
+    assert.equal(item.state, "open");
+    await readDirectoryEntry(item);
+  }
+  const observedRecovered = resumedDirectory.find(
+    (item) => item.workshop_id === recoveredDraft.workshop_id,
+  );
+  assert.ok(observedRecovered);
+  assert.deepEqual(
+    await publicState(),
+    beforeDirectoryRecovery,
+    "directory and exact recovery reads append no public work",
+  );
+
+  // A new session is not authority to read or publish someone else's work,
+  // work on another problem, or to continue writing through a closed session.
+  const otherProblem = "P-CLOSE-RETAINED-OTHER";
+  await fixtures.seedProblem(otherProblem, sponsor);
+  const wrongProblemSession = (
+    await call(
+      "/v1/sessions",
+      {
+        problem_id: otherProblem,
+        intent: "explore",
+      },
+      author,
+      201,
+    )
+  ).session_id;
+  const otherProblemDraft = await push(wrongProblemSession, null, "OTHER_PROBLEM_DIRECTORY_CANARY");
+  const peer = await enroll("close-directory-peer", sponsor);
+  const peerSession = await open(peer);
+  const peerDrafts = [];
+  for (let index = 0; index < 6; index++) {
+    peerDrafts.push(
+      await push(
+        peerSession,
+        publication(
+          `An integer multiple of ${index + 31} remains a multiple after adding ${index + 31}.`,
+          `An integer multiple of ${index + 31} whose sum with ${index + 31} is not a multiple.`,
+        ),
+        `SAME_SPONSOR_PEER_DIRECTORY_CANARY ${index}`,
+        peer,
+      ),
+    );
+  }
+  // Ordinary refused convenience claims legitimately leave revisionless,
+  // discarded heads. Such metadata cannot make all later saved work unreadable.
+  await fixtures.setScreenMode("reject");
+  try {
+    const refused = await call(
+      `/v1/p/${problem}/claims`,
+      publication(
+        "Every integer multiple of ninety-seven remains a multiple after adding ninety-seven.",
+        "An integer multiple of ninety-seven whose sum with ninety-seven is not a multiple.",
+      ),
+      peer,
+      403,
+      "directory-refused-convenience-claim",
+    );
+    assert.equal(refused.code, "POLICY_DENIED");
+  } finally {
+    await fixtures.setScreenMode("pass");
+  }
+  const peerFellow = (await closeState(peerSession)).fellow_id;
+  const revisionless = await one(
+    `SELECT w.* FROM workshop_objects w
+    WHERE w.problem_id=? AND w.fellow_id=? AND NOT EXISTS
+      (SELECT 1 FROM workshop_revisions r WHERE r.workshop_id=w.workshop_id)
+    ORDER BY w.workshop_id`,
+    problem,
+    peerFellow,
+  );
+  assert.ok(revisionless);
+  assert.equal(revisionless.state, "discarded");
+  // Give the same supported legacy shape a deterministic leading key for
+  // the read-boundary probe. Admission is the real rejected request above;
+  // this copied private metadata fixture is not a second publication command.
+  const omittedBoundaryId = `W-${"0".repeat(26)}`;
+  await env.DB.prepare(`INSERT INTO workshop_objects
+    (workshop_id,problem_id,fellow_id,session_id,workshop_seq,type,title,body_md,
+      cas_hash,relates_to_json,current_version,state,created_at)
+    SELECT ?,problem_id,fellow_id,session_id,
+      (SELECT MAX(workshop_seq)+1 FROM workshop_objects WHERE problem_id=? AND fellow_id=?),
+      type,title,body_md,cas_hash,relates_to_json,current_version,state,created_at
+    FROM workshop_objects WHERE workshop_id=?`)
+    .bind(omittedBoundaryId, problem, peerFellow, revisionless.workshop_id)
+    .run();
+  const peerBefore = await publicState();
+  const omittedFirst = (await directory(peerSession, peer, { limit: 1 })).data;
+  assert.deepEqual(omittedFirst.items, []);
+  assert.equal(omittedFirst.scanned_through, omittedBoundaryId);
+  assert.equal(omittedFirst.next_after, omittedBoundaryId);
+  assert.ok(omittedFirst.omitted.includes("source_unavailable"));
+  const peerPages = [omittedFirst];
+  let peerAfter = omittedFirst.next_after;
+  let editedPeerEntry;
+  for (let index = 0; index < 20 && peerAfter !== null; index++) {
+    const page = (await directory(peerSession, peer, { limit: 1, after: peerAfter })).data;
+    peerPages.push(page);
+    if (editedPeerEntry === undefined && page.items.length > 0) {
+      editedPeerEntry = page.items[0];
+      await call(
+        `/v1/sessions/${peerSession}/workshop`,
+        {
+          workshop_id: editedPeerEntry.workshop_id,
+          base_version: editedPeerEntry.version,
+          title: "SAME_SPONSOR_PEER_DIRECTORY_CANARY edited during traversal",
+        },
+        peer,
+        201,
+      );
+      const pinned = await readDirectoryEntry(editedPeerEntry, peer);
+      assert.equal(pinned.object.title, editedPeerEntry.title);
+      assert.equal(pinned.object.current_version, editedPeerEntry.version + 1);
+    }
+    assert.ok(page.next_after === null || page.next_after > peerAfter);
+    peerAfter = page.next_after;
+  }
+  assert.equal(peerAfter, null);
+  assert.ok(editedPeerEntry);
+  const peerItems = peerPages.flatMap((page) => page.items);
+  assert.deepEqual(
+    peerItems.map((item) => item.workshop_id),
+    peerDrafts.map((item) => item.workshop_id).sort(),
+  );
+  assert.ok(!JSON.stringify(peerPages).includes(revisionless.title));
+  assert.equal(new Set(peerItems.map((item) => item.workshop_id)).size, 6);
+  const refreshedPeer = (await directoryPages(peerSession, peer)).flatMap((page) => page.items);
+  assert.equal(
+    refreshedPeer.find((item) => item.workshop_id === editedPeerEntry.workshop_id)?.version,
+    editedPeerEntry.version + 1,
+  );
+  assert.deepEqual(
+    await publicState(),
+    peerBefore,
+    "private metadata edits and directory reads leave the public cursor unchanged",
+  );
+
+  for (const method of ["GET", "HEAD"]) {
+    await directory(resumedSession, peer, {}, 404, method);
+    await directory(peerSession, author, {}, 404, method);
+  }
+  const peerOwnDirectory = await directory(peerSession, peer, { limit: 100 });
+  assert.ok(!peerOwnDirectory.raw.includes(recoveredDraft.workshop_id));
+  const authorOwnDirectory = await directory(resumedSession, author, { limit: 100 });
+  assert.ok(!authorOwnDirectory.raw.includes("SAME_SPONSOR_PEER_DIRECTORY_CANARY"));
+  assert.ok(!authorOwnDirectory.raw.includes(otherProblemDraft.workshop_id));
+  const otherOwnDirectory = (await directory(wrongProblemSession, author, { limit: 100 })).data;
+  assert.deepEqual(
+    otherOwnDirectory.items.map((item) => item.workshop_id),
+    [otherProblemDraft.workshop_id],
+  );
+  assert.ok(!JSON.stringify(otherOwnDirectory).includes(recoveredDraft.workshop_id));
+  const refusalSnapshot = {
+    public: await publicState(),
+    private: await privateState(resumedSession),
+  };
+  const refusalScreens = await fixtures.screeningCalls();
+  for (const [session, credential] of [
+    [foreignSession, reviewer],
+    [peerSession, peer],
+    [wrongProblemSession, author],
+  ]) {
+    for (const method of ["GET", "HEAD"])
+      await recoveredRead(session, recoveredDraft, credential, 404, undefined, method);
+    const refused = await call(
+      `/v1/sessions/${session}/promote`,
+      {
+        workshop_id: recoveredDraft.workshop_id,
+        expected_workshop_version: 2,
+      },
+      credential,
+      404,
+    );
+    assert.equal(refused.code, "WORKSHOP_OBJECT_NOT_FOUND");
+    const refusedClose = await attempt(
+      session,
+      `retained-wrong-scope-${session}`,
+      {
+        handback: "A foreign private work product cannot be selected for this close.",
+        promote: [recoveredDraft.workshop_id],
+      },
+      credential,
+    );
+    assert.equal(refusedClose.status, 404);
+    assert.equal(refusedClose.body.code, "WORKSHOP_OBJECT_NOT_FOUND");
+  }
+  const closedSource = await call(
+    `/v1/sessions/${sourceSession}/promote`,
+    {
+      workshop_id: recoveredDraft.workshop_id,
+      expected_workshop_version: 2,
+    },
+    author,
+    409,
+  );
+  assert.equal(closedSource.code, "SESSION_CLOSED");
+  assert.equal(await fixtures.screeningCalls(), refusalScreens);
+  assert.deepEqual(await publicState(), refusalSnapshot.public);
+  assert.deepEqual(await privateState(resumedSession), refusalSnapshot.private);
+  await call(
+    `/v1/sessions/${wrongProblemSession}/close`,
+    {
+      handback: "The wrong-problem control selected no private work.",
+    },
+    author,
+    201,
+  );
+
+  const firstResumedPublication = {
+    ...retainedPublication,
+    statement: "For every integer n, n times n plus one is divisible by two.",
+    falsifier: "An integer n for which n times n plus one is odd.",
+  };
+  const edited = WorkshopPushResponseSchema.parse(
+    await call(
+      `${resumedPath}/workshop`,
+      {
+        workshop_id: recoveredDraft.workshop_id,
+        base_version: 2,
+        publication: firstResumedPublication,
+      },
+      author,
+      201,
+    ),
+  );
+  assert.equal(edited.version, 3);
+  assert.deepEqual(
+    (await recoveredRead(resumedSession, recoveredDraft)).object.publication,
+    firstResumedPublication,
+  );
+  assert.deepEqual(
+    (await recoveredRead(resumedSession, recoveredDraft, author, 200, 1)).object.publication,
+    retainedPublication,
+  );
+  assert.equal((await history(recoveredDraft)).at(-1).session_id, resumedSession);
+  assert.equal((await head(recoveredDraft)).session_id, sourceSession);
+  const stillPinned = await readDirectoryEntry(observedRecovered);
+  assert.equal(stillPinned.object.version, 2);
+  assert.equal(stillPinned.object.current_version, 3);
+  assert.deepEqual(stillPinned.object.publication, retainedPublication);
+  const oldSelection = await call(
+    `${resumedPath}/promote`,
+    {
+      workshop_id: recoveredDraft.workshop_id,
+      expected_workshop_version: 2,
+    },
+    author,
+    409,
+  );
+  assert.equal(oldSelection.code, "WORKSHOP_VERSION_CONFLICT");
+  assert.equal(oldSelection.current_version, 3);
+
+  // The current publisher and the immutable draft source are different
+  // sessions. Recheck the selected source inside the actual commit anyway.
+  const racePublic = await publicState();
+  const retainedRaceScreens = await fixtures.screeningCalls();
+  const finalResumedPublication = {
+    ...firstResumedPublication,
+    statement: "For every integer n, the product n(n + 1) is an even integer.",
+  };
+  let retainedRace;
+  let racedPrivate;
+  await fixtures.pauseScreening(30_000);
+  const pendingRetained = worker.fetch(`${origin}${resumedPath}/promote`, {
+    method: "POST",
+    headers: {
+      "User-Agent": userAgent,
+      authorization: `Bearer ${author}`,
+      "content-type": "application/json",
+      "idempotency-key": "retained-source-race",
+    },
+    body: JSON.stringify({ workshop_id: recoveredDraft.workshop_id, expected_workshop_version: 3 }),
+  });
+  try {
+    await waitForScreens(retainedRaceScreens + 1);
+    const correction = await call(
+      `${resumedPath}/workshop`,
+      {
+        workshop_id: recoveredDraft.workshop_id,
+        base_version: 3,
+        publication: finalResumedPublication,
+      },
+      author,
+      201,
+    );
+    assert.equal(correction.version, 4);
+    racedPrivate = await privateState(resumedSession);
+    await fixtures.resumeScreening();
+    retainedRace = await pendingRetained;
+  } finally {
+    await fixtures.resumeScreening();
+    await Promise.allSettled([pendingRetained]);
+  }
+  assert.equal(retainedRace.status, 409);
+  assert.equal((await retainedRace.json()).code, "WORKSHOP_VERSION_CONFLICT");
+  assert.deepEqual(await publicState(), racePublic);
+  assert.deepEqual(await privateState(resumedSession), racedPrivate);
+  const resumedHistory = await history(recoveredDraft);
+  const promotedRecovered = await call(
+    `${resumedPath}/promote`,
+    {
+      workshop_id: recoveredDraft.workshop_id,
+      expected_workshop_version: 4,
+    },
+    author,
+    201,
+    "retained-reviewed-publication",
+  );
+  const recoveredEvent = await one(
+    `SELECT e.*, c.payload_json FROM events e
+    JOIN event_content c ON c.event_id=e.id WHERE e.problem_id=? AND e.seq=?`,
+    problem,
+    promotedRecovered.seq,
+  );
+  assert.equal(recoveredEvent.actor_session_id, resumedSession);
+  assert.equal(recoveredEvent.actor_fellow_id, sourceClosedState.fellow_id);
+  assert.equal(
+    JSON.parse(recoveredEvent.payload_json).statement,
+    finalResumedPublication.statement,
+  );
+  assert.ok(!recoveredEvent.payload_json.includes(privateCanary));
+  await retainBytes(
+    recoveredDraft,
+    resumedHistory,
+    "archive",
+    "archived",
+    recoveredEvent.id,
+    sessions,
+  );
+
+  const replacementHistory = await history(recoveredReplacement);
+  const oldClaim = await one(
+    "SELECT * FROM claim_versions WHERE problem_id=? AND claim_id=? AND version=1",
+    problem,
+    resumedReplacement.claim_id,
+  );
+  const revisedRecovered = await call(
+    `${resumedPath}/revise`,
+    {
+      workshop_id: recoveredReplacement.workshop_id,
+    },
+    author,
+    201,
+    "retained-claim-replacement",
+  );
+  assert.equal(revisedRecovered.version, 2);
+  const replacementEvent = await one(
+    `SELECT e.*, c.payload_json FROM events e
+    JOIN event_content c ON c.event_id=e.id WHERE e.problem_id=? AND e.seq=?`,
+    problem,
+    revisedRecovered.seq,
+  );
+  assert.equal(replacementEvent.actor_session_id, resumedSession);
+  assert.equal(JSON.parse(replacementEvent.payload_json).statement, resumedReplacement.statement);
+  assert.deepEqual(
+    await one(
+      "SELECT * FROM claim_versions WHERE problem_id=? AND claim_id=? AND version=1",
+      problem,
+      resumedReplacement.claim_id,
+    ),
+    oldClaim,
+  );
+  await retainBytes(
+    recoveredReplacement,
+    replacementHistory,
+    "archive",
+    "archived",
+    replacementEvent.id,
+    sessions,
+  );
+
+  const retainedSelections = await Promise.all(
+    closeDrafts.map(async (draft) => ({
+      draft,
+      before: await history(draft),
+      sessions,
+    })),
+  );
+  const keepHistory = await history(keepAfterResume);
+  const discardHistory = await history(discardAfterResume);
+  const revokeHistory = await history(revokedDraft);
+  const resumedLease = LeaseAcquireResponseSchema.parse(
+    await call(
+      `${resumedPath}/leases`,
+      {
+        object: promotedRecovered.claim_id,
+        objective: "Check the recovered parity calculation",
+        deliverable: "An exact independent divisibility check",
+        ttl_seconds: 1800,
+      },
+      author,
+      201,
+    ),
+  );
+  const resumedCloseRequest = {
+    handback:
+      "RESUMED_CLOSE_HANDBACK: the recovered calculations now have exact public statements.",
+    promote: closeDrafts.map((draft) => draft.workshop_id),
+    keep: [keepAfterResume.workshop_id, revokedDraft.workshop_id],
+    discard: [discardAfterResume.workshop_id],
+  };
+  const beforeResumedClose = await publicState();
+  const resumedClose = await attempt(resumedSession, "retained-atomic-close", resumedCloseRequest);
+  await assertPublished(
+    resumedSession,
+    resumedCloseRequest,
+    retainedSelections,
+    beforeResumedClose,
+    resumedClose,
+  );
+  await retainBytes(keepAfterResume, keepHistory, "keep", "open", null, sessions);
+  await retainBytes(discardAfterResume, discardHistory, "discard", "discarded", null, sessions);
+  await retainBytes(revokedDraft, revokeHistory, "keep", "open", null, sessions);
+  assert.equal(
+    (await one("SELECT status FROM leases WHERE lease_id=?", resumedLease.lease.lease_id)).status,
+    "released",
+  );
+  assert.deepEqual(
+    await closeState(sourceSession),
+    sourceClosedState,
+    "using retained work never reopens or rewrites its original session handback",
+  );
+  await assertReplay(resumedSession, "retained-atomic-close", resumedCloseRequest, resumedClose);
+
+  const beforeStateDirectories = await publicState();
+  const openItems = (
+    await directoryPages(resumedSession, author, { state: "open", limit: 2 })
+  ).flatMap((page) => page.items);
+  const archivedItems = (
+    await directoryPages(resumedSession, author, { state: "archived", limit: 2 })
+  ).flatMap((page) => page.items);
+  const discardedItems = (
+    await directoryPages(resumedSession, author, { state: "discarded", limit: 2 })
+  ).flatMap((page) => page.items);
+  for (const draft of [keepAfterResume, revokedDraft])
+    assert.ok(openItems.some((item) => item.workshop_id === draft.workshop_id));
+  for (const draft of [recoveredDraft, recoveredReplacement, ...closeDrafts]) {
+    assert.ok(archivedItems.some((item) => item.workshop_id === draft.workshop_id));
+    assert.ok(!openItems.some((item) => item.workshop_id === draft.workshop_id));
+  }
+  assert.ok(discardedItems.some((item) => item.workshop_id === discardAfterResume.workshop_id));
+  assert.deepEqual(await publicState(), beforeStateDirectories);
+
+  const credentialSession = await open();
+  await recoveredRead(credentialSession, revokedDraft);
+  const changeAdmission = (mode) =>
+    sponsorCall(
+      sponsor,
+      "POST",
+      `/v1/sponsors/problems/${problem}/lifecycle`,
+      "problem-lifecycle",
+      { action: "set-admission-mode", mode },
+    );
+  await changeAdmission("archived-read-only");
+  const beforeArchivedRecovery = {
+    public: await publicState(),
+    private: await privateState(credentialSession),
+    peerPrivate: await privateState(peerSession),
+  };
+  const archivedDirectory = (await directoryPages(resumedSession, author, { limit: 2 })).flatMap(
+    (page) => page.items,
+  );
+  const archivedRecoveryEntry = archivedDirectory.find(
+    (item) => item.workshop_id === revokedDraft.workshop_id,
+  );
+  assert.ok(archivedRecoveryEntry);
+  await readDirectoryEntry(archivedRecoveryEntry);
+  await directory(credentialSession, author, { state: "open", limit: 2 });
+  // Use the peer's low-use publication budget to isolate the archival gate
+  // from the author's earlier successful publications and rejection probes.
+  const archivedPeerDirectory = (
+    await directoryPages(peerSession, peer, { state: "open", limit: 2 })
+  ).flatMap((page) => page.items);
+  const archivedPeerEntry = archivedPeerDirectory.find(
+    (item) => item.workshop_id === peerDrafts[0].workshop_id,
+  );
+  assert.ok(archivedPeerEntry);
+  await readDirectoryEntry(archivedPeerEntry, peer);
+  const blockedPublication = await call(
+    `/v1/sessions/${peerSession}/promote`,
+    {
+      workshop_id: archivedPeerEntry.workshop_id,
+      expected_workshop_version: archivedPeerEntry.version,
+    },
+    peer,
+    403,
+    "directory-archive-publication-refusal",
+  );
+  assert.equal(blockedPublication.code, "WRITE_REFUSED");
+  assert.deepEqual(await publicState(), beforeArchivedRecovery.public);
+  assert.deepEqual(await privateState(credentialSession), beforeArchivedRecovery.private);
+  assert.deepEqual(await privateState(peerSession), beforeArchivedRecovery.peerPrivate);
+  await changeAdmission("open");
+
+  // A real private proposal permits the creator to recover its work. As in
+  // the dedicated workshop-read lane, a current sponsor change is a fixture
+  // for loss of that private resource grant, not a claimed transfer workflow.
+  const privateProposal = (
+    await call(
+      "/v1/problems",
+      {
+        title: "Private recovery of divisibility notes",
+        statement: "Every multiple of nineteen is divisible by nineteen.",
+        falsifier: "A multiple of nineteen that is not divisible by nineteen.",
+        motivation: "Keep the private source recoverable only under its current problem grant.",
+        areas: ["number-theory"],
+      },
+      author,
+      201,
+    )
+  ).problem.id;
+  const privateContext = (
+    await call("/v1/sessions", { problem_id: privateProposal, intent: "explore" }, author, 201)
+  ).session_id;
+  const privateResourceDraft = await push(
+    privateContext,
+    null,
+    "PRIVATE_RESOURCE_DIRECTORY_CANARY",
+  );
+  const privateResourcePage = await directory(privateContext, author, { limit: 2 });
+  assert.deepEqual(
+    privateResourcePage.data.items.map((item) => item.workshop_id),
+    [privateResourceDraft.workshop_id],
+  );
+  await readDirectoryEntry(privateResourcePage.data.items[0]);
+  const beforeResourceRefusals = await publicState();
+  await env.DB.prepare("UPDATE problems SET sponsor_id=? WHERE id=?")
+    .bind("usr_close_publications_reviewer", privateProposal)
+    .run();
+  try {
+    for (const method of ["GET", "HEAD"]) {
+      const missing = await directory(privateContext, author, { limit: 2 }, 404, method);
+      assert.ok(!missing.raw.includes("PRIVATE_RESOURCE_DIRECTORY_CANARY"));
+      const exact = await worker.fetch(`${origin}${privateResourcePage.data.items[0].read_url}`, {
+        method,
+        headers: { "User-Agent": userAgent, authorization: `Bearer ${author}` },
+      });
+      assert.equal(exact.status, 404);
+      assert.equal(exact.headers.get("cache-control"), "private, no-store");
+      assert.ok(!(await exact.text()).includes(privateCanary));
+    }
+    assert.deepEqual(await publicState(), beforeResourceRefusals);
+  } finally {
+    await env.DB.prepare("UPDATE problems SET sponsor_id=? WHERE id=?")
+      .bind(sponsor, privateProposal)
+      .run();
+  }
+  await call(
+    `/v1/sessions/${privateContext}/close`,
+    {
+      handback: "The private grant refusal control is complete; retain its draft.",
+      keep: [privateResourceDraft.workshop_id],
+    },
+    author,
+    201,
+  );
+  const credential = await one(
+    "SELECT credential_id,fellow_id FROM fellow_tokens WHERE fellow_id=? AND revoked_at IS NULL",
+    sourceClosedState.fellow_id,
+  );
+  assert.ok(credential);
+  await sponsorCall(sponsor, "POST", "/v1/fellows/credentials/revoke", "fellow.credential.revoke", {
+    ...credential,
+    confirm: "revoke-credential",
+    step_up_authenticated_at: Math.floor(Date.now() / 1000),
+  });
+  const revokedState = {
+    public: await publicState(),
+    private: await privateState(credentialSession),
+  };
+  for (const method of ["GET", "HEAD"]) {
+    await recoveredRead(credentialSession, revokedDraft, author, 401, undefined, method);
+    await directory(credentialSession, author, { limit: 2 }, 401, method);
+    await directory(sourceSession, author, { limit: 2 }, 401, method);
+  }
+  await call(
+    `/v1/sessions/${credentialSession}/promote`,
+    {
+      workshop_id: revokedDraft.workshop_id,
+      expected_workshop_version: 3,
+    },
+    author,
+    401,
+  );
+  assert.deepEqual(await publicState(), revokedState.public);
+  assert.deepEqual(await privateState(credentialSession), revokedState.private);
   return {
     single_and_multiple_claims: true,
     mixed_public_creation_and_revision: true,
@@ -909,6 +1722,15 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
     later_content_and_policy_refusals: true,
     concurrent_source_revision_rollback: true,
     fresh_identity_after_source_review: true,
+    retained_work_read_edit_promote_and_revise: true,
+    retained_source_session_and_current_publisher_provenance: true,
+    retained_sources_atomic_close_keep_discard_and_lease_release: true,
+    retained_source_cas_and_authorization_refusals: true,
+    private_directory_pagination_and_exact_observed_revisions: true,
+    private_directory_same_sponsor_and_problem_isolation: true,
+    private_directory_revisionless_omissions_and_edit_stable_cursors: true,
+    private_directory_closed_and_archived_recovery: true,
+    private_directory_current_grant_and_credential_refusals: true,
   };
 });
 

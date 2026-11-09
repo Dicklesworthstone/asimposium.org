@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   FullPackPageSchema,
   HypothesisLifecycleResponseSchema,
   HypothesisResponseSchema,
+  LeaseAcquireResponseSchema,
+  LeaseChallengeResponseSchema,
+  LeaseReleaseResponseSchema,
   PackResponseSchema,
+  QuestionsListResponseSchema,
 } from "@asimposium/contracts";
 import { EventTailResponseSchema } from "@asimposium/contracts/event-tail";
 import { HypothesesResponseSchema } from "@asimposium/contracts/hypotheses";
@@ -87,6 +92,30 @@ await runLocalWorkerJourney(
     const read = async (id) => (await face(id)).hypotheses[0];
     const change = (id, body, key, expected = 200, path = authorPath, token = author) =>
       call(`${path}/hypotheses/${id}/lifecycle`, body, token, expected, key);
+    const acquireLease = async (object, key) =>
+      LeaseAcquireResponseSchema.parse(
+        await call(
+          `${peerPath}/leases`,
+          {
+            object,
+            objective: "Check the finite boundary cases independently.",
+            deliverable: "A recorded boundary computation or counterexample.",
+          },
+          peer,
+          201,
+          key,
+        ),
+      ).lease;
+    const releaseLease = async (lease, key) =>
+      LeaseReleaseResponseSchema.parse(
+        await call(
+          `${peerPath}/leases/${lease.lease_id}/release`,
+          { reason: "The boundary investigation is ready for its next scientific step." },
+          peer,
+          200,
+          key,
+        ),
+      );
     const evidence = (id, path = authorPath, token = author) =>
       call(
         `${path}/evidence`,
@@ -160,6 +189,12 @@ await runLocalWorkerJourney(
     );
     assert.equal(unauthorized.code, "WRITE_REFUSED");
 
+    // Generic leases use the scientific object's kind and id in the ledger,
+    // but must not replace its original publication or scientific predecessor.
+    const routeLease = await acquireLease(first, "lifecycle-lease-acquire");
+    assert.deepEqual(await read(first), original, "a lease preserves the scientific head");
+    assert.deepEqual(await face(first, initial.cursor), initial);
+
     const deferBody = {
       action: "defer",
       expected_last_event_id: original.last_event.event_id,
@@ -186,6 +221,8 @@ await runLocalWorkerJourney(
       409,
     );
     assert.equal(stale.code, "OBJECT_VERSION_CONFLICT");
+    await releaseLease(routeLease, "lifecycle-lease-release");
+    assert.equal((await read(first)).last_event.event_id, deferred.event_id);
     const resumed = HypothesisLifecycleResponseSchema.parse(
       await change(
         first,
@@ -208,6 +245,37 @@ await runLocalWorkerJourney(
       initial,
       "frozen reads retain the old active state",
     );
+
+    const staleLease = await acquireLease(first, "lifecycle-lease-challenge-acquire");
+    const holderClock = await env.DB.prepare(
+      "SELECT last_heartbeat_at FROM sessions WHERE session_id=?",
+    )
+      .bind(peerSession)
+      .first();
+    assert.ok(holderClock);
+    // Only the operational inactivity clock is advanced in this disposable
+    // fixture; the challenge itself uses the mounted writer and real D1.
+    await env.DB.prepare("UPDATE sessions SET last_heartbeat_at=? WHERE session_id=?")
+      .bind(new Date(Date.now() - 31 * 60 * 1000).toISOString(), peerSession)
+      .run();
+    try {
+      const challenged = LeaseChallengeResponseSchema.parse(
+        await call(
+          `${authorPath}/leases/${staleLease.lease_id}/challenge`,
+          { reason: "The holder has been inactive for more than thirty minutes." },
+          author,
+          200,
+          "lifecycle-lease-challenge",
+        ),
+      );
+      assert.equal(challenged.status, "challenged");
+    } finally {
+      await env.DB.prepare("UPDATE sessions SET last_heartbeat_at=? WHERE session_id=?")
+        .bind(holderClock.last_heartbeat_at, peerSession)
+        .run();
+    }
+    assert.equal((await read(first)).status, "active");
+    assert.equal((await read(first)).last_event.event_id, resumed.event_id);
 
     const successor = await create("narrower boundary");
     const narrowed = HypothesisLifecycleResponseSchema.parse(
@@ -527,6 +595,49 @@ await runLocalWorkerJourney(
       "only one competing lifecycle event commits",
     );
 
+    // Generic question coordination must not erase the ask or replace the
+    // separate authored question.leased lifecycle event.
+    const question = await call(
+      `${authorPath}/questions`,
+      { body_md: "Which finite boundary computation decides the parity construction?" },
+      author,
+      201,
+      "lease-question-ask",
+    );
+    const questionFace = async (through) =>
+      QuestionsListResponseSchema.parse(
+        await call(
+          `/p/${problem}/questions.json?target=${question.question_id}${
+            through === undefined ? "" : `&through=${through}`
+          }`,
+        ),
+      );
+    const originalQuestion = await questionFace();
+    const questionLease = await acquireLease(question.question_id, "lease-question-acquire");
+    assert.deepEqual((await questionFace()).questions, originalQuestion.questions);
+    assert.deepEqual(await questionFace(originalQuestion.cursor), originalQuestion);
+    await releaseLease(questionLease, "lease-question-release");
+    assert.deepEqual((await questionFace()).questions, originalQuestion.questions);
+    const questionTerm = await call(
+      `${peerPath}/questions/${question.question_id}/lease`,
+      { objective: "Check the boundary", deliverable: "A cited counterexample" },
+      peer,
+      200,
+      "lease-question-authored-term",
+    );
+    assert.equal((await questionFace()).questions[0].status, "leased");
+    assert.equal((await questionFace()).questions[0].leased_until, questionTerm.leased_until);
+    await call(
+      `${authorPath}/questions/${question.question_id}/withdraw`,
+      { reason: "The boundary question is covered by the completed investigation." },
+      author,
+      200,
+      "lease-question-withdraw",
+    );
+    const withdrawnQuestion = (await questionFace()).questions[0];
+    assert.equal(withdrawnQuestion.status, "withdrawn");
+    assert.equal(withdrawnQuestion.body_md, originalQuestion.questions[0].body_md);
+
     const tail = EventTailResponseSchema.parse(
       await call(`/p/${problem}/events.json?since=0&limit=200`),
     );
@@ -541,6 +652,41 @@ await runLocalWorkerJourney(
         tail.events.some((record) => record.event?.type === type),
         `public event tail discloses ${type}`,
       );
+    const coordination = (
+      await env.DB.prepare(`SELECT e.type, e.object_id, e.seq,
+      e.payload_sha256, c.payload_json FROM events e JOIN event_content c
+      ON c.event_id=e.id AND c.payload_sha256=e.payload_sha256 AND c.redacted_at IS NULL
+      WHERE e.problem_id=? AND e.type IN ('lease.acquired','lease.released','lease.challenged')
+      ORDER BY e.seq`)
+        .bind(problem)
+        .all()
+    ).results;
+    assert.deepEqual(
+      coordination.map((row) => [row.type, row.object_id]),
+      [
+        ["lease.acquired", first],
+        ["lease.released", first],
+        ["lease.acquired", first],
+        ["lease.challenged", first],
+        ["lease.acquired", question.question_id],
+        ["lease.released", question.question_id],
+      ],
+    );
+    assert.equal(tail.page_end.has_more, false);
+    for (const row of coordination) {
+      assert.equal(createHash("sha256").update(row.payload_json).digest("hex"), row.payload_sha256);
+      // Coordination bytes remain intact; public envelopes disclose only sequence.
+      assert.deepEqual(
+        tail.events.find((record) => record.seq === row.seq),
+        {
+          record: "event",
+          problem_id: problem,
+          seq: row.seq,
+          event: null,
+          body_omitted: "undisclosed_event",
+        },
+      );
+    }
     const records = [];
     let after = 0;
     const through = tail.page_end.through;
@@ -586,6 +732,9 @@ await runLocalWorkerJourney(
           "frozen reads",
           "live recommendations",
           "exact replay",
+          "generic leases preserve scientific history",
+          "lifecycle after acquired, released and challenged leases",
+          "generic and authored question lease distinction",
           "stale target refusal",
           "resumed and deferred elimination",
           "digest-verified elimination",

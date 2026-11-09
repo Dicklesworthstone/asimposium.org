@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   EnrollmentHelloResponseSchema,
+  getMoveTemplate,
   type NextMoveCandidate,
   ProblemGovernanceEventSchema,
   ProblemNextResponseSchema,
@@ -24,6 +25,7 @@ import {
   ContractFixtureMovesProvider,
   PROMOTION_MOVE_KINDS,
 } from "../../src/mega-commands/provider.ts";
+import { normHash } from "../../src/split/policy.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 
@@ -195,67 +197,95 @@ async function createTestHarness(options: { movesProvider?: any } = {}) {
   }
 
   // Helper to insert a problem directly into the DB
-  async function seedProblem(
-    problemId: string,
-    title = "Test Problem",
-    admissionMode = "open",
-    publication?: FixtureFellow,
-  ) {
+  async function seedProblem(problemId: string, title = "Test Problem", admissionMode = "open") {
     const now = Math.floor(Date.now() / 1_000);
     await db
       .prepare(
         "INSERT INTO problems (id, title, admission_mode, status, created_at, updated_at, chain_digest) VALUES (?, ?, ?, 'active', ?, ?, ?)",
       )
-      .bind(problemId, title, admissionMode, now, now, publication ? null : "genesis")
+      .bind(problemId, title, admissionMode, now, now, "genesis")
       .run();
-    if (publication) {
-      // Default selectors read committed formulation bytes; a mutable problem
-      // row alone is only sufficient for the explicitly injected unit provider.
-      const createdAt = new Date().toISOString();
-      const payloadJson = JSON.stringify(
-        ProblemGovernanceEventSchema.parse({
-          action: "publish",
-          previous_status: "private-draft",
-          previous_statement_version: 1,
-          source_fellow_id: publication.fellowId,
-          acting_principal: { type: "sponsor", id: publication.sponsorId },
-          problem: {
-            id: problemId,
-            title,
-            status: "sharpening",
-            current_statement_version: 1,
-            statement: "Every integer has the same parity as its square.",
-            falsifier: "An integer whose square has the opposite parity.",
-            motivation: "Exercise the default source-grounded first-claim move.",
-            updated_at: createdAt,
-          },
-        }),
-      );
-      await writeLedgerEvent(
-        db,
-        {
-          problemId,
-          eventId: `E-FORMULATION-${problemId}`,
-          idempotencyKey: `fixture-formulation-${problemId}`,
-          requestDigest: await sha256Hex(payloadJson),
-          eventType: "problem.admitted",
-          objectKind: "problem",
-          objectId: problemId,
-          objectVersion: 1,
-          payloadJson,
-          createdAt,
-          attribution: {
-            principalType: "sponsor",
-            sponsorId: publication.sponsorId,
-            fellowId: null,
-            sessionId: null,
-            modelSelfDeclared: null,
-            harness: null,
-          },
+  }
+
+  // The two production-selector scenarios start with an active empty board.
+  // Its routing row alone is not evidence of a published scientific problem:
+  // construct the version and record its admission through the real writer.
+  // This remains unit setup, not proof of publication or statement-review admission.
+  async function seedPublishedProblem(problemId: string, title: string, author: FixtureFellow) {
+    await seedProblem(problemId, title);
+    const now = new Date().toISOString();
+    const formulation = {
+      statement: "Every finite tree has one fewer edge than vertices.",
+      falsifier: "A finite tree whose number of edges is not one less than its vertex count.",
+      motivation: "Establish the finite counting invariant before generalizing it.",
+    };
+    // Preserve the existing production-default coverage: the canonical writer
+    // establishes an empty head itself; fixture bookkeeping cannot pre-certify it.
+    await db.prepare("UPDATE problems SET chain_digest=NULL WHERE id=?").bind(problemId).run();
+    expect(
+      await db
+        .prepare("SELECT public_seq,chain_digest FROM problems WHERE id=?")
+        .bind(problemId)
+        .first(),
+    ).toMatchObject({ public_seq: 0, chain_digest: null });
+    await db
+      .prepare(`INSERT INTO problem_statement_versions
+      (problem_id,version,statement,norm_hash,falsifier,motivation,created_at)
+      VALUES(?,1,?,?,?,?,?)`)
+      .bind(
+        problemId,
+        formulation.statement,
+        `sha256:${await normHash(formulation.statement)}`,
+        formulation.falsifier,
+        formulation.motivation,
+        now,
+      )
+      .run();
+    const publication = ProblemGovernanceEventSchema.parse({
+      action: "publish",
+      previous_status: "private-draft",
+      previous_statement_version: 1,
+      source_fellow_id: author.fellowId,
+      acting_principal: { type: "sponsor", id: author.sponsorId },
+      problem: {
+        id: problemId,
+        title,
+        status: "sharpening",
+        current_statement_version: 1,
+        ...formulation,
+        updated_at: now,
+      },
+    });
+    await writeLedgerEvent(
+      db,
+      {
+        problemId,
+        eventId: `PG-${problemId}`,
+        idempotencyKey: `fixture-admission-${problemId}`,
+        requestDigest: sha256Hex(JSON.stringify(publication)),
+        eventType: "problem.admitted",
+        objectKind: "problem",
+        objectId: problemId,
+        objectVersion: 1,
+        payloadJson: JSON.stringify(publication),
+        createdAt: now,
+        attribution: {
+          principalType: "sponsor",
+          sponsorId: author.sponsorId,
+          fellowId: null,
+          sessionId: null,
+          modelSelfDeclared: null,
+          harness: null,
         },
-        { statementsAfterEvent: () => [] },
-      );
-    }
+      },
+      { statementsAfterEvent: () => [] },
+    );
+    expect(
+      await db
+        .prepare("SELECT public_seq,chain_version FROM problems WHERE id=?")
+        .bind(problemId)
+        .first(),
+    ).toMatchObject({ public_seq: 1, chain_version: 2 });
   }
 
   // Helper to add problem membership
@@ -275,6 +305,7 @@ async function createTestHarness(options: { movesProvider?: any } = {}) {
     service,
     enrollFellow,
     seedProblem,
+    seedPublishedProblem,
     seedMembership,
   };
 }
@@ -519,9 +550,10 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
   });
 
   test("GET /v1/triage returns hello and a real first-claim move for an empty board", async () => {
-    const { app, env, enrollFellow, seedProblem, seedMembership } = await createTestHarness();
+    const { app, env, enrollFellow, seedPublishedProblem, seedMembership } =
+      await createTestHarness();
     const fellow = await enrollFellow();
-    await seedProblem("P-TRIAGE1", "Triage Problem", "open", fellow);
+    await seedPublishedProblem("P-TRIAGE1", "Triage Problem", fellow);
     await seedMembership("P-TRIAGE1", fellow.fellowId, "contributor");
 
     const res = await app.fetch(
@@ -549,7 +581,7 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
       move: "sharpen-statement",
       why: "The statement needs clearer boundary conditions.",
       refs: ["P-CUSTOM1"],
-      contract: { action: "statement_review", schema: "problems:statement_review_request" },
+      contract: { ...getMoveTemplate("sharpen-statement") },
     };
     const fixtureProvider = new ContractFixtureMovesProvider({
       triageMoves: {
@@ -631,9 +663,10 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
   });
 
   test("GET /v1/p/:id/next production default returns a workshop-first claim contract", async () => {
-    const { app, env, enrollFellow, seedProblem, seedMembership } = await createTestHarness();
+    const { app, env, enrollFellow, seedPublishedProblem, seedMembership } =
+      await createTestHarness();
     const fellow = await enrollFellow();
-    await seedProblem("P-PROD1", "Production Moves Problem", "open", fellow);
+    await seedPublishedProblem("P-PROD1", "Production Moves Problem", fellow);
     await seedMembership("P-PROD1", fellow.fellowId, "contributor");
 
     const res = await app.fetch(
@@ -794,7 +827,7 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
       move: "sharpen-statement",
       why: "Sharpen hypotheses.",
       refs: ["P-MD1"],
-      contract: { action: "statement_review", schema: "problems:statement_review_request" },
+      contract: { ...getMoveTemplate("sharpen-statement") },
     };
     const fixtureProvider = new ContractFixtureMovesProvider({
       problemMoves: {

@@ -9,6 +9,7 @@ import {
   RelationDisputedResponseSchema,
   RelationFiledResponseSchema,
 } from "@asimposium/contracts";
+import { ProofGapsResponseSchema } from "@asimposium/contracts/proof-gaps";
 import { faceCensus } from "./face-census.mjs";
 import { assertFullPackPublication } from "./full-pack-publication.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
@@ -17,7 +18,7 @@ import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall, env } = context;
+  const { call, enroll, sponsorCall, env, fixtures, worker, origin, userAgent } = context;
   const sponsorA = "usr_rel_sponsor_a";
   const authorA = await enroll("rel-author-a", sponsorA);
   const helloA = await call("/v1/hello", undefined, authorA);
@@ -662,6 +663,132 @@ await runLocalWorkerJourney(async (context) => {
     "an echo is private",
   );
 
+  // A contextual warning publishes a missing proof obligation, preserving
+  // the filing's notice on every reading face and collaborator's pack.
+  await fixtures.setScreenMode("allow-with-warning");
+  const warningBody = {
+    target_claim_id: claim1Id,
+    target_version: 1,
+    obligation:
+      "NATIVE-WARNING-GAP: derive the uniform residue bound before the limiting argument.",
+    closes_what: "The missing uniform estimate in the claimed upper bound.",
+  };
+  const warning = GapFiledResponseSchema.parse(
+    await call(
+      `/v1/sessions/${sessionIdA}/gaps`,
+      warningBody,
+      authorA,
+      201,
+      "native-proof-gap-warning",
+    ),
+  );
+  const screenedCalls = await fixtures.screeningCalls();
+  assert.deepEqual(
+    await call(
+      `/v1/sessions/${sessionIdA}/gaps`,
+      warningBody,
+      authorA,
+      200,
+      "native-proof-gap-warning",
+    ),
+    warning,
+  );
+  assert.equal(
+    await fixtures.screeningCalls(),
+    screenedCalls,
+    "replay reuses the committed screening decision",
+  );
+  await fixtures.setScreenMode("pass");
+  const warningNotice = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  };
+  const receiptCount = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM screening_publications s JOIN events e ON e.id = s.event_id
+      WHERE e.problem_id = ? AND e.object_id = ? AND e.type = 'gap.filed'`,
+  )
+    .bind(problemId, warning.gap_id)
+    .first();
+  assert.equal(receiptCount.n, 1, "one immutable publication receipt per filing");
+  const warningFaces = [];
+  for (const extension of ["json", "md", "html"]) {
+    const url = `${origin}/p/${problemId}/gaps.${extension}?through=${warning.seq}&target=${warning.gap_id}`;
+    const response = await worker.fetch(url, { headers: { "User-Agent": userAgent } });
+    assert.equal(response.status, 200);
+    const bytes = await response.text();
+    assert.ok(bytes.includes(warningBody.obligation));
+    if (extension === "json") {
+      const face = ProofGapsResponseSchema.parse(JSON.parse(bytes));
+      assert.deepEqual(face.gaps[0].screening_notice, warningNotice);
+      assert.deepEqual(face.gaps[0].content, warningBody);
+    } else {
+      assert.ok(bytes.includes("Published with a screening context notice:"));
+      assert.ok(
+        bytes.indexOf("Published with a screening context notice:") <
+          bytes.indexOf(warningBody.obligation),
+      );
+    }
+    warningFaces.push({ url, etag: response.headers.get("etag") });
+  }
+  const warningPackUrls = [
+    [`/v1/sessions/${sessionIdA}/pack?profile=formal&max_tokens=8000`, authorA],
+    [`/v1/sessions/${sessionIdA}/pack?profile=claim&target=${claim1Id}@1&max_tokens=8000`, authorA],
+    [
+      `/v1/sessions/${sessionIdB}/pack?profile=review&target=${claim1Id}@1&max_tokens=8000`,
+      reviewerB,
+    ],
+  ];
+  for (const [path, token] of warningPackUrls) {
+    const pack = PackResponseSchema.parse(await call(path, undefined, token));
+    const item = pack.items.find((candidate) => candidate.id === warning.gap_id);
+    assert.deepEqual(item?.screening_notice, warningNotice, path);
+    assert.ok(item.body.includes(warningBody.obligation));
+    assert.ok(
+      !item.body.includes("screening_notice"),
+      "platform context stays outside authored work",
+    );
+  }
+  const controlWarningGap = async (visibility, version) =>
+    env.DB.prepare(
+      `INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,visibility,source,
+      reason_category,actor,reason,version,created_at)
+      VALUES(?,?,'ledger-object',?,?,'operator','privacy','native-gap-test',
+        'Local current-visibility proof.',?,?)`,
+    )
+      .bind(
+        `CC-GAP-WARNING-${version}`,
+        problemId,
+        `${warning.gap_id}@1`,
+        visibility,
+        version,
+        new Date().toISOString(),
+      )
+      .run();
+  await controlWarningGap("hidden", 1);
+  for (const before of warningFaces) {
+    const response = await worker.fetch(before.url, {
+      headers: { "User-Agent": userAgent, "If-None-Match": before.etag },
+    });
+    assert.equal(response.status, 200, "current controls precede conditional historical reads");
+    const bytes = await response.text();
+    assert.ok(!bytes.includes(warningBody.obligation));
+    assert.ok(!bytes.includes("screening-warning"));
+    assert.ok(!bytes.includes("Published with a screening context notice:"));
+  }
+  for (const [path, token] of warningPackUrls) {
+    const pack = PackResponseSchema.parse(await call(path, undefined, token));
+    assert.ok(!JSON.stringify(pack).includes(warningBody.obligation), path);
+    assert.ok(!JSON.stringify(pack).includes("screening-warning"), path);
+  }
+  await controlWarningGap("visible", 2);
+  for (const before of warningFaces) {
+    const response = await worker.fetch(before.url, {
+      headers: { "User-Agent": userAgent, "If-None-Match": before.etag },
+    });
+    assert.equal(response.status, 304, "restoration returns the identical filing and its notice");
+  }
+
   // Diptych census over this journey's gap and relation faces (lu59 / 92x /
   // qvzk). A relation is cited by the seq of its relation.asserted event.
   {
@@ -680,5 +807,12 @@ await runLocalWorkerJourney(async (context) => {
   const rebuilt = await assertProjectionsRebuild(context.env.DB, problemId);
   console.log(JSON.stringify({ stage: "projection-rebuild", ...rebuilt }));
 
-  console.log(JSON.stringify({ stage: "relations-gaps-real-bindings-success" }));
+  console.log(
+    JSON.stringify({
+      stage: "relations-gaps-real-bindings-success",
+      warning_publication_and_replay_verified: true,
+      warning_faces_and_packs_verified: true,
+      historical_visibility_before_etag_verified: true,
+    }),
+  );
 });
