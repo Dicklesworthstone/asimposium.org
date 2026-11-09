@@ -33,15 +33,20 @@ import { startLocalTarget, USER_AGENT } from "./local-target.mjs";
 import { REFERENCE_AGENT_MODES, runReferenceAgent } from "./reference-agent.mjs";
 import { GAUNTLET_STAGES, gauntletVerdict } from "./state-verdict.mjs";
 
-const args = process.argv.slice(2);
-const agentsArg = args.includes("--agents") ? args[args.indexOf("--agents") + 1] : null;
-const agents = (agentsArg ?? REFERENCE_AGENT_MODES.join(",")).split(",");
-for (const mode of agents)
-  assert.ok(
-    REFERENCE_AGENT_MODES.includes(mode) ||
-      (mode.startsWith("harness:") && mode.slice(8) in HARNESSES),
-    `unknown agent ${mode}`,
-  );
+function selectedAgents(args) {
+  if (args.length === 0) return REFERENCE_AGENT_MODES;
+  if (args.length !== 2 || args[0] !== "--agents" || !args[1]) return undefined;
+  const agents = args[1].split(",");
+  if (
+    !agents.every(
+      (mode) =>
+        REFERENCE_AGENT_MODES.includes(mode) ||
+        (mode.startsWith("harness:") && Object.hasOwn(HARNESSES, mode.slice(8))),
+    )
+  )
+    return undefined;
+  return agents;
+}
 
 export const SPONSOR = "usr_gauntlet_local_sponsor";
 const REVIEW_SPONSOR = "usr_gauntlet_local_reviewer";
@@ -507,6 +512,12 @@ async function gatherFacts(
 }
 
 async function main() {
+  const agents = selectedAgents(process.argv.slice(2));
+  if (agents === undefined) {
+    emit({ status: "fail", code: "GAUNTLET_AGENT_SELECTION_INVALID" });
+    process.exitCode = 64;
+    return;
+  }
   const target = await startLocalTarget();
   const results = [];
   try {

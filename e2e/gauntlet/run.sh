@@ -16,6 +16,8 @@ self_test=0
 write_artifacts=0
 explicit_run_id=""
 target="staging"
+agent_selection=""
+agents_explicit=0
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
@@ -31,6 +33,16 @@ while [[ "$#" -gt 0 ]]; do
         exit 64
       }
       target="$2"
+      shift
+      ;;
+    --agents)
+      if [[ "$#" -lt 2 || "$agents_explicit" -eq 1 || -z "$2" \
+        || ! "$2" =~ ^[a-z0-9:,-]+$ ]]; then
+        e2e_emit_diagnostic "$suite" "$started_ms" "fail" "AGENT_SELECTION_INVALID" "$reproduce"
+        exit 64
+      fi
+      agent_selection="$2"
+      agents_explicit=1
       shift
       ;;
     --run-id)
@@ -52,6 +64,11 @@ while [[ "$#" -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ "$agents_explicit" -eq 1 && "$target" != "local" ]]; then
+  e2e_emit_diagnostic "$suite" "$started_ms" "fail" "AGENT_SELECTION_REQUIRES_LOCAL_TARGET" "$reproduce"
+  exit 64
+fi
 
 if [[ -n "$explicit_run_id" ]]; then
   e2e_validate_run_id "$explicit_run_id" || {
@@ -76,18 +93,42 @@ if [[ "$write_artifacts" -eq 1 ]] \
 fi
 
 # Local target (bead asimposiumorg-g5h0): the state-derived product flow runs
-# against real local Workerd/D1/R2 with the scripted reference agent. It proves
-# the flow and the verdict, not language-model completion, hosted screening,
-# OAuth or the staging G-C bar.
+# against real local Workerd/D1/R2. The default runs the scripted oracles;
+# explicit selectors can also measure the existing real harness adapters.
+# Neither mode supplies hosted screening, OAuth or the staging G-C bar.
 if [[ "$target" == "local" ]]; then
   node_binary="$(e2e_select_node_runtime 2>/dev/null || true)"
   [[ -n "$node_binary" && -x "$node_binary" ]] || node_binary="node"
-  if "$node_binary" "$repository_root/e2e/gauntlet/local-product-flow.mjs"; then
-    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "GAUNTLET_LOCAL_REFERENCE_FLOW_PASS" "$reproduce --target local"
-    exit 0
+  local_args=()
+  if [[ "$agents_explicit" -eq 1 ]]; then local_args=(--agents "$agent_selection"); fi
+  local_status=0
+  "$node_binary" "$repository_root/e2e/gauntlet/local-product-flow.mjs" "${local_args[@]}" \
+    || local_status=$?
+  local_reproduce="$reproduce --target local"
+  # Only a validated selection can reach a completed or prerequisite result.
+  # Invalid caller text never enters a retained reproduction command.
+  if [[ "$agents_explicit" -eq 1 && ( "$local_status" -eq 0 || "$local_status" -eq 78 ) ]]; then
+    local_reproduce+=" --agents $agent_selection"
   fi
-  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "GAUNTLET_LOCAL_REFERENCE_FLOW_FAILED" "$reproduce --target local"
-  exit 1
+  case "$local_status" in
+    0)
+      code="GAUNTLET_LOCAL_REFERENCE_FLOW_PASS"
+      if [[ "$agent_selection" == *harness:* ]]; then code="GAUNTLET_LOCAL_MEASUREMENT_COMPLETE"; fi
+      e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "$code" "$local_reproduce"
+      ;;
+    78)
+      e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GAUNTLET_LOCAL_HARNESS_UNAVAILABLE" "$local_reproduce"
+      ;;
+    64)
+      e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_SELECTION_INVALID" "$local_reproduce"
+      ;;
+    *)
+      code="GAUNTLET_LOCAL_REFERENCE_FLOW_FAILED"
+      if [[ "$agent_selection" == *harness:* ]]; then code="GAUNTLET_LOCAL_MEASUREMENT_FAILED"; fi
+      e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "$code" "$local_reproduce"
+      ;;
+  esac
+  exit "$local_status"
 fi
 
 # The staging product flow still needs provisioned join URLs and a staging

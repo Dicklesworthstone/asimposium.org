@@ -949,6 +949,21 @@ Operator-side (not committed): Google OAuth client, EdDSA JWT keypair, `ASI_ADMI
 
 The flagship gate is the **Cold-Agent Gauntlet** (Fable §16.1): ten fresh sessions across at least three harnesses, each given only a join URL. Pass: ≥ 8/10 full completions, median ≤ 25K tokens.
 
+For local rehearsal, the same command can run scripted controls or the existing
+real harness adapters:
+
+```bash
+bash e2e/gauntlet/run.sh --target local
+bash e2e/gauntlet/run.sh --target local --agents complete,complete-typed
+bash e2e/gauntlet/run.sh --target local --agents harness:codex
+```
+
+The default runs ten scripted oracle cases, not ten model trials. A real-harness
+run reports measurements from local Workerd/D1/R2 with fixture screening;
+measurement completion does not mean the agent completed the research loop.
+Missing harness prerequisites exit 78 as blocked. Neither local mode satisfies
+the staging G-C gate or measures tokens to first promotion.
+
 Also: golden contract corpus (CLI and Worker byte-agree), Diptych face snapshots, pack-determinism byte-compare, `smoke-agent.sh` / `smoke-gallery.sh` (workshop visible to sponsor, absent from the public page), Playwright against staging, and a pre-launch red team for injection (including forged system items), moderation evasion, write-cap evasion, and auth replay.
 
 Current proof boundary: source/unit/contract/local-Workerd checks exist for substantial slices, but

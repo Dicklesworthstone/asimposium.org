@@ -9,6 +9,138 @@ import { assignHarnesses, runGauntlet } from "./orchestrate.ts";
 
 const KEYWORD_SOUP = "pair session pack workshop promote close\nsession_id: S-1";
 
+// Only shell dispatch is doubled here. Actual Workerd journeys run separately;
+// these probes cannot claim model execution or server-derived completion.
+function localShellProbe(args: string[], childExit = 0) {
+  const directory = mkdtempSync(resolve(tmpdir(), "gauntlet-shell-dispatch-"));
+  const argumentFile = resolve(directory, "arguments");
+  writeFileSync(
+    resolve(directory, "node"),
+    '#!/bin/bash\nif [[ "$1" == "-e" ]]; then exit 0; fi\nprintf "%s\\n" "$@" > "$GAUNTLET_TEST_ARGUMENTS"\nexit "$GAUNTLET_TEST_EXIT"\n',
+    { mode: 0o700 },
+  );
+  const result = spawnSync("/bin/bash", [resolve(import.meta.dir, "run.sh"), ...args], {
+    cwd: resolve(import.meta.dir, "../.."),
+    encoding: "utf8",
+    env: {
+      PATH: `${directory}:/usr/bin:/bin`,
+      ASIMPOSIUM_E2E_RUN_ID: "gauntlet-shell-dispatch-unit",
+      GAUNTLET_TEST_ARGUMENTS: argumentFile,
+      GAUNTLET_TEST_EXIT: String(childExit),
+    },
+    timeout: 5000,
+  });
+  return {
+    result,
+    args: existsSync(argumentFile) ? readFileSync(argumentFile, "utf8").trimEnd().split("\n") : [],
+  };
+}
+
+describe("canonical local gauntlet command dispatch (unit only)", () => {
+  test("the default forwards no selection and retains the reference result", () => {
+    const { result, args } = localShellProbe(["--target", "local"]);
+    expect(result.status).toBe(0);
+    expect(args).toEqual([resolve(import.meta.dir, "local-product-flow.mjs")]);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "pass",
+      code: "GAUNTLET_LOCAL_REFERENCE_FLOW_PASS",
+      reproduce: "bash e2e/gauntlet/run.sh --target local",
+    });
+  });
+
+  test("selectors are forwarded exactly, including fresh repeated harness attempts", () => {
+    for (const selection of ["complete,complete-typed", "harness:codex,harness:codex"]) {
+      const { result, args } = localShellProbe(["--agents", selection, "--target", "local"]);
+      expect(result.status).toBe(0);
+      expect(args).toEqual([
+        resolve(import.meta.dir, "local-product-flow.mjs"),
+        "--agents",
+        selection,
+      ]);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        code: selection.startsWith("harness:")
+          ? "GAUNTLET_LOCAL_MEASUREMENT_COMPLETE"
+          : "GAUNTLET_LOCAL_REFERENCE_FLOW_PASS",
+        reproduce: `bash e2e/gauntlet/run.sh --target local --agents ${selection}`,
+      });
+    }
+  });
+
+  test("real-harness prerequisites remain blocked78 and real failures keep their exit", () => {
+    for (const [childExit, status, code] of [
+      [78, "blocked", "GAUNTLET_LOCAL_HARNESS_UNAVAILABLE"],
+      [1, "fail", "GAUNTLET_LOCAL_MEASUREMENT_FAILED"],
+      [69, "fail", "GAUNTLET_LOCAL_MEASUREMENT_FAILED"],
+    ] as const) {
+      const { result } = localShellProbe(
+        ["--target", "local", "--agents", "harness:codex"],
+        childExit,
+      );
+      expect(result.status).toBe(childExit);
+      expect(JSON.parse(status === "fail" ? result.stderr : result.stdout)).toMatchObject({
+        status,
+        code,
+      });
+      expect(status === "fail" ? result.stdout : result.stderr).toBe("");
+      expect(`${result.stdout}${result.stderr}`).not.toContain(
+        "GAUNTLET_LOCAL_REFERENCE_FLOW_PASS",
+      );
+    }
+  });
+
+  test("invalid or staging selections never invoke a runner or echo caller secrets", () => {
+    for (const args of [
+      ["--target", "local", "--agents"],
+      ["--target", "local", "--agents", ""],
+      ["--target", "local", "--agents", "CANARY#secret"],
+      ["--target", "local", "--agents", "complete", "--agents", "complete"],
+      ["--agents", "harness:codex"],
+      ["--agents", "harness:codex", "--target", "staging"],
+    ]) {
+      const probe = localShellProbe(args);
+      expect(probe.result.status).toBe(64);
+      expect(probe.args).toEqual([]);
+      expect(probe.result.stdout).toBe("");
+      expect(probe.result.stderr).not.toContain("CANARY");
+      expect(JSON.parse(probe.result.stderr)).toMatchObject({
+        status: "fail",
+        code: args.includes("local")
+          ? "AGENT_SELECTION_INVALID"
+          : "AGENT_SELECTION_REQUIRES_LOCAL_TARGET",
+      });
+    }
+    const invalid = localShellProbe(["--target", "local", "--agents", "unknown-canary"], 64);
+    expect(invalid.result.status).toBe(64);
+    expect(invalid.result.stdout).toBe("");
+    expect(invalid.result.stderr).not.toContain("unknown-canary");
+    expect(JSON.parse(invalid.result.stderr)).toMatchObject({ code: "AGENT_SELECTION_INVALID" });
+  });
+
+  test("direct Node-runner input errors cannot silently run the default or echo input", () => {
+    for (const args of [
+      ["--agents"],
+      ["--agents", ""],
+      ["--agents", "harness:toString"],
+      ["--agents", "CANARY#secret"],
+    ]) {
+      const result = spawnSync(
+        process.execPath,
+        [resolve(import.meta.dir, "local-product-flow.mjs"), ...args],
+        {
+          cwd: resolve(import.meta.dir, "../.."),
+          encoding: "utf8",
+          timeout: 5000,
+        },
+      );
+      expect(result.status).toBe(64);
+      expect(result.stdout).toBe(
+        `${JSON.stringify({ status: "fail", code: "GAUNTLET_AGENT_SELECTION_INVALID" })}\n`,
+      );
+      expect(result.stderr).toBe("");
+    }
+  });
+});
+
 describe("the gauntlet orchestrator", () => {
   test("harnesses rotate across the adapters (diversity is structural)", () => {
     expect(assignHarnesses(6)).toEqual([
