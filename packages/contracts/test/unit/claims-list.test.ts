@@ -8,7 +8,9 @@ import {
   generateClaimsListSchema,
 } from "../../src/claims-list.ts";
 import invalid from "../fixtures/invalid/claims-list.json";
+import invalidFormat from "../fixtures/invalid/claims-list-query-format.json";
 import valid from "../fixtures/valid/claims-list.json";
+import toonQuery from "../fixtures/valid/claims-list-query-toon.json";
 
 test("claims collection fixtures bind exact versions to a cut and advance past omitted bodies", () => {
   const face = ClaimsListResponseSchema.parse(valid);
@@ -44,6 +46,20 @@ test("query ingress refuses ambiguous, unsafe, repeated and contradictory cursor
     expect(ClaimsListQuerySchema.safeParse(query).success, JSON.stringify(query)).toBe(false);
 });
 
+test("claims TOON is an explicit canonical query with a format-preserving continuation", () => {
+  const query = ClaimsListQuerySchema.parse(toonQuery);
+  expect(query).toEqual({ through: 40, after: 12, format: "toon" });
+  expect(claimsListPath("P-CLAIMS", "toon", query)).toBe(
+    "/p/P-CLAIMS/claims?through=40&after=12&format=toon",
+  );
+  expect(claimsListPath("P-CLAIMS", "json", query)).toBe(
+    "/p/P-CLAIMS/claims.json?through=40&after=12",
+  );
+  expect(ClaimsListQuerySchema.safeParse(invalidFormat.input).success).toBe(false);
+  expect(invalidFormat.expected_code).toBe("UNKNOWN_FORMAT");
+  expect(ClaimsListQuerySchema.safeParse({ format: ["toon", "json"] }).success).toBe(false);
+});
+
 test("response boundary refuses impossible counts, ordering and continuation", () => {
   const claim = valid.claims[0];
   if (claim === undefined) throw new Error("The fixture must contain a claim");
@@ -73,6 +89,7 @@ test("public schema exposes both query and response from the canonical contract"
   expect(Object.keys(schema.properties)).toEqual(["query", "response"]);
   expect(schema.properties.query.additionalProperties).toBe(false);
   expect(schema.properties.query.properties.through.type).toBe("string");
+  expect(schema.properties.query.properties.format.enum).toEqual(["json", "md", "html", "toon"]);
   expect(schema.properties.response.properties.claims.maxItems).toBe(8);
   expect(schema.properties.response.properties.claims.items.additionalProperties).toBe(false);
 });

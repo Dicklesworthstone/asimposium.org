@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { ContractProblemSchema } from "@asimposium/contracts";
 import { ClaimsListResponseSchema } from "@asimposium/contracts/claims-list";
+import { parseClaimsListToon } from "@asimposium/render/claims-list";
 import { ensureProblem } from "../../src/krater/krater.ts";
 import { appendClaimsListFixture } from "../support/claims-list-fixture.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
@@ -23,7 +24,18 @@ async function claimsListJourney({ call, worker, env, origin, userAgent }) {
   }
   const list = async (query = "") =>
     ClaimsListResponseSchema.parse(await call(`/p/${problem}/claims.json${query}`));
+  const toon = async (query = "") => {
+    const params = new URLSearchParams(query);
+    params.set("format", "toon");
+    const url = `${origin}/p/${problem}/claims?${params}`;
+    const response = await worker.fetch(url, { headers: { "User-Agent": userAgent } });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "text/toon; charset=utf-8");
+    const body = await response.text();
+    return { url, response, body, face: parseClaimsListToon(body) };
+  };
   const first = await list();
+  assert.deepEqual((await toon()).face, first);
   assert.equal(first.cursor, 205);
   assert.equal(first.count, 8);
   assert.equal(first.next_after, 8);
@@ -36,6 +48,7 @@ async function claimsListJourney({ call, worker, env, origin, userAgent }) {
   let pages = 1;
   while (after !== null) {
     const page = await list(`?through=${first.cursor}&after=${after}`);
+    assert.deepEqual((await toon(`?through=${first.cursor}&after=${after}`)).face, page);
     assert.equal(page.cursor, first.cursor);
     assert.ok(page.claims.length <= 8);
     seen.push(...page.claims);
@@ -62,13 +75,14 @@ async function claimsListJourney({ call, worker, env, origin, userAgent }) {
   const schema = await call("/schemas/claims-list.v1.json");
   assert.ok(schema.properties.query.properties.through);
   assert.ok(schema.properties.query.properties.after);
+  assert.deepEqual(schema.properties.query.properties.format.enum, ["json", "md", "html", "toon"]);
   assert.ok(schema.properties.response.properties.claims);
   const suffix = "?through=205&after=0";
   const paths = ["claims", "claims.json", "claims.md", "claims.html"];
   let jsonEtag;
   for (const path of paths) {
     const operation = openapi.paths[`/p/{id}/${path}`].get;
-    for (const name of ["through", "after"]) {
+    for (const name of ["through", "after", "format"]) {
       assert.ok(
         operation.parameters.some(
           (parameter) =>
@@ -127,6 +141,63 @@ async function claimsListJourney({ call, worker, env, origin, userAgent }) {
     }
   }
 
+  const capturedToon = await toon(suffix);
+  assert.deepEqual(capturedToon.face, await list(suffix));
+  const toonEtag = capturedToon.response.headers.get("etag");
+  assert.ok(toonEtag);
+  assert.notEqual(toonEtag, jsonEtag);
+  assert.ok(openapi.paths["/p/{id}/claims"].get.responses["200"].content["text/toon"]);
+  const location = new URL(capturedToon.response.headers.get("content-location"), origin);
+  assert.equal(location.searchParams.get("format"), "toon");
+  assert.equal(location.searchParams.get("through"), "205");
+  const nextToon = capturedToon.response.headers.get("link").match(/<([^>]+)>; rel="next"/);
+  assert.ok(nextToon);
+  const nextToonUrl = new URL(nextToon[1], origin);
+  assert.equal(nextToonUrl.origin, origin);
+  assert.equal(nextToonUrl.searchParams.get("format"), "toon");
+  assert.equal(nextToonUrl.searchParams.get("through"), "205");
+  assert.equal(nextToonUrl.searchParams.get("after"), "8");
+  const followedToon = await worker.fetch(nextToonUrl, { headers: { "User-Agent": userAgent } });
+  assert.deepEqual(
+    parseClaimsListToon(await followedToon.text()),
+    await list("?through=205&after=8"),
+  );
+  for (const method of ["GET", "HEAD"]) {
+    const conditional = await worker.fetch(capturedToon.url, {
+      method,
+      headers: { "User-Agent": userAgent, "If-None-Match": toonEtag },
+    });
+    assert.equal(conditional.status, 304);
+    assert.equal(await conditional.text(), "");
+  }
+  const toonHead = await worker.fetch(capturedToon.url, {
+    method: "HEAD",
+    headers: { "User-Agent": userAgent },
+  });
+  assert.equal(toonHead.status, 200);
+  assert.equal(toonHead.headers.get("etag"), toonEtag);
+  assert.equal(await toonHead.text(), "");
+  const negotiated = await worker.fetch(`${origin}/p/${problem}/claims${suffix}`, {
+    headers: { "User-Agent": userAgent, accept: "text/toon" },
+  });
+  assert.equal(negotiated.headers.get("content-type"), "text/toon; charset=utf-8");
+  assert.equal(await negotiated.text(), capturedToon.body);
+  const forcedJson = await call(`/p/${problem}/claims.json${suffix}&format=toon`);
+  assert.deepEqual(forcedJson, capturedToon.face);
+  const unknownFormat = ContractProblemSchema.parse(
+    await call(`/p/${problem}/claims?format=private-format-marker`, undefined, undefined, 400),
+  );
+  assert.equal(unknownFormat.code, "UNKNOWN_FORMAT");
+  assert.deepEqual(unknownFormat.allowed, ["json", "md", "html", "toon"]);
+  assert.ok(!JSON.stringify(unknownFormat).includes("private-format-marker"));
+  const repeatedFormat = await call(
+    `/p/${problem}/claims?format=toon&format=json`,
+    undefined,
+    undefined,
+    400,
+  );
+  assert.equal(repeatedFormat.code, "CURSOR_INVALID");
+
   let controlId = 0;
   async function hide(target, kind = "claim") {
     await env.DB.prepare(`INSERT INTO content_controls
@@ -144,12 +215,18 @@ async function claimsListJourney({ call, worker, env, origin, userAgent }) {
   assert.deepEqual(hidden.claims, []);
   assert.equal(hidden.next_after, 8);
   assert.deepEqual(hidden.omitted, ["content_unavailable", "page_limit"]);
+  const hiddenToon = await worker.fetch(capturedToon.url, {
+    headers: { "User-Agent": userAgent, "If-None-Match": toonEtag },
+  });
+  assert.equal(hiddenToon.status, 200);
+  assert.deepEqual(parseClaimsListToon(await hiddenToon.text()), hidden);
   assert.ok(!JSON.stringify(hidden).includes("C-1"));
   assert.equal((await list("?through=205&after=8")).claims[0].id, "C-9");
 
   await appendClaimsListFixture(env.DB, problem, 9, 2);
   await hide("C-9@2");
   const hiddenRevision = await list("?after=207");
+  assert.deepEqual((await toon("?after=207")).face, hiddenRevision);
   assert.deepEqual(hiddenRevision.claims, []);
   assert.ok(hiddenRevision.omitted.includes("content_unavailable"));
   assert.equal((await list("?through=205&after=8")).claims[0].version, 1);
@@ -160,6 +237,7 @@ async function claimsListJourney({ call, worker, env, origin, userAgent }) {
     .bind("2026-10-28T12:00:00.000Z", `EV-${problem}-11-1`)
     .run();
   const withheld = await list("?through=205&after=8");
+  assert.deepEqual((await toon("?through=205&after=8")).face, withheld);
   assert.ok(withheld.claims.every((claim) => claim.id !== "C-10" && claim.id !== "C-11"));
   assert.ok(withheld.omitted.includes("content_unavailable"));
 
@@ -170,11 +248,18 @@ async function claimsListJourney({ call, worker, env, origin, userAgent }) {
   assert.equal(unlisted.status, 200);
   assert.equal(unlisted.headers.get("cache-control"), "private, no-store");
   assert.ok(unlisted.headers.get("x-robots-tag").includes("noindex"));
+  const unlistedToon = await toon(suffix);
+  assert.equal(unlistedToon.response.headers.get("cache-control"), "private, no-store");
+  assert.ok(unlistedToon.response.headers.get("x-robots-tag").includes("noindex"));
   await hide("problem", "problem");
   for (const path of paths) {
     const refused = await call(`/p/${problem}/${path}${suffix}`, undefined, undefined, 404);
     assert.equal(refused.code, "PROBLEM_NOT_FOUND");
   }
+  assert.equal(
+    (await call(`/p/${problem}/claims${suffix}&format=toon`, undefined, undefined, 404)).code,
+    "PROBLEM_NOT_FOUND",
+  );
   return {
     kind: "claims-list-real-bindings",
     status: "pass",
@@ -184,8 +269,9 @@ async function claimsListJourney({ call, worker, env, origin, userAgent }) {
     withheld_page_advances: true,
     hidden_revision_never_resurrects_predecessor: true,
     current_controls_at_historical_cut: true,
-    conditional_faces: paths.length,
-    malformed_queries: paths.length * 6,
+    conditional_faces: paths.length + 1,
+    malformed_queries: paths.length * 6 + 2,
+    toon_pages_equal_canonical_json: pages,
   };
 }
 

@@ -1,4 +1,9 @@
-import { type ClaimsListResponse, claimsListPath } from "@asimposium/contracts/claims-list";
+import {
+  type ClaimsListResponse,
+  ClaimsListResponseSchema,
+  claimsListPath,
+} from "@asimposium/contracts/claims-list";
+import { decode, encode } from "@toon-format/toon";
 import { safeInlineProse } from "./discovery.ts";
 import { escapeHtml } from "./sanitize.ts";
 import { screeningNoticeText } from "./screening-notice.ts";
@@ -12,6 +17,33 @@ export const CLAIMS_LIST_OMISSIONS = {
   standing_unavailable:
     "Some admitted claims lack a matching scientific history or exceed this collection's assessment budget. They are omitted rather than assessed from a partial history.",
 } as const;
+
+export class ClaimsListToonUnavailableError extends Error {
+  constructor(options?: ErrorOptions) {
+    super("Claims TOON cannot preserve the canonical data over UTF-8", options);
+    this.name = "ClaimsListToonUnavailableError";
+  }
+}
+
+/** The canonical data, including omissions and optional notices, is unchanged.
+ * The maintained codec quotes authored strings; no hand-written delimiter or
+ * backslash parser can turn statement bytes into additional records. */
+export function parseClaimsListToon(body: string): ClaimsListResponse {
+  return ClaimsListResponseSchema.parse(decode(body, { strict: true }));
+}
+
+export function renderClaimsListToon(face: ClaimsListResponse): string {
+  const canonical = ClaimsListResponseSchema.parse(face);
+  try {
+    const body = `${encode(canonical)}\n`;
+    const transported = new TextDecoder().decode(new TextEncoder().encode(body));
+    if (JSON.stringify(parseClaimsListToon(transported)) !== JSON.stringify(canonical))
+      throw new ClaimsListToonUnavailableError();
+    return body;
+  } catch (cause) {
+    throw new ClaimsListToonUnavailableError({ cause });
+  }
+}
 
 export function claimListEntryPath(
   problem: string,

@@ -79,15 +79,18 @@ digests belong to the Worker's SHA-256.
 | `json` | `application/json; charset=utf-8` | canonical for machines; each item carries `untrusted`, `why_included` and its `neutralized` report |
 | `html-fragment` | `text/html; charset=utf-8` | a fragment, not a document: no `<html>`, no comments at all, and no character of an untrusted body survives as markup |
 
-### TOON is owed, and not here yet
+### TOON on the claims collection
 
 Fable G0 **S-5 is md / json / html**, which is the scope this package covers. TOON is not part of
 S-5 and its absence is not a gap in S-5 — but it is **not abandoned either**: §7.8 and ADR-5 place
 opt-in `?format=toon` in **W6**, restricted to uniform mega-reads (`problems`, `claims`, `events`),
 emitted only after a **lossless round-trip validation**, and never accepted on a write. When that
 lands it belongs in this package, behind the same `prepareProjection()` pass, so the sanitization
-story stays singular. Nothing here claims TOON works today; `renderProjection(_, "toon")` is an
-`UNKNOWN_FORMAT` refusal that names the formats that do.
+story stays singular. The immutable claims collection now offers `?format=toon` through
+`renderClaimsListToon`, using the pinned reference codec and strict decode/schema equality
+before serving. It preserves every page field, omission, exact claim version and screening
+notice. General `renderProjection(_, "toon")` still refuses `UNKNOWN_FORMAT`; this does not
+add TOON to arbitrary prose faces or claim measured token savings.
 
 ## Using it
 

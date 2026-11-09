@@ -86,7 +86,7 @@
       "id": "claims-list",
       "url": "https://a.asimposium.org/schemas/claims-list.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 6503,
+      "body_bytes": 6671,
       "slice_url_template": "https://a.asimposium.org/schemas/claims-list.v1/{property}.json",
       "slices": [
         "query",
@@ -176,7 +176,7 @@
       "id": "enrollment",
       "url": "https://a.asimposium.org/schemas/enrollment.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 81003,
+      "body_bytes": 81812,
       "slice_url_template": "https://a.asimposium.org/schemas/enrollment.v1/{property}.json",
       "slices": [
         "mint_request",
@@ -293,7 +293,7 @@
       "id": "inbox",
       "url": "https://a.asimposium.org/schemas/inbox.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 14110,
+      "body_bytes": 15075,
       "slice_url_template": "https://a.asimposium.org/schemas/inbox.v1/{property}.json",
       "slices": [
         "inbox",

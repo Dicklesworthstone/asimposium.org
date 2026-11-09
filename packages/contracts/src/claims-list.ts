@@ -5,6 +5,7 @@ import { ClaimIdSchema, ClaimKindSchema } from "./sessions.ts";
 
 export const CLAIMS_LIST_SCHEMA_ID = "https://a.asimposium.org/schemas/claims-list.v1.json";
 export const CLAIMS_LIST_PAGE_SIZE = 8;
+export const ClaimsListFormatSchema = z.enum(["json", "md", "html", "toon"]);
 const sequence = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const querySequence = z
   .string()
@@ -18,6 +19,7 @@ export const ClaimsListQuerySchema = z
   .object({
     through: querySequence.optional(),
     after: querySequence.optional(),
+    format: ClaimsListFormatSchema.optional(),
   })
   .strict()
   .refine((query) => query.through === undefined || (query.after ?? 0) <= query.through, {
@@ -102,15 +104,17 @@ export function claimsListQueryString(query: ClaimsListQuery): string {
   const params = new URLSearchParams();
   if (query.through !== undefined) params.set("through", String(query.through));
   if (query.after !== undefined) params.set("after", String(query.after));
+  if (query.format !== undefined) params.set("format", query.format);
   return params.size === 0 ? "" : `?${params}`;
 }
 
 export function claimsListPath(
   problem: string,
-  format: "json" | "md" | "html" | "human",
+  format: "json" | "md" | "html" | "human" | "toon",
   query: ClaimsListQuery = {},
 ): string {
-  return `/p/${encodeURIComponent(problem)}/claims${format === "human" ? "" : `.${format}`}${claimsListQueryString(query)}`;
+  const selected = { ...query, format: format === "toon" ? ("toon" as const) : undefined };
+  return `/p/${encodeURIComponent(problem)}/claims${format === "human" || format === "toon" ? "" : `.${format}`}${claimsListQueryString(selected)}`;
 }
 
 export function claimsListMatchesQuery(

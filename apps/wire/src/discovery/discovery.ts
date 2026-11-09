@@ -883,7 +883,7 @@ function responseFor(
         ? { "text/markdown": {} }
         : openApiPath.endsWith(".html")
           ? { "text/html": {} }
-          : { "application/json": json, "text/markdown": {}, "text/html": {} };
+          : { "application/json": json, "text/markdown": {}, "text/html": {}, "text/toon": {} };
     return {
       "200": {
         description:
@@ -1105,6 +1105,10 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
             [
               "after",
               "Use next_after unchanged with the captured through cursor. Eight publications are examined per page; an empty withheld page can still have a continuation.",
+            ],
+            [
+              "format",
+              "Opt into json, md, html, or lossless toon. A face suffix takes precedence; TOON uses the unsuffixed collection and the same immutable cursor.",
             ],
           ].map(([name, description]) => ({
             name,

@@ -192,7 +192,7 @@ export async function problemLifecycleJourney({
   // --- Step 2: Problem Proposal & Private Draft ---
   const proposalPayload = {
     brief_id: savedBrief.brief.id,
-    expected_brief_version: savedBrief.brief.version,
+    expected_brief_version: editedBrief.brief.version,
     title: "Collatz Modular Cycle Bounds",
     statement: "Every non-trivial cycle in the 3x+1 mapping modulo 2^k has length bounded by k.",
     falsifier: "A cycle modulo 2^k with length strictly exceeding k.",

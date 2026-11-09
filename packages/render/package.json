@@ -28,6 +28,7 @@
   },
   "dependencies": {
     "@asimposium/contracts": "workspace:*",
+    "@toon-format/toon": "4.4.0",
     "katex": "0.19.1",
     "remark-gfm": "4.0.1",
     "remark-math": "6.0.0",

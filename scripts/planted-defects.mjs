@@ -1766,9 +1766,18 @@ export const PLANTS = [
     id: "uphold-claims-a-hide-for-any-kind",
     bead: "5s97",
     file: "apps/wire/src/moderation/store.ts",
-    // Upholding a hypothesis report logs a hide that no face applies.
+    // Legacy unsupported kinds are blocked by both the dispatcher and its
+    // transactional target guard. Reintroduce the unconditional-hide defect
+    // across both current guards; supported hypothesis hides stay legitimate.
     find: "  if (HIDEABLE_TARGET_KINDS.has(report.target_kind)) {",
     replace: "  if (true) {",
+    also: [
+      {
+        file: "apps/wire/src/moderation/target.ts",
+        find: '  const denied = { sql: "0", bindings: [] };',
+        replace: '  const denied = { sql: "1", bindings: [] };',
+      },
+    ],
     command: LANE("content-hide-sweep"),
   },
   {

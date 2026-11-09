@@ -6,6 +6,8 @@ import {
   PublicMovesResponseSchema,
   TriageResponseSchema,
 } from "@asimposium/contracts";
+import { ClaimsListResponseSchema } from "@asimposium/contracts/claims-list";
+import { parseClaimsListToon } from "@asimposium/render/claims-list";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // asimposiumorg-aucv / f3v1: an operator hide of a claim or a whole
@@ -23,7 +25,7 @@ const CLAIM_CANARY = "Quokkafrabjous conjecture: for all natural n, n plus zero 
 const TITLE_CANARY = "Zanzibarquux hide sweep problem";
 
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, operatorCall, worker, origin, userAgent }) => {
+  async ({ call, enroll, sponsorCall, operatorCall, worker, env, origin, userAgent }) => {
     const raw = async (path, token, conditional = {}) => {
       const response = await worker.fetch(`${origin}${path}`, {
         headers: {
@@ -32,9 +34,27 @@ await runLocalWorkerJourney(
           ...conditional,
         },
       });
+      const text = await response.text();
+      if (new URL(path, origin).searchParams.get("format") === "toon" && response.status === 200) {
+        assert.equal(response.headers.get("content-type"), "text/toon; charset=utf-8");
+        const canonicalUrl = new URL(path, origin);
+        canonicalUrl.pathname += ".json";
+        canonicalUrl.searchParams.delete("format");
+        const canonical = await worker.fetch(canonicalUrl, {
+          headers: {
+            "User-Agent": userAgent,
+            ...(token ? { authorization: `Bearer ${token}` } : {}),
+          },
+        });
+        assert.equal(canonical.status, 200);
+        assert.deepEqual(
+          parseClaimsListToon(text),
+          ClaimsListResponseSchema.parse(await canonical.json()),
+        );
+      }
       return {
         status: response.status,
-        text: await response.text(),
+        text,
         etag: response.headers.get("etag"),
       };
     };
@@ -423,11 +443,19 @@ await runLocalWorkerJourney(
         (target) =>
           target.startsWith("problem:") &&
           (pathname === `/p/${target.slice(8)}.md` ||
-            pathname === `/v1/problems/${target.slice(8)}`),
+            pathname === `/v1/problems/${target.slice(8)}` ||
+            ["", ".md", ".json", ".html"].some(
+              (suffix) => pathname === `/p/${target.slice(8)}/claims${suffix}`,
+            ) ||
+            (pathname.startsWith(`/p/${target.slice(8)}/statements/`) &&
+              /^[1-9][0-9]*\.md$/.test(
+                pathname.slice(`/p/${target.slice(8)}/statements/`.length),
+              ))),
       );
       // The problem reader filters hidden problems in its SQL before the
       // outer 200/304 content-control guard; this exact face refuses404.
-      if (hiddenProblemFace && response.status === 404) {
+      if (hiddenProblemFace) {
+        assert.equal(response.status, 404, `${label}: hidden collection/problem is not found`);
         assert.equal(refusal.code, "PROBLEM_NOT_FOUND");
       } else {
         assert.equal(
@@ -612,6 +640,16 @@ await runLocalWorkerJourney(
         );
       }
     };
+    const expectedMoveReadPath = (scope, target, move, readUrl) => {
+      if (target.startsWith("C-")) return `/p/${scope}/claims/${target}.md`;
+      assert.match(target, /^S@[1-9][0-9]*$/);
+      const preparation = move.contract.preparation;
+      assert.equal(preparation.statement_version, Number(target.slice(2)));
+      assert.ok(Number.isSafeInteger(preparation.captured_cursor));
+      assert.ok(preparation.captured_cursor >= 0);
+      assert.equal(readUrl.search, `?through=${preparation.captured_cursor}`);
+      return `/p/${scope}/statements/${target.slice(2)}.md`;
+    };
     const checkMoves = async (
       scope,
       target,
@@ -681,10 +719,7 @@ await runLocalWorkerJourney(
             assert.equal(read?.method, "GET");
             const readUrl = new URL(read.path, origin);
             assert.equal(readUrl.origin, origin, "move references stay on this Worker");
-            assert.equal(
-              readUrl.pathname,
-              target.startsWith("C-") ? `/p/${scope}/claims/${target}.md` : `/p/${scope}.md`,
-            );
+            assert.equal(readUrl.pathname, expectedMoveReadPath(scope, target, move, readUrl));
             assert.ok(
               markdown.text.includes(read.path),
               "both move faces retain the actual read reference",
@@ -732,7 +767,11 @@ await runLocalWorkerJourney(
       for (const [path, item] of references) {
         // The formulation reader omits a hidden problem at its SQL boundary.
         // Exact claim reads instead return the explicit content-control refusal.
-        const formulation = new URL(path, origin).pathname === `/p/${scope}.md`;
+        const pathname = new URL(path, origin).pathname;
+        const formulation =
+          pathname === `/p/${scope}.md` ||
+          (pathname.startsWith(`/p/${scope}/statements/`) &&
+            /^[1-9][0-9]*\.md$/.test(pathname.slice(`/p/${scope}/statements/`.length)));
         const hiddenStatus = formulation ? 404 : 403;
         const hiddenCode = formulation ? "PROBLEM_NOT_FOUND" : "CONTENT_HIDDEN";
         for (const reader of [undefined, ...readers]) {
@@ -838,10 +877,7 @@ await runLocalWorkerJourney(
           assert.equal(read?.method, "GET");
           const readUrl = new URL(read.path, origin);
           assert.equal(readUrl.origin, origin);
-          assert.equal(
-            readUrl.pathname,
-            target.startsWith("C-") ? `/p/${scope}/claims/${target}.md` : `/p/${scope}.md`,
-          );
+          assert.equal(readUrl.pathname, expectedMoveReadPath(scope, target, move, readUrl));
           assert.ok(
             markdown.text.includes(read.path),
             "public faces agree on the actionable read reference",
@@ -1018,8 +1054,9 @@ await runLocalWorkerJourney(
       watcher,
     ]);
 
-    // 4. asimposiumorg-5s97: upholding a report on a kind no face can hide
-    //    (a hypothesis) is recorded as upheld, never logged as a hide.
+    // 4. Hypotheses now have public readers that enforce content controls.
+    // Prove their real report action hides bytes, then retain 5s97's legacy
+    // unsupported-kind invariant with an explicitly stored historical fixture.
     const hypothesis = (
       await call(
         `/v1/sessions/${session}/hypotheses`,
@@ -1034,6 +1071,10 @@ await runLocalWorkerJourney(
         201,
       )
     ).hypothesis_id;
+    const hypothesisPath = `/p/${problem}/hypotheses/${hypothesis}.json`;
+    const hypothesisBefore = await raw(hypothesisPath);
+    assert.equal(hypothesisBefore.status, 200);
+    assert.ok(hypothesisBefore.text.includes("Hide sweep hypothesis."));
     const report = await call(
       "/v1/reports",
       { problem_id: problem, target: hypothesis, reason: "spam" },
@@ -1060,8 +1101,72 @@ await runLocalWorkerJourney(
       "the uphold is recorded",
     );
     assert.ok(
-      !newEntries.some((entry) => entry.action === "hidden"),
+      newEntries.some((entry) => entry.action === "hidden"),
+      "a supported hypothesis hide is recorded",
+    );
+    const hypothesisAfter = await raw(hypothesisPath);
+    assert.equal(hypothesisAfter.status, 404);
+    assert.ok(!hypothesisAfter.text.includes("Hide sweep hypothesis."));
+    assert.equal(JSON.parse(hypothesisAfter.text).code, "PROBLEM_NOT_FOUND");
+    const hiddenHypotheses = await call(`/p/${problem}/hypotheses.json`);
+    const hiddenHypothesis = hiddenHypotheses.hypotheses.find(
+      (item) => item.hypothesis_id === hypothesis,
+    );
+    assert.ok(hiddenHypothesis, "the hidden publication retains its admission envelope");
+    assert.equal(hiddenHypothesis.content, null);
+    assert.ok(hiddenHypotheses.omitted.includes("content_unavailable"));
+
+    // This is legacy report state, not a report admitted by today's intake or
+    // a scientific publication fixture. Null source pins are allowed for old
+    // reports; the operator must resolve them without inventing a content hide.
+    const legacyReportId = `RP-${crypto.randomUUID().replaceAll("-", "").slice(0, 26).toUpperCase()}`;
+    const legacyTarget = "legacy-unsupported-hide-sweep";
+    const legacy = await env.DB.prepare(`INSERT INTO reports
+      (report_id,problem_id,target_kind,target_ref,reason,reporter_class,
+       reporter_fellow_id,reporter_sponsor_id,status,created_at)
+      SELECT ?,problem_id,'legacy-unsupported',?,reason,reporter_class,
+        reporter_fellow_id,reporter_sponsor_id,'pending',created_at
+      FROM reports WHERE report_id=?`)
+      .bind(legacyReportId, legacyTarget, report.report_id)
+      .run();
+    assert.equal(legacy.meta.changes, 1);
+    const legacyLogBefore = JSON.parse((await raw("/moderation/log.json")).text).entries.length;
+    await operatorCall(
+      "POST",
+      "/v1/operators/reports/resolution",
+      "operator.reports.resolve",
+      {
+        report_id: legacyReportId,
+        resolution: "uphold",
+        reason: "Hide sweep: resolve a historical unsupported-kind report.",
+      },
+      200,
+    );
+    const legacyEntries = JSON.parse((await raw("/moderation/log.json")).text).entries.slice(
+      legacyLogBefore,
+    );
+    assert.ok(legacyEntries.some((entry) => entry.action === "report-upheld"));
+    assert.deepEqual(
+      await env.DB.prepare(
+        "SELECT status,source_event_id,source_digest,source_ref FROM reports WHERE report_id=?",
+      )
+        .bind(legacyReportId)
+        .first(),
+      { status: "upheld", source_event_id: null, source_digest: null, source_ref: null },
+    );
+    assert.ok(
+      !legacyEntries.some((entry) => entry.action === "hidden"),
       "no hide is claimed for a kind no face hides",
+    );
+    assert.equal(
+      (
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM content_controls WHERE problem_id=? AND target_ref=?",
+        )
+          .bind(problem, legacyTarget)
+          .first()
+      ).n,
+      0,
     );
     assert.equal(retainedPackPaths.size, packProfiles.length);
     await call(

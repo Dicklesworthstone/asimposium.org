@@ -21,6 +21,7 @@ import {
 } from "@asimposium/contracts";
 import {
   CLAIMS_LIST_SCHEMA_ID,
+  ClaimsListFormatSchema,
   ClaimsListQuerySchema,
   claimsListPath,
 } from "@asimposium/contracts/claims-list";
@@ -39,7 +40,12 @@ import {
   renderPublicProblemMovesMarkdown,
   safeCodeSpan,
 } from "@asimposium/render";
-import { renderClaimsListHtml, renderClaimsListMarkdown } from "@asimposium/render/claims-list";
+import {
+  ClaimsListToonUnavailableError,
+  renderClaimsListHtml,
+  renderClaimsListMarkdown,
+  renderClaimsListToon,
+} from "@asimposium/render/claims-list";
 import {
   renderFormalRecordsHtml,
   renderFormalRecordsMarkdown,
@@ -2550,6 +2556,25 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const problemId = c.req.param("id");
     if (!problemId) return problemNotFound(c.req.method);
     const params = new URL(c.req.url).searchParams;
+    const requestedFormat = params.get("format");
+    if (requestedFormat !== null && !ClaimsListFormatSchema.safeParse(requestedFormat).success) {
+      const response = problemDocument({
+        status: 400,
+        code: "UNKNOWN_FORMAT",
+        title: "Unknown claims collection format",
+        detail: "Supported formats: json, md, html, toon.",
+        fixHint: "Use format=toon for TOON, or read claims.json, claims.md, or claims.html.",
+        rule: "A1",
+        extensions: {
+          schema: CLAIMS_LIST_SCHEMA_ID,
+          example: { path: "/p/P-EXAMPLE/claims?format=toon" },
+          allowed: ClaimsListFormatSchema.options,
+        },
+      });
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: response.status, headers: response.headers })
+        : response;
+    }
     const query = ClaimsListQuerySchema.safeParse(Object.fromEntries(params));
     const invalid = () => {
       const response = problemDocument({
@@ -2557,7 +2582,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
         code: "CURSOR_INVALID",
         title: "Invalid claims collection cursor",
         detail:
-          "Use one canonical non-negative through cursor and one after cursor; after cannot exceed through or the public cursor. Other query keys are not supported.",
+          "Use one canonical non-negative through cursor and one after cursor; after cannot exceed through or the public cursor. Optional format is json, md, html, or toon. Other query keys are not supported.",
         fixHint:
           "Start with /p/<problem-id>/claims.json, then follow next_after while preserving the returned cursor as through.",
         rule: "A5",
@@ -2585,14 +2610,44 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const accept = c.req.header("accept") ?? "";
     const format =
       forceFormat ??
-      (accept.includes("application/json") ? "json" : accept.includes("text/html") ? "html" : "md");
+      query.data.format ??
+      (accept.includes("application/json")
+        ? "json"
+        : accept.includes("text/html")
+          ? "html"
+          : accept.includes("text/toon")
+            ? "toon"
+            : "md");
     const face = result.face;
-    const body =
-      format === "json"
-        ? JSON.stringify(face, null, 2)
-        : format === "html"
-          ? renderClaimsListHtml(face)
-          : renderClaimsListMarkdown(face);
+    let body: string;
+    try {
+      body =
+        format === "json"
+          ? JSON.stringify(face, null, 2)
+          : format === "toon"
+            ? renderClaimsListToon(face)
+            : format === "html"
+              ? renderClaimsListHtml(face)
+              : renderClaimsListMarkdown(face);
+    } catch (error) {
+      if (!(error instanceof ClaimsListToonUnavailableError)) throw error;
+      const response = problemDocument({
+        status: 500,
+        code: "INTERNAL_ERROR",
+        title: "Lossless TOON representation unavailable",
+        detail: "This page cannot be represented losslessly as TOON. No altered data was returned.",
+        fixHint: `Read ${claimsListPath(problemId, "json", query.data)} for the same canonical data.`,
+        rule: "A1",
+        headers: { "cache-control": "no-store" },
+        extensions: {
+          schema: CLAIMS_LIST_SCHEMA_ID,
+          example: { method: "GET", path: claimsListPath(problemId, "json", query.data) },
+        },
+      });
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: response.status, headers: response.headers })
+        : response;
+    }
     if (new TextEncoder().encode(body).length > 1024 * 1024)
       throw new ClaimsListReadError("unavailable");
     const etag = await strongEtag(format, body);
@@ -2602,9 +2657,11 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
       "content-type":
         format === "json"
           ? "application/json; charset=utf-8"
-          : format === "html"
-            ? "text/html; charset=utf-8"
-            : "text/markdown; charset=utf-8",
+          : format === "toon"
+            ? "text/toon; charset=utf-8"
+            : format === "html"
+              ? "text/html; charset=utf-8"
+              : "text/markdown; charset=utf-8",
       "cache-control": result.unlisted ? "private, no-store" : "public, max-age=0, must-revalidate",
       vary: "Accept, Accept-Encoding",
       "x-content-type-options": "nosniff",
