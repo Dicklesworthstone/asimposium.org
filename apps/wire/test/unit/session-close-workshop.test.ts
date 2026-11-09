@@ -16,7 +16,8 @@ import {
 function fixture() {
   const sql = new Database(":memory:");
   let readCount = 0;
-  sql.exec(`CREATE TABLE sessions(session_id TEXT PRIMARY KEY,closed_at TEXT);
+  sql.exec(`CREATE TABLE sessions(session_id TEXT PRIMARY KEY,closed_at TEXT,
+      fellow_id TEXT DEFAULT 'F-1',problem_id TEXT DEFAULT 'P-1');
     CREATE TABLE events(id TEXT PRIMARY KEY,problem_id TEXT,type TEXT,object_kind TEXT);
     CREATE TABLE workshop_objects(workshop_id TEXT PRIMARY KEY,problem_id TEXT,fellow_id TEXT,session_id TEXT,
       workshop_seq INTEGER,type TEXT,title TEXT,body_md TEXT,cas_hash TEXT,relates_to_json TEXT,
@@ -29,7 +30,7 @@ function fixture() {
       publication_json TEXT CHECK(publication_json IS NULL OR
         (json_valid(publication_json) AND json_type(publication_json)='object')),
       PRIMARY KEY(workshop_id,version));
-    INSERT INTO sessions VALUES('S-1',NULL);
+    INSERT INTO sessions(session_id,closed_at) VALUES('S-1',NULL);
     INSERT INTO workshop_objects VALUES
       ('W-A','P-1','F-1','S-1',1,'scratch','a','body a',NULL,'[]',NULL,1,'open',NULL,NULL,NULL),
       ('W-B','P-1','F-1','S-1',2,'note','b','body b',NULL,'[]',NULL,1,'archived',NULL,NULL,NULL),
@@ -277,7 +278,7 @@ test("an unselected object's new sequence aborts close and a fresh retry succeed
 test("another session of the same fellow shares the sequence guard", () =>
   using(async (f) => {
     const plan = await prepareSessionCloseWorkshopActions(f.db, closeInput);
-    f.sql.exec(`INSERT INTO sessions VALUES('S-2',NULL);
+    f.sql.exec(`INSERT INTO sessions(session_id,closed_at) VALUES('S-2',NULL);
       INSERT INTO workshop_objects
         SELECT 'W-NEW',problem_id,fellow_id,'S-2',3,type,title,body_md,cas_hash,
           relates_to_json,revision_json,current_version,state,ledger_intent_json,updated_at,publication_json
@@ -495,17 +496,21 @@ function saveClaimPublication(f: ReturnType<typeof fixture>, publication: string
   savePublicationSource(f, "W-abcdefghijklmnopqrstuvwxyz");
 }
 
-function savePublicationSource(f: ReturnType<typeof fixture>, workshopId: string) {
+function savePublicationSource(
+  f: ReturnType<typeof fixture>,
+  workshopId: string,
+  authoringSessionId?: string,
+) {
   f.sql
     .query(
       "INSERT INTO workshop_revisions " +
         "(workshop_id,version,problem_id,fellow_id,session_id,type,title,body_md,cas_hash," +
         "relates_to_json,ledger_intent_json,revision_json,publication_json) " +
-        "SELECT workshop_id,current_version,problem_id,fellow_id,session_id,type,title,body_md,cas_hash," +
+        "SELECT workshop_id,current_version,problem_id,fellow_id,COALESCE(?,session_id),type,title,body_md,cas_hash," +
         "relates_to_json,ledger_intent_json,revision_json,publication_json " +
         "FROM workshop_objects WHERE workshop_id=?",
     )
-    .run(workshopId);
+    .run(authoringSessionId ?? null, workshopId);
 }
 
 const claimPublication = JSON.stringify({
@@ -666,6 +671,223 @@ function saveClaimReplacement(
     )
     .run(workshopId, claimReplacement, intent, sourceId);
   savePublicationSource(f, workshopId);
+}
+
+function resumeSession(f: ReturnType<typeof fixture>) {
+  f.sql.exec(`UPDATE sessions SET closed_at='origin closed' WHERE session_id='S-1';
+    INSERT INTO sessions(session_id,closed_at) VALUES('S-resumed',NULL);`);
+}
+
+for (const kind of ["create", "revise", "edited"] as const) {
+  test(`a resumed session publishes a retained ${kind} source without rewriting its origin or history`, () =>
+    using(async (f) => {
+      if (kind === "revise") saveClaimReplacement(f);
+      else saveClaimPublication(f, claimPublication);
+      const id = closePublicationInput.promote[0];
+      assert.ok(id);
+      const originalSource = f.sql
+        .query("SELECT * FROM workshop_revisions WHERE workshop_id=? AND version=1")
+        .get(id);
+      resumeSession(f);
+      if (kind === "edited") {
+        f.sql
+          .query("UPDATE workshop_objects SET current_version=2,body_md=? WHERE workshop_id=?")
+          .run("Private resumed notes remain private.", id);
+        savePublicationSource(f, id, "S-resumed");
+      }
+      const [selected] = await readSessionClosePublications(f.db, {
+        ...closePublicationInput,
+        sessionId: "S-resumed",
+      });
+      assert.ok(selected);
+      assert.equal(selected.kind, kind === "revise" ? "revise" : "create");
+      assert.equal(selected.pin.version, kind === "edited" ? 2 : 1);
+      assert.ok(!JSON.stringify(selected).includes("Private resumed notes"));
+      const plan = await prepareSessionCloseWorkshopActions(f.db, {
+        ...closeInput,
+        sessionId: "S-resumed",
+        promote: [
+          {
+            workshopId: id,
+            expectedVersion: selected.pin.version,
+            ...(selected.kind === "revise"
+              ? { revisionJson: selected.revisionJson }
+              : { publicationJson: selected.publicationJson }),
+            eventId: "E-resumed",
+          },
+        ],
+        keep: ["W-B"],
+        discard: [],
+      });
+      await f.db.batch([
+        f.db
+          .prepare("INSERT INTO events VALUES('E-resumed','P-1',?,'claim')")
+          .bind(kind === "revise" ? "claim.revised" : "claim.created"),
+        ...plan.statements,
+        f.db.prepare("UPDATE sessions SET closed_at='resumed closed' WHERE session_id='S-resumed'"),
+      ]);
+      assert.deepEqual(
+        f.sql
+          .query(
+            "SELECT session_id,current_version,state FROM workshop_objects WHERE workshop_id=?",
+          )
+          .get(id),
+        { session_id: "S-1", current_version: selected.pin.version + 1, state: "archived" },
+      );
+      assert.deepEqual(
+        f.sql.query("SELECT * FROM workshop_revisions WHERE workshop_id=? AND version=1").get(id),
+        originalSource,
+      );
+      assert.deepEqual(
+        f.sql
+          .query(
+            "SELECT session_id,revise_action,publication_event_id FROM workshop_revisions WHERE workshop_id=? AND version=?",
+          )
+          .get(id, selected.pin.version + 1),
+        { session_id: "S-resumed", revise_action: "archive", publication_event_id: "E-resumed" },
+      );
+      assert.deepEqual(
+        f.sql
+          .query("SELECT session_id,revise_action FROM workshop_revisions WHERE workshop_id='W-B'")
+          .get(),
+        { session_id: "S-resumed", revise_action: "keep" },
+      );
+      assert.deepEqual(
+        f.sql.query("SELECT session_id,closed_at FROM sessions ORDER BY session_id").all(),
+        [
+          { session_id: "S-1", closed_at: "origin closed" },
+          { session_id: "S-resumed", closed_at: "resumed closed" },
+        ],
+      );
+    }));
+}
+
+test("a resumed session can discard retained work and is rechecked before committing", () =>
+  using(async (f) => {
+    savePublicationSource(f, "W-A");
+    resumeSession(f);
+    const plan = await prepareSessionCloseWorkshopActions(f.db, {
+      ...closeInput,
+      sessionId: "S-resumed",
+    });
+    f.sql.exec("UPDATE sessions SET closed_at='already closed' WHERE session_id='S-resumed'");
+    await assert.rejects(f.db.batch([...plan.statements]), /SESSION_CLOSE_WORKSHOP_CHANGED/);
+    assert.deepEqual(
+      f.sql
+        .query(
+          "SELECT session_id,current_version,state FROM workshop_objects WHERE workshop_id='W-A'",
+        )
+        .get(),
+      { session_id: "S-1", current_version: 1, state: "open" },
+    );
+    f.sql.exec("UPDATE sessions SET closed_at=NULL WHERE session_id='S-resumed'");
+    await f.db.batch([...plan.statements]);
+    assert.deepEqual(
+      f.sql
+        .query(
+          "SELECT session_id,current_version,state FROM workshop_objects WHERE workshop_id='W-A'",
+        )
+        .get(),
+      { session_id: "S-1", current_version: 2, state: "discarded" },
+    );
+    assert.deepEqual(
+      f.sql
+        .query(
+          "SELECT version,session_id,revise_action FROM workshop_revisions WHERE workshop_id='W-A' ORDER BY version",
+        )
+        .all(),
+      [
+        { version: 1, session_id: "S-1", revise_action: null },
+        { version: 2, session_id: "S-resumed", revise_action: "discard" },
+      ],
+    );
+  }));
+
+for (const scope of ["fellow", "problem", "missing"] as const) {
+  test(`a retained publication rejects a ${scope} source-session mismatch at read and commit`, () =>
+    using(async (f) => {
+      saveClaimPublication(f, claimPublication);
+      resumeSession(f);
+      const id = closePublicationInput.promote[0];
+      assert.ok(id);
+      const plan = await prepareSessionCloseWorkshopActions(f.db, {
+        ...closeInput,
+        sessionId: "S-resumed",
+        promote: [
+          {
+            workshopId: id,
+            expectedVersion: 1,
+            publicationJson: claimPublication,
+            eventId: "E-resumed",
+          },
+        ],
+        keep: ["W-B"],
+        discard: [],
+      });
+      if (scope !== "missing")
+        f.sql
+          .query("INSERT INTO sessions(session_id,fellow_id,problem_id) VALUES('S-invalid',?,?)")
+          .run(scope === "fellow" ? "F-other" : "F-1", scope === "problem" ? "P-other" : "P-1");
+      f.sql
+        .query("UPDATE workshop_revisions SET session_id='S-invalid' WHERE workshop_id=?")
+        .run(id);
+      await assert.rejects(
+        readSessionClosePublications(f.db, { ...closePublicationInput, sessionId: "S-resumed" }),
+        (error: unknown) =>
+          error instanceof SessionClosePublicationError && error.code === "INVALID_PUBLICATION",
+      );
+      await assert.rejects(
+        f.db.batch([
+          f.db.prepare("INSERT INTO events VALUES('E-resumed','P-1','claim.created','claim')"),
+          ...plan.statements,
+          f.db.prepare(
+            "UPDATE sessions SET closed_at='resumed closed' WHERE session_id='S-resumed'",
+          ),
+        ]),
+        /SESSION_CLOSE_WORKSHOP_CHANGED/,
+      );
+      assert.deepEqual(f.sql.query("SELECT * FROM events").all(), []);
+      assert.deepEqual(
+        f.sql
+          .query("SELECT current_version,state FROM workshop_objects WHERE workshop_id=?")
+          .get(id),
+        { current_version: 1, state: "open" },
+      );
+      assert.deepEqual(
+        f.sql.query("SELECT closed_at FROM sessions WHERE session_id='S-resumed'").get(),
+        { closed_at: null },
+      );
+      assert.deepEqual(
+        f.sql
+          .query("SELECT current_version,state FROM workshop_objects WHERE workshop_id='W-B'")
+          .get(),
+        { current_version: 1, state: "archived" },
+      );
+    }));
+}
+
+for (const scope of ["fellow", "problem"] as const) {
+  test(`a retained draft cannot be selected through another ${scope}'s publishing session`, () =>
+    using(async (f) => {
+      saveClaimPublication(f, claimPublication);
+      f.sql
+        .query("INSERT INTO sessions(session_id,fellow_id,problem_id) VALUES('S-foreign',?,?)")
+        .run(scope === "fellow" ? "F-other" : "F-1", scope === "problem" ? "P-other" : "P-1");
+      await assert.rejects(
+        readSessionClosePublications(f.db, { ...closePublicationInput, sessionId: "S-foreign" }),
+        (error: unknown) =>
+          error instanceof SessionClosePublicationError && error.code === "NOT_FOUND",
+      );
+      await assert.rejects(
+        prepareSessionCloseWorkshopActions(f.db, {
+          ...closeInput,
+          sessionId: "S-foreign",
+          discard: closePublicationInput.promote,
+        }),
+        (error: unknown) =>
+          error instanceof SessionCloseWorkshopError && error.code === "NOT_FOUND",
+      );
+    }));
 }
 
 for (const intent of [
@@ -1082,7 +1304,7 @@ test("a late private-feed change aborts dead-end publication and a fresh retry k
   using(async (f) => {
     saveDeadEndPublication(f);
     const plan = await prepareSessionCloseWorkshopActions(f.db, deadEndArchiveInput);
-    f.sql.exec("INSERT INTO sessions VALUES('S-other',NULL)");
+    f.sql.exec("INSERT INTO sessions(session_id,closed_at) VALUES('S-other',NULL)");
     f.sql.exec(
       "INSERT INTO workshop_objects " +
         "SELECT 'W-other',problem_id,fellow_id,'S-other',3,type,title,body_md,cas_hash,relates_to_json," +

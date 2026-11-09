@@ -313,6 +313,7 @@ import {
   SessionCloseWorkshopError,
   type SessionCloseWorkshopPlan,
   type SessionCloseWorkshopPromotion,
+  workshopRevisionSessionMatchesSql,
 } from "./session-close-workshop";
 import {
   type ClientStatementContext,
@@ -1432,7 +1433,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                          AND source.revision_json IS NULL AND source.type = w.type
                          AND source.ledger_intent_json IS w.ledger_intent_json
                          AND source.problem_id = w.problem_id AND source.fellow_id = w.fellow_id
-                         AND source.session_id = w.session_id
                          AND source.session_id = sessions.session_id
                          AND source.publication_json = ? AND w.publication_json = source.publication_json
                      )`
@@ -5421,7 +5421,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         detail:
           kind === "changed"
             ? "The selected private version changed. No scientific checkpoint was published."
-            : "The selection must be an open matching typed research draft owned by this session and Fellow.",
+            : "The selection must be an open matching research draft owned by this Fellow on the session's problem.",
         fixHint:
           "Refetch your workshop object, save the exact typed publication or replacement, then retry with its expected_workshop_version and a new Idempotency-Key.",
         rule: "A5",
@@ -5438,6 +5438,26 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     );
   }
 
+  function workshopPublicationSourceSql(head: string, source: string): string {
+    return `${source}.workshop_id = ${head}.workshop_id AND ${source}.version = ${head}.current_version
+      AND ${source}.problem_id = ${head}.problem_id AND ${source}.fellow_id = ${head}.fellow_id
+      AND ${source}.type = ${head}.type
+      AND ${source}.ledger_intent_json IS ${head}.ledger_intent_json
+      AND ${source}.publication_json IS ${head}.publication_json
+      AND ${source}.revision_json IS ${head}.revision_json
+      AND ${workshopRevisionSessionMatchesSql(head, source)}`;
+  }
+
+  function workshopPromotionSourceSql(head: string, publishing: string): string {
+    // Content-bearing convenience claims can create an untyped head without
+    // a saved revision. That established path belongs to its creating session;
+    // resuming work or publishing saved content requires its exact source.
+    return `((${head}.session_id = ${publishing}.session_id
+        AND ${head}.publication_json IS NULL AND ${head}.revision_json IS NULL)
+      OR EXISTS (SELECT 1 FROM workshop_revisions source
+        WHERE ${workshopPublicationSourceSql(head, "source")}))`;
+  }
+
   /** Read only typed publication fields, never working notes. Both ordinary
    * and batch publication use this immutable source and its current head CAS. */
   async function readOwnedWorkshopPublication(
@@ -5448,6 +5468,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   ) {
     const row = await db
       .prepare(`SELECT w.workshop_id, w.current_version, w.state, w.type,
+      w.session_id AS origin_session_id,
       w.publication_json, w.revision_json, w.ledger_intent_json,
       source.publication_json AS source_publication_json,
       source.revision_json AS source_revision_json,
@@ -5457,11 +5478,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       FROM workshop_objects w LEFT JOIN workshop_revisions source
         ON source.workshop_id=w.workshop_id AND source.version=w.current_version
         AND source.problem_id=w.problem_id AND source.fellow_id=w.fellow_id
-        AND source.session_id=w.session_id
-      WHERE w.workshop_id=? AND w.session_id=? AND w.problem_id=? AND w.fellow_id=?`)
+        AND ${workshopRevisionSessionMatchesSql("w", "source")}
+      WHERE w.workshop_id=? AND EXISTS (SELECT 1 FROM sessions publishing
+        WHERE publishing.session_id=? AND publishing.problem_id=w.problem_id
+          AND publishing.fellow_id=w.fellow_id)
+        AND w.problem_id=? AND w.fellow_id=?`)
       .bind(request.workshop_id, session.session_id, session.problem_id, fellowId)
       .first<{
         workshop_id: string;
+        origin_session_id: string;
         current_version: number;
         state: string;
         type: string;
@@ -5501,8 +5526,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const ownedWorkshop = { workshop_id: row.workshop_id, current_version: row.current_version };
     // The established content-bearing form remains available for untyped WIP.
     // Once a typed publication exists, a promote action cannot rewrite it.
-    if (row.publication_json === null && row.revision_json === null && "kind" in request)
+    if (row.publication_json === null && row.revision_json === null && "kind" in request) {
+      if (
+        row.origin_session_id !== session.session_id &&
+        (row.source_version !== row.current_version ||
+          row.source_type !== row.type ||
+          row.source_publication_json !== null ||
+          row.source_revision_json !== null ||
+          row.source_ledger_intent_json !== row.ledger_intent_json)
+      )
+        return workshopPublicationProblem("invalid", request.workshop_id, row.current_version);
       return { data: request as DirectClaimRequest, ownedWorkshop, workshopPublication: undefined };
+    }
     try {
       const publication = ClaimPublicationDraftSchema.safeParse(
         JSON.parse(row.publication_json ?? "null"),
@@ -5516,6 +5551,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         row.revision_json !== null ||
         !publication.success ||
         row.source_version !== row.current_version ||
+        row.source_type !== row.type ||
         row.publication_json !== row.source_publication_json ||
         row.revision_json !== row.source_revision_json ||
         row.ledger_intent_json !== row.source_ledger_intent_json ||
@@ -5616,6 +5652,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         row.type !== "claim-draft" ||
         row.publication_json !== null ||
         row.source_version !== row.current_version ||
+        row.source_type !== row.type ||
         row.revision_json !== row.source_revision_json ||
         row.publication_json !== row.source_publication_json ||
         row.ledger_intent_json !== row.source_ledger_intent_json ||
@@ -6099,13 +6136,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                                sponsorActing
                                  ? `AND EXISTS (
                                SELECT 1 FROM workshop_revisions source
-                               WHERE source.workshop_id = w.workshop_id AND source.version = w.current_version
+                               WHERE ${workshopPublicationSourceSql("w", "source")}
                                  AND source.session_id = sessions.session_id
-                                 AND source.publication_json = w.publication_json
                              )`
-                                 : "AND w.session_id = sessions.session_id"
+                                 : `AND ${workshopPromotionSourceSql("w", "sessions")}`
 }
-                             AND w.fellow_id = sessions.fellow_id AND w.current_version = ?
+                             AND w.fellow_id = sessions.fellow_id AND w.problem_id = sessions.problem_id
+                             AND w.current_version = ?
                              ${sponsorActing ? "AND w.state = 'open' AND w.revision_json IS NULL" : ""}
                          )
                      ) THEN ? ELSE NULL END,
@@ -7099,20 +7136,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                              : `AND EXISTS (
                            SELECT 1 FROM workshop_objects w
                            WHERE w.workshop_id = ?
-                             ${
-                               sponsorActing
-                                 ? `AND EXISTS (
+                             AND EXISTS (
                                SELECT 1 FROM workshop_revisions source
-                               WHERE source.workshop_id = w.workshop_id AND source.version = w.current_version
-                                 AND source.session_id = sessions.session_id
-                                 AND source.fellow_id = sessions.fellow_id AND source.problem_id = sessions.problem_id
-                                 AND source.revision_json = w.revision_json
-                                 AND source.ledger_intent_json IS w.ledger_intent_json
+                               WHERE ${workshopPublicationSourceSql("w", "source")}
+                                 ${sponsorActing ? "AND source.session_id = sessions.session_id" : ""}
                                  AND source.publication_json IS NULL AND w.publication_json IS NULL
                                  AND source.type = 'claim-draft' AND w.type = 'claim-draft'
-                             )`
-                                 : "AND w.session_id = sessions.session_id"
-}
+                             )
                              AND w.fellow_id = sessions.fellow_id AND w.problem_id = sessions.problem_id
                              AND w.current_version = ? AND w.state = ? AND w.revision_json = ?
                          )`
@@ -7355,15 +7385,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         const current = await db
           .prepare(
             `SELECT current_version, state, revision_json FROM workshop_objects
-             WHERE workshop_id = ? ${sponsorActing ? "" : "AND session_id = ?"}
+             WHERE workshop_id = ?
                AND fellow_id = ? AND problem_id = ?`,
           )
-          .bind(
-            input.workshopSource.workshop_id,
-            ...(sponsorActing ? [] : [session.session_id]),
-            auth.binding.fellowId,
-            session.problem_id,
-          )
+          .bind(input.workshopSource.workshop_id, auth.binding.fellowId, session.problem_id)
           .first<{ current_version: number; state: string; revision_json: string | null }>();
         if (
           isSessionCloseWorkshopChanged(error) ||
@@ -10367,7 +10392,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         workshop === undefined
           ? ""
           : `AND EXISTS (SELECT 1 FROM workshop_objects w
-        WHERE w.workshop_id = ? AND w.problem_id = p.id AND w.session_id = ?
+        WHERE w.workshop_id = ? AND w.problem_id = p.id
+          AND EXISTS (SELECT 1 FROM sessions publishing WHERE publishing.session_id = ?
+            AND publishing.problem_id = w.problem_id AND publishing.fellow_id = w.fellow_id
+            AND publishing.closed_at IS NULL)
+          AND EXISTS (SELECT 1 FROM workshop_revisions source
+            WHERE ${workshopPublicationSourceSql("w", "source")})
           AND w.fellow_id = ? AND w.current_version = ? AND w.state = ? AND w.revision_json = ?)`
       }`;
     const bindings = [
@@ -10530,8 +10560,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (ownedWorkshop === undefined) {
         const row = await db
           .prepare(`SELECT workshop_id, current_version FROM workshop_objects
-            WHERE workshop_id = ? AND session_id = ? AND fellow_id = ? AND problem_id = ?`)
-          .bind(data.workshop_id, session.session_id, auth.binding.fellowId, session.problem_id)
+            WHERE workshop_id = ? AND fellow_id = ? AND problem_id = ?`)
+          .bind(data.workshop_id, auth.binding.fellowId, session.problem_id)
           .first<{ workshop_id: string; current_version: number }>();
         if (!row) return privateNoStore(workshopNotFound());
         ownedWorkshop = row;
@@ -10575,7 +10605,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ownedWorkshop === undefined
           ? ""
           : `AND EXISTS (SELECT 1 FROM workshop_objects w
-        WHERE w.workshop_id = ? AND w.problem_id = p.id AND w.session_id = ?
+        WHERE w.workshop_id = ? AND w.problem_id = p.id
+          AND EXISTS (SELECT 1 FROM sessions publishing WHERE publishing.session_id = ?
+            AND publishing.problem_id = w.problem_id AND publishing.fellow_id = w.fellow_id
+            AND publishing.closed_at IS NULL AND ${workshopPromotionSourceSql("w", "publishing")})
           AND w.fellow_id = ? AND w.current_version = ?)`
       }`;
     const bindings = [
@@ -19241,16 +19274,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (parsed.data.workshop_id !== undefined) {
       const row = await db
         .prepare(
-          "SELECT workshop_id, current_version FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
+          "SELECT workshop_id, current_version FROM workshop_objects WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ?",
         )
-        .bind(parsed.data.workshop_id, session.session_id, auth.binding.fellowId)
+        .bind(parsed.data.workshop_id, session.problem_id, auth.binding.fellowId)
         .first<{ workshop_id: string; current_version: number }>();
       if (!row) {
         return validatedProblem({
           status: 404,
           code: "WORKSHOP_OBJECT_NOT_FOUND",
-          title: "No such workshop object in this session",
-          detail: "The workshop id is not one this session and Fellow own.",
+          title: "No such workshop object on this problem",
+          detail: "The workshop id is not one this Fellow owns on the session's problem.",
           fixHint: "Promote an id from your own workshop (see your pack's workshop-heads).",
           rule: "A5",
           extensions: {
@@ -21159,11 +21192,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           if (parsedClaim.data.workshop_id !== undefined) {
             const row = await db
               .prepare(
-                "SELECT workshop_id, current_version FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
+                "SELECT workshop_id, current_version FROM workshop_objects WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ?",
               )
               .bind(
                 parsedClaim.data.workshop_id,
-                sessionResult.session.session_id,
+                sessionResult.session.problem_id,
                 auth.binding.fellowId,
               )
               .first<{ workshop_id: string; current_version: number }>();
@@ -21171,8 +21204,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               return validatedProblem({
                 status: 404,
                 code: "WORKSHOP_OBJECT_NOT_FOUND",
-                title: "No such workshop object in this session",
-                detail: `The workshop id in member ${member.tempId} is not one this session and Fellow own.`,
+                title: "No such workshop object on this problem",
+                detail: `The workshop id in member ${member.tempId} is not one this Fellow owns on the session's problem.`,
                 fixHint: "Promote an id from your own workshop.",
                 rule: "A5",
                 extensions: {

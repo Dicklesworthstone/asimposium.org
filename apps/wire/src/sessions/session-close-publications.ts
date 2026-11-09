@@ -10,6 +10,7 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { sha256Hex } from "../split/policy.ts";
+import { workshopRevisionSessionMatchesSql } from "./session-close-workshop.ts";
 
 export class SessionClosePublicationError extends Error {
   readonly code: "NOT_FOUND" | "INVALID_PUBLICATION" | "CHANGED";
@@ -94,8 +95,10 @@ export async function readSessionClosePublications(
         "FROM workshop_objects w LEFT JOIN workshop_revisions source " +
         "ON source.workshop_id=w.workshop_id AND source.version=w.current_version " +
         "AND source.problem_id=w.problem_id AND source.fellow_id=w.fellow_id " +
-        "AND source.session_id=w.session_id " +
-        "WHERE w.session_id=? AND w.problem_id=? AND w.fellow_id=? " +
+        `AND ${workshopRevisionSessionMatchesSql("w", "source")} ` +
+        "JOIN sessions publishing ON publishing.session_id=? " +
+        "AND publishing.problem_id=w.problem_id AND publishing.fellow_id=w.fellow_id " +
+        "WHERE w.problem_id=? AND w.fellow_id=? " +
         "AND w.workshop_id IN (SELECT value FROM json_each(?))",
     )
     .bind(input.sessionId, input.problemId, input.fellowId, JSON.stringify(input.promote))

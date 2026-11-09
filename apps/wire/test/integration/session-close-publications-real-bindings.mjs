@@ -5,6 +5,7 @@ import {
   LeaseAcquireResponseSchema,
   ScreeningPromotionDeniedResponseSchema,
   SessionCloseResponseSchema,
+  WorkshopObjectResponseSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
@@ -207,7 +208,14 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
       "the intended screening boundary was reached",
     );
   };
-  const retainBytes = async (draft, before, action, state, eventId = null) => {
+  const retainBytes = async (
+    draft,
+    before,
+    action,
+    state,
+    eventId = null,
+    sessionAttribution = null,
+  ) => {
     const after = await history(draft);
     assert.equal(
       after.length,
@@ -241,8 +249,18 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
       "revision_json",
       "publication_json",
     ]) {
-      assert.equal(revision[field], original[field], `archive preserves ${field}`);
-      assert.equal(current[field], original[field], `head preserves ${field}`);
+      // A resumed action belongs to its current session; the head still
+      // names the originating session and every prior revision is unchanged.
+      const revisionValue =
+        field === "session_id" && sessionAttribution
+          ? sessionAttribution.actingSession
+          : original[field];
+      const headValue =
+        field === "session_id" && sessionAttribution
+          ? sessionAttribution.originSession
+          : original[field];
+      assert.equal(revision[field], revisionValue, `archive preserves ${field}`);
+      assert.equal(current[field], headValue, `head preserves ${field}`);
     }
     assert.match(revision.cas_hash, /^sha256:[a-f0-9]{64}$/);
     const key = `cas/sha256/${revision.cas_hash.slice("sha256:".length)}`;
@@ -331,7 +349,7 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
         1,
         "the same transaction supplied the exact durable search outbox witness",
       );
-      await retainBytes(item.draft, item.before, "archive", "archived", event.id);
+      await retainBytes(item.draft, item.before, "archive", "archived", event.id, item.sessions);
       const face = ClaimFaceResponseSchema.parse(
         await call(`/p/${problem}/claims/${event.object_id}@1.json`),
       );
@@ -897,6 +915,424 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
     ),
   );
   await assertReplay(failedSession, "close-after-review", finalRequest, finalClose);
+
+  // Retaining work is a usable handoff across sessions, not only storage.
+  // All writes below use the existing public commands and their normal
+  // credentials; private notes never become inferred publication text.
+  const sourceSession = await open();
+  const retainedPublication = publication(
+    "The product of two consecutive integers is divisible by two.",
+    "Consecutive integers with an odd product.",
+  );
+  const recoveredDraft = await push(sourceSession, retainedPublication, "Calculation to resume");
+  const resumedReplacement = {
+    claim_id: single.body.promoted[0],
+    base_version: 1,
+    kind: "conjecture",
+    statement: "For every integer k, the integer (2k + 1) squared minus one is divisible by eight.",
+    falsifier: "An integer k for which (2k + 1) squared minus one is not divisible by eight.",
+    depends_on: [],
+  };
+  const recoveredReplacement = await pushReplacement(sourceSession, resumedReplacement);
+  const closeDrafts = [
+    await push(
+      sourceSession,
+      publication(
+        "The sum of any two integers divisible by five is divisible by five.",
+        "Two integers divisible by five whose sum is not divisible by five.",
+      ),
+      "First retained close calculation",
+    ),
+    await push(
+      sourceSession,
+      publication(
+        "The difference of any two integers divisible by seven is divisible by seven.",
+        "Two integers divisible by seven whose difference is not divisible by seven.",
+      ),
+      "Second retained close calculation",
+    ),
+  ];
+  const keepAfterResume = await push(sourceSession, null, "Retain a second private handback");
+  const discardAfterResume = await push(sourceSession, null, "Discard after resumed review");
+  const revokedDraft = await push(
+    sourceSession,
+    publication(
+      "The additive inverse of an integer divisible by eleven is divisible by eleven.",
+      "An integer divisible by eleven whose additive inverse is not divisible by eleven.",
+    ),
+    "Retained publication requiring a current credential",
+  );
+  const recovered = [
+    recoveredDraft,
+    recoveredReplacement,
+    ...closeDrafts,
+    keepAfterResume,
+    discardAfterResume,
+    revokedDraft,
+  ];
+  const initialHistories = await Promise.all(recovered.map(history));
+  const beforeRetention = await publicState();
+  const retentionRequest = {
+    handback: "RETAINED_HANDBACK: recover the exact private calculations in the next session.",
+    keep: recovered.map((draft) => draft.workshop_id),
+  };
+  const retained = await attempt(sourceSession, "close-retain-for-next-session", retentionRequest);
+  assert.equal(retained.status, 201);
+  assert.deepEqual(retained.body.promoted, []);
+  assert.deepEqual(await publicState(), beforeRetention, "retention itself publishes nothing");
+  for (const [index, draft] of recovered.entries())
+    await retainBytes(draft, initialHistories[index], "keep", "open");
+  const sourceClosedState = await closeState(sourceSession);
+  const resumedSession = await open();
+  const resumedPath = `/v1/sessions/${resumedSession}`;
+  const sessions = { originSession: sourceSession, actingSession: resumedSession };
+  const recoveredRead = async (
+    session,
+    draft,
+    token = author,
+    status = 200,
+    version,
+    method = "GET",
+  ) => {
+    const response = await worker.fetch(
+      `${origin}/v1/sessions/${session}/workshop/${draft.workshop_id}${version === undefined ? "" : `?version=${version}`}`,
+      { method, headers: { "User-Agent": userAgent, authorization: `Bearer ${token}` } },
+    );
+    assert.equal(response.status, status);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    const body = await response.text();
+    if (method === "HEAD") {
+      assert.equal(body, "");
+      return null;
+    }
+    if (status !== 200) {
+      assert.ok(!body.includes(privateCanary));
+      return JSON.parse(body);
+    }
+    const read = WorkshopObjectResponseSchema.parse(JSON.parse(body));
+    assert.equal(read.problem_id, problem);
+    assert.equal(read.fellow_id, sourceClosedState.fellow_id);
+    assert.equal(read.object.body_md, privateBody);
+    assert.equal(read.body_sha256, createHash("sha256").update(privateBody).digest("hex"));
+    return read;
+  };
+  for (const draft of recovered) {
+    assert.equal((await recoveredRead(resumedSession, draft)).object.current_version, 2);
+    assert.equal((await recoveredRead(resumedSession, draft, author, 200, 1)).object.version, 1);
+    assert.equal((await head(draft)).session_id, sourceSession);
+  }
+
+  // A new session is not authority to read or publish someone else's work,
+  // work on another problem, or to continue writing through a closed session.
+  const otherProblem = "P-CLOSE-RETAINED-OTHER";
+  await fixtures.seedProblem(otherProblem, sponsor);
+  const wrongProblemSession = (
+    await call(
+      "/v1/sessions",
+      {
+        problem_id: otherProblem,
+        intent: "explore",
+      },
+      author,
+      201,
+    )
+  ).session_id;
+  const refusalSnapshot = {
+    public: await publicState(),
+    private: await privateState(resumedSession),
+  };
+  const refusalScreens = await fixtures.screeningCalls();
+  for (const [session, credential] of [
+    [foreignSession, reviewer],
+    [wrongProblemSession, author],
+  ]) {
+    for (const method of ["GET", "HEAD"])
+      await recoveredRead(session, recoveredDraft, credential, 404, undefined, method);
+    const refused = await call(
+      `/v1/sessions/${session}/promote`,
+      {
+        workshop_id: recoveredDraft.workshop_id,
+        expected_workshop_version: 2,
+      },
+      credential,
+      404,
+    );
+    assert.equal(refused.code, "WORKSHOP_OBJECT_NOT_FOUND");
+    const refusedClose = await attempt(
+      session,
+      `retained-wrong-scope-${session}`,
+      {
+        handback: "A foreign private work product cannot be selected for this close.",
+        promote: [recoveredDraft.workshop_id],
+      },
+      credential,
+    );
+    assert.equal(refusedClose.status, 404);
+    assert.equal(refusedClose.body.code, "WORKSHOP_OBJECT_NOT_FOUND");
+  }
+  const closedSource = await call(
+    `/v1/sessions/${sourceSession}/promote`,
+    {
+      workshop_id: recoveredDraft.workshop_id,
+      expected_workshop_version: 2,
+    },
+    author,
+    409,
+  );
+  assert.equal(closedSource.code, "SESSION_CLOSED");
+  assert.equal(await fixtures.screeningCalls(), refusalScreens);
+  assert.deepEqual(await publicState(), refusalSnapshot.public);
+  assert.deepEqual(await privateState(resumedSession), refusalSnapshot.private);
+  await call(
+    `/v1/sessions/${wrongProblemSession}/close`,
+    {
+      handback: "The wrong-problem control selected no private work.",
+    },
+    author,
+    201,
+  );
+
+  const firstResumedPublication = {
+    ...retainedPublication,
+    statement: "For every integer n, n times n plus one is divisible by two.",
+    falsifier: "An integer n for which n times n plus one is odd.",
+  };
+  const edited = WorkshopPushResponseSchema.parse(
+    await call(
+      `${resumedPath}/workshop`,
+      {
+        workshop_id: recoveredDraft.workshop_id,
+        base_version: 2,
+        publication: firstResumedPublication,
+      },
+      author,
+      201,
+    ),
+  );
+  assert.equal(edited.version, 3);
+  assert.deepEqual(
+    (await recoveredRead(resumedSession, recoveredDraft)).object.publication,
+    firstResumedPublication,
+  );
+  assert.deepEqual(
+    (await recoveredRead(resumedSession, recoveredDraft, author, 200, 1)).object.publication,
+    retainedPublication,
+  );
+  assert.equal((await history(recoveredDraft)).at(-1).session_id, resumedSession);
+  assert.equal((await head(recoveredDraft)).session_id, sourceSession);
+  const oldSelection = await call(
+    `${resumedPath}/promote`,
+    {
+      workshop_id: recoveredDraft.workshop_id,
+      expected_workshop_version: 2,
+    },
+    author,
+    409,
+  );
+  assert.equal(oldSelection.code, "WORKSHOP_VERSION_CONFLICT");
+  assert.equal(oldSelection.current_version, 3);
+
+  // The current publisher and the immutable draft source are different
+  // sessions. Recheck the selected source inside the actual commit anyway.
+  const racePublic = await publicState();
+  const retainedRaceScreens = await fixtures.screeningCalls();
+  const finalResumedPublication = {
+    ...firstResumedPublication,
+    statement: "For every integer n, the product n(n + 1) is an even integer.",
+  };
+  let retainedRace;
+  let racedPrivate;
+  await fixtures.pauseScreening(30_000);
+  const pendingRetained = worker.fetch(`${origin}${resumedPath}/promote`, {
+    method: "POST",
+    headers: {
+      "User-Agent": userAgent,
+      authorization: `Bearer ${author}`,
+      "content-type": "application/json",
+      "idempotency-key": "retained-source-race",
+    },
+    body: JSON.stringify({ workshop_id: recoveredDraft.workshop_id, expected_workshop_version: 3 }),
+  });
+  try {
+    await waitForScreens(retainedRaceScreens + 1);
+    const correction = await call(
+      `${resumedPath}/workshop`,
+      {
+        workshop_id: recoveredDraft.workshop_id,
+        base_version: 3,
+        publication: finalResumedPublication,
+      },
+      author,
+      201,
+    );
+    assert.equal(correction.version, 4);
+    racedPrivate = await privateState(resumedSession);
+    await fixtures.resumeScreening();
+    retainedRace = await pendingRetained;
+  } finally {
+    await fixtures.resumeScreening();
+    await Promise.allSettled([pendingRetained]);
+  }
+  assert.equal(retainedRace.status, 409);
+  assert.equal((await retainedRace.json()).code, "WORKSHOP_VERSION_CONFLICT");
+  assert.deepEqual(await publicState(), racePublic);
+  assert.deepEqual(await privateState(resumedSession), racedPrivate);
+  const resumedHistory = await history(recoveredDraft);
+  const promotedRecovered = await call(
+    `${resumedPath}/promote`,
+    {
+      workshop_id: recoveredDraft.workshop_id,
+      expected_workshop_version: 4,
+    },
+    author,
+    201,
+    "retained-reviewed-publication",
+  );
+  const recoveredEvent = await one(
+    `SELECT e.*, c.payload_json FROM events e
+    JOIN event_content c ON c.event_id=e.id WHERE e.problem_id=? AND e.seq=?`,
+    problem,
+    promotedRecovered.seq,
+  );
+  assert.equal(recoveredEvent.actor_session_id, resumedSession);
+  assert.equal(recoveredEvent.actor_fellow_id, sourceClosedState.fellow_id);
+  assert.equal(
+    JSON.parse(recoveredEvent.payload_json).statement,
+    finalResumedPublication.statement,
+  );
+  assert.ok(!recoveredEvent.payload_json.includes(privateCanary));
+  await retainBytes(
+    recoveredDraft,
+    resumedHistory,
+    "archive",
+    "archived",
+    recoveredEvent.id,
+    sessions,
+  );
+
+  const replacementHistory = await history(recoveredReplacement);
+  const oldClaim = await one(
+    "SELECT * FROM claim_versions WHERE problem_id=? AND claim_id=? AND version=1",
+    problem,
+    resumedReplacement.claim_id,
+  );
+  const revisedRecovered = await call(
+    `${resumedPath}/revise`,
+    {
+      workshop_id: recoveredReplacement.workshop_id,
+    },
+    author,
+    201,
+    "retained-claim-replacement",
+  );
+  assert.equal(revisedRecovered.version, 2);
+  const replacementEvent = await one(
+    `SELECT e.*, c.payload_json FROM events e
+    JOIN event_content c ON c.event_id=e.id WHERE e.problem_id=? AND e.seq=?`,
+    problem,
+    revisedRecovered.seq,
+  );
+  assert.equal(replacementEvent.actor_session_id, resumedSession);
+  assert.equal(JSON.parse(replacementEvent.payload_json).statement, resumedReplacement.statement);
+  assert.deepEqual(
+    await one(
+      "SELECT * FROM claim_versions WHERE problem_id=? AND claim_id=? AND version=1",
+      problem,
+      resumedReplacement.claim_id,
+    ),
+    oldClaim,
+  );
+  await retainBytes(
+    recoveredReplacement,
+    replacementHistory,
+    "archive",
+    "archived",
+    replacementEvent.id,
+    sessions,
+  );
+
+  const retainedSelections = await Promise.all(
+    closeDrafts.map(async (draft) => ({
+      draft,
+      before: await history(draft),
+      sessions,
+    })),
+  );
+  const keepHistory = await history(keepAfterResume);
+  const discardHistory = await history(discardAfterResume);
+  const revokeHistory = await history(revokedDraft);
+  const resumedLease = LeaseAcquireResponseSchema.parse(
+    await call(
+      `${resumedPath}/leases`,
+      {
+        object: promotedRecovered.claim_id,
+        objective: "Check the recovered parity calculation",
+        deliverable: "An exact independent divisibility check",
+        ttl_seconds: 1800,
+      },
+      author,
+      201,
+    ),
+  );
+  const resumedCloseRequest = {
+    handback:
+      "RESUMED_CLOSE_HANDBACK: the recovered calculations now have exact public statements.",
+    promote: closeDrafts.map((draft) => draft.workshop_id),
+    keep: [keepAfterResume.workshop_id, revokedDraft.workshop_id],
+    discard: [discardAfterResume.workshop_id],
+  };
+  const beforeResumedClose = await publicState();
+  const resumedClose = await attempt(resumedSession, "retained-atomic-close", resumedCloseRequest);
+  await assertPublished(
+    resumedSession,
+    resumedCloseRequest,
+    retainedSelections,
+    beforeResumedClose,
+    resumedClose,
+  );
+  await retainBytes(keepAfterResume, keepHistory, "keep", "open", null, sessions);
+  await retainBytes(discardAfterResume, discardHistory, "discard", "discarded", null, sessions);
+  await retainBytes(revokedDraft, revokeHistory, "keep", "open", null, sessions);
+  assert.equal(
+    (await one("SELECT status FROM leases WHERE lease_id=?", resumedLease.lease.lease_id)).status,
+    "released",
+  );
+  assert.deepEqual(
+    await closeState(sourceSession),
+    sourceClosedState,
+    "using retained work never reopens or rewrites its original session handback",
+  );
+  await assertReplay(resumedSession, "retained-atomic-close", resumedCloseRequest, resumedClose);
+
+  const credentialSession = await open();
+  await recoveredRead(credentialSession, revokedDraft);
+  const credential = await one(
+    "SELECT credential_id,fellow_id FROM fellow_tokens WHERE fellow_id=? AND revoked_at IS NULL",
+    sourceClosedState.fellow_id,
+  );
+  assert.ok(credential);
+  await sponsorCall(sponsor, "POST", "/v1/fellows/credentials/revoke", "fellow.credential.revoke", {
+    ...credential,
+    confirm: "revoke-credential",
+    step_up_authenticated_at: Math.floor(Date.now() / 1000),
+  });
+  const revokedState = {
+    public: await publicState(),
+    private: await privateState(credentialSession),
+  };
+  for (const method of ["GET", "HEAD"])
+    await recoveredRead(credentialSession, revokedDraft, author, 401, undefined, method);
+  await call(
+    `/v1/sessions/${credentialSession}/promote`,
+    {
+      workshop_id: revokedDraft.workshop_id,
+      expected_workshop_version: 3,
+    },
+    author,
+    401,
+  );
+  assert.deepEqual(await publicState(), revokedState.public);
+  assert.deepEqual(await privateState(credentialSession), revokedState.private);
   return {
     single_and_multiple_claims: true,
     mixed_public_creation_and_revision: true,
@@ -909,6 +1345,10 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
     later_content_and_policy_refusals: true,
     concurrent_source_revision_rollback: true,
     fresh_identity_after_source_review: true,
+    retained_work_read_edit_promote_and_revise: true,
+    retained_source_session_and_current_publisher_provenance: true,
+    retained_sources_atomic_close_keep_discard_and_lease_release: true,
+    retained_source_cas_and_authorization_refusals: true,
   };
 });
 

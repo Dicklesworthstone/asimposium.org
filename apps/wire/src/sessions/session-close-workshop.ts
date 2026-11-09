@@ -32,6 +32,17 @@ interface WorkshopHead {
 
 const SAFE_INTEGER_MAX = 9007199254740991;
 
+/** A workshop head keeps its creation session forever. Each immutable
+ * revision identifies the session that authored that version, which may be
+ * a later session of the same Fellow on the same problem. SQL aliases are
+ * supplied by callers in code, never by a request. */
+export function workshopRevisionSessionMatchesSql(head: string, source: string): string {
+  return `EXISTS (SELECT 1 FROM sessions workshop_authoring_session
+    WHERE workshop_authoring_session.session_id = ${source}.session_id
+      AND workshop_authoring_session.fellow_id = ${head}.fellow_id
+      AND workshop_authoring_session.problem_id = ${head}.problem_id)`;
+}
+
 export async function prepareSessionCloseWorkshopActions(
   db: D1Database,
   input: {
@@ -60,11 +71,12 @@ export async function prepareSessionCloseWorkshopActions(
   // One JSON binding keeps large selections within D1's parameter limit.
   // IDs remain data, including quotes and other SQL-looking characters.
   const heads = await db
-    .prepare(`SELECT workshop_id,current_version
-    FROM workshop_objects
-    WHERE session_id=? AND problem_id=? AND fellow_id=?
-      AND workshop_id IN (SELECT value FROM json_each(?))
-    ORDER BY workshop_id`)
+    .prepare(`SELECT w.workshop_id,w.current_version
+    FROM workshop_objects w JOIN sessions s
+      ON s.session_id=? AND s.problem_id=w.problem_id AND s.fellow_id=w.fellow_id
+    WHERE w.problem_id=? AND w.fellow_id=?
+      AND w.workshop_id IN (SELECT value FROM json_each(?))
+    ORDER BY w.workshop_id`)
     .bind(input.sessionId, input.problemId, input.fellowId, JSON.stringify(all))
     .all<WorkshopHead>();
   if (heads.results.length !== all.length) throw new SessionCloseWorkshopError("NOT_FOUND");
@@ -116,9 +128,10 @@ export async function prepareSessionCloseWorkshopActions(
             WHERE problem_id=? AND fellow_id=?)=? AND
           NOT EXISTS (SELECT 1 FROM expected x WHERE NOT EXISTS (
             SELECT 1 FROM workshop_objects w
-            JOIN sessions s ON s.session_id=w.session_id
+            JOIN sessions s ON s.session_id=?
+              AND s.problem_id=w.problem_id AND s.fellow_id=w.fellow_id
             WHERE w.workshop_id=x.id AND w.current_version=x.version
-              AND w.session_id=? AND w.problem_id=? AND w.fellow_id=?
+              AND w.problem_id=? AND w.fellow_id=?
               AND s.closed_at IS NULL
           )) AND
           NOT EXISTS (SELECT 1 FROM publications x WHERE NOT EXISTS (
@@ -136,7 +149,8 @@ export async function prepareSessionCloseWorkshopActions(
               AND w.revision_json IS x.revision AND source.revision_json IS x.revision
               AND w.publication_json IS x.publication AND source.publication_json IS x.publication
               AND (x.revision IS NOT NULL OR x.publication IS NOT NULL)
-              AND source.session_id=w.session_id AND source.fellow_id=w.fellow_id
+              AND ${workshopRevisionSessionMatchesSql("w", "source")}
+              AND source.fellow_id=w.fellow_id
               AND source.problem_id=w.problem_id
               AND source.type=w.type AND source.ledger_intent_json IS w.ledger_intent_json
           ))
@@ -187,7 +201,7 @@ export async function prepareSessionCloseWorkshopActions(
             workshop_seq=?+1+(SELECT CAST(key AS INTEGER) FROM json_each(?)
               WHERE value=workshop_objects.workshop_id),
             updated_at=?
-        WHERE session_id=? AND problem_id=? AND fellow_id=?
+        WHERE problem_id=? AND fellow_id=?
           AND workshop_id IN (SELECT value FROM json_each(?))`)
         .bind(
           promoteJson,
@@ -195,7 +209,6 @@ export async function prepareSessionCloseWorkshopActions(
           base,
           selectionJson,
           closedAt,
-          input.sessionId,
           input.problemId,
           input.fellowId,
           selectionJson,
@@ -205,7 +218,7 @@ export async function prepareSessionCloseWorkshopActions(
         (workshop_id,version,problem_id,fellow_id,session_id,type,title,body_md,cas_hash,
          relates_to_json,ledger_intent_json,revision_json,publication_json,revise_action,created_at,
          publication_event_id)
-        SELECT workshop_id,current_version,problem_id,fellow_id,session_id,type,title,body_md,cas_hash,
+        SELECT workshop_id,current_version,problem_id,fellow_id,?,type,title,body_md,cas_hash,
           relates_to_json,ledger_intent_json,revision_json,publication_json,
           CASE
             WHEN workshop_id IN (SELECT json_extract(value,'$.id') FROM json_each(?)) THEN 'archive'
@@ -214,14 +227,14 @@ export async function prepareSessionCloseWorkshopActions(
           (SELECT json_extract(value,'$.event_id') FROM json_each(?)
             WHERE json_extract(value,'$.id')=workshop_objects.workshop_id)
         FROM workshop_objects
-        WHERE session_id=? AND problem_id=? AND fellow_id=?
+        WHERE problem_id=? AND fellow_id=?
           AND workshop_id IN (SELECT value FROM json_each(?))`)
         .bind(
+          input.sessionId,
           promoteJson,
           keepJson,
           closedAt,
           promoteJson,
-          input.sessionId,
           input.problemId,
           input.fellowId,
           selectionJson,
