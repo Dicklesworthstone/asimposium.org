@@ -94,11 +94,11 @@ class RevokeBarrier {
 const barrier = new RevokeBarrier();
 
 /**
- * Local-only gate immediately before the real D1 transaction boundary used by
- * session writes. Each contender has already prepared its replay claim and
- * side effects, but neither `DB.batch()` can execute until two independent
- * HTTP requests have arrived and the capability-bound controller releases
- * them. This makes the same-key collision causal without mocking D1.
+ * Local-only gate at the first real D1 admission boundary for session writes.
+ * Workshop and promotion requests first elect an owner through their quota
+ * guards; open and close race their replay claims directly. Two independent
+ * HTTP requests must arrive before the capability-bound controller releases
+ * them. D1 and the production guards still decide the winner.
  */
 class SessionReplayBarrier {
   #window: SessionReplayBarrierWindow | undefined;
@@ -152,10 +152,11 @@ const replayScopeByWrapper = new WeakMap<object, SessionReplayScope>();
 const wrappedDatabaseByBinding = new WeakMap<object, Env["DB"]>();
 
 function sessionReplayScope(sql: string): SessionReplayScope | undefined {
+  if (sql.includes("INSERT INTO workshop_write_attempts")) return "workshop_push";
   if (!sql.includes("INSERT INTO session_write_replays")) return undefined;
-  // Promote is admission-gated at public_write_attempt_reservations before screening;
-  // it races at quota reservation, not at the post-screening replay batch.
-  if (sql.includes("'promote'")) return undefined;
+  // Quota admission precedes these replay batches. The duplicate may return a
+  // pending response without ever reaching the later mutation transaction.
+  if (sql.includes("'promote'") || sql.includes("'workshop_push'")) return undefined;
   return SESSION_REPLAY_SCOPES.find((scope) => sql.includes(`'${scope}'`));
 }
 

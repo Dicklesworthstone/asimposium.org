@@ -2901,7 +2901,9 @@ async function sessionReplayRace(
       suite: "token-lifecycle-local",
       assertion: `concurrent_http_same_key_${scope}_exact_replay`,
       deterministic_barrier: true,
-      store_gate: "immediately_before_real_d1_batch",
+      store_gate: scope === "workshop_push"
+        ? "immediately_before_real_d1_workshop_admission_batch"
+        : "immediately_before_real_d1_batch",
       status: "pass",
     })}\n`,
   );
