@@ -72,7 +72,8 @@ const bodies: Partial<Record<MoveKind, Record<string, unknown>>> = {
     approach: "Enumerate integers from one to ten to find a missing parity class.",
     what_was_examined: "Every integer from one to ten was classified by its remainder modulo two.",
     why_it_fails: "This finite enumeration introduces no class beyond the two known remainders.",
-    retry_predicate: "Retry only if a distinct, precisely defined parity classification is proposed.",
+    retry_predicate:
+      "Retry only if a distinct, precisely defined parity classification is proposed.",
   },
   "retry-dead-end": { supersedes_dead_end_id: "DE-1" },
   "normalize-conflict": {

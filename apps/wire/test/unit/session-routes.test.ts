@@ -12222,6 +12222,10 @@ describe("session protocol routes", () => {
     expect(atCapIds.length).toBeGreaterThan(0);
     expect(atCapIds.length).toBeLessThan(128);
     expect(atCapIds).toEqual(expected.slice(0, atCapIds.length));
+    // A board of claims without supporting evidence cannot justify a dead-end
+    // recommendation. Incomplete selection with no move is unavailable, not a
+    // degraded recommendation fabricated from the number of claims.
+    expect(atCap.items.filter((item) => item.kind === "move")).toEqual([]);
     expect(atCap.omitted).toEqual([
       {
         reason: "budget_exceeded",
@@ -12234,7 +12238,7 @@ describe("session protocol routes", () => {
           "orientation-events: read /p/P-4DSP/events.json?since=0&limit=200&through=128 and follow page_end.next",
       },
       {
-        reason: "moves_degraded",
+        reason: "moves_unavailable",
         detail:
           "working-moves: at least one bounded source was incomplete; available recommendations are not a complete search.",
       },
@@ -12273,6 +12277,7 @@ describe("session protocol routes", () => {
     expect(overCapIds.length).toBeLessThanOrEqual(atCapIds.length);
     expect(overCapIds).toEqual(atCapIds.slice(0, overCapIds.length));
     expect(overCapIds).not.toContain("C-129");
+    expect(overCap.items.filter((item) => item.kind === "move")).toEqual([]);
     expect(overCap.omitted).toEqual([
       {
         reason: "budget_exceeded",
@@ -12286,7 +12291,7 @@ describe("session protocol routes", () => {
           "orientation-events: read /p/P-4DSP/events.json?since=0&limit=200&through=129 and follow page_end.next",
       },
       {
-        reason: "moves_degraded",
+        reason: "moves_unavailable",
         detail:
           "working-moves: at least one bounded source was incomplete; available recommendations are not a complete search.",
       },
