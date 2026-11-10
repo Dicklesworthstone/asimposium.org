@@ -4,8 +4,12 @@ import {
   DEAD_ENDS_SCHEMA_ID,
   DeadEndsListResponseSchema,
   EnrollmentDeclaredRuntimeSchema,
+  FullPackPageSchema,
+  type FullPackQuery,
+  FullPackQuerySchema,
   LedgerContractsSchema,
   ProblemFaceResponseSchema,
+  ProblemFullResponseSchema,
   ProblemGovernanceEventSchema,
   type ProblemIndexEntry,
   ProblemIndexTimestampSchema,
@@ -71,6 +75,7 @@ import {
   renderDeadEndsMarkdown,
 } from "./ledger/dead-ends";
 import { displayClaimDisposition, reviewStateFromRecordedReviews } from "./ledger/dispositions";
+import { EventTailReadError } from "./ledger/event-tail-read.ts";
 import { FormalRecordReadError } from "./ledger/formal-records";
 import { formalRecordResponse } from "./ledger/formal-records-http";
 import { loadFormalRecordResource } from "./ledger/formal-records-service";
@@ -97,6 +102,13 @@ import {
   publicationScreeningNotice,
   readPublicationNotices,
 } from "./screening/publication-notice.ts";
+import {
+  type FullPackReadWitness,
+  FullPackSourceChangedError,
+  FullPackSourceUnavailableError,
+  publicFullPackProjection,
+  readFullPack,
+} from "./sessions/full-pack.ts";
 import { readLedgerPackSection, readPublicClaimSnapshot } from "./sessions/ledger-pack";
 
 /**
@@ -942,177 +954,169 @@ function problemNotFound(method: string): Response {
 async function loadProblemFullFace(
   db: Env["DB"],
   requestedProblemId: string,
-): Promise<{ body: string; unlisted: boolean; formulationUnavailable: boolean } | null> {
+  query: Pick<FullPackQuery, "after" | "through">,
+): Promise<{
+  body: string;
+  unlisted: boolean;
+  formulationUnavailable: boolean;
+  next: string | null;
+  release: () => Promise<void>;
+} | null> {
   if (!PublicLedgerProblemIdSchema.safeParse(requestedProblemId).success) return null;
-  const query = await db
-    .prepare(PROBLEM_DIGEST_SELECT)
+  const headSql = `SELECT id, public_seq, unlisted,
+    (SELECT source_cursor FROM projection_health WHERE problem_id = problems.id
+      AND status = 'drift') AS projection_drift_cursor
+    FROM problems WHERE id = ?
+    AND status <> 'private-draft' AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
+  const headRows = await db
+    .prepare(headSql)
     .bind(requestedProblemId)
-    .all<ProblemDigestRow>();
-  const rows = query.results ?? [];
-  if (rows.length === 0) return null;
-
-  const first = rows[0];
+    .all<{
+      id: string;
+      public_seq: number;
+      unlisted: number;
+      projection_drift_cursor: number | null;
+    }>();
+  const first = headRows.results[0];
   if (first === undefined) return null;
-  const status = ProblemFaceResponseSchema.shape.problem_status.parse(first.status);
   if (
-    first.problem_id !== requestedProblemId ||
-    !PublicLedgerProblemIdSchema.safeParse(first.problem_id).success ||
+    headRows.results.length !== 1 ||
+    first.id !== requestedProblemId ||
     !Number.isSafeInteger(first.public_seq) ||
-    first.public_seq < 0
+    first.public_seq < 0 ||
+    ![0, 1].includes(first.unlisted)
   ) {
-    throw new Error("the problem digest snapshot returned invalid problem metadata");
+    throw new FullPackSourceChangedError();
   }
-
-  const claims: Array<{ readonly id: string; readonly statement: string; readonly seq: number }> =
-    [];
-  let contentUnavailable = false;
-  for (const [index, row] of rows.entries()) {
-    const { claim_id: claimId, statement, source_seq: sourceSeq } = row;
-    const nullFields = [claimId, statement, sourceSeq].filter((value) => value === null).length;
-    if (nullFields === 3) continue;
-    if (
-      typeof claimId !== "string" ||
-      (statement !== null && typeof statement !== "string") ||
-      !Number.isSafeInteger(sourceSeq) ||
-      sourceSeq === null ||
-      sourceSeq < 1 ||
-      sourceSeq > first.public_seq
-    ) {
-      continue;
-    }
-    if (index === PROBLEM_DIGEST_CANDIDATE_LIMIT) continue;
-    if (statement === null) {
-      contentUnavailable = true;
-      continue;
-    }
-    claims.push({ id: claimId, statement, seq: sourceSeq });
-  }
-
-  const screeningNotices = await readPublicationNotices(
-    db,
-    first.problem_id,
-    claims.map((claim) => claim.seq),
-  );
-  // Bind formulation bytes to the captured public head and its statement version.
-  // Current controls and digest verification still apply to that exact publication.
-  const formulation = await currentPublishedFormulation(db, first);
-  const reviews = await statementReviewCandidates(
-    first,
-    formulation?.current_statement_version ?? null,
-  );
-  const resultReview = await resultReviewCandidates(first);
-  const resolution = await resolutionCandidates(db, first);
-  const headerCandidates = [
-    ...resolution.candidates,
-    ...resultReview.candidates.map((candidate) => ({
-      ...candidate,
-      stable_prefix: candidate.stable_prefix + resolution.candidates.length,
-    })),
-  ];
-  const driftNotice = projectionDriftNotice(first.projection_drift_cursor);
-  const formulationItems = formulationCandidates(formulation, headerCandidates.length);
-
-  const composed = composePack({
-    schema: "asimposium.problem-face.v1",
-    session: "PUBLIC-FACE",
-    problem: first.problem_id,
-    profile: "full",
-    cursor: first.public_seq,
-    requested_max_tokens: 8000,
-    viewer: { audience: "public", membership: "none", effective_permissions: [] },
-    candidates: [
-      ...headerCandidates,
-      ...formulationItems,
-      ...reviews.candidates.map((candidate, index) => ({
-        ...candidate,
-        stable_prefix: index + formulationItems.length + headerCandidates.length,
-      })),
-      ...claims.map((claim, index) => ({
-        kind: "claim",
-        id: claim.id,
-        scope: "ledger" as const,
-        tokens: 1,
-        untrusted: true,
-        body: `${claim.id} (seq ${claim.seq}): ${claim.statement}`,
-        ...(screeningNotices.has(claim.seq)
-          ? { screening_notice: screeningNotices.get(claim.seq)! }
-          : {}),
-        why_included: "a public claim on this problem in ledger sequence order",
-        stable_prefix:
-          index + formulationItems.length + reviews.candidates.length + headerCandidates.length,
-      })),
-    ],
-    action_candidates: [
-      ...resolution.actions,
-      ...resultReview.actions,
-      ...(formulation === null
-        ? []
-        : [
-            {
-              method: "GET" as const,
-              url: `/v1/problems/${first.problem_id}`,
-              why: "the complete current formulation, including fields omitted by the digest budget",
-              public_read: true,
-            },
-          ]),
-      ...claims.slice(0, 4).map((claim) => ({
-        method: "GET" as const,
-        url: `/p/${first.problem_id}/claims/${claim.id}.json`,
-        why: "statement, computed standing, evidence and reviews for this claim",
-        public_read: true,
-      })),
-      {
-        method: "GET",
-        url: `/p/${first.problem_id}.md`,
-        why: "the canonical readable Markdown face",
-        public_read: true,
-      },
-      {
-        method: "GET",
-        url: "/problems.json",
-        why: "the public problem index",
-        public_read: true,
-      },
-    ],
-    omitted: [
-      ...resolution.omitted,
-      ...resultReview.omitted,
-      ...reviews.omitted,
-      ...(formulation === null
-        ? [
-            {
-              reason: "formulation_unavailable",
-              detail: "The current formulation has no available, verified public source.",
-            },
-          ]
-        : []),
-      ...(contentUnavailable
-        ? [
-            {
-              reason: "content_unavailable",
-              detail: "Claim text without an available, matching source event is omitted.",
-            },
-          ]
-        : []),
-    ],
-    degraded: driftNotice,
-  });
-
-  const unlisted = first.unlisted === 1;
-  const projection = problemFaceProjection(
+  const through = query.through ?? first.public_seq;
+  if (through > first.public_seq || query.after > through)
+    throw new EventTailReadError("CURSOR_INVALID");
+  const witnesses: FullPackReadWitness[] = [
     {
-      ...composed,
-      preamble:
-        (unlisted ? `${UNLISTED_NOTICE} ` : "") +
-        composed.preamble +
-        " Statement reviews describe a pinned formulation, not a proof of its claims. Model and harness declarations are self-declared.",
+      sql: headSql,
+      bindings: [requestedProblemId],
+      rows: headRows.results,
     },
-    composed.items.length,
-    false,
-    status,
+  ];
+  const publication = await readPublishedProblemFormulation(
+    db,
+    requestedProblemId,
+    through,
+    (sql, bindings, rows) => witnesses.push({ sql, bindings, rows }),
+  );
+  const formulation =
+    publication === undefined
+      ? null
+      : {
+          ...publication.problem,
+          ...(publication.screening_notice === undefined
+            ? {}
+            : { screening_notice: publication.screening_notice }),
+        };
+  // Standing formulation context is immutable at the page cut and bounded
+  // independently so a large statement cannot starve contiguous event progress.
+  const candidates = formulationCandidates(formulation, 1);
+  const context: PackCandidate[] = [];
+  let contextBytes = 0;
+  for (const candidate of candidates) {
+    const bytes = new TextEncoder().encode(neutralizeUntrustedBody(candidate.body).text).byteLength;
+    if (contextBytes + bytes > 4096) break;
+    contextBytes += bytes;
+    context.push({
+      ...candidate,
+      why_included: `Published formulation at the frozen public cursor ${through}.`,
+    });
+  }
+  const unlisted = first.unlisted === 1;
+  const preamble =
+    (unlisted ? `${UNLISTED_NOTICE} ` : "") +
+    "Each page represents a contiguous range of public event sequences at a frozen cursor. " +
+    "Historical publications are not current scientific standing; current controls still apply. " +
+    "Model and harness declarations are self-declared.";
+  let release: (() => Promise<void>) | undefined;
+  const composed = await readFullPack(db, {
+    session: "PUBLIC-FACE",
+    problem: requestedProblemId,
+    through,
+    after: query.after,
+    requestedMaxTokens: 8000,
+    membership: "none",
+    publicFace: {
+      preamble,
+      context,
+      witnesses,
+      degraded: projectionDriftNotice(first.projection_drift_cursor),
+      captureRelease: (guard) => {
+        release = guard;
+      },
+      actions: [
+        ...(formulation === null
+          ? []
+          : [
+              {
+                method: "GET" as const,
+                url: `/p/${requestedProblemId}/statements/${formulation.current_statement_version}.json?through=${through}`,
+                why: "Read the complete verified formulation at this page's frozen cursor.",
+                public_read: true,
+              },
+            ]),
+        {
+          method: "GET",
+          url: `/p/${requestedProblemId}/claims.json?through=${through}`,
+          why: "Read current claim versions and their computed standing at this frozen cursor.",
+          public_read: true,
+        },
+        {
+          method: "GET",
+          url: `/p/${requestedProblemId}.md`,
+          why: "Read the current problem digest and lifecycle; it may be newer than this frozen page.",
+          public_read: true,
+        },
+      ],
+      omitted: [
+        {
+          reason: "historical_publications",
+          detail:
+            "Records contain allowlisted publication fields, not current scientific standing or a complete raw archive. Explicit content omissions and exact read links accompany each record.",
+        },
+        ...(formulation === null
+          ? [
+              {
+                reason: "formulation_unavailable",
+                detail:
+                  "The formulation at this frozen cursor has no available, verified public source.",
+              },
+            ]
+          : []),
+        ...(context.length < candidates.length
+          ? [
+              {
+                reason: "formulation_budget",
+                detail:
+                  "Whole formulation fields exceed the standing-context budget; follow the exact statement link.",
+              },
+            ]
+          : []),
+      ],
+    },
+  });
+  const projection = publicFullPackProjection(composed, preamble);
+  ProblemFullResponseSchema.parse(JSON.parse(renderProjection(projection, "json").body));
+  const control = FullPackPageSchema.parse(
+    JSON.parse(composed.items.find((item) => item.kind === "full-page")!.body),
   );
   const rendered = renderProjection(projection, "md");
-  return { body: rendered.body, unlisted, formulationUnavailable: formulation === null };
+  if (release === undefined) throw new FullPackSourceChangedError();
+  return {
+    body: rendered.body,
+    unlisted,
+    formulationUnavailable: formulation === null,
+    release,
+    next:
+      control.next_after === null
+        ? null
+        : `/p/${encodeURIComponent(requestedProblemId)}/full.md?through=${through}&after=${control.next_after}`,
+  };
 }
 
 function escapeToonField(val: string): string {
@@ -2406,20 +2410,87 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   // neutralization path. The JSON result is also checked against the exported
   // ledger contract before any bytes are served.
 
-  // W6.1 problem full pack: 8,000 token budget, full profile
+  // W6.1 public full history: bounded contiguous pages at one frozen cursor.
   app.on(["GET", "HEAD"], "/p/:id/full.md", async (c) => {
     const problemId = c.req.param("id");
     if (!problemId) return problemNotFound(c.req.method);
-    const face = await loadProblemFullFace(c.env.DB, problemId);
+    const params = new URL(c.req.url).searchParams;
+    const invalid = () => {
+      const response = problemDocument({
+        status: 400,
+        code: "CURSOR_INVALID",
+        title: "Invalid public full-page cursor",
+        detail:
+          "Use canonical nonnegative through and after integers. A continuation requires through, and after cannot exceed that captured public cursor. Unknown and repeated parameters are refused.",
+        fixHint:
+          "Start with /p/<problem-id>/full.md and follow its next action, preserving through.",
+        rule: "A5",
+        headers: { "cache-control": "private, no-store" },
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json#/properties/full_pack_query",
+          example: { path: "/p/P-EXAMPLE/full.md?through=25&after=20" },
+        },
+      });
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: response.status, headers: response.headers })
+        : response;
+    };
+    const unavailable = () => {
+      const response = problemDocument({
+        status: 500,
+        code: "INTERNAL_ERROR",
+        title: "The public full page is unavailable",
+        detail:
+          "A complete, currently public page could not be established. No continuation was advanced.",
+        fixHint: "Retry the unchanged request without advancing your saved cursor.",
+        headers: { "cache-control": "private, no-store", "retry-after": "5" },
+      });
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: response.status, headers: response.headers })
+        : response;
+    };
+    if (
+      [...params.keys()].some(
+        (key) =>
+          !["through", "after"].includes(key) ||
+          params.getAll(key).length !== 1 ||
+          !/^(0|[1-9][0-9]{0,15})$/.test(params.get(key) ?? ""),
+      )
+    )
+      return invalid();
+    const query = FullPackQuerySchema.safeParse({
+      profile: "full",
+      ...Object.fromEntries([...params.entries()].map(([key, value]) => [key, Number(value)])),
+    });
+    if (!query.success) return invalid();
+    let face: Awaited<ReturnType<typeof loadProblemFullFace>>;
+    try {
+      face = await loadProblemFullFace(c.env.DB, problemId, query.data);
+    } catch (error) {
+      if (error instanceof FullPackSourceUnavailableError) return problemNotFound(c.req.method);
+      if (error instanceof EventTailReadError && error.code === "CURSOR_INVALID") return invalid();
+      if (!(error instanceof FullPackSourceChangedError || error instanceof EventTailReadError))
+        throw error;
+      return unavailable();
+    }
     if (face === null) return problemNotFound(c.req.method);
     const etag = await strongEtag("markdown", face.body);
+    try {
+      await face.release();
+    } catch (error) {
+      if (error instanceof FullPackSourceUnavailableError) return problemNotFound(c.req.method);
+      if (error instanceof FullPackSourceChangedError) return unavailable();
+      throw error;
+    }
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
-      "cache-control": face.formulationUnavailable
-        ? "private, no-store"
-        : "public, max-age=0, must-revalidate",
+      "cache-control":
+        face.unlisted || face.formulationUnavailable
+          ? "private, no-store"
+          : "public, max-age=0, must-revalidate",
       ...indexingHeaders(face.unlisted),
       etag,
+      ...(face.next === null ? {} : { link: `<${face.next}>; rel="next"` }),
     };
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
     return new Response(c.req.method === "HEAD" ? null : face.body, {

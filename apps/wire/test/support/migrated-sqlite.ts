@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { D1Database } from "@cloudflare/workers-types";
 
 const MIGRATIONS = fileURLToPath(new URL("../../../../db/migrations/", import.meta.url));
 let image: { digest: string; bytes: Uint8Array } | undefined;
@@ -47,4 +48,73 @@ export function migratedSqlite(
     database.close();
     throw error;
   }
+}
+
+/** SQLite-backed D1 method adapter for route unit fixtures that previously
+ * needed no database. Executes the real migrations and SQL, including atomic
+ * RETURNING reads; this is not a substitute for the native Workerd/D1 lane. */
+export function migratedSqliteD1() {
+  const sqlite = migratedSqlite({ strict: true });
+  let tail: Promise<unknown> = Promise.resolve();
+  const prepare = (query: string) => {
+    const methods = (values: unknown[]) => ({
+      async first<T>(column?: string): Promise<T | null> {
+        const row = sqlite.prepare(query).get(...(values as any[])) as Record<
+          string,
+          unknown
+        > | null;
+        return (column === undefined ? (row ?? null) : (row?.[column] ?? null)) as T | null;
+      },
+      async all() {
+        const results = sqlite.prepare(query).all(...(values as any[]));
+        return {
+          success: true,
+          results,
+          meta: { changes: 0, rows_read: results.length, rows_written: 0 },
+        };
+      },
+      async run() {
+        const statement = sqlite.prepare(query);
+        if (statement.columnNames.length > 0) {
+          const results = statement.all(...(values as any[]));
+          return {
+            success: true,
+            results,
+            meta: { changes: 0, rows_read: results.length, rows_written: 0 },
+          };
+        }
+        const result = statement.run(...(values as any[]));
+        return {
+          success: true,
+          results: [],
+          meta: { changes: result.changes, rows_read: 0, rows_written: result.changes },
+        };
+      },
+    });
+    return { ...methods([]), bind: (...values: unknown[]) => methods(values) };
+  };
+  const db = {
+    prepare,
+    batch(statements: readonly { run(): Promise<unknown> }[]) {
+      const result = tail.then(async () => {
+        sqlite.exec("BEGIN");
+        try {
+          const results = [];
+          for (const statement of statements) results.push(await statement.run());
+          sqlite.exec("COMMIT");
+          return results;
+        } catch (error) {
+          sqlite.exec("ROLLBACK");
+          throw error;
+        }
+      });
+      tail = result.catch(() => undefined);
+      return result;
+    },
+    async exec(sql: string) {
+      sqlite.exec(sql);
+      return { count: 0, duration: 0 };
+    },
+  } as unknown as D1Database;
+  return { db, sqlite };
 }

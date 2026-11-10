@@ -121,6 +121,7 @@ import { sponsorSuspensionHttp } from "../moderation/sponsor-suspension-http.ts"
 import { fellowMayReadAssignedBriefs } from "../problems/fellow-briefs.ts";
 import { rebuildSearchIndex, searchIndexHealth } from "../search/index-health";
 import { getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
+import { admitFellowRead, fellowReadBudgetHeaders } from "../sessions/read-quota.ts";
 import { getWorkshopBudget } from "../sessions/workshop-quota.ts";
 import { AccountExportError, readSponsorDataExportPage } from "./account-export.ts";
 import {
@@ -1368,6 +1369,7 @@ export async function buildHelloResponse(input: {
   readonly service: EnrollmentService;
   readonly db?: D1Database;
   readonly sponsorPromotionRateLimit?: number | string;
+  readonly readBudget?: RateLimitBudget;
 }): Promise<EnrollmentHelloResponse> {
   const { binding, service, db, sponsorPromotionRateLimit } = input;
 
@@ -1636,6 +1638,7 @@ export async function buildHelloResponse(input: {
     },
     ...(promotionBudget === undefined ? {} : { promotion_budget: promotionBudget }),
     ...(workshopBudget === undefined ? {} : { workshop_budget: workshopBudget }),
+    ...(input.readBudget === undefined ? {} : { read_budget: input.readBudget }),
     ...(assignments !== undefined ? { assignments } : {}),
     ...(openSessions !== undefined ? { open_sessions: openSessions } : {}),
     ...(unreadReviews !== undefined ? { unread_reviews: unreadReviews } : {}),
@@ -2234,10 +2237,13 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono<{
       }
       const env = (c.env ?? {}) as Partial<Env>;
       const db = options.db ?? env.DB;
+      const readBudget = await admitFellowRead(db, binding.fellowId);
+      if (readBudget instanceof Response) return readBudget;
       const response = await buildHelloResponse({
         binding,
         service: options.service,
         db,
+        readBudget,
         sponsorPromotionRateLimit:
           options.sponsorPromotionRateLimit ?? env.SPONSOR_PROMOTION_RATE_LIMIT,
       });
@@ -2249,7 +2255,10 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono<{
         permissions: response.granted_scopes,
         projection: response,
       });
-      return c.json(response, 200, { "cache-control": "private, no-store" });
+      return c.json(response, 200, {
+        "cache-control": "private, no-store",
+        ...fellowReadBudgetHeaders(readBudget),
+      });
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
       return operational ?? enrollmentUnavailableResponse();

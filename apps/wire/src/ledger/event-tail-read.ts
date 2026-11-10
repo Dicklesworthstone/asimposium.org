@@ -291,6 +291,11 @@ export async function readPublicEventTail(
   db: EventTailDatabase,
   problemId: string,
   query: EventTailQuery,
+  capture?: (
+    sql: string,
+    bindings: readonly (string | number | null)[],
+    rows: readonly unknown[],
+  ) => void,
 ): Promise<{ page: EventTailPage; unlisted: boolean } | null> {
   if (
     !EVENT_TAIL_PROBLEM_PATTERN.test(problemId) ||
@@ -307,6 +312,11 @@ export async function readPublicEventTail(
     .prepare(EVENT_TAIL_SELECT)
     .bind(query.through ?? null, problemId, query.since, query.limit + 1)
     .all<TailRow>();
+  capture?.(
+    EVENT_TAIL_SELECT,
+    [query.through ?? null, problemId, query.since, query.limit + 1],
+    result.results,
+  );
   const first = result.results[0];
   if (first === undefined) return null;
   if (

@@ -49,6 +49,7 @@ const LANES = [
   "projection-legacy-backfill",
   "publication-context",
   "questions-retractions",
+  "read-quota",
   "reanchor-moves",
   "relations-gaps",
   "reviews",

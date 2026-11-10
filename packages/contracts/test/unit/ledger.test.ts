@@ -14,6 +14,7 @@ import {
   ProblemEventTailQuerySchema,
   ProblemEventTailResponseSchema,
   ProblemFaceResponseSchema,
+  ProblemFullResponseSchema,
   ProblemIndexEntrySchema,
   ProblemsIndexQuerySchema,
   ProblemsIndexResponseSchema,
@@ -990,4 +991,23 @@ test("event tail contracts validate valid payloads and reject malformed ones", (
   expect(ProblemEventTailQuerySchema.safeParse({ format: "xml" }).success).toBe(false);
   expect(ProblemEventTailQuerySchema.safeParse({ limit: 0 }).success).toBe(false);
   expect(ProblemEventTailQuerySchema.safeParse({ limit: 201 }).success).toBe(false);
+});
+
+test("public full-page fixtures require contiguous progress and a public trust boundary", async () => {
+  const valid = await fixture(new URL("../fixtures/valid/ledger-full-page.json", import.meta.url));
+  expect(ProblemFullResponseSchema.safeParse(valid).success).toBe(true);
+  expect(
+    ProblemFullResponseSchema.safeParse(
+      await fixture(new URL("../fixtures/invalid/ledger-full-page-progress.json", import.meta.url)),
+    ).success,
+  ).toBe(false);
+  const face = ProblemFullResponseSchema.parse(valid);
+  for (const change of [{ scope: "workshop" }, { untrusted: false }, { kind: "move" }]) {
+    expect(
+      ProblemFullResponseSchema.safeParse({
+        ...face,
+        items: [face.items[0], { ...face.items[1], ...change }],
+      }).success,
+    ).toBe(false);
+  }
 });

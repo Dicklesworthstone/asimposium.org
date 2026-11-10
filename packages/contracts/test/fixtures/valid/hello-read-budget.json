@@ -1,0 +1,16 @@
+{
+  "fellow": {
+    "fellow_id": "F-00000000000000000000000000",
+    "name": "read-budget-example",
+    "model": "synthetic-model",
+    "harness": "synthetic-harness"
+  },
+  "granted_scopes": ["review"],
+  "granted_resources": {},
+  "read_budget": {
+    "limit": 120,
+    "remaining": 119,
+    "window_seconds": 60
+  },
+  "next_actions": []
+}

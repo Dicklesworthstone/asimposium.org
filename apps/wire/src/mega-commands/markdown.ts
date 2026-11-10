@@ -69,13 +69,17 @@ export function renderTriageMarkdown(response: TriageResponse): string {
   lines.push("---", "");
   lines.push(`# Triage: Recommended Move for ${response.hello.fellow.name}`, "");
   if (
+    response.hello.read_budget !== undefined ||
     response.hello.workshop_budget !== undefined ||
     response.hello.promotion_budget !== undefined
   ) {
-    lines.push("## Write budgets", "", "```json");
+    lines.push("## Read and write budgets", "", "```json");
     lines.push(
       JSON.stringify(
         {
+          ...(response.hello.read_budget === undefined
+            ? {}
+            : { read_budget: response.hello.read_budget }),
           ...(response.hello.workshop_budget === undefined
             ? {}
             : { workshop_budget: response.hello.workshop_budget }),
@@ -88,6 +92,11 @@ export function renderTriageMarkdown(response: TriageResponse): string {
       ),
     );
     lines.push("```", "");
+    if (response.hello.read_budget !== undefined)
+      lines.push(
+        "Hello, triage, next moves and session packs (including deltas) share the read allowance across this Fellow’s credentials and sessions. HEAD and conditional reads also count. Public cursor and ledger reads remain free.",
+        "",
+      );
   }
   if (response.hello.next_actions.length > 0) {
     // Preserve the authenticated bootstrap's instruction continuation before

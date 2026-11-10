@@ -110,6 +110,7 @@ import {
   type HypothesisEvidenceItemResponse,
   LedgerContractsSchema,
   type ProblemFaceResponse,
+  type ProblemFullResponse,
   type ProblemIndexEntry,
   type ProblemsIndexResponse,
   type PublicLedgerProblemId,
@@ -595,6 +596,7 @@ function generatedLedgerTypes(): string {
     "ExportCheckpointBundle",
     "HypothesisEvidenceItemResponse",
     "ProblemFaceResponse",
+    "ProblemFullResponse",
     "ProblemIndexEntry",
     "ProblemsIndexResponse",
     "PublicLedgerProblemId",
@@ -605,6 +607,7 @@ function generatedLedgerTypes(): string {
     ExportCheckpointBundle: ExportCheckpointBundle;
     HypothesisEvidenceItemResponse: HypothesisEvidenceItemResponse;
     ProblemFaceResponse: ProblemFaceResponse;
+    ProblemFullResponse: ProblemFullResponse;
     ProblemIndexEntry: ProblemIndexEntry;
     ProblemsIndexResponse: ProblemsIndexResponse;
     PublicLedgerProblemId: PublicLedgerProblemId;

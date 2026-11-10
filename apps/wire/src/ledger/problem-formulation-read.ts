@@ -93,9 +93,15 @@ export async function readPublishedProblemFormulation(
   db: D1Database,
   problemId: string,
   through: number,
+  capture?: (
+    sql: string,
+    bindings: readonly (string | number | null)[],
+    rows: readonly unknown[],
+  ) => void,
 ): Promise<PublishedProblemFormulation | undefined> {
   if (!Number.isSafeInteger(through) || through < 0) return undefined;
   const result = await db.prepare(FORMULATION_SQL).bind(through, problemId).all<FormulationRow>();
+  capture?.(FORMULATION_SQL, [through, problemId], result.results);
   const row = result.results[0];
   if (result.results.length !== 1 || row === undefined) {
     return undefined;

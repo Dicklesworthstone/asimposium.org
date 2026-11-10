@@ -1,11 +1,17 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0141_workshop_write_rate_limit.sql`.
+schema through `0142_fellow_read_rate_limit.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
 deployed `0009_device_flow.sql` in `0010_device_flow_hardening.sql`.
+
+Migration `0142_fellow_read_rate_limit.sql` retains a bounded rolling-minute
+window for authenticated Hello, triage, next and session-pack reads. All
+credentials and sessions share one 120-read allowance per Fellow. Apply it
+before the matching Worker; authenticated orientation reads fail closed when
+the counter cannot be read or written. Public cursor and ledger reads are free.
 
 Migration `0141_workshop_write_rate_limit.sql` records the rolling 60-attempt
 workshop budget shared across a Fellow's sessions. Admission precedes private

@@ -52,6 +52,11 @@ export async function readPublishedProblemResolution(
   db: D1Database,
   problemId: string,
   through: number,
+  capture?: (
+    sql: string,
+    bindings: readonly (string | number | null)[],
+    rows: readonly unknown[],
+  ) => void,
 ): Promise<ProblemDetail["resolution"] | undefined> {
   if (
     typeof problemId !== "string" ||
@@ -136,8 +141,7 @@ export async function readPublishedProblemResolution(
   // The two source reads above are separate D1 snapshots. Recheck both exact
   // witnesses together so a hide, redaction or changed retained body between
   // reads cannot publish a copied conclusion from an unavailable source.
-  const current = await db
-    .prepare(`SELECT 1 AS available FROM problems p
+  const resolutionWitnessSql = `SELECT 1 AS available FROM problems p
     JOIN events resolution ON resolution.problem_id=p.id AND resolution.id=?
       AND resolution.seq=? AND resolution.payload_sha256=?
       AND resolution.type='problem.resolved' AND resolution.object_kind='problem'
@@ -157,26 +161,33 @@ export async function readPublishedProblemResolution(
       AND NOT ${eventContentHiddenSql("synthesis")}
       AND NOT EXISTS (SELECT 1 FROM events newer WHERE newer.problem_id=p.id
         AND newer.type='problem.resolved' AND newer.seq>resolution.seq AND newer.seq<=?)
-    LIMIT 1`)
-    .bind(
-      row.id,
-      row.seq,
-      row.payload_sha256,
-      row.object_version,
-      row.actor_sponsor_id,
-      row.created_at,
-      row.payload_json,
-      item.source.eventId,
-      item.source.seq,
-      item.source.payloadDigest,
-      closing.synthesis_id,
-      item.synthesis.authoring_principal,
-      item.source.payloadJson,
-      problemId,
-      through,
-      through,
-    )
+    LIMIT 1`;
+  const resolutionWitnessBindings = [
+    row.id,
+    row.seq,
+    row.payload_sha256,
+    row.object_version,
+    row.actor_sponsor_id,
+    row.created_at,
+    row.payload_json,
+    item.source.eventId,
+    item.source.seq,
+    item.source.payloadDigest,
+    closing.synthesis_id,
+    item.synthesis.authoring_principal,
+    item.source.payloadJson,
+    problemId,
+    through,
+    through,
+  ] as const;
+  const current = await db
+    .prepare(resolutionWitnessSql)
+    .bind(...resolutionWitnessBindings)
     .all<{ available: number }>();
+  // A composed public page may perform further awaited reads. Retain this
+  // exact two-source guard so its final transaction can recheck the closing
+  // synthesis even when that publication is outside the page's event window.
+  capture?.(resolutionWitnessSql, resolutionWitnessBindings, current.results);
   if (current.results.length !== 1 || current.results[0]?.available !== 1) return undefined;
   return ProblemDetailSchema.shape.resolution.safeParse({
     direction: resolved.resolution_direction,

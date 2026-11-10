@@ -607,6 +607,8 @@ export {
   ProblemEventTailResponseSchema,
   type ProblemFaceResponse,
   ProblemFaceResponseSchema,
+  type ProblemFullResponse,
+  ProblemFullResponseSchema,
   type ProblemIndexEntry,
   ProblemIndexEntrySchema,
   ProblemIndexTimestampSchema,

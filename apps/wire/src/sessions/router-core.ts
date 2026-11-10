@@ -496,6 +496,41 @@ function bearerToken(request: Request): string | undefined {
   return match?.[1]?.toLowerCase() === "bearer" ? match[2] : undefined;
 }
 
+/** Shared with the outer pack route, which admits one HTTP read before any
+ * internal review-queue/target reads. All inner handlers still recheck the
+ * credential; no request header can supply an authenticated binding. */
+export async function authenticateSessionFellow(
+  request: Request,
+  service: EnrollmentService,
+): Promise<
+  | { readonly ok: true; readonly binding: FellowCredentialBinding }
+  | { readonly ok: false; readonly response: Response }
+> {
+  const token = bearerToken(request);
+  let binding: FellowCredentialBinding | undefined;
+  try {
+    binding = token === undefined ? undefined : await service.credentialBinding(token);
+  } catch {
+    // Credential-store availability must not distinguish a known token from
+    // an unknown one, and the unread request stream still belongs to us.
+  }
+  if (binding === undefined) {
+    cancelUnconsumedRequestBody(request);
+    return {
+      ok: false,
+      response: validatedProblem({
+        status: 401,
+        code: "FELLOW_TOKEN_INVALID",
+        title: "Fellow bearer token is not accepted",
+        detail: "The bearer token was not accepted.",
+        fixHint:
+          "Obtain a token through an explicitly approved enrollment flow and send it in Authorization.",
+      }),
+    };
+  }
+  return { ok: true, binding };
+}
+
 function idempotencyKeyOrRefusal(request: Request, path: string): string | Response {
   const key = request.headers.get("idempotency-key");
   if (key === null || !/^[A-Za-z0-9._-]{1,160}$/.test(key)) {
@@ -1633,16 +1668,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   const isEventBudgetAbort = (error: unknown): boolean =>
     error instanceof Error && error.message.includes("EVENT_BUDGET_EXHAUSTED");
 
-  const fellowTokenInvalidProblem = (): Response =>
-    validatedProblem({
-      status: 401,
-      code: "FELLOW_TOKEN_INVALID",
-      title: "Fellow bearer token is not accepted",
-      detail: "The bearer token was not accepted.",
-      fixHint:
-        "Obtain a token through an explicitly approved enrollment flow and send it in Authorization.",
-    });
-
   // SQL's current clock is evaluated inside the publication transaction, after
   // any screening wait. A pause or expiry need not revoke the token itself.
   const LIVE_LEDGER_CREDENTIAL_SQL = `SELECT 1 AS live FROM fellow_tokens t
@@ -1807,28 +1832,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   }
 
-  async function authenticate(
-    request: Request,
-  ): Promise<
-    | { readonly ok: true; readonly binding: FellowCredentialBinding }
-    | { readonly ok: false; readonly response: Response }
-  > {
-    const token = bearerToken(request);
-    let binding: FellowCredentialBinding | undefined;
-    try {
-      binding = token === undefined ? undefined : await options.service.credentialBinding(token);
-    } catch {
-      // Credential-store availability must not distinguish a known token from
-      // an unknown one, and the unread request stream still belongs to us.
-      cancelUnconsumedRequestBody(request);
-      return { ok: false, response: fellowTokenInvalidProblem() };
-    }
-    if (binding === undefined) {
-      cancelUnconsumedRequestBody(request);
-      return { ok: false, response: fellowTokenInvalidProblem() };
-    }
-    return { ok: true, binding };
-  }
+  const authenticate = (request: Request) => authenticateSessionFellow(request, options.service);
 
   async function openSessionOf(
     db: Env["DB"],

@@ -118,6 +118,8 @@ test("mounted empty review selection returns a valid teaching 400 without privat
   expect(response.headers.get("content-type")).toContain("application/problem+json");
   expect(response.headers.get("cache-control")).toBe("private, no-store");
   expect(response.headers.get("retry-after")).toBeNull();
+  expect(response.headers.get("ratelimit-limit")).toBe("120");
+  expect(response.headers.get("ratelimit-remaining")).toBe("118");
   const raw = await response.text();
   const problem = ContractProblemSchema.parse(JSON.parse(raw));
   expect(problem).toMatchObject({ status: 400, code: "SCHEMA_INVALID", rule: "A5" });
@@ -151,6 +153,8 @@ test("mounted selection validator failure returns an opaque retryable 503 and re
   expect(response.headers.get("content-type")).toContain("application/problem+json");
   expect(response.headers.get("cache-control")).toBe("private, no-store");
   expect(response.headers.get("retry-after")).toBe("5");
+  expect(response.headers.get("ratelimit-limit")).toBe("120");
+  expect(response.headers.get("ratelimit-remaining")).toBe("119");
   const raw = await response.text();
   const problem = OpaqueProblemSchema.parse(JSON.parse(raw));
   expect(problem).toMatchObject({ status: 503, code: "INTERNAL_ERROR" });
@@ -169,7 +173,7 @@ test("mounted selection validator failure returns an opaque retryable 503 and re
   expect(ProblemDocumentSchema.parse(await recovered.json()).code).toBe("SCHEMA_INVALID");
 });
 
-test("mounted review selection still opens an exact public claim and preserves auth refusals", async () => {
+test("mounted review auto-selection spends one read slot for queue plus target and preserves auth refusals", async () => {
   const f = await mounted();
   const author = await f.enroll("review-boundary-author");
   const publication = await f.call(
@@ -183,8 +187,24 @@ test("mounted review selection still opens an exact public claim and preserves a
   );
   expect(publication.status, await publication.clone().text()).toBe(201);
   const claim = (await publication.json()) as { claim_id: string };
+  // One HTTP request internally reads the queue and then the exact target.
+  // Seed only one remaining slot: a second reservation would refuse the
+  // actual target, so the 200 below proves this composition is charged once.
+  f.sql
+    .query(`INSERT INTO fellow_read_windows (fellow_id, admitted_at_json)
+    SELECT fellow_id, ? FROM enrollment_fellows WHERE name = 'review-boundary-reader'`)
+    .run(JSON.stringify(Array.from({ length: 119 }, () => Date.now())));
   const response = await f.call(`${f.path}/pack?profile=review&max_tokens=8000`);
   expect(response.status, await response.clone().text()).toBe(200);
+  expect(response.headers.get("ratelimit-limit")).toBe("120");
+  expect(response.headers.get("ratelimit-remaining")).toBe("0");
+  expect(
+    f.sql
+      .query(`SELECT json_array_length(w.admitted_at_json) AS n
+    FROM fellow_read_windows w JOIN enrollment_fellows f ON f.fellow_id = w.fellow_id
+    WHERE f.name = 'review-boundary-reader'`)
+      .get(),
+  ).toEqual({ n: 120 });
   expect(
     new URL(
       response.headers.get("content-location") ?? "",

@@ -247,7 +247,6 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /p/:id/export.jsonl.gz": true,
   "GET /problems": true,
   "GET /problems.toon": true,
-  "GET /p/:id/full.md": true,
   "GET /p/:id/orders.md": true,
   "GET /p/:id/orders.json": true,
   "GET /p/:id/orders": true,
@@ -310,6 +309,8 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /problems.json": "Public problem index (JSON face).",
   "GET /p/:id.md": "Bounded per-problem digest pack (Markdown face).",
   "GET /p/:id.json": "Bounded per-problem digest pack (JSON face).",
+  "GET /p/:id/full.md":
+    "Cursor-paginated public ledger publications with typed content, explicit omissions and exact read links; never includes private workshop work.",
   "GET /p/:id/claims":
     "Paginated exact-version claims at one ledger snapshot; Markdown by default, JSON or HTML by Accept.",
   "GET /p/:id/claims.json":
@@ -863,6 +864,36 @@ function responseFor(
   origins: DiscoveryOrigins,
   method: string,
 ): Readonly<Record<string, unknown>> {
+  if (openApiPath === "/p/{id}/full.md") {
+    return {
+      "200": {
+        description:
+          "A bounded Markdown page of contiguous public sequences at one captured cursor. Full-page controls and Link rel=next advance across represented records, including records whose content is explicitly unavailable. Current content controls still apply; historical publications do not assert current scientific standing.",
+        content: { "text/markdown": { schema: { type: "string" } } },
+        headers: {
+          Link: {
+            description:
+              "When more sequences remain, the exact continuation also appears in next_actions.",
+            schema: { type: "string" },
+          },
+          ETag: {
+            description: "Validator for the exact currently available page.",
+            schema: { type: "string" },
+          },
+        },
+      },
+      "304": { description: "The page is unchanged after current source and visibility checks." },
+      default: {
+        description:
+          "Teaching refusal for malformed cursors, unavailable public sources or changed content. Unknown and duplicate query parameters are refused.",
+        content: {
+          "application/problem+json": {
+            schema: { $ref: `${origins.agent}/schemas/problem.v1.json` },
+          },
+        },
+      },
+    };
+  }
   if (openApiPath === "/v1/problem-briefs" || openApiPath === "/v1/problem-briefs/read") {
     return {
       "200": {
@@ -1130,6 +1161,26 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
     responses: responseFor(operation.openApiPath, origins, operation.method),
     "x-asimposium-auth": operation.auth,
     parameters: [
+      ...(operation.openApiPath === "/p/{id}/full.md"
+        ? [
+            [
+              "through",
+              "Capture the first page's cursor and preserve it unchanged for every continuation; later publications are excluded, current content withdrawals still apply.",
+            ],
+            [
+              "after",
+              "Use next_after unchanged with through. At most 20 public sequences are examined per page; omitted bodies still have a represented sequence and do not block progress.",
+            ],
+          ].map(([name, description]) => ({
+            name,
+            in: "query",
+            required: false,
+            description,
+            schema: {
+              $ref: `${origins.agent}/schemas/sessions.v1.json#/properties/full_pack_query/properties/${name}`,
+            },
+          }))
+        : []),
       ...(operation.openApiPath === "/v1/problem-briefs" ||
       operation.openApiPath === "/v1/problem-briefs/read"
         ? [

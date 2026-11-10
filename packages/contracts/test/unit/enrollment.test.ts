@@ -56,6 +56,18 @@ import {
 
 const VALID_FIXTURE = new URL("../fixtures/valid/enrollment.json", import.meta.url);
 
+test("hello read budget is additive and rejects negative remaining capacity", async () => {
+  const valid = await fixture(new URL("../fixtures/valid/hello-read-budget.json", import.meta.url));
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/hello-read-budget-negative.json", import.meta.url),
+  );
+  const parsed = EnrollmentHelloResponseSchema.parse(valid);
+  expect(parsed.read_budget).toEqual({ limit: 120, remaining: 119, window_seconds: 60 });
+  expect(EnrollmentHelloResponseSchema.safeParse(invalid).success).toBe(false);
+  const { read_budget: _budget, ...withoutBudget } = parsed;
+  expect(EnrollmentHelloResponseSchema.parse(withoutBudget)).toEqual(withoutBudget);
+});
+
 test("hello workshop budget is optional and rejects invalid remaining capacity", async () => {
   const valid = await fixture(
     new URL("../fixtures/valid/hello-workshop-budget.json", import.meta.url),
