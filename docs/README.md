@@ -21,10 +21,13 @@ revision; later documentation and tracker commits do not imply another test run.
 delivered the public instrument promised by Fable. The main obstacle is now
 finishing and deploying a qualified candidate, then earning the external
 collaboration, safety and operational evidence. Rebuilding the existing source
-subsystems would miss that obstacle. Current candidate `7dd91148` passes all
-eight typecheck, lint and unfiltered unit groups, the five required contract
-groups and 438 production-browser checks in the primary execution. Independent
-component and causal checks pass; its complete unfiltered root run is pending.
+subsystems would miss that obstacle. Candidate `7dd91148` passes all eight
+typecheck, lint and unfiltered unit groups in both primary and independent
+execution, plus the required contract and 438 production-browser checks.
+Its three narrow repairs are independently accepted. A later external merge
+adds workshop admission and Fellow calibration; its repaired successor
+`babf6766` is undergoing separate qualification. The older passes do not
+qualify that new source.
 The earlier canonical-runner acceptance remains bound to `e4b21525`. Broad
 incoming JavaScript scanner coverage remains incomplete and prevents complete
 integration acceptance. Deployed acceptance remains separate.**
@@ -90,10 +93,48 @@ parsed and exercised, not falsely claimed as scanned JavaScript. Report-only
 scans return exit three with nothing analyzed. Neither observation completes
 the older incoming integration scan or establishes a security-clean project.
 
-Independent full-root execution and original-criterion leaf acceptance remain
-pending. These observations do not close the three repairs or their parents.
+The independent unfiltered root at `7dd91148` also passes all eight groups in
+1,457.24 seconds, normal owner exit zero at 05:17:29.960 UTC. Its 2,664 source
+and installed SDK hashes match the primary receipts. The different reviewer
+then closes only `asimposiumorg-mbp.1`, `asimposiumorg-k9o.2` and
+`asimposiumorg-dn6.3`, with original-criterion and source-line maps in comments
+3036–3038. Their parents and broader integration requirements remain open.
 Receipts are in `e2e/artifacts/honors-links-20261110-coppertiger/` and
 `e2e/artifacts/independent-20261110-honors-citations-recovery-09f36cfc/`.
+
+### Incoming workshop admission and Fellow calibration — `babf6766`
+
+While that independent root was running, main advanced externally to
+`a0605833`: migration 0141 adds atomic rolling workshop admission, and Fellow
+calibration is derived from immutable scientific records. That merge was not
+performed by this repair session. Preserve its 28 application/data paths and
+the original scientific, privacy and quota requirements; the earlier repairs
+do not establish that the expanded source is green.
+
+The first checks against the actual merge find four TypeScript errors and two
+failing replay tests. The latter expire a 24-hour receipt while leaving its
+60-second admission fresh; changed-target reuse is correctly refused. The
+narrow repair in `babf6766` ages only the matching admission in those two
+fixtures and retains every original race, replacement, response and storage
+assertion. It also repairs the test types and adds the two new reachable
+modules to the strict S-2 source inventory. No runtime quota, authorization,
+TTL, scientific fold or assertion is weakened. The migration boundary is now
+documented through `0141_workshop_write_rate_limit.sql`.
+
+Focused repaired checks pass, including 389 affected Worker tests, actual
+local Workerd/D1/R2 quota and scientific journeys, and all 438 production-browser
+checks. The frozen successor's full root and independent qualification are
+still running; these focused results do not substitute for them.
+
+The stock diff scan again crashes in its scheduler. The stock staged scan and
+the documented serial diff scan each complete the same 4,985 findings across
+five supported inputs. The reviewer inspects all 185 critical/warning sites;
+the one critical match is a test comparing Response object identity. Information
+classes are reviewed without claiming an individual review of all 4,800
+information sites. No scanner rule is suppressed or changed. This completes
+the six-repair scan scope, not the older full incoming JavaScript audit or a
+scanner-engine fix. `asimposiumorg-df71.3` and `asimposiumorg-g4b4` remain open.
+Receipts are in `e2e/artifacts/incoming-a0605833-20261110-coppertiger/`.
 
 ### Canonical local gauntlet command — `e4b21525`
 
