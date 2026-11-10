@@ -26,8 +26,12 @@ typecheck, lint and unfiltered unit groups in both primary and independent
 execution, plus the required contract and 438 production-browser checks.
 Its three narrow repairs are independently accepted. A later external merge
 adds workshop admission and Fellow calibration; its repaired successor
-`babf6766` is undergoing separate qualification. The older passes do not
-qualify that new source.
+`babf6766` passes the component checks but its full root is red on four token
+harness cases. `dd0f63db` repairs their barrier, then exposes a separate
+response-status failure. Candidate `526398d7` follows the existing pending
+response contract and passes typecheck, lint, native checks and all eight
+unfiltered root groups in both primary and independent execution. The older
+failed runs remain recorded separately.
 The earlier canonical-runner acceptance remains bound to `e4b21525`. Broad
 incoming JavaScript scanner coverage remains incomplete and prevents complete
 integration acceptance. Deployed acceptance remains separate.**
@@ -102,7 +106,7 @@ then closes only `asimposiumorg-mbp.1`, `asimposiumorg-k9o.2` and
 Receipts are in `e2e/artifacts/honors-links-20261110-coppertiger/` and
 `e2e/artifacts/independent-20261110-honors-citations-recovery-09f36cfc/`.
 
-### Incoming workshop admission and Fellow calibration — `babf6766`
+### Incoming workshop admission and Fellow calibration — `526398d7`
 
 While that independent root was running, main advanced externally to
 `a0605833`: migration 0141 adds atomic rolling workshop admission, and Fellow
@@ -123,8 +127,62 @@ documented through `0141_workshop_write_rate_limit.sql`.
 
 Focused repaired checks pass, including 389 affected Worker tests, actual
 local Workerd/D1/R2 quota and scientific journeys, and all 438 production-browser
-checks. The frozen successor's full root and independent qualification are
-still running; these focused results do not substitute for them.
+checks. The frozen successor's unfiltered root finishes with seven groups
+passing and one failing: Worker 7,251 pass and four fail, all in the token
+lifecycle harness. Each retained failure stops before its intended assertion
+with `workshop_push-session-barrier-did-not-observe-both-real-d1-batches`.
+The new earlier quota election lets only one request reach the old replay
+barrier. This is a concrete harness boundary mismatch, not evidence that the
+panic or log-leak plants caught their intended defect. The independent full
+root is held while that mismatch is repaired. Original assertions and limits
+remain in force.
+
+Successor `dd0f63db` moves only the local barrier to the earlier real workshop
+admission transaction and identifies that stage in the existing receipt.
+The original concurrent requests, exact 200/201 responses, byte equality,
+side-effect counts, token-safety plants and cleanup limits are unchanged.
+An experimental pending-response retry was removed before freezing because
+the actual native races all completed without it. The final standalone token
+lifecycle script passes. Typecheck and lint each pass all eight groups; the
+new unfiltered root is also red: seven groups pass, while one Worker panic
+plant stops at the workshop response-status assertion before reaching its
+intended panic assertion. Worker passes 7,254 tests and fails one. An independent
+native baseline fails that same status assertion. Neither run retained its
+initial response pair; one safe diagnostic passes and leaves those earlier
+pairs unclassified.
+The application and other native/browser inputs remain unchanged from the
+earlier `babf6766` component executions; those receipts retain that attribution.
+
+The existing API permits an identical admitted request to return a private
+pending 409. `526398d7` deliberately adapts the harness to that contract: after
+both initial requests finish, require a completed 201 owner and a strict pending
+problem, then repeat the identical request once and require a byte-identical
+200 replay. Original final status, row-count, token-safety, panic and cleanup
+assertions still run. Initial statuses, canonical codes and the recovery count
+are recorded, so a recovered response cannot masquerade as an initial 200.
+
+A controlled schedule at the existing real-D1 proxy actually produces 201/409
+and completes the whole proof with recovery. Disabling only recovery fails
+the original status assertion; exact restoration passes again. The primary
+execution separately reproduces that controlled positive. The 200 ms scheduling
+delay exists only in retained experiment variants and is absent from the frozen
+source. These results prove the allowed schedule, not the missing status pairs
+from the earlier failures.
+
+Primary and independent `526398d7` typecheck and lint each pass all eight groups.
+Clean native controls pass; the one-line old barrier mapping fault reaches
+the original missing-arrivals assertion and exact restoration passes. Its
+primary unfiltered root passes all eight groups in 1,498.04 seconds, normal
+owner exit zero at 07:53:34.611 UTC: Worker 7,255 tests and Agora 1,057. All
+2,671 source and installed SDK hashes remain unchanged and match its typecheck
+and lint receipts. The independent full root runs only after that terminal
+and also passes all eight groups in 1,454.79 seconds, normal exit zero at
+08:18:36.368 UTC, with the same 7,255 Worker and 1,057 Agora tests. Its source
+and SDK maps match the primary run and main before the final documentation-only
+edits. Qualification remains pinned to `526398d7`. Literal Worker
+expectation counts are retained separately (primary 37,447; independent 37,446);
+no cause is inferred from that difference. All verifier jobs end and its lease
+is released. These source results do not close broader integration acceptance.
 
 The stock diff scan again crashes in its scheduler. The stock staged scan and
 the documented serial diff scan each complete the same 4,985 findings across
@@ -133,8 +191,25 @@ the one critical match is a test comparing Response object identity. Information
 classes are reviewed without claiming an individual review of all 4,800
 information sites. No scanner rule is suppressed or changed. This completes
 the six-repair scan scope, not the older full incoming JavaScript audit or a
-scanner-engine fix. `asimposiumorg-df71.3` and `asimposiumorg-g4b4` remain open.
+scanner-engine fix. A separate scan of the 31 new incoming paths also completes:
+26 supported inputs, 7,886 complete findings, all 515 critical/warning contexts
+reviewed against actual source, with no additional defect established.
+Information classes are reviewed separately. This still does not complete
+the older full incoming scope. `asimposiumorg-df71.3` and
+`asimposiumorg-g4b4` remain open.
 Receipts are in `e2e/artifacts/incoming-a0605833-20261110-coppertiger/`.
+
+The final public refresh at 08:23 UTC still finds production and staging
+`/capabilities` at `0.1.0-draft`, with the same retained body hashes. The seven
+required Cloudflare/Vercel pipeline variables remain absent in this session;
+this does not audit cached credentials or provider state. Deployment authority,
+existing D1 lineage through source migration 0141, and the sanctioned
+Worker-before-Agora staging run remain operator work. The cost verifier reports
+blocked 78, `S2_COST_MEASUREMENT_UNAVAILABLE`; the required measurement is absent.
+Real Google approval, hosted screening, staging G-C, external cost/load and
+recovery evidence remain separate. The optional Rust CLI is not qualified by
+these TypeScript checks. Current disk headroom is an observation, not a diagnosis
+or closure of the earlier storage incident.
 
 ### Canonical local gauntlet command — `e4b21525`
 

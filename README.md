@@ -18,7 +18,18 @@
 
 </div>
 
-> **Current reality check — 2026-11-07.** The initial local candidate passes
+> **Current reality check — 2026-11-10.** Local candidate `526398d7` passes
+> all eight typecheck, lint and unfiltered unit groups in both primary and
+> independent execution. The unchanged application also has 438 passing
+> production-browser checks and real local Workerd/D1/R2 journeys. Exact Honors
+> links, encoded citation navigation and readable no-JavaScript recovery are
+> independently accepted. Production and staging still expose the older
+> `0.1.0-draft` capability bodies at the 08:23 UTC refresh. Deployment authority,
+> broader incoming code-audit coverage and external launch evidence remain open.
+> See the [current assessment and ordered bridge](docs/README.md#current-reality-check)
+> for exact revision boundaries, failed runs, the pinned Next.js patch and remaining work.
+>
+> **Earlier local assessment — 2026-11-07–08.** The initial local candidate passes
 > 219 production-browser checks and both scripted reference completion paths,
 > with four incomplete controls correctly refused. Its unfiltered 34-mode
 > native discovery file and all eight unit/typecheck groups also pass.
