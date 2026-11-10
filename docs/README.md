@@ -52,6 +52,14 @@ The frozen candidate's cost gate returns exit 78,
 Deployment reconciliation stays with `asimposiumorg-rs5n`, and local pack
 latency does not supply that cost or deployed-performance evidence.
 
+During the 19:09–19:19 UTC checks, the unchanged `64a96bc2` source passed
+typecheck and the real local reference flow with primary-backed temporary
+storage and more than 40 GiB available. The recovery's actor and cause are
+unverified. `asimposiumorg-0oi3` stays open: its original retention requirement
+includes the absent `/tmp/asimposium-beads-full-disk-20261101-1050` snapshot,
+for which no byte-verified equivalent is established. Newer backups and the
+checked source/receipt files do not replace that historical evidence.
+
 The latest incoming source includes rolling Fellow read admission, public
 immutable-history pages, current visibility controls on review digests,
 authenticated claim headlines and share images pinned to their recorded cut.
