@@ -1344,12 +1344,18 @@ seed_session_problem() {
   }
   versions_json="$("${BUN}" --eval '
     import { claimContentDigest } from "./apps/wire/src/krater/claim-version.ts";
-    import { sha256Hex } from "./apps/wire/src/krater/krater.ts";
+    import { canonicalClaimPayload, sha256Hex } from "./apps/wire/src/krater/krater.ts";
     const versions = [];
     for (let seq = 1; seq <= 130; seq += 1) {
-      versions.push(["C-" + seq, await claimContentDigest({
+      const claimId = "C-" + seq;
+      const content = {
         kind: "lemma", statement: "pack-measurement-" + seq, falsifier: null,
-      }, sha256Hex)]);
+      };
+      const payloadJson = canonicalClaimPayload({ claimId, ...content });
+      versions.push([
+        claimId, await claimContentDigest(content, sha256Hex),
+        await sha256Hex(payloadJson), payloadJson,
+      ]);
     }
     console.log(JSON.stringify(versions));
   ')" || {
@@ -1357,8 +1363,9 @@ seed_session_problem() {
     return 1
   }
   # SQL read-benchmark fixtures, not promotion or integrity-chain proof. Each
-  # readable claim has an explicit source and immutable version; keep D1's
-  # head and contiguity guards. Packs must never fall back to mutable text.
+  # readable claim has an explicit source and immutable version, with its exact
+  # canonical publication bytes and SHA-256; keep D1's head and contiguity
+  # guards. Packs must never fall back to mutable text.
   for ((claim_seq = 1; claim_seq <= 130; claim_seq++)); do
     publication_sql+="
       UPDATE problems SET public_seq = ${claim_seq} WHERE id = '${PACK_MEASUREMENT_PROBLEM_ID}';
@@ -1370,8 +1377,9 @@ seed_session_problem() {
       FROM claims WHERE problem_id = '${PACK_MEASUREMENT_PROBLEM_ID}' AND source_seq = ${claim_seq};
     "
   done
-  run_owned_deadline "${WRANGLER_NODE}" "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
-    --command "
+  # Retain the full fixture without transporting canonical bodies through one
+  # command argument (Linux limits each argument independently of the owner).
+  cat >"${STATE_DIR}/session-seed.sql" <<SQL
       INSERT INTO problems (id, title, public_seq, created_at, updated_at, chain_digest, chain_version)
       VALUES ('${SESSION_PROBLEM_ID}', 'Session replay collision', 0, '${now}', '${now}', '${genesis}', 2);
       INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version)
@@ -1390,8 +1398,10 @@ seed_session_problem() {
       VALUES ('${PACK_MEASUREMENT_PROBLEM_ID}', 'complete', 0, '${now}', 2);
       WITH RECURSIVE claim_numbers(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM claim_numbers WHERE value < 130)
       INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
-      SELECT 'C-' || value, '${PACK_MEASUREMENT_PROBLEM_ID}', 'pack-measurement-' || value,
-        printf('%064x', value), value, '${now}' FROM claim_numbers;
+      SELECT 'C-' || n.value, '${PACK_MEASUREMENT_PROBLEM_ID}', 'pack-measurement-' || n.value,
+        json_extract(v.value, '\$[2]'), n.value, '${now}'
+      FROM claim_numbers n JOIN json_each('${versions_json}') v
+        ON json_extract(v.value, '\$[0]') = 'C-' || n.value;
       INSERT INTO claim_versions
         (claim_id, problem_id, version, kind, statement, falsifier,
           content_digest, editor_fellow_id, created_at)
@@ -1402,10 +1412,14 @@ seed_session_problem() {
       WHERE c.problem_id = '${PACK_MEASUREMENT_PROBLEM_ID}';
       ${publication_sql}
       INSERT INTO event_content (event_id, payload_sha256, payload_json)
-      SELECT 'E-pack-measurement-' || source_seq, payload_sha256,
-        json_object('statement', statement)
-      FROM claims WHERE problem_id = '${PACK_MEASUREMENT_PROBLEM_ID}';
-    " \
+      SELECT 'E-pack-measurement-' || c.source_seq, c.payload_sha256,
+        json_extract(v.value, '\$[3]')
+      FROM claims c JOIN json_each('${versions_json}') v
+        ON json_extract(v.value, '\$[0]') = c.id
+      WHERE c.problem_id = '${PACK_MEASUREMENT_PROBLEM_ID}';
+SQL
+  run_owned_deadline "${WRANGLER_NODE}" "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
+    --file "${STATE_DIR}/session-seed.sql" \
     --json >"${SESSION_SEED_LOG}" 2>"${SESSION_SEED_ERROR_LOG}" || {
     fail "TOKEN_LIFECYCLE_SESSION_SEED_FAILED"
     return 1
