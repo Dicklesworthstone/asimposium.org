@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
 
 import {
   CONTRACT_PROBLEM_CODES,
@@ -9,6 +11,39 @@ import {
   ProblemCodeSchema,
   ProblemDocumentSchema,
 } from "../../src/problem.ts";
+
+test("route recovery goldens agree in Zod and the published JSON Schema", async () => {
+  const published = await Bun.file(
+    new URL("../../generated/problem.schema.json", import.meta.url),
+  ).json();
+  const ajv = new Ajv2020({ strict: true });
+  addFormats(ajv);
+  const validate = ajv.compile({
+    $schema: published.$schema,
+    $defs: published.$defs,
+    ...published.properties.problem_document,
+  });
+  for (const [directory, name, valid] of [
+    ["valid", "route-recovery", true],
+    ["invalid", "route-recovery-policy", false],
+    ["invalid", "route-recovery-external-url", false],
+    ["invalid", "route-recovery-extra-body", false],
+  ] as const) {
+    const document = await Bun.file(
+      new URL(`../fixtures/${directory}/${name}.json`, import.meta.url),
+    ).json();
+    expect(ProblemDocumentSchema.safeParse(document).success, name).toBe(valid);
+    expect(validate(document), `${name}: ${ajv.errorsText(validate.errors)}`).toBe(valid);
+  }
+  const recovery = await Bun.file(
+    new URL("../fixtures/valid/route-recovery.json", import.meta.url),
+  ).json();
+  for (const code of OPAQUE_PROBLEM_CODES.filter((code) => code !== "ROUTE_NOT_FOUND")) {
+    const policy = { ...recovery, code, type: `${PROBLEM_TYPE_PREFIX}${code}` };
+    expect(ProblemDocumentSchema.safeParse(policy).success, code).toBe(false);
+    expect(validate(policy), code).toBe(false);
+  }
+});
 
 const VALID_MINT_BODY_INVALID = new URL(
   "../fixtures/valid/problem-mint-body-invalid.json",

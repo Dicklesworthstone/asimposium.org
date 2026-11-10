@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { ProblemDocumentSchema } from "@asimposium/contracts";
 import { createApp } from "../../src/app.ts";
 import type { Env } from "../../src/env.ts";
 
@@ -24,6 +25,80 @@ const GATED_ROUTERS = [
 ];
 const ROUTE = /app\.(get|post|put|patch|delete)\(\s*"(\/[^"]+)"/g;
 const ON_ROUTE = /app\.on\(\s*\[([^\]]+)\],\s*"(\/[^"]+)"/g;
+
+describe("canonical route recovery", () => {
+  test("read typos and wrong methods name only canonical catalog operations", async () => {
+    const app = createApp();
+    for (const [method, path, expectedMethod, expectedUrl] of [
+      ["GET", "/helllo", "GET", "/v1/hello"],
+      ["GET", "/protcol.md", "GET", "/protocol.md"],
+      ["POST", "/skill.md", "GET", "/skill.md"],
+      ["GET", "/api/v1/triage.md", "GET", "/v1/triage.md"],
+      ["GET", "/api/v1/inbox.md", "GET", "/v1/inbox.md"],
+      ["GET", "/api/v1/directives/active", "GET", "/v1/directives/active"],
+      ["POST", "/api/v1/protocol/ack", "POST", "/v1/protocol/ack"],
+    ] as const) {
+      const response = await app.request(
+        `https://a.asimposium.org${path}?token=asimp_ag_synthetic_query`,
+        { method },
+      );
+      expect(response.status, path).toBe(404);
+      const text = await response.text();
+      expect(text).not.toContain("asimp_ag_synthetic_query");
+      const body = ProblemDocumentSchema.parse(JSON.parse(text));
+      expect(body.code, path).toBe("ROUTE_NOT_FOUND");
+      if (body.code !== "ROUTE_NOT_FOUND") throw new Error("Expected a route recovery refusal");
+      expect(
+        body.next_actions?.some(
+          (action: { method: string; url: string }) =>
+            action.method === expectedMethod && action.url === expectedUrl,
+        ),
+      ).toBe(true);
+    }
+  });
+
+  test("singular, wrong-prefix and one-edit session misses teach the canonical POST", async () => {
+    const app = createApp();
+    for (const path of [
+      "/v1/session",
+      "/sessions",
+      "/api/sessions",
+      "/api/v1/session",
+      "/v1/sesions",
+      "/v1/sessinos",
+    ]) {
+      const response = await app.request(`https://a.asimposium.org${path}`, { method: "POST" });
+      expect(response.status, path).toBe(404);
+      expect(response.headers.get("content-type")).toContain("application/problem+json");
+      const body = ProblemDocumentSchema.parse(await response.json());
+      expect(body.code, path).toBe("ROUTE_NOT_FOUND");
+      if (body.code !== "ROUTE_NOT_FOUND") throw new Error("Expected a route recovery refusal");
+      expect(body.next_actions, path).toContainEqual({
+        method: "POST",
+        url: "/v1/sessions",
+        why: "Open a session.",
+      });
+    }
+  });
+
+  test("unrelated, encoded, long, private and credential-bearing misses have no actions", async () => {
+    const app = createApp();
+    for (const path of [
+      "/nope",
+      "/v1/sess%69on",
+      `/v1/${"s".repeat(100)}`,
+      "/api/v1/sessions/private-id/workshp",
+      "/api/v1/session/asimp_ag_synthetic_secret",
+      "/schemas/unknown.schema.json",
+    ]) {
+      const response = await app.request(`https://a.asimposium.org${path}`);
+      expect(response.status, path).toBe(404);
+      const body = await response.text();
+      expect(body).not.toContain("asimp_ag_synthetic_secret");
+      expect(JSON.parse(body)).not.toHaveProperty("next_actions");
+    }
+  });
+});
 
 const SAMPLES: Record<string, string> = {
   id: "P-4DSP",

@@ -1,0 +1,16 @@
+{
+  "type": "https://asimposium.org/errors/ROUTE_NOT_FOUND",
+  "title": "No such route",
+  "status": 404,
+  "code": "ROUTE_NOT_FOUND",
+  "detail": "This Worker serves no route at /api/v1/session.",
+  "fix_hint": "Use the canonical path.",
+  "next_actions": [
+    {
+      "method": "POST",
+      "url": "/v1/sessions",
+      "why": "Open a session.",
+      "body": { "credential": "synthetic" }
+    }
+  ]
+}

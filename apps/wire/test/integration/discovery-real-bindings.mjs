@@ -3,11 +3,13 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import {
+  ActiveDirectiveResponseSchema,
   AnswerQuestionRequestSchema,
   AskQuestionRequestSchema,
   ConflictsListResponseSchema,
   LeaseQuestionRequestSchema,
   NormalizeConflictRequestSchema,
+  ProblemDocumentSchema,
   ResolveConflictRequestSchema,
   RetractRequestSchema,
   WithdrawQuestionRequestSchema,
@@ -164,7 +166,12 @@ async function runDiscovery() {
     const schemas = (await readdir(generatedDirectory))
       .filter((name) => name.endsWith(".schema.json") && !privateSchemas.has(name))
       .sort();
-    assert.equal(schemas.length, 22, "file-backed public schema census includes readiness");
+    assert.equal(
+      schemas.length,
+      23,
+      "file-backed public schema census includes workshop-directory",
+    );
+    assert.ok(schemas.includes("workshop-directory.schema.json"));
     let bytes = 0;
     for (const name of schemas) {
       const expected = await readFile(`${generatedDirectory}/${name}`);
@@ -197,7 +204,12 @@ async function runDiscovery() {
       bytes += actual.length;
     }
     console.log(
-      JSON.stringify({ stage: "file-backed-schema-byte-parity", schemas: 20, requests: 80, bytes }),
+      JSON.stringify({
+        stage: "file-backed-schema-byte-parity",
+        schemas: schemas.length,
+        requests: schemas.length * 4,
+        bytes,
+      }),
     );
   }
   await worker.applyD1Migrations("DB");
@@ -755,6 +767,13 @@ async function runDiscovery() {
   const author = await enroll("discovery-author", "usr_discoveryauthor");
   const reviewer = await enroll("discovery-reviewer", "usr_discoveryreviewer");
   console.log(JSON.stringify({ stage: "fellows-enrolled" }));
+  const readMiss = await call("/api/v1/directives/active", undefined, author, 404);
+  ProblemDocumentSchema.parse(readMiss);
+  const readAction = readMiss.next_actions?.find((action) => action.method === "GET");
+  assert.ok(readAction, "nested static read recovery must teach a canonical action");
+  assert.equal(readAction.url, "/v1/directives/active");
+  await call(readAction.url, undefined, undefined, 401);
+  ActiveDirectiveResponseSchema.parse(await call(readAction.url, undefined, author));
   const privateCanary = "PRIVATE_WORKSHOP_DISCOVERY_CANARY";
   const privateBody = `${privateCanary}\n${"Synthetic private scratch work. ".repeat(80)}`;
   const publicCanary = [
@@ -787,12 +806,40 @@ async function runDiscovery() {
   await checkUnscopedClaim();
   for (const problem of ["P-DISC-A", "P-DISC-B"]) {
     await fixtures.seedProblem(problem);
-    const session = await call(
-      "/v1/sessions",
-      { problem_id: problem, intent: "prove" },
-      author,
-      201,
-    );
+    let sessionRoute = "/v1/sessions";
+    if (problem === "P-DISC-A") {
+      const countSessions = async () =>
+        (
+          await env.DB.prepare("SELECT COUNT(*) AS total FROM sessions WHERE problem_id = ?")
+            .bind(problem)
+            .first()
+        ).total;
+      assert.equal(await countSessions(), 0, "recovery starts without a session");
+      const miss = await call(
+        "/api/v1/session",
+        { problem_id: problem, intent: "prove" },
+        author,
+        404,
+      );
+      ProblemDocumentSchema.parse(miss);
+      assert.equal(miss.code, "ROUTE_NOT_FOUND");
+      assert.equal(await countSessions(), 0, "the mistaken POST must not execute");
+      const action = miss.next_actions?.find((action) => action.method === "POST");
+      assert.ok(action, "the real recovery lane requires a server-authored POST next action");
+      assert.equal(
+        action.url,
+        "/v1/sessions",
+        "recovery must name the canonical session operation",
+      );
+      sessionRoute = action.url;
+      await call(sessionRoute, { problem_id: problem, intent: "prove" }, undefined, 401);
+      assert.equal(
+        await countSessions(),
+        0,
+        "canonical recovery still requires Fellow authentication",
+      );
+    }
+    const session = await call(sessionRoute, { problem_id: problem, intent: "prove" }, author, 201);
     const path = `/v1/sessions/${session.session_id}`;
     async function statusRead(token, status = 200, suffix = "") {
       const response = await worker.fetch(`${origin}${path}${suffix}`, {

@@ -778,6 +778,7 @@ export {
   ProblemDocumentSchema,
   type ProblemRule,
   ProblemRuleSchema,
+  RouteRecoveryActionSchema,
   SECRET_FINDING_KINDS,
   type SecretFinding,
   SecretFindingSchema,

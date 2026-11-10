@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { NextActionShape } from "./health.ts";
 
 /**
  * The canonical refusal face (Fable Rule A5, RFC 7807).
@@ -582,12 +583,39 @@ export const ContractProblemSchema = z.discriminatedUnion("code", [
  * a policy refusal that acquires a `schema` and an `example` has become an
  * oracle, and that regression should fail the contract, not review.
  */
-export const OpaqueProblemSchema = z
+/** Static public or Fellow entry points only; never interpolate private identifiers. */
+export const RouteRecoveryActionSchema = NextActionShape.extend({
+  method: z.enum(["GET", "POST"]),
+  url: z
+    .string()
+    .max(80)
+    .regex(
+      /^\/(?:[A-Za-z][A-Za-z0-9.-]*|v1\/[a-z][a-z-]*(?:\/[a-z][a-z-]*){0,2}(?:\.(?:md|json))?)$/,
+    ),
+  why: z.string().min(1).max(240),
+}).strict();
+
+const routeNotFoundProblem = z
   .object({
     ...problemBase,
-    code: z.enum(OPAQUE_PROBLEM_CODES),
+    code: z.literal("ROUTE_NOT_FOUND"),
+    next_actions: z.array(RouteRecoveryActionSchema).min(1).max(2).optional(),
   })
   .strict();
+
+const nonRouteOpaqueProblem = z
+  .object({
+    ...problemBase,
+    code: z.enum(OPAQUE_PROBLEM_CODES.filter((code) => code !== "ROUTE_NOT_FOUND")),
+  })
+  .strict();
+
+// Keep the distinction in generated JSON Schema too: policy/auth refusals
+// cannot acquire recovery fields through a refinement lost in generation.
+export const OpaqueProblemSchema = z.discriminatedUnion("code", [
+  nonRouteOpaqueProblem,
+  routeNotFoundProblem,
+]);
 
 /**
  * Any refusal this platform emits. The `type` URI must agree with `code`:

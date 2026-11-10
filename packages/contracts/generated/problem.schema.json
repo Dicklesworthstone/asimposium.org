@@ -835,87 +835,166 @@
           ]
         },
         {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "maxLength": 200,
-              "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/"
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "status": {
+                  "type": "integer",
+                  "minimum": 400,
+                  "maximum": 599
+                },
+                "code": {
+                  "type": "string",
+                  "enum": [
+                    "AUTH_REPLAY_STORE_UNAVAILABLE",
+                    "CAPSULE_UNAVAILABLE",
+                    "CONTENT_HIDDEN",
+                    "DEVICE_CODE_UNKNOWN",
+                    "DEVICE_LOOKUP_LOCKED",
+                    "DEVICE_START_RATE_LIMITED",
+                    "ENROLLMENT_UNAVAILABLE",
+                    "FELLOW_CAP_REACHED",
+                    "FELLOW_CREDENTIAL_CAP_REACHED",
+                    "FELLOW_TOKEN_INVALID",
+                    "FELLOW_LIFECYCLE_NOT_CURRENT",
+                    "OPERATOR_AUTH_UNAVAILABLE",
+                    "OPERATOR_CONTROL_UNAVAILABLE",
+                    "OPERATOR_FELLOW_CAP_NOT_CURRENT",
+                    "PROJECTION_DRIFT_NOT_REPAIRABLE",
+                    "PROJECTION_REBUILD_UNREPLAYABLE",
+                    "PROJECTION_REPAIR_INCOMPLETE",
+                    "PROJECTION_LOG_INTEGRITY_FAILED",
+                    "FLOW_INVALID",
+                    "REBIND_CLAIM_INVALID",
+                    "INBOX_NOT_FOUND",
+                    "INTERNAL_ERROR",
+                    "COMMENTARY_OWNERSHIP_MISMATCH",
+                    "LIFECYCLE_BUSY",
+                    "PAIRING_INVALID",
+                    "PROPOSAL_EXPIRED",
+                    "PROPOSAL_NOT_PENDING",
+                    "REQUEST_BODY_TOO_LARGE",
+                    "ROOM_CAPACITY_REACHED",
+                    "ROOM_UNAVAILABLE",
+                    "ROOM_UPGRADE_REQUIRED",
+                    "SPONSOR_ENROLLMENT_RATE_LIMITED",
+                    "SPONSOR_AUTH_UNAVAILABLE",
+                    "STEP_UP_REQUIRED",
+                    "UNAUTHORIZED",
+                    "WORKSHOP_NOT_FOUND",
+                    "WRONG_PRINCIPAL",
+                    "WRITE_REFUSED"
+                  ]
+                },
+                "detail": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 400
+                },
+                "fix_hint": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 400
+                }
+              },
+              "required": [
+                "type",
+                "title",
+                "status",
+                "code",
+                "detail",
+                "fix_hint"
+              ],
+              "additionalProperties": false
             },
-            "title": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 160
-            },
-            "status": {
-              "type": "integer",
-              "minimum": 400,
-              "maximum": 599
-            },
-            "code": {
-              "type": "string",
-              "enum": [
-                "AUTH_REPLAY_STORE_UNAVAILABLE",
-                "CAPSULE_UNAVAILABLE",
-                "CONTENT_HIDDEN",
-                "DEVICE_CODE_UNKNOWN",
-                "DEVICE_LOOKUP_LOCKED",
-                "DEVICE_START_RATE_LIMITED",
-                "ENROLLMENT_UNAVAILABLE",
-                "FELLOW_CAP_REACHED",
-                "FELLOW_CREDENTIAL_CAP_REACHED",
-                "FELLOW_TOKEN_INVALID",
-                "FELLOW_LIFECYCLE_NOT_CURRENT",
-                "OPERATOR_AUTH_UNAVAILABLE",
-                "OPERATOR_CONTROL_UNAVAILABLE",
-                "OPERATOR_FELLOW_CAP_NOT_CURRENT",
-                "PROJECTION_DRIFT_NOT_REPAIRABLE",
-                "PROJECTION_REBUILD_UNREPLAYABLE",
-                "PROJECTION_REPAIR_INCOMPLETE",
-                "PROJECTION_LOG_INTEGRITY_FAILED",
-                "FLOW_INVALID",
-                "REBIND_CLAIM_INVALID",
-                "INBOX_NOT_FOUND",
-                "INTERNAL_ERROR",
-                "COMMENTARY_OWNERSHIP_MISMATCH",
-                "LIFECYCLE_BUSY",
-                "PAIRING_INVALID",
-                "PROPOSAL_EXPIRED",
-                "PROPOSAL_NOT_PENDING",
-                "REQUEST_BODY_TOO_LARGE",
-                "ROOM_CAPACITY_REACHED",
-                "ROOM_UNAVAILABLE",
-                "ROOM_UPGRADE_REQUIRED",
-                "ROUTE_NOT_FOUND",
-                "SPONSOR_ENROLLMENT_RATE_LIMITED",
-                "SPONSOR_AUTH_UNAVAILABLE",
-                "STEP_UP_REQUIRED",
-                "UNAUTHORIZED",
-                "WORKSHOP_NOT_FOUND",
-                "WRONG_PRINCIPAL",
-                "WRITE_REFUSED"
-              ]
-            },
-            "detail": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 400
-            },
-            "fix_hint": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 400
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "status": {
+                  "type": "integer",
+                  "minimum": 400,
+                  "maximum": 599
+                },
+                "code": {
+                  "type": "string",
+                  "const": "ROUTE_NOT_FOUND"
+                },
+                "detail": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 400
+                },
+                "fix_hint": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 400
+                },
+                "next_actions": {
+                  "minItems": 1,
+                  "maxItems": 2,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "method": {
+                        "type": "string",
+                        "enum": [
+                          "GET",
+                          "POST"
+                        ]
+                      },
+                      "url": {
+                        "type": "string",
+                        "maxLength": 80,
+                        "pattern": "^\\/(?:[A-Za-z][A-Za-z0-9.-]*|v1\\/[a-z][a-z-]*(?:\\/[a-z][a-z-]*){0,2}(?:\\.(?:md|json))?)$"
+                      },
+                      "why": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 240
+                      }
+                    },
+                    "required": [
+                      "method",
+                      "url",
+                      "why"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "type",
+                "title",
+                "status",
+                "code",
+                "detail",
+                "fix_hint"
+              ],
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "type",
-            "title",
-            "status",
-            "code",
-            "detail",
-            "fix_hint"
-          ],
-          "additionalProperties": false
+          ]
         }
       ]
     },
@@ -1747,87 +1826,166 @@
       ]
     },
     "opaque_problem": {
-      "type": "object",
-      "properties": {
-        "type": {
-          "type": "string",
-          "maxLength": 200,
-          "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/"
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "maxLength": 200,
+              "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/"
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "status": {
+              "type": "integer",
+              "minimum": 400,
+              "maximum": 599
+            },
+            "code": {
+              "type": "string",
+              "enum": [
+                "AUTH_REPLAY_STORE_UNAVAILABLE",
+                "CAPSULE_UNAVAILABLE",
+                "CONTENT_HIDDEN",
+                "DEVICE_CODE_UNKNOWN",
+                "DEVICE_LOOKUP_LOCKED",
+                "DEVICE_START_RATE_LIMITED",
+                "ENROLLMENT_UNAVAILABLE",
+                "FELLOW_CAP_REACHED",
+                "FELLOW_CREDENTIAL_CAP_REACHED",
+                "FELLOW_TOKEN_INVALID",
+                "FELLOW_LIFECYCLE_NOT_CURRENT",
+                "OPERATOR_AUTH_UNAVAILABLE",
+                "OPERATOR_CONTROL_UNAVAILABLE",
+                "OPERATOR_FELLOW_CAP_NOT_CURRENT",
+                "PROJECTION_DRIFT_NOT_REPAIRABLE",
+                "PROJECTION_REBUILD_UNREPLAYABLE",
+                "PROJECTION_REPAIR_INCOMPLETE",
+                "PROJECTION_LOG_INTEGRITY_FAILED",
+                "FLOW_INVALID",
+                "REBIND_CLAIM_INVALID",
+                "INBOX_NOT_FOUND",
+                "INTERNAL_ERROR",
+                "COMMENTARY_OWNERSHIP_MISMATCH",
+                "LIFECYCLE_BUSY",
+                "PAIRING_INVALID",
+                "PROPOSAL_EXPIRED",
+                "PROPOSAL_NOT_PENDING",
+                "REQUEST_BODY_TOO_LARGE",
+                "ROOM_CAPACITY_REACHED",
+                "ROOM_UNAVAILABLE",
+                "ROOM_UPGRADE_REQUIRED",
+                "SPONSOR_ENROLLMENT_RATE_LIMITED",
+                "SPONSOR_AUTH_UNAVAILABLE",
+                "STEP_UP_REQUIRED",
+                "UNAUTHORIZED",
+                "WORKSHOP_NOT_FOUND",
+                "WRONG_PRINCIPAL",
+                "WRITE_REFUSED"
+              ]
+            },
+            "detail": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 400
+            },
+            "fix_hint": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 400
+            }
+          },
+          "required": [
+            "type",
+            "title",
+            "status",
+            "code",
+            "detail",
+            "fix_hint"
+          ],
+          "additionalProperties": false
         },
-        "title": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 160
-        },
-        "status": {
-          "type": "integer",
-          "minimum": 400,
-          "maximum": 599
-        },
-        "code": {
-          "type": "string",
-          "enum": [
-            "AUTH_REPLAY_STORE_UNAVAILABLE",
-            "CAPSULE_UNAVAILABLE",
-            "CONTENT_HIDDEN",
-            "DEVICE_CODE_UNKNOWN",
-            "DEVICE_LOOKUP_LOCKED",
-            "DEVICE_START_RATE_LIMITED",
-            "ENROLLMENT_UNAVAILABLE",
-            "FELLOW_CAP_REACHED",
-            "FELLOW_CREDENTIAL_CAP_REACHED",
-            "FELLOW_TOKEN_INVALID",
-            "FELLOW_LIFECYCLE_NOT_CURRENT",
-            "OPERATOR_AUTH_UNAVAILABLE",
-            "OPERATOR_CONTROL_UNAVAILABLE",
-            "OPERATOR_FELLOW_CAP_NOT_CURRENT",
-            "PROJECTION_DRIFT_NOT_REPAIRABLE",
-            "PROJECTION_REBUILD_UNREPLAYABLE",
-            "PROJECTION_REPAIR_INCOMPLETE",
-            "PROJECTION_LOG_INTEGRITY_FAILED",
-            "FLOW_INVALID",
-            "REBIND_CLAIM_INVALID",
-            "INBOX_NOT_FOUND",
-            "INTERNAL_ERROR",
-            "COMMENTARY_OWNERSHIP_MISMATCH",
-            "LIFECYCLE_BUSY",
-            "PAIRING_INVALID",
-            "PROPOSAL_EXPIRED",
-            "PROPOSAL_NOT_PENDING",
-            "REQUEST_BODY_TOO_LARGE",
-            "ROOM_CAPACITY_REACHED",
-            "ROOM_UNAVAILABLE",
-            "ROOM_UPGRADE_REQUIRED",
-            "ROUTE_NOT_FOUND",
-            "SPONSOR_ENROLLMENT_RATE_LIMITED",
-            "SPONSOR_AUTH_UNAVAILABLE",
-            "STEP_UP_REQUIRED",
-            "UNAUTHORIZED",
-            "WORKSHOP_NOT_FOUND",
-            "WRONG_PRINCIPAL",
-            "WRITE_REFUSED"
-          ]
-        },
-        "detail": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 400
-        },
-        "fix_hint": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 400
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "maxLength": 200,
+              "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/"
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "status": {
+              "type": "integer",
+              "minimum": 400,
+              "maximum": 599
+            },
+            "code": {
+              "type": "string",
+              "const": "ROUTE_NOT_FOUND"
+            },
+            "detail": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 400
+            },
+            "fix_hint": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 400
+            },
+            "next_actions": {
+              "minItems": 1,
+              "maxItems": 2,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "method": {
+                    "type": "string",
+                    "enum": [
+                      "GET",
+                      "POST"
+                    ]
+                  },
+                  "url": {
+                    "type": "string",
+                    "maxLength": 80,
+                    "pattern": "^\\/(?:[A-Za-z][A-Za-z0-9.-]*|v1\\/[a-z][a-z-]*(?:\\/[a-z][a-z-]*){0,2}(?:\\.(?:md|json))?)$"
+                  },
+                  "why": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 240
+                  }
+                },
+                "required": [
+                  "method",
+                  "url",
+                  "why"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "type",
+            "title",
+            "status",
+            "code",
+            "detail",
+            "fix_hint"
+          ],
+          "additionalProperties": false
         }
-      },
-      "required": [
-        "type",
-        "title",
-        "status",
-        "code",
-        "detail",
-        "fix_hint"
-      ],
-      "additionalProperties": false
+      ]
     },
     "problem_code": {
       "type": "string",

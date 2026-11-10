@@ -6,6 +6,7 @@ import {
   PUBLIC_RESOURCE_REGISTRY,
   PublicMovesQuerySchema,
   type ReadinessStatus,
+  RouteRecoveryActionSchema,
   SponsorIdSchema,
   unavailableReadiness,
 } from "@asimposium/contracts";
@@ -755,8 +756,56 @@ function isProblemPath(pathname: string): boolean {
   return false;
 }
 
+// The discovery manifest is the sole operation catalog. Recovery never names
+// resource IDs, sponsor/operator operations, or a destination on another host.
+const ROUTE_RECOVERY_CANDIDATES = DISCLOSED_OPERATIONS.flatMap((operation) => {
+  if (operation.auth !== "public" && operation.auth !== "fellow-bearer") return [];
+  const parsed = RouteRecoveryActionSchema.safeParse({
+    method: operation.method,
+    url: operation.openApiPath,
+    why: operation.summary,
+  });
+  if (!parsed.success) return [];
+  const path = parsed.data.url;
+  const aliases = path.startsWith("/v1/")
+    ? [path, path.slice(3), `/api${path}`, `/api${path.slice(3)}`]
+    : [path];
+  return [{ action: parsed.data, aliases }];
+});
+
+/** Bounded single edit, including one adjacent transposition; no URL decoding. */
+function oneRouteEdit(left: string, right: string): boolean {
+  if (Math.abs(left.length - right.length) > 1) return false;
+  let index = 0;
+  while (index < left.length && left[index] === right[index]) index++;
+  if (index === left.length && index === right.length) return true;
+  if (left.length < right.length) return left.slice(index) === right.slice(index + 1);
+  if (left.length > right.length) return left.slice(index + 1) === right.slice(index);
+  return (
+    left.slice(index + 1) === right.slice(index + 1) ||
+    (left[index] === right[index + 1] &&
+      left[index + 1] === right[index] &&
+      left.slice(index + 2) === right.slice(index + 2))
+  );
+}
+
+function routeRecoveryActions(pathname: string) {
+  if (pathname.length > 80 || !/^\/[A-Za-z0-9./-]+$/.test(pathname)) return [];
+  const exact = ROUTE_RECOVERY_CANDIDATES.filter(({ aliases }) => aliases.includes(pathname));
+  const matches =
+    exact.length > 0
+      ? exact
+      : ROUTE_RECOVERY_CANDIDATES.filter(({ aliases }) =>
+          aliases.some((alias) => oneRouteEdit(pathname, alias)),
+        );
+  // An ambiguous guess teaches nothing. Never pick the first alphabetic result.
+  if (new Set(matches.map(({ action }) => action.url)).size !== 1) return [];
+  return matches.map(({ action }) => action).slice(0, 2);
+}
+
 function routeNotFound(requestUrl: string, ownedPathMethod?: string): Response {
   const pathname = redactPathname(new URL(requestUrl).pathname);
+  const actions = routeRecoveryActions(pathname);
   return problem({
     status: 404,
     code: "ROUTE_NOT_FOUND",
@@ -769,7 +818,10 @@ function routeNotFound(requestUrl: string, ownedPathMethod?: string): Response {
         ? `This Worker serves no route at ${pathname}.`
         : `This Worker serves ${pathname}, but not with ${ownedPathMethod}.`,
     fixHint:
-      "GET / for the handbook, /protocol.md for the rules, /internal/health for operations, the join capsule at /join/<id>, or the /v1 enrollment surface.",
+      actions.length > 0
+        ? "Use the canonical method and path in next_actions; preserve the route's documented authentication and JSON contract. The failed request was not executed."
+        : "GET / for the handbook, /protocol.md for the rules, /internal/health for operations, the join capsule at /join/<id>, or the /v1 enrollment surface.",
+    ...(actions.length > 0 ? { extensions: { next_actions: actions } } : {}),
   });
 }
 
