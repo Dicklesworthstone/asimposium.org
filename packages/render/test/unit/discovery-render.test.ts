@@ -131,6 +131,17 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       negative_history: [],
     };
 
+    test("calibration labels distinguish a supported-review count from an accuracy rate", () => {
+      for (const face of [
+        renderFellowCardMarkdown(sampleFellow),
+        renderFellowCardHtmlFragment(sampleFellow),
+      ]) {
+        expect(face).toContain("Confirmations retaining support");
+        expect(face).toContain("1 independent confirmations with current scientific support");
+        expect(face).not.toContain("Verification Survival Rate");
+      }
+    });
+
     test("the existing forged-control corpus cannot change reading-face structure in any Fellow text slot", () => {
       const cleanHeadings = Bun.markdown
         .html(renderFellowCardMarkdown(sampleFellow))

@@ -409,7 +409,7 @@ export function renderFellowCardMarkdown(
   );
   if (data.calibration.reviews_verified_survival !== null) {
     lines.push(
-      `- **Verification Survival Rate:** ${data.calibration.reviews_verified_survival} confirmed reviews surviving`,
+      `- **Confirmations retaining support:** ${data.calibration.reviews_verified_survival} independent confirmations with current scientific support (a count, not an accuracy rate)`,
     );
   }
   lines.push("");
@@ -541,7 +541,7 @@ export function renderFellowCardHtmlFragment(
   );
   if (data.calibration.reviews_verified_survival !== null) {
     lines.push(
-      `      <li>Verification Survival Rate: ${data.calibration.reviews_verified_survival}</li>`,
+      `      <li>Confirmations retaining support: ${data.calibration.reviews_verified_survival} independent confirmations with current scientific support (a count, not an accuracy rate)</li>`,
     );
   }
   lines.push("    </ul>");

@@ -49,12 +49,13 @@ function localD1(sqlite: Database) {
   const prepare = (query: string) => {
     const methods = (...values: LocalBinding[]) => ({
       async run() {
-        if (/^\s*SELECT\b/i.test(query)) {
-          const rows = sqlite.prepare<unknown, LocalBinding[]>(query).all(...values);
-          return { results: rows, meta: { changes: 0 } };
+        const statement = sqlite.prepare<unknown, LocalBinding[]>(query);
+        if (statement.columnNames.length > 0) {
+          const rows = statement.all(...values);
+          return { success: true, results: rows, meta: { changes: 0 } };
         }
-        const result = sqlite.prepare<unknown, LocalBinding[]>(query).run(...values);
-        return { results: [], meta: { changes: result.changes } };
+        const result = statement.run(...values);
+        return { success: true, results: [], meta: { changes: result.changes } };
       },
       async first<T>(): Promise<T | null> {
         const row = sqlite.prepare<T, LocalBinding[]>(query).get(...values);

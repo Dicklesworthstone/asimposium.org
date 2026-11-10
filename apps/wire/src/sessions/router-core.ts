@@ -335,6 +335,7 @@ import {
 } from "./statement-context";
 import { readWorkingMovesPack } from "./working-moves";
 import { readWorkshopDirectory, WorkshopDirectoryUnavailable } from "./workshop-directory.ts";
+import { reserveWorkshopWrite, workshopRateLimitedProblem } from "./workshop-quota";
 import { logFellowWrite } from "./write-ops-log";
 
 /**
@@ -5041,6 +5042,57 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     });
     if (decision.decision !== "allow") return writeRefusedProblem();
 
+    const admitWorkshopWrite = async (): Promise<Response | undefined> => {
+      try {
+        const admission = await reserveWorkshopWrite(db, {
+          fellowId: auth.binding.fellowId,
+          idempotencyKey: key,
+          requestDigest: digest,
+        });
+        if (admission.status === "admitted") return undefined;
+        if (admission.status === "limited") return workshopRateLimitedProblem(admission.budget);
+        if (admission.status === "conflict") return idempotencyConflictProblem();
+        // The first writer may have committed since our initial replay lookup.
+        const replay = await replayResponseBeforeMutablePreconditions(
+          db,
+          "workshop_push",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+          (raw) => WorkshopPushResponseSchema.parse(JSON.parse(raw)),
+        );
+        if (replay !== undefined) return replay;
+        const response = validatedProblem({
+          status: 409,
+          code: "IDEMPOTENCY_CONFLICT",
+          title: "This workshop request is already admitted",
+          detail:
+            "An identical request is in progress or its storage outcome is not yet known. This retry did not consume capacity or repeat storage work.",
+          fixHint:
+            "Retry the same request with the original Idempotency-Key. If the earlier attempt failed before committing, its admission expires within one minute.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1/workshop_push_request.json",
+            example: { headers: { "Idempotency-Key": "original-workshop-request-key" } },
+          },
+        });
+        response.headers.set("retry-after", "1");
+        return privateNoStore(response);
+      } catch (error) {
+        if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+        return privateNoStore(
+          validatedProblem({
+            status: 503,
+            code: "INTERNAL_ERROR",
+            title: "Workshop admission is unavailable",
+            detail: "The Worker could not reserve workshop capacity. No draft storage was started.",
+            fixHint: "Keep working locally and retry later with the original Idempotency-Key.",
+          }),
+        );
+      }
+    };
+
     if ("workshop_id" in parsed.data) {
       const reviseData = parsed.data;
       const head = await db
@@ -5145,6 +5197,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           });
         }
       }
+
+      const admissionRefusal = await admitWorkshopWrite();
+      if (admissionRefusal !== undefined) return admissionRefusal;
 
       let newBodyMd = head.body_md;
       let newCasHash = head.cas_hash;
@@ -5434,6 +5489,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
       autoArchiveWorkshopId = oldestScratch.workshop_id;
     }
+
+    const admissionRefusal = await admitWorkshopWrite();
+    if (admissionRefusal !== undefined) return admissionRefusal;
 
     // CAS spill
     const bodyStorage = await storeWorkshopBody(c.env.ARTIFACTS, createData.body_md, {

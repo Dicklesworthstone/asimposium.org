@@ -121,6 +121,7 @@ import { sponsorSuspensionHttp } from "../moderation/sponsor-suspension-http.ts"
 import { fellowMayReadAssignedBriefs } from "../problems/fellow-briefs.ts";
 import { rebuildSearchIndex, searchIndexHealth } from "../search/index-health";
 import { getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
+import { getWorkshopBudget } from "../sessions/workshop-quota.ts";
 import { AccountExportError, readSponsorDataExportPage } from "./account-export.ts";
 import {
   capsuleUnavailableHtml,
@@ -1371,6 +1372,7 @@ export async function buildHelloResponse(input: {
   const { binding, service, db, sponsorPromotionRateLimit } = input;
 
   let promotionBudget: RateLimitBudget | undefined;
+  let workshopBudget: RateLimitBudget | undefined;
   if (db !== undefined) {
     try {
       const sponsorLimit = parseSponsorLimit(sponsorPromotionRateLimit);
@@ -1382,6 +1384,11 @@ export async function buildHelloResponse(input: {
       });
     } catch {
       // Safe reads remain usable even if quota storage is unavailable
+    }
+    try {
+      workshopBudget = await getWorkshopBudget(db, binding.fellowId);
+    } catch {
+      // Absence does not promise capacity: workshop admission fails closed.
     }
   }
 
@@ -1628,6 +1635,7 @@ export async function buildHelloResponse(input: {
         : { fellow_grant_expires_at: binding.grantedResources.fellowGrantExpiresAt }),
     },
     ...(promotionBudget === undefined ? {} : { promotion_budget: promotionBudget }),
+    ...(workshopBudget === undefined ? {} : { workshop_budget: workshopBudget }),
     ...(assignments !== undefined ? { assignments } : {}),
     ...(openSessions !== undefined ? { open_sessions: openSessions } : {}),
     ...(unreadReviews !== undefined ? { unread_reviews: unreadReviews } : {}),

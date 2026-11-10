@@ -4400,9 +4400,28 @@ describe("session protocol routes", () => {
 
   test("same-key races atomically elect one open, workshop, promotion, and close", async () => {
     const barrier = stagedReadBarrier();
-    const { call, db, binding } = await fixture({
+    const { call, db, binding, env } = await fixture({
       afterFirstRead: barrier.afterFirstRead,
     });
+    const casBodies = new Map<string, string>();
+    let casWrites = 0;
+    env.ARTIFACTS = {
+      put: async (key: string, body: string) => {
+        casWrites += 1;
+        casBodies.set(key, body);
+        return {};
+      },
+      get: async (key: string) => {
+        const body = casBodies.get(key);
+        if (body === undefined) return null;
+        const bytes = new TextEncoder().encode(body);
+        return {
+          size: bytes.byteLength,
+          body: new Response(bytes).body,
+          arrayBuffer: async () => bytes.buffer,
+        };
+      },
+    } as never;
     const race = async (path: string, key: string, body: string) => {
       const request = () =>
         call(path, {
@@ -4435,22 +4454,56 @@ describe("session protocol routes", () => {
         .first<{ count: number }>(),
     ).toEqual({ count: 1 });
 
-    barrier.arm([
-      /FROM session_write_replays/,
-      /FROM session_write_replays/,
-      /MAX\(workshop_seq\)/,
-    ]);
-    const workshop = await race(
-      `/v1/sessions/${String(sessionId)}/workshop`,
-      "race-workshop",
-      JSON.stringify({
-        type: "claim-draft",
-        title: "Concurrent draft",
-        body_md: "Only one durable workshop object may win this replay key.",
-        relates_to: [],
-      }),
-    );
+    // Both callers start without a replay, but admission elects one before
+    // CAS work and sequence allocation. An in-flight duplicate may therefore
+    // teach a retry instead of waiting for the winning receipt to commit.
+    barrier.arm([/FROM session_write_replays/]);
+    const workshopBody = "Only one durable workshop object may win this replay key. ".repeat(24);
+    const pushWorkshop = () =>
+      call(`/v1/sessions/${String(sessionId)}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "race-workshop" },
+        body: JSON.stringify({
+          type: "claim-draft",
+          title: "Concurrent draft",
+          body_md: workshopBody,
+          relates_to: [],
+        }),
+      });
+    const workshopResponses = await Promise.all([pushWorkshop(), pushWorkshop()]);
+    expect(workshopResponses.filter((response) => response.status === 201)).toHaveLength(1);
+    const committed = workshopResponses.find((response) => response.status === 201);
+    const competing = workshopResponses.find((response) => response !== committed);
+    if (committed === undefined || competing === undefined) {
+      throw new Error("Expected one committed workshop writer and its competing request");
+    }
+    for (const response of workshopResponses) {
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+    }
+    const workshopBytes = await committed.text();
+    expect([200, 409]).toContain(competing.status);
+    if (competing.status === 200) {
+      expect(await competing.text()).toBe(workshopBytes);
+    } else {
+      expect(ProblemDocumentSchema.parse(await competing.json())).toMatchObject({
+        code: "IDEMPOTENCY_CONFLICT",
+        status: 409,
+      });
+      expect(competing.headers.get("retry-after")).toBe("1");
+    }
+    const workshopReplay = await pushWorkshop();
+    expect(workshopReplay.status).toBe(200);
+    expect(await workshopReplay.text()).toBe(workshopBytes);
+    const workshop = WorkshopPushResponseSchema.parse(JSON.parse(workshopBytes));
     expect(workshop.workshop_seq).toBe(1);
+    expect(casWrites).toBe(1);
+    expect([...casBodies.values()]).toEqual([workshopBody]);
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS count FROM workshop_write_attempts WHERE fellow_id = ?")
+        .bind(binding.fellowId)
+        .first<{ count: number }>(),
+    ).toEqual({ count: 1 });
     expect(
       await db
         .prepare("SELECT COUNT(*) AS count FROM workshop_objects WHERE fellow_id = ?")
