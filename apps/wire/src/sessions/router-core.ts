@@ -79,6 +79,7 @@ import {
   ReviseRequestSchema,
   ReviseResponseSchema,
   RUBRIC_DOMAINS,
+  requestFieldHints,
   SessionCloseRequestSchema,
   SessionCloseResponseSchema,
   SessionHeartbeatRequestSchema,
@@ -139,7 +140,7 @@ import type {
 import { authorizeFellowWrite, fellowCanAccessPrivateProblem } from "../enrollment/service";
 import type { Env } from "../env";
 import { publicCursorResponse } from "../herald/public-cursor";
-import { validatedProblem } from "../http/envelope";
+import { SCHEMA_BASE, validatedProblem } from "../http/envelope";
 import { planBatchCommit } from "../krater/batch";
 import { casKeyForHash, storeWorkshopBody } from "../krater/cas";
 import { mintClaimVersion } from "../krater/claim-version";
@@ -346,6 +347,8 @@ import { logFellowWrite } from "./write-ops-log";
 
 const ID_PREFIX_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const SESSION_IDLE_MS = 12 * 60 * 60 * 1_000;
+const SESSIONS_SCHEMA_BASE = `${SCHEMA_BASE}/sessions.v1`;
+const SESSIONS_SCHEMA_URI = `${SESSIONS_SCHEMA_BASE}.json`;
 const REPLAY_TTL_MS = 24 * 60 * 60 * 1_000;
 
 /** Routes an agent needs after opening a session (capsule: never construct them). */
@@ -544,7 +547,7 @@ function idempotencyKeyOrRefusal(request: Request, path: string): string | Respo
         "Send 1 to 160 letters, digits, dots, underscores, or hyphens and reuse the same key for an unchanged retry.",
       rule: "A5",
       extensions: {
-        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        schema: SESSIONS_SCHEMA_URI,
         example: { method: "POST", path, headers: { "Idempotency-Key": "session-01JXYZ4K6Q" } },
       },
     });
@@ -656,7 +659,7 @@ function leaseNotStaleProblem(lease: {
       "Refresh active leases. Wait until the lease expires or the holder session becomes idle for > 30 minutes, then retry the unchanged request with the same Idempotency-Key.",
     rule: "§7.5",
     extensions: {
-      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      schema: SESSIONS_SCHEMA_URI,
       example: {
         lease_id: lease.lease_id,
         object_ref: lease.object_ref,
@@ -675,7 +678,7 @@ function objectStateChangedProblem(kind: string, id: string): Response {
     fixHint: "Read the object again from your pack, then retry only if the action still applies.",
     rule: "A5",
     extensions: {
-      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      schema: SESSIONS_SCHEMA_URI,
       example: { object: id },
     },
   });
@@ -690,7 +693,7 @@ function idempotencyConflictProblem(): Response {
     fixHint: "Retry with a fresh Idempotency-Key for a new request.",
     rule: "A5",
     extensions: {
-      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      schema: SESSIONS_SCHEMA_URI,
       example: { headers: { "Idempotency-Key": "session-new-request-01" } },
     },
   });
@@ -707,7 +710,7 @@ function packBudgetOrRefusal(raw: string | null, profile: PackProfile): number |
       fixHint: `Request at most ${PACK_BUDGET_BUCKETS.at(-1)} tokens; the server rounds upward to a fixed cache bucket.`,
       rule: "A5",
       extensions: {
-        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        schema: SESSIONS_SCHEMA_URI,
         example: { max_tokens: PACK_BUDGET_BUCKETS.at(-1) },
       },
     });
@@ -723,7 +726,7 @@ function packBudgetOrRefusal(raw: string | null, profile: PackProfile): number |
       fixHint: `Use one of the fixed buckets directly, or request a positive value that rounds up to one: ${PACK_BUDGET_BUCKETS.join(", ")}.`,
       rule: "A5",
       extensions: {
-        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        schema: SESSIONS_SCHEMA_URI,
         example: { max_tokens: PACK_BUDGET_BUCKETS.at(-1) },
       },
     });
@@ -761,7 +764,7 @@ function dependencyUnavailableProblem(): Response {
       "Read the dependency's public claim face, remove unavailable references, and retry with a new Idempotency-Key.",
     rule: "P10",
     extensions: {
-      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      schema: SESSIONS_SCHEMA_URI,
       example: { depends_on: ["C-1"] },
     },
   });
@@ -777,7 +780,7 @@ function scientificRefusal(scope: "review" | "evidence", detail: string): Respon
       "Fetch the exact-version review pack and use its claim content_digest and published evidence IDs and content digests. Describe the actual check; omit verification claims you did not perform.",
     rule: "P9",
     extensions: {
-      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      schema: SESSIONS_SCHEMA_URI,
       example:
         scope === "review"
           ? {
@@ -823,7 +826,7 @@ function reviewBodyInvalidProblem(
         "A novelty review uses verdict 'inform' and a novelty block {verdict, searches[1..16] of {source, searched_on YYYY-MM-DD, terms[1..16]}, nearest_prior_art[0..16] of {locator, relation}, semantic_difference}. At least one recorded search is required.",
       rule: "A5",
       extensions: {
-        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        schema: SESSIONS_SCHEMA_URI,
         example: {
           target_claim_id: "C-1",
           target_version: 1,
@@ -858,7 +861,7 @@ function reviewBodyInvalidProblem(
       "Send {target_claim_id, target_version, verdict, basis, capable_of_failure?, rubric?, body_md}.",
     rule: "A5",
     extensions: {
-      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      schema: SESSIONS_SCHEMA_URI,
       example: {
         target_claim_id: "C-1",
         target_version: 1,
@@ -1039,7 +1042,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           fixHint: "Wait briefly, then retry the same request with the same Idempotency-Key.",
           rule: "A5",
           extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            schema: SESSIONS_SCHEMA_URI,
             example: { headers: { "Idempotency-Key": "same-request-key" } },
           },
         });
@@ -1624,7 +1627,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       fixHint: "Close one of the open sessions with POST /v1/sessions/:id/close, then reopen.",
       rule: "A5",
       extensions: {
-        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        schema: SESSIONS_SCHEMA_URI,
         open_session_ids: [...openSessionIds].slice(0, 2),
         example: {
           method: "POST",
@@ -1765,7 +1768,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       fixHint: "Check the problem's current state before retrying, or explore an active problem.",
       rule: "P3",
       extensions: {
-        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        schema: SESSIONS_SCHEMA_URI,
         example: { method: "GET", path: "/problems.json" },
       },
     });
@@ -1851,7 +1854,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         fixHint: "Open a session with POST /v1/sessions and use the returned session_id.",
         rule: "A5",
         extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          schema: SESSIONS_SCHEMA_URI,
           example: {
             method: "POST",
             path: "/v1/sessions",
@@ -1869,7 +1872,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         fixHint: "Open a session with POST /v1/sessions and use the returned session_id.",
         rule: "A5",
         extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          schema: SESSIONS_SCHEMA_URI,
           example: {
             method: "POST",
             path: "/v1/sessions",
@@ -1887,7 +1890,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         fixHint: "Open a new session on the same problem; your previous handback is included.",
         rule: "A5",
         extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          schema: SESSIONS_SCHEMA_URI,
           example: {
             method: "POST",
             path: "/v1/sessions",
@@ -1950,7 +1953,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           fixHint: "Check the problem id against GET /problems.json.",
           rule: "A5",
           extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            schema: SESSIONS_SCHEMA_URI,
             example: { method: "GET", path: "/problems.json" },
           },
         }),
@@ -1968,7 +1971,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           fixHint: "Explore an active problem or fork an alternate formulation.",
           rule: "P3",
           extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            schema: SESSIONS_SCHEMA_URI,
             example: { method: "GET", path: "/problems.json" },
           },
         }),
@@ -2180,7 +2183,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         fixHint: "Open a session with POST /v1/sessions and use the returned session_id.",
         rule: "A5",
         extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          schema: SESSIONS_SCHEMA_URI,
           example: {
             method: "POST",
             path: "/v1/sessions",
@@ -2200,7 +2203,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         fixHint: "Open a new session on the same problem; your previous handback is included.",
         rule: "A5",
         extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          schema: SESSIONS_SCHEMA_URI,
           example: {
             method: "POST",
             path: "/v1/sessions",
@@ -2715,7 +2718,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             fixHint: "Omit query parameters or specify ?version=N.",
             rule: "A5",
             extensions: {
-              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              schema: SESSIONS_SCHEMA_URI,
               example: {
                 method: "GET",
                 path: `/v1/sessions/${c.req.param("id")}/workshop/${c.req.param("workshopId")}?version=1`,
@@ -2735,7 +2738,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             fixHint: "Specify ?version=N with a positive integer such as ?version=1.",
             rule: "A5",
             extensions: {
-              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              schema: SESSIONS_SCHEMA_URI,
               example: {
                 method: "GET",
                 path: `/v1/sessions/${c.req.param("id")}/workshop/${c.req.param("workshopId")}?version=1`,
@@ -2849,7 +2852,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const object = await materializeWorkshopObject(c.env, target);
       const body = JSON.stringify(
         WorkshopObjectResponseSchema.parse({
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          schema: SESSIONS_SCHEMA_URI,
           problem_id: session.problem_id,
           fellow_id: auth.binding.fellowId,
           object,
@@ -2936,7 +2939,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               "Use the session_id returned by POST /v1/sessions with its owning Fellow credential.",
             rule: "A5",
             extensions: {
-              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              schema: SESSIONS_SCHEMA_URI,
               example: {
                 method: "POST",
                 path: "/v1/sessions",
@@ -3295,7 +3298,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           "Send {problem_id, intent?, declared?} with a problem id like P-4DSP. declared, if given, carries the registered model and harness plus optional reasoning_effort and tools_note. intent is one of prove, refute, review, sharpen-statement, explore.",
         rule: "A5",
         extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          ...requestFieldHints(SessionOpenRequestSchema, rawBody),
+          schema: `${SESSIONS_SCHEMA_BASE}/session_open_request.json`,
           example: { problem_id: "P-4DSP", intent: "prove" },
         },
       });
@@ -4960,7 +4964,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           "Send {type, title, body_md, relates_to?, revision?} or revise with {workshop_id, base_version, ...}.",
         rule: "A5",
         extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          ...requestFieldHints(WorkshopPushRequestSchema, rawBody),
+          schema: `${SESSIONS_SCHEMA_BASE}/workshop_push_request.json`,
           example: {
             type: "claim-draft",
             title: "Orbit count under toggles",
@@ -6813,7 +6818,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           "Send {workshop_id, kind, statement, falsifier?, relates_to?}. If supplied, expected_workshop_version must be a positive integer.",
         rule: "A5",
         extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          ...requestFieldHints(PromoteRequestSchema, rawBody),
+          schema: `${SESSIONS_SCHEMA_BASE}/promote_request.json`,
           example: {
             workshop_id: "W-4DSP-01JXYZ",
             kind: "conjecture",
@@ -6872,7 +6878,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           "Contribute reviews, evidence, or dead ends to this problem, or promote claims on a problem with available writer slots.",
         rule: "A5",
         extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          schema: SESSIONS_SCHEMA_URI,
           example: {
             action: "review",
             detail: "Read unreviewed claims via GET /v1/sessions/:id/pack?profile=review",
@@ -7220,7 +7226,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           fixHint: "Reference claim ids that exist on this problem (see your pack's claims board).",
           rule: "P10",
           extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            schema: SESSIONS_SCHEMA_URI,
             missing_dependency_ids: missing,
             example: { depends_on: ["C-1"] },
           },
@@ -7854,7 +7860,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           "Send {claim_id, base_version, kind, statement, falsifier?, depends_on?}, or {workshop_id} to publish your stored replacement unchanged.",
         rule: "A5",
         extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          schema: SESSIONS_SCHEMA_URI,
           example: {
             claim_id: "C-1",
             base_version: 1,
@@ -7944,7 +7950,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         fixHint: "Fork the problem or explore an alternate formulation.",
         rule: "P3",
         extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          schema: SESSIONS_SCHEMA_URI,
           example: {
             claim_id: "C-1",
             base_version: 1,
@@ -8302,7 +8308,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           fixHint: "Re-read the current head from your pack, then re-apply your reanchor.",
           rule: "P9",
           extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            schema: SESSIONS_SCHEMA_URI,
             head_version: claimHead.head_version,
             example: { claim_id: claimHead.id, base_version: claimHead.head_version },
           },
@@ -8799,7 +8805,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           fixHint: "Re-read the gap's current state from your pack.",
           rule: "A5",
           extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            schema: SESSIONS_SCHEMA_URI,
             example: {
               gap_id: "G-1",
               decision: "withdraw",

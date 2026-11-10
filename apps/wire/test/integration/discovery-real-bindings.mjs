@@ -285,6 +285,51 @@ async function runDiscovery() {
     );
     return data;
   }
+  async function correctBodyField(path, body, token, typo, expectedField, expectedCode) {
+    const refused = await call(path, body, token, 422);
+    assert.ok(
+      ProblemDocumentSchema.safeParse(refused).success,
+      "field refusal must match the public contract",
+    );
+    assert.equal(refused.code, expectedCode);
+    const fields = refused.suggested_fields;
+    assert.ok(
+      Array.isArray(fields) && fields.length === 1 && fields[0] === expectedField,
+      "the actual field recovery lane requires the canonical suggested field",
+    );
+    const serialized = JSON.stringify(refused);
+    assert.ok(!serialized.includes(typo), "field recovery must not reflect the rejected key");
+    assert.ok(
+      !serialized.includes(body[typo]),
+      "field recovery must not reflect the private field value",
+    );
+    const property = {
+      SESSION_OPEN_BODY_INVALID: "session_open_request",
+      WORKSHOP_PUSH_BODY_INVALID: "workshop_push_request",
+      PROMOTE_BODY_INVALID: "promote_request",
+    }[expectedCode];
+    assert.ok(
+      refused.schema === `https://a.asimposium.org/schemas/sessions.v1/${property}.json`,
+      "body refusal must link the canonical standalone request schema",
+    );
+    const schemaResponse = await worker.fetch(`${origin}${new URL(refused.schema).pathname}`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(schemaResponse.status, 200);
+    assert.match(schemaResponse.headers.get("content-type"), /^application\/schema\+json/);
+    const linked = await schemaResponse.json();
+    assert.ok(linked.$id === refused.schema, "the served request schema must identify itself");
+    function rootHasField(schema) {
+      return (
+        Object.hasOwn(schema.properties ?? {}, expectedField) ||
+        ["anyOf", "oneOf", "allOf"].some((kind) => schema[kind]?.some(rootHasField))
+      );
+    }
+    assert.ok(rootHasField(linked), "the linked schema must describe the request body directly");
+    const { [typo]: value, ...remaining } = body;
+    return { ...remaining, [fields[0]]: value };
+  }
+
   let registrationRecoveryChecked = false;
   async function enroll(name, sponsor, declaration = {}) {
     const minted = await fixtures.mint(sponsor);
@@ -847,6 +892,7 @@ async function runDiscovery() {
   for (const problem of ["P-DISC-A", "P-DISC-B"]) {
     await fixtures.seedProblem(problem);
     let sessionRoute = "/v1/sessions";
+    let sessionBody = { problem_id: problem, intent: "prove" };
     if (problem === "P-DISC-A") {
       const countSessions = async () =>
         (
@@ -878,8 +924,27 @@ async function runDiscovery() {
         0,
         "canonical recovery still requires Fellow authentication",
       );
+      const privateKeyProbe = await call(
+        sessionRoute,
+        { problemId: problem, [author]: "untrusted-key" },
+        author,
+        422,
+      );
+      assert.ok(
+        !JSON.stringify(privateKeyProbe).includes(author),
+        "field hints must never echo a credential-shaped unknown key",
+      );
+      sessionBody = await correctBodyField(
+        sessionRoute,
+        { problemId: problem, intent: "prove" },
+        author,
+        "problemId",
+        "problem_id",
+        "SESSION_OPEN_BODY_INVALID",
+      );
+      assert.equal(await countSessions(), 0, "field suggestions must not open a session");
     }
-    const session = await call(sessionRoute, { problem_id: problem, intent: "prove" }, author, 201);
+    const session = await call(sessionRoute, sessionBody, author, 201);
     const path = `/v1/sessions/${session.session_id}`;
     async function statusRead(token, status = 200, suffix = "") {
       const response = await worker.fetch(`${origin}${path}${suffix}`, {
@@ -898,13 +963,28 @@ async function runDiscovery() {
     assert.equal(freshStatus.workshop_cursor, 0);
     await statusRead(reviewer, 404);
     await statusRead("invalid", 401);
-    const draft = await call(
-      `${path}/workshop`,
-      { type: "claim-draft", title: "Local synthetic draft", body_md: privateBody, relates_to: [] },
-      author,
-      201,
-    );
-    const promotion = {
+    let workshopBody = {
+      type: "claim-draft",
+      title: "Local synthetic draft",
+      body_md: privateBody,
+      relates_to: [],
+    };
+    if (problem === "P-DISC-A") {
+      const { body_md, ...remaining } = workshopBody;
+      workshopBody = await correctBodyField(
+        `${path}/workshop`,
+        { ...remaining, bodymd: body_md },
+        author,
+        "bodymd",
+        "body_md",
+        "WORKSHOP_PUSH_BODY_INVALID",
+      );
+      const unchanged = await statusRead(author);
+      assert.equal(unchanged.workshop_cursor, 0, "field suggestions must not store workshop bytes");
+      assert.equal(unchanged.public_cursor, 0);
+    }
+    const draft = await call(`${path}/workshop`, workshopBody, author, 201);
+    let promotion = {
       workshop_id: draft.workshop_id,
       kind: "conjecture",
       statement: `Synthetic ${problem}: integer 2 is even.\n${problem === "P-DISC-B" ? literalSearchText : ""}${publicCanary}`,
@@ -914,6 +994,20 @@ async function runDiscovery() {
     const draftStatus = await statusRead(author);
     assert.equal(draftStatus.workshop_cursor, 1);
     assert.equal(draftStatus.public_cursor, 0);
+    if (problem === "P-DISC-A") {
+      const { workshop_id, ...remaining } = promotion;
+      promotion = await correctBodyField(
+        `${path}/promote`,
+        { ...remaining, workshopid: workshop_id },
+        author,
+        "workshopid",
+        "workshop_id",
+        "PROMOTE_BODY_INVALID",
+      );
+      const unchanged = await statusRead(author);
+      assert.equal(unchanged.workshop_cursor, 1);
+      assert.equal(unchanged.public_cursor, 0, "field suggestions must not publish a claim");
+    }
     const promoted = await call(`${path}/promote`, promotion, author, 201, `promote-${problem}`);
     assert.equal(promoted.claim_id, "C-1");
     await checkUnscopedClaim();

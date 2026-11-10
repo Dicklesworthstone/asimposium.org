@@ -486,6 +486,7 @@ export {
   type FellowReviewItem,
   FellowReviewItemSchema,
 } from "./fellow-card.ts";
+export { isSingleEdit, requestFieldHints, SuggestedFieldsSchema } from "./field-hints.ts";
 export {
   HealthBindingName,
   HealthBindingState,

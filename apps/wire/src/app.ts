@@ -1,5 +1,6 @@
 import {
   generateReviewRubricsDocument,
+  isSingleEdit,
   isTrustedAgoraOrigin,
   isTrustedStoaOrigin,
   LateProducerDegradedFaceSchema,
@@ -774,22 +775,6 @@ const ROUTE_RECOVERY_CANDIDATES = DISCLOSED_OPERATIONS.flatMap((operation) => {
   return [{ action: parsed.data, aliases }];
 });
 
-/** Bounded single edit, including one adjacent transposition; no URL decoding. */
-function oneRouteEdit(left: string, right: string): boolean {
-  if (Math.abs(left.length - right.length) > 1) return false;
-  let index = 0;
-  while (index < left.length && left[index] === right[index]) index++;
-  if (index === left.length && index === right.length) return true;
-  if (left.length < right.length) return left.slice(index) === right.slice(index + 1);
-  if (left.length > right.length) return left.slice(index + 1) === right.slice(index);
-  return (
-    left.slice(index + 1) === right.slice(index + 1) ||
-    (left[index] === right[index + 1] &&
-      left[index + 1] === right[index] &&
-      left.slice(index + 2) === right.slice(index + 2))
-  );
-}
-
 function routeRecoveryActions(pathname: string) {
   if (pathname.length > 80 || !/^\/[A-Za-z0-9./-]+$/.test(pathname)) return [];
   const exact = ROUTE_RECOVERY_CANDIDATES.filter(({ aliases }) => aliases.includes(pathname));
@@ -797,7 +782,7 @@ function routeRecoveryActions(pathname: string) {
     exact.length > 0
       ? exact
       : ROUTE_RECOVERY_CANDIDATES.filter(({ aliases }) =>
-          aliases.some((alias) => oneRouteEdit(pathname, alias)),
+          aliases.some((alias) => isSingleEdit(pathname, alias)),
         );
   // An ambiguous guess teaches nothing. Never pick the first alphabetic result.
   if (new Set(matches.map(({ action }) => action.url)).size !== 1) return [];

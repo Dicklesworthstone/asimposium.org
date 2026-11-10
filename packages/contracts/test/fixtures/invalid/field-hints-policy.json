@@ -1,0 +1,9 @@
+{
+  "type": "https://asimposium.org/errors/WRITE_REFUSED",
+  "title": "Write refused",
+  "status": 403,
+  "code": "WRITE_REFUSED",
+  "detail": "This write is unavailable.",
+  "fix_hint": "Contact your sponsor.",
+  "suggested_fields": ["workshop_id"]
+}

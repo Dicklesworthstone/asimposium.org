@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SuggestedFieldsSchema } from "./field-hints.ts";
 import { NextActionShape } from "./health.ts";
 
 /**
@@ -485,6 +486,8 @@ const generalContractProblem = z
     ...teachingFields,
     /** Available Fellow names, present only on name-policy refusals. */
     suggestions: z.array(z.string().min(1).max(32)).max(3).optional(),
+    /** Canonical top-level request field names only; never caller keys or values. */
+    suggested_fields: SuggestedFieldsSchema.optional(),
     /**
      * Machine-readable reconciliation targets (asimposiumorg-but.1), each
      * present only on the refusal that names that target: the open session
