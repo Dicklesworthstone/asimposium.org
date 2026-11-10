@@ -17,6 +17,36 @@ observed.
 Updated 2026-11-10. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+**Cold enrollment recovery at `97800ee9`:** strict fragment registration can
+suggest `tools_note` for `toolsNote` after verifying the invitation. Device
+start can suggest `harness` for `harnes`. Missing or wrong invitation
+credentials and a malformed required registration declaration still return the
+same opaque refusal. The real local Workerd/D1 test follows both suggestions
+with explicit same-key retries and verifies one proposal per corrected request.
+
+Pinned typecheck and lint pass all eight groups. The initial native case for
+required runtime metadata reached credential preflight as designed. The
+corrected optional-field case failed the hint assertion on the old producer
+and passed with the new producer. The existing S3 guard and 328 focused Worker
+tests pass. Both agents pass the full contracts package, the two owning
+enrollment files, HTTP contracts, security, and the native journey at the
+frozen revision. Removing either hint from its producer fails the corresponding
+native assertion. Restoring the producer passes with all 2,690 source hashes
+and the pinned SDK verified. The original full root suite is running.
+
+The staging Agora's anonymous checks reach exit 70
+`GALLERY_PRODUCT_FLOW_NOT_IMPLEMENTED`. The hosted pipeline requires Gallery
+smoke before Worker deploy, so completing the authenticated Gallery flow in
+`7ft` is required alongside the operator authority and staging lineage in
+`rs5n`. Staging Worker capabilities still return `0.1.0-draft` with the
+retained SHA-256 `8e79852b…aa70`. The public checks leave the provider
+revision unknown.
+
+The historical problem-lifecycle failure in `2tnr` remains unclassified.
+No candidate matched its retained digest in a bounded search of historical
+assertion formats. The current real local journey passed once, and existing
+commit `8dd3a7c5` records a source location if the failure recurs.
+
 **Core request recovery at `ea5c11c3`:** session open, workshop push, and
 promotion now return bounded canonical `suggested_fields` for a mistyped
 top-level key, for example `problemId` → `problem_id`. The refused request
