@@ -46,6 +46,7 @@ import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { ClaimFaceResponseSchema } from "../../packages/contracts/src/ledger.ts";
+import { SITE } from "../../apps/web/lib/site.ts";
 import {
   enrollSetupFellow,
   fellowPost,
@@ -2092,7 +2093,13 @@ async function main() {
           await fetch(`${agora.origin}${path}`, { headers: { "user-agent": USER_AGENT } })
         ).text();
         const match = /<meta property="og:image" content="([^"]+)"/.exec(html);
-        return match === null ? null : new URL(match[1], agora.origin).pathname;
+        if (match === null) return null;
+        const image = new URL(match[1], agora.origin);
+        if (
+          (image.origin !== agora.origin && image.origin !== SITE.agora) ||
+          image.username !== "" || image.password !== ""
+        ) return null;
+        return `${image.pathname}${image.search}`;
       };
       const card = async (imagePath) => {
         const response = await fetch(`${agora.origin}${imagePath}`, {
@@ -2113,7 +2120,7 @@ async function main() {
       const page = await context.newPage();
       for (const path of [`/p/${problemId}`, `/p/${problemId}/claims/${claimId}`]) {
         const imagePath = await ogImagePath(path);
-        record(`og ${path} declares an og:image on this origin`, imagePath !== null, imagePath);
+        record(`og ${path} declares an og:image for Agora`, imagePath !== null, imagePath);
         if (imagePath === null) continue;
         const image = await card(imagePath);
         record(
