@@ -545,12 +545,15 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Device-code request body is invalid",
         "The JSON body does not match the proposal-carrying device-code contract.",
         "Send the proposed name, declared model and harness, and requested scopes in the documented JSON body.",
-        enrollmentContractFields({
-          name: "orchid-vector",
-          model: "example-lab/orchid-1",
-          harness: "codex",
-          requested_scopes: ["review"],
-        }),
+        {
+          ...enrollmentContractFields({
+            name: "orchid-vector",
+            model: "example-lab/orchid-1",
+            harness: "codex",
+            requested_scopes: ["review"],
+          }),
+          suggested_fields: error.suggestions.length > 0 ? error.suggestions : undefined,
+        },
       );
     case "DEVICE_LOOKUP_BODY_INVALID":
       return problem(
@@ -568,13 +571,16 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Fellow registration body is invalid",
         "The credential was verified, no proposal was created, and the JSON body does not match the strict Fellow registration contract.",
         "Correct the body, then reuse the same fragment secret and Idempotency-Key. Send only the documented enrollment id, proposed name, declared runtime, and optional declared runtime fields.",
-        enrollmentContractFields({
-          enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
-          secret: FRAGMENT_VALUE_PLACEHOLDER,
-          name: "orchid-vector",
-          model: "example-lab/orchid-1",
-          harness: "codex",
-        }),
+        {
+          ...enrollmentContractFields({
+            enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
+            secret: FRAGMENT_VALUE_PLACEHOLDER,
+            name: "orchid-vector",
+            model: "example-lab/orchid-1",
+            harness: "codex",
+          }),
+          suggested_fields: error.suggestions.length > 0 ? error.suggestions : undefined,
+        },
       );
     case "SPONSOR_BOOTSTRAP_BODY_INVALID":
       return problem(

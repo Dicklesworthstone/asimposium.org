@@ -7,6 +7,7 @@ import {
   AnswerQuestionRequestSchema,
   AskQuestionRequestSchema,
   ConflictsListResponseSchema,
+  DeviceCodeStartResponseSchema,
   LeaseQuestionRequestSchema,
   NormalizeConflictRequestSchema,
   ProblemDocumentSchema,
@@ -334,7 +335,7 @@ async function runDiscovery() {
   async function enroll(name, sponsor, declaration = {}) {
     const minted = await fixtures.mint(sponsor);
     let registrationPath = discoveredRequest("fellow_registration_request");
-    const registration = {
+    let registration = {
       enrollment_id: minted.enrollmentId,
       secret: minted.secret,
       name,
@@ -343,6 +344,7 @@ async function runDiscovery() {
       ...declaration,
     };
     const checkRecovery = !registrationRecoveryChecked;
+    const repairKey = checkRecovery ? "discovery-fragment-field-repair" : undefined;
     const countProposals = async () =>
       (
         await env.DB.prepare(
@@ -373,14 +375,54 @@ async function runDiscovery() {
       );
       registrationPath = action.url;
       const { secret: _secret, ...withoutSecret } = registration;
-      await call(registrationPath, withoutSecret, undefined, 400);
+      const missingSecret = await call(registrationPath, withoutSecret, undefined, 400);
+      assert.equal(missingSecret.code, "PAIRING_INVALID");
+      assert.equal(missingSecret.suggested_fields, undefined);
       assert.equal(
         await countProposals(),
         0,
         "canonical registration still requires its fragment secret",
       );
+      const { harness, ...withoutHarness } = registration;
+      const missingRequiredRuntime = await call(
+        registrationPath,
+        { ...withoutHarness, harnes: harness },
+        undefined,
+        400,
+      );
+      assert.equal(missingRequiredRuntime.code, "PAIRING_INVALID");
+      assert.equal(missingRequiredRuntime.suggested_fields, undefined);
+      const toolsNote = "private-registration-declaration";
+      const mistyped = { ...registration, toolsNote };
+      const wrongSecret = `v1.${minted.secret[3] === "A" ? "B" : "A"}${minted.secret.slice(4)}`;
+      const opaque = await call(
+        registrationPath,
+        { ...mistyped, secret: wrongSecret },
+        undefined,
+        400,
+      );
+      assert.equal(opaque.code, "PAIRING_INVALID");
+      assert.equal(opaque.suggested_fields, undefined);
+      assert.ok(!JSON.stringify(opaque).includes(wrongSecret));
+      const refusal = ProblemDocumentSchema.parse(
+        await call(registrationPath, mistyped, undefined, 422, repairKey),
+      );
+      assert.equal(refusal.code, "REGISTRATION_BODY_INVALID");
+      assert.ok(
+        JSON.stringify(refusal.suggested_fields) === '["tools_note"]',
+        "verified registration must suggest the canonical declaration field",
+      );
+      const serialized = JSON.stringify(refusal);
+      assert.ok(!serialized.includes('"toolsNote"') && !serialized.includes(minted.secret));
+      assert.ok(!serialized.includes(toolsNote));
+      assert.equal(
+        await countProposals(),
+        0,
+        "field hints must not create a registration proposal",
+      );
+      registration = { ...registration, [refusal.suggested_fields[0]]: mistyped.toolsNote };
     }
-    const claimed = await call(registrationPath, registration, undefined, 202);
+    const claimed = await call(registrationPath, registration, undefined, 202, repairKey);
     if (checkRecovery) {
       assert.equal(await countProposals(), 1, "following the hint creates exactly one proposal");
       registrationRecoveryChecked = true;
@@ -3622,6 +3664,54 @@ async function runDiscovery() {
     );
   }
   if (screenMode === "positive") {
+    const deviceName = "discovery-device-repair";
+    const countDeviceProposals = async () =>
+      (
+        await env.DB.prepare("SELECT COUNT(*) AS total FROM enrollment_proposals WHERE name = ?")
+          .bind(deviceName)
+          .first()
+      ).total;
+    const deviceStart = (body) =>
+      worker.fetch(`${origin}${discoveredRequest("device_code_start_request")}`, {
+        method: "POST",
+        headers: {
+          "User-Agent": userAgent,
+          "Content-Type": "application/json",
+          "Idempotency-Key": "discovery-device-field-repair",
+          "CF-Connecting-IP": "192.0.2.42",
+        },
+        body: JSON.stringify(body),
+      });
+    const mistypedDevice = {
+      name: deviceName,
+      model: "synthetic-device-model",
+      harnes: "private-device-declaration",
+      requested_scopes: ["review"],
+    };
+    assert.equal(await countDeviceProposals(), 0);
+    const deviceRefusal = await deviceStart(mistypedDevice);
+    assert.equal(deviceRefusal.status, 422);
+    const problem = ProblemDocumentSchema.parse(await deviceRefusal.json());
+    assert.equal(problem.code, "DEVICE_CODE_BODY_INVALID");
+    assert.ok(
+      JSON.stringify(problem.suggested_fields) === '["harness"]',
+      "device start must suggest the canonical declaration field",
+    );
+    const serialized = JSON.stringify(problem);
+    assert.ok(!serialized.includes('"harnes"') && !serialized.includes(mistypedDevice.harnes));
+    assert.equal(await countDeviceProposals(), 0, "field hints must not create a device proposal");
+    const { harnes, ...deviceFields } = mistypedDevice;
+    const startedDevice = await deviceStart({
+      ...deviceFields,
+      [problem.suggested_fields[0]]: harnes,
+    });
+    assert.equal(startedDevice.status, 201);
+    assert.ok(DeviceCodeStartResponseSchema.safeParse(await startedDevice.json()).success);
+    assert.equal(
+      await countDeviceProposals(),
+      1,
+      "the explicitly repaired device request creates one proposal",
+    );
     console.log(
       JSON.stringify({
         kind: "discovery-real-bindings",

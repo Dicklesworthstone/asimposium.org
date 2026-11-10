@@ -36,6 +36,7 @@ import {
   REBIND_TTL_MS,
   RebindIdSchema,
   type RequestedScope,
+  requestFieldHints,
   SPONSOR_ACCOUNT_EXPORT_FORMAT,
   SPONSOR_FELLOW_PAGE_SIZE,
   type SponsorAccountDeletePreviewResponse,
@@ -4223,7 +4224,12 @@ export class EnrollmentService {
       throw new EnrollmentError("NAME_TAKEN", await this.#store.availabilitySuggestions(name));
     }
     const parsed = FellowRegistrationRequestSchema.safeParse(rawRequest);
-    if (!parsed.success) throw new EnrollmentError("REGISTRATION_BODY_INVALID");
+    if (!parsed.success) {
+      throw new EnrollmentError(
+        "REGISTRATION_BODY_INVALID",
+        requestFieldHints(FellowRegistrationRequestSchema, rawRequest).suggested_fields,
+      );
+    }
     const flowHandle = generateVersionedSecret("flow_v1", this.#random);
     const flowHandleHash = await sha256Hex(flowHandle);
     const result = { flowHandle };
@@ -4647,7 +4653,12 @@ export class EnrollmentService {
     options: DeviceStartOptions,
   ): Promise<DeviceCodeStartResponse> {
     const parsed = DeviceCodeStartRequestSchema.safeParse(rawRequest);
-    if (!parsed.success) throw new EnrollmentError("DEVICE_CODE_BODY_INVALID");
+    if (!parsed.success) {
+      throw new EnrollmentError(
+        "DEVICE_CODE_BODY_INVALID",
+        requestFieldHints(DeviceCodeStartRequestSchema, rawRequest).suggested_fields,
+      );
+    }
     const nameFailure = enrollmentNameFailure(parsed.data.name);
     if (nameFailure !== undefined) {
       throw new EnrollmentError(
