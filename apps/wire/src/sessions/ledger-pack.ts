@@ -11,6 +11,11 @@ import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render"
 import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 import type { Env } from "../env";
 import { eventContentHiddenSql } from "../krater/public-content";
+import {
+  type CitationContentRow,
+  PUBLIC_EVENT_CONTENT_MAX_BYTES,
+  verifiedCitationContent,
+} from "../ledger/citation-read-integrity";
 import { loadProblemCitations } from "../ledger/citations";
 import {
   composeDependencyAssessment,
@@ -65,11 +70,18 @@ export interface PackClaimHead {
   statement: string | null;
 }
 
-/** Version text and its visibility are read together. Current controls still
+interface PackClaimContentRow extends CitationContentRow {
+  id: string;
+  source_seq: number;
+  version: number;
+  type: "claim.created" | "claim.revised";
+}
+
+/** Source content and its visibility are read together. Current controls still
  * apply to historical cuts; a retained claim version is never permission to
  * republish hidden or redacted content. Missing content stays an omission,
  * not a fallback to the mutable head or to an older visible version. */
-export function preparePackClaimHeads(
+function preparePackClaimHeads(
   db: Env["DB"],
   problemId: string,
   cursor: number,
@@ -78,20 +90,61 @@ export function preparePackClaimHeads(
   return db
     .prepare(`WITH pack_claim_heads AS (${CLAIM_HEADS_AT_CURSOR_SQL})
     SELECT head.id, head.source_seq, e.object_version AS version,
+      e.problem_id, e.seq, e.type, p.public_seq, e.payload_sha256,
+      c.payload_sha256 AS content_sha256, c.redacted_at,
       CASE WHEN p.status != 'private-draft' AND e.seq <= p.public_seq
         AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
+        AND length(CAST(c.payload_json AS BLOB)) <= ${PUBLIC_EVENT_CONTENT_MAX_BYTES}
         AND NOT ${eventContentHiddenSql("e")}
-        THEN v.statement END AS statement
+        THEN c.payload_json END AS payload_json
     FROM pack_claim_heads head
     JOIN events e ON e.problem_id = head.problem_id AND e.seq = head.source_seq
       AND e.object_id = head.id AND e.object_kind = 'claim'
       AND e.type IN ('claim.created', 'claim.revised')
     JOIN problems p ON p.id = head.problem_id
-    LEFT JOIN claim_versions v ON v.problem_id = e.problem_id
-      AND v.claim_id = e.object_id AND v.version = e.object_version
     LEFT JOIN event_content c ON c.event_id = e.id
     ORDER BY head.source_seq ASC, head.id ASC`)
     .bind(problemId, cursor, limit);
+}
+
+/** The exact event bytes authorize headline text, just as they authorize an
+ * exact-version claim detail. Matching stored hash columns alone cannot prove
+ * that the retained bytes, or a surviving version projection, are authentic. */
+export async function readPackClaimHeads(
+  db: Env["DB"],
+  problemId: string,
+  cursor: number,
+  limit: number,
+): Promise<PackClaimHead[]> {
+  const result = await preparePackClaimHeads(
+    db,
+    problemId,
+    cursor,
+    limit,
+  ).all<PackClaimContentRow>();
+  return Promise.all(
+    (result.results ?? []).map(async (row): Promise<PackClaimHead> => {
+      const payload = await verifiedCitationContent(problemId, row, PUBLIC_EVENT_CONTENT_MAX_BYTES);
+      const boundToVersion =
+        Number.isSafeInteger(row.version) &&
+        ((row.type === "claim.created" && row.version === 1) ||
+          (row.type === "claim.revised" &&
+            row.version > 1 &&
+            payload?.base_version === row.version - 1));
+      return {
+        id: row.id,
+        source_seq: row.source_seq,
+        version: row.version,
+        statement:
+          boundToVersion &&
+          payload !== undefined &&
+          payload.claim_id === row.id &&
+          typeof payload.statement === "string"
+            ? payload.statement
+            : null,
+      };
+    }),
+  );
 }
 
 /** Arrival context and the graveyard share the public reader, never another

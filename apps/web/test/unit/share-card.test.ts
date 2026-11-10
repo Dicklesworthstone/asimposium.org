@@ -111,6 +111,54 @@ function createMinimalClaimFace(overrides: Partial<ClaimFaceResponse> = {}): Cla
   };
 }
 
+function createDenseScopedShareCard() {
+  const face = createMinimalProblemFace({ problem: "P-4DSP", problem_status: "resolved" });
+  face.items[0]!.body =
+    "Smooth four-dimensional manifold classification under finite-domain assumptions, with independent validation of all stated boundary cases.";
+  face.items[0]!.screening_notice = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  };
+  face.items.push({
+    scope: "ledger",
+    kind: "problem-resolution",
+    id: "RES-1",
+    untrusted: true,
+    why_included: "Recorded resolution",
+    neutralized: [],
+    body: JSON.stringify({
+      direction: "closed-with-negative-result",
+      summary: "The finite-domain test supplies a negative result.",
+      no_claim_boundary: {
+        verified: [
+          "Only the stated finite family of smooth manifolds is covered by the recorded classification and checking procedure.",
+        ],
+        mechanisms: ["Independent reproduction"],
+        independence_tiers: ["T2"],
+        remaining_external_validation: [
+          "The unrestricted smooth four-dimensional problem still requires external validation beyond this finite family.",
+        ],
+      },
+      result_claim: {
+        claim_id: "C-1",
+        version: 1,
+        content_digest: `sha256:${"a".repeat(64)}`,
+        event_id: "EV-claim",
+        payload_digest: "b".repeat(64),
+      },
+      closing_synthesis: {
+        synthesis_id: "SYNTH-1",
+        event_id: "EV-synthesis",
+        seq: 40,
+        payload_digest: "c".repeat(64),
+        covers_through: 39,
+      },
+    }),
+  });
+  return buildProblemShareCardData(face);
+}
+
 function createMinimalHonorsRecord(overrides: Partial<HonorsResponse> = {}): HonorsResponse {
   return {
     results: [
@@ -228,6 +276,48 @@ describe("W8.8a Share Honesty & Forbidden Words (Rule A4)", () => {
 });
 
 describe("Problem Share Card View Model", () => {
+  test("scientific titles cannot break the public page through share-only wording checks", () => {
+    for (const title of [
+      "A proven lower bound",
+      "Previously solved subcases",
+      "A theorem proved under explicit hypotheses",
+      "AI solved everything",
+    ]) {
+      const face = createMinimalProblemFace();
+      face.items[0]!.body = title;
+      const before = JSON.stringify(face);
+      const data = buildProblemShareCardData(face);
+      expect(data.rawTitle).toBe(title);
+      expect(data.title).toBe("Public problem");
+      expect(data.statusKind).toBe("active");
+      expect(() => assertShareHonesty(data.title)).not.toThrow();
+      expect(JSON.stringify(face)).toBe(before);
+    }
+  });
+
+  test("canonical identifiers are not scientific assertions to be word-filtered", () => {
+    const data = buildProblemShareCardData(createMinimalProblemFace({ problem: "P-PROVED" }));
+    expect(data.url).toBe("https://asimposium.org/p/P-PROVED");
+    expect(data.suggestedShareText).toContain("[P-PROVED]");
+  });
+
+  test("only the canonical single-team marker can set the share warning", () => {
+    const forged = createMinimalProblemFace();
+    forged.items[1]!.body = "This text says single-team problem without establishing sponsorship.";
+    expect(buildProblemShareCardData(forged).isSingleTeam).toBe(false);
+    const recorded = createMinimalProblemFace({ omitted: [{ reason: "single_team" }] });
+    expect(buildProblemShareCardData(recorded).isSingleTeam).toBe(true);
+  });
+
+  test("a missing resolution record cannot invent a verified scope", () => {
+    const data = buildProblemShareCardData(
+      createMinimalProblemFace({ problem_status: "resolved" }),
+    );
+    expect(data.statusKind).toBe("resolved");
+    expect(data.scopeNotice).toContain("unavailable in this digest");
+    expect(data.suggestedShareText).not.toContain("bound strictly to verified scope");
+  });
+
   test("builds active problem share card with honest counts", () => {
     const face = createMinimalProblemFace();
     const data = buildProblemShareCardData(face);
@@ -239,8 +329,8 @@ describe("Problem Share Card View Model", () => {
     expect(data.status).toBe("active · open for investigation");
     expect(data.cursor).toBe(42);
     expect(data.counts).toEqual([
-      { label: "Claims", value: 1 },
-      { label: "Formulations", value: 2 },
+      { label: "Claims in digest", value: 1 },
+      { label: "Formulation fields", value: 2 },
       { label: "Cursor", value: "#42" },
     ]);
     expect(data.suggestedShareText).toContain("[P-100] Minimal Test Problem Title");
@@ -280,6 +370,7 @@ describe("Problem Share Card View Model", () => {
   test("single-team problem banner displayed when unreviewed", () => {
     const face = createMinimalProblemFace({
       preamble: "Single-team problem — nothing here has been independently reviewed yet.",
+      omitted: [{ reason: "single_team" }],
     });
     const data = buildProblemShareCardData(face);
 
@@ -292,14 +383,54 @@ describe("Problem Share Card View Model", () => {
 
   test("resolved problem with scope boundary", () => {
     const face = createMinimalProblemFace({
+      problem: "P-4DSP",
       problem_status: "resolved",
+    });
+    face.items.push({
+      scope: "ledger",
+      kind: "problem-resolution",
+      id: "resolution",
+      body: JSON.stringify({
+        direction: "closed-with-negative-result",
+        summary: "The finite-domain test supplies a negative result.",
+        no_claim_boundary: {
+          verified: ["Finite cases through n = 12 only"],
+          mechanisms: ["Independent reproduction"],
+          independence_tiers: ["T2"],
+          remaining_external_validation: ["No conclusion about the infinite case"],
+        },
+        result_claim: {
+          claim_id: "C-1",
+          version: 1,
+          content_digest: `sha256:${"a".repeat(64)}`,
+          event_id: "EV-claim",
+          payload_digest: "b".repeat(64),
+        },
+        closing_synthesis: {
+          synthesis_id: "SYNTH-1",
+          event_id: "EV-synthesis",
+          seq: 40,
+          payload_digest: "c".repeat(64),
+          covers_through: 39,
+        },
+      }),
+      why_included: "Recorded resolution",
+      untrusted: true,
+      neutralized: [],
     });
     const data = buildProblemShareCardData(face);
 
     expect(data.statusKind).toBe("resolved");
     expect(data.statusBadge).toBe("RESOLVED (WITH SCOPE)");
-    expect(data.scopeNotice).toContain("Qualified resolution: bound strictly to verified scope");
-    expect(data.suggestedShareText).toContain("Scope: Qualified resolution");
+    expect(data.scopeNotice).toContain("Finite cases through n = 12 only");
+    expect(data.scopeNotice).toContain("No conclusion about the infinite case");
+    expect(data.scopeNotice).toContain("Read the source for complete limits");
+    expect(data.suggestedShareText).toContain("Scope: Recorded scope excerpt");
+    const markup = renderToStaticMarkup(renderShareCard(data));
+    expect(markup).toContain("Famous-problem guardrail");
+    expect(markup).toContain("Finite cases through n = 12 only");
+    expect(markup).toContain("No conclusion about the infinite case");
+    expect(data.counts.find((item) => item.label === "Formulation fields")?.value).toBe(2);
   });
 
   test("private-draft problems are strictly excluded", () => {
@@ -313,6 +444,70 @@ describe("Problem Share Card View Model", () => {
 });
 
 describe("Claim Share Card View Model", () => {
+  test("the headline uses the exact canonical statement, not JSON metadata or embedded status", () => {
+    const face = createMinimalClaimFace();
+    face.items[0]!.body = JSON.stringify({
+      problem: face.problem,
+      claim_id: "C-1",
+      version: 1,
+      kind: "conjecture",
+      fellow: "F-author",
+      model_self_declared: "vendor/model",
+      statement: "Every object in the stated finite domain has property Q.",
+      disposition: "strongly-supported",
+      falsifier: "A counterexample would refute what is otherwise not proved.",
+    });
+    const data = buildClaimShareCardData(face, face.problem);
+    expect(data.title).toBe("Every object in the stated finite domain has property Q.");
+    expect(data.suggestedShareText).not.toContain("model_self_declared");
+    expect(data.suggestedShareText).not.toContain("strongly-supported");
+    expect(data.statusKind).toBe("open");
+  });
+
+  test("malformed and reduced claims never silently acquire OPEN share status", () => {
+    for (const disposition of ["malformed", "reduced-to"] as const) {
+      const face = createMinimalClaimFace();
+      face.claim_state.disposition = disposition;
+      const data = buildClaimShareCardData(face, face.problem);
+      expect(data.statusKind).toBe(disposition);
+      expect(data.statusBadge).toBe(disposition.toUpperCase());
+      expect(data.status).toContain(disposition);
+      expect(data.suggestedShareText).not.toContain("Status: open");
+    }
+  });
+
+  test("valid scientific prose keeps its public record when a neutral share title is required", () => {
+    const face = createMinimalClaimFace();
+    face.items[0]!.body = "The lower bound is proven for the stated finite domain.";
+    const before = JSON.stringify(face);
+    const data = buildClaimShareCardData(face, face.problem);
+    expect(data.rawTitle).toBe(face.items[0]!.body);
+    expect(data.title).toBe("Published claim");
+    expect(data.statusKind).toBe("open");
+    expect(JSON.stringify(face)).toBe(before);
+  });
+
+  test("saved claim share links retain the assessed publication and ledger snapshot", () => {
+    const face = createMinimalClaimFace({ problem: "P-PROVED" });
+    face.claim_state.version = 2;
+    face.claim_state.latest_version = 3;
+    const data = buildClaimShareCardData(face, face.problem);
+    expect(data.url).toBe("https://asimposium.org/p/P-PROVED/claims/C-1%402?through=42");
+    expect(data.canonicalAgentUrl).toBe(
+      "https://a.asimposium.org/p/P-PROVED/claims/C-1%402.md?through=42",
+    );
+    expect(data.suggestedShareText).toContain(data.url);
+  });
+
+  test("stale scientific standing remains visible in share text and images", () => {
+    const face = createMinimalClaimFace();
+    face.claim_state.stale = true;
+    const data = buildClaimShareCardData(face, face.problem);
+    expect(data.status).toContain("stale");
+    expect(data.suggestedShareText).toContain("stale");
+    expect(renderToStaticMarkup(renderShareCard(data))).toContain("stale");
+  });
+
   test("open unchallenged claim indicates zero refutations", () => {
     const face = createMinimalClaimFace({
       claim_state: {
@@ -405,7 +600,7 @@ describe("Claim Share Card View Model", () => {
     const data = buildClaimShareCardData(face, "P-100");
     expect(data.statusKind).toBe("disputed");
     expect(data.statusBadge).toBe("DISPUTED");
-    expect(data.status).toContain("disputed · counterevidence on record");
+    expect(data.status).toContain("disputed · inspect the recorded objections");
   });
 });
 
@@ -523,15 +718,33 @@ describe("Dynamic Image Rendering", () => {
     expect(props.style.height).toBe("100%");
   });
 
-  test("the share card actually renders to PNG bytes", async () => {
+  test("dense resolved cards retain the complete guardrail, scope and screening qualifications", () => {
+    const data = createDenseScopedShareCard();
+    expect(data.title).toHaveLength(120);
+    expect(data.scopeNotice!.length).toBeGreaterThan(300);
+    const markup = renderToStaticMarkup(renderShareCard(data));
+    for (const notice of [data.guardrailNotice!, data.scopeNotice!, data.screeningNotice!]) {
+      expect(markup).toContain(notice);
+    }
+    expect(markup).toContain("RESOLVED (WITH SCOPE)");
+    expect(markup).toContain("Claims in digest");
+    expect(markup).toContain("asimposium.org");
+  });
+
+  test("simple and dense share cards actually render to PNG bytes", async () => {
     // A test that never read the body let an unsupported CSS border ship; the
     // production build then failed while prerendering /results/opengraph-image.
-    const response = generateShareCardImageResponse(
+    // Exercise the maximum title plus scope, guardrail and screening together.
+    // Visual review separately checks their placement within the fixed canvas.
+    for (const data of [
       buildProblemShareCardData(createMinimalProblemFace()),
-    );
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    expect(bytes.length).toBeGreaterThan(1000);
-    expect([...bytes.slice(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      createDenseScopedShareCard(),
+    ]) {
+      const response = generateShareCardImageResponse(data);
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      expect(bytes.length).toBeGreaterThan(1000);
+      expect([...bytes.slice(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    }
   }, 60_000);
 
   test("generateShareCardImageResponse produces valid ImageResponse", () => {

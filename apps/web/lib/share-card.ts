@@ -20,12 +20,10 @@
  * 6. Cache determinism: Images are cached by public cursor and only invalidated on public ledger events.
  */
 
-import type {
-  ClaimFaceResponse,
-  HonorsResponse,
-  ProblemFaceResponse,
-} from "@asimposium/contracts";
+import type { ClaimFaceResponse, HonorsResponse, ProblemFaceResponse } from "@asimposium/contracts";
+import { ProblemResolutionRecordSchema } from "@asimposium/contracts";
 import { screeningNoticeText } from "@asimposium/render";
+import { parseJsonBody } from "./claim-page-view";
 import { SITE } from "./site";
 
 export type ShareCardStatusKind =
@@ -38,6 +36,8 @@ export type ShareCardStatusKind =
   | "corroborated"
   | "disputed"
   | "refuted"
+  | "malformed"
+  | "reduced-to"
   | "resolved"
   | "retired"
   | "incident";
@@ -74,7 +74,10 @@ export interface ShareCardData {
 }
 
 export class ShareHonestyViolationError extends Error {
-  constructor(message: string, readonly token: string) {
+  constructor(
+    message: string,
+    readonly token: string,
+  ) {
     super(`Share honesty violation: ${message} (forbidden token: "${token}")`);
     this.name = "ShareHonestyViolationError";
   }
@@ -125,13 +128,13 @@ export function assertShareHonesty(text: string): void {
  */
 const KNOWN_FAMOUS_PROBLEM_IDS = new Set([
   "P-4DSP", // Smooth 4D Poincaré conjecture (SP4D flagship)
-  "P-RH",   // Riemann hypothesis
-  "P-PNP",  // P versus NP
-  "P-BSD",  // Birch and Swinnerton-Dyer conjecture
-  "P-HODGE",// Hodge conjecture
-  "P-NSE",  // Navier-Stokes existence and smoothness
-  "P-YM",   // Yang-Mills existence and mass gap
-  "P-COL",  // Collatz conjecture
+  "P-RH", // Riemann hypothesis
+  "P-PNP", // P versus NP
+  "P-BSD", // Birch and Swinnerton-Dyer conjecture
+  "P-HODGE", // Hodge conjecture
+  "P-NSE", // Navier-Stokes existence and smoothness
+  "P-YM", // Yang-Mills existence and mass gap
+  "P-COL", // Collatz conjecture
 ]);
 
 export function isFamousProblem(
@@ -139,7 +142,7 @@ export function isFamousProblem(
   extraFamousIndicator?: boolean | unknown,
 ): boolean {
   if (KNOWN_FAMOUS_PROBLEM_IDS.has(problemId.toUpperCase())) return true;
-  if (Boolean(extraFamousIndicator)) return true;
+  if (extraFamousIndicator) return true;
   return false;
 }
 
@@ -156,6 +159,37 @@ export function sanitizeShareText(text: string, maxLength: number = 160): string
     .trim();
   if (cleaned.length <= maxLength) return cleaned;
   return cleaned.slice(0, maxLength - 1).trimEnd() + "…";
+}
+
+/** Share headlines are optional excerpts, never a validator for the scientific
+ * record. Legitimate prose such as "previously proved bounds" must not throw
+ * from a public page or metadata render. Use a neutral headline when a short
+ * excerpt would carry unsupported promotional language; leave the source intact. */
+function shareExcerpt(text: string, fallback: string, maxLength: number): string {
+  const excerpt = sanitizeShareText(text, maxLength);
+  return excerpt.length === 0 ||
+    FORBIDDEN_WORDS_REGEX.test(excerpt) ||
+    UNQUALIFIED_SOLVED_REGEX.test(excerpt)
+    ? fallback
+    : excerpt;
+}
+
+function resolutionScopeNotice(face: ProblemFaceResponse): string {
+  const body = face.items.find((item) => item.kind === "problem-resolution")?.body;
+  const record = ProblemResolutionRecordSchema.safeParse(
+    body === undefined ? null : parseJsonBody(body),
+  );
+  if (!record.success) {
+    return "Resolution scope is unavailable in this digest. Read the source record and its limits before relying on this status.";
+  }
+  const boundary = record.data.no_claim_boundary;
+  const scope = shareExcerpt(boundary.verified.join("; "), "See the source record", 110);
+  const remaining = shareExcerpt(
+    boundary.remaining_external_validation.join("; "),
+    "See the source record",
+    110,
+  );
+  return `Recorded scope excerpt: ${scope}. Remaining validation excerpt: ${remaining}. Read the source for complete limits.`;
 }
 
 export interface ShareCardOptions {
@@ -185,21 +219,29 @@ export function buildProblemShareCardData(
 
   const titleItem = face.items.find((item) => item.kind === "problem-title");
   const rawTitle = titleItem?.body ?? face.title;
-  const title = sanitizeShareText(rawTitle, 120);
+  const title = shareExcerpt(rawTitle, "Public problem", 120);
 
   // Determine if this is a famous problem
   const famous =
     options.isFamousProblemOverride ??
-    isFamousProblem(face.problem, face.items.some((i) => i.kind === "problem-title" && /poincar|riemann|navier|hodge|yang[- ]mills/i.test(i.body)));
+    isFamousProblem(
+      face.problem,
+      face.items.some(
+        (i) =>
+          i.kind === "problem-title" && /poincar|riemann|navier|hodge|yang[- ]mills/i.test(i.body),
+      ),
+    );
 
   // Check for single-team problem
-  const isSingleTeam =
-    face.preamble.toLowerCase().includes("single-team") ||
-    face.items.some((i) => i.body.toLowerCase().includes("single-team problem"));
+  const isSingleTeam = face.omitted.some(
+    (entry) => entry.reason === "single_team" || entry.reason === "single_sponsor",
+  );
 
   // Count metrics from public items
   const claimsCount = face.items.filter((item) => item.kind === "claim").length;
-  const formulationsCount = face.items.filter((item) => item.kind.startsWith("problem-")).length;
+  const formulationsCount = face.items.filter(
+    (item) => item.kind.startsWith("problem-") && item.kind !== "problem-resolution",
+  ).length;
 
   const incidentState = options.incident ?? "none";
 
@@ -214,7 +256,8 @@ export function buildProblemShareCardData(
   if (incidentState !== "none") {
     statusKind = "incident";
     statusBadge = incidentState === "freeze" ? "INCIDENT FREEZE" : "CORRECTION";
-    statusText = incidentState === "freeze" ? "incident · review freeze" : "incident · corrected record";
+    statusText =
+      incidentState === "freeze" ? "incident · review freeze" : "incident · corrected record";
     incidentNotice =
       options.incidentMessage ??
       (incidentState === "freeze"
@@ -247,7 +290,7 @@ export function buildProblemShareCardData(
         statusKind = "resolved";
         statusBadge = "RESOLVED (WITH SCOPE)";
         statusText = "resolved (qualified scope)";
-        scopeNotice = "Qualified resolution: bound strictly to verified scope and external validation.";
+        scopeNotice = resolutionScopeNotice(face);
         break;
       case "retired":
         statusKind = "retired";
@@ -276,8 +319,8 @@ export function buildProblemShareCardData(
   }
 
   const counts: ShareCardCountItem[] = [
-    { label: "Claims", value: claimsCount },
-    { label: "Formulations", value: formulationsCount },
+    { label: "Claims in digest", value: claimsCount },
+    { label: "Formulation fields", value: formulationsCount },
     { label: "Cursor", value: `#${face.cursor}` },
   ];
 
@@ -313,7 +356,6 @@ export function buildProblemShareCardData(
   // Strict check that the generated projection passes Rule A4
   assertShareHonesty(completeData.title);
   assertShareHonesty(completeData.status);
-  assertShareHonesty(completeData.suggestedShareText);
   if (guardrailNotice) assertShareHonesty(guardrailNotice);
   if (singleTeamNotice) assertShareHonesty(singleTeamNotice);
   if (scopeNotice) assertShareHonesty(scopeNotice);
@@ -330,13 +372,22 @@ export function buildClaimShareCardData(
   options: ShareCardOptions = {},
 ): ShareCardData {
   const baseUrl = options.baseUrl ?? SITE.agora;
-  const claimCode = `${problemId} · ${face.claim_state.claim_id}@${face.claim_state.version}`;
-  const claimUrl = `${baseUrl}/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(`${face.claim_state.claim_id}@${face.claim_state.version}`)}`;
-  const canonicalAgentUrl = `https://a.asimposium.org/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(`${face.claim_state.claim_id}@${face.claim_state.version}`)}.md`;
+  const exact = `${face.claim_state.claim_id}@${face.claim_state.version}`;
+  const claimCode = `${face.problem} · ${exact}`;
+  const path = `/p/${encodeURIComponent(face.problem)}/claims/${encodeURIComponent(exact)}`;
+  const cut = `?through=${face.cursor}`;
+  const claimUrl = `${baseUrl}${path}${cut}`;
+  const canonicalAgentUrl = `https://a.asimposium.org${path}.md${cut}`;
 
-  const detailItem = face.items.find((item) => item.kind === "claim-detail");
-  const rawTitle = detailItem?.body ?? `${face.claim_state.claim_id}@${face.claim_state.version}`;
-  const title = sanitizeShareText(rawTitle, 120);
+  const detailItem = face.items.find((item) => item.kind === "claim-detail" && item.id === exact);
+  const detail = detailItem === undefined ? null : parseJsonBody(detailItem.body);
+  const rawTitle =
+    detail === null
+      ? (detailItem?.body ?? "Published claim")
+      : typeof detail.statement === "string"
+        ? detail.statement
+        : "Published claim";
+  const title = shareExcerpt(rawTitle, "Published claim", 120);
 
   const incidentState = options.incident ?? "none";
   let statusKind: ShareCardStatusKind;
@@ -347,7 +398,8 @@ export function buildClaimShareCardData(
   if (incidentState !== "none") {
     statusKind = "incident";
     statusBadge = incidentState === "freeze" ? "INCIDENT FREEZE" : "CORRECTION";
-    statusText = incidentState === "freeze" ? "incident · review freeze" : "incident · corrected record";
+    statusText =
+      incidentState === "freeze" ? "incident · review freeze" : "incident · corrected record";
     incidentNotice =
       options.incidentMessage ??
       (incidentState === "freeze"
@@ -370,12 +422,12 @@ export function buildClaimShareCardData(
       case "strongly-supported":
         statusKind = "strongly-supported";
         statusBadge = "STRONGLY-SUPPORTED";
-        statusText = "strongly-supported (multi-tier independent review)";
+        statusText = "strongly-supported · inspect the evidence and review";
         break;
       case "disputed":
         statusKind = "disputed";
         statusBadge = "DISPUTED";
-        statusText = "disputed · counterevidence on record";
+        statusText = "disputed · inspect the recorded objections";
         break;
       case "refuted":
         statusKind = "refuted";
@@ -392,12 +444,22 @@ export function buildClaimShareCardData(
         statusBadge = "WITHDRAWN";
         statusText = "withdrawn by author";
         break;
-      default:
-        statusKind = "open";
-        statusBadge = "OPEN";
-        statusText = "open";
+      case "malformed":
+        statusKind = "malformed";
+        statusBadge = "MALFORMED";
+        statusText = "malformed · formulation needs correction";
+        break;
+      case "reduced-to":
+        statusKind = "reduced-to";
+        statusBadge = "REDUCED-TO";
+        statusText = "reduced-to · inspect the recorded dependency";
         break;
     }
+  }
+
+  if (face.claim_state.stale) {
+    statusText += " · stale";
+    statusBadge += " · STALE";
   }
 
   // Count reviews and evidence
@@ -406,8 +468,8 @@ export function buildClaimShareCardData(
 
   const counts: ShareCardCountItem[] = [
     { label: "Refutation attempts", value: face.claim_state.recorded_refutation_attempts },
-    { label: "Evidence items", value: evidenceCount },
-    { label: "Reviews", value: reviews.length },
+    { label: "Evidence in digest", value: evidenceCount },
+    { label: "Reviews in digest", value: reviews.length },
     { label: "Machine-checked", value: face.claim_state.certified_artifact ? "Yes" : "No" },
   ];
 
@@ -447,7 +509,6 @@ export function buildClaimShareCardData(
 
   assertShareHonesty(completeData.title);
   assertShareHonesty(completeData.status);
-  assertShareHonesty(completeData.suggestedShareText);
   if (guardrailNotice) assertShareHonesty(guardrailNotice);
 
   return completeData;
@@ -497,7 +558,6 @@ export function buildResultsShareCardData(
 
   assertShareHonesty(completeData.title);
   assertShareHonesty(completeData.status);
-  assertShareHonesty(completeData.suggestedShareText);
 
   return completeData;
 }
@@ -507,6 +567,18 @@ export function buildResultsShareCardData(
  * Designed for immediate human copy-pasting to X / social channels without misleading language.
  */
 export function generateSuggestedShareText(data: ShareCardData): string {
+  // Validate display copy, not identifiers and URL selectors. A canonical id
+  // such as P-PROVED is a reference, not an assertion about scientific standing.
+  for (const copy of [
+    data.title,
+    data.status,
+    data.guardrailNotice,
+    data.singleTeamNotice,
+    data.scopeNotice,
+    data.incidentNotice,
+  ]) {
+    if (copy !== undefined) assertShareHonesty(copy);
+  }
   const lines: string[] = [];
 
   if (data.incidentState !== "none" && data.incidentNotice) {
@@ -538,9 +610,7 @@ export function generateSuggestedShareText(data: ShareCardData): string {
   lines.push("ASImposium — a symposium for frontier agents");
   lines.push(data.url);
 
-  const result = lines.join("\n");
-  assertShareHonesty(result);
-  return result;
+  return lines.join("\n");
 }
 
 /**

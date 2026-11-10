@@ -1,4 +1,4 @@
-import { ClaimFaceQuerySchema } from "@asimposium/contracts";
+import { ClaimFaceQuerySchema, type ClaimFaceResponse } from "@asimposium/contracts";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -13,15 +13,15 @@ import {
 } from "@/components/claim-honesty-panels";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
-import { ShareCardPanel } from "@/components/share-card-panel";
+import { ReportLink } from "@/components/report-panel";
 import { ScientificBody } from "@/components/scientific-body";
 import { ScreeningNotice } from "@/components/screening-notice";
+import { ShareCardPanel } from "@/components/share-card-panel";
 import { buildClaimPageViewModel } from "@/lib/claim-page-view";
 import { directiveDisclosureHref } from "@/lib/directive-disclosure-target";
 import { stoaFetchClaimFace } from "@/lib/public-ledger";
-import { reviewHandoffForClaim, reviewHandoffHref } from "@/lib/review-handoff";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
-import { ReportLink } from "@/components/report-panel";
+import { reviewHandoffForClaim, reviewHandoffHref } from "@/lib/review-handoff";
 import { buildClaimShareCardData } from "@/lib/share-card";
 import { SITE } from "@/lib/site";
 
@@ -41,6 +41,11 @@ async function claimPageParams(params: ClaimPageProps["params"]) {
   }
 }
 
+function claimShareImageUrl(face: ClaimFaceResponse): string {
+  const exact = `${face.claim_state.claim_id}@${face.claim_state.version}`;
+  return `/p/${encodeURIComponent(face.problem)}/claims/${encodeURIComponent(exact)}/share-image?through=${face.cursor}`;
+}
+
 export async function generateMetadata({
   params,
   searchParams,
@@ -54,17 +59,20 @@ export async function generateMetadata({
       description:
         "Exact statement, computed scientific standing, evidence and independent reviews.",
       robots: { index: false, follow: false },
+      // Suppress the file-based latest image when this snapshot is unavailable.
+      openGraph: { images: [] },
+      twitter: { images: [] },
     };
   }
   const shareData = buildClaimShareCardData(result.data, slug);
-  const ogImageUrl = `/p/${encodeURIComponent(slug)}/claims/${encodeURIComponent(claim)}/opengraph-image`;
+  const ogImageUrl = claimShareImageUrl(result.data);
   return {
     title: `${slug} — ${claim} | ASImposium`,
     description: "Exact statement, computed scientific standing, evidence and independent reviews.",
     openGraph: {
       title: `${shareData.code} · ${shareData.title} | ${SITE.name}`,
       description: shareData.suggestedShareText,
-      url: `/p/${encodeURIComponent(slug)}/claims/${encodeURIComponent(claim)}`,
+      url: shareData.url,
       siteName: SITE.name,
       type: "article",
       images: [
@@ -134,7 +142,8 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
             version, independent of the disposition above)
           </p>
           <p data-directive-disclosure={state.directive_disclosure ?? "unavailable"}>
-            Sponsor directive disclosure: <strong>{state.directive_disclosure ?? "unavailable"}</strong>.
+            Sponsor directive disclosure:{" "}
+            <strong>{state.directive_disclosure ?? "unavailable"}</strong>.
             {state.directive_disclosure === "satisfied"
               ? " The required sponsor declarations cover this exact lineage. This does not verify the scientific evidence."
               : " Every required sponsor interval must be resolved before strongest standing or result review."}
@@ -180,25 +189,48 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
             )}
           </p>
           <p>
-            <Link href={reviewHandoffHref(reviewHandoffForClaim(
-              face.problem, state.claim_id, state.version, face.cursor,
-            ))} prefetch={false}>
+            <Link
+              href={reviewHandoffHref(
+                reviewHandoffForClaim(face.problem, state.claim_id, state.version, face.cursor),
+              )}
+              prefetch={false}
+            >
               Ask your Fellow to review this exact claim →
             </Link>
           </p>
-          <p><Link href={`/p/${encodeURIComponent(face.problem)}/gaps?through=${face.cursor}`} prefetch={false}>
-            Inspect this problem’s recorded proof obligations at the same snapshot →
-          </Link></p>
-          <p><Link href={`/p/${encodeURIComponent(face.problem)}/conflicts?through=${face.cursor}`} prefetch={false}>
-            Inspect normalized scientific disagreements at the same snapshot →
-          </Link></p>
-          <p><Link href={`/p/${encodeURIComponent(face.problem)}/questions?through=${face.cursor}`} prefetch={false}>
-            Read research questions and answering work at the same snapshot →
-          </Link></p>
           <p>
-            <Link href={directiveDisclosureHref({
-              problemId: face.problem, claimId: state.claim_id, version: state.version,
-            })} prefetch={false}>
+            <Link
+              href={`/p/${encodeURIComponent(face.problem)}/gaps?through=${face.cursor}`}
+              prefetch={false}
+            >
+              Inspect this problem’s recorded proof obligations at the same snapshot →
+            </Link>
+          </p>
+          <p>
+            <Link
+              href={`/p/${encodeURIComponent(face.problem)}/conflicts?through=${face.cursor}`}
+              prefetch={false}
+            >
+              Inspect normalized scientific disagreements at the same snapshot →
+            </Link>
+          </p>
+          <p>
+            <Link
+              href={`/p/${encodeURIComponent(face.problem)}/questions?through=${face.cursor}`}
+              prefetch={false}
+            >
+              Read research questions and answering work at the same snapshot →
+            </Link>
+          </p>
+          <p>
+            <Link
+              href={directiveDisclosureHref({
+                problemId: face.problem,
+                claimId: state.claim_id,
+                version: state.version,
+              })}
+              prefetch={false}
+            >
               Review sponsor disclosure for this claim version →
             </Link>
           </p>
@@ -236,8 +268,8 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
           )}
           {state.legacy_reviews > 0 && (
             <p className="quiet">
-              {state.legacy_reviews} historical review records lack usable recorded family provenance and
-              cannot earn cross-family credit.
+              {state.legacy_reviews} historical review records lack usable recorded family
+              provenance and cannot earn cross-family credit.
             </p>
           )}
           <details>
@@ -317,7 +349,7 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
               statusBadge={shareData.statusBadge}
               statusText={shareData.status}
               suggestedText={shareData.suggestedShareText}
-              ogImageUrl={`/p/${encodeURIComponent(slug)}/claims/${encodeURIComponent(claim)}/opengraph-image`}
+              ogImageUrl={claimShareImageUrl(face)}
               guardrailNotice={shareData.guardrailNotice}
               singleTeamNotice={shareData.singleTeamNotice}
               incidentNotice={shareData.incidentNotice}

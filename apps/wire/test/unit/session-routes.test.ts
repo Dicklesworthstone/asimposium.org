@@ -106,9 +106,8 @@ import {
   type WorkersAIPromotionInput,
 } from "../../src/screening/workers-ai.ts";
 import {
-  type PackClaimHead,
-  preparePackClaimHeads,
   readLedgerPackSection,
+  readPackClaimHeads,
   readReviewQueuePack,
   readTargetClaimPack,
 } from "../../src/sessions/ledger-pack.ts";
@@ -127,6 +126,22 @@ const SESSION_FIXTURE_STATEMENT = {
 // Explicit source rows for the legacy SQL-only projection fixtures below.
 // Never invoked by production-write fixtures or missing-content controls.
 async function seedClaimPublication(db: Env["DB"], claimId: string) {
+  const claim = await db
+    .prepare("SELECT statement FROM claims WHERE problem_id = 'P-4DSP' AND id = ?")
+    .bind(claimId)
+    .first<{ statement: string }>();
+  assert.ok(claim);
+  const content = {
+    kind: "conjecture",
+    statement: claim.statement,
+    falsifier: "Synthetic counterexample.",
+  };
+  const payload = JSON.stringify({ claim_id: claimId, ...content, dependency_pins: [] });
+  const payloadSha256 = await sha256Hex(payload);
+  await db
+    .prepare("UPDATE claims SET payload_sha256 = ? WHERE problem_id = 'P-4DSP' AND id = ?")
+    .bind(payloadSha256, claimId)
+    .run();
   await db
     .prepare(`UPDATE problems SET public_seq = (
     SELECT source_seq FROM claims WHERE problem_id = 'P-4DSP' AND id = ?
@@ -143,19 +158,19 @@ async function seedClaimPublication(db: Env["DB"], claimId: string) {
     .run();
   await db
     .prepare(`INSERT INTO event_content (event_id, payload_sha256, payload_json)
-    SELECT id, payload_sha256, '{}' FROM events WHERE id = ?`)
-    .bind(`E-fixture-${claimId}`)
+    SELECT id, payload_sha256, ? FROM events WHERE id = ?`)
+    .bind(payload, `E-fixture-${claimId}`)
     .run();
   await db
     .prepare(`INSERT INTO claim_versions
       (claim_id, problem_id, version, kind, statement, falsifier, content_digest,
        editor_fellow_id, created_at)
       SELECT id, problem_id, 1, 'conjecture', statement, 'Synthetic counterexample.',
-        'sha256:' || payload_sha256, 'F-fixture', created_at FROM claims
+        ?, 'F-fixture', created_at FROM claims
       WHERE problem_id = 'P-4DSP' AND id = ?
         AND NOT EXISTS (SELECT 1 FROM claim_versions v
           WHERE v.problem_id = claims.problem_id AND v.claim_id = claims.id AND v.version = 1)`)
-    .bind(claimId)
+    .bind(await claimContentDigest(content, sha256Hex), claimId)
     .run();
 }
 
@@ -11545,13 +11560,8 @@ describe("session protocol routes", () => {
       expect(claim?.body).toContain("Two is even.");
       expect(claim?.body).not.toContain("REVISION-AFTER-PACK-CURSOR");
       expect(pack.items.some((item) => item.id === "SYS-claims-empty")).toBe(false);
-      const capturedHeads = await preparePackClaimHeads(
-        f.db,
-        "P-4DSP",
-        before.public_seq,
-        128,
-      ).all<PackClaimHead>();
-      expect(capturedHeads.results).toContainEqual({
+      const capturedHeads = await readPackClaimHeads(f.db, "P-4DSP", before.public_seq, 128);
+      expect(capturedHeads).toContainEqual({
         id: "C-1",
         source_seq: 1,
         version: 1,
@@ -11565,6 +11575,68 @@ describe("session protocol routes", () => {
       expect(next.items.find((item) => item.kind === "claim" && item.id === "C-1")?.body).toContain(
         "REVISION-AFTER-PACK-CURSOR",
       );
+    },
+  );
+
+  test("claim pack headlines use authenticated source text when a version projection drifts", async () => {
+    const f = await ledgerPackFixture();
+    // A read-only shadow models corrupt/rebuilt projections without bypassing
+    // the production claim_versions immutability triggers.
+    await f.db
+      .prepare(`CREATE TEMP VIEW claim_versions AS
+        SELECT claim_id, problem_id, version, kind,
+          CASE WHEN problem_id = 'P-4DSP' AND claim_id = 'C-1'
+            THEN 'DRIFTED-CLAIM-PROJECTION' ELSE statement END AS statement,
+          falsifier, content_digest, editor_fellow_id, created_at
+        FROM main.claim_versions`)
+      .run();
+    const response = await f.call(`${f.path}/pack?profile=working&max_tokens=8000`);
+    expect(response.status, await response.clone().text()).toBe(200);
+    const pack = PackResponseSchema.parse(await response.json());
+    const claim = pack.items.find((item) => item.kind === "claim" && item.id === "C-1");
+    expect(claim?.body).toContain("Two is even.");
+    expect(claim?.body).not.toContain("DRIFTED-CLAIM-PROJECTION");
+  });
+
+  test.each(["missing", "corrupt"] as const)(
+    "claim pack headlines omit a %s current source without falling back to an older version",
+    async (fault) => {
+      const f = await ledgerPackFixture();
+      const revised = await f.post(`${f.path}/revise`, {
+        claim_id: "C-1",
+        base_version: 1,
+        kind: "conjecture",
+        statement: "CURRENT-CLAIM-SOURCE-MARKER: four is even.",
+        falsifier: "A nonzero remainder after dividing four by two.",
+      });
+      const revisionSeq = Number(revised.seq);
+      const isRevision =
+        "e.problem_id = 'P-4DSP' AND e.object_id = 'C-1' AND e.type = 'claim.revised' AND e.object_version = 2";
+      // Matching retained hash columns do not authenticate changed bytes.
+      // The source fault is confined to this adapter's read view; no immutable
+      // producer rows or production guards are removed.
+      await f.db
+        .prepare(`CREATE TEMP VIEW event_content AS
+          SELECT c.event_id, c.payload_sha256,
+            ${fault === "corrupt" ? `CASE WHEN ${isRevision} THEN c.payload_json || ' ' ELSE c.payload_json END` : "c.payload_json"} AS payload_json,
+            c.redacted_at, c.redaction_reason
+          FROM main.event_content c JOIN main.events e ON e.id = c.event_id
+          ${fault === "missing" ? `WHERE NOT (${isRevision})` : ""}`)
+        .run();
+      const response = await f.call(`${f.path}/pack?profile=working&max_tokens=8000`);
+      expect(response.status, await response.clone().text()).toBe(200);
+      const pack = PackResponseSchema.parse(await response.json());
+      expect(pack.items.some((item) => item.kind === "claim" && item.id === "C-1")).toBe(false);
+      expect(pack.items.some((item) => item.id === "SYS-claims-empty")).toBe(false);
+      expect(pack.omitted).toContainEqual({ reason: "content_unavailable", detail: "claims" });
+      expect(JSON.stringify(pack)).not.toContain("CURRENT-CLAIM-SOURCE-MARKER");
+      expect(await readPackClaimHeads(f.db, "P-4DSP", revisionSeq, 128)).toEqual([
+        { id: "C-1", source_seq: revisionSeq, version: 2, statement: null },
+      ]);
+      // A genuine historical cut still reads its own authenticated publication.
+      expect(await readPackClaimHeads(f.db, "P-4DSP", revisionSeq - 1, 128)).toEqual([
+        { id: "C-1", source_seq: 1, version: 1, statement: "Two is even." },
+      ]);
     },
   );
 
@@ -12074,9 +12146,9 @@ describe("session protocol routes", () => {
       .bind(statement, "d".repeat(64), "2026-08-20T00:00:00.000Z")
       .run();
     // This is a storage-corruption plant, not an accepted publication. The
-    // pack now reads the immutable version, whose normal CHECK rejects this
-    // payload before the mounted refusal can be exercised. Bypass that CHECK
-    // only while planting the corrupt fixture, then restore it before the read.
+    // source and its immutable version both carry the oversized statement.
+    // The normal version CHECK rejects this fixture before the mounted refusal
+    // can be exercised, so bypass it only while planting, then restore it.
     await db.prepare("PRAGMA ignore_check_constraints = ON").run();
     try {
       await seedClaimPublication(db, "C-oversized");
