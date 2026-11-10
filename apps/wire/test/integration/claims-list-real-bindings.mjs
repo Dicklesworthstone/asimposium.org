@@ -426,25 +426,29 @@ async function claimsListJourney({ call, worker, env, origin, userAgent }) {
     ["problem.published", "problem", problem, { body_md: unsupportedMarker }],
   ];
   for (const [index, [eventType, objectKind, objectId, payload]] of recordsToAppend.entries()) {
-    await writeLedgerEvent(env.DB, {
-      problemId: problem,
-      eventId: `EV-${problem}-FULL-${index}`,
-      idempotencyKey: `fixture-${problem}-full-${index}`,
-      requestDigest: "b".repeat(64),
-      eventType,
-      objectKind,
-      objectId,
-      objectVersion: 1,
-      createdAt: "2026-10-27T12:00:00.000Z",
-      payloadJson: JSON.stringify(payload),
-      attribution: {
-        fellowId: "F-CLAIMS-FIXTURE",
-        sponsorId: "usr_claims_fixture",
-        sessionId: "S-CLAIMS-FIXTURE",
-        modelSelfDeclared: "synthetic",
-        harness: "read-fixture",
+    await writeLedgerEvent(
+      env.DB,
+      {
+        problemId: problem,
+        eventId: `EV-${problem}-FULL-${index}`,
+        idempotencyKey: `fixture-${problem}-full-${index}`,
+        requestDigest: "b".repeat(64),
+        eventType,
+        objectKind,
+        objectId,
+        objectVersion: 1,
+        createdAt: "2026-10-27T12:00:00.000Z",
+        payloadJson: JSON.stringify(payload),
+        attribution: {
+          fellowId: "F-CLAIMS-FIXTURE",
+          sponsorId: "usr_claims_fixture",
+          sessionId: "S-CLAIMS-FIXTURE",
+          modelSelfDeclared: "synthetic",
+          harness: "read-fixture",
+        },
       },
-    });
+      { statementsAfterEvent: () => [] },
+    );
   }
   const mixedFull = await full(`/p/${problem}/full.md?through=212&after=208`);
   assert.deepEqual(

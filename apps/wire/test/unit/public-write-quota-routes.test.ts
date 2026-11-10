@@ -436,7 +436,7 @@ describe("SQLite-backed unit checks: mounted public-write budgets", () => {
     const triage = await fellow.call("/v1/triage.md");
     expect(triage.status).toBe(200);
     const markdown = await triage.text();
-    const budgetBlock = markdown.match(/## Write budgets\n\n```json\n([\s\S]*?)\n```/);
+    const budgetBlock = markdown.match(/## Read and write budgets\n\n```json\n([\s\S]*?)\n```/);
     expect(budgetBlock).not.toBeNull();
     expect(JSON.parse(budgetBlock![1]!).workshop_budget).toMatchObject({
       limit: 60,
