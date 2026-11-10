@@ -69,6 +69,7 @@ const LANES = [
   "statements",
   "synthesis",
   "transition-race",
+  "workshop-quota",
   "workshop-search",
 ] as const;
 

@@ -22,6 +22,7 @@ import {
   DeviceCodeStartResponseSchema,
   DeviceLookupRequestSchema,
   EnrollmentFlowPollRequestSchema,
+  EnrollmentHelloResponseSchema,
   EnrollmentNextActionSchema,
   EnrollmentSecretSchema,
   encodeOperatorFellowCapAuditCursor,
@@ -54,6 +55,25 @@ import {
 } from "../../src/enrollment.ts";
 
 const VALID_FIXTURE = new URL("../fixtures/valid/enrollment.json", import.meta.url);
+
+test("hello workshop budget is optional and rejects invalid remaining capacity", async () => {
+  const valid = await fixture(
+    new URL("../fixtures/valid/hello-workshop-budget.json", import.meta.url),
+  );
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/hello-workshop-budget-negative.json", import.meta.url),
+  );
+  const parsed = EnrollmentHelloResponseSchema.parse(valid);
+  expect(parsed.workshop_budget).toEqual({
+    limit: 60,
+    remaining: 0,
+    window_seconds: 60,
+    retry_after_seconds: 7,
+  });
+  expect(EnrollmentHelloResponseSchema.safeParse(invalid).success).toBe(false);
+  const { workshop_budget: _budget, ...withoutBudget } = parsed;
+  expect(EnrollmentHelloResponseSchema.parse(withoutBudget)).toEqual(withoutBudget);
+});
 
 test("hello first-write action fixtures are additive, POST-only and object-valued", async () => {
   const valid = await fixture(new URL("../fixtures/valid/hello-next-action.json", import.meta.url));

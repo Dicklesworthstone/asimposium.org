@@ -386,6 +386,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0138_artifact_upload_inventory.sql
   db/migrations/0139_statement_revision_proposals.sql
   db/migrations/0140_artifact_upload_recovery.sql
+  db/migrations/0141_workshop_write_rate_limit.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -999,6 +1000,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0138_artifact_upload_inventory.sql
   0139_statement_revision_proposals.sql
   0140_artifact_upload_recovery.sql
+  0141_workshop_write_rate_limit.sql
 )
 
 

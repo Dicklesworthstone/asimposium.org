@@ -11,6 +11,7 @@ import {
 } from "../../src/enrollment/service";
 import type { Env } from "../../src/env";
 import { genesisChainDigest } from "../../src/krater/krater";
+import { reserveWorkshopWrite } from "../../src/sessions/workshop-quota";
 import { migratedSqlite } from "../support/migrated-sqlite";
 import { syntheticScreeningObservation } from "../support/screening";
 
@@ -97,6 +98,7 @@ interface TestHarnessOptions {
   readonly sponsorLimit?: string | number;
   readonly screenDecision?: "pass" | "reject" | "quarantine";
   readonly duringScreen?: (db: Env["DB"]) => Promise<void>;
+  readonly artifactPut?: () => Promise<void>;
 }
 
 async function createQuotaTestHarness(options: TestHarnessOptions = {}) {
@@ -158,6 +160,7 @@ async function createQuotaTestHarness(options: TestHarnessOptions = {}) {
       "base64url",
     ),
     SPONSOR_PROMOTION_RATE_LIMIT: options.sponsorLimit,
+    ...(options.artifactPut === undefined ? {} : { ARTIFACTS: { put: options.artifactPut } }),
   } as unknown as Env;
 
   const app = createApp({
@@ -360,6 +363,146 @@ async function createQuotaTestHarness(options: TestHarnessOptions = {}) {
 }
 
 describe("SQLite-backed unit checks: mounted public-write budgets", () => {
+  test("workshop create and revision refuse before R2 while completed replay stays free", async () => {
+    let puts = 0;
+    const harness = await createQuotaTestHarness({
+      artifactPut: async () => {
+        puts++;
+      },
+    });
+    const fellow = await harness.registerFellow("workshop-limit");
+    const post = (path: string, key: string, body: unknown) =>
+      fellow.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(body),
+      });
+    const opened = await post("/v1/sessions", "workshop-limit-open", { problem_id: "P-4DSP" });
+    expect(opened.status).toBe(201);
+    const { session_id } = (await opened.json()) as { session_id: string };
+    const path = `/v1/sessions/${session_id}/workshop`;
+    const body = {
+      type: "scratch",
+      title: "Resumable private work",
+      body_md: "Deliberate private observations.\n".repeat(100),
+    };
+    const created = await post(path, "workshop-accepted", body);
+    expect(created.status).toBe(201);
+    const receipt = await created.text();
+    const draft = JSON.parse(receipt) as { workshop_id: string };
+    expect(puts).toBe(1);
+    for (let index = 0; index < 59; index++) {
+      expect(
+        await reserveWorkshopWrite(harness.db, {
+          fellowId: fellow.binding.fellowId,
+          idempotencyKey: `workshop-fill-${index}`,
+          requestDigest: `fixture-${index}`,
+        }),
+      ).toEqual({ status: "admitted" });
+    }
+    for (const [key, candidate] of [
+      ["workshop-create-refused", { ...body, body_md: `${body.body_md} another draft` }],
+      [
+        "workshop-revise-refused",
+        { workshop_id: draft.workshop_id, base_version: 1, body_md: `${body.body_md} revised` },
+      ],
+    ] as const) {
+      const response = await post(path, key, candidate);
+      expect(response.status).toBe(429);
+      expect(response.headers.get("retry-after")).not.toBeNull();
+      expect(await response.json()).toMatchObject({
+        code: "RATE_LIMITED",
+        limit: 60,
+        remaining: 0,
+        window_seconds: 60,
+      });
+    }
+    const replay = await post(path, "workshop-accepted", body);
+    expect(replay.status).toBe(200);
+    expect(await replay.text()).toBe(receipt);
+    expect(puts).toBe(1);
+    expect(
+      await harness.db.prepare("SELECT COUNT(*) AS n FROM workshop_revisions").first(),
+    ).toEqual({ n: 1 });
+    const hello = await fellow.call("/v1/hello");
+    expect(hello.status).toBe(200);
+    expect(EnrollmentHelloResponseSchema.parse(await hello.json()).workshop_budget).toMatchObject({
+      limit: 60,
+      remaining: 0,
+      window_seconds: 60,
+    });
+    const triage = await fellow.call("/v1/triage.md");
+    expect(triage.status).toBe(200);
+    const markdown = await triage.text();
+    const budgetBlock = markdown.match(/## Write budgets\n\n```json\n([\s\S]*?)\n```/);
+    expect(budgetBlock).not.toBeNull();
+    expect(JSON.parse(budgetBlock![1]!).workshop_budget).toMatchObject({
+      limit: 60,
+      remaining: 0,
+      window_seconds: 60,
+    });
+  });
+
+  test("in-flight same-key retries cannot multiply workshop R2 writes or their counter", async () => {
+    let puts = 0;
+    let releasePut!: () => void;
+    let observePut!: () => void;
+    const started = new Promise<void>((resolve) => {
+      observePut = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      releasePut = resolve;
+    });
+    const harness = await createQuotaTestHarness({
+      artifactPut: async () => {
+        puts++;
+        observePut();
+        await held;
+      },
+    });
+    const fellow = await harness.registerFellow("workshop-race");
+    const post = (path: string, key: string, body: unknown) =>
+      fellow.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(body),
+      });
+    const opened = await post("/v1/sessions", "workshop-race-open", { problem_id: "P-4DSP" });
+    expect(opened.status).toBe(201);
+    const { session_id } = (await opened.json()) as { session_id: string };
+    const path = `/v1/sessions/${session_id}/workshop`;
+    const body = {
+      type: "scratch",
+      title: "Pending private write",
+      body_md: "Deliberate private observations.\n".repeat(100),
+    };
+    const original = post(path, "one-workshop-attempt", body);
+    await started;
+    try {
+      const retry = await post(path, "one-workshop-attempt", body);
+      expect(retry.status).toBe(409);
+      expect(retry.headers.get("retry-after")).toBe("1");
+      const conflict = await post(path, "one-workshop-attempt", {
+        ...body,
+        body_md: `${body.body_md} changed`,
+      });
+      expect(conflict.status).toBe(409);
+      expect(puts).toBe(1);
+      expect(
+        await harness.db.prepare("SELECT COUNT(*) AS n FROM workshop_write_attempts").first(),
+      ).toEqual({ n: 1 });
+    } finally {
+      releasePut();
+    }
+    const completed = await original;
+    expect(completed.status).toBe(201);
+    const receipt = await completed.text();
+    const replay = await post(path, "one-workshop-attempt", body);
+    expect(replay.status).toBe(200);
+    expect(await replay.text()).toBe(receipt);
+    expect(puts).toBe(1);
+  });
+
   test("archived existing sessions recover accepted receipts but cannot buy another screen", async () => {
     const harness = await createQuotaTestHarness();
     const fellow = await harness.registerFellow("archived-replay");

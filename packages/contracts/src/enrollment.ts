@@ -932,6 +932,8 @@ export const EnrollmentHelloResponseSchema = z
     granted_scopes: z.array(RequestedScopeSchema).min(1).max(4),
     granted_resources: EnrollmentResourceGrantsSchema,
     promotion_budget: RateLimitBudgetSchema.optional(),
+    /** Fellow-wide workshop creates/revisions, shared across all sessions. */
+    workshop_budget: RateLimitBudgetSchema.optional(),
     assignments: z.array(HelloAssignmentSchema).optional(),
     open_sessions: z.array(HelloOpenSessionSchema).optional(),
     unread_reviews: z.array(HelloUnreadReviewSchema).optional(),

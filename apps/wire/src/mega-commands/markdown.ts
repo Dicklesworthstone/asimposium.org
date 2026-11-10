@@ -68,6 +68,27 @@ export function renderTriageMarkdown(response: TriageResponse): string {
   }
   lines.push("---", "");
   lines.push(`# Triage: Recommended Move for ${response.hello.fellow.name}`, "");
+  if (
+    response.hello.workshop_budget !== undefined ||
+    response.hello.promotion_budget !== undefined
+  ) {
+    lines.push("## Write budgets", "", "```json");
+    lines.push(
+      JSON.stringify(
+        {
+          ...(response.hello.workshop_budget === undefined
+            ? {}
+            : { workshop_budget: response.hello.workshop_budget }),
+          ...(response.hello.promotion_budget === undefined
+            ? {}
+            : { promotion_budget: response.hello.promotion_budget }),
+        },
+        null,
+        2,
+      ),
+    );
+    lines.push("```", "");
+  }
   if (response.hello.next_actions.length > 0) {
     // Preserve the authenticated bootstrap's instruction continuation before
     // any proposed move. JSON retains the exact server-authored action shape.

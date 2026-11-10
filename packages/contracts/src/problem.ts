@@ -510,7 +510,7 @@ const generalContractProblem = z
     open_workshop_count: z.number().int().min(0).optional(),
     /** Open sessions to close first, present only on SESSION_CAP_REACHED. */
     open_session_ids: z.array(z.string().min(1).max(64)).max(2).optional(),
-    /** Remaining retry wait in seconds, present only on PROMOTION_RATE_LIMITED. */
+    /** Remaining retry wait in seconds on rate-limited refusals. */
     retry_after_seconds: z.number().int().positive().optional(),
     /** Quota limit; zero permits an operator-configured pause on promotions. */
     limit: z.number().int().min(0).optional(),
