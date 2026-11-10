@@ -454,6 +454,11 @@ export async function readFullPackContent(
   problem: string,
   through: number,
   envelopes: readonly PublicEventEnvelope[],
+  capture?: (
+    sql: string,
+    bindings: readonly (string | number | null)[],
+    rows: readonly unknown[],
+  ) => void,
 ): Promise<FullPackRecord[]> {
   const pins = envelopes.flatMap(({ seq, event, body_omitted }) =>
     event !== null && body_omitted === "separate_object_face" && SUPPORTED.has(event.type)
@@ -470,12 +475,7 @@ export async function readFullPackContent(
         ]
       : [],
   );
-  const rows =
-    pins.length === 0
-      ? []
-      : (
-          await db
-            .prepare(`
+  const sourceSql = `
     WITH admitted AS MATERIALIZED (
       SELECT e.id AS event_id,e.problem_id,e.seq,p.public_seq,e.payload_sha256,
         c.payload_sha256 AS content_sha256,
@@ -500,10 +500,18 @@ export async function readFullPackContent(
       AND c.payload_sha256=b.payload_sha256
       AND b.source_bytes<=${FULL_PACK_SOURCE_BYTES} AND b.total_bytes<=${TOTAL_SOURCE_BYTES}
     ORDER BY b.seq
-  `)
-            .bind(JSON.stringify(pins), problem, through)
+  `;
+  const bindings = [JSON.stringify(pins), problem, through] as const;
+  const rows =
+    pins.length === 0
+      ? []
+      : (
+          await db
+            .prepare(sourceSql)
+            .bind(...bindings)
             .all<ContentRow>()
         ).results;
+  if (pins.length > 0) capture?.(sourceSql, bindings, rows);
   const bySequence = new Map(rows.map((row) => [row.seq, row]));
   return Promise.all(
     envelopes.map(async (envelope): Promise<FullPackRecord> => {
@@ -523,7 +531,7 @@ export async function readFullPackContent(
       if (payload === undefined) return absent("content_unavailable");
       const content = decodeContent(envelope.event, payload, { problem, seq: envelope.seq });
       if (content !== null && envelope.event.type === "problem.resolved") {
-        const available = await readPublishedProblemResolution(db, problem, envelope.seq);
+        const available = await readPublishedProblemResolution(db, problem, envelope.seq, capture);
         if (available === undefined || JSON.stringify(available) !== JSON.stringify(content))
           return absent("content_unavailable");
       }

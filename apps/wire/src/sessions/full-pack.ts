@@ -6,9 +6,12 @@ import {
   composePack,
   neutralizeUntrustedBody,
   PACK_BUDGET_BUCKETS,
+  type PackActionCandidate,
   type PackCandidate,
   PackComposerError,
   type PackMembership,
+  type Projection,
+  renderProjection,
 } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import { readPublicEventTail } from "../ledger/event-tail-read.ts";
@@ -41,8 +44,64 @@ export interface FullPackInput {
   readonly through: number;
   readonly after: number;
   readonly requestedMaxTokens: number;
-  readonly membership: Exclude<PackMembership, "none">;
+  readonly membership: PackMembership;
   readonly provenance?: SessionProvenance | null;
+  readonly publicFace?: {
+    readonly preamble: string;
+    readonly context: readonly PackCandidate[];
+    readonly actions: readonly PackActionCandidate[];
+    readonly omitted: ComposedPack["omitted"];
+    readonly witnesses: readonly FullPackReadWitness[];
+    readonly degraded?: ComposedPack["degraded"];
+    /** HTTP callers run this after hashing the rendered response so a 304
+     * cannot bypass the last current-visibility snapshot. */
+    readonly captureRelease?: (release: () => Promise<void>) => void;
+  };
+}
+
+/** Request-local read witnesses never cross the public projection boundary.
+ * All participating bounded reads are replayed in one final D1 snapshot,
+ * after asynchronous digest verification and before releasing a page. */
+export interface FullPackReadWitness {
+  readonly sql: string;
+  readonly bindings: readonly (string | number | null)[];
+  readonly rows: readonly unknown[];
+}
+
+export class FullPackSourceChangedError extends Error {
+  constructor() {
+    super("FULL_PACK_SOURCE_CHANGED");
+    this.name = "FullPackSourceChangedError";
+  }
+}
+
+function snapshotRows(rows: readonly unknown[]): string {
+  return JSON.stringify(
+    rows.map((row) => {
+      if (row === null || typeof row !== "object" || Array.isArray(row)) return row;
+      // Later appends may advance the live head without changing a frozen page.
+      const { public_seq: _head, ...source } = row as Record<string, unknown>;
+      return source;
+    }),
+  );
+}
+
+/** Public full pages carry no session identity, authority or live lifecycle
+ * status. They retain the public face's existing Markdown header vocabulary. */
+export function publicFullPackProjection(pack: ComposedPack, preamble: string): Projection {
+  return {
+    schema: "asimposium.problem-face.v1",
+    kind: "problem-face",
+    problem: pack.problem,
+    profile: "full",
+    cursor: pack.cursor,
+    title: `${pack.problem} — full problem pack`,
+    preamble: `${pack.preamble} ${preamble}`,
+    items: pack.items.map(({ tokens: _tokens, ...item }) => item),
+    omitted: pack.omitted,
+    next_actions: pack.next_actions,
+    degraded: pack.degraded,
+  };
 }
 
 export function fullPackPath(
@@ -50,6 +109,8 @@ export function fullPackPath(
   after: number,
   budget = bucketizePackBudget(input.requestedMaxTokens),
 ): string {
+  if (input.publicFace !== undefined)
+    return `/p/${encodeURIComponent(input.problem)}/full.md?through=${input.through}&after=${after}`;
   return `/v1/sessions/${encodeURIComponent(input.session)}/pack?profile=full&max_tokens=${budget}&through=${input.through}&after=${after}`;
 }
 
@@ -75,7 +136,11 @@ function recordCandidate(
     (event?.object_kind === "hypothesis" &&
     /^H-[A-Za-z0-9][A-Za-z0-9._:-]{0,77}$/.test(event.object_id)
       ? `/p/${encodeURIComponent(input.problem)}/hypotheses/${encodeURIComponent(event.object_id)}.json?through=${input.through}`
-      : null);
+      : event?.object_kind === "problem" &&
+          event.object_id === input.problem &&
+          ["problem.admitted", "problem.statement-revised"].includes(event.type)
+        ? `/p/${encodeURIComponent(input.problem)}/statements/${event.object_version}.json?through=${input.through}`
+        : null);
   const omission = record.content_omitted ?? referenceReason ?? null;
   const body = JSON.stringify(
     referenceReason === undefined
@@ -131,7 +196,7 @@ function page(
   omitProvenanceForBudget: boolean,
 ): ComposedPack {
   const provenance =
-    input.provenance === undefined || omitProvenanceForBudget
+    input.publicFace !== undefined || input.provenance === undefined || omitProvenanceForBudget
       ? undefined
       : sessionPackProvenance(input.session, input.provenance);
   const nextBudget = PACK_BUDGET_BUCKETS.find(
@@ -162,7 +227,12 @@ function page(
     cursor: input.through,
     ...(provenance === undefined ? {} : { provenance: provenance.provenance }),
     requested_max_tokens: input.requestedMaxTokens,
-    viewer: { audience: "session", membership: input.membership, effective_permissions: [] },
+    ...(input.publicFace?.degraded === undefined ? {} : { degraded: input.publicFace.degraded }),
+    viewer: {
+      audience: input.publicFace === undefined ? "session" : "public",
+      membership: input.publicFace === undefined ? input.membership : "none",
+      effective_permissions: [],
+    },
     candidates: [
       {
         kind: "full-page",
@@ -175,7 +245,11 @@ function page(
         why_included:
           "All public sequences, typed publication fields. Null content_url means no complete-body route is registered. Current controls still apply.",
       },
-      ...(omitProvenanceForBudget && input.provenance != null
+      ...(input.publicFace?.context.map((candidate, index) => ({
+        ...candidate,
+        stable_prefix: index + 1,
+      })) ?? []),
+      ...(input.publicFace === undefined && omitProvenanceForBudget && input.provenance != null
         ? [
             {
               kind: "standing-context",
@@ -189,11 +263,13 @@ function page(
             },
           ]
         : []),
-      ...records.map(({ candidate }) =>
-        omitProvenanceForBudget
-          ? { ...candidate, stable_prefix: (candidate.stable_prefix ?? 0) + 1 }
-          : candidate,
-      ),
+      ...records.map(({ candidate }) => ({
+        ...candidate,
+        stable_prefix:
+          (candidate.stable_prefix ?? 0) +
+          (input.publicFace?.context.length ?? 0) +
+          (omitProvenanceForBudget ? 1 : 0),
+      })),
     ],
     action_candidates: [
       ...(hasMore
@@ -202,7 +278,7 @@ function page(
               method: "GET" as const,
               url: fullPackPath(input, next),
               why: "Continue after the represented records at the same frozen cursor.",
-              public_read: false,
+              public_read: input.publicFace !== undefined,
             },
           ]
         : []),
@@ -216,6 +292,7 @@ function page(
         why: "Read canonical event envelopes; this route does not return publication bodies.",
         public_read: true,
       },
+      ...(input.publicFace?.actions ?? []),
       ...(omitProvenanceForBudget && nextBudget !== undefined
         ? [
             {
@@ -228,6 +305,7 @@ function page(
         : []),
     ],
     omitted: [
+      ...(input.publicFace?.omitted ?? []),
       ...(provenance?.omitted ?? []),
       ...(omitProvenanceForBudget ? [sessionPackProvenanceBudgetOmission(input.session)] : []),
       ...[...grouped].map(([reason, ids]) => ({
@@ -258,6 +336,12 @@ function tryPage(
 ): ComposedPack | null {
   try {
     const composed = page(input, records, omitProvenanceForBudget);
+    if (
+      input.publicFace !== undefined &&
+      renderProjection(publicFullPackProjection(composed, input.publicFace.preamble), "md").bytes >
+        bucketizePackBudget(input.requestedMaxTokens) * 4
+    )
+      return null;
     return allRepresented(composed, records, omitProvenanceForBudget) ? composed : null;
   } catch (error) {
     if (error instanceof PackComposerError && error.code === "MANDATORY_OVERHEAD_EXCEEDS_BUDGET")
@@ -289,6 +373,7 @@ export function composeFullPack(
     return composeFullPackPage(input, records, false);
   } catch (error) {
     if (
+      input.publicFace === undefined &&
       input.provenance != null &&
       error instanceof PackComposerError &&
       error.code === "MANDATORY_OVERHEAD_EXCEEDS_BUDGET"
@@ -336,14 +421,49 @@ function composeFullPackPage(
 /** No workshop, sessions.handback, mutable projection text or private inbox
  * is read. Every page starts with the same canonical public-tail admission. */
 export async function readFullPack(db: D1Database, input: FullPackInput): Promise<ComposedPack> {
-  const result = await readPublicEventTail(db, input.problem, {
-    since: input.after,
-    through: input.through,
-    limit: FULL_PACK_RECORD_LIMIT,
-  });
-  if (result === null) throw new FullPackSourceUnavailableError();
-  return composeFullPack(
-    input,
-    await readFullPackContent(db, input.problem, input.through, result.page.events),
+  const witnesses: FullPackReadWitness[] = [...(input.publicFace?.witnesses ?? [])];
+  const capture =
+    input.publicFace === undefined
+      ? undefined
+      : (sql: string, bindings: readonly (string | number | null)[], rows: readonly unknown[]) =>
+          witnesses.push({ sql, bindings, rows });
+  const tailIndex = witnesses.length;
+  const result = await readPublicEventTail(
+    db,
+    input.problem,
+    {
+      since: input.after,
+      through: input.through,
+      limit: FULL_PACK_RECORD_LIMIT,
+    },
+    capture,
   );
+  if (result === null) throw new FullPackSourceUnavailableError();
+  const records = await readFullPackContent(
+    db,
+    input.problem,
+    input.through,
+    result.page.events,
+    capture,
+  );
+  const composed = composeFullPack(input, records);
+  if (input.publicFace !== undefined) {
+    const release = async () => {
+      const final = await db.batch(
+        witnesses.map((witness) => db.prepare(witness.sql).bind(...witness.bindings)),
+      );
+      if (final.length !== witnesses.length || final.some((row) => !row.success))
+        throw new FullPackSourceChangedError();
+      if (final[tailIndex]?.results.length === 0) throw new FullPackSourceUnavailableError();
+      if (
+        witnesses.some(
+          (witness, index) => snapshotRows(witness.rows) !== snapshotRows(final[index]!.results),
+        )
+      )
+        throw new FullPackSourceChangedError();
+    };
+    if (input.publicFace.captureRelease === undefined) await release();
+    else input.publicFace.captureRelease(release);
+  }
+  return composed;
 }

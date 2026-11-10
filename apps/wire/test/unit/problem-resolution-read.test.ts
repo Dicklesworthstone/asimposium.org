@@ -45,19 +45,32 @@ function fixture(synthesisChange: Record<string, unknown> = {}) {
   `);
   const queries: string[] = [];
   let queryHook: ((query: string) => void) | undefined;
+  let beforeRelease: (() => void) | undefined;
+  type Statement = { query: string; values: (string | number | null)[] };
+  const read = ({ query, values }: Statement) => {
+    queries.push(query);
+    queryHook?.(query);
+    return { results: sql.query(query).all(...values), success: true };
+  };
   const db = {
     prepare(query: string) {
       return {
         bind(...values: (string | number | null)[]) {
           return {
+            query,
+            values,
             async all() {
-              queries.push(query);
-              queryHook?.(query);
-              return { results: sql.query(query).all(...values), success: true };
+              return read({ query, values });
             },
           };
         },
       };
+    },
+    async batch(statements: Statement[]) {
+      const hook = beforeRelease;
+      beforeRelease = undefined;
+      hook?.();
+      return sql.transaction(() => statements.map(read))();
     },
   } as unknown as D1Database;
   let seq = 0;
@@ -195,6 +208,9 @@ function fixture(synthesisChange: Record<string, unknown> = {}) {
     expected,
     onQuery: (hook: (query: string) => void) => {
       queryHook = hook;
+    },
+    beforeRelease: (hook: () => void) => {
+      beforeRelease = hook;
     },
     read: (through = seq) => readPublishedProblemResolution(db, PROBLEM, through),
   };
@@ -474,9 +490,9 @@ function digestRoutes(f: ReturnType<typeof fixture>) {
       verdict TEXT,basis TEXT,created_at TEXT);
   `);
   const app = createLedgerFaceRoutes();
-  return (suffix: string, etag?: string) =>
+  return (suffix: string, etag?: string, query = "") =>
     app.request(
-      `https://a.asimposium.org/p/${PROBLEM}${suffix === "full.md" ? "/full.md" : `.${suffix}`}`,
+      `https://a.asimposium.org/p/${PROBLEM}${suffix === "full.md" ? "/full.md" : `.${suffix}`}${query}`,
       {
         headers: {
           "User-Agent":
@@ -487,6 +503,51 @@ function digestRoutes(f: ReturnType<typeof fixture>) {
       { DB: f.db } as unknown as Env,
     );
 }
+
+test("public full release rechecks closing work outside its event window before a conditional response", async () => {
+  for (const mutate of [
+    (f: ReturnType<typeof fixture>) => f.control("SYNTH-CLOSE@1", "hidden"),
+    (f: ReturnType<typeof fixture>) =>
+      f.sql.exec("UPDATE event_content SET redacted_at='now' WHERE event_id='E-2'"),
+    (f: ReturnType<typeof fixture>) =>
+      f.sql.exec(
+        "UPDATE event_content SET payload_json=replace(payload_json,'finite','fabricated') WHERE event_id='E-2'",
+      ),
+  ]) {
+    const f = fixture();
+    try {
+      f.resolve();
+      const get = digestRoutes(f);
+      // The page includes only resolution sequence 3. Its copied conclusion
+      // still depends on the exact closing synthesis at sequence 2.
+      const query = "?through=3&after=2";
+      const original = await get("full.md", undefined, query);
+      expect(original.status).toBe(200);
+      const body = await original.text();
+      expect(body).toContain(SUMMARY);
+      expect(body).toContain("asimp:item id=FULL-3");
+      expect(body).not.toContain("asimp:item id=FULL-2");
+      const etag = original.headers.get("etag");
+      expect(etag).toBeTruthy();
+      let raced = false;
+      f.beforeRelease(() => {
+        raced = true;
+        mutate(f);
+      });
+      const response = await get("full.md", etag ?? undefined, query);
+      expect(raced).toBe(true);
+      expect(response.status).toBe(500);
+      expect(await response.text()).not.toContain(SUMMARY);
+      const withheld = await get("full.md", etag ?? undefined, query);
+      expect(withheld.status).toBe(200);
+      const withheldBody = await withheld.text();
+      expect(withheldBody).not.toContain(SUMMARY);
+      expect(withheldBody).toContain("content_unavailable");
+    } finally {
+      f.sql.close();
+    }
+  }
+});
 
 test("primary digest and full Markdown expose only verified resolution and existing exact source links", async () => {
   const f = fixture();

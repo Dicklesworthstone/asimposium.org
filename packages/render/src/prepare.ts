@@ -436,14 +436,18 @@ function snapshotProjection(value: Projection): Projection {
   }
   const problemStatusValue = readProjectionMember(source, "problem_status", "problem_status");
   const isProblemFace = kind === "problem-face" && schema === "asimposium.problem-face.v1";
-  const problemStatus = isProblemFace
+  // Full pages traverse historical publications at a frozen cursor. A live
+  // lifecycle label would imply a historical state that this reader did not
+  // establish; current problem digests still require the canonical lifecycle.
+  const requiresProblemStatus = isProblemFace && profile !== "full";
+  const problemStatus = requiresProblemStatus
     ? ProblemFaceResponseSchema.shape.problem_status.safeParse(problemStatusValue)
     : undefined;
   if (
-    (isProblemFace && !problemStatus?.success) ||
-    (!isProblemFace && problemStatusValue !== undefined)
+    (requiresProblemStatus && !problemStatus?.success) ||
+    (!requiresProblemStatus && problemStatusValue !== undefined)
   ) {
-    refuseUnreadableProjection("problem_status requires a public lifecycle on a problem face");
+    refuseUnreadableProjection("problem_status requires a public lifecycle on a problem digest");
   }
   if (
     claimState !== undefined &&

@@ -166,6 +166,21 @@ describe("discovery generators (W1.6)", () => {
     }
   });
 
+  test("public full reads disclose their frozen continuation and explicit omissions", () => {
+    const doc = JSON.parse(generateOpenApiDocument());
+    const operation = doc.paths["/p/{id}/full.md"].get;
+    expect(operation.security).toEqual([]);
+    expect(
+      operation.parameters
+        .filter((parameter: { in: string }) => parameter.in === "query")
+        .map((parameter: { name: string }) => parameter.name),
+    ).toEqual(["through", "after"]);
+    expect(operation.responses["200"].content["text/markdown"]).toBeDefined();
+    expect(operation.responses["200"].headers.Link.description).toContain("next_actions");
+    expect(operation.responses["200"].description).toContain("explicitly unavailable");
+    expect(operation.responses["304"].description).toContain("visibility");
+  });
+
   test("openapi paths equal the manifest templates exactly", () => {
     const doc = JSON.parse(generateOpenApiDocument()) as {
       openapi: string;

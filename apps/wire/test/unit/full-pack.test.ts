@@ -1,11 +1,19 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { FullPackPageSchema, FullPackQuerySchema, PackResponseSchema } from "@asimposium/contracts";
+import {
+  FullPackPageSchema,
+  FullPackQuerySchema,
+  PackResponseSchema,
+  ProblemFullResponseSchema,
+} from "@asimposium/contracts";
 import { composedPackToProjection, renderProjection } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
+import type { Env } from "../../src/env.ts";
+import { createLedgerFaceRoutes } from "../../src/ledger-face.ts";
 import {
   type FullPackInput,
   FullPackSourceUnavailableError,
+  publicFullPackProjection,
   readFullPack,
 } from "../../src/sessions/full-pack.ts";
 
@@ -27,6 +35,200 @@ const claim = (id: string, statement: string) => ({
   dependency_pins: [],
   workshop_id: PRIVATE,
   private_payload: PRIVATE,
+});
+
+describe("anonymous full Markdown pages", () => {
+  function routes(f: ReturnType<typeof fixture>) {
+    const app = createLedgerFaceRoutes();
+    return (query = "", init: RequestInit = {}) =>
+      app.request(`https://a.asimposium.org/p/P-DEMO/full.md${query}`, init, { DB: f.db } as Env);
+  }
+
+  function decoded(body: string) {
+    const items = [
+      ...body.matchAll(
+        /^<!-- asimp:item id=(\S+) kind=(\S+) scope=\S+ untrusted=(?:true|false)(?: tokens=\d+)? -->\n([\s\S]*?)^<!-- asimp:item-end id=\1 -->$/gm,
+      ),
+    ];
+    const value = (item: RegExpMatchArray) =>
+      JSON.parse(item[3]?.match(/^\{.*\}$/m)?.[0] ?? "null");
+    const controlItem = items.find((item) => item[2] === "full-page");
+    if (!controlItem) throw new Error("Public full page lost its control");
+    return {
+      control: FullPackPageSchema.parse(value(controlItem)),
+      records: items.filter((item) => item[2] === "full-event").map(value),
+    };
+  }
+
+  test("public continuations traverse immutable records without session authority or mutable claim tables", async () => {
+    const f = fixture();
+    try {
+      for (let i = 1; i <= 45; i++)
+        await f.append("claim.created", "claim", `C-${i}`, claim(`C-${i}`, `PUBLIC-FULL-${i}`));
+      const get = routes(f);
+      const sequences: number[] = [];
+      let query = "";
+      do {
+        const response = await get(query);
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        expect(new TextEncoder().encode(body).byteLength).toBeLessThanOrEqual(32_000);
+        expect(body).not.toContain(PRIVATE);
+        expect(body).not.toContain("/v1/sessions/");
+        const page = decoded(body);
+        expect(page.control.through).toBe(45);
+        sequences.push(...page.records.map((record) => record.seq));
+        if (query === "")
+          await f.append("claim.created", "claim", "C-46", claim("C-46", "NEWER-PUBLICATION"));
+        const next = page.control.next_after;
+        expect(response.headers.get("link")).toBe(
+          next === null ? null : `</p/P-DEMO/full.md?through=45&after=${next}>; rel="next"`,
+        );
+        query = next === null ? "" : `?through=45&after=${next}`;
+      } while (query);
+      expect(sequences).toEqual(Array.from({ length: 45 }, (_, index) => index + 1));
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test("strict queries and HEAD do not silently restart a full traversal", async () => {
+    const f = fixture();
+    try {
+      await f.append("claim.created", "claim", "C-1", claim("C-1", "Only claim"));
+      for (const query of [
+        "?after=1",
+        "?through=0&after=1",
+        "?through=2",
+        "?through=01",
+        "?through=1&through=1",
+        "?format=json",
+        "?after=-1",
+        "?through=9007199254740992",
+      ]) {
+        const response = await routes(f)(query);
+        expect(response.status).toBe(400);
+        expect(await response.json()).toMatchObject({ code: "CURSOR_INVALID", rule: "A5" });
+      }
+      const head = await routes(f)("?unknown=1", { method: "HEAD" });
+      expect(head.status).toBe(400);
+      expect(await head.text()).toBe("");
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test("the last D1 snapshot defeats hidden content, forged bytes and stale304 while allowing later appends", async () => {
+    const f = fixture();
+    try {
+      await f.append("claim.created", "claim", "C-1", claim("C-1", "VISIBLE-CONTENT-CANARY"));
+      const get = routes(f);
+      const before = await get("?through=1");
+      const etag = before.headers.get("etag")!;
+      expect(before.status).toBe(200);
+      f.beforeRelease(() => f.control("C-1@1", "hidden"));
+      const raced = await get("?through=1", { headers: { "If-None-Match": etag } });
+      expect(raced.status).toBe(500);
+      expect(await raced.text()).not.toContain("VISIBLE-CONTENT-CANARY");
+      const hidden = await get("?through=1", { headers: { "If-None-Match": etag } });
+      expect(hidden.status).toBe(200);
+      expect(decoded(await hidden.text()).records[0]).toMatchObject({
+        seq: 1,
+        content: null,
+        content_omitted: "content_unavailable",
+      });
+      f.control("C-1@1", "visible");
+      f.beforeRelease(() =>
+        f.sql
+          .prepare("UPDATE event_content SET payload_json = ? WHERE event_id='EVENT-1'")
+          .run(JSON.stringify(claim("C-1", "ALTERED-BYTES-CANARY"))),
+      );
+      const changed = await get("?through=1");
+      expect(changed.status).toBe(500);
+      expect(await changed.text()).not.toContain("VISIBLE-CONTENT-CANARY");
+      f.beforeRelease(() => f.control("problem", "hidden"));
+      expect((await get("?through=1")).status).toBe(404);
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test("immutable formulation context is guarded together with the full page and current lifecycle stays separate", async () => {
+    const f = fixture();
+    try {
+      await f.append("problem.admitted", "problem", "P-DEMO", {
+        action: "publish",
+        acting_principal: { type: "sponsor", id: "usr_author" },
+        source_fellow_id: "F-AUTHOR",
+        previous_status: "private-draft",
+        previous_statement_version: 1,
+        problem: {
+          id: "P-DEMO",
+          title: "Published formulation",
+          current_statement_version: 1,
+          statement: "IMMUTABLE-FORMULATION-CANARY",
+          falsifier: "A contrary integer.",
+          motivation: "Check the finite cases.",
+          status: "sharpening",
+          updated_at: AT,
+        },
+      });
+      await f.append("claim.created", "claim", "C-1", claim("C-1", "The public claim"));
+      const get = routes(f);
+      const initial = await get();
+      expect(initial.status).toBe(200);
+      expect(initial.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
+      const body = await initial.text();
+      expect(body).toContain("IMMUTABLE-FORMULATION-CANARY");
+      expect(body).toContain("/p/P-DEMO/statements/1.json?through=2");
+      expect(body).not.toContain("problem_status");
+      f.beforeRelease(() => f.control("#1", "hidden"));
+      const raced = await get("?through=2");
+      expect(raced.status).toBe(500);
+      const withheld = await get("?through=2");
+      expect(withheld.status).toBe(200);
+      const withheldBody = await withheld.text();
+      expect(withheldBody).not.toContain("IMMUTABLE-FORMULATION-CANARY");
+      expect(withheldBody).toContain("formulation_unavailable");
+      f.sql.prepare("UPDATE problems SET unlisted=1 WHERE id='P-DEMO'").run();
+      expect((await get("?through=2")).headers.get("cache-control")).toBe("private, no-store");
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test("public full response contract forbids missing control and invented record progress", async () => {
+    const f = fixture();
+    try {
+      await f.append("claim.created", "claim", "C-1", claim("C-1", "Public contract claim"));
+      const pack = await readFullPack(f.db, {
+        ...input,
+        session: "PUBLIC-FACE",
+        membership: "none",
+        through: 1,
+        publicFace: {
+          preamble: "Historical publications.",
+          context: [],
+          actions: [],
+          omitted: [{ reason: "historical_publications" }],
+          witnesses: [],
+        },
+      });
+      const face = JSON.parse(
+        renderProjection(publicFullPackProjection(pack, "Historical publications."), "json").body,
+      );
+      expect(ProblemFullResponseSchema.safeParse(face).success).toBe(true);
+      expect(
+        ProblemFullResponseSchema.safeParse({
+          ...face,
+          items: face.items.filter((item: { kind: string }) => item.kind !== "full-page"),
+        }).success,
+      ).toBe(false);
+      expect(ProblemFullResponseSchema.safeParse({ ...face, cursor: 2 }).success).toBe(false);
+    } finally {
+      f.sql.close();
+    }
+  });
 });
 const hypothesis = {
   route: "Compare parity classes",
@@ -324,6 +526,7 @@ function fixture() {
     CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
     CREATE TABLE screening_publications (event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
+    CREATE TABLE projection_health (problem_id TEXT PRIMARY KEY, status TEXT, source_cursor INTEGER);
     CREATE TABLE workshop_objects (body_md TEXT);
     CREATE TABLE sessions (handback TEXT);
     INSERT INTO problems VALUES ('P-DEMO',0,'active',0);
@@ -331,19 +534,25 @@ function fixture() {
   sql.prepare("INSERT INTO workshop_objects VALUES (?)").run(PRIVATE);
   sql.prepare("INSERT INTO sessions VALUES (?)").run(PRIVATE);
   const queries: string[] = [];
+  let beforeRelease: (() => void) | undefined;
   const db = {
     prepare(query: string) {
       queries.push(query);
       return {
         bind(...values: (string | number | null)[]) {
+          const read = () => ({ success: true, results: sql.prepare(query).all(...values) });
           return {
-            all: async <T>() => ({
-              success: true,
-              results: sql.prepare(query).all(...values) as T[],
-            }),
+            all: async <T>() => read() as { success: boolean; results: T[] },
+            read,
           };
         },
       };
+    },
+    batch: async (statements: readonly { read: () => unknown }[]) => {
+      const change = beforeRelease;
+      beforeRelease = undefined;
+      change?.();
+      return sql.transaction(() => statements.map((statement) => statement.read()))();
     },
   } as unknown as D1Database;
   let cursor = 0;
@@ -377,7 +586,17 @@ function fixture() {
       COALESCE(MAX(version),0)+1 FROM content_controls WHERE problem_id='P-DEMO' AND target_ref=?`)
       .run(target, visibility, target);
   }
-  return { sql, db, append, read, control, queries };
+  return {
+    sql,
+    db,
+    append,
+    read,
+    control,
+    queries,
+    beforeRelease(change: () => void) {
+      beforeRelease = change;
+    },
+  };
 }
 
 describe("full public ledger packs", () => {

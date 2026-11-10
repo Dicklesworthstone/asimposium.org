@@ -2541,7 +2541,8 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
         type TEXT NOT NULL,
         action TEXT NOT NULL,
         payload_sha256 TEXT NOT NULL,
-        created_at TEXT NOT NULL DEFAULT '2026-08-14T00:00:00.000Z'
+        created_at TEXT NOT NULL DEFAULT '2026-08-14T00:00:00.000Z',
+        UNIQUE(problem_id, seq)
       );
       CREATE TABLE event_content (
         event_id TEXT PRIMARY KEY,
@@ -2627,6 +2628,19 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
         `E-${seq}`,
         digest,
         payload,
+      );
+    }
+
+    // A public full traversal accounts for every sequence, including process
+    // records whose bodies are deliberately undisclosed. The old digest-only
+    // fixture skipped these positions despite advertising cursor10.
+    for (const seq of [2, 3, 4, 6, 7, 9, 10]) {
+      db.prepare(`INSERT INTO events
+        (id,problem_id,seq,object_id,object_kind,type,action,payload_sha256)
+        VALUES (?,'P-TEST',?,'process','process','fixture.process','fixture.process',?)`).run(
+        `E-process-${seq}`,
+        seq,
+        "0".repeat(64),
       );
     }
 
@@ -2814,7 +2828,7 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
       };
       const revision = committedFormulationFixture("P-TEST", 2, fields);
       db.prepare(
-        "INSERT INTO events (id, problem_id, seq, object_id, object_kind, object_version, type, action, payload_sha256) VALUES ('E-boundaries', 'P-TEST', 9, 'P-TEST', 'problem', 2, 'problem.statement-revised', 'problem.statement-revised', ?)",
+        "INSERT OR REPLACE INTO events (id, problem_id, seq, object_id, object_kind, object_version, type, action, payload_sha256) VALUES ('E-boundaries', 'P-TEST', 9, 'P-TEST', 'problem', 2, 'problem.statement-revised', 'problem.statement-revised', ?)",
       ).run(revision.digest);
       db.prepare(
         "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-boundaries', ?, ?)",
@@ -2921,8 +2935,8 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
         expect(body).not.toContain("PROJECTION-ONLY-CANARY");
       }
 
-      const assertUnavailable = async () => {
-        for (const suffix of suffixes) {
+      const assertUnavailable = async (paths: readonly string[] = suffixes) => {
+        for (const suffix of paths) {
           const response = await read(suffix, {
             "if-none-match": initialEtags.get(suffix) ?? "",
           });
@@ -2973,7 +2987,15 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
       ).run(published.payload_sha256);
 
       db.run("UPDATE problems SET current_statement_version = 2");
-      await assertUnavailable();
+      await assertUnavailable([".json", ".md"]);
+      // Historical full pages derive the formulation version from its
+      // immutable publication at through, not the current mutable head. A
+      // forged projection version must not erase or rewrite that history.
+      const historical = await read("/full.md", {
+        "if-none-match": initialEtags.get("/full.md") ?? "",
+      });
+      expect(historical.status).toBe(304);
+      expect(await historical.text()).toBe("");
       db.run("UPDATE problems SET current_statement_version = 1");
 
       const setControl = (target: string, visibility: "hidden" | "visible", version: number) => {
@@ -3001,7 +3023,7 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
         motivation: "Explain the revised convention.",
       });
       db.prepare(
-        "INSERT INTO events (id, problem_id, seq, object_id, object_kind, object_version, type, action, payload_sha256) VALUES ('E-revised', 'P-TEST', 9, 'P-TEST', 'problem', 2, 'problem.statement-revised', 'problem.statement-revised', ?)",
+        "INSERT OR REPLACE INTO events (id, problem_id, seq, object_id, object_kind, object_version, type, action, payload_sha256) VALUES ('E-revised', 'P-TEST', 9, 'P-TEST', 'problem', 2, 'problem.statement-revised', 'problem.statement-revised', ?)",
       ).run(revision.digest);
       db.prepare(
         "INSERT INTO event_content (event_id, payload_sha256, payload_json, redacted_at) VALUES ('E-revised', ?, ?, '2026-08-15T00:00:00.000Z')",

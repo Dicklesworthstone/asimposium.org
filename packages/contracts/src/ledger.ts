@@ -11,6 +11,7 @@ import {
   ClaimIdSchema,
   EvidenceRequestSchema,
   EvidenceResponseSchema,
+  FullPackPageSchema,
   NextActionSchema,
   PackNeutralizationSchema,
 } from "./sessions.ts";
@@ -484,6 +485,57 @@ export const ProblemFaceResponseSchema = PublicFaceResponseSchema.extend({
 });
 export type ProblemFaceResponse = z.infer<typeof ProblemFaceResponseSchema>;
 
+/** The public full face traverses immutable event sequences at one captured
+ * cursor. Its control item is server-authored; every publication remains
+ * untrusted. Current lifecycle status is deliberately absent from history. */
+export const ProblemFullResponseSchema = PublicFaceResponseSchema.extend({
+  profile: z.literal("full"),
+  items: z
+    .array(
+      z.union([
+        ProblemFaceItemSchema,
+        FaceItemSchema.extend({
+          kind: z.literal("full-event"),
+          id: z.string().regex(/^FULL-[1-9][0-9]{0,15}$/),
+        }),
+        FaceItemSchema.extend({
+          kind: z.literal("full-page"),
+          id: z.literal("SYS-full-page"),
+          scope: z.literal("system"),
+          untrusted: z.literal(false),
+        }),
+      ]),
+    )
+    .min(1)
+    .max(28),
+}).superRefine((face, context) => {
+  if (face.items.filter((item) => item.kind === "full-page").length !== 1)
+    context.addIssue({ code: "custom", message: "A full page requires one continuation control." });
+  if (new Set(face.items.map((item) => item.id)).size !== face.items.length)
+    context.addIssue({ code: "custom", message: "Full-page item IDs must be unique." });
+  try {
+    const control = FullPackPageSchema.parse(
+      JSON.parse(face.items.find((item) => item.kind === "full-page")?.body ?? "null"),
+    );
+    const records = face.items.filter((item) => item.kind === "full-event");
+    if (
+      control.through !== face.cursor ||
+      control.records !== records.length ||
+      records.some((item, index) => item.id !== `FULL-${control.after + index + 1}`)
+    )
+      context.addIssue({
+        code: "custom",
+        message: "Full records must match the contiguous page control.",
+      });
+  } catch {
+    context.addIssue({
+      code: "custom",
+      message: "The full-page control must match its canonical schema.",
+    });
+  }
+});
+export type ProblemFullResponse = z.infer<typeof ProblemFullResponseSchema>;
+
 /** One detail, three groups of up to 20 records, and eight proof obligations.
  * The producer independently bounds each group before its complete-face byte budget. */
 export const CLAIM_FACE_MAX_ITEMS = 1 + 3 * 20 + 8;
@@ -806,6 +858,7 @@ export const LedgerContractsSchema = z
     problems_index_response: ProblemsIndexResponseSchema,
     problems_index_query: ProblemsIndexQuerySchema.optional(),
     problem_face_response: ProblemFaceResponseSchema,
+    problem_full_response: ProblemFullResponseSchema.optional(),
     claim_face_response: ClaimFaceResponseSchema.optional(),
     hypothesis_evidence_item_response: HypothesisEvidenceItemResponseSchema.optional(),
     claim_face_query: ClaimFaceQuerySchema.optional(),

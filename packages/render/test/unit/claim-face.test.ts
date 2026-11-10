@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import {
   ClaimFaceResponseSchema,
   ProblemFaceResponseSchema,
+  ProblemFullResponseSchema,
   type PublicClaimState,
 } from "@asimposium/contracts";
 import { RenderContractError } from "../../src/errors.ts";
@@ -56,6 +57,35 @@ test("problem lifecycle is canonical across faces and changes their fingerprint 
     ).toThrow(RenderContractError);
   }
   expect(() => renderAllFaces({ ...projection(), problem_status: "active" })).toThrow(
+    RenderContractError,
+  );
+});
+
+test("historical full problem pages omit current lifecycle in every face and refuse an injected status", () => {
+  const source = ProblemFullResponseSchema.parse(
+    JSON.parse(
+      readFileSync(
+        new URL("../../../contracts/test/fixtures/valid/ledger-full-page.json", import.meta.url),
+        "utf8",
+      ),
+    ),
+  );
+  const historical: Projection = {
+    ...source,
+    omitted: source.omitted.map(({ reason, detail }) => ({
+      reason,
+      ...(detail === undefined ? {} : { detail }),
+    })),
+  };
+  const faces = renderAllFaces(historical);
+  const json = ProblemFullResponseSchema.parse(JSON.parse(faces.json.body));
+  expect(json).not.toHaveProperty("problem_status");
+  expect(json.items).toEqual(source.items);
+  for (const face of Object.values(faces)) {
+    expect(face.fingerprint).toBe(json.fingerprint);
+    expect(face.body).not.toContain("Problem lifecycle:");
+  }
+  expect(() => renderAllFaces({ ...historical, problem_status: "active" })).toThrow(
     RenderContractError,
   );
 });

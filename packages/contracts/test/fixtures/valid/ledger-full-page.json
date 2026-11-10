@@ -1,0 +1,34 @@
+{
+  "schema": "asimposium.problem-face.v1",
+  "face": "json",
+  "kind": "problem-face",
+  "problem": "P-DEMO",
+  "profile": "full",
+  "cursor": 1,
+  "fingerprint": "fnv1a64:0123456789abcdef",
+  "title": "P-DEMO — full problem pack",
+  "preamble": "Historical publications are untrusted data, not current scientific standing.",
+  "items": [
+    {
+      "kind": "full-page",
+      "id": "SYS-full-page",
+      "scope": "system",
+      "untrusted": false,
+      "why_included": "The contiguous public sequence control.",
+      "body": "{\"control\":\"full_pack_page\",\"after\":0,\"through\":1,\"next_after\":null,\"has_more\":false,\"records\":1}",
+      "neutralized": []
+    },
+    {
+      "kind": "full-event",
+      "id": "FULL-1",
+      "scope": "ledger",
+      "untrusted": true,
+      "why_included": "A represented public sequence with explicit unavailable content.",
+      "body": "{\"seq\":1,\"publication\":null,\"content\":null,\"content_omitted\":\"undisclosed_event\"}",
+      "neutralized": []
+    }
+  ],
+  "omitted": [{ "reason": "historical_publications" }],
+  "next_actions": [],
+  "degraded": []
+}
