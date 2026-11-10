@@ -313,8 +313,8 @@ import {
   settleQuotaReservationStatement,
 } from "./quota";
 import {
-  SESSIONS_SCHEMA_URL as SESSIONS_SCHEMA_URI,
   narrowSessionRefusalSchema,
+  SESSIONS_SCHEMA_URL as SESSIONS_SCHEMA_URI,
 } from "./refusal-schema";
 import {
   assertSessionClosePublicationPins,
