@@ -5,8 +5,8 @@
  * Uses `next/og` ImageResponse for Satori SVG-to-PNG generation.
  */
 
-import type { ReactElement } from "react";
 import { ImageResponse } from "next/og";
+import type { ReactElement } from "react";
 import type { ShareCardData, ShareCardStatusKind } from "./share-card";
 
 export const SHARE_CARD_IMAGE_SIZE = {
@@ -26,6 +26,7 @@ function getStatusTheme(kind: ShareCardStatusKind): { bg: string; text: string; 
       return { bg: "#9c6500", text: "#ffffff", border: "#6b4500" };
     case "disputed":
     case "refuted":
+    case "malformed":
       return { bg: "#8b2500", text: "#ffffff", border: "#5c1800" };
     case "incident":
       return { bg: "#b31b1b", text: "#ffffff", border: "#7a1111" };
@@ -249,7 +250,8 @@ export function renderShareCard(data: ShareCardData): ReactElement {
           >
             {data.singleTeamNotice}
           </div>
-        ) : data.scopeNotice ? (
+        ) : null}
+        {data.scopeNotice ? (
           <div
             style={{
               display: "flex",
@@ -279,9 +281,9 @@ export function renderShareCard(data: ShareCardData): ReactElement {
           backgroundColor: "#faf7f0",
         }}
       >
-        {data.counts.map((c, i) => (
+        {data.counts.map((c) => (
           <div
-            key={i}
+            key={c.label}
             style={{
               display: "flex",
               flexDirection: "column",
