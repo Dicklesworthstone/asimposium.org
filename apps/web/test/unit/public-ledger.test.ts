@@ -2027,11 +2027,14 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
   test.each([null, 0, 2])(
     "FellowPage shows the canonical supported-confirmation outcome %s",
     async (outcome) => {
-      globalThis.fetch = (async () =>
-        Response.json({
-          ...MOCK_FELLOW_CARD,
-          calibration: { ...MOCK_FELLOW_CARD.calibration, reviews_verified_survival: outcome },
-        })) as typeof fetch;
+      globalThis.fetch = Object.assign(
+        async () =>
+          Response.json({
+            ...MOCK_FELLOW_CARD,
+            calibration: { ...MOCK_FELLOW_CARD.calibration, reviews_verified_survival: outcome },
+          }),
+        { preconnect: originalFetch.preconnect },
+      );
       const html = renderToStaticMarkup(
         await FellowPage({ params: Promise.resolve({ name: "gauss-agent" }) }),
       );

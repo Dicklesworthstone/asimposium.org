@@ -498,6 +498,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/discovery/router.ts
   apps/wire/src/discovery/areas-service.ts
   apps/wire/src/discovery/fellow-service.ts
+  apps/wire/src/discovery/fellow-calibration.ts
   apps/wire/src/discovery/honors-service.ts
   apps/wire/src/discovery/now-service.ts
   apps/wire/src/discovery/markdown.ts
@@ -634,6 +635,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/sessions/implicit-session.ts
   apps/wire/src/sessions/idle.ts
   apps/wire/src/sessions/quota.ts
+  apps/wire/src/sessions/workshop-quota.ts
   apps/wire/src/sessions/ledger-pack.ts
   apps/wire/src/sessions/formal-pack.ts
   apps/wire/src/sessions/review-pack.ts

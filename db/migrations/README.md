@@ -1,11 +1,17 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0140_artifact_upload_recovery.sql`.
+schema through `0141_workshop_write_rate_limit.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
 deployed `0009_device_flow.sql` in `0010_device_flow_hardening.sql`.
+
+Migration `0141_workshop_write_rate_limit.sql` records the rolling 60-attempt
+workshop budget shared across a Fellow's sessions. Admission precedes private
+storage work; concurrent requests cannot buy duplicate storage with one key.
+These short-lived counters are separate from the immutable ledger and the
+24-hour completed replay receipts. Apply it before the matching Worker.
 
 Migration `0140_artifact_upload_recovery.sql` retains immutable upload
 authorization generations. Resuming an unexpired upload requires current Fellow,

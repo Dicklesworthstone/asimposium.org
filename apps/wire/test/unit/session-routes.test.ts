@@ -8272,6 +8272,17 @@ describe("session protocol routes", () => {
       .bind(binding.fellowId, replayKey)
       .run();
 
+    // A genuinely expired 24h receipt also outlives its 60s admission. Keep
+    // both parts of this simulated generation old before arming the race.
+    const expiredAdmission = await db
+      .prepare(
+        `UPDATE workshop_write_attempts SET admitted_at = 1
+         WHERE fellow_id = ? AND idempotency_key_hash = ?`,
+      )
+      .bind(binding.fellowId, await sha256Hex(replayKey))
+      .run();
+    expect(expiredAdmission.meta.changes).toBe(1);
+
     armed = true;
     const staleRequest = push(body("Stale request A"));
     await expiredObserved;
@@ -12636,6 +12647,16 @@ describe("session protocol routes", () => {
       )
       .bind(binding.fellowId, "target-bound-key")
       .run();
+    // Expiring the durable replay must also expire its much shorter admission;
+    // an otherwise fresh admission would correctly refuse the changed target.
+    const expiredAdmission = await db
+      .prepare(
+        `UPDATE workshop_write_attempts SET admitted_at = 1
+         WHERE fellow_id = ? AND idempotency_key_hash = ?`,
+      )
+      .bind(binding.fellowId, await sha256Hex("target-bound-key"))
+      .run();
+    expect(expiredAdmission.meta.changes).toBe(1);
     const acceptedAfterExpiry = await call(`/v1/sessions/${second.session_id}/workshop`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "target-bound-key" },

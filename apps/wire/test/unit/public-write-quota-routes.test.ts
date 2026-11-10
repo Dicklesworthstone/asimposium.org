@@ -422,7 +422,9 @@ describe("SQLite-backed unit checks: mounted public-write budgets", () => {
     expect(await replay.text()).toBe(receipt);
     expect(puts).toBe(1);
     expect(
-      await harness.db.prepare("SELECT COUNT(*) AS n FROM workshop_revisions").first(),
+      await harness.db
+        .prepare("SELECT COUNT(*) AS n FROM workshop_revisions")
+        .first<{ n: number }>(),
     ).toEqual({ n: 1 });
     const hello = await fellow.call("/v1/hello");
     expect(hello.status).toBe(200);
@@ -489,7 +491,9 @@ describe("SQLite-backed unit checks: mounted public-write budgets", () => {
       expect(conflict.status).toBe(409);
       expect(puts).toBe(1);
       expect(
-        await harness.db.prepare("SELECT COUNT(*) AS n FROM workshop_write_attempts").first(),
+        await harness.db
+          .prepare("SELECT COUNT(*) AS n FROM workshop_write_attempts")
+          .first<{ n: number }>(),
       ).toEqual({ n: 1 });
     } finally {
       releasePut();

@@ -133,12 +133,15 @@ describe("workshop rolling admission", () => {
   test("D1 failure, missing migration and a clock error cannot grant capacity", async () => {
     const { db, sqlite } = fixture();
     try {
-      const unavailable = {
-        ...db,
-        batch: async () => {
-          throw new Error("storage unavailable");
+      const unavailable = new Proxy(db, {
+        get(target, property, receiver) {
+          if (property === "batch")
+            return async () => {
+              throw new Error("storage unavailable");
+            };
+          return Reflect.get(target, property, receiver);
         },
-      } as D1Database;
+      });
       await expect(reserveWorkshopWrite(unavailable, input("unavailable"))).rejects.toThrow();
       await expect(reserveWorkshopWrite(db, input("bad-clock", Number.NaN))).rejects.toThrow(
         "WORKSHOP_RATE_CLOCK_INVALID",
