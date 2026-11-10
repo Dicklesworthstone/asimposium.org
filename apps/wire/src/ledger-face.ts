@@ -193,6 +193,7 @@ const PROBLEM_DIGEST_SELECT = `SELECT
         'payload_sha256', e.payload_sha256,
         'payload_json', CASE WHEN c.redacted_at IS NULL
           AND c.payload_sha256 = e.payload_sha256
+          AND NOT ${eventContentHiddenSql("e")}
           AND length(CAST(c.payload_json AS BLOB)) <= 65536 THEN c.payload_json END
       ) AS review_json
       FROM problem_statement_reviews r
@@ -216,8 +217,10 @@ const PROBLEM_DIGEST_SELECT = `SELECT
       'payload_sha256', re.payload_sha256,
       'payload_json', CASE WHEN rc.redacted_at IS NULL
         AND rc.payload_sha256 = re.payload_sha256
+        AND NOT ${eventContentHiddenSql("re")}
         AND length(CAST(rc.payload_json AS BLOB)) <= 65536 THEN rc.payload_json END,
       'target_json', CASE WHEN tc.redacted_at IS NULL AND tc.payload_sha256 = te.payload_sha256
+        AND NOT ${eventContentHiddenSql("te")}
         AND length(CAST(tc.payload_json AS BLOB)) <= 65536 THEN tc.payload_json END,
       'target_id', te.object_id, 'target_version', te.object_version,
       'target_digest', te.payload_sha256, 'target_content_digest', tv.content_digest)
@@ -342,7 +345,9 @@ interface StatementReviewRow {
 }
 
 /** No current identity lookup: attribution belongs to the publication. Legacy
- * projection rows cannot acquire a made-up session or today's sponsor. */
+ * projection rows cannot acquire a made-up session or today's sponsor.
+ * Current controls withhold the selected event's content without falling back
+ * to another publication, including reviews of earlier statement versions. */
 async function statementReviewCandidates(first: ProblemDigestRow, currentVersion: number | null) {
   const rows: StatementReviewRow[] = JSON.parse(first.statement_reviews_json ?? "[]");
   const candidates = [];
@@ -433,7 +438,7 @@ async function statementReviewCandidates(first: ProblemDigestRow, currentVersion
     statement_review_attribution_unavailable:
       "Statement reviews without a complete matching publication attribution are omitted, including legacy projection-only rows.",
     statement_review_content_unavailable:
-      "Statement review content is withdrawn, missing, oversized or detached from its immutable event digest.",
+      "Statement review content is hidden, withdrawn, missing, oversized or detached from its immutable event digest.",
     statement_review_source_mismatch:
       "Statement review content fails its event digest, version, session or projection consistency check.",
   };
@@ -453,7 +458,7 @@ async function resultReviewCandidates(first: ProblemDigestRow) {
       {
         reason: "result_review_unavailable",
         detail:
-          "The recorded result-review target is missing, withdrawn, oversized or lacks a matching immutable claim identity.",
+          "The recorded result-review request or target is hidden, missing, withdrawn, oversized or lacks a matching immutable claim identity.",
       },
     ],
   };
@@ -968,15 +973,12 @@ async function loadProblemFullFace(
       AND status = 'drift') AS projection_drift_cursor
     FROM problems WHERE id = ?
     AND status <> 'private-draft' AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
-  const headRows = await db
-    .prepare(headSql)
-    .bind(requestedProblemId)
-    .all<{
-      id: string;
-      public_seq: number;
-      unlisted: number;
-      projection_drift_cursor: number | null;
-    }>();
+  const headRows = await db.prepare(headSql).bind(requestedProblemId).all<{
+    id: string;
+    public_seq: number;
+    unlisted: number;
+    projection_drift_cursor: number | null;
+  }>();
   const first = headRows.results[0];
   if (first === undefined) return null;
   if (

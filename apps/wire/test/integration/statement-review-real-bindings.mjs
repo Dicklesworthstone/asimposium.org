@@ -623,6 +623,60 @@ await runLocalWorkerJourney(
       "OBJECT_VERSION_CONFLICT",
     );
     assert.deepEqual(await state(), terminal);
+    // Current controls also withhold earlier-version reviews. These local
+    // operator fixtures leave the ledger and its cursor unchanged, so an ETag
+    // derived only from the public head would incorrectly return the old bytes.
+    const controlVersion = new Map();
+    const reviewVisibility = async (target, visibility) => {
+      const version = (controlVersion.get(target) ?? 0) + 1;
+      controlVersion.set(target, version);
+      await env.DB.prepare(`INSERT INTO content_controls
+        (control_id, problem_id, target_kind, target_ref, visibility, source,
+         reason_category, actor, reason, version, created_at)
+        VALUES (?, ?, ?, ?, ?, 'operator', 'privacy', 'statement-review-fixture',
+          'Exercise current controls on an immutable statement review.', ?, ?)`)
+        .bind(
+          `CC-statement-review-${controlVersion.size}-${version}`,
+          id,
+          target.startsWith("#") ? "event" : "problem",
+          target,
+          visibility,
+          version,
+          new Date().toISOString(),
+        )
+        .run();
+    };
+    const beforeControl = new Map();
+    for (const suffix of ["json", "md"]) {
+      const response = await publicGet(suffix);
+      const bytes = await response.text();
+      assert.ok(bytes.includes(event.id));
+      beforeControl.set(suffix, { bytes, etag: response.headers.get("etag") });
+    }
+    for (const target of [`#${event.seq}`, `${id}@${event.object_version}`]) {
+      await reviewVisibility(target, "hidden");
+      for (const suffix of ["json", "md"]) {
+        const previous = beforeControl.get(suffix);
+        const response = await publicGet(suffix, { "If-None-Match": previous.etag });
+        assert.equal(response.status, 200);
+        assert.notEqual(response.headers.get("etag"), previous.etag);
+        const bytes = await response.text();
+        assert.ok(!bytes.includes(event.id));
+        assert.ok(bytes.includes("statement_review_content_unavailable"));
+        if (suffix === "json") {
+          const face = ProblemFaceResponseSchema.parse(JSON.parse(bytes));
+          assert.equal(face.cursor, terminal.problem[0].public_seq);
+          assert.ok(!face.items.some((item) => item.id === `SR-${event.seq}`));
+        }
+      }
+      await reviewVisibility(target, "visible");
+      for (const suffix of ["json", "md"]) {
+        const restored = await publicGet(suffix);
+        assert.equal(await restored.text(), beforeControl.get(suffix).bytes);
+        assert.equal(restored.headers.get("etag"), beforeControl.get(suffix).etag);
+      }
+    }
+    assert.deepEqual(await state(), terminal, "Visibility never rewrites the review or cursor");
     // W2.6 (79n, pjkj): compare all verdicts, versions and reviewers while
     // their event payloads still exist, before projection-only legacy rows.
     const rebuilt = await assertProjectionsRebuild(env.DB, id);
