@@ -647,6 +647,7 @@ describe("face wire format", () => {
         "/p/{id}/formal.html",
         "/p/{id}/formal.json",
         "/p/{id}/formal.md",
+        "/p/{id}/full.md",
         "/p/{id}/statements",
         "/p/{id}/statements/{reference}",
         "/p/{id}/reviews/{target}",

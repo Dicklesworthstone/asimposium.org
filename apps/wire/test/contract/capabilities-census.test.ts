@@ -439,8 +439,6 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     "GET /problems":
       "negotiated problem index face; canonical representations are advertised under their explicit suffixes (/problems.json, /problems.md)",
     "GET /problems.toon": "TOON problem index is opt-in and rendered for uniform lists",
-    "GET /p/<id>/full.md":
-      "full problem pack markdown projection; canonical machine discovery uses the digest pack (/p/{id}.json, /p/{id}.md)",
     "GET /p/<id>/orders.md":
       "legacy alias for problem-scoped moves; 308 redirects to /p/{id}/moves.md",
     "GET /p/<id>/orders.json":
