@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { ContractProblemSchema, OpaqueProblemSchema } from "@asimposium/contracts";
 
 import {
@@ -13,6 +13,12 @@ import {
   FELLOW_TOKEN_TTL_MS,
   InMemoryEnrollmentStore,
 } from "../../src/enrollment/service.ts";
+import { migratedSqliteD1 } from "../support/migrated-sqlite.ts";
+
+const readBudgetDatabases: ReturnType<typeof migratedSqliteD1>["sqlite"][] = [];
+afterEach(() => {
+  for (const sqlite of readBudgetDatabases.splice(0)) sqlite.close();
+});
 
 const FRAGMENT_VALUE_PLACEHOLDER = "<value from the join URL fragment>";
 const TEST_STOA_ORIGIN = "https://a.asimposium.org";
@@ -103,7 +109,9 @@ function routerFixture() {
       random,
     ),
   });
-  return { clock, service, router: createEnrollmentRouter({ service }) };
+  const { db, sqlite } = migratedSqliteD1();
+  readBudgetDatabases.push(sqlite);
+  return { clock, service, router: createEnrollmentRouter({ service, db }) };
 }
 
 async function request(

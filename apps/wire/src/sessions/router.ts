@@ -16,8 +16,10 @@ import {
   isProblemMembershipAdmissionError,
   problemMembershipAdmissionProblem,
 } from "./problem-membership-admission.ts";
+import { admitFellowRead, fellowReadBudgetHeaders } from "./read-quota.ts";
 import { ReviewPackSelectionError, selectIsolatedReviewPack } from "./review-pack-selection.ts";
 import {
+  authenticateSessionFellow,
   createSessionRouter as createLedgerSessionRouter,
   type SessionRouterOptions,
 } from "./router-core.ts";
@@ -85,6 +87,24 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   });
   const ledger = createLedgerSessionRouter(options);
   app.get("/v1/sessions/:id/pack", async (c, next) => {
+    const auth = await authenticateSessionFellow(c.req.raw, options.service);
+    if (!auth.ok) {
+      auth.response.headers.set("cache-control", "private, no-store");
+      return auth.response;
+    }
+    const readBudget = await admitFellowRead(c.env?.DB, auth.binding.fellowId);
+    if (readBudget instanceof Response) return readBudget;
+    const withBudget = (response: Response): Response => {
+      const headers = new Headers(response.headers);
+      headers.set("cache-control", "private, no-store");
+      for (const [name, value] of Object.entries(fellowReadBudgetHeaders(readBudget)))
+        headers.set(name, value);
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      });
+    };
     try {
       // A local Hono request may not carry a Worker execution context.
       let execution: Parameters<typeof ledger.fetch>[2];
@@ -98,38 +118,43 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         parsePack: (value) => PackResponseSchema.parse(value),
         parseTarget: (value) => PackTargetQuerySchema.parse(value),
       });
-      if (response === undefined) return next();
-      c.header("cache-control", "private, no-store");
-      return response;
+      if (response === undefined) {
+        await next();
+        c.res = withBudget(c.res);
+        return c.res;
+      }
+      return withBudget(response);
     } catch (error) {
       const needsTarget =
         error instanceof ReviewPackSelectionError && error.kind === "target-required";
-      return validatedProblem({
-        status: needsTarget ? 400 : 503,
-        code: needsTarget ? "SCHEMA_INVALID" : "INTERNAL_ERROR",
-        title: needsTarget
-          ? "An exact review target is needed"
-          : "Review selection is temporarily unavailable",
-        detail: needsTarget
-          ? "The bounded authenticated queue did not supply an eligible exact claim version. No broad claims context, private invitations, workshop or handback was returned."
-          : "An isolated review target could not be read safely. No broad review context was returned.",
-        fixHint: needsTarget
-          ? "Read this session's review-queue pack or supply profile=review&target=C-1@1 using an actual public claim version. Selection does not reserve work or grant publication permission."
-          : "Retry the unchanged request, or request an isolated review pack with an explicit public claim@version.",
-        ...(needsTarget
-          ? {
-              rule: "A5" as const,
-              extensions: {
-                schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-                example: { profile: "review", target: "C-1@1" },
-              },
-            }
-          : {}),
-        headers: {
-          "cache-control": "private, no-store",
-          ...(needsTarget ? {} : { "retry-after": "5" }),
-        },
-      });
+      return withBudget(
+        validatedProblem({
+          status: needsTarget ? 400 : 503,
+          code: needsTarget ? "SCHEMA_INVALID" : "INTERNAL_ERROR",
+          title: needsTarget
+            ? "An exact review target is needed"
+            : "Review selection is temporarily unavailable",
+          detail: needsTarget
+            ? "The bounded authenticated queue did not supply an eligible exact claim version. No broad claims context, private invitations, workshop or handback was returned."
+            : "An isolated review target could not be read safely. No broad review context was returned.",
+          fixHint: needsTarget
+            ? "Read this session's review-queue pack or supply profile=review&target=C-1@1 using an actual public claim version. Selection does not reserve work or grant publication permission."
+            : "Retry the unchanged request, or request an isolated review pack with an explicit public claim@version.",
+          ...(needsTarget
+            ? {
+                rule: "A5" as const,
+                extensions: {
+                  schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                  example: { profile: "review", target: "C-1@1" },
+                },
+              }
+            : {}),
+          headers: {
+            "cache-control": "private, no-store",
+            ...(needsTarget ? {} : { "retry-after": "5" }),
+          },
+        }),
+      );
     }
   });
   app.route("/", createSponsorWorkshopIndexRouter(options));

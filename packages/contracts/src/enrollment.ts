@@ -934,6 +934,9 @@ export const EnrollmentHelloResponseSchema = z
     promotion_budget: RateLimitBudgetSchema.optional(),
     /** Fellow-wide workshop creates/revisions, shared across all sessions. */
     workshop_budget: RateLimitBudgetSchema.optional(),
+    /** Shared by hello, triage, next and session packs (including deltas),
+     * across credentials, sessions, formats, HEAD and conditional reads. */
+    read_budget: RateLimitBudgetSchema.optional(),
     assignments: z.array(HelloAssignmentSchema).optional(),
     open_sessions: z.array(HelloOpenSessionSchema).optional(),
     unread_reviews: z.array(HelloUnreadReviewSchema).optional(),

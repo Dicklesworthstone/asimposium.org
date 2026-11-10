@@ -11340,11 +11340,17 @@ describe("session protocol routes", () => {
     recordReads = false;
     expect(foreign.status).toBe(404);
     expect(foreign.headers.get("cache-control")).toBe("private, no-store");
+    expect(foreign.headers.get("ratelimit-remaining")).toBe("119");
     const foreignBody = await foreign.text();
     for (const marker of [claimMarker, handbackMarker, workshopMarker]) {
       expect(foreignBody).not.toContain(marker);
     }
     expect(observedReads).toEqual([
+      {
+        kind: "first",
+        sql: expect.stringMatching(/^INSERT INTO fellow_read_windows\b/u),
+        bindings: [foreignBinding.fellowId, expect.any(Number), expect.any(Number)],
+      },
       {
         kind: "first",
         sql: packSessionSql,
@@ -11358,8 +11364,14 @@ describe("session protocol routes", () => {
     recordReads = false;
     expect(unknown.status).toBe(404);
     expect(unknown.headers.get("cache-control")).toBe("private, no-store");
+    expect(unknown.headers.get("ratelimit-remaining")).toBe("118");
     expect(await unknown.text()).toBe(foreignBody);
     expect(observedReads).toEqual([
+      {
+        kind: "first",
+        sql: expect.stringMatching(/^INSERT INTO fellow_read_windows\b/u),
+        bindings: [foreignBinding.fellowId, expect.any(Number), expect.any(Number)],
+      },
       {
         kind: "first",
         sql: packSessionSql,
@@ -11459,7 +11471,13 @@ describe("session protocol routes", () => {
       membership: "none",
       effective_permissions: [],
     });
+    expect(response.headers.get("ratelimit-remaining")).toBe("118");
     expect(observedReads).toEqual([
+      {
+        kind: "first",
+        sql: expect.stringMatching(/^INSERT INTO fellow_read_windows\b/u),
+        bindings: [binding.fellowId, expect.any(Number), expect.any(Number)],
+      },
       {
         kind: "first",
         sql: packSessionSql,

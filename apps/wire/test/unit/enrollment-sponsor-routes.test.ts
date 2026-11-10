@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   ContractProblemSchema,
   DeviceCodeStartResponseSchema,
@@ -35,6 +35,20 @@ import {
   SPONSOR_STEP_UP_WINDOW_SECONDS,
   SponsorEnrollmentRateLimitError,
 } from "../../src/enrollment/service";
+import { migratedSqliteD1 } from "../support/migrated-sqlite.ts";
+
+const readBudgetDatabases: ReturnType<typeof migratedSqliteD1>["sqlite"][] = [];
+afterEach(() => {
+  for (const sqlite of readBudgetDatabases.splice(0)) sqlite.close();
+});
+
+// Keep the sponsor/operator fixture's intentionally absent DB unchanged. An
+// authenticated Hello uses the real counter binding supplied by the Worker.
+function readBudgetEnv() {
+  const { db, sqlite } = migratedSqliteD1();
+  readBudgetDatabases.push(sqlite);
+  return { DB: db };
+}
 
 /**
  * Sponsor-route proof for Propylon W3.3/W3.4: mint, proposal list, decision,
@@ -1025,6 +1039,7 @@ describe("sponsor enrollment routes", () => {
       new Request(`${origin}/v1/hello`, {
         headers: { authorization: `Bearer ${outcome.token}` },
       }),
+      readBudgetEnv(),
     );
     expect(hello.status).toBe(200);
     const helloBody = EnrollmentHelloResponseSchema.parse(await hello.json());
@@ -1601,6 +1616,7 @@ describe("sponsor enrollment routes", () => {
       new Request(`${origin}/v1/hello`, {
         headers: { authorization: `Bearer ${fixture.token}` },
       }),
+      readBudgetEnv(),
     );
     expect(hello.status).toBe(200);
     const helloBody = EnrollmentHelloResponseSchema.parse(await hello.json());
@@ -2553,6 +2569,7 @@ describe("sponsor enrollment routes", () => {
       new Request(`${origin}/v1/hello`, {
         headers: { authorization: `Bearer ${outcome.token}` },
       }),
+      readBudgetEnv(),
     );
     expect(hello.status).toBe(200);
 

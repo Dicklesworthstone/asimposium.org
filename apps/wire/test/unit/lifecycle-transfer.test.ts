@@ -1356,6 +1356,7 @@ test("private export transfer isolates original grant directives and returns a t
       new Request("https://a.asimposium.org/v1/hello", {
         headers: { authorization: `Bearer ${replacement.token}` },
       }),
+      { DB: db },
     );
     expect(hello.status).toBe(200);
     expect(EnrollmentHelloResponseSchema.parse(await hello.json()).granted_resources).toMatchObject(

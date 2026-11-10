@@ -15,6 +15,7 @@ import { getDocument, sha256Hex } from "@asimposium/protocol";
 
 import { createApp } from "../../src/app.ts";
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
+import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
 import {
   AesGcmEnrollmentReplayProtector,
   EnrollmentService,
@@ -26,6 +27,7 @@ import {
   ContractFixtureMovesProvider,
   PROMOTION_MOVE_KINDS,
 } from "../../src/mega-commands/provider.ts";
+import { createMegaCommandsRouter } from "../../src/mega-commands/router.ts";
 import { normHash } from "../../src/split/policy.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
@@ -312,6 +314,146 @@ async function createTestHarness(options: { movesProvider?: any } = {}) {
 }
 
 describe("W6.2 Mega-Commands (hello, triage, next)", () => {
+  test("orientation aliases and HEAD share one Fellow read budget and refuse before move composition", async () => {
+    let moves = 0;
+    const movesProvider = {
+      async nextMoves() {
+        moves++;
+        return { primaryMove: null, alternatives: [], degraded: false };
+      },
+      async triageMove() {
+        moves++;
+        return { move: null, degraded: false };
+      },
+    };
+    const { app, env, db, enrollFellow, seedProblem, seedMembership } = await createTestHarness({
+      movesProvider,
+    });
+    const fellow = await enrollFellow();
+    await seedProblem("P-READBUDGET");
+    await seedMembership("P-READBUDGET", fellow.fellowId, "contributor");
+    const routes = [
+      { path: "/v1/hello" },
+      { path: "/v1/triage" },
+      { path: "/v1/triage.md" },
+      { path: "/v1/triage", accept: "text/markdown" },
+      { path: "/v1/p/P-READBUDGET/next" },
+      { path: "/v1/p/P-READBUDGET/next.md" },
+      { path: "/v1/p/P-READBUDGET/next", accept: "text/markdown" },
+      { path: "/v1/hello", method: "HEAD" },
+      { path: "/v1/triage.md", method: "HEAD" },
+      { path: "/v1/p/P-READBUDGET/next.md", method: "HEAD" },
+    ];
+    for (const [index, route] of routes.entries()) {
+      const response = await app.fetch(
+        new Request(`https://a.asimposium.org${route.path}`, {
+          method: route.method ?? "GET",
+          headers: {
+            authorization: `Bearer ${fellow.token}`,
+            ...(route.accept ? { accept: route.accept } : {}),
+          },
+        }),
+        env,
+      );
+      expect(response.status, route.path).toBe(200);
+      expect(response.headers.get("ratelimit-limit")).toBe("120");
+      expect(response.headers.get("ratelimit-remaining")).toBe(String(119 - index));
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      if (index === 0)
+        expect(EnrollmentHelloResponseSchema.parse(await response.json()).read_budget).toEqual({
+          limit: 120,
+          remaining: 119,
+          window_seconds: 60,
+        });
+      else if (index === 1)
+        expect(TriageResponseSchema.parse(await response.json()).hello.read_budget?.remaining).toBe(
+          118,
+        );
+      else if (index === 2) {
+        const markdown = await response.text();
+        expect(markdown).toContain('"read_budget"');
+        expect(markdown).toContain("HEAD and conditional reads also count");
+      } else if (route.method === "HEAD") expect(await response.text()).toBe("");
+      else await response.body?.cancel();
+    }
+    expect(
+      await db
+        .prepare(
+          "SELECT json_array_length(admitted_at_json) AS used FROM fellow_read_windows WHERE fellow_id = ?",
+        )
+        .bind(fellow.fellowId)
+        .first(),
+    ).toEqual({ used: routes.length });
+    const composed = moves;
+    await db
+      .prepare("UPDATE fellow_read_windows SET admitted_at_json = ? WHERE fellow_id = ?")
+      .bind(JSON.stringify(Array.from({ length: 120 }, () => Date.now())), fellow.fellowId)
+      .run();
+    for (const route of routes) {
+      const response = await app.fetch(
+        new Request(`https://a.asimposium.org${route.path}`, {
+          method: route.method ?? "GET",
+          headers: { authorization: `Bearer ${fellow.token}` },
+        }),
+        env,
+      );
+      expect(response.status, route.path).toBe(429);
+      expect(response.headers.get("ratelimit-remaining")).toBe("0");
+      expect(Number(response.headers.get("retry-after"))).toBeGreaterThan(0);
+    }
+    expect(moves).toBe(composed);
+    const peer = await enrollFellow();
+    const peerHello = await app.fetch(
+      new Request("https://a.asimposium.org/v1/hello", {
+        headers: { authorization: `Bearer ${peer.token}` },
+      }),
+      env,
+    );
+    expect(peerHello.status).toBe(200);
+    expect(peerHello.headers.get("ratelimit-remaining")).toBe("119");
+    const invalid = await app.fetch(
+      new Request("https://a.asimposium.org/v1/triage", {
+        headers: { authorization: "Bearer invalid-token" },
+      }),
+      env,
+    );
+    expect(invalid.status).toBe(401);
+    expect(moves).toBe(composed);
+  });
+
+  test("authenticated hello and triage fail closed when no read-budget database is supplied", async () => {
+    const { service, enrollFellow } = await createTestHarness();
+    const fellow = await enrollFellow();
+    let moves = 0;
+    const triage = createMegaCommandsRouter({
+      service,
+      movesProvider: {
+        async nextMoves() {
+          moves++;
+          return { primaryMove: null, alternatives: [], degraded: false };
+        },
+        async triageMove() {
+          moves++;
+          return { move: null, degraded: false };
+        },
+      },
+    });
+    for (const [router, path] of [
+      [createEnrollmentRouter({ service }), "/v1/hello"],
+      [triage, "/v1/triage"],
+      [triage, "/v1/p/P-READBUDGET/next"],
+    ] as const) {
+      const response = await router.request(`https://a.asimposium.org${path}`, {
+        headers: { authorization: `Bearer ${fellow.token}` },
+      });
+      expect(response.status, path).toBe(503);
+      expect(response.headers.get("retry-after")).toBe("1");
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      expect(await response.json()).toMatchObject({ code: "INTERNAL_ERROR" });
+    }
+    expect(moves).toBe(0);
+  });
+
   test("hello, triage and next emit one OPS.2a line each without bodies or tokens", async () => {
     const { app, env, enrollFellow, seedProblem, seedMembership } = await createTestHarness();
     const fellow = await enrollFellow();

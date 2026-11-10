@@ -387,6 +387,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0139_statement_revision_proposals.sql
   db/migrations/0140_artifact_upload_recovery.sql
   db/migrations/0141_workshop_write_rate_limit.sql
+  db/migrations/0142_fellow_read_rate_limit.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -635,6 +636,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/sessions/implicit-session.ts
   apps/wire/src/sessions/idle.ts
   apps/wire/src/sessions/quota.ts
+  apps/wire/src/sessions/read-quota.ts
   apps/wire/src/sessions/workshop-quota.ts
   apps/wire/src/sessions/ledger-pack.ts
   apps/wire/src/sessions/formal-pack.ts
@@ -1003,6 +1005,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0139_statement_revision_proposals.sql
   0140_artifact_upload_recovery.sql
   0141_workshop_write_rate_limit.sql
+  0142_fellow_read_rate_limit.sql
 )
 
 

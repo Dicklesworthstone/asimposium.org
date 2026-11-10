@@ -14,6 +14,7 @@ import { buildHelloResponse } from "../enrollment/router.ts";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service.ts";
 import type { Env } from "../env.ts";
 import { validatedProblem as problem } from "../http/envelope.ts";
+import { admitFellowRead, fellowReadBudgetHeaders } from "../sessions/read-quota.ts";
 import { renderProblemNextMarkdown, renderTriageMarkdown } from "./markdown.ts";
 import { logMegaCommand } from "./ops-log.ts";
 import {
@@ -92,10 +93,14 @@ export function createMegaCommandsRouter(
     const env = (c.env ?? {}) as Partial<Env>;
     const db = options.db ?? env.DB;
 
+    const readBudget = await admitFellowRead(db, auth.fellowId);
+    if (readBudget instanceof Response) return readBudget;
+
     const hello = await buildHelloResponse({
       binding: auth,
       service: options.service,
       db,
+      readBudget,
       sponsorPromotionRateLimit:
         options.sponsorPromotionRateLimit ?? env.SPONSOR_PROMOTION_RATE_LIMIT,
     });
@@ -141,11 +146,15 @@ export function createMegaCommandsRouter(
         headers: {
           "content-type": "text/markdown; charset=utf-8",
           "cache-control": "private, no-store",
+          ...fellowReadBudgetHeaders(readBudget),
         },
       });
     }
 
-    return c.json(response, 200, { "cache-control": "private, no-store" });
+    return c.json(response, 200, {
+      "cache-control": "private, no-store",
+      ...fellowReadBudgetHeaders(readBudget),
+    });
   }
 
   // GET /v1/p/:id/next and GET /v1/p/:id/next.md
@@ -171,6 +180,9 @@ export function createMegaCommandsRouter(
 
     const env = (c.env ?? {}) as Partial<Env>;
     const db = options.db ?? env.DB;
+
+    const readBudget = await admitFellowRead(db, auth.fellowId);
+    if (readBudget instanceof Response) return readBudget;
 
     let rawProblemId = c.req.param("id") ?? "";
     if (rawProblemId.endsWith(".md")) {
@@ -292,11 +304,15 @@ export function createMegaCommandsRouter(
         headers: {
           "content-type": "text/markdown; charset=utf-8",
           "cache-control": "private, no-store",
+          ...fellowReadBudgetHeaders(readBudget),
         },
       });
     }
 
-    return c.json(response, 200, { "cache-control": "private, no-store" });
+    return c.json(response, 200, {
+      "cache-control": "private, no-store",
+      ...fellowReadBudgetHeaders(readBudget),
+    });
   }
 
   return app;

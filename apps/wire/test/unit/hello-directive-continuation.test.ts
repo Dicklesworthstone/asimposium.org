@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   EnrollmentHelloResponseSchema,
   type NextMoveCandidate,
@@ -13,11 +13,19 @@ import {
 } from "../../src/enrollment/service.ts";
 import { ContractFixtureMovesProvider } from "../../src/mega-commands/provider.ts";
 import { createMegaCommandsRouter } from "../../src/mega-commands/router.ts";
+import { migratedSqliteD1 } from "../support/migrated-sqlite.ts";
+
+const readBudgetDatabases: ReturnType<typeof migratedSqliteD1>["sqlite"][] = [];
+afterEach(() => {
+  for (const sqlite of readBudgetDatabases.splice(0)) sqlite.close();
+});
 
 const ORIGIN = "https://a.asimposium.org";
 const ACTIVE = ORIGIN + "/v1/directives/active";
 
 function fixture() {
+  const { db, sqlite } = migratedSqliteD1();
+  readBudgetDatabases.push(sqlite);
   const service = new EnrollmentService({
     stoaOrigin: ORIGIN,
     agoraOrigin: "https://asimposium.org",
@@ -25,10 +33,11 @@ function fixture() {
     replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
   });
   const triageMoves: Record<string, NextMoveCandidate | null> = {};
-  const app = new Hono().route("/", createEnrollmentRouter({ service })).route(
+  const app = new Hono().route("/", createEnrollmentRouter({ service, db })).route(
     "/",
     createMegaCommandsRouter({
       service,
+      db,
       movesProvider: new ContractFixtureMovesProvider({ triageMoves }),
     }),
   );
