@@ -382,7 +382,7 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
           "SELECT json_array_length(admitted_at_json) AS used FROM fellow_read_windows WHERE fellow_id = ?",
         )
         .bind(fellow.fellowId)
-        .first(),
+        .first<{ used: number }>(),
     ).toEqual({ used: routes.length });
     const composed = moves;
     await db

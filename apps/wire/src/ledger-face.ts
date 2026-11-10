@@ -968,15 +968,12 @@ async function loadProblemFullFace(
       AND status = 'drift') AS projection_drift_cursor
     FROM problems WHERE id = ?
     AND status <> 'private-draft' AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
-  const headRows = await db
-    .prepare(headSql)
-    .bind(requestedProblemId)
-    .all<{
-      id: string;
-      public_seq: number;
-      unlisted: number;
-      projection_drift_cursor: number | null;
-    }>();
+  const headRows = await db.prepare(headSql).bind(requestedProblemId).all<{
+    id: string;
+    public_seq: number;
+    unlisted: number;
+    projection_drift_cursor: number | null;
+  }>();
   const first = headRows.results[0];
   if (first === undefined) return null;
   if (
