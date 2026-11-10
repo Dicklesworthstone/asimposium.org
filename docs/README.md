@@ -18,23 +18,81 @@ Updated 2026-11-10. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
 **ASImposium has a substantial working local research workflow, but it has not
-delivered the public instrument promised by Fable. The main obstacle is now
-finishing and deploying a qualified candidate, then earning the external
-collaboration, safety and operational evidence. Rebuilding the existing source
-subsystems would miss that obstacle. Candidate `7dd91148` passes all eight
-typecheck, lint and unfiltered unit groups in both primary and independent
-execution, plus the required contract and 438 production-browser checks.
-Its three narrow repairs are independently accepted. A later external merge
-adds workshop admission and Fellow calibration; its repaired successor
-`babf6766` passes the component checks but its full root is red on four token
-harness cases. `dd0f63db` repairs their barrier, then exposes a separate
-response-status failure. Candidate `526398d7` follows the existing pending
-response contract and passes typecheck, lint, native checks and all eight
-unfiltered root groups in both primary and independent execution. The older
-failed runs remain recorded separately.
-The earlier canonical-runner acceptance remains bound to `e4b21525`. Broad
-incoming JavaScript scanner coverage remains incomplete and prevents complete
-integration acceptance. Deployed acceptance remains separate.**
+delivered the public instrument promised by Fable.**
+
+The current frozen candidate is `62cb6a8f`: both agents independently pass the
+original full root suite's eight groups, including 7,274 Worker tests and 1,073
+Agora tests. Their four before/after maps match all 2,681 source hashes and the
+pinned SDK. Primary execution completes at 18:13 UTC; independent execution at
+18:39 UTC. Both agents' typecheck and lint also pass all eight groups.
+Contracts, real-binding journeys and the 438-check
+production browser journey pass at their named source revisions below. The last
+source change repairs only the token harness fixture, preserving those
+production implementations.
+
+The preceding `5a42c6bd` root failure is retained: its D1 measurement fixture had
+130 mismatched payload hashes and 130 missing claim identifiers, which the
+authenticated reader correctly omitted. `asimposiumorg-x77k.1` repairs the seed
+with canonical publication bytes and real hashes. Both agents pass the complete
+original 33-case token file. A sole hash-corruption fault triggers the intended
+original refusal, followed by exact restoration. The original workload selects
+79 claims across five deterministic samples, with a 125 ms median against its
+unchanged 600 ms local regression limit.
+
+Deployment reconciliation, live multi-harness collaboration, hosted screening,
+OAuth and operational evidence remain separate work. Rebuilding the existing
+source subsystems would miss those obstacles. Broad incoming JavaScript scanner
+coverage remains incomplete and prevents complete integration acceptance.
+
+Public reads at 18:15 UTC still return the September capability bytes:
+production `1844555d…bbc0`, staging `8e79852b…aa70`, both `0.1.0-draft`.
+These observations do not identify provider revision or deployment history.
+The frozen candidate's cost gate returns exit 78,
+`S2_COST_MEASUREMENT_UNAVAILABLE`; its required retained measurement is absent.
+Deployment reconciliation stays with `asimposiumorg-rs5n`, and local pack
+latency does not supply that cost or deployed-performance evidence.
+
+The latest incoming source includes rolling Fellow read admission, public
+immutable-history pages, current visibility controls on review digests,
+authenticated claim headlines and share images pinned to their recorded cut.
+The qualification repairs preserve those implementations: type the SQL probe,
+match the combined budget heading, supply the required projection argument in
+the history fixture, require the real full-history type and discovery route,
+and preserve the advertised image query in the browser consumer. No production
+fallback or schema was added to make a test pass. The S-3 evidence receiver
+explicitly grows from 3.75 MB to 3.76 MB after measuring the complete original
+bundle arrays; the 8 MB envelope, 1 MB diagnostics, build graph, source checks
+and deadlines remain unchanged. Original refusals and failed runs are retained.
+
+Current real Workerd/D1/R2 checks exercise shared read quotas, 205 immutable
+claim records, full-page continuations and statement/result-review hide/restore
+controls. The full contracts suite passes 1,010 tests; the Worker contract
+suite passes 190. The browser uses production Next and real Chromium, with a
+locally minted sponsor session; it proves no Google exchange or deployed cache
+behavior. A separate scripted reference flow passes its ten expected scenarios
+(three completed positive cases and seven deliberate negative cases), not the
+live three-harness gauntlet. A different verifier reexecutes the positive gates,
+causal faults and exact restorations, then closes only the seven earned repair
+leaves: `asimposiumorg-df71.3.1` through `.6` and `asimposiumorg-x77k.1`.
+Their broader parents keep every unmet criterion. The independent full Rust
+test prerequisite remains unfinished under `asimposiumorg-l1yg.1`.
+
+The optional Rust CLI now executes its original locked suite remotely: 45
+library tests, 16 CLI surface tests and one canonical-JSON test pass. Its two
+ignored HTTP tests are then exercised through their real local Worker drivers:
+25 workshop reads plus four next reads, and nine search cases. The compiler
+source receipt matches all 2,681 source files at `5a42c6bd`; remote-before, downloaded
+and remote-after library-test hashes agree. The build ran from working source
+before the final commit, whose bytes match the frozen candidate; its original
+execution label is retained. This is CLI and local-HTTP proof, not complete W11,
+TLS, deployment or launch acceptance. Independent formatting, check, Clippy and
+both local HTTP consumers pass. Independent full Rust tests are blocked before
+Cargo by remote-worker availability; the alternate worker lacks required space.
+
+Current raw results, exact source/SDK maps and original failures are retained in
+`e2e/artifacts/current-rust-20261110-coppertiger/`; independent executions use
+`e2e/artifacts/independent-20261110-honors-citations-recovery-09f36cfc/`.
+The broader original parents retain every unmet condition.
 
 A fresh canonical local Codex rehearsal at `b3ad21dc` (runtime source unchanged
 from `526398d7`) completes every scored stage, including the injected 422,
@@ -48,8 +106,9 @@ run with fixture screening and scripted sponsor approval, not three-harness,
 receipts: `e2e/artifacts/cold-codex-20261110-coppertiger/`. Original `pcsn` stays
 blocked with its existing owner and requirements.
 
-Fresh stock UBS working and index scans of the full 463-path incoming selection
-both remain partial at the original JavaScript 300-second limit. An isolated
+The last stock UBS working and index attempts over the complete 463-path
+selection at `b3ad21dc` both remain partial at the original JavaScript
+300-second limit. Later completed scans cover only their named repairs. An isolated
 whole-analyzer concurrency prototype also times out on that complete selection.
 Its smaller exact-finding controls do not supply the missing coverage, and
 independent review identifies additional error-handling differences. The
