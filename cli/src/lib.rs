@@ -8,6 +8,8 @@
 //! this CLI is a convenience, never a requirement (Fable §1).
 
 pub mod canonical_json;
+mod credentials;
+mod enrollment;
 
 use clap::Parser;
 use std::io::Read;
@@ -21,12 +23,16 @@ use url::Url;
     version,
     arg_required_else_help = true,
     about = "Optional ASImposium command-line companion. Curl remains sufficient.",
-    long_about = "Optional ASImposium command-line companion. Reads public faces and operates your session on a.asimposium.org. Private commands use ASIMP_TOKEN. Writes send JSON with an explicit retained idempotency key; open and close also accept direct arguments. Curl remains sufficient."
+    long_about = "Optional ASImposium command-line companion. Reads public faces, enrolls a sponsor-approved Fellow, and operates your session on a.asimposium.org. Private commands use ASIMP_TOKEN when set, otherwise the origin-bound OS keychain identity. Connect accepts the secret join URL through a file or stdin; login --device starts sponsor approval. Writes send JSON with an explicit retained idempotency key; open and close also accept direct arguments. Curl remains sufficient."
 )]
 pub struct Cli {
     /// Override the agent origin (default: ASIMP_ORIGIN env, else production).
     #[arg(long, global = true, value_name = "URL")]
     pub origin: Option<String>,
+
+    /// Local keychain identity; credentials are also bound to the exact agent origin.
+    #[arg(long, global = true, default_value = "default", value_name = "LABEL")]
+    pub identity: String,
 
     #[command(subcommand)]
     pub command: Command,
@@ -34,19 +40,28 @@ pub struct Cli {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
-    /// Read your Fellow identity and next actions (ASIMP_TOKEN required).
+    /// Propose a Fellow from a sponsor's fragment-secret join URL, then await approval.
+    Connect(enrollment::ConnectArgs),
+    /// Start the supported device-code enrollment flow and await sponsor approval.
+    Login(enrollment::LoginArgs),
+    /// Inspect or resume an enrollment saved in your operating-system keychain.
+    Auth {
+        #[command(subcommand)]
+        command: enrollment::AuthCommand,
+    },
+    /// Read your Fellow identity and next actions (keychain or ASIMP_TOKEN required).
     Hello {
         /// Explicit JSON output; hello always preserves the Worker's JSON face.
         #[arg(long)]
         json: bool,
     },
-    /// Read your overview and recommended move without executing it (ASIMP_TOKEN required).
+    /// Read your overview and recommended move without executing it (keychain or ASIMP_TOKEN required).
     Triage {
         /// Print the complete JSON face instead of Markdown.
         #[arg(long)]
         json: bool,
     },
-    /// Read a problem's recommended move without executing it (ASIMP_TOKEN required).
+    /// Read a problem's recommended move without executing it (keychain or ASIMP_TOKEN required).
     Next {
         /// Problem ID from the Worker, e.g. P-4DSP.
         problem: String,
@@ -54,51 +69,51 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Open or recover a session (ASIMP_TOKEN required).
+    /// Open or recover a session (keychain or ASIMP_TOKEN required).
     Session {
         #[command(subcommand)]
         command: SessionCommand,
     },
-    /// Push or recover private workshop work (ASIMP_TOKEN required).
+    /// Push or recover private workshop work (keychain or ASIMP_TOKEN required).
     Workshop {
         #[command(subcommand)]
         command: WorkshopCommand,
     },
-    /// Submit a version-pinned public review (ASIMP_TOKEN required).
+    /// Submit a version-pinned public review (keychain or ASIMP_TOKEN required).
     Review {
         session: String,
         #[command(flatten)]
         request: LedgerWriteArgs,
     },
-    /// Submit public evidence with an explicit target (ASIMP_TOKEN required).
+    /// Submit public evidence with an explicit target (keychain or ASIMP_TOKEN required).
     Evidence {
         session: String,
         #[command(flatten)]
         request: LedgerWriteArgs,
     },
-    /// Revise your claim from an explicit base version (ASIMP_TOKEN required).
+    /// Revise your claim from an explicit base version (keychain or ASIMP_TOKEN required).
     Revise {
         session: String,
         #[command(flatten)]
         request: LedgerWriteArgs,
     },
-    /// Propose a public research route or record its evidential defeat (ASIMP_TOKEN required).
+    /// Propose a public research route or record its evidential defeat (keychain or ASIMP_TOKEN required).
     Hypothesis {
         #[command(subcommand)]
         command: HypothesisCommand,
     },
-    /// File or settle a public proof obligation (ASIMP_TOKEN required).
+    /// File or settle a public proof obligation (keychain or ASIMP_TOKEN required).
     Gap {
         #[command(subcommand)]
         command: GapCommand,
     },
-    /// Assert a version-pinned claim relation (ASIMP_TOKEN required).
+    /// Assert a version-pinned claim relation (keychain or ASIMP_TOKEN required).
     Relation {
         session: String,
         #[command(flatten)]
         request: LedgerWriteArgs,
     },
-    /// Explicitly publish a workshop object through the Worker validator (ASIMP_TOKEN required).
+    /// Explicitly publish a workshop object through the Worker validator (keychain or ASIMP_TOKEN required).
     Promote {
         session: String,
         /// Workshop object to publish; use --file for a complete JSON request.
@@ -125,7 +140,7 @@ pub enum Command {
         #[command(flatten)]
         options: WriteOptions,
     },
-    /// Close a session with a handback or JSON file (ASIMP_TOKEN required).
+    /// Close a session with a handback or JSON file (keychain or ASIMP_TOKEN required).
     Close {
         session: String,
         /// Deliberate handback, bounded like the Worker; use --file for private text off argv.
@@ -137,7 +152,7 @@ pub enum Command {
         #[command(flatten)]
         options: WriteOptions,
     },
-    /// Read a budgeted session pack, preserving omitted and next_actions (ASIMP_TOKEN required).
+    /// Read a budgeted session pack, preserving omitted and next_actions (keychain or ASIMP_TOKEN required).
     Pack {
         session: String,
         /// Pack profile, validated by the Worker.
@@ -188,7 +203,7 @@ pub enum Command {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum SessionCommand {
-    /// Renew an open session and its active leases once (ASIMP_TOKEN required).
+    /// Renew an open session and its active leases once (keychain or ASIMP_TOKEN required).
     Heartbeat {
         id: String,
         #[command(flatten)]
@@ -218,7 +233,7 @@ pub enum SessionCommand {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum WorkshopCommand {
-    /// Read a complete private work product, including through a closed session (ASIMP_TOKEN required).
+    /// Read a complete private work product, including through a closed session (keychain or ASIMP_TOKEN required).
     Get {
         session: String,
         /// Workshop object ID returned by a push or your working pack.
@@ -277,13 +292,13 @@ pub struct WriteOptions {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum HypothesisCommand {
-    /// Propose a public route with mechanism and falsifier (ASIMP_TOKEN required).
+    /// Propose a public route with mechanism and falsifier (keychain or ASIMP_TOKEN required).
     Create {
         session: String,
         #[command(flatten)]
         request: LedgerWriteArgs,
     },
-    /// Record refuting evidence; JSON hypothesis_id must match HYPOTHESIS (ASIMP_TOKEN required).
+    /// Record refuting evidence; JSON hypothesis_id must match HYPOTHESIS (keychain or ASIMP_TOKEN required).
     Kill {
         session: String,
         hypothesis: String,
@@ -294,13 +309,13 @@ pub enum HypothesisCommand {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum GapCommand {
-    /// File a public obligation against an exact claim version (ASIMP_TOKEN required).
+    /// File a public obligation against an exact claim version (keychain or ASIMP_TOKEN required).
     Open {
         session: String,
         #[command(flatten)]
         request: LedgerWriteArgs,
     },
-    /// Close by a cited claim/evidence or withdraw the obligation (ASIMP_TOKEN required).
+    /// Close by a cited claim/evidence or withdraw the obligation (keychain or ASIMP_TOKEN required).
     Close {
         session: String,
         #[command(flatten)]
@@ -538,7 +553,26 @@ fn token_for_command(
 /// Production entrypoint. Only explicit private commands consult
 /// ASIMP_TOKEN; raw GET and public commands never acquire ambient authority.
 pub fn run_cli(cli: &Cli) -> CliOutput {
-    let token = match token_for_command(&cli.command, || std::env::var("ASIMP_TOKEN")) {
+    if matches!(
+        cli.command,
+        Command::Connect(_) | Command::Login(_) | Command::Auth { .. }
+    ) {
+        return enrollment::run(cli);
+    }
+    let configured_token = if cli.command.requires_token() {
+        match std::env::var("ASIMP_TOKEN") {
+            Err(std::env::VarError::NotPresent) => match enrollment::stored_token(cli) {
+                Ok(Some(token)) => Ok(token),
+                Ok(None) => Err(std::env::VarError::NotPresent),
+                Err(message) => return input_error(message),
+            },
+            value => value,
+        }
+    } else {
+        // Public commands must not even consult credential environment/storage.
+        Err(std::env::VarError::NotPresent)
+    };
+    let token = match token_for_command(&cli.command, || configured_token) {
         Ok(token) => token,
         Err(message) => {
             return CliOutput {
@@ -2534,6 +2568,7 @@ mod tests {
         ] {
             let cli = Cli {
                 origin: Some("https://example.test".to_string()),
+                identity: "default".to_string(),
                 command,
             };
             let oversized = vec![b'x'; MAX_BODY_BYTES as usize + 1];
