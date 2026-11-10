@@ -71,14 +71,12 @@ export const HonorsDagContextSchema = z
   .strict();
 export type HonorsDagContext = z.infer<typeof HonorsDagContextSchema>;
 
-export const HonorsItemSchema = z
+const HonorsItemBaseSchema = z
   .object({
-    kind: z.enum(["claim", "problem"]),
     result_id: z.string().min(1).max(128),
     problem_id: PublicLedgerProblemIdSchema,
     settled_at: z.string(),
     sequence: z.number().int().min(0),
-    status: HonorsGatedStatusSchema,
     title: z.string().min(1).max(300),
     statement: z.string().min(1).max(8192).optional(),
     screening_notice: ScreeningPublicationNoticeSchema.optional(),
@@ -88,6 +86,20 @@ export const HonorsItemSchema = z
     evidence_trail: z.array(z.string().min(1).max(256)),
   })
   .strict();
+/** Claim recognition names the exact assessed publication and problem-local
+ * read cut. A saved result must not silently navigate to later science. */
+export const HonorsItemSchema = z.discriminatedUnion("kind", [
+  HonorsItemBaseSchema.extend({
+    kind: z.literal("claim"),
+    status: z.enum(["machine-checked", "strongly-supported"]),
+    version: z.number().int().positive(),
+    cursor: z.number().int().nonnegative().max(999_999_999_999_999),
+  }),
+  HonorsItemBaseSchema.extend({
+    kind: z.literal("problem"),
+    status: z.literal("resolved"),
+  }),
+]);
 export type HonorsItem = z.infer<typeof HonorsItemSchema>;
 
 export const HonorsQuerySchema = z

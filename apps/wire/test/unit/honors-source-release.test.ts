@@ -84,6 +84,8 @@ function fixture() {
     item: {
       kind: "claim",
       result_id: "C-1",
+      version: 1,
+      cursor: 3,
       problem_id: "P-TEST",
       settled_at: "2026-10-27T00:00:00.000Z",
       sequence: 3,

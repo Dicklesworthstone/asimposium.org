@@ -54,6 +54,7 @@ export interface HonorsResultRecord {
 }
 
 export interface HonorsClaimRecord extends HonorsResultRecord {
+  readonly item: Extract<HonorsItem, { kind: "claim" }>;
   readonly version: number;
   readonly publication: { eventId: string; payloadDigest: string; contentDigest: string };
 }
@@ -482,6 +483,8 @@ export async function readHonorsClaim(
     item: {
       kind: "claim",
       result_id: claim,
+      version,
+      cursor: through,
       problem_id: problem,
       settled_at: settlement.created_at,
       sequence: settlement.seq,
@@ -636,12 +639,13 @@ export async function readHonorsProblem(
       harness: synthesis.harness ?? "unknown",
       harness_provenance: "self_declared",
     });
+  const { version: _version, cursor: _cursor, ...resultItem } = claim.item;
   return {
     scope: claim.scope,
     witnesses,
     contextWitnesses: claim.contextWitnesses,
     item: {
-      ...claim.item,
+      ...resultItem,
       kind: "problem",
       result_id: problem,
       status: "resolved",

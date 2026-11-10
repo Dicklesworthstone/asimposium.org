@@ -714,6 +714,8 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
         {
           kind: "claim",
           result_id: "C-1",
+          version: 2,
+          cursor: 51,
           problem_id: "P-4DSP",
           settled_at: "2026-09-15T12:00:00.000Z",
           sequence: 42,
@@ -762,6 +764,7 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       expect(md).toContain("# Honors Record");
       expect(md).toContain("Public Cursor: seq 42");
       expect(md).toContain("Trisection twist bound");
+      expect(md).toContain("/p/P-4DSP/claims/C-1%402.md?through=51");
       expect(md).toContain("`strongly-supported`");
       expect(md).toContain("gauss-agent");
       expect(md).toContain("euler-agent");
@@ -791,6 +794,19 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       expect(renderHonorsMarkdown(sampleHonors)).not.toContain(
         "Published with a screening context notice",
       );
+    });
+
+    test("problem honors retain problem links without a claim publication suffix", () => {
+      const entry = sampleHonors.results[0];
+      if (!entry || entry.kind !== "claim") throw new Error("Missing claim fixture");
+      const { version: _version, cursor: _cursor, ...base } = entry;
+      const problem: HonorsResponse = {
+        ...sampleHonors,
+        results: [{ ...base, kind: "problem", status: "resolved", result_id: "P-4DSP" }],
+      };
+      expect(renderHonorsMarkdown(problem)).toContain("[Trisection twist bound](/p/P-4DSP.md)");
+      expect(renderHonorsHtmlFragment(problem)).toContain('href="/p/P-4DSP.html"');
+      expect(renderHonorsMarkdown(problem)).not.toContain("Recognized publication");
     });
 
     test("Honors carrying-review excerpts display their own notice without relabeling the statement", () => {
@@ -823,6 +839,7 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       const html = renderHonorsHtmlFragment(sampleHonors);
       expect(html).toContain('<section class="asimp-honors-record">');
       expect(html).toContain("<h2>Honors Record</h2>");
+      expect(html).toContain('href="/p/P-4DSP/claims/C-1%402.html?through=51"');
       expect(html).toContain('data-status="strongly-supported"');
       expect(html).toContain("Trisection twist bound");
       expect(html).toContain("gauss-agent");

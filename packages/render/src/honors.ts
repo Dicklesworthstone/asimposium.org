@@ -25,11 +25,12 @@ function renderFencedUntrustedBlock(body: string, indent = "  "): string[] {
   return lines;
 }
 
-function resultHref(item: HonorsItem, face: "md" | "html"): string {
+export function honorsResultPath(item: HonorsItem, face: "md" | "html" | null): string {
+  const suffix = face === null ? "" : `.${face}`;
   if (item.kind === "claim") {
-    return `/p/${encodeURIComponent(item.problem_id)}/claims/${encodeURIComponent(item.result_id)}.${face}`;
+    return `/p/${encodeURIComponent(item.problem_id)}/claims/${encodeURIComponent(`${item.result_id}@${item.version}`)}${suffix}?through=${item.cursor}`;
   }
-  return `/p/${encodeURIComponent(item.problem_id)}.${face}`;
+  return `/p/${encodeURIComponent(item.problem_id)}${suffix}`;
 }
 
 export function renderHonorsMarkdown(data: HonorsResponse, _query: HonorsQuery = {}): string {
@@ -47,12 +48,16 @@ export function renderHonorsMarkdown(data: HonorsResponse, _query: HonorsQuery =
     lines.push("");
   } else {
     for (const item of data.results) {
-      const href = resultHref(item, "md");
+      const href = honorsResultPath(item, "md");
       lines.push(`## [${safeInlineProse(item.title)}](${href})`);
       lines.push(
         `- **Result:** ${safeCodeSpan(item.result_id)} (${safeCodeSpan(item.kind)}) on [${safeInlineProse(item.problem_id)}](/p/${encodeURIComponent(item.problem_id)}.md)`,
       );
       lines.push(`- **Settled At:** ${item.settled_at} (seq ${item.sequence})`);
+      if (item.kind === "claim")
+        lines.push(
+          `- **Recognized publication:** ${safeCodeSpan(`${item.result_id}@${item.version}`)} · read through seq ${item.cursor}`,
+        );
       lines.push(`- **Gated Status:** ${safeCodeSpan(item.status)}`);
       if (item.screening_notice !== undefined) {
         lines.push("", screeningNoticeText(item.screening_notice), "");
@@ -141,7 +146,7 @@ export function renderHonorsHtmlFragment(data: HonorsResponse, _query: HonorsQue
   } else {
     lines.push('  <ol class="asimp-honors-list">');
     for (const item of data.results) {
-      const href = resultHref(item, "html");
+      const href = honorsResultPath(item, "html");
       lines.push(
         `    <li id="result-${encodeURIComponent(item.problem_id)}-${encodeURIComponent(item.result_id)}" class="asimp-honors-item" data-status="${escapeHtml(item.status)}">`,
       );
@@ -151,6 +156,10 @@ export function renderHonorsHtmlFragment(data: HonorsResponse, _query: HonorsQue
       lines.push(
         `      <p class="asimp-meta">result: <code>${escapeHtml(item.result_id)}</code> (${escapeHtml(item.kind)}) on <a href="/p/${encodeURIComponent(item.problem_id)}.html">${escapeHtml(item.problem_id)}</a> · settled: ${escapeHtml(item.settled_at)} (seq ${item.sequence})</p>`,
       );
+      if (item.kind === "claim")
+        lines.push(
+          `      <p>Recognized publication: <code>${escapeHtml(`${item.result_id}@${item.version}`)}</code> · read through seq ${item.cursor}</p>`,
+        );
 
       if (item.screening_notice !== undefined) {
         lines.push(

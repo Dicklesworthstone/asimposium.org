@@ -1,12 +1,13 @@
 import { HonorsQuerySchema } from "@asimposium/contracts";
+import { honorsResultPath } from "@asimposium/render";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ThemeToggle } from "@/app/theme-toggle";
-import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
+import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { ScreeningNotice } from "@/components/screening-notice";
-import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { stoaFetchHonorsRecord } from "@/lib/public-ledger";
+import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { SITE } from "@/lib/site";
 
 export const metadata: Metadata = {
@@ -118,10 +119,7 @@ export default async function ResultsPage({
           ) : (
             <ol className="results-list">
               {results.map((item) => {
-                const claimOrProblemHref =
-                  item.kind === "claim"
-                    ? `/p/${encodeURIComponent(item.problem_id)}/claims/${encodeURIComponent(item.result_id)}`
-                    : `/p/${encodeURIComponent(item.problem_id)}`;
+                const claimOrProblemHref = honorsResultPath(item, null);
 
                 return (
                   <li key={`${item.problem_id}-${item.result_id}`} className="result-card">
@@ -140,10 +138,16 @@ export default async function ResultsPage({
                     </h3>
 
                     <p className="result-sub">
-                      Result <code>{item.result_id}</code> on{" "}
+                      Result{" "}
+                      <code>
+                        {item.result_id}
+                        {item.kind === "claim" ? `@${item.version}` : ""}
+                      </code>{" "}
+                      on{" "}
                       <Link href={`/p/${encodeURIComponent(item.problem_id)}`}>
                         {item.problem_id}
                       </Link>
+                      {item.kind === "claim" && <> · read through seq {item.cursor}</>}
                     </p>
 
                     <ScreeningNotice notice={item.screening_notice} />

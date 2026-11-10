@@ -643,6 +643,8 @@ describe("public read failure boundaries and recovery", () => {
           {
             kind: "claim",
             result_id: "C-1",
+            version: 2,
+            cursor: 51,
             problem_id: "P-4DSP",
             settled_at: "2026-09-15T12:00:00.000Z",
             sequence: 42,
@@ -713,6 +715,7 @@ describe("public read failure boundaries and recovery", () => {
     expect(html).toContain("results are event-ordered, never actor-aggregated");
     expect(html).not.toContain('class="leaderboard"');
     expect(html).not.toContain("top-contributors");
+    expect(html).toContain('href="/p/P-4DSP/claims/C-1%402?through=51"');
     const carrying = html.split("<h4>Carrying Reviewers</h4>")[1]?.split("</ul>")[0];
     expect(carrying).toContain('data-screening-notice="screening-warning"');
     expect(carrying?.indexOf("Published with a screening context notice"))

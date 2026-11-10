@@ -280,6 +280,21 @@ await runLocalWorkerJourney(
     );
     assert.ok(!earned.includes(claimB) && !earned.includes(claimC));
 
+    // A later non-carrying review separates the current read cut from the
+    // historical settlement sequence; neither is the site's global cursor.
+    await call(
+      `/v1/sessions/${reviewB}/review`,
+      {
+        target_claim_id: claimA,
+        target_version: 1,
+        verdict: "confirm",
+        basis: "A later impression does not replace the settlement's supporting checks.",
+        body_md: "No new scientific check.",
+      },
+      reviewerB,
+      201,
+    );
+
     // The honored item carries its attribution and carrying reviewers, and the
     // HTML face agrees with the JSON face (Diptych).
     const item = (await call("/results.json", undefined, undefined, 200)).results.find(
@@ -287,6 +302,8 @@ await runLocalWorkerJourney(
     );
     assert.equal(item.status, "strongly-supported");
     assert.equal(item.problem_id, problem);
+    assert.equal(item.version, 1);
+    assert.ok(item.cursor > item.sequence, "assessment cut is not the settlement sequence");
     assert.ok(item.contributing_fellows.length >= 1);
     assert.equal(
       item.carrying_reviewers.length,
@@ -339,9 +356,28 @@ await runLocalWorkerJourney(
       headers: { "User-Agent": userAgent },
     });
     assert.equal(markdownResponse.status, 200);
-    assert.ok(
-      (await markdownResponse.text()).includes("screening context notice: dual-use-boundary"),
-    );
+    const markdown = await markdownResponse.text();
+    assert.ok(markdown.includes("screening context notice: dual-use-boundary"));
+    const resultLink = markdown.match(/\]\((\/p\/[^)]+\/claims\/[^)]+\.md(?:\?[^)]*)?)\)/)?.[1];
+    assert.ok(resultLink, "the earned result offers a claim read");
+    const resultRead = await worker.fetch(`${origin}${resultLink}`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(resultRead.status, 200, "the emitted Honors link opens its earned claim");
+    const resultJsonLink = resultLink.replace(".md", ".json");
+    const originalClaimRead = await call(resultJsonLink, undefined, undefined, 200);
+    assert.equal(originalClaimRead.cursor, item.cursor);
+    assert.equal(originalClaimRead.claim_state.version, item.version);
+    assert.equal(originalClaimRead.claim_state.claim_id, item.result_id);
+    assert.equal(originalClaimRead.claim_state.disposition, item.status);
+    assert.ok(originalClaimRead.items.some((entry) => entry.id === proofA));
+    assert.ok(originalClaimRead.items.some((entry) => entry.id === qualifiedB.review_id));
+    const expectedHtmlLink = `/p/${problem}/claims/${encodeURIComponent(`${claimA}@1`)}.html?through=${item.cursor}`;
+    assert.ok(html.includes(`href="${expectedHtmlLink}"`));
+    const exactHtml = await worker.fetch(`${origin}${expectedHtmlLink}`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(exactHtml.status, 200);
 
     const resultItems = async () =>
       (await call("/results.json", undefined, undefined, 200)).results;
@@ -362,6 +398,12 @@ await runLocalWorkerJourney(
       201,
     );
     const laterReview = await findClaim();
+    const savedClaimRead = await call(resultJsonLink, undefined, undefined, 200);
+    assert.equal(
+      savedClaimRead.cursor,
+      originalClaimRead.cursor,
+      "a saved Honors link retains the scientific cut it displayed",
+    );
     assert.equal(
       laterReview.sequence,
       item.sequence,
@@ -520,6 +562,18 @@ await runLocalWorkerJourney(
       [closing.synthesis_id, "synthesis"],
     ]) {
       await visibility(target, kind, 1, "hidden");
+      if (kind === "evidence") {
+        const hiddenSnapshot = await call(resultJsonLink, undefined, undefined, 200);
+        assert.notEqual(
+          hiddenSnapshot.claim_state.disposition,
+          "strongly-supported",
+          "a pinned Honors link still respects current evidence hiding",
+        );
+        assert.ok(
+          !JSON.stringify(hiddenSnapshot).includes("By the Peano axioms."),
+          "a pinned historical read never republishes hidden evidence bytes",
+        );
+      }
       const withheld = await resultItems();
       assert.ok(
         !withheld.some((result) => result.kind === "problem"),
@@ -594,6 +648,26 @@ await runLocalWorkerJourney(
       200,
     );
     const corrected = await resultItems();
+    const withdrawnSnapshot = await call(resultJsonLink, undefined, undefined, 200);
+    // Scientific withdrawals are ledger events: an earlier cut retains its
+    // history, while latest standing and the live Honors feed lose recognition.
+    assert.equal(withdrawnSnapshot.cursor, item.cursor);
+    assert.equal(
+      withdrawnSnapshot.claim_state.disposition,
+      originalClaimRead.claim_state.disposition,
+      "a saved Honors link retains the science recorded before a later withdrawal",
+    );
+    const currentClaim = await call(
+      `/p/${problem}/claims/${claimA}.json`,
+      undefined,
+      undefined,
+      200,
+    );
+    assert.notEqual(
+      currentClaim.claim_state.disposition,
+      "strongly-supported",
+      "the latest claim read reflects the withdrawal",
+    );
     assert.ok(
       !corrected.some((result) => result.result_id === claimA || result.kind === "problem"),
       "an actual source withdrawal removes stale claim and problem recognition",

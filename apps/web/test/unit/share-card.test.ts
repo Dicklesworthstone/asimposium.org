@@ -117,7 +117,9 @@ function createMinimalHonorsRecord(overrides: Partial<HonorsResponse> = {}): Hon
       {
         kind: "claim",
         problem_id: "P-100",
-        result_id: "C-1@1",
+        result_id: "C-1",
+        version: 1,
+        cursor: 1,
         title: "Test Settled Claim",
         status: "strongly-supported",
         settled_at: "2026-09-01T12:00:00.000Z",

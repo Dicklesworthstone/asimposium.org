@@ -33,6 +33,7 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
         ["discovery-fellow-query", FellowCardQuerySchema],
         ["discovery-fellow-negative-history", FellowNegativeHistoryItemSchema],
         ["discovery-honors-query", HonorsQuerySchema],
+        ["discovery-honors-item", HonorsItemSchema],
         ["discovery-fellow-query-error", ContractProblemSchema],
         ["discovery-now-query-error", ContractProblemSchema],
         ["discovery-honors-query-error", ContractProblemSchema],
@@ -498,6 +499,8 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
     const validClaimEntry = {
       kind: "claim" as const,
       result_id: "C-1",
+      version: 2,
+      cursor: 51,
       problem_id: "P-4DSP",
       settled_at: "2026-09-15T12:00:00.000Z",
       sequence: 42,
@@ -542,14 +545,34 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
       };
       expect(HonorsItemSchema.safeParse(machineChecked).success).toBe(true);
 
+      const { version: _version, cursor: _cursor, ...problemEntry } = validClaimEntry;
       const resolvedProblem = {
-        ...validClaimEntry,
+        ...problemEntry,
         kind: "problem" as const,
         result_id: "P-4DSP",
         status: "resolved" as const,
         statement: undefined,
       };
       expect(HonorsItemSchema.safeParse(resolvedProblem).success).toBe(true);
+    });
+
+    test("claim honors require an exact version and readable problem-local cut", () => {
+      for (const patch of [
+        { version: undefined },
+        { version: 0 },
+        { version: 1.5 },
+        { cursor: undefined },
+        { cursor: -1 },
+        { cursor: 1.5 },
+        { cursor: 1_000_000_000_000_000 },
+        { status: "resolved" },
+      ]) {
+        expect(HonorsItemSchema.safeParse({ ...validClaimEntry, ...patch }).success).toBe(false);
+      }
+      expect(
+        HonorsItemSchema.safeParse({ ...validClaimEntry, kind: "problem", status: "resolved" })
+          .success,
+      ).toBe(false);
     });
 
     test("carrying reviewer warnings remain public-safe and independent of the settled statement", () => {

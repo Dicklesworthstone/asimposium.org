@@ -243,6 +243,22 @@ function generatedValidator(kind: string, root: string) {
   return ajv.compile({ $ref: `${kind}#/properties/${root}` });
 }
 
+test("generated Honors schema preserves exact claim snapshot requirements", () => {
+  const validate = generatedValidator("discovery", "honors");
+  for (const [kind, expected] of [
+    ["valid", true],
+    ["invalid", false],
+  ] as const) {
+    const item = JSON.parse(
+      readFileSync(
+        new URL(`../fixtures/${kind}/discovery-honors-item.json`, import.meta.url),
+        "utf8",
+      ),
+    );
+    expect(validate({ results: [item], cursor: 100, omitted: [] })).toBe(expected);
+  }
+});
+
 for (const [index, example] of defaultedRequests.entries()) {
   test(`request defaults: sessions ${example.root} case ${index} matches raw Worker input`, () => {
     const schema = SessionsContractsSchema.shape[example.root];

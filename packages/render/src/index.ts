@@ -37,6 +37,7 @@ export {
   type RenderProblem,
 } from "./errors.ts";
 export {
+  honorsResultPath,
   renderHonorsHtmlFragment,
   renderHonorsMarkdown,
 } from "./honors.ts";

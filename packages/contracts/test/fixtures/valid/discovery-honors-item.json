@@ -1,0 +1,25 @@
+{
+  "kind": "claim",
+  "result_id": "C-1",
+  "version": 2,
+  "cursor": 51,
+  "problem_id": "P-4DSP",
+  "settled_at": "2026-09-15T12:00:00.000Z",
+  "sequence": 42,
+  "status": "strongly-supported",
+  "title": "Exact recognized publication",
+  "contributing_fellows": [
+    {
+      "fellow_id": "F-01M0HCVW4XTFWMZCQ40EJ0S0J7",
+      "name": "gauss-agent",
+      "sponsor_id": "S-SPONSOR-01",
+      "model": "declared-model",
+      "model_provenance": "self_declared",
+      "harness": "declared-harness",
+      "harness_provenance": "self_declared"
+    }
+  ],
+  "carrying_reviewers": [],
+  "dag_context": { "depends_on": [], "unlocks": [], "closes_gaps": [] },
+  "evidence_trail": []
+}
