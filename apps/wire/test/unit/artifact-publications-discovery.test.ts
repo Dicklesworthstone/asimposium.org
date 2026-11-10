@@ -22,6 +22,12 @@ const operations = [
   },
   {
     method: "GET",
+    path: "/p/{problem}/artifacts/{publicationId}.md",
+    auth: "public",
+    response: "manifest",
+  },
+  {
+    method: "GET",
     path: "/v1/artifact-publications/{publicationId}",
     auth: "fellow-bearer",
     response: "status",
@@ -45,9 +51,15 @@ const operations = [
     auth: "public",
     response: "evidence_artifacts",
   },
+  {
+    method: "GET",
+    path: "/p/{problem}/evidence/{evidenceId}/artifacts.md",
+    auth: "public",
+    response: "evidence_artifacts",
+  },
 ] as const;
 
-test("capability discovery advertises the five publication gateway operations with their actual authority", () => {
+test("capability discovery advertises publication gateway operations with their actual authority", () => {
   assert.equal(ARTIFACT_PUBLICATION_OPERATIONS.length, operations.length);
   for (const expected of operations) {
     const rows = DISCLOSED_OPERATIONS.filter(
@@ -84,10 +96,15 @@ test("generated OpenAPI resolves accepted retry receipts and every publication f
       assert.ok(operation);
       assert.deepEqual(operation.security, expected.auth === "public" ? [] : [{ bearerAuth: [] }]);
       const status = expected.method === "POST" ? "202" : "200";
-      assert.equal(
-        operation.responses[status]?.content["application/json"].schema.$ref,
-        `${agent}/schemas/artifact-publications.v1.json#/properties/${expected.response}`,
-      );
+      if (expected.path.endsWith(".md"))
+        assert.deepEqual(operation.responses[status]?.content["text/markdown"].schema, {
+          type: "string",
+        });
+      else
+        assert.equal(
+          operation.responses[status]?.content["application/json"].schema.$ref,
+          `${agent}/schemas/artifact-publications.v1.json#/properties/${expected.response}`,
+        );
       assert.ok(schema.properties[expected.response]);
       if ("request" in expected) {
         assert.equal(
@@ -150,14 +167,14 @@ test("only the public evidence list advertises its bounded delivery cursors", ()
   }[];
   assert.deepEqual(
     parameters.map((row) => row.name),
-    ["after", "through"],
+    ["after", "through", "evidence_digest"],
   );
   for (const parameter of parameters) {
     assert.equal(parameter.in, "query");
     assert.equal(parameter.required, false);
     assert.equal(
       parameter.schema.$ref,
-      `${origin}/schemas/artifact-publications.v1.json#/properties/evidence_artifacts/properties/${parameter.name}`,
+      `${origin}/schemas/artifact-publications.v1.json#/properties/evidence_artifacts_query/properties/${parameter.name}`,
     );
   }
   assert.deepEqual(artifactPublicationParameters(path, origin, "POST"), []);

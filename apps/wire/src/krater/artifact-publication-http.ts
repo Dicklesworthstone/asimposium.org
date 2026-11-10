@@ -1,4 +1,13 @@
-import type { ArtifactPublicationRetryRequest } from "@asimposium/contracts/artifact-publications";
+import {
+  type ArtifactPublicationRetryRequest,
+  type EvidenceArtifacts,
+  EvidenceArtifactsQuerySchema,
+  type PublicArtifactManifest,
+} from "@asimposium/contracts/artifact-publications";
+import {
+  renderEvidenceArtifactsMarkdown,
+  renderPublicArtifactMarkdown,
+} from "@asimposium/render/artifact-publications";
 import type { FellowCredentialBinding } from "../enrollment/service.ts";
 import type { ValidatedProblemInput } from "../http/envelope.ts";
 import type { PublicationRequest } from "./artifact-publication-store.ts";
@@ -42,8 +51,8 @@ type PublicationRoute =
   | { kind: "publish"; id: string }
   | { kind: "status"; id: string }
   | { kind: "retry"; id: string }
-  | { kind: "manifest"; problem: string; id: string }
-  | { kind: "evidence"; problem: string; evidence: string };
+  | { kind: "manifest"; problem: string; id: string; format: "json" | "md" }
+  | { kind: "evidence"; problem: string; evidence: string; format: "json" | "md" };
 
 /** Exact, closed namespace. A neighboring route never constructs publication
  * dependencies; encoded slashes, URL-supplied principals and arbitrary R2 keys
@@ -55,12 +64,24 @@ export function artifactPublicationRoute(path: string): PublicationRoute | undef
   if (match?.[1]) return { kind: "status", id: match[1] };
   match = /^\/v1\/artifact-publications\/(AP-[a-f0-9]{32})\/retry$/.exec(path);
   if (match?.[1]) return { kind: "retry", id: match[1] };
-  match = new RegExp(`^/p/${PROBLEM}/artifacts/(AP-[a-f0-9]{32})\\.json$`).exec(path);
-  if (match?.[1] && match[2] && !match[1].includes("--"))
-    return { kind: "manifest", problem: match[1], id: match[2] };
-  match = new RegExp(`^/p/${PROBLEM}/evidence/(E-[A-Za-z0-9]{1,78})/artifacts\\.json$`).exec(path);
-  if (match?.[1] && match[2] && !match[1].includes("--"))
-    return { kind: "evidence", problem: match[1], evidence: match[2] };
+  match = new RegExp(`^/p/${PROBLEM}/artifacts/(AP-[a-f0-9]{32})\\.(json|md)$`).exec(path);
+  if (
+    match?.[1] &&
+    match[2] &&
+    (match[3] === "json" || match[3] === "md") &&
+    !match[1].includes("--")
+  )
+    return { kind: "manifest", problem: match[1], id: match[2], format: match[3] };
+  match = new RegExp(`^/p/${PROBLEM}/evidence/(E-[A-Za-z0-9]{1,78})/artifacts\\.(json|md)$`).exec(
+    path,
+  );
+  if (
+    match?.[1] &&
+    match[2] &&
+    (match[3] === "json" || match[3] === "md") &&
+    !match[1].includes("--")
+  )
+    return { kind: "evidence", problem: match[1], evidence: match[2], format: match[3] };
   return undefined;
 }
 
@@ -88,6 +109,11 @@ export class PublicationHttpError extends Error {
  * fresh enrollment authority and durable services. No transport port can be
  * selected through request data. Operation results are schema-validated at
  * that composition boundary before they reach serialization here. */
+export interface PublicArtifactReadResult {
+  readonly face: unknown;
+  readonly unlisted: boolean;
+}
+
 export interface PublicationHttpOperations {
   readonly authenticate: (token: string) => Promise<FellowCredentialBinding | undefined>;
   readonly decodeRequest: (value: unknown) => PublicationRequest | undefined;
@@ -106,13 +132,14 @@ export interface PublicationHttpOperations {
     input: ArtifactPublicationRetryRequest,
     key: string,
   ) => Promise<{ readonly status_path: string }>;
-  readonly manifest: (problem: string, id: string) => Promise<unknown>;
+  readonly manifest: (problem: string, id: string) => Promise<PublicArtifactReadResult>;
   readonly evidence: (
     problem: string,
     evidence: string,
     after: number,
     through?: number,
-  ) => Promise<unknown>;
+    evidenceDigest?: string,
+  ) => Promise<PublicArtifactReadResult>;
 }
 
 function cancel(request: Request): void {
@@ -265,13 +292,28 @@ function failure(
     headers: { ...PRIVATE, ...(status === 503 || status === 429 ? { "retry-after": retry } : {}) },
   });
 }
-async function publicJson(request: Request, value: unknown): Promise<Response> {
-  const body = JSON.stringify(value);
+async function publicFace(
+  request: Request,
+  result: PublicArtifactReadResult,
+  route: Extract<PublicationRoute, { kind: "manifest" | "evidence" }>,
+): Promise<Response> {
+  const value = result.face;
+  const body =
+    route.format === "json"
+      ? JSON.stringify(value)
+      : route.kind === "manifest"
+        ? renderPublicArtifactMarkdown(value as PublicArtifactManifest)
+        : renderEvidenceArtifactsMarkdown(value as EvidenceArtifacts);
   const digest = new Uint8Array(
     await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body)),
   );
   const etag = `"${Array.from(digest, (x) => x.toString(16).padStart(2, "0")).join("")}"`;
-  const headers = { ...PUBLIC, "content-type": "application/json; charset=utf-8", etag };
+  const headers = {
+    ...PUBLIC,
+    ...(result.unlisted ? { "x-robots-tag": "noindex, nofollow" } : {}),
+    "content-type": `${route.format === "json" ? "application/json" : "text/markdown"}; charset=utf-8`,
+    etag,
+  };
   // Validation/read happens FIRST. An old ETag cannot resurrect redacted data.
   const conditional = request.headers.get("if-none-match");
   const matches = conditional
@@ -282,18 +324,6 @@ async function publicJson(request: Request, value: unknown): Promise<Response> {
     headers,
   });
 }
-function cursor(query: URLSearchParams, name: string): number | undefined {
-  const values = query.getAll(name);
-  if (!values.length) return undefined;
-  if (
-    values.length !== 1 ||
-    !/^(0|[1-9][0-9]*)$/.test(values[0]!) ||
-    !Number.isSafeInteger(Number(values[0]))
-  )
-    throw new Error("PUBLICATION_CURSOR_INVALID");
-  return Number(values[0]);
-}
-
 export async function handleArtifactPublicationHttp(
   request: Request,
   ops: PublicationHttpOperations,
@@ -328,28 +358,30 @@ export async function handleArtifactPublicationHttp(
         example,
       );
     else if (route.kind === "manifest")
-      response = await publicJson(request, await ops.manifest(route.problem, route.id));
+      response = await publicFace(request, await ops.manifest(route.problem, route.id), route);
     else if (route.kind === "evidence") {
-      let after: number, through: number | undefined;
+      let after: number, through: number | undefined, evidenceDigest: string | undefined;
       try {
-        if ([...url.searchParams.keys()].some((key) => key !== "after" && key !== "through"))
-          throw new Error("UNKNOWN_QUERY");
-        after = cursor(url.searchParams, "after") ?? 0;
-        through = cursor(url.searchParams, "through");
-        if (through !== undefined && through < after) throw new Error("REVERSED_RANGE");
+        if ([...url.searchParams.keys()].some((key) => url.searchParams.getAll(key).length !== 1))
+          throw new Error("DUPLICATE_QUERY");
+        const query = EvidenceArtifactsQuerySchema.parse(Object.fromEntries(url.searchParams));
+        after = Number(query.after ?? 0);
+        through = query.through === undefined ? undefined : Number(query.through);
+        evidenceDigest = query.evidence_digest;
       } catch {
         const refused = teaching(
           ops,
           400,
-          "Use unique, nonnegative safe-integer after and through cursors, with through at least after.",
+          "Use unique, nonnegative safe-integer after and through delivery cursors, with through at least after. An optional evidence_digest must pin the exact sha256 evidence source. No other query fields are accepted.",
         );
         return request.method === "HEAD"
           ? new Response(null, { status: refused.status, headers: refused.headers })
           : refused;
       }
-      response = await publicJson(
+      response = await publicFace(
         request,
-        await ops.evidence(route.problem, route.evidence, after, through),
+        await ops.evidence(route.problem, route.evidence, after, through, evidenceDigest),
+        route,
       );
     } else {
       if (request.headers.has("asimp-service-envelope")) throw new PublicationHttpError("AUTH");

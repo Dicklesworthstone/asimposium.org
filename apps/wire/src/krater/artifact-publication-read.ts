@@ -1,4 +1,5 @@
 import type { ScreeningPublicationNotice } from "@asimposium/contracts";
+import { evidenceArtifactsPath } from "@asimposium/contracts/artifact-publications";
 import type { D1Database } from "@cloudflare/workers-types";
 import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 import {
@@ -97,15 +98,18 @@ export async function readPublicArtifactManifest(
 
 /** Pagination is by delivery cursor, NOT the earlier request-event sequence:
  * a slow older upload that finishes later must remain discoverable by polling. */
-export async function readEvidenceArtifacts(
+export async function readEvidenceArtifactsWithMetadata(
   db: D1Database,
   origin: string,
   problem: string,
   evidence: string,
   after = 0,
   through?: number,
+  evidenceDigest?: string,
 ) {
-  await readPublicationEvidence(db, problem, evidence);
+  const source = await readPublicationEvidence(db, problem, evidence);
+  if (evidenceDigest !== undefined && evidenceDigest !== `sha256:${source.evidence_sha256}`)
+    return notFound();
   const head = await db
     .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
     .first<{ cursor: number }>();
@@ -141,6 +145,11 @@ export async function readEvidenceArtifacts(
   // evidence/target moderation invalidates the entire owning face. Pagination
   // still advances by scanned delivery rows, including now-hidden entries.
   const owner = await readPublicationEvidence(db, problem, evidence);
+  if (
+    owner.evidence_event_id !== source.evidence_event_id ||
+    owner.evidence_sha256 !== source.evidence_sha256
+  )
+    return notFound();
   const current = await db
     .prepare(`SELECT ${
       resolved.length === 0
@@ -160,7 +169,9 @@ export async function readEvidenceArtifacts(
       AND b.fellow_id = v.fellow_id AND b.sponsor_id = v.sponsor_id AND b.artifact_origin = ?
       AND NOT ${eventContentHiddenSql("e")}
   )`
-    } AS publication_ids FROM artifact_publication_evidence v
+    } AS publication_ids,
+    (SELECT p.unlisted FROM problems p WHERE p.id = v.problem_id) AS unlisted
+    FROM artifact_publication_evidence v
     WHERE ${PUBLICATION_EVIDENCE_PIN_SQL}`)
     .bind(
       ...(resolved.length === 0
@@ -176,24 +187,60 @@ export async function readEvidenceArtifacts(
           ]),
       ...publicationEvidencePinBindings(owner),
     )
-    .first<{ publication_ids: string }>();
-  if (!current) return notFound();
+    .first<{ publication_ids: string; unlisted: number }>();
+  if (!current || ![0, 1].includes(current.unlisted)) return notFound();
   const visible = new Set(JSON.parse(current.publication_ids) as string[]);
   const artifacts = resolved
     .filter(({ face }) => visible.has(face.publication_id))
     .map(({ face }) => face);
   const more = result.results.length > ARTIFACT_PUBLICATION_PAGE_SIZE;
   const next = more ? scanned.at(-1)!.delivery_cursor! : null;
-  const path = `/p/${problem}/evidence/${evidence}/artifacts.json`;
+  const pin = { evidence_digest: `sha256:${owner.evidence_sha256}` };
   return {
-    schema: ARTIFACT_PUBLICATION_SCHEMA,
-    problem_id: problem,
-    evidence_id: evidence,
-    after,
-    through: cut,
-    artifacts,
-    next_after: next,
-    next_path: next === null ? null : `${path}?after=${next}&through=${cut}`,
-    poll_path: `${path}?after=${cut}`,
+    unlisted: current.unlisted === 1,
+    face: {
+      schema: ARTIFACT_PUBLICATION_SCHEMA,
+      problem_id: problem,
+      evidence_id: evidence,
+      evidence_event_id: owner.evidence_event_id,
+      evidence_digest: pin.evidence_digest,
+      after,
+      through: cut,
+      artifacts,
+      next_after: next,
+      next_path:
+        next === null
+          ? null
+          : evidenceArtifactsPath(problem, evidence, "json", {
+              after: String(next),
+              through: String(cut),
+              ...pin,
+            }),
+      poll_path: evidenceArtifactsPath(problem, evidence, "json", { after: String(cut), ...pin }),
+    },
   };
+}
+
+/** Structured consumers receive the unchanged public body. The HTTP gateway
+ * also uses current source metadata, including empty lists, for robots policy. */
+export async function readEvidenceArtifacts(
+  db: D1Database,
+  origin: string,
+  problem: string,
+  evidence: string,
+  after = 0,
+  through?: number,
+  evidenceDigest?: string,
+) {
+  return (
+    await readEvidenceArtifactsWithMetadata(
+      db,
+      origin,
+      problem,
+      evidence,
+      after,
+      through,
+      evidenceDigest,
+    )
+  ).face;
 }

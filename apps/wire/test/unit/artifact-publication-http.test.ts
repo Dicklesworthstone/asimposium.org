@@ -1,5 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { ArtifactPublicationRetryRequestSchema } from "@asimposium/contracts/artifact-publications";
 import type { FellowCredentialBinding } from "../../src/enrollment/service.ts";
 import {
@@ -120,17 +121,20 @@ function fixture() {
     },
     async manifest(...args) {
       calls.push(["manifest", ...args]);
-      return { publication_id: publication, verification: "bytes-only" };
+      return { face: { publication_id: publication, verification: "bytes-only" }, unlisted: false };
     },
     async evidence(...args) {
       calls.push(["evidence", ...args]);
       return {
-        artifacts: [],
-        after: args[2],
-        through: args[3] ?? 100,
-        next_after: null,
-        next_path: null,
-        poll_path: `${listPath}?after=${args[3] ?? 100}`,
+        unlisted: false,
+        face: {
+          artifacts: [],
+          after: args[2],
+          through: args[3] ?? 100,
+          next_after: null,
+          next_path: null,
+          poll_path: `${listPath}?after=${args[3] ?? 100}`,
+        },
       };
     },
   };
@@ -349,6 +353,9 @@ for (const query of [
   "after=9007199254740992",
   "after=1&after=2",
   "through=1&through=1",
+  "evidence_digest=sha256:invalid",
+  `evidence_digest=sha256:${"a".repeat(64)}&evidence_digest=sha256:${"b".repeat(64)}`,
+  "after=2%0A",
   "after=4&through=3",
   "token=sentinel",
   "limit=100",
@@ -367,7 +374,7 @@ test("public listing preserves the pinned delivery cut and never authenticates s
   );
   assert.equal(result.status, 200);
   assert.equal(result.headers.get("cache-control"), "no-store");
-  assert.deepEqual(calls, [["evidence", "P-DEMO", "E-1", 3, 15]]);
+  assert.deepEqual(calls, [["evidence", "P-DEMO", "E-1", 3, 15, undefined]]);
   assert.deepEqual(await result.json(), {
     artifacts: [],
     after: 3,
@@ -376,6 +383,109 @@ test("public listing preserves the pinned delivery cut and never authenticates s
     next_path: null,
     poll_path: `${listPath}?after=15`,
   });
+});
+test("Markdown public artifact faces share source pins, bodyless conditions and live refusal with JSON", async () => {
+  const f = fixture();
+  const manifest = {
+    ...JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/artifact-publication-evidence-warning.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ),
+    publication_id: publication,
+  };
+  const digest: string = manifest.evidence.digest;
+  const page = {
+    schema: manifest.schema,
+    problem_id: "P-DEMO",
+    evidence_id: "E-1",
+    evidence_event_id: manifest.evidence.event_id,
+    evidence_digest: digest,
+    after: 0,
+    through: 10,
+    artifacts: [manifest],
+    next_after: null,
+    next_path: null,
+    poll_path: `${listPath}?after=10&evidence_digest=${digest}`,
+  };
+  let unlisted = false;
+  let publicPage = page;
+  f.ops = {
+    ...f.ops,
+    manifest: async (...args) => {
+      f.calls.push(["manifest", ...args]);
+      return { face: manifest, unlisted };
+    },
+    evidence: async (...args) => {
+      f.calls.push(["evidence", ...args]);
+      return { face: publicPage, unlisted };
+    },
+  };
+  const mdPath = listPath.replace(".json", ".md");
+  const pinned = `${mdPath}?after=0&through=10&evidence_digest=${encodeURIComponent(digest)}`;
+  const listing = await response(request(pinned), f);
+  assert.equal(listing.result.status, 200);
+  assert.equal(listing.result.headers.get("content-type"), "text/markdown; charset=utf-8");
+  const markdown = await listing.result.text();
+  assert.ok(markdown.includes(manifest.artifact.download_url));
+  assert.ok(markdown.includes("not this problem's ledger sequence"));
+  assert.ok(markdown.includes("screening context notice"));
+  assert.deepEqual(f.calls, [["evidence", "P-DEMO", "E-1", 0, 10, digest]]);
+  const etag = listing.result.headers.get("etag")!;
+  const head = await response(request(pinned, { method: "HEAD" }), f);
+  assert.equal(head.result.headers.get("etag"), etag);
+  assert.equal(await head.result.text(), "");
+  const unchanged = await response(request(pinned, { headers: { "if-none-match": etag } }), f);
+  assert.equal(unchanged.result.status, 304);
+  assert.equal(await unchanged.result.text(), "");
+  assert.equal(f.calls.filter((call) => call[0] === "evidence").length, 3);
+  const json = await response(request(`${listPath}?evidence_digest=${digest}`), f);
+  assert.deepEqual(await json.result.json(), page);
+  assert.notEqual(json.result.headers.get("etag"), etag);
+  const provenance = await response(request(manifestPath.replace(".json", ".md")), f);
+  assert.equal(provenance.result.status, 200);
+  assert.ok((await provenance.result.text()).includes("Current files for this evidence"));
+  unlisted = true;
+  for (const empty of [false, true]) {
+    publicPage = { ...page, artifacts: empty ? [] : page.artifacts };
+    for (const path of [pinned, listPath, manifestPath, manifestPath.replace(".json", ".md")]) {
+      const get = await response(request(path), f);
+      assert.equal(get.result.status, 200);
+      assert.equal(get.result.headers.get("x-robots-tag"), "noindex, nofollow");
+      const currentEtag = get.result.headers.get("etag");
+      assert.ok(currentEtag);
+      for (const init of [
+        { method: "HEAD" },
+        { headers: { "if-none-match": currentEtag } },
+        { method: "HEAD", headers: { "if-none-match": currentEtag } },
+      ]) {
+        const read = await response(request(path, init), f);
+        assert.equal(read.result.status, init.headers === undefined ? 200 : 304);
+        assert.equal(read.result.headers.get("x-robots-tag"), "noindex, nofollow");
+        assert.equal(await read.result.text(), "");
+      }
+    }
+  }
+  unlisted = false;
+  const restored = await response(request(pinned, { method: "HEAD" }), f);
+  assert.equal(restored.result.headers.get("x-robots-tag"), null);
+  f.ops = {
+    ...f.ops,
+    evidence: async () => {
+      throw new PublicationHttpError("NOT_FOUND");
+    },
+  };
+  const withdrawn = await response(
+    request(pinned, { method: "HEAD", headers: { "if-none-match": etag } }),
+    f,
+  );
+  assert.equal(withdrawn.result.status, 404);
+  assert.equal(withdrawn.result.headers.get("etag"), null);
+  assert.equal(await withdrawn.result.text(), "");
 });
 test("conditional public reads still resolve current visibility before 304", async () => {
   const f = fixture(),

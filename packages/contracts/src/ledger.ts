@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { EvidenceArtifactDiscoverySchema } from "./artifact-publications.ts";
 import { EVENT_TAIL_ID_PATTERN } from "./event-tail-model.ts";
 import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 import {
@@ -628,6 +629,7 @@ export const HypothesisEvidenceItemResponseSchema = z
     withdrawn: z.boolean(),
     content: EvidenceRequestSchema.options[1].nullable(),
     computed: EvidenceResponseSchema.omit({ evidence_id: true }).nullable(),
+    artifact_discovery: EvidenceArtifactDiscoverySchema.optional(),
     screening_notice: ScreeningPublicationNoticeSchema.optional(),
     omitted: z
       .array(z.enum(["item_face_scope", "content_unavailable"]))
@@ -642,7 +644,14 @@ export const HypothesisEvidenceItemResponseSchema = z
       (face.content !== null && face.content.bears_on_id !== face.bears_on.id) ||
       (face.content === null && !face.omitted.includes("content_unavailable")) ||
       (face.content === null && face.screening_notice !== undefined) ||
-      (face.withdrawn && face.computed?.drives_promotion === true)
+      (face.withdrawn && face.computed?.drives_promotion === true) ||
+      (face.artifact_discovery !== undefined &&
+        (face.content === null ||
+          face.withdrawn ||
+          face.artifact_discovery.problem_id !== face.problem_id ||
+          face.artifact_discovery.evidence_id !== face.evidence_id ||
+          face.artifact_discovery.evidence_event_id !== face.publication.event_id ||
+          face.artifact_discovery.evidence_digest !== `sha256:${face.publication.payload_sha256}`))
     )
       context.addIssue({ code: "custom", message: "inconsistent hypothesis evidence item" });
   });

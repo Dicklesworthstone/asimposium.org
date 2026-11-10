@@ -7,6 +7,7 @@
   "license": "SEE LICENSE IN ../../LICENSE",
   "exports": {
     ".": "./src/index.ts",
+    "./artifact-publications": "./src/artifact-publications.ts",
     "./claims-list": "./src/claims-list.ts",
     "./math": "./src/math.ts",
     "./math.css": "./styles/math.css",

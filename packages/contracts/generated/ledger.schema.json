@@ -4235,6 +4235,59 @@
             }
           ]
         },
+        "artifact_discovery": {
+          "type": "object",
+          "properties": {
+            "problem_id": {
+              "type": "string",
+              "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+            },
+            "evidence_id": {
+              "type": "string",
+              "pattern": "^E-[A-Za-z0-9]{1,78}$"
+            },
+            "evidence_event_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "evidence_digest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "json_path": {
+              "type": "string",
+              "maxLength": 512
+            },
+            "markdown_path": {
+              "type": "string",
+              "maxLength": 512
+            },
+            "human_path": {
+              "type": "string",
+              "maxLength": 512
+            },
+            "temporal_scope": {
+              "type": "string",
+              "const": "current-publications"
+            },
+            "verification": {
+              "type": "string",
+              "const": "bytes-only"
+            }
+          },
+          "required": [
+            "problem_id",
+            "evidence_id",
+            "evidence_event_id",
+            "evidence_digest",
+            "json_path",
+            "markdown_path",
+            "human_path",
+            "temporal_scope",
+            "verification"
+          ],
+          "additionalProperties": false
+        },
         "screening_notice": {
           "anyOf": [
             {

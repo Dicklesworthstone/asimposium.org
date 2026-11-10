@@ -1374,6 +1374,43 @@ try {
   assert.equal(evArtifacts.artifacts[0].publication_id, pubId);
   assert.equal(evArtifacts.artifacts[0].artifact.sha256, textSha256);
   assert.deepEqual(evArtifacts.artifacts[0].evidence.screening_notice, sourceEvidenceNotice);
+  assert.equal(evArtifacts.evidence_event_id, publicManifest.evidence.event_id);
+  assert.equal(evArtifacts.evidence_digest, publicManifest.evidence.digest);
+  const artifactListPath = `/p/${problemId}/evidence/${evidenceId}/artifacts`;
+  const pinnedArtifactList = `${artifactListPath}.json?evidence_digest=${publicManifest.evidence.digest}`;
+  assert.deepEqual(
+    EvidenceArtifactsSchema.parse((await call(pinnedArtifactList)).data),
+    evArtifacts,
+  );
+  await call(
+    `${artifactListPath}.json?evidence_digest=sha256:${"f".repeat(64)}`,
+    undefined,
+    undefined,
+    404,
+  );
+  const noLaterDeliveries = EvidenceArtifactsSchema.parse((await call(evArtifacts.poll_path)).data);
+  assert.equal(noLaterDeliveries.after, evArtifacts.through);
+  assert.equal(noLaterDeliveries.evidence_digest, evArtifacts.evidence_digest);
+  assert.deepEqual(noLaterDeliveries.artifacts, []);
+  const artifactMarkdownPath = `${artifactListPath}.md?evidence_digest=${publicManifest.evidence.digest}`;
+  const artifactMarkdown = await call(artifactMarkdownPath);
+  assert.match(artifactMarkdown.headers.get("content-type"), /^text\/markdown/);
+  assert.ok(artifactMarkdown.raw.includes(publicManifest.artifact.download_url));
+  assert.ok(artifactMarkdown.raw.includes("global file-publication cursors"));
+  assert.ok(artifactMarkdown.raw.includes("screening context notice"));
+  assert.ok(artifactMarkdown.raw.includes("does not establish that the computation is correct"));
+  const artifactMarkdownEtag = artifactMarkdown.headers.get("etag");
+  assert.ok(artifactMarkdownEtag);
+  assert.equal(
+    (
+      await call(artifactMarkdownPath, undefined, undefined, 304, undefined, {
+        "if-none-match": artifactMarkdownEtag,
+      })
+    ).raw,
+    "",
+  );
+  const artifactManifestMarkdown = await call(`/p/${problemId}/artifacts/${pubId}.md`);
+  assert.ok(artifactManifestMarkdown.raw.includes(publicManifest.artifact.download_url));
   const manifestEtag = manifestRes.headers.get("etag");
   assert.ok(manifestEtag);
   assert.equal(
@@ -1384,6 +1421,35 @@ try {
     ).raw,
     "",
   );
+
+  // Public gateway responses carry current board indexing policy outside their
+  // strict scientific bodies, including empty pages and conditional HEAD reads.
+  await fixtures.execRaw("UPDATE problems SET unlisted=1 WHERE id=?", [problemId]);
+  for (const path of [
+    pubReceipt.manifest_path,
+    `/p/${problemId}/artifacts/${pubId}.md`,
+    pinnedArtifactList,
+    artifactMarkdownPath,
+    evArtifacts.poll_path,
+  ]) {
+    const current = await call(path);
+    assert.equal(current.headers.get("x-robots-tag"), "noindex, nofollow");
+    const currentEtag = current.headers.get("etag");
+    assert.ok(currentEtag);
+    const unchanged = await call(path, undefined, undefined, 304, undefined, {
+      "if-none-match": currentEtag,
+    });
+    assert.equal(unchanged.headers.get("x-robots-tag"), "noindex, nofollow");
+    const head = await worker.fetch(`${origin}${path}`, {
+      method: "HEAD",
+      headers: { "User-Agent": userAgent, "if-none-match": currentEtag },
+    });
+    assert.equal(head.status, 304);
+    assert.equal(head.headers.get("x-robots-tag"), "noindex, nofollow");
+    assert.equal(await head.text(), "");
+  }
+  await fixtures.execRaw("UPDATE problems SET unlisted=0 WHERE id=?", [problemId]);
+  assert.equal((await call(pinnedArtifactList)).headers.get("x-robots-tag"), null);
 
   // 14. Observer evidence publication uses the same production HTTP/D1/R2
   // path. Fixture setup supplies the roster role; no publication is injected.
@@ -1501,6 +1567,10 @@ try {
   });
   await call(observerPublication.manifest_path, undefined, undefined, 404);
   await call(`/p/${problemId}/evidence/${evidenceId}/artifacts.json`, undefined, undefined, 404);
+  await call(artifactMarkdownPath, undefined, undefined, 404, undefined, {
+    "if-none-match": artifactMarkdownEtag,
+  });
+  await call(pinnedArtifactList, undefined, undefined, 404);
   await call(
     `/v1/artifacts/${visibilityRace.declaration.upload_id}/publish`,
     observerPayload,

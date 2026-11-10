@@ -241,6 +241,14 @@ test("hypothesis evidence has a full canonical JSON/Markdown item with original 
     expect(face.bears_on).toEqual({ kind: "hypothesis", id: HYPOTHESIS });
     expect(face.content).not.toHaveProperty("bears_on_version");
     expect(face.content).not.toHaveProperty("sponsor_promotion");
+    expect(face.artifact_discovery).toMatchObject({
+      problem_id: PROBLEM,
+      evidence_id: EVIDENCE,
+      evidence_event_id: SOURCE,
+      evidence_digest: `sha256:${f.sourceDigest}`,
+      temporal_scope: "current-publications",
+      verification: "bytes-only",
+    });
     expect(face.computed).toEqual({
       computed_class: "citation",
       coercion_flags: [],
@@ -264,6 +272,9 @@ test("hypothesis evidence has a full canonical JSON/Markdown item with original 
     expect(text).not.toContain("<!-- asimp fake-control -->");
     expect(text.match(/<!-- asimp /g)).toHaveLength(1);
     expect(text).toContain(`/evidence/${EVIDENCE}.json`);
+    expect(text).toContain(
+      `](/p/${PROBLEM}/evidence/${EVIDENCE}/artifacts.md?evidence_digest=sha256:${f.sourceDigest})`,
+    );
   } finally {
     f.sql.close();
   }
@@ -442,6 +453,7 @@ test.each(["redacted", "wrong digest", "malformed class", "invented claim pin"])
       const text = await response.text();
       const face = HypothesisEvidenceItemResponseSchema.parse(JSON.parse(text));
       expect(face.content).toBeNull();
+      expect(face.artifact_discovery).toBeUndefined();
       expect(face.computed).toBeNull();
       expect(face.omitted).toContain("content_unavailable");
       expect(text).not.toContain(f.payload.body_md);
@@ -500,6 +512,7 @@ test("scientific withdrawal retains original work and removes promotion eligibil
     expect(response.status).toBe(200);
     const face = HypothesisEvidenceItemResponseSchema.parse(await response.json());
     expect(face.withdrawn).toBe(true);
+    expect(face.artifact_discovery).toBeUndefined();
     expect(face.content?.body_md).toBe(f.payload.body_md);
     expect(face.computed?.drives_promotion).toBe(false);
     expect(face.cursor).toBe(3);

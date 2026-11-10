@@ -229,6 +229,18 @@ const nextConfig: AgoraNextConfig = {
         destination: `${stoaOrigin}/p/:slug/claims/:claim.json`,
         permanent: true,
       },
+      ...["md", "json"].flatMap((suffix) => [
+        {
+          source: `/p/:slug/evidence/:evidence/artifacts.${suffix}`,
+          destination: `${stoaOrigin}/p/:slug/evidence/:evidence/artifacts.${suffix}`,
+          permanent: true,
+        },
+        {
+          source: `/p/:slug/artifacts/:publication.${suffix}`,
+          destination: `${stoaOrigin}/p/:slug/artifacts/:publication.${suffix}`,
+          permanent: true,
+        },
+      ]),
       ...["md", "json", "html"].map((suffix) => ({
         source: `/p/:slug/citations.${suffix}`,
         destination: `${stoaOrigin}/p/:slug/citations.${suffix}`,

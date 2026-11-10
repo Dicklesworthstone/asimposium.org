@@ -12,6 +12,10 @@
  * The fragment carries no `<html>`, `<head>` or `<body>`: Agora embeds it.
  */
 
+import {
+  CLAIM_ARTIFACT_DISCOVERY_BOUNDARY,
+  claimEvidenceArtifactDiscovery,
+} from "../artifact-publications.ts";
 import { stableStringify } from "../canonical.ts";
 import type { PreparedItem, PreparedProjection } from "../prepare.ts";
 import { escapeHtml } from "../sanitize.ts";
@@ -21,7 +25,7 @@ function attribute(name: string, value: string | number): string {
   return `${name}="${escapeHtml(String(value))}"`;
 }
 
-function renderItem(item: PreparedItem): string[] {
+function renderItem(item: PreparedItem, problem: string): string[] {
   const lines: string[] = [];
   const tokenAttribute =
     item.tokens === undefined ? "" : ` ${attribute("data-tokens", item.tokens)}`;
@@ -46,6 +50,12 @@ function renderItem(item: PreparedItem): string[] {
       .map((finding) => `${finding.marker}×${finding.count}`)
       .join(", ");
     lines.push(`      <p class="asimp-item__neutralized">neutralized: ${escapeHtml(summary)}</p>`);
+  }
+  const artifacts = claimEvidenceArtifactDiscovery(problem, item);
+  if (artifacts !== undefined) {
+    lines.push(
+      `<p><a href="${escapeHtml(artifacts.human_path)}">Inspect current public files for this exact evidence</a></p>`,
+    );
   }
   lines.push("    </li>");
   return lines;
@@ -95,8 +105,14 @@ export function renderHtmlFragmentFace(prepared: PreparedProjection): string {
     lines.push("  </section>");
   }
 
+  if (
+    prepared.items.some(
+      (item) => claimEvidenceArtifactDiscovery(prepared.problem, item) !== undefined,
+    )
+  )
+    lines.push(`<p>${escapeHtml(CLAIM_ARTIFACT_DISCOVERY_BOUNDARY)}</p>`);
   lines.push(`  <ol class="asimp-face__items">`);
-  for (const item of prepared.items) lines.push(...renderItem(item));
+  for (const item of prepared.items) lines.push(...renderItem(item, prepared.problem));
   lines.push("  </ol>");
 
   if (prepared.promotion_budget !== undefined) {

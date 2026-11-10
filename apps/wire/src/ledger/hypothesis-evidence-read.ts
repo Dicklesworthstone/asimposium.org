@@ -4,6 +4,7 @@ import {
   HypothesisEvidenceItemResponseSchema,
   PublicLedgerProblemIdSchema,
 } from "@asimposium/contracts";
+import { tryBuildEvidenceArtifactDiscovery } from "@asimposium/contracts/artifact-publications";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql } from "../krater/public-content.ts";
@@ -187,6 +188,16 @@ export async function loadHypothesisEvidenceItem(
     withdrawn: row.withdrawn === 1,
     content,
     computed,
+    ...(content === null || row.withdrawn === 1
+      ? {}
+      : {
+          artifact_discovery: tryBuildEvidenceArtifactDiscovery({
+            problem_id: problemId,
+            evidence_id: row.evidence_id,
+            evidence_event_id: row.event_id,
+            evidence_digest: `sha256:${row.payload_sha256}`,
+          }),
+        }),
     ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
     omitted: ["item_face_scope", ...(content === null ? ["content_unavailable"] : [])],
   });
