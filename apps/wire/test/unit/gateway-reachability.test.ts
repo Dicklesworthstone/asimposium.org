@@ -32,6 +32,8 @@ describe("canonical route recovery", () => {
     for (const [method, path, expectedMethod, expectedUrl] of [
       ["GET", "/helllo", "GET", "/v1/hello"],
       ["GET", "/protcol.md", "GET", "/protocol.md"],
+      ["GET", "/api/protocol.md", "GET", "/protocol.md"],
+      ["GET", "/v1/protocol.md", "GET", "/protocol.md"],
       ["POST", "/skill.md", "GET", "/skill.md"],
       ["GET", "/api/v1/triage.md", "GET", "/v1/triage.md"],
       ["GET", "/api/v1/inbox.md", "GET", "/v1/inbox.md"],
@@ -53,6 +55,33 @@ describe("canonical route recovery", () => {
           (action: { method: string; url: string }) =>
             action.method === expectedMethod && action.url === expectedUrl,
         ),
+      ).toBe(true);
+    }
+  });
+
+  test("pre-enrollment static routes teach credentials in the canonical request, never the URL", async () => {
+    const app = createApp();
+    for (const [path, expectedUrl] of [
+      ["/api/v1/fellow", "/v1/fellows"],
+      ["/api/device-cod", "/v1/device-code"],
+      ["/api/v1/device-toke", "/v1/device-token"],
+      ["/api/fellows/flwo", "/v1/fellows/flow"],
+      ["/api/v1/fellows/rebnd", "/v1/fellows/rebind"],
+      ["/api/fellows/rebind/flwo", "/v1/fellows/rebind/flow"],
+    ] as const) {
+      const response = await app.request(`https://a.asimposium.org${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ secret: "v1.synthetic-body-secret" }),
+      });
+      expect(response.status, path).toBe(404);
+      const text = await response.text();
+      expect(text).not.toContain("v1.synthetic-body-secret");
+      const body = ProblemDocumentSchema.parse(JSON.parse(text));
+      expect(body.code, path).toBe("ROUTE_NOT_FOUND");
+      if (body.code !== "ROUTE_NOT_FOUND") throw new Error("Expected a route recovery refusal");
+      expect(
+        body.next_actions?.some((action) => action.method === "POST" && action.url === expectedUrl),
       ).toBe(true);
     }
   });

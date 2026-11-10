@@ -285,21 +285,61 @@ async function runDiscovery() {
     );
     return data;
   }
+  let registrationRecoveryChecked = false;
   async function enroll(name, sponsor, declaration = {}) {
     const minted = await fixtures.mint(sponsor);
-    const claimed = await call(
-      discoveredRequest("fellow_registration_request"),
-      {
-        enrollment_id: minted.enrollmentId,
-        secret: minted.secret,
-        name,
-        model: `synthetic-model\`\n${FORGED.faceHeader} ${"x".repeat(65)}`,
-        harness: `local-workerd-proof ${FORGED.handler}`,
-        ...declaration,
-      },
-      undefined,
-      202,
-    );
+    let registrationPath = discoveredRequest("fellow_registration_request");
+    const registration = {
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name,
+      model: `synthetic-model\`\n${FORGED.faceHeader} ${"x".repeat(65)}`,
+      harness: `local-workerd-proof ${FORGED.handler}`,
+      ...declaration,
+    };
+    const checkRecovery = !registrationRecoveryChecked;
+    const countProposals = async () =>
+      (
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS total FROM enrollment_proposals WHERE enrollment_id = ?",
+        )
+          .bind(minted.enrollmentId)
+          .first()
+      ).total;
+    if (checkRecovery) {
+      assert.equal(await countProposals(), 0);
+      const miss = await call("/api/v1/fellow", registration, undefined, 404);
+      ProblemDocumentSchema.parse(miss);
+      assert.ok(
+        !JSON.stringify(miss).includes(minted.secret),
+        "registration recovery never reflects the fragment secret",
+      );
+      assert.ok(
+        !JSON.stringify(miss).includes(minted.enrollmentId),
+        "registration recovery never invents a private enrollment URL",
+      );
+      assert.equal(await countProposals(), 0, "the mistaken registration must not execute");
+      const action = miss.next_actions?.find((action) => action.method === "POST");
+      assert.ok(action, "cold registration recovery requires a server-authored POST action");
+      assert.equal(
+        action.url,
+        registrationPath,
+        "recovery must name the disclosed registration operation",
+      );
+      registrationPath = action.url;
+      const { secret: _secret, ...withoutSecret } = registration;
+      await call(registrationPath, withoutSecret, undefined, 400);
+      assert.equal(
+        await countProposals(),
+        0,
+        "canonical registration still requires its fragment secret",
+      );
+    }
+    const claimed = await call(registrationPath, registration, undefined, 202);
+    if (checkRecovery) {
+      assert.equal(await countProposals(), 1, "following the hint creates exactly one proposal");
+      registrationRecoveryChecked = true;
+    }
     await fixtures.approve(sponsor, minted.enrollmentId);
     const issued = await call(discoveredRequest("flow_poll_request"), {
       flow_handle: claimed.flow_handle,

@@ -759,7 +759,8 @@ function isProblemPath(pathname: string): boolean {
 // The discovery manifest is the sole operation catalog. Recovery never names
 // resource IDs, sponsor/operator operations, or a destination on another host.
 const ROUTE_RECOVERY_CANDIDATES = DISCLOSED_OPERATIONS.flatMap((operation) => {
-  if (operation.auth !== "public" && operation.auth !== "fellow-bearer") return [];
+  // The manifest includes enrollment-secret, device and flow operations too;
+  // their canonical handlers still require the documented credentials.
   const parsed = RouteRecoveryActionSchema.safeParse({
     method: operation.method,
     url: operation.openApiPath,
@@ -767,9 +768,9 @@ const ROUTE_RECOVERY_CANDIDATES = DISCLOSED_OPERATIONS.flatMap((operation) => {
   });
   if (!parsed.success) return [];
   const path = parsed.data.url;
-  const aliases = path.startsWith("/v1/")
-    ? [path, path.slice(3), `/api${path}`, `/api${path.slice(3)}`]
-    : [path];
+  const unversioned = path.startsWith("/v1/") ? path.slice(3) : path;
+  const versioned = path.startsWith("/v1/") ? path : `/v1${path}`;
+  const aliases = [unversioned, versioned, `/api${unversioned}`, `/api${versioned}`];
   return [{ action: parsed.data, aliases }];
 });
 

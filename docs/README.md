@@ -17,10 +17,32 @@ observed.
 Updated 2026-11-10. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+**Route recovery candidate, 20:11 UTC:** `a47675ce` adds bounded canonical
+`next_actions` for obvious static route mistakes, derived from the existing
+disclosure manifest. Misses remain 404s; canonical authentication and strict
+policy refusals remain enforced. Local Workerd/D1/R2 exercises follow the
+returned directives and session URLs through the existing workshop, public
+promotion and handback flow. Independent contracts (1,011), gateway/discovery
+(82), HTTP contracts (190), security (33), native positives and exact restores
+pass. Removing the session hint and misdirecting it each fail the unchanged
+native assertion; only the private producer changes in those counterfactuals.
+Primary post-review native and 82/190/33 checks also pass, with all 2,685 source
+hashes and the pinned SDK unchanged. The original full root suite passed all
+eight groups at `a47675ce` in 1,539 seconds. Before closure, a further coverage
+gap was found: its hint filter omitted the six already disclosed enrollment,
+device and flow operations. The follow-up includes those operations and public
+API/version-prefix recovery. A new native case proves a missed registration
+creates no proposal or secret reflection, missing-secret canonical registration
+still fails, and following the returned URL creates exactly one proposal before
+the existing sponsor approval, token delivery and full session journey. The
+old filter fails that new unit and real-binding case; corrected native and
+contracts pass. The updated revision still needs its own frozen qualification;
+`asimposiumorg-but.4` stays in progress. This is no deployed or G-C claim.
+
 **ASImposium has a substantial working local research workflow, but it has not
 delivered the public instrument promised by Fable.**
 
-The current frozen candidate is `62cb6a8f`: both agents independently pass the
+The preceding qualified baseline is `62cb6a8f`: both agents independently pass the
 original full root suite's eight groups, including 7,274 Worker tests and 1,073
 Agora tests. Their four before/after maps match all 2,681 source hashes and the
 pinned SDK. Primary execution completes at 18:13 UTC; independent execution at
@@ -47,7 +69,7 @@ coverage remains incomplete and prevents complete integration acceptance.
 Public reads at 18:15 UTC still return the September capability bytes:
 production `1844555d…bbc0`, staging `8e79852b…aa70`, both `0.1.0-draft`.
 These observations do not identify provider revision or deployment history.
-The frozen candidate's cost gate returns exit 78,
+The `62cb6a8f` cost gate returned exit 78,
 `S2_COST_MEASUREMENT_UNAVAILABLE`; its required retained measurement is absent.
 Deployment reconciliation stays with `asimposiumorg-rs5n`, and local pack
 latency does not supply that cost or deployed-performance evidence.

@@ -583,7 +583,7 @@ export const ContractProblemSchema = z.discriminatedUnion("code", [
  * a policy refusal that acquires a `schema` and an `example` has become an
  * oracle, and that regression should fail the contract, not review.
  */
-/** Static public or Fellow entry points only; never interpolate private identifiers. */
+/** Disclosed static agent entry points only; never interpolate private identifiers. */
 export const RouteRecoveryActionSchema = NextActionShape.extend({
   method: z.enum(["GET", "POST"]),
   url: z
