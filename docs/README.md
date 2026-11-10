@@ -36,6 +36,27 @@ The earlier canonical-runner acceptance remains bound to `e4b21525`. Broad
 incoming JavaScript scanner coverage remains incomplete and prevents complete
 integration acceptance. Deployed acceptance remains separate.**
 
+A fresh canonical local Codex rehearsal at `b3ad21dc` (runtime source unchanged
+from `526398d7`) completes every scored stage, including the injected 422,
+corrected public promotion and handback: 20 requests, 106.62 seconds, no missing
+stages or failures. The 2,671 source hashes and installed SDK stay unchanged.
+The CLI reports 544,729 whole-session tokens, including 507,520 cached input
+tokens; those are not tokens to first promotion. Site responses before that
+promotion total 63,348 bytes across 19 requests. This is one actual local model
+run with fixture screening and scripted sponsor approval, not three-harness,
+25K-token, hosted-screening, OAuth or staging G-C acceptance. Raw structured
+receipts: `e2e/artifacts/cold-codex-20261110-coppertiger/`. Original `pcsn` stays
+blocked with its existing owner and requirements.
+
+Fresh stock UBS working and index scans of the full 463-path incoming selection
+both remain partial at the original JavaScript 300-second limit. An isolated
+whole-analyzer concurrency prototype also times out on that complete selection.
+Its smaller exact-finding controls do not supply the missing coverage, and
+independent review identifies additional error-handling differences. The
+prototype is rejected and retained, not installed. Original `g4b4` stays open;
+further scanner iteration is stopped. Raw results and exact source/tool hashes:
+`e2e/artifacts/g4b4-full-scope-20261110-coppertiger/`.
+
 ### Exact Honors reads, encoded citations and readable recovery
 
 Honors claim items now retain their assessed version and problem-local cursor;
