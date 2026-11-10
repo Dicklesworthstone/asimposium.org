@@ -21,7 +21,15 @@ const readCitation = cache((slug: string, target: string, path: string) =>
 );
 
 async function pageInput({ params, searchParams }: CitationPageProps) {
-  const { slug, target } = await params;
+  const { slug, target: rawTarget } = await params;
+  let target = rawTarget;
+  try {
+    // Next navigation can retain the encoded @ in a dynamic segment. Decode
+    // once, then validate the complete selector before any source read.
+    target = decodeURIComponent(rawTarget);
+  } catch {
+    // Malformed escapes remain invalid under the strict target schema below.
+  }
   return {
     slug, target,
     validTarget: target.trim() === target && PublicCitationTargetSchema.safeParse(target).success,

@@ -129,6 +129,25 @@ test("an exact citation remains readable outside the bounded history and omissio
   expect(html).toContain('href="/p/P-DEMO/citations/L-1%40205?through=300"');
 });
 
+test("Next raw and encoded citation selectors open the same pinned publication and metadata", async () => {
+  const calls: string[] = [];
+  globalThis.fetch = mock(async (url: string | URL | Request) => {
+    calls.push(String(url));
+    return Response.json(detail());
+  }) as unknown as typeof fetch;
+  for (const target of ["L-1@1", "L-1%401"]) {
+    const input = exactProps(target, { through: "80" });
+    const html = renderToStaticMarkup(await CitationPage(input));
+    expect(html).toContain("<h1>L-1@1</h1>");
+    expect(html).toContain("Publication attribution for L-1@1");
+    expect(html).toContain('href="/p/P-DEMO/citations/L-1%402?through=80"');
+    expect((await citationMetadata(input)).title).toBe("P-DEMO — L-1@1 | ASImposium");
+  }
+  expect(calls).toEqual(Array(4).fill(
+    `${PRODUCTION_STOA_ORIGIN}/p/P-DEMO/citations/L-1%401.json?through=80`,
+  ));
+});
+
 test("model-memory and unanchored sources are distinct from declared retrieval and authored bytes stay inert", () => {
   const memory = { ...citation(), source_provenance: "model_memory" as const, unanchored: true,
     locator_kind: "model_memory" as const, locator: null, canonical_locator: null, retrieved_at: null,
@@ -191,6 +210,10 @@ test("exact citation selectors reject malformed versions and unsupported filters
     expect((await citationMetadata(exactProps("L-1@1", query))).robots).toEqual({ index: false, follow: false });
   }
   await expect(CitationPage(exactProps("../private"))).rejects.toThrow("NEXT_HTTP_ERROR_FALLBACK;404");
+  for (const target of ["L-1%25401", "L-1%", "L-1%C0%AF", "%20L-1%401", "L-1%401%20"]) {
+    await expect(CitationPage(exactProps(target))).rejects.toThrow("NEXT_HTTP_ERROR_FALLBACK;404");
+    expect((await citationMetadata(exactProps(target))).robots).toEqual({ index: false, follow: false });
+  }
   expect(request).not.toHaveBeenCalled();
 });
 
