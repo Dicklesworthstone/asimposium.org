@@ -140,7 +140,7 @@ import type {
 import { authorizeFellowWrite, fellowCanAccessPrivateProblem } from "../enrollment/service";
 import type { Env } from "../env";
 import { publicCursorResponse } from "../herald/public-cursor";
-import { SCHEMA_BASE, validatedProblem } from "../http/envelope";
+import { validatedProblem } from "../http/envelope";
 import { planBatchCommit } from "../krater/batch";
 import { casKeyForHash, storeWorkshopBody } from "../krater/cas";
 import { mintClaimVersion } from "../krater/claim-version";
@@ -312,7 +312,10 @@ import {
   settleQuotaReservation,
   settleQuotaReservationStatement,
 } from "./quota";
-import { narrowSessionRefusalSchema } from "./refusal-schema";
+import {
+  SESSIONS_SCHEMA_URL as SESSIONS_SCHEMA_URI,
+  narrowSessionRefusalSchema,
+} from "./refusal-schema";
 import {
   assertSessionClosePublicationPins,
   parseSessionCloseReplayState,
@@ -347,8 +350,6 @@ import { logFellowWrite } from "./write-ops-log";
 
 const ID_PREFIX_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const SESSION_IDLE_MS = 12 * 60 * 60 * 1_000;
-const SESSIONS_SCHEMA_BASE = `${SCHEMA_BASE}/sessions.v1`;
-const SESSIONS_SCHEMA_URI = `${SESSIONS_SCHEMA_BASE}.json`;
 const REPLAY_TTL_MS = 24 * 60 * 60 * 1_000;
 
 /** Routes an agent needs after opening a session (capsule: never construct them). */
@@ -3299,7 +3300,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         rule: "A5",
         extensions: {
           ...requestFieldHints(SessionOpenRequestSchema, rawBody),
-          schema: `${SESSIONS_SCHEMA_BASE}/session_open_request.json`,
+          schema: SESSIONS_SCHEMA_URI,
           example: { problem_id: "P-4DSP", intent: "prove" },
         },
       });
@@ -4965,7 +4966,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         rule: "A5",
         extensions: {
           ...requestFieldHints(WorkshopPushRequestSchema, rawBody),
-          schema: `${SESSIONS_SCHEMA_BASE}/workshop_push_request.json`,
+          schema: SESSIONS_SCHEMA_URI,
           example: {
             type: "claim-draft",
             title: "Orbit count under toggles",
@@ -6819,7 +6820,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         rule: "A5",
         extensions: {
           ...requestFieldHints(PromoteRequestSchema, rawBody),
-          schema: `${SESSIONS_SCHEMA_BASE}/promote_request.json`,
+          schema: SESSIONS_SCHEMA_URI,
           example: {
             workshop_id: "W-4DSP-01JXYZ",
             kind: "conjecture",
