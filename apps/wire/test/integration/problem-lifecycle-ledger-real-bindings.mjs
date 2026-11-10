@@ -640,6 +640,80 @@ await runLocalWorkerJourney(
     });
     assert.ok((await targetMarkdown.text()).includes(targetItem.body));
 
+    // Current controls apply to both sources of the result-review summary:
+    // the selected governance event and the exact claim publication it names.
+    // Preserve both ledger records while exercising versioned operator controls.
+    const reviewState = await state();
+    const resultReviewEvent = reviewState.events.findLast(
+      (event) => event.type === "problem.result-review-started",
+    );
+    const resultClaimEvent = reviewState.events.find(
+      (event) => event.id === recordedTarget.event_id,
+    );
+    assert.ok(resultReviewEvent && resultClaimEvent);
+    const sourceControls = [
+      ["claim", recordedTarget.claim_id],
+      ["claim", `${recordedTarget.claim_id}@${recordedTarget.version}`],
+      ["event", `#${resultClaimEvent.seq}`],
+      ["event", `#${resultReviewEvent.seq}`],
+    ];
+    const readResultFace = (suffix, etag) =>
+      worker.fetch(`${origin}/p/${id}.${suffix}`, {
+        headers: { "User-Agent": userAgent, ...(etag ? { "If-None-Match": etag } : {}) },
+      });
+    const originalFaces = new Map();
+    for (const suffix of ["json", "md"]) {
+      const response = await readResultFace(suffix);
+      originalFaces.set(suffix, {
+        bytes: await response.text(),
+        etag: response.headers.get("etag"),
+      });
+    }
+    for (const [index, [kind, target]] of sourceControls.entries()) {
+      const setVisibility = (visibility, version) =>
+        env.DB.prepare(`INSERT INTO content_controls
+          (control_id, problem_id, target_kind, target_ref, visibility, source,
+           reason_category, actor, reason, version, created_at)
+          VALUES (?, ?, ?, ?, ?, 'operator', 'privacy', 'result-review-fixture',
+            'Exercise the exact result-review publication visibility.', ?, ?)`)
+          .bind(
+            `CC-result-review-${index}-${version}`,
+            id,
+            kind,
+            target,
+            visibility,
+            version,
+            new Date().toISOString(),
+          )
+          .run();
+      await setVisibility("hidden", 1);
+      for (const suffix of ["json", "md"]) {
+        const response = await readResultFace(suffix, originalFaces.get(suffix).etag);
+        assert.equal(response.status, 200);
+        assert.notEqual(response.headers.get("etag"), originalFaces.get(suffix).etag);
+        const bytes = await response.text();
+        assert.ok(!bytes.includes(recordedTarget.content_digest));
+        assert.ok(bytes.includes("result_review_unavailable"));
+        if (suffix === "json") {
+          const face = JSON.parse(bytes);
+          assert.equal(face.cursor, targetFace.cursor);
+          assert.ok(!face.items.some((item) => item.kind === "result-review"));
+          assert.ok(
+            !face.next_actions.some((action) =>
+              action.url.includes(`/claims/${recordedTarget.claim_id}@1`),
+            ),
+          );
+        }
+      }
+      await setVisibility("visible", 2);
+      for (const suffix of ["json", "md"]) {
+        const response = await readResultFace(suffix);
+        assert.equal(await response.text(), originalFaces.get(suffix).bytes);
+        assert.equal(response.headers.get("etag"), originalFaces.get(suffix).etag);
+      }
+    }
+    assert.deepEqual(await state(), reviewState);
+
     // Fault after event insertion: SQLite must undo the complete status-only governance write.
     await env.DB.prepare(
       `CREATE TABLE governance_status_fault (problem_id TEXT NOT NULL, enabled INTEGER NOT NULL)`,
