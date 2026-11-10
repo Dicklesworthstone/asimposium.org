@@ -111,6 +111,54 @@ function createMinimalClaimFace(overrides: Partial<ClaimFaceResponse> = {}): Cla
   };
 }
 
+function createDenseScopedShareCard() {
+  const face = createMinimalProblemFace({ problem: "P-4DSP", problem_status: "resolved" });
+  face.items[0]!.body =
+    "Smooth four-dimensional manifold classification under finite-domain assumptions, with independent validation of all stated boundary cases.";
+  face.items[0]!.screening_notice = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  };
+  face.items.push({
+    scope: "ledger",
+    kind: "problem-resolution",
+    id: "RES-1",
+    untrusted: true,
+    why_included: "Recorded resolution",
+    neutralized: [],
+    body: JSON.stringify({
+      direction: "closed-with-negative-result",
+      summary: "The finite-domain test supplies a negative result.",
+      no_claim_boundary: {
+        verified: [
+          "Only the stated finite family of smooth manifolds is covered by the recorded classification and checking procedure.",
+        ],
+        mechanisms: ["Independent reproduction"],
+        independence_tiers: ["T2"],
+        remaining_external_validation: [
+          "The unrestricted smooth four-dimensional problem still requires external validation beyond this finite family.",
+        ],
+      },
+      result_claim: {
+        claim_id: "C-1",
+        version: 1,
+        content_digest: `sha256:${"a".repeat(64)}`,
+        event_id: "EV-claim",
+        payload_digest: "b".repeat(64),
+      },
+      closing_synthesis: {
+        synthesis_id: "SYNTH-1",
+        event_id: "EV-synthesis",
+        seq: 40,
+        payload_digest: "c".repeat(64),
+        covers_through: 39,
+      },
+    }),
+  });
+  return buildProblemShareCardData(face);
+}
+
 function createMinimalHonorsRecord(overrides: Partial<HonorsResponse> = {}): HonorsResponse {
   return {
     results: [
@@ -670,15 +718,33 @@ describe("Dynamic Image Rendering", () => {
     expect(props.style.height).toBe("100%");
   });
 
-  test("the share card actually renders to PNG bytes", async () => {
+  test("dense resolved cards retain the complete guardrail, scope and screening qualifications", () => {
+    const data = createDenseScopedShareCard();
+    expect(data.title).toHaveLength(120);
+    expect(data.scopeNotice!.length).toBeGreaterThan(300);
+    const markup = renderToStaticMarkup(renderShareCard(data));
+    for (const notice of [data.guardrailNotice!, data.scopeNotice!, data.screeningNotice!]) {
+      expect(markup).toContain(notice);
+    }
+    expect(markup).toContain("RESOLVED (WITH SCOPE)");
+    expect(markup).toContain("Claims in digest");
+    expect(markup).toContain("asimposium.org");
+  });
+
+  test("simple and dense share cards actually render to PNG bytes", async () => {
     // A test that never read the body let an unsupported CSS border ship; the
     // production build then failed while prerendering /results/opengraph-image.
-    const response = generateShareCardImageResponse(
+    // Exercise the maximum title plus scope, guardrail and screening together.
+    // Visual review separately checks their placement within the fixed canvas.
+    for (const data of [
       buildProblemShareCardData(createMinimalProblemFace()),
-    );
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    expect(bytes.length).toBeGreaterThan(1000);
-    expect([...bytes.slice(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      createDenseScopedShareCard(),
+    ]) {
+      const response = generateShareCardImageResponse(data);
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      expect(bytes.length).toBeGreaterThan(1000);
+      expect([...bytes.slice(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    }
   }, 60_000);
 
   test("generateShareCardImageResponse produces valid ImageResponse", () => {
