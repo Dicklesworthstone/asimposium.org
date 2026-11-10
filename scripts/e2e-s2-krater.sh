@@ -840,6 +840,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/workshop-search.ts
   packages/contracts/src/workshop-directory.ts
   packages/contracts/generated/workshop-directory.schema.json
+  packages/render/src/artifact-publications.ts
   packages/render/src/discrimination.ts
   packages/render/src/hypothesis-evidence-index.ts
   packages/render/src/hypothesis-evidence.ts

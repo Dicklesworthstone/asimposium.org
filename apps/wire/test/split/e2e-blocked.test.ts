@@ -129,21 +129,16 @@ const S3_OWNED_PIPE_DRAIN_MS = 500;
 const S3_OWNED_STREAM_BYTES = 1_000_000;
 const S3_OWNED_OUTPUT_BYTES = 1_000_000;
 /**
- * The raw bundle is evidence, not a diagnostic. Exact db845c60 builds on
- * 2026-11-10 produced 3,721,336 and 3,756,005 canonical-evidence bytes. The
- * previous 3.75 MB cap rejected the complete counterfactual by 6,005 bytes.
+ * The isolated graph proof retains the complete build output for the parent
+ * to scan. After the artifact merge at c72f78ca, the original builds emitted
+ * 3,747,282 production and 3,781,957 counterfactual evidence bytes. The
+ * 3,760,000-byte receiver rejected the counterfactual (x77k.2).
  *
- * Keep the ordinary owned-command diagnostics at 1 MB. This narrowly gives
- * the isolated graph proof an explicitly reviewed 3.76 MB capacity (df71.3.3),
- * preserving the full raw arrays and parent-derived facts. This increases the
- * previous evidence ceiling; it does not change the build or its encoding.
- * Its canonical fresh result remains below the unchanged 8 MB pinned-result cap:
- * strict canonical JSON cannot contain a literal control byte, and nesting it
- * in the result JSON expands only quote/backslash bytes, at most twofold. The
- * derived bound below verifies that relationship. A future larger bundle fails
- * closed at the isolated limit rather than widening any other transport.
+ * The 3,785,000-byte receiver preserves both full arrays. Nesting canonical
+ * JSON in the result can at most double the encoded evidence bytes. The bound
+ * below verifies that the complete record fits the 8,000,000-byte result cap.
  */
-const S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES = 3_760_000;
+const S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES = 3_785_000;
 const S3_FRESH_RUNTIME_FIXED_GRACE_MS = 5_000;
 const S3_FRESH_RUNTIME_RESULT_MAX_BYTES = 8 * S3_OWNED_OUTPUT_BYTES;
 const S3_FRESH_RUNTIME_DIAGNOSTIC_MAX_BYTES = 1_024;
@@ -2421,7 +2416,9 @@ async function isolatedProductionBundle(
 }
 
 test("measured S3 graph evidence fits its explicitly reviewed capacity", () => {
-  for (const bytes of [3_500_001, 3_750_000, 3_750_001, 3_756_005, 3_760_000]) {
+  for (const bytes of [
+    3_500_001, 3_747_282, 3_750_000, 3_750_001, 3_756_005, 3_760_000, 3_781_957, 3_785_000,
+  ]) {
     const body = "x".repeat(bytes - Buffer.byteLength('[""]', "utf8"));
     const raw = JSON.stringify([body]);
     expect(Buffer.byteLength(raw, "utf8")).toBe(bytes);
@@ -2431,9 +2428,9 @@ test("measured S3 graph evidence fits its explicitly reviewed capacity", () => {
       createHash("sha256").update(body, "utf8").digest("hex"),
     );
   }
-  const oversized = JSON.stringify(["x".repeat(3_760_001 - Buffer.byteLength('[""]', "utf8"))]);
+  const oversized = JSON.stringify(["x".repeat(3_785_001 - Buffer.byteLength('[""]', "utf8"))]);
   expect(() => decodeIsolatedProductionBuildOutputEvidence(oversized)).toThrow(
-    "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_OVERRUN:3760001",
+    "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_OVERRUN:3785001",
   );
 });
 
