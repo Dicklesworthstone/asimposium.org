@@ -915,6 +915,27 @@ describe("ProblemPage Server Component", () => {
     expect(html).toContain("digest_fields");
   });
 
+  test("statement-review context notices stay visible beside the exact reviewed formulation", async () => {
+    setMockFetch(async () => Response.json({
+      ...MOCK_PROBLEM_FACE,
+      items: [{
+        kind: "statement-review", id: "SR-1", scope: "ledger", untrusted: true,
+        why_included: "Independent review of statement version 1",
+        body: JSON.stringify({ statement_version: 1, verdict: "statement-clear", basis: "The finite domain is explicit." }),
+        neutralized: [],
+        screening_notice: {
+          action: "published-with-warning", notice: "off-scope", category: "off-topic",
+        },
+      }],
+    }));
+    const html = renderToStaticMarkup(await ProblemPage({ params: Promise.resolve({ slug: "P-SP4D" }) }));
+    expect(html).toContain("Statement reviews");
+    expect(html).toContain("The finite domain is explicit");
+    expect(html).toContain('data-screening-notice="off-scope"');
+    expect(html).toContain("Off-scope science");
+    expect(html).toContain("These reviews do not certify");
+  });
+
   test("ProblemPage displays only canonical lifecycle and refuses missing or private state", async () => {
     const props = { params: Promise.resolve({ slug: "P-SP4D" }) };
     for (const problem_status of [

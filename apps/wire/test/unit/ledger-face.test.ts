@@ -4,8 +4,9 @@ import {
   ClaimFaceResponseSchema,
   ConflictsListResponseSchema,
   ProblemFaceResponseSchema,
+  ScreeningPublicationProvenanceSchema,
 } from "@asimposium/contracts";
-import type { Projection } from "@asimposium/render";
+import { type Projection, screeningNoticeText } from "@asimposium/render";
 import type { Env } from "../../src/env.ts";
 import { sha256Hex } from "../../src/krater/krater.ts";
 import { createLedgerFaceRoutes, renderBudgetedClaimFace } from "../../src/ledger-face.ts";
@@ -218,25 +219,71 @@ test("statement review reader verifies event content, projection and attribution
   };
   const env = formulationEnv(row);
   const app = createLedgerFaceRoutes();
-  const get = async () =>
-    ProblemFaceResponseSchema.parse(
-      await (
-        await app.request(
-          "https://a.asimposium.org/p/P-PATHS.json",
-          {
-            headers: {
-              "User-Agent":
-                "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
-            },
-          },
-          env,
-        )
-      ).json(),
+  const response = (suffix = "json") =>
+    app.request(
+      `https://a.asimposium.org/p/P-PATHS.${suffix}`,
+      {
+        headers: {
+          "User-Agent":
+            "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
+        },
+      },
+      env,
     );
+  const get = async () => ProblemFaceResponseSchema.parse(await (await response()).json());
   const valid = await get();
   expect(valid.items.find((item) => item.kind === "statement-review")?.body).toContain(
     payload.basis,
   );
+  expect(
+    valid.items.find((item) => item.kind === "statement-review")?.screening_notice,
+  ).toBeUndefined();
+  const passedReceipt = await Bun.file(
+    new URL(
+      "../../../../packages/contracts/test/fixtures/valid/screening-publication-provenance.json",
+      import.meta.url,
+    ),
+  ).json();
+  for (const notice of [
+    {
+      category: "dual-use-boundary",
+      action: "published-with-warning",
+      notice: "screening-warning",
+    },
+    { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
+  ] as const) {
+    const receipt = ScreeningPublicationProvenanceSchema.parse({
+      ...passedReceipt,
+      outcome: "allow-with-warning",
+      public_action: notice,
+    });
+    row.statement_reviews_json = JSON.stringify([
+      { ...review, screening_provenance: JSON.stringify(receipt) },
+    ]);
+    const warned = await get();
+    const item = warned.items.find((item) => item.kind === "statement-review");
+    expect(item?.screening_notice).toEqual(notice);
+    expect(item?.body).toBe(valid.items.find((item) => item.kind === "statement-review")?.body);
+    expect(warned.items.filter((item) => item.kind !== "statement-review")).toEqual(
+      valid.items.filter((item) => item.kind !== "statement-review"),
+    );
+    const markdown = await (await response("md")).text();
+    expect(markdown).toContain(screeningNoticeText(notice));
+    expect(markdown.indexOf(screeningNoticeText(notice))).toBeLessThan(
+      markdown.indexOf(payload.basis),
+    );
+    for (const bytes of [JSON.stringify(warned), markdown]) {
+      expect(bytes).not.toContain(receipt.input_digest);
+      expect(bytes).not.toContain(receipt.context_digest);
+      expect(bytes).not.toContain(receipt.model_version);
+      expect(bytes).not.toContain(receipt.policy_version);
+      expect(bytes).not.toContain(receipt.configuration_digest);
+    }
+  }
+  for (const receipt of [null, JSON.stringify(passedReceipt)]) {
+    row.statement_reviews_json = JSON.stringify([{ ...review, screening_provenance: receipt }]);
+    expect(await get()).toEqual(valid);
+  }
   for (const [patch, reason] of [
     [{ event_id: null }, "statement_review_attribution_unavailable"],
     [{ payload_json: null }, "statement_review_content_unavailable"],
@@ -251,6 +298,15 @@ test("statement review reader verifies event content, projection and attribution
     [{ harness: null }, "statement_review_attribution_unavailable"],
     [{ seq: 3 }, "statement_review_source_mismatch"],
     [{ created_at: "2026-09-08T00:00:00.000Z" }, "statement_review_source_mismatch"],
+    [{ screening_provenance: "CORRUPT_RECEIPT" }, "statement_review_screening_unavailable"],
+    [
+      { screening_provenance: JSON.stringify({ public_action: { notice: "screening-warning" } }) },
+      "statement_review_screening_unavailable",
+    ],
+    [
+      { screening_provenance: "CORRUPT_RECEIPT".repeat(400) },
+      "statement_review_screening_unavailable",
+    ],
   ] as const) {
     row.statement_reviews_json = JSON.stringify([{ ...review, ...patch }]);
     const face = await get();

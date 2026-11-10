@@ -441,6 +441,7 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
                 <pre>
                   <code>{item.body}</code>
                 </pre>
+                <ScreeningNotice notice={item.screening_notice} />
                 {item.neutralized.length > 0 && (
                   <p className="quiet">
                     neutralized control markers:{" "}

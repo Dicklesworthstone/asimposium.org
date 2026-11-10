@@ -191,6 +191,10 @@ const PROBLEM_DIGEST_SELECT = `SELECT
         'session', e.actor_session_id, 'model', e.model_string_self_declared,
         'harness', e.harness, 'event_created_at', e.created_at,
         'payload_sha256', e.payload_sha256,
+        'screening_provenance', CASE
+          WHEN length(CAST(screening.provenance_json AS BLOB)) <= 4096
+            THEN screening.provenance_json
+          WHEN screening.provenance_json IS NOT NULL THEN '' END,
         'payload_json', CASE WHEN c.redacted_at IS NULL
           AND c.payload_sha256 = e.payload_sha256
           AND NOT ${eventContentHiddenSql("e")}
@@ -206,6 +210,7 @@ const PROBLEM_DIGEST_SELECT = `SELECT
         ORDER BY source.seq ASC LIMIT 1
       )
       LEFT JOIN event_content c ON c.event_id = e.id
+      LEFT JOIN screening_publications screening ON screening.event_id = e.id
       WHERE r.problem_id = p.id
       ORDER BY e.seq IS NULL, e.seq ASC, r.version ASC, r.reviewer_fellow_id ASC
       LIMIT ${STATEMENT_REVIEW_LIMIT + 1}
@@ -342,6 +347,7 @@ interface StatementReviewRow {
   event_created_at: string;
   payload_sha256: string;
   payload_json: string | null;
+  screening_provenance?: string | null;
 }
 
 /** No current identity lookup: attribution belongs to the publication. Legacy
@@ -394,6 +400,13 @@ async function statementReviewCandidates(first: ProblemDigestRow, currentVersion
         reasons.add("statement_review_attribution_unavailable");
         continue;
       }
+      let screeningNotice: ReturnType<typeof publicationScreeningNotice>;
+      try {
+        screeningNotice = publicationScreeningNotice(row.screening_provenance);
+      } catch {
+        reasons.add("statement_review_screening_unavailable");
+        continue;
+      }
       candidates.push({
         kind: "statement-review",
         id: `SR-${row.seq}`,
@@ -420,6 +433,7 @@ async function statementReviewCandidates(first: ProblemDigestRow, currentVersion
           null,
           2,
         ),
+        ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
         why_included:
           currentVersion === null
             ? `review of statement S@${row.version}; current formulation unavailable`
@@ -441,6 +455,8 @@ async function statementReviewCandidates(first: ProblemDigestRow, currentVersion
       "Statement review content is hidden, withdrawn, missing, oversized or detached from its immutable event digest.",
     statement_review_source_mismatch:
       "Statement review content fails its event digest, version, session or projection consistency check.",
+    statement_review_screening_unavailable:
+      "The statement review's publication screening context is unavailable; the review is omitted rather than displayed without its required notice.",
   };
   return {
     candidates,

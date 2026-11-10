@@ -187,31 +187,37 @@ describe("published screening warnings", () => {
       expect(count(f, "moderation_log")).toBe(0);
     }));
 
-  test("claim review warnings require the server-selected review writer and retain exact-byte binding", () =>
+  test("claim and statement review warnings require their server-selected writers and exact candidate and context binding", () =>
     withFixture(async (f) => {
-      for (const category of ["dual-use-boundary", "off-topic"] as const) {
-        const receipt = published(
-          await screen(f, candidate(f, "review"), { coarse_category: category }, "review"),
-        );
-        expect(receipt.provenance.public_action).toEqual(
-          category === "off-topic"
-            ? { category, action: "published-with-warning", notice: "off-scope" }
-            : { category, action: "published-with-warning", notice: "screening-warning" },
-        );
+      for (const route of ["review", "statement-review"]) {
+        for (const category of ["dual-use-boundary", "off-topic"] as const) {
+          const receipt = published(
+            await screen(f, candidate(f, "review"), { coarse_category: category }, route),
+          );
+          expect(receipt.provenance.public_action).toEqual(
+            category === "off-topic"
+              ? { category, action: "published-with-warning", notice: "off-scope" }
+              : { category, action: "published-with-warning", notice: "screening-warning" },
+          );
+        }
       }
       expect(count(f, "screening_cases")).toBe(0);
       expect(count(f, "screening_refusals")).toBe(0);
-      for (const route of ["statement-review", "promote"]) {
+      for (const route of ["promote", "evidence", "unrecognized-review-writer"]) {
         const held = await screen(f, candidate(f, "review"), {}, route);
         expect(held instanceof Response && held.status).toBe(202);
       }
-      const unbound = await screen(
-        f,
-        candidate(f, "review"),
-        { evaluated_body_digest: `sha256:${"f".repeat(64)}` },
-        "review",
-      );
-      expect(unbound instanceof Response && unbound.status).toBe(202);
+      for (const route of ["review", "statement-review"]) {
+        for (const patch of [
+          { evaluated_body_digest: `sha256:${"f".repeat(64)}` },
+          { evaluated_context_digest: `sha256:${"f".repeat(64)}` },
+          { provider_status: "timeout" },
+          { coarse_category: "provider-unavailable" },
+        ] as const) {
+          const held = await screen(f, candidate(f, "review"), patch, route);
+          expect(held instanceof Response && held.status).toBe(202);
+        }
+      }
       expect(f.state().events).toEqual([]);
     }));
 
