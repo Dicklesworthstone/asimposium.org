@@ -121,9 +121,10 @@ function supportsPublishedWarning(
     // Gap filings carry an exact-publication notice through canonical history,
     // claim/review obligations and formal packs. Settlements are separate kinds.
     (kind === "gaps" && holdContext?.route === "gaps") ||
-    // Claim and statement reviews share a classifier kind. Only the server's
-    // claim-review writer has complete public notice propagation.
-    (kind === "review" && holdContext?.route === "review")
+    // Claim and statement reviews share a classifier kind. Their server-owned
+    // writers preserve each publication's notice through canonical faces and packs.
+    (kind === "review" &&
+      (holdContext?.route === "review" || holdContext?.route === "statement-review"))
   );
 }
 

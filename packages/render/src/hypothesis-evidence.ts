@@ -1,5 +1,7 @@
 import type { HypothesisEvidenceItemResponse } from "@asimposium/contracts";
+import { EvidenceArtifactDiscoverySchema } from "@asimposium/contracts/artifact-publications";
 import { readDiscriminationReport } from "@asimposium/contracts/discrimination";
+import { EVIDENCE_ARTIFACTS_BOUNDARY } from "./artifact-publications.ts";
 import { stableStringify } from "./canonical.ts";
 import { safeCodeSpan, safeInlineProse } from "./discovery.ts";
 import {
@@ -21,12 +23,26 @@ function fact(label: string, value: string | number | null): string {
   return `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(safe.text)}</dd>`;
 }
 
+function artifactDiscovery(face: HypothesisEvidenceItemResponse) {
+  if (face.content === null || face.withdrawn) return undefined;
+  const parsed = EvidenceArtifactDiscoverySchema.safeParse(face.artifact_discovery);
+  if (!parsed.success) return undefined;
+  const discovery = parsed.data;
+  return discovery.problem_id === face.problem_id &&
+    discovery.evidence_id === face.evidence_id &&
+    discovery.evidence_event_id === face.publication.event_id &&
+    discovery.evidence_digest === `sha256:${face.publication.payload_sha256}`
+    ? discovery
+    : undefined;
+}
+
 /**
  * The human face of the existing evidence contract, with no invented claim version
  * or historical snapshot. Keep the scientific work, computation inputs and original
  * publication readable while preserving the current withdrawal and omission state.
  */
 export function renderHypothesisEvidenceHtml(face: HypothesisEvidenceItemResponse): string {
+  const artifacts = artifactDiscovery(face);
   const content = face.content;
   const publication = face.publication;
   const problem = encodeURIComponent(face.problem_id);
@@ -161,6 +177,11 @@ export function renderHypothesisEvidenceHtml(face: HypothesisEvidenceItemRespons
         "</details>",
       );
     }
+    if (artifacts !== undefined) {
+      lines.push(
+        `<section><h3>Published files</h3><p><a href="${escapeHtml(artifacts.human_path)}">Inspect current public downloads for this exact evidence</a></p><p>${escapeHtml(EVIDENCE_ARTIFACTS_BOUNDARY)} File availability does not change scientific standing.</p></section>`,
+      );
+    }
   }
   lines.push(
     "<section><h3>Original publication attribution</h3><dl>",
@@ -194,6 +215,7 @@ export function renderHypothesisEvidenceHtml(face: HypothesisEvidenceItemRespons
 /** Use the full-record renderer's limits, not the smaller working-pack cap.
  * Every authored field and model/harness declaration remains fenced data. */
 export function renderHypothesisEvidenceMarkdown(face: HypothesisEvidenceItemResponse): string {
+  const artifacts = artifactDiscovery(face);
   const record = neutralizeUntrustedBody(JSON.stringify(face, null, 2));
   const fence = fenceFor(record.text).delimiter;
   const path = `/p/${encodeURIComponent(face.problem_id)}/evidence/${encodeURIComponent(face.evidence_id)}.json`;
@@ -247,6 +269,16 @@ export function renderHypothesisEvidenceMarkdown(face: HypothesisEvidenceItemRes
       ? []
       : [screeningNoticeText(face.screening_notice), ""]),
     ...experiment,
+    ...(artifacts === undefined
+      ? []
+      : [
+          "## Published files",
+          "",
+          `[Inspect current public downloads for this exact evidence](${artifacts.markdown_path})`,
+          "",
+          `${EVIDENCE_ARTIFACTS_BOUNDARY} File availability does not change scientific standing.`,
+          "",
+        ]),
     "## Complete published record",
     "",
     `${fence}json`,

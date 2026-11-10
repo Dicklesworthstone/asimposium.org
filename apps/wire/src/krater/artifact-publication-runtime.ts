@@ -31,7 +31,10 @@ import {
   drainArtifactPublications,
   publicationScreenContext,
 } from "./artifact-publication-outbox.ts";
-import { readEvidenceArtifacts, readPublicArtifactManifest } from "./artifact-publication-read.ts";
+import {
+  readEvidenceArtifactsWithMetadata,
+  readPublicArtifactManifest,
+} from "./artifact-publication-read.ts";
 import { retryArtifactPublication } from "./artifact-publication-retry.ts";
 import { PUBLICATION_SCREEN_BYTES, screenBoundArtifact } from "./artifact-publication-screen.ts";
 import {
@@ -147,17 +150,23 @@ export function artifactPublicationOperations(env: ArtifactRuntimeEnv): Publicat
         return ArtifactPublicationStatusSchema.parse(publicationStatus(job));
       }),
     manifest: (problem, id) =>
-      mapped(async () =>
-        PublicArtifactManifestSchema.parse(
-          (await readPublicArtifactManifest(env.DB, originFor(env), problem, id)).face,
-        ),
-      ),
-    evidence: (problem, evidence, after, through) =>
-      mapped(async () =>
-        EvidenceArtifactsSchema.parse(
-          await readEvidenceArtifacts(env.DB, originFor(env), problem, evidence, after, through),
-        ),
-      ),
+      mapped(async () => {
+        const result = await readPublicArtifactManifest(env.DB, originFor(env), problem, id);
+        return { face: PublicArtifactManifestSchema.parse(result.face), unlisted: result.unlisted };
+      }),
+    evidence: (problem, evidence, after, through, evidenceDigest) =>
+      mapped(async () => {
+        const result = await readEvidenceArtifactsWithMetadata(
+          env.DB,
+          originFor(env),
+          problem,
+          evidence,
+          after,
+          through,
+          evidenceDigest,
+        );
+        return { face: EvidenceArtifactsSchema.parse(result.face), unlisted: result.unlisted };
+      }),
   };
 }
 

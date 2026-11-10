@@ -29,9 +29,19 @@ export const ARTIFACT_PUBLICATION_OPERATIONS: readonly [
     "Read delivered artifact provenance with current evidence and target visibility. Verification is bytes-only; this face accepts no query parameters and also supports HEAD.",
   ],
   [
+    "GET /p/:problem/artifacts/:publicationId.md",
+    "public",
+    "Read the Markdown rendition of delivered artifact provenance, with byte-only verification and the same current source checks as JSON. HEAD is supported.",
+  ],
+  [
     "GET /p/:problem/evidence/:evidenceId/artifacts.json",
     "public",
-    "Read up to twenty delivered artifact manifests for exact evidence, using after and through delivery cursors. Current source visibility applies to every page; HEAD is supported.",
+    "Read up to twenty delivered artifact manifests for exact evidence, using after and through global delivery cursors and an optional exact evidence_digest pin. Current source visibility applies to every page; HEAD is supported. Delivery cursors are not problem ledger cursors.",
+  ],
+  [
+    "GET /p/:problem/evidence/:evidenceId/artifacts.md",
+    "public",
+    "Read the Markdown rendition of current evidence files with the same exact evidence_digest pin, delivery pagination and visibility checks as JSON. HEAD is supported; availability never implies scientific verification.",
   ],
 ];
 
@@ -43,8 +53,16 @@ function operation(path: string, method: string): ArtifactPublicationOperation |
   }
   if (method === "GET") {
     if (path === "/v1/artifact-publications/{publicationId}") return "status";
-    if (path === "/p/{problem}/artifacts/{publicationId}.json") return "manifest";
-    if (path === "/p/{problem}/evidence/{evidenceId}/artifacts.json") return "evidence";
+    if (
+      path === "/p/{problem}/artifacts/{publicationId}.json" ||
+      path === "/p/{problem}/artifacts/{publicationId}.md"
+    )
+      return "manifest";
+    if (
+      path === "/p/{problem}/evidence/{evidenceId}/artifacts.json" ||
+      path === "/p/{problem}/evidence/{evidenceId}/artifacts.md"
+    )
+      return "evidence";
   }
   return undefined;
 }
@@ -69,16 +87,18 @@ export function artifactPublicationParameters(
       },
     ];
   if (kind !== "evidence") return [];
-  return ["after", "through"].map((name) => ({
+  return ["after", "through", "evidence_digest"].map((name) => ({
     name,
     in: "query",
     required: false,
     description:
       name === "after"
         ? "Nonnegative safe-integer delivery cursor. Use next_after for continuation or poll_path for newly delivered artifacts; omitted after starts at zero."
-        : "Pinned delivery cutoff from the first page, at least after. Keep it unchanged while following next_path. Omit it for a new delivery snapshot.",
+        : name === "through"
+          ? "Pinned delivery cutoff from the first page, at least after. Keep it unchanged while following next_path. Omit it for a new delivery snapshot."
+          : "Exact sha256 evidence publication digest. A mismatch is unavailable; continuation retains this pin while following current delivery availability.",
     schema: {
-      $ref: `${origin}/schemas/artifact-publications.v1.json#/properties/evidence_artifacts/properties/${name}`,
+      $ref: `${origin}/schemas/artifact-publications.v1.json#/properties/evidence_artifacts_query/properties/${name}`,
     },
   }));
 }
@@ -114,7 +134,9 @@ export function artifactPublicationResponses(
             : kind === "status"
               ? "Private current delivery state. recovery is null unless this held job can request a bounded owner recovery; download_url is present only when published."
               : "Public byte-only artifact provenance after current source checks.",
-      content: { "application/json": { schema: { $ref: `${schema}#/properties/${root}` } } },
+      content: path.endsWith(".md")
+        ? { "text/markdown": { schema: { type: "string" } } }
+        : { "application/json": { schema: { $ref: `${schema}#/properties/${root}` } } },
       headers: {
         "Cache-Control": {
           schema: { type: "string", const: isPublic ? "no-store" : "private, no-store" },

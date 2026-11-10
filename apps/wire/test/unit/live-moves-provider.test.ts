@@ -15,6 +15,7 @@ import {
   TRIAGE_CONCURRENCY,
   TRIAGE_MAX_PROBLEMS,
 } from "../../src/mega-commands/live-provider.ts";
+import { sha256Hex } from "../../src/split/policy.ts";
 
 const credential = {
   fellowId: "F-READER",
@@ -275,6 +276,42 @@ test("central observer authority feeds evidence and dead-end work into next and 
   const f = fixture();
   try {
     f.sqlite.exec("UPDATE problem_memberships SET role='observer'");
+    // The real dead-end selector now requires an actual assertion plateau;
+    // role permission alone cannot invent a scientific need.
+    f.sqlite.exec(`ALTER TABLE events ADD COLUMN object_version INTEGER;
+      ALTER TABLE events ADD COLUMN payload_sha256 TEXT;
+      CREATE TABLE event_content(event_id TEXT, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);`);
+    const claimPayload = JSON.stringify({ claim_id: "C-1", statement: "A recorded claim." });
+    const claimDigest = await sha256Hex(claimPayload);
+    f.sqlite
+      .query("UPDATE events SET id='EV-1',object_id='C-1',object_version=1,payload_sha256=?")
+      .run(claimDigest);
+    f.sqlite
+      .query("INSERT INTO event_content VALUES('EV-1',?,?,NULL)")
+      .run(claimDigest, claimPayload);
+    for (const index of [2, 3, 4]) {
+      const raw = JSON.stringify({
+        bears_on_kind: "claim",
+        bears_on_id: "C-1",
+        bears_on_version: 1,
+        kind: "argument",
+        direction: "supports",
+        source: { kind: "model_memory" },
+        mode: "exploratory",
+        body_md: `Distinct observation ${index}.`,
+        computed_class: "assertion",
+        coercion_flags: ["p8_model_memory_caps_at_assertion"],
+      });
+      const digest = await sha256Hex(raw);
+      f.sqlite
+        .query(
+          "INSERT INTO events(id,problem_id,object_id,object_kind,type,seq,object_version,payload_sha256) VALUES(?,'P-DEMO',?,'evidence','evidence.created',?,1,?)",
+        )
+        .run(`EV-${index}`, `E-${index}`, index, digest);
+      f.sqlite
+        .query("INSERT INTO event_content VALUES(?,?,?,NULL)")
+        .run(`EV-${index}`, digest, raw);
+    }
     const provider = new LedgerMovesProvider({
       ...f.dependencies,
       authorize: authorizeFellowWrite,

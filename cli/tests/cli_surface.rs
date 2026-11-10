@@ -5,6 +5,16 @@ use std::{
 
 const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+fn binary() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_asimp"));
+    // These surface tests must never consult a developer's live OS keychain
+    // or inherit credentials. Explicit origin cases still override this.
+    command
+        .env("ASIMP_ORIGIN", "https://example.invalid")
+        .env_remove("ASIMP_TOKEN");
+    command
+}
+
 #[test]
 fn research_lifecycle_commands_expose_help_and_require_authenticated_files() {
     for args in [
@@ -30,7 +40,7 @@ fn research_lifecycle_commands_expose_help_and_require_authenticated_files() {
             assert!(output.stdout.is_empty());
         }
         for token in [None, Some("secret-canary\r\nx-header: bad")] {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_asimp"));
+            let mut command = binary();
             command
                 .args(
                     [
@@ -78,7 +88,7 @@ fn ledger_followup_commands_require_files_keys_and_authenticated_sessions() {
             assert!(output.stdout.is_empty());
         }
         for token in [None, Some("secret-canary\r\nx-header: bad")] {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_asimp"));
+            let mut command = binary();
             command
                 .args([
                     verb,
@@ -197,7 +207,7 @@ fn private_commands_fail_before_network_when_token_is_missing_or_malformed() {
         ],
     ] {
         for token in [None, Some("secret-canary\r\nx-header: bad")] {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_asimp"));
+            let mut command = binary();
             command.args(&args).env_remove("ASIMP_TOKEN");
             if let Some(token) = token {
                 command.env("ASIMP_TOKEN", token);
@@ -292,7 +302,7 @@ fn typed_session_help_describes_alternatives_and_rejects_conflicting_inputs() {
 #[test]
 fn handback_limit_errors_count_without_echoing_private_text() {
     let text = format!("private-canary{}", "😀".repeat(1000));
-    let output = Command::new(env!("CARGO_BIN_EXE_asimp"))
+    let output = binary()
         .args([
             "--origin",
             "https://example.invalid",
@@ -338,7 +348,7 @@ fn write_help_and_required_inputs_explain_json_files_and_retained_keys() {
 
 #[test]
 fn missing_request_file_fails_without_network_or_private_path_disclosure() {
-    let output = Command::new(env!("CARGO_BIN_EXE_asimp"))
+    let output = binary()
         .args([
             "--origin",
             "https://example.invalid",
@@ -366,7 +376,7 @@ struct Invocation {
 
 fn invoke(args: &[&str]) -> Invocation {
     let started = Instant::now();
-    let output = Command::new(env!("CARGO_BIN_EXE_asimp"))
+    let output = binary()
         .args(args)
         .env("NO_COLOR", "1")
         .output()
@@ -513,4 +523,136 @@ fn capabilities_help_advertises_explicit_json() {
     assert!(invocation.output.status.success());
     assert!(invocation.output.stderr.is_empty());
     assert!(String::from_utf8_lossy(&invocation.output.stdout).contains("--json"));
+}
+
+#[test]
+fn enrollment_help_exposes_safe_secret_input_and_recoverable_device_flow() {
+    for (command, flags) in [
+        (
+            vec!["connect"],
+            vec![
+                "--join-url-file",
+                "--join-url-stdin",
+                "--name",
+                "--model",
+                "--harness",
+                "--idempotency-key",
+                "--wait-seconds",
+                "--replace",
+                "--identity",
+                "--json",
+            ],
+        ),
+        (
+            vec!["login"],
+            vec![
+                "--device",
+                "--scope",
+                "--name",
+                "--model",
+                "--harness",
+                "--idempotency-key",
+                "--wait-seconds",
+                "--replace",
+                "--identity",
+            ],
+        ),
+        (
+            vec!["auth", "resume"],
+            vec!["--wait-seconds", "--origin", "--identity", "--json"],
+        ),
+        (
+            vec!["auth", "status"],
+            vec!["local saved state", "--origin", "--identity", "--json"],
+        ),
+    ] {
+        let help = invoke(&[command, vec!["--help"]].concat());
+        assert!(help.output.status.success());
+        let text = String::from_utf8_lossy(&help.output.stdout);
+        for flag in flags {
+            assert!(text.contains(flag), "missing {flag}");
+        }
+        assert!(!text.contains("--token"));
+        assert!(!text.contains("<JOIN_URL>"));
+    }
+}
+
+#[test]
+fn enrollment_requires_explicit_input_mode_metadata_and_retained_key() {
+    for args in [
+        vec!["connect"],
+        vec!["connect", "--join-url-stdin", "--name", "orchid-vector"],
+        vec![
+            "connect",
+            "--join-url-stdin",
+            "--join-url-file",
+            "private.txt",
+            "--name",
+            "orchid-vector",
+            "--model",
+            "model",
+            "--harness",
+            "harness",
+            "--idempotency-key",
+            "key",
+        ],
+        vec![
+            "login",
+            "--name",
+            "orchid-vector",
+            "--model",
+            "model",
+            "--harness",
+            "harness",
+            "--scope",
+            "review",
+            "--idempotency-key",
+            "key",
+        ],
+        vec![
+            "login",
+            "--device",
+            "--name",
+            "orchid-vector",
+            "--model",
+            "model",
+            "--harness",
+            "harness",
+            "--idempotency-key",
+            "key",
+        ],
+        vec!["auth", "resume", "--wait-seconds", "901"],
+    ] {
+        let output = invoke(&args).output;
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn enrollment_rejects_untrusted_origins_before_keychain_stdin_or_network() {
+    let output = binary()
+        .args([
+            "--origin",
+            "https://untrusted-canary.invalid",
+            "connect",
+            "--join-url-stdin",
+            "--name",
+            "orchid-vector",
+            "--model",
+            "model",
+            "--harness",
+            "harness",
+            "--idempotency-key",
+            "key",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("exact production or staging Stoa origin"));
+    assert!(!stderr.contains("canary"));
+    assert!(!stderr.contains("unavailable or locked"));
 }

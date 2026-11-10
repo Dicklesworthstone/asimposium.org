@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type {
   ProblemFaceResponse as PackageProblemFaceResponse,
+  ProblemFullResponse as PackageProblemFullResponse,
   ScreeningContracts as PackageScreeningContracts,
   ScreeningPromotionDecisionProvenance as PackageScreeningPromotionDecisionProvenance,
   ScreeningPublicAction as PackageScreeningPublicAction,
@@ -11,6 +12,7 @@ import addFormats from "ajv-formats";
 import { z } from "zod";
 import type {
   ProblemFaceResponse as GeneratedProblemFaceResponse,
+  ProblemFullResponse as GeneratedProblemFullResponse,
   PublicLedgerProblemId as GeneratedPublicLedgerProblemId,
 } from "../../generated/ledger.types.ts";
 import type {
@@ -578,6 +580,9 @@ test("the generated ledger TypeScript face exports the complete mounted-face ros
   const generatedFace = {} as GeneratedProblemFaceResponse;
   const packageFace: PackageProblemFaceResponse = generatedFace;
   expect(packageFace).toBe(generatedFace);
+  const generatedFull = {} as GeneratedProblemFullResponse;
+  const packageFull: PackageProblemFullResponse = generatedFull;
+  expect(packageFull).toBe(generatedFull);
   const publicId = "P-4DSP" as GeneratedPublicLedgerProblemId;
   expect(publicId).toBe("P-4DSP");
 });

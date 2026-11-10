@@ -23,8 +23,120 @@ const downloadUrl = z
 const listPath = z
   .string()
   .regex(
-    /^\/p\/P-[A-Z0-9][A-Z0-9-]{1,30}\/evidence\/E-[A-Za-z0-9]{1,78}\/artifacts\.json\?after=(?:0|[1-9][0-9]*)(?:&through=(?:0|[1-9][0-9]*))?$/,
+    /^\/p\/P-[A-Z0-9][A-Z0-9-]{1,30}\/evidence\/E-[A-Za-z0-9]{1,78}\/artifacts\.json\?after=(?:0|[1-9][0-9]*)(?:&through=(?:0|[1-9][0-9]*))?&evidence_digest=sha256:[a-f0-9]{64}$/,
   );
+
+const queryCursor = z
+  .string()
+  .regex(/^(0|[1-9][0-9]*)$(?![\s\S])/)
+  .refine((value) => Number.isSafeInteger(Number(value)), "Use a safe-integer delivery cursor.");
+
+/** Delivery cursors belong to the global publication stream, not a claim's
+ * problem-local ledger snapshot. The optional digest pins the evidence source
+ * while following current availability, including after later deliveries. */
+export const EvidenceArtifactsQuerySchema = z
+  .object({
+    after: queryCursor.optional(),
+    through: queryCursor.optional(),
+    evidence_digest: digest.optional(),
+  })
+  .strict()
+  .refine(
+    (query) => query.through === undefined || Number(query.through) >= Number(query.after ?? 0),
+    "The delivery cutoff must be at least after.",
+  );
+export type EvidenceArtifactsQuery = z.infer<typeof EvidenceArtifactsQuerySchema>;
+
+export function evidenceArtifactsPath(
+  problem: string,
+  evidence: string,
+  format: "json" | "md" | "human",
+  query: EvidenceArtifactsQuery = {},
+): string {
+  const parsed = EvidenceArtifactsQuerySchema.parse(query);
+  const suffix = format === "human" ? "" : `.${format}`;
+  const path = `/p/${problemId.parse(problem)}/evidence/${evidenceId.parse(evidence)}/artifacts${suffix}`;
+  const values = [
+    ...(parsed.after === undefined ? [] : [`after=${parsed.after}`]),
+    ...(parsed.through === undefined ? [] : [`through=${parsed.through}`]),
+    ...(parsed.evidence_digest === undefined ? [] : [`evidence_digest=${parsed.evidence_digest}`]),
+  ];
+  return `${path}${values.length === 0 ? "" : `?${values.join("&")}`}`;
+}
+
+export const EvidenceArtifactsTargetSchema = z
+  .object({
+    problem_id: problemId,
+    evidence_id: evidenceId,
+  })
+  .strict();
+const EvidenceArtifactSourceSchema = EvidenceArtifactsTargetSchema.extend({
+  evidence_event_id: safeId,
+  evidence_digest: digest,
+}).strict();
+
+export const EvidenceArtifactDiscoverySchema = z
+  .object({
+    ...EvidenceArtifactSourceSchema.shape,
+    json_path: z.string().max(512),
+    markdown_path: z.string().max(512),
+    human_path: z.string().max(512),
+    temporal_scope: z.literal("current-publications"),
+    verification: z.literal("bytes-only"),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      !problemId.safeParse(value.problem_id).success ||
+      !evidenceId.safeParse(value.evidence_id).success ||
+      !digest.safeParse(value.evidence_digest).success
+    )
+      return;
+    const query = { evidence_digest: value.evidence_digest };
+    for (const [key, format] of [
+      ["json_path", "json"],
+      ["markdown_path", "md"],
+      ["human_path", "human"],
+    ] as const)
+      if (value[key] !== evidenceArtifactsPath(value.problem_id, value.evidence_id, format, query))
+        context.addIssue({
+          code: "custom",
+          path: [key],
+          message: "Discovery must pin this exact evidence source.",
+        });
+  });
+export type EvidenceArtifactDiscovery = z.infer<typeof EvidenceArtifactDiscoverySchema>;
+
+/** Server-authored read affordance only. It asserts neither that files exist
+ * nor that any file was available at the enclosing historical ledger cursor. */
+export function buildEvidenceArtifactDiscovery(input: {
+  readonly problem_id: string;
+  readonly evidence_id: string;
+  readonly evidence_event_id: string;
+  readonly evidence_digest: string;
+}): EvidenceArtifactDiscovery {
+  const query = { evidence_digest: input.evidence_digest };
+  return EvidenceArtifactDiscoverySchema.parse({
+    ...input,
+    json_path: evidenceArtifactsPath(input.problem_id, input.evidence_id, "json", query),
+    markdown_path: evidenceArtifactsPath(input.problem_id, input.evidence_id, "md", query),
+    human_path: evidenceArtifactsPath(input.problem_id, input.evidence_id, "human", query),
+    temporal_scope: "current-publications",
+    verification: "bytes-only",
+  });
+}
+
+/** Older ledger identifiers may lie outside the artifact gateway's namespace.
+ * Preserve those records without advertising a route that cannot serve them. */
+export function tryBuildEvidenceArtifactDiscovery(input: {
+  readonly problem_id: string;
+  readonly evidence_id: string;
+  readonly evidence_event_id: string;
+  readonly evidence_digest: string;
+}): EvidenceArtifactDiscovery | undefined {
+  const source = EvidenceArtifactSourceSchema.safeParse(input);
+  return source.success ? buildEvidenceArtifactDiscovery(source.data) : undefined;
+}
 
 /** Only this explicit consent shape may enqueue publication. Upload completion
  * is private and byte-only; it cannot imply a public license or evidence link. */
@@ -185,12 +297,18 @@ export const PublicArtifactManifestSchema = z
     published_at: positive,
     delivery_cursor: positive,
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) => value.artifact.download_url.endsWith(`/sha256/${value.artifact.sha256}`),
+    "The public download must name the declared artifact digest.",
+  );
 export const EvidenceArtifactsSchema = z
   .object({
     schema: z.literal(ARTIFACT_PUBLICATIONS_SCHEMA_ID),
     problem_id: problemId,
     evidence_id: evidenceId,
+    evidence_event_id: safeId,
+    evidence_digest: digest,
     after: cursor,
     through: cursor,
     artifacts: z.array(PublicArtifactManifestSchema).max(20),
@@ -198,11 +316,85 @@ export const EvidenceArtifactsSchema = z
     next_path: listPath.nullable(),
     poll_path: listPath,
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      !problemId.safeParse(value.problem_id).success ||
+      !evidenceId.safeParse(value.evidence_id).success ||
+      !digest.safeParse(value.evidence_digest).success ||
+      !cursor.safeParse(value.after).success ||
+      !cursor.safeParse(value.through).success ||
+      (value.next_after !== null && !positive.safeParse(value.next_after).success)
+    )
+      return;
+    let previous = value.after;
+    for (const artifact of value.artifacts) {
+      if (
+        artifact.problem_id !== value.problem_id ||
+        artifact.evidence.evidence_id !== value.evidence_id ||
+        artifact.evidence.event_id !== value.evidence_event_id ||
+        artifact.evidence.digest !== value.evidence_digest ||
+        artifact.delivery_cursor <= previous ||
+        artifact.delivery_cursor > value.through
+      )
+        context.addIssue({
+          code: "custom",
+          message: "Artifacts must belong to this evidence and ordered delivery window.",
+        });
+      previous = artifact.delivery_cursor;
+    }
+    const pin = { evidence_digest: value.evidence_digest };
+    if (
+      value.through < value.after ||
+      (value.next_after !== null &&
+        (value.next_after <= value.after ||
+          value.next_after < previous ||
+          value.next_after > value.through)) ||
+      value.next_path !==
+        (value.next_after === null
+          ? null
+          : evidenceArtifactsPath(value.problem_id, value.evidence_id, "json", {
+              after: String(value.next_after),
+              through: String(value.through),
+              ...pin,
+            })) ||
+      value.poll_path !==
+        evidenceArtifactsPath(value.problem_id, value.evidence_id, "json", {
+          after: String(value.through),
+          ...pin,
+        })
+    )
+      context.addIssue({
+        code: "custom",
+        message: "Continuation must preserve the evidence source and delivery window.",
+      });
+  });
 export type ArtifactPublicationReceipt = z.infer<typeof ArtifactPublicationReceiptSchema>;
 export type ArtifactPublicationStatus = z.infer<typeof ArtifactPublicationStatusSchema>;
 export type PublicArtifactManifest = z.infer<typeof PublicArtifactManifestSchema>;
 export type EvidenceArtifacts = z.infer<typeof EvidenceArtifactsSchema>;
+
+/** Consumers must check the response against their own requested scope before
+ * rendering a link or treating an empty page as a successful read. */
+export function evidenceArtifactsMatchesQuery(
+  face: unknown,
+  problem: string,
+  evidence: string,
+  query: EvidenceArtifactsQuery = {},
+): face is EvidenceArtifacts {
+  const parsed = EvidenceArtifactsSchema.safeParse(face);
+  const requested = EvidenceArtifactsQuerySchema.safeParse(query);
+  if (!parsed.success || !requested.success) return false;
+  return (
+    parsed.data.problem_id === problem &&
+    parsed.data.evidence_id === evidence &&
+    parsed.data.after === Number(requested.data.after ?? 0) &&
+    (requested.data.through === undefined ||
+      parsed.data.through === Number(requested.data.through)) &&
+    (requested.data.evidence_digest === undefined ||
+      parsed.data.evidence_digest === requested.data.evidence_digest)
+  );
+}
 
 export function generateArtifactPublicationsSchema(): string {
   return `${JSON.stringify({
@@ -220,6 +412,8 @@ export function generateArtifactPublicationsSchema(): string {
           status: ArtifactPublicationStatusSchema,
           manifest: PublicArtifactManifestSchema,
           evidence_artifacts: EvidenceArtifactsSchema,
+          evidence_artifacts_query: EvidenceArtifactsQuerySchema,
+          evidence_artifact_discovery: EvidenceArtifactDiscoverySchema,
         })
         .strict(),
     ),

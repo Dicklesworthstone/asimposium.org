@@ -9,6 +9,10 @@
  * bodies, an untrusted body cannot forge an item boundary.
  */
 
+import {
+  CLAIM_ARTIFACT_DISCOVERY_BOUNDARY,
+  claimEvidenceArtifactDiscovery,
+} from "../artifact-publications.ts";
 import { stableStringify } from "../canonical.ts";
 import type { PreparedItem, PreparedProjection } from "../prepare.ts";
 import { fenceFor, neutralizeUntrustedBody } from "../sanitize.ts";
@@ -23,7 +27,7 @@ function controlComment(tag: string, fields: readonly Field[]): string {
   return pairs === "" ? `<!-- ${name} -->` : `<!-- ${name} ${pairs} -->`;
 }
 
-function renderItem(item: PreparedItem): string[] {
+function renderItem(item: PreparedItem, problem: string): string[] {
   const lines: string[] = [];
   const metadata: Field[] = [
     ["id", item.id],
@@ -58,6 +62,13 @@ function renderItem(item: PreparedItem): string[] {
     // System items are the instruction channel and are server-authored, so they
     // render as markdown rather than as quarantined text.
     lines.push(item.body);
+  }
+  const artifacts = claimEvidenceArtifactDiscovery(problem, item);
+  if (artifacts !== undefined) {
+    lines.push(
+      "",
+      `[Inspect current public files for this exact evidence](${artifacts.markdown_path})`,
+    );
   }
   lines.push("");
   lines.push(controlComment("item-end", [["id", item.id]]));
@@ -151,11 +162,17 @@ export function renderMarkdownFace(prepared: PreparedProjection): string {
 
   lines.push("## Items");
   lines.push("");
+  if (
+    prepared.items.some(
+      (item) => claimEvidenceArtifactDiscovery(prepared.problem, item) !== undefined,
+    )
+  )
+    lines.push(CLAIM_ARTIFACT_DISCOVERY_BOUNDARY, "");
   if (prepared.items.length === 0) {
     lines.push("_none_");
     lines.push("");
   } else {
-    for (const item of prepared.items) lines.push(...renderItem(item));
+    for (const item of prepared.items) lines.push(...renderItem(item, prepared.problem));
   }
 
   lines.push(controlComment("trailer", trailerFields(prepared)));

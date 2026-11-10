@@ -4,7 +4,7 @@ import {
   EnrollmentSecretSchema,
   ProblemDocumentSchema,
 } from "@asimposium/contracts";
-import { scanBodyForSecrets } from "../../src/krater/cas";
+import { bodyLooksSecretShaped, scanBodyForSecrets } from "../../src/krater/cas";
 
 import {
   scanFieldForCredentials,
@@ -232,4 +232,209 @@ test("the response boundary redacts unsafe supplied locations and benign JSON re
       }),
     ),
   ).toEqual([]);
+});
+
+test("credential-labelled assignments catch prefixed names and weak literal values", async () => {
+  for (const [assignment, kind] of [
+    ["DB_PASSWORD=synthetic-db-secret", "access-token"],
+    ["export GITHUB_TOKEN='synthetic-github-secret'", "access-token"],
+    ['STRIPE_SECRET="synthetic-stripe-secret"', "access-token"],
+    ["MY_API_KEY=synthetic-api-secret", "api-key"],
+    ["service_apiKey = 'synthetic-api-secret'", "api-key"],
+    ["password=x", "access-token"],
+    ["PASSWORD=0", "access-token"],
+    ["CLIENT_SECRET=changeme", "access-token"],
+    ["REFRESH_TOKEN=test", "access-token"],
+    ["DB_PASSWORD=p(a)[s]s", "access-token"],
+    ["AWS_SECRET_ACCESS_KEY=synthetic-aws-secret", "api-key"],
+    ['const config={DB_PASSWORD:"synthetic-nested-secret"};', "access-token"],
+    ['const config="DB_PASSWORD=synthetic-nested-secret";', "access-token"],
+    ["PASSWORD=${TOKEN}synthetic-suffix", "access-token"],
+    ['PASSWORD=""synthetic-suffix', "access-token"],
+    ['PASSWORD="<redacted>"+"synthetic-suffix"', "access-token"],
+    ['PASSWORD=process.env.PASSWORD || "synthetic-fallback"', "access-token"],
+    ["DB_PASSWORD=#synthetic-password", "access-token"],
+    ['"db_password": "synthetic-json-secret"', "access-token"],
+    ['password: "synthetic-yaml-secret"', "access-token"],
+    [String.raw`MY_API_KEY="synthetic\"quoted-secret"`, "api-key"],
+  ] as const) {
+    const findings = scanTextForCredentials("body_md", assignment);
+    expect(findings.map((finding) => finding.kind)).toEqual([kind]);
+    expect(scanBodyForSecrets(assignment).some((finding) => finding.kind === kind)).toBe(true);
+    expect(bodyLooksSecretShaped(assignment)).toBe(true);
+    const refusal = await secretShapedContentProblem(findings).text();
+    expect(ProblemDocumentSchema.safeParse(JSON.parse(refusal)).success).toBe(true);
+    expect(refusal).not.toContain("synthetic");
+  }
+});
+
+test("assignment findings retain Unicode columns, repeated lines and specific token kinds", () => {
+  const text = '𝔽 DB_PASSWORD="synthetic-one"\nDB_PASSWORD=synthetic-two';
+  expect(scanTextForCredentials("body_md", text)).toEqual([
+    { path: "body_md", kind: "access-token", line: 1, column: 16 },
+    { path: "body_md", kind: "access-token", line: 2, column: 13 },
+  ]);
+  expect(scanBodyForSecrets(text)).toEqual([
+    { kind: "access-token", line: 1, column: 16 },
+    { kind: "access-token", line: 2, column: 13 },
+  ]);
+  expect(scanTextForCredentials("body_md", `API_KEY=${AWS}`)).toEqual([
+    { path: "body_md", kind: "api-key", line: 1, column: 9 },
+  ]);
+  expect(scanTextForCredentials("body_md", "PASSWORD=<redacted> API_KEY=synthetic-value")).toEqual([
+    { path: "body_md", kind: "api-key", line: 1, column: 29 },
+  ]);
+});
+
+test("benign code, scientific identifiers, source references and explicit placeholders pass", () => {
+  for (const text of [
+    "let token_count = 42; let password_length = 16;",
+    'const secreted = "ordinary biological result";',
+    "const key = 'lemma-1';",
+    "token: String",
+    "api_key: Option<String>",
+    "For every token, token_count = n.",
+    "const token = nextToken(input);",
+    "let secret = p*q;",
+    "secret = p * q",
+    'token = request.headers.get("authorization");',
+    "token == expected_token",
+    "token === expected_token",
+    "const password = await fetchSecret();",
+    "password = input.password",
+    "DB_PASSWORD=process.env.DB_PASSWORD",
+    'DB_PASSWORD=process.env["DB_PASSWORD"]',
+    'DB_PASSWORD=os.environ[ "DB_PASSWORD" ]',
+    'DB_PASSWORD=getenv( "DB_PASSWORD" )',
+    'DB_PASSWORD=os.getenv("DB_PASSWORD")',
+    "DB_PASSWORD=${DB_PASSWORD}",
+    "DB_PASSWORD=$DB_PASSWORD",
+    "DB_PASSWORD=%DB_PASSWORD%",
+    "DB_PASSWORD={{ DB_PASSWORD }}",
+    "DB_PASSWORD=<your_password>",
+    "DB_PASSWORD=[REDACTED]",
+    'DB_PASSWORD="<redacted>"',
+    'DB_PASSWORD=""',
+    "DB_PASSWORD=xxxxxx",
+    "DB_PASSWORD=********",
+    "DB_PASSWORD=...",
+    'MY_API_KEY="${MY_API_KEY}"',
+  ]) {
+    expect(scanTextForCredentials("body_md", text)).toEqual([]);
+    expect(scanBodyForSecrets(text)).toEqual([]);
+    expect(bodyLooksSecretShaped(text)).toBe(false);
+  }
+});
+
+test("password-bearing connection URIs are detected including encoded and empty-user forms", async () => {
+  for (const uri of [
+    "postgresql://reader:synthetic-db-password@db.example.invalid/research",
+    "redis://:synthetic-cache-password@cache.example.invalid:6379/0",
+    "mongodb+srv://reader:synthetic%40encoded%3Apassword@db.example.invalid/research",
+    "https://reader:x@service.example.invalid/",
+    "amqps://reader:synthetic%ZZpassword@queue.example.invalid/",
+    "postgres://reader:[redacted]@actual@db.example.invalid/research",
+    "postgres://reader:%3Credacted%3E%40actual@db.example.invalid/research",
+  ]) {
+    const findings = scanTextForCredentials("body_md", `𝔽 ${uri}`);
+    expect(findings.map((finding) => finding.kind)).toEqual(["access-token"]);
+    expect(bodyLooksSecretShaped(uri)).toBe(true);
+    expect(scanBodyForSecrets(uri).some((finding) => finding.kind === "access-token")).toBe(true);
+    const response = await secretShapedContentProblem(findings).text();
+    expect(response).not.toContain("synthetic");
+    expect(response).not.toContain(uri);
+    expect(ProblemDocumentSchema.safeParse(JSON.parse(response)).success).toBe(true);
+  }
+  for (const uri of [
+    "https://service.example.invalid/paper",
+    "https://reader@service.example.invalid/paper",
+    "postgresql://reader:@db.example.invalid/research",
+    "postgresql://reader:<password>@db.invalid/research",
+    "postgresql://reader:%3Credacted%3E@db.invalid/research",
+    "redis://:${REDIS_PASSWORD}@cache.invalid/0",
+  ]) {
+    expect(scanTextForCredentials("body_md", uri)).toEqual([]);
+  }
+});
+
+test("decoded JSON credential fields cannot hide behind escaped or duplicate keys", async () => {
+  const cases = [
+    ['{"DB_PASSWORD":"synthetic-json-value"}', "DB_PASSWORD", "access-token"],
+    ['{"connection":{"my_api_key":"synthetic-json-value"}}', "connection.my_api_key", "api-key"],
+    ['{"PASSWORD":0}', "PASSWORD", "access-token"],
+    [
+      `{"${escaped("DB_PASSWORD")}":"${escaped("synthetic-json-value")}"}`,
+      "DB_PASSWORD",
+      "access-token",
+    ],
+    [
+      '{"DB_PASSWORD":"synthetic-json-value","DB_PASSWORD":"<redacted>"}',
+      "DB_PASSWORD",
+      "access-token",
+    ],
+  ] as const;
+  for (const [text, path, kind] of cases) {
+    const findings = scanFieldForCredentials("request", text);
+    expect(findings).toEqual([{ path, kind, line: 1, column: 1 }]);
+    expect(JSON.stringify(findings)).not.toContain("synthetic-json-value");
+    const response = await secretShapedContentProblem(findings).text();
+    expect(response).not.toContain("synthetic-json-value");
+    expect(ProblemDocumentSchema.safeParse(JSON.parse(response)).success).toBe(true);
+  }
+  const source = '{"db_password":"synthetic-json-value","db_password":"<redacted>"}';
+  expect(scanFieldForCredentials("request", JSON.stringify({ body_md: source }))).toEqual([
+    { path: "body_md", kind: "access-token", line: 1, column: 17 },
+    { path: "body_md.db_password", kind: "access-token", line: 1, column: 1 },
+  ]);
+  expect(
+    scanFieldForCredentials(
+      "request",
+      JSON.stringify({ password: "<redacted>", token_count: 123 }),
+    ),
+  ).toEqual([]);
+});
+
+test("generic credentials in hostile diagnostic keys are not echoed", async () => {
+  const hostileKey = "DB_PASSWORD=synthetic-key-value";
+  const findings = scanFieldForCredentials(
+    "request",
+    JSON.stringify({ [hostileKey]: { password: "synthetic-value" } }),
+  );
+  expect(findings.map((finding) => finding.path)).toEqual(["[key:0]", "[entry:0].password"]);
+  const response = await secretShapedContentProblem(findings).text();
+  expect(response).not.toContain("synthetic");
+  const supplied = await secretShapedContentProblem([
+    { path: hostileKey, kind: "access-token", line: 1, column: 1 },
+  ]).text();
+  expect(JSON.parse(supplied).secret_findings[0].path).toBe("[redacted-field]");
+  expect(supplied).not.toContain("synthetic");
+});
+
+test("JSON artifacts share decoded credential detection and source-token locations", () => {
+  for (const body of [
+    String.raw`{"DB_PASS\u0057ORD":"synthetic-artifact-password"}`,
+    String.raw`{"DB_PASSWORD":"\u0073ynthetic-artifact-password"}`,
+    '{\n  "DB_PASSWORD"\n  :\n  "synthetic-artifact-password"\n}',
+    '{"DB_PASSWORD":\n1234}',
+    JSON.stringify({ source: String.raw`{"DB_PASS\u0057ORD":"synthetic-artifact-password"}` }),
+    String.raw`{"connection":"postgres:\/\/reader:synthetic-artifact-password@db.invalid/research"}`,
+    String.raw`"postgres:\/\/reader:synthetic-artifact-password@db.invalid/research"`,
+  ]) {
+    expect(scanFieldForCredentials("request", body).length).toBeGreaterThan(0);
+    expect(bodyLooksSecretShaped(body)).toBe(true);
+    expect(scanBodyForSecrets(body).some((finding) => finding.kind === "access-token")).toBe(true);
+    expect(JSON.stringify(scanBodyForSecrets(body))).not.toContain("synthetic");
+  }
+  expect(scanBodyForSecrets('{\n  "DB_PASSWORD"\n  :\n  "synthetic-artifact-password"\n}')).toEqual(
+    [{ kind: "access-token", line: 4, column: 4 }],
+  );
+  for (const body of [
+    String.raw`{"DB_PASS\u0057ORD":"<redacted>"}`,
+    '{\n "DB_PASSWORD": "${DB_PASSWORD}"\n}',
+    String.raw`{"connection":"postgres:\/\/reader:%3Credacted%3E@db/research"}`,
+    '{"token_count":1234,"password_length":20}',
+  ]) {
+    expect(bodyLooksSecretShaped(body)).toBe(false);
+    expect(scanBodyForSecrets(body)).toEqual([]);
+  }
 });

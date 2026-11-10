@@ -321,13 +321,11 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
       sqlite.close();
     });
 
-    test("record-dead-end provides structured retry_when guidance", async () => {
+    test("record-dead-end cannot invent a negative route without source records", async () => {
       const sqlite = new Database(":memory:");
       const db = createMockDb(sqlite);
       const res = await selectRecordDeadEndMove(db, "P-1", 10);
-      expect(res.move).not.toBeNull();
-      expect(res.move?.move).toBe("record-dead-end");
-      expect(res.move?.why).toContain("An honest null is success");
+      expect(res).toEqual({ move: null, degraded: true });
       sqlite.close();
     });
   });

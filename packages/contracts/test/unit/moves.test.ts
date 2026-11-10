@@ -54,6 +54,16 @@ describe("Move Templates registry", () => {
     expect(() => getMoveTemplate("nonexistent" as never)).toThrow("UNKNOWN_MOVE_KIND");
   });
 
+  test("dead-end guidance leaves scientific findings to the Fellow", () => {
+    const template = getMoveTemplate("record-dead-end");
+    expect(template.availability).toBe("available");
+    if (template.availability !== "available") throw new Error("dead-end route unavailable");
+    expect(template.prefilled_hints).toEqual({});
+    expect(template.required_fields).toEqual(["approach", "why_it_fails", "retry_predicate"]);
+    expect(template.description).toContain("repeated assertions alone establish no failure");
+    expect(generateMoveTemplatesDocument().moves["record-dead-end"]).toEqual(template);
+  });
+
   test("all templates preserve their identity and disclose request availability", () => {
     expect(MOVE_TEMPLATES["re-anchor"].availability).toBe("available");
     expect(MOVE_TEMPLATES.discriminate.availability).toBe("available");

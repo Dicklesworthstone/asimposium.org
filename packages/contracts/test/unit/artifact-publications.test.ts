@@ -8,9 +8,15 @@ import {
   ArtifactPublicationRetryReceiptSchema,
   ArtifactPublicationRetryRequestSchema,
   ArtifactPublicationStatusSchema,
+  buildEvidenceArtifactDiscovery,
+  EvidenceArtifactDiscoverySchema,
+  EvidenceArtifactsQuerySchema,
   EvidenceArtifactsSchema,
+  evidenceArtifactsMatchesQuery,
+  evidenceArtifactsPath,
   generateArtifactPublicationsSchema,
   PublicArtifactManifestSchema,
+  tryBuildEvidenceArtifactDiscovery,
 } from "../../src/artifact-publications.ts";
 
 const id = `AP-${"a".repeat(32)}`,
@@ -346,12 +352,14 @@ test("bounded evidence pages carry delivery cutoffs and canonical continuation p
     schema: ARTIFACT_PUBLICATIONS_SCHEMA_ID,
     problem_id: "P-DEMO",
     evidence_id: "E-1",
+    evidence_event_id: manifest.evidence.event_id,
+    evidence_digest: digest,
     after: 0,
     through: 3,
     artifacts: [manifest],
     next_after: null,
     next_path: null,
-    poll_path: `${path}?after=3`,
+    poll_path: `${path}?after=3&evidence_digest=${digest}`,
   };
   assert.deepEqual(EvidenceArtifactsSchema.parse(page), page);
   for (const change of [
@@ -360,8 +368,108 @@ test("bounded evidence pages carry delivery cutoffs and canonical continuation p
     { through: 1.5 },
     { poll_path: "https://evil.test" },
     { next_path: `${path}?token=secret` },
+    { evidence_event_id: "other-event" },
+    { evidence_digest: `sha256:${"c".repeat(64)}` },
+    { problem_id: "P-OTHER" },
+    { through: 2 },
+    { after: 3 },
+    { next_after: 2, next_path: `${path}?after=2&through=3&evidence_digest=${digest}` },
+    { artifacts: [manifest, manifest] },
   ])
     assert.equal(EvidenceArtifactsSchema.safeParse({ ...page, ...change }).success, false);
+  assert.equal(
+    evidenceArtifactsMatchesQuery(page, "P-DEMO", "E-1", { evidence_digest: digest }),
+    true,
+  );
+  assert.equal(evidenceArtifactsMatchesQuery(page, "P-OTHER", "E-1"), false);
+  assert.equal(evidenceArtifactsMatchesQuery(page, "P-DEMO", "E-2"), false);
+  assert.equal(evidenceArtifactsMatchesQuery(page, "P-DEMO", "E-1", { after: "1" }), false);
+  assert.equal(evidenceArtifactsMatchesQuery(page, "P-DEMO", "E-1", { through: "4" }), false);
+  assert.equal(
+    evidenceArtifactsMatchesQuery(page, "P-DEMO", "E-1", {
+      evidence_digest: `sha256:${"c".repeat(64)}`,
+    }),
+    false,
+  );
+});
+test("discovery links bind one evidence publication without asserting available files", () => {
+  const input = {
+    problem_id: "P-DEMO",
+    evidence_id: "E-1",
+    evidence_event_id: "event-evidence",
+    evidence_digest: digest,
+  };
+  const discovery = buildEvidenceArtifactDiscovery(input);
+  assert.deepEqual(EvidenceArtifactDiscoverySchema.parse(discovery), discovery);
+  assert.equal(discovery.temporal_scope, "current-publications");
+  assert.equal(discovery.verification, "bytes-only");
+  for (const [key, format] of [
+    ["json_path", "json"],
+    ["markdown_path", "md"],
+    ["human_path", "human"],
+  ] as const) {
+    assert.equal(
+      discovery[key],
+      evidenceArtifactsPath("P-DEMO", "E-1", format, { evidence_digest: digest }),
+    );
+    for (const path of [
+      "https://evil.example/files",
+      "/p/P-OTHER/evidence/E-1/artifacts.json",
+      `${discovery[key]}&token=secret`,
+    ]) {
+      assert.equal(
+        EvidenceArtifactDiscoverySchema.safeParse({ ...discovery, [key]: path }).success,
+        false,
+      );
+    }
+  }
+  assert.equal(
+    EvidenceArtifactDiscoverySchema.safeParse({
+      ...discovery,
+      verification: "scientifically-verified",
+    }).success,
+    false,
+  );
+  assert.equal(
+    EvidenceArtifactDiscoverySchema.safeParse({ ...discovery, available: true }).success,
+    false,
+  );
+  for (const problem_id of ["legacy.problem", "P-A", "P--DEMO", "../secret"]) {
+    assert.equal(tryBuildEvidenceArtifactDiscovery({ ...input, problem_id }), undefined);
+    assert.equal(
+      EvidenceArtifactDiscoverySchema.safeParse({ ...discovery, problem_id }).success,
+      false,
+    );
+  }
+});
+test("artifact queries reject alternate cursor spelling, out-of-range numbers and private authority", () => {
+  assert.deepEqual(
+    EvidenceArtifactsQuerySchema.parse({ after: "0", through: "5", evidence_digest: digest }),
+    { after: "0", through: "5", evidence_digest: digest },
+  );
+  for (const query of [
+    { after: "-1" },
+    { after: "01" },
+    { after: "1.0" },
+    { after: "1e2" },
+    { after: "2\n" },
+    { after: "9007199254740992" },
+    { after: "5", through: "4" },
+    { evidence_digest: hash },
+    { evidence_digest: `sha256:${"A".repeat(64)}` },
+    { token: "secret" },
+  ])
+    assert.equal(EvidenceArtifactsQuerySchema.safeParse(query).success, false);
+  assert.equal(
+    PublicArtifactManifestSchema.safeParse({
+      ...manifest,
+      artifact: {
+        ...manifest.artifact,
+        download_url: `https://artifacts.asimposium.org/sha256/${"c".repeat(64)}`,
+      },
+    }).success,
+    false,
+  );
 });
 test("the generated public schema comes from the same strict runtime contracts", () => {
   const first = generateArtifactPublicationsSchema();
@@ -370,7 +478,9 @@ test("the generated public schema comes from the same strict runtime contracts",
   assert.equal(schema.$id, ARTIFACT_PUBLICATIONS_SCHEMA_ID);
   assert.equal(schema.additionalProperties, false);
   assert.deepEqual(Object.keys(schema.properties).sort(), [
+    "evidence_artifact_discovery",
     "evidence_artifacts",
+    "evidence_artifacts_query",
     "manifest",
     "receipt",
     "request",

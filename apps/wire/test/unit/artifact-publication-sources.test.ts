@@ -1,8 +1,10 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { EvidenceArtifactsSchema } from "@asimposium/contracts/artifact-publications";
 import { deliverArtifactPublication } from "../../src/krater/artifact-publication-outbox.ts";
 import {
   readEvidenceArtifacts,
+  readEvidenceArtifactsWithMetadata,
   readPublicArtifactManifest,
 } from "../../src/krater/artifact-publication-read.ts";
 import {
@@ -43,6 +45,119 @@ async function noRelease(f: Awaited<ReturnType<typeof queue>>, screens: number) 
 }
 
 for (const kind of ["claim", "hypothesis"] as const) {
+  test(`${kind} file discovery pins its exact evidence source and applies current withdrawal`, async () => {
+    const f = await queue(kind);
+    const before = EvidenceArtifactsSchema.parse(
+      await readEvidenceArtifacts(
+        f.db,
+        f.options.artifactOrigin,
+        f.problem,
+        "E-1",
+        0,
+        undefined,
+        f.input.evidence_digest,
+      ),
+    );
+    assert.deepEqual(before.artifacts, []);
+    assert.equal(before.evidence_event_id, "EV-1");
+    assert.equal(before.evidence_digest, f.input.evidence_digest);
+    assert.equal(
+      (await readEvidenceArtifactsWithMetadata(f.db, f.options.artifactOrigin, f.problem, "E-1"))
+        .unlisted,
+      false,
+    );
+    f.sql.exec("UPDATE problems SET unlisted=1");
+    const emptyUnlisted = await readEvidenceArtifactsWithMetadata(
+      f.db,
+      f.options.artifactOrigin,
+      f.problem,
+      "E-1",
+    );
+    assert.equal(emptyUnlisted.unlisted, true);
+    assert.deepEqual(emptyUnlisted.face, before);
+    assert.equal(await deliverArtifactPublication(f.drainer, f.id), "published");
+    const delivered = EvidenceArtifactsSchema.parse(
+      await readEvidenceArtifacts(
+        f.db,
+        f.options.artifactOrigin,
+        f.problem,
+        "E-1",
+        0,
+        undefined,
+        f.input.evidence_digest,
+      ),
+    );
+    assert.equal(delivered.artifacts[0]?.publication_id, f.id);
+    assert.equal(
+      (await readPublicArtifactManifest(f.db, f.options.artifactOrigin, f.problem, f.id)).unlisted,
+      true,
+    );
+    assert.equal(
+      (await readEvidenceArtifactsWithMetadata(f.db, f.options.artifactOrigin, f.problem, "E-1"))
+        .unlisted,
+      true,
+    );
+    f.sql.exec("UPDATE problems SET unlisted=0");
+    const relisted = await readEvidenceArtifactsWithMetadata(
+      f.db,
+      f.options.artifactOrigin,
+      f.problem,
+      "E-1",
+    );
+    assert.equal(relisted.unlisted, false);
+    assert.deepEqual(relisted.face, delivered);
+    assert.ok(delivered.poll_path.endsWith(`&evidence_digest=${f.input.evidence_digest}`));
+    await assert.rejects(
+      readEvidenceArtifacts(
+        f.db,
+        f.options.artifactOrigin,
+        f.problem,
+        "E-1",
+        0,
+        undefined,
+        `sha256:${"f".repeat(64)}`,
+      ),
+      notFound,
+    );
+    await assert.rejects(
+      readEvidenceArtifacts(
+        f.db,
+        f.options.artifactOrigin,
+        "P-OTHER",
+        "E-1",
+        0,
+        undefined,
+        f.input.evidence_digest,
+      ),
+      notFound,
+    );
+    await assert.rejects(
+      readEvidenceArtifacts(
+        f.db,
+        f.options.artifactOrigin,
+        f.problem,
+        "E-2",
+        0,
+        undefined,
+        f.input.evidence_digest,
+      ),
+      notFound,
+    );
+    f.sql.exec("INSERT INTO scientific_withdrawals VALUES('EV-1')");
+    await assert.rejects(
+      readEvidenceArtifacts(
+        f.db,
+        f.options.artifactOrigin,
+        f.problem,
+        "E-1",
+        0,
+        delivered.through,
+        f.input.evidence_digest,
+      ),
+      notFound,
+    );
+    assert.equal(f.publicStore.writes(), 1);
+  });
   for (const source of [
     "problem",
     "evidence",

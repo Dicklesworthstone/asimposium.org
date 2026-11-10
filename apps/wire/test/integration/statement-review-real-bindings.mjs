@@ -6,8 +6,14 @@ import {
   ProblemNextResponseSchema,
   ProblemStatementReviewEventSchema,
   ScreeningPromotionDeniedResponseSchema,
+  ScreeningPublicationProvenanceSchema,
   TriageResponseSchema,
 } from "@asimposium/contracts";
+import { EventTailResponseSchema } from "@asimposium/contracts/event-tail";
+import {
+  parsePublicProblemExport,
+  verifyPublicProblemExportChain,
+} from "../../src/krater/export.ts";
 import {
   ProjectionRepairRefusedError,
   projectionDoctorReport,
@@ -134,6 +140,7 @@ await runLocalWorkerJourney(
     const unclearEtag = (await publicGet()).headers.get("etag");
     const clearReviewer = await reviewer();
     const preClear = await state();
+    await fixtures.setScreenMode("allow-with-warning");
     const response = await worker.fetch(`${origin}${route}`, {
       method: "POST",
       headers: {
@@ -144,6 +151,7 @@ await runLocalWorkerJourney(
       },
       body: JSON.stringify(body(clearReviewer)),
     });
+    await fixtures.setScreenMode("pass");
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("cache-control"), "private, no-store");
     const exact = await response.text();
@@ -179,6 +187,19 @@ await runLocalWorkerJourney(
     assert.equal(publicFace.cursor, postClear.problem[0].public_seq);
     const reviews = publicFace.items.filter((item) => item.kind === "statement-review");
     assert.equal(reviews.length, 2);
+    const warningNotice = {
+      category: "dual-use-boundary",
+      action: "published-with-warning",
+      notice: "screening-warning",
+    };
+    assert.equal(reviews[0].screening_notice, undefined);
+    assert.deepEqual(reviews[1].screening_notice, warningNotice);
+    assert.ok(
+      publicFace.items
+        .filter((item) => item.kind !== "statement-review")
+        .every((item) => item.screening_notice === undefined),
+      "The review's warning cannot qualify the problem formulation or another publication",
+    );
     assert.ok(reviews.every((item) => item.why_included === "review of current statement S@1"));
     assert.deepEqual(JSON.parse(reviews[1].body), {
       problem: id,
@@ -199,8 +220,61 @@ await runLocalWorkerJourney(
     const mdResponse = await publicGet("md");
     const mdEtag = mdResponse.headers.get("etag");
     const markdown = await mdResponse.text();
+    assert.ok(markdown.includes("screening context notice: dual-use-boundary"));
     for (const item of reviews)
       assert.ok(markdown.includes(item.body), "Markdown has the same verified body as JSON");
+    const full = PackResponseSchema.parse(
+      await call(
+        `/v1/sessions/${clearReviewer.session}/pack?profile=full&max_tokens=8000&through=${event.seq}&after=${event.seq - 1}`,
+        undefined,
+        clearReviewer.token,
+      ),
+    );
+    const fullReview = full.items.find((item) => item.id === `FULL-${event.seq}`);
+    assert.deepEqual(fullReview?.screening_notice, warningNotice);
+    assert.deepEqual(JSON.parse(fullReview.body).publication.screening_notice, warningNotice);
+    const tail = EventTailResponseSchema.parse(
+      await call(`/p/${id}/events.json?since=${event.seq - 1}&through=${event.seq}`),
+    );
+    assert.deepEqual(tail.events[0].event.screening_notice, warningNotice);
+    const feed = await call(`/p/${id}/feed.json`);
+    assert.deepEqual(
+      feed.items.find((item) => item.id.endsWith(`:event:${event.id}`))._screening_notice,
+      warningNotice,
+    );
+    for (const path of [
+      `/p/${id}/full.md?through=${event.seq}&after=${event.seq - 1}`,
+      `/p/${id}/events.md?since=${event.seq - 1}&through=${event.seq}`,
+      `/p/${id}/feed.atom`,
+      `/p/${id}/feed.rss`,
+    ]) {
+      const response = await worker.fetch(`${origin}${path}`, {
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(response.status, 200);
+      const bytes = await response.text();
+      assert.ok(bytes.includes("screening context notice: dual-use-boundary"), path);
+      assert.ok(!bytes.includes("evaluated_context_digest"), path);
+      assert.ok(!bytes.includes("decision_path"), path);
+    }
+    const download = await worker.fetch(`${origin}/p/${id}/export.jsonl.gz`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(download.status, 200);
+    const archive = await new Response(
+      download.body.pipeThrough(new DecompressionStream("gzip")),
+    ).text();
+    assert.equal((await verifyPublicProblemExportChain(archive)).intact, true);
+    const exported = parsePublicProblemExport(archive);
+    assert.equal(exported.ok, true);
+    assert.deepEqual(exported.publicationContext.notices, [
+      {
+        event_id: event.id,
+        seq: event.seq,
+        payload_sha256: event.payload_sha256,
+        screening_notice: warningNotice,
+      },
+    ]);
     for (const [suffix, etag] of [
       ["json", publicEtag],
       ["md", mdEtag],
@@ -296,7 +370,12 @@ await runLocalWorkerJourney(
       .bind(event.id)
       .first();
     assert.ok(provenance);
-    assert.equal(JSON.parse(provenance.provenance_json).principal, "platform:symposiarch");
+    const receipt = ScreeningPublicationProvenanceSchema.parse(
+      JSON.parse(provenance.provenance_json),
+    );
+    assert.equal(receipt.principal, "platform:symposiarch");
+    assert.equal(receipt.outcome, "allow-with-warning");
+    assert.deepEqual(receipt.public_action, warningNotice);
     await fixtures.setScreenMode("reject");
     const rejected = await call(route, body(fresh), fresh.token, 403, "rejected-review");
     assert.ok(ScreeningPromotionDeniedResponseSchema.safeParse(rejected).success);
@@ -323,6 +402,11 @@ await runLocalWorkerJourney(
     assert.deepEqual(
       earlier.map((item) => item.body),
       reviews.map((item) => item.body),
+    );
+    assert.deepEqual(
+      earlier.map((item) => item.screening_notice),
+      [undefined, warningNotice],
+      "A later formulation cannot replace or erase a review's original screening notice",
     );
     await call(
       `/v1/sessions/${clearReviewer.session}/close`,
@@ -663,6 +747,8 @@ await runLocalWorkerJourney(
         const bytes = await response.text();
         assert.ok(!bytes.includes(event.id));
         assert.ok(bytes.includes("statement_review_content_unavailable"));
+        assert.ok(!bytes.includes("screening-warning"));
+        assert.ok(!bytes.includes("screening context notice: dual-use-boundary"));
         if (suffix === "json") {
           const face = ProblemFaceResponseSchema.parse(JSON.parse(bytes));
           assert.equal(face.cursor, terminal.problem[0].public_seq);
@@ -694,6 +780,7 @@ await runLocalWorkerJourney(
     assert.equal(withdrawn.status, 200);
     const withdrawnFace = ProblemFaceResponseSchema.parse(await withdrawn.json());
     assert.ok(!withdrawnFace.items.some((item) => item.id === `SR-${event.seq}`));
+    assert.ok(withdrawnFace.items.every((item) => item.screening_notice === undefined));
     assert.ok(
       withdrawnFace.omitted.some((item) => item.reason === "statement_review_content_unavailable"),
     );

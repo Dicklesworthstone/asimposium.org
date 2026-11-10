@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { ClaimFaceResponseSchema } from "@asimposium/contracts";
+import { type Projection, renderAllFaces } from "@asimposium/render";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import {
   loadReviewQueue,
@@ -503,6 +504,29 @@ async function scientificEvidence(
   return { event, id };
 }
 
+test("claim evidence discovery preserves exact publication provenance and omits withdrawn or unsupported sources", async () => {
+  const f = fixture();
+  await f.add(1);
+  const source = await scientificEvidence(f, 2, "C-1", "computation", {}, "E-2");
+  const body = bodies(await f.pack("C-1@1", 2), "claim-evidence")[0];
+  expect(body.event).toBe(source.event);
+  expect(body.artifact_discovery).toBe(
+    `/p/P-PACK/evidence/E-2/artifacts.json?evidence_digest=${body.content_digest}`,
+  );
+  await withdrawInput(f, source, 3);
+  expect(bodies(await f.pack("C-1@1", 3), "claim-evidence")[0].artifact_discovery).toBeUndefined();
+  // The historical record keeps a current-state discovery affordance; its file
+  // endpoint still applies the withdrawal, never historical byte availability.
+  expect(bodies(await f.pack("C-1@1", 2), "claim-evidence")[0].artifact_discovery).toEqual(
+    body.artifact_discovery,
+  );
+  await scientificEvidence(f, 4, "C-1");
+  expect(
+    bodies(await f.pack("C-1@1", 4), "claim-evidence").find((item) => item.event === "EV-SCI-4")
+      ?.artifact_discovery,
+  ).toBeUndefined();
+});
+
 async function scientificReview(
   f: ReturnType<typeof fixture>,
   seq: number,
@@ -779,12 +803,53 @@ async function focusedClaimHistory() {
   return { ...f, app, read, review, evidence };
 }
 
-test("exact public item URLs read the twenty-first record without narrowing standing or ordinary windows", async () => {
+test("exact public item URLs read the twenty-first record while ordinary faces retain the largest bounded record prefix and complete standing", async () => {
   const f = await focusedClaimHistory();
   const ordinaryResponse = await f.read("claims/C-1@1.json");
   expect(ordinaryResponse.status).toBe(200);
   const ordinary = ClaimFaceResponseSchema.parse(await ordinaryResponse.json());
-  expect(ordinary.items.filter((item) => item.kind === "claim-review")).toHaveLength(20);
+  const source = await readPublicClaimSnapshot(f.d1, "P-PACK", ordinary.cursor, "C-1", 1);
+  const allItems = source.section.candidates
+    .filter((item) => item.scope === "ledger")
+    .map((item) => ({
+      kind: item.kind,
+      id: item.id,
+      scope: "ledger" as const,
+      untrusted: true,
+      body: item.body,
+      why_included: item.why_included,
+      ...(item.screening_notice === undefined ? {} : { screening_notice: item.screening_notice }),
+    }));
+  const projection: Projection = {
+    ...ordinary,
+    items: allItems,
+    omitted: ordinary.omitted.map(({ reason, detail }) => ({
+      reason,
+      ...(detail === undefined ? {} : { detail }),
+    })),
+  };
+  const largestFace = (value: Projection) =>
+    Math.max(...Object.values(renderAllFaces(value)).map((face) => face.bytes));
+  const completeBytes = largestFace({
+    ...projection,
+    omitted: projection.omitted.filter((entry) => entry.reason !== "budget_exceeded"),
+  });
+  expect(largestFace({ ...projection, items: ordinary.items })).toBeLessThanOrEqual(64_000);
+  expect(ordinary.items.map((item) => item.id)).toEqual(
+    allItems.slice(0, ordinary.items.length).map((item) => item.id),
+  );
+  if (completeBytes > 64_000) {
+    expect(ordinary.omitted.some((entry) => entry.reason === "budget_exceeded")).toBe(true);
+    expect(ordinary.items.some((item) => item.kind === "claim-review")).toBe(true);
+    // The next entire record cannot fit. This proves the omission follows the
+    // published face-byte limit, rather than accepting an arbitrary lower cap.
+    expect(
+      largestFace({ ...projection, items: allItems.slice(0, ordinary.items.length + 1) }),
+    ).toBeGreaterThan(64_000);
+  } else {
+    expect(ordinary.items.filter((item) => item.kind === "claim-review")).toHaveLength(20);
+    expect(ordinary.omitted.some((entry) => entry.reason === "budget_exceeded")).toBe(false);
+  }
   expect(ordinary.items.filter((item) => item.kind === "claim-evidence")).toHaveLength(20);
   expect(ordinary.claim_state.legacy_reviews).toBe(21);
   for (const kind of ["claim-review", "claim-evidence"])

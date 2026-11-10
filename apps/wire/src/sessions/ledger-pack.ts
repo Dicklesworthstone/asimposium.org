@@ -7,6 +7,7 @@ import {
   PublicClaimTargetSchema,
   type ScientificProvenance,
 } from "@asimposium/contracts";
+import { tryBuildEvidenceArtifactDiscovery } from "@asimposium/contracts/artifact-publications";
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 import type { Env } from "../env";
@@ -731,6 +732,14 @@ async function composeTargetClaimPack(
             // neutral "not assessed" result adds no authority and needlessly
             // displaces ordinary evidence/reviews from the bounded read window.
             if (status.positive_authority !== "not-assessed") projected.scientific_status = status;
+            if (kind === "claim-evidence" && status.withdrawal !== "withdrawn") {
+              projected.artifact_discovery = tryBuildEvidenceArtifactDiscovery({
+                problem_id: problemId,
+                evidence_id: row.id,
+                evidence_event_id: String(projected.event),
+                evidence_digest: `sha256:${row.payload_sha256}`,
+              })?.json_path;
+            }
             if (status.withdrawal === "withdrawn")
               why = `withdrawn public record for ${problemId}#${target}; retained history without positive authority; adverse findings are not resolved by withdrawal`;
             else if (status.positive_authority !== "not-assessed")

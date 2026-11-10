@@ -2,6 +2,7 @@ import { ClaimFaceQuerySchema, type ClaimFaceResponse } from "@asimposium/contra
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { EvidenceArtifactLink } from "@/components/evidence-artifact-link";
 import {
   ClaimCitationBox,
   ClaimDependencyGraphTable,
@@ -316,6 +317,7 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
                 )}
                 <ScientificBody body={item.body} namespace={`claim-record-${item.id}`} />
                 <ScreeningNotice notice={item.screening_notice} />
+                <EvidenceArtifactLink problem={face.problem} item={item} />
                 <p className="quiet">{item.why_included}</p>
                 {item.neutralized.length > 0 && (
                   <p className="quiet">

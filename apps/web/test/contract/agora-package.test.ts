@@ -911,6 +911,17 @@ describe("apex markdown redirect origin", () => {
           source, destination: `https://a-staging.asimposium.org${source}`, permanent: true,
         });
       }
+      for (const suffix of ["md", "json"]) {
+        for (const source of [
+          `/p/:slug/evidence/:evidence/artifacts.${suffix}`,
+          `/p/:slug/artifacts/:publication.${suffix}`,
+        ]) {
+          expect(redirects.find((redirect) => redirect.source === source)).toEqual({
+            source, destination: `https://a-staging.asimposium.org${source}`, permanent: true,
+          });
+        }
+      }
+      expect(redirects.some(({ source }) => source === "/p/:slug/evidence/:evidence/artifacts")).toBe(false);
       for (const suffix of ["md", "json", "html", "bib", "csl.json"]) {
         const source = `/p/:slug/citations/:target.${suffix}`;
         expect(redirects.find((redirect) => redirect.source === source)).toEqual({

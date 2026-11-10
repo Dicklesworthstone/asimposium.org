@@ -33,7 +33,7 @@
       "id": "artifact-publications",
       "url": "https://a.asimposium.org/schemas/artifact-publications.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 19147,
+      "body_bytes": 20574,
       "slice_url_template": "https://a.asimposium.org/schemas/artifact-publications.v1/{property}.json",
       "slices": [
         "request",
@@ -42,7 +42,9 @@
         "receipt",
         "status",
         "manifest",
-        "evidence_artifacts"
+        "evidence_artifacts",
+        "evidence_artifacts_query",
+        "evidence_artifact_discovery"
       ]
     },
     {
@@ -327,7 +329,7 @@
       "id": "ledger",
       "url": "https://a.asimposium.org/schemas/ledger.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 174101,
+      "body_bytes": 175636,
       "slice_url_template": "https://a.asimposium.org/schemas/ledger.v1/{property}.json",
       "slices": [
         "problem_index_entry",

@@ -241,6 +241,91 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, fixtures, w
     );
   }
 
+  // Ordinary copied configuration has no vendor token prefix. These literals
+  // must stop at the same P7 boundary as explicit bearer shapes, before either
+  // private storage, a public event, a handback, or the screening provider.
+  for (const [text, value, kind] of [
+    [
+      "DB_PASSWORD=synthetic-native-db-credential",
+      "synthetic-native-db-credential",
+      "access-token",
+    ],
+    ['MY_API_KEY="synthetic-native-api-credential"', "synthetic-native-api-credential", "api-key"],
+    [
+      "postgres://reader:synthetic-native-uri-credential@db.invalid/research",
+      "synthetic-native-uri-credential",
+      "access-token",
+    ],
+  ]) {
+    const before = {
+      events: await events(),
+      workshop: await workshopRows(),
+      screens: await fixtures.screeningCalls(),
+      cursor: await call("/cursor"),
+    };
+    const push = await call(
+      `/v1/sessions/${session}/workshop`,
+      { type: "scratch", title: "Reproduction notes", body_md: text },
+      author,
+      422,
+    );
+    assertRefused(push, "body_md", kind);
+    const evidence = await call(
+      `/v1/sessions/${session}/evidence`,
+      {
+        bears_on_kind: "claim",
+        bears_on_id: claim,
+        bears_on_version: 1,
+        direction: "supports",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "confirmatory",
+        body_md: text,
+      },
+      author,
+      422,
+    );
+    assertRefused(evidence, "body_md", kind);
+    const close = await call(
+      `/v1/sessions/${session}/close`,
+      { handback: text, promote: [], keep: [], discard: [] },
+      author,
+      422,
+    );
+    assertRefused(close, "handback", kind);
+    assert.equal(await events(), before.events, "generic credentials append no public event");
+    assert.equal(
+      await workshopRows(),
+      before.workshop,
+      "generic credentials store no workshop body",
+    );
+    assert.equal(
+      await fixtures.screeningCalls(),
+      before.screens,
+      "generic credentials never reach a model",
+    );
+    assert.deepEqual(
+      await call("/cursor"),
+      before.cursor,
+      "generic credential refusal preserves public cursor",
+    );
+    assert.deepEqual(
+      await env.DB.prepare("SELECT closed_at, handback FROM sessions WHERE session_id = ?")
+        .bind(session)
+        .first(),
+      { closed_at: null, handback: null },
+      "generic credential refusal preserves the open session without a handback",
+    );
+    assert.ok(
+      !JSON.stringify([push, evidence, close]).includes(value),
+      "refusals never echo generic credential bytes",
+    );
+    assert.ok(
+      !JSON.stringify(workerLogs()).includes(value),
+      "generic credentials never enter Worker diagnostics",
+    );
+  }
+
   // Clean text still flows end to end.
   await call(
     `/v1/sessions/${session}/close`,
