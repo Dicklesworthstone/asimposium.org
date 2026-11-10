@@ -78,7 +78,9 @@ await runLocalWorkerJourney(async (context) => {
         token,
       ),
     );
-    const items = pack.items.filter((item) => item.id === "SYS-working-moves");
+    const items = pack.items.filter(
+      (item) => item.id === "SYS-working-moves" || item.id === "SYS-working-moves-empty",
+    );
     assert.equal(items.length, 1, "working pack includes the complete canonical move record");
     const selected = JSON.parse(items[0].body);
     const canonical = await next(token);
@@ -128,7 +130,11 @@ await runLocalWorkerJourney(async (context) => {
   const forAuthor = await next(author);
   assert.equal(forAuthor.degraded, false);
   assert.ok(!moveNames(forAuthor).includes("review"), `author moves: ${moveNames(forAuthor)}`);
-  assert.ok((await working(author, session)).selected.primary_move.move !== "review");
+  assert.ok((await working(author, session)).selected.primary_move?.move !== "review");
+  assert.ok(
+    !moveNames(forAuthor).includes("record-dead-end"),
+    "a claim alone is not an exhausted route",
+  );
 
   // Once the non-author records a review, that review move is gone for them.
   await call(
@@ -846,6 +852,31 @@ await runLocalWorkerJourney(async (context) => {
   const observerSession = (
     await call("/v1/sessions", { problem_id: observerProblem, intent: "refute" }, observer, 201)
   ).session_id;
+  const anecdoteIds = [];
+  for (const index of [1, 2, 3]) {
+    const beforeAnecdote = await call(`/v1/p/${observerProblem}/next`, undefined, observer);
+    assert.ok(
+      !moveNames(beforeAnecdote).includes("record-dead-end"),
+      "fewer than three assertions cannot trigger negative-result work",
+    );
+    const anecdote = await call(
+      `/v1/sessions/${observerAuthorSession}/evidence`,
+      {
+        bears_on_kind: "claim",
+        bears_on_id: observerClaim.claim_id,
+        bears_on_version: 1,
+        direction: "supports",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "exploratory",
+        body_md: `Distinct additive-identity observation ${index}; this is an unverified supporting anecdote.`,
+      },
+      observerAuthor,
+      201,
+    );
+    assert.equal(anecdote.computed_class, "assertion");
+    anecdoteIds.push(anecdote.evidence_id);
+  }
   const observerNext = await call(`/v1/p/${observerProblem}/next`, undefined, observer);
   assert.equal(observerNext.viewer.role, "observer");
   assert.equal(observerNext.viewer.effective_permissions.promote, false);
@@ -884,6 +915,25 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(typeof observerEvidence.evidence_id, "string");
   const deadEndMove = observerNext.alternatives.find((move) => move.move === "record-dead-end");
   assert.ok(deadEndMove, "the observer can discover negative-result work");
+  assert.deepEqual(deadEndMove.refs, [
+    observerProblem,
+    `${observerClaim.claim_id}@1`,
+    ...anecdoteIds,
+  ]);
+  assert.deepEqual(
+    deadEndMove.contract.prefilled_hints,
+    {},
+    "a recommendation cannot supply a fictional failure",
+  );
+  for (const read of [
+    deadEndMove.contract.preparation.read_first,
+    ...deadEndMove.contract.preparation.additional_reads,
+  ]) {
+    const response = await worker.fetch(`${origin}${read.path}`, {
+      headers: { "user-agent": userAgent },
+    });
+    assert.equal(response.status, 200, "exact claim and evidence source links are executable");
+  }
   const observerDeadEnd = await call(
     deadEndMove.contract.request.path.replace("{id}", observerSession),
     {
@@ -897,6 +947,41 @@ await runLocalWorkerJourney(async (context) => {
     201,
   );
   assert.equal(typeof observerDeadEnd.dead_end_id, "string");
+  // Current controls remove an anecdote from all consumers without treating
+  // the retained projection as public scientific authority.
+  await fixtures.setArtifactSourceVisibility(observerProblem, anecdoteIds[0], "hidden");
+  const hiddenAnecdote = await call(`/v1/p/${observerProblem}/next`, undefined, observer);
+  assert.ok(!moveNames(hiddenAnecdote).includes("record-dead-end"));
+  await fixtures.setArtifactSourceVisibility(observerProblem, anecdoteIds[0], "visible");
+  assert.ok(
+    moveNames(await call(`/v1/p/${observerProblem}/next`, undefined, observer)).includes(
+      "record-dead-end",
+    ),
+  );
+  await call(
+    `/v1/sessions/${observerAuthorSession}/evidence`,
+    {
+      bears_on_kind: "claim",
+      bears_on_id: observerClaim.claim_id,
+      bears_on_version: 1,
+      direction: "supports",
+      kind: "citation",
+      source: {
+        kind: "locator",
+        locator: "https://example.org/additive-identity",
+        excerpt: "Adding zero leaves an integer unchanged.",
+      },
+      mode: "confirmatory",
+      body_md: "A retrieved source provides a new evidence class for the exact statement.",
+    },
+    observerAuthor,
+    201,
+  );
+  const progressed = await call(`/v1/p/${observerProblem}/next`, undefined, observer);
+  assert.ok(
+    !moveNames(progressed).includes("record-dead-end"),
+    "a stronger evidence class retires the assertion-only suggestion",
+  );
   const observerDraft = await call(
     `/v1/sessions/${observerSession}/workshop`,
     {
@@ -940,6 +1025,9 @@ await runLocalWorkerJourney(async (context) => {
       duplicate_discovery_uses_current_heads: true,
       withheld_revision_does_not_revive_old_duplicate: true,
       observer_evidence_and_dead_end_contracts_executable: true,
+      dead_end_recommendation_has_exact_assertion_sources: true,
+      dead_end_no_invented_findings: true,
+      dead_end_hidden_and_stronger_sources_excluded: true,
       observer_working_pack_canonical_parity: true,
       observer_claim_promotion_still_refused: true,
       boundary:

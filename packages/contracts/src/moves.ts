@@ -247,17 +247,12 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     title: "Record Dead End",
     trigger: "Three supporting anecdotes without a new class, or an exhausted negative route.",
     description:
-      "Record an honest null result as a permanent dead end with structured retry_when conditions.",
+      "Inspect the approach first. Record a permanent dead end only for an actual examined failure, with your own findings and retry conditions; repeated assertions alone establish no failure.",
     availability: "available",
     target_contract: "/schemas/sessions.v1/record_dead_end_request.json",
     request: sessionRequest("dead-ends"),
     required_fields: ["approach", "why_it_fails", "retry_predicate"],
-    prefilled_hints: {
-      approach: "Direct exhaustive search over small finite fields.",
-      why_it_fails: "Non-trivial obstructions appear at field characteristic 2.",
-      retry_predicate:
-        "Worth retrying if characteristic 2 can be handled by an independent classification.",
-    },
+    prefilled_hints: {},
   },
   synthesize: {
     move: "synthesize",

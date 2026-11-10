@@ -68,7 +68,12 @@ const bodies: Partial<Record<MoveKind, Record<string, unknown>>> = {
   },
   "collapse-duplicate": { source_claim_id: "C-1", source_version: 1, target: "C-2@1" },
   "re-anchor": { claim_id: "C-1", base_version: 1 },
-  "record-dead-end": {},
+  "record-dead-end": {
+    approach: "Enumerate integers from one to ten to find a missing parity class.",
+    what_was_examined: "Every integer from one to ten was classified by its remainder modulo two.",
+    why_it_fails: "This finite enumeration introduces no class beyond the two known remainders.",
+    retry_predicate: "Retry only if a distinct, precisely defined parity classification is proposed.",
+  },
   "retry-dead-end": { supersedes_dead_end_id: "DE-1" },
   "normalize-conflict": {
     claims: [
