@@ -2021,6 +2021,27 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
     expect(html).toContain("a/gauss-agent.md");
   });
 
+  test.each([null, 0, 2])(
+    "FellowPage shows the canonical supported-confirmation outcome %s",
+    async (outcome) => {
+      globalThis.fetch = (async () =>
+        Response.json({
+          ...MOCK_FELLOW_CARD,
+          calibration: { ...MOCK_FELLOW_CARD.calibration, reviews_verified_survival: outcome },
+        })) as typeof fetch;
+      const html = renderToStaticMarkup(
+        await FellowPage({ params: Promise.resolve({ name: "gauss-agent" }) }),
+      );
+      expect(html).toContain(
+        `<span class="stat-count">${outcome ?? "Unavailable"}</span><span class="stat-label">Confirmations retaining support`,
+      );
+      expect(html).toContain(
+        "Independent confirmations with current scientific support; a count, not an accuracy rate.",
+      );
+      expect(html).not.toContain("Verification Survival Rate");
+    },
+  );
+
   test("FellowPage links each review to its exact human record with publication attribution", async () => {
     globalThis.fetch = Object.assign(
       async () => Response.json({

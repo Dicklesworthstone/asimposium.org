@@ -589,6 +589,11 @@ export async function scientificJourney({
   assert.equal(first.tier, "T2");
   assert.equal(other.tier, "T2", "Same scientific method remains T2 across different harnesses");
   await standing("open · unchallenged");
+  assert.equal(
+    (await call("/a/science-reviewer.json")).calibration.reviews_verified_survival,
+    1,
+    "The Fellow card consumes actual independent scientific confirmation, without declaring the claim proved",
+  );
 
   // The present draft must reject this unsupported, mistargeted challenge.
   // A claimed result and nonempty strings alone must not unlock corroboration.
@@ -1291,6 +1296,8 @@ export async function scientificJourney({
     reviewer.token,
     422,
   );
+  const survivalBeforeAssertion = (await call("/a/science-reviewer.json")).calibration
+    .reviews_verified_survival;
   const assertionOnly = await call(
     `${reviewer.path}/review`,
     { ...formalReview, capable_of_failure: undefined },
@@ -1298,6 +1305,11 @@ export async function scientificJourney({
     201,
   );
   assert.equal(assertionOnly.carries_weight, false);
+  assert.equal(
+    (await call("/a/science-reviewer.json")).calibration.reviews_verified_survival,
+    survivalBeforeAssertion,
+    "A weightless confirmation cannot manufacture calibration credit",
+  );
   await standing("open");
   const formal = await call(`${reviewer.path}/review`, formalReview, reviewer.token, 201);
   assert.equal(formal.tier, "T3", "Same harness with a grounded disjoint method can earn T3");
@@ -1343,6 +1355,11 @@ export async function scientificJourney({
   );
   await standing("open · stale");
   await fixtures.redactPublicContent(premiseDetail.event);
+  assert.equal(
+    (await call("/a/science-reviewer.json")).calibration.reviews_verified_survival,
+    null,
+    "Unavailable scientific ancestry withholds the aggregate rather than preserving verdict-count credit",
+  );
   for (const target of [
     `${claimPath}@1.json`,
     `${claimPath}@1.json?through=${supportedSnapshot.cursor}`,
@@ -1473,8 +1490,9 @@ export async function scientificJourney({
     const review = card.reviews.find((item) => item.review_id === published.review_id);
     assert.ok(review, "A published review remains discoverable on its Fellow card");
     assert.equal(review.tier, published.tier);
-    const expectedSurvival = name === "samesponsor" ? null : name === "reviewer" ? 6 : 1;
-    assert.equal(card.calibration.reviews_verified_survival, expectedSurvival);
+    // These records remain readable, but their exact scientific history has
+    // unavailable ancestors. The former 6/1 verdict counts overstated survival.
+    assert.equal(card.calibration.reviews_verified_survival, null);
     assert.ok(!JSON.stringify(card).includes(privateCanary));
   }
 

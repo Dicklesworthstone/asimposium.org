@@ -22,6 +22,7 @@ import {
   ScientificInputError,
 } from "../ledger/scientific-checks";
 import { publicationScreeningNotice } from "../screening/publication-notice.ts";
+import { loadFellowCalibration } from "./fellow-calibration.ts";
 
 interface FellowRecord {
   fellow_id: string;
@@ -93,7 +94,9 @@ export async function loadFellowCard(
   {
     const sessionRes = await db
       .prepare(`SELECT COUNT(*) as count FROM sessions s JOIN problems p ON p.id = s.problem_id
-        WHERE s.fellow_id = ? AND p.status != 'private-draft' AND p.unlisted = 0`)
+        WHERE s.fellow_id = ? AND p.status != 'private-draft' AND p.unlisted = 0
+          AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
+          AND NOT ${hiddenByContentControlSql("p.id", "p.id")}`)
       .bind(fellow.fellow_id)
       .first<CountRecord>();
     if (!sessionRes) throw new Error("Fellow session count unavailable");
@@ -134,6 +137,7 @@ export async function loadFellowCard(
          JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
          WHERE cv.editor_fellow_id = ?1 AND p.status != 'private-draft' AND p.unlisted = 0
            AND NOT ${eventContentHiddenSql("e")}
+           AND NOT ${hiddenByContentControlSql("p.id", "p.id")}
          ${contributionsBoundary === undefined ? "" : HISTORY_BEFORE}
          ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
          LIMIT 51`,
@@ -209,6 +213,7 @@ export async function loadFellowCard(
           AND author.actor_sponsor_id IS NOT NULL
          WHERE r.reviewer_fellow_id = ?1 AND p.status != 'private-draft' AND p.unlisted = 0
            AND NOT ${eventContentHiddenSql("e")}
+           AND NOT ${hiddenByContentControlSql("p.id", "p.id")}
          ${reviewsBoundary === undefined ? "" : HISTORY_BEFORE}
          ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
          LIMIT 51`,
@@ -312,92 +317,15 @@ export async function loadFellowCard(
          WHERE e.problem_id = cv.problem_id AND e.object_id = cv.claim_id
            AND e.object_version = cv.version AND e.object_kind = 'claim'
            AND e.type = 'claim.created' AND e.actor_fellow_id = cv.editor_fellow_id
-           AND e.actor_sponsor_id IS NOT NULL AND e.seq <= p.public_seq)
+           AND e.actor_sponsor_id IS NOT NULL AND e.seq <= p.public_seq
+           AND NOT ${eventContentHiddenSql("e")}
+           AND NOT ${hiddenByContentControlSql("p.id", "p.id")}
+           AND EXISTS(SELECT 1 FROM event_content c WHERE c.event_id=e.id
+             AND c.payload_sha256=e.payload_sha256 AND c.redacted_at IS NULL))
   `)
     .bind(fellow.fellow_id)
     .first<{ conjectures: number; theorems: number }>();
   if (!totals) throw new Error("Fellow promotion totals unavailable");
-
-  // Calibration: retractions self-corrected vs externally-refuted (Fable §9.5)
-  const retractionsRow = await db
-    .prepare(`
-      SELECT
-        COUNT(CASE WHEN r.retraction_kind = 'self-corrected' THEN 1 END) AS self_corrected,
-        COUNT(CASE WHEN r.retraction_kind = 'externally-refuted' THEN 1 END) AS externally_refuted,
-        COUNT(*) AS total_retractions
-      FROM retractions r
-      JOIN problems p ON p.id = r.problem_id AND p.status != 'private-draft' AND p.unlisted = 0
-      WHERE r.author_fellow_id = ? AND (r.seq IS NULL OR r.seq <= p.public_seq)
-    `)
-    .bind(fellow.fellow_id)
-    .first<{ self_corrected: number; externally_refuted: number; total_retractions: number }>();
-
-  const refutationsSelfCorrected =
-    retractionsRow && retractionsRow.total_retractions > 0 ? retractionsRow.self_corrected : null;
-  const refutationsExternallyRefuted =
-    retractionsRow && retractionsRow.total_retractions > 0
-      ? retractionsRow.externally_refuted
-      : null;
-
-  // Calibration: verified reviews survival (Fable §9.5)
-  const reviewsSurvivalRow = await db
-    .prepare(`
-      SELECT
-        COUNT(*) AS total_confirmed,
-        COUNT(CASE WHEN
-          NOT EXISTS (
-            SELECT 1 FROM retractions ret
-            JOIN problems p2 ON p2.id = ret.problem_id AND p2.status != 'private-draft' AND p2.unlisted = 0
-            WHERE ret.problem_id = r.problem_id
-              AND (ret.target_object = r.target_claim_id
-                   OR ret.target_object = r.target_claim_id || '@' || r.target_version
-                   OR ret.target_object = r.target_claim_id || '@v' || r.target_version)
-              AND (ret.seq IS NULL OR ret.seq <= p2.public_seq)
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM reviews ref
-            JOIN problems p3 ON p3.id = ref.problem_id AND p3.status != 'private-draft' AND p3.unlisted = 0
-            JOIN events eref ON eref.id = ref.source_event_id AND eref.seq <= p3.public_seq
-            WHERE ref.problem_id = r.problem_id
-              AND ref.target_claim_id = r.target_claim_id
-              AND ref.target_version = r.target_version
-              AND ref.verdict IN ('refute', 'fails-to-reproduce')
-          )
-        THEN 1 END) AS surviving_confirmed
-      FROM reviews r
-      JOIN events e
-        ON e.id = r.source_event_id
-       AND e.problem_id = r.problem_id
-       AND e.seq = r.source_seq
-       AND e.object_id = r.review_id
-       AND e.object_kind = 'review'
-       AND e.type = 'review.created'
-       AND e.actor_fellow_id = r.reviewer_fellow_id
-       AND e.actor_sponsor_id IS NOT NULL
-      JOIN event_content content ON content.event_id = e.id
-       AND content.payload_sha256 = e.payload_sha256 AND content.redacted_at IS NULL
-      JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
-      JOIN events author
-        ON author.problem_id = r.problem_id
-       AND author.object_id = r.target_claim_id
-       AND author.object_version = r.target_version
-       AND author.object_kind = 'claim'
-       AND author.type IN ('claim.created', 'claim.revised')
-       AND author.seq < e.seq
-       AND author.actor_sponsor_id IS NOT NULL
-      WHERE r.reviewer_fellow_id = ?
-        AND p.status != 'private-draft' AND p.unlisted = 0
-        AND json_extract(content.payload_json, '$.target_claim_id') = r.target_claim_id
-        AND CAST(json_extract(content.payload_json, '$.target_version') AS INTEGER) = r.target_version
-        AND json_extract(content.payload_json, '$.verdict') IN ('confirm', 'reproduces', 'corroborates')
-    `)
-    .bind(fellow.fellow_id)
-    .first<{ total_confirmed: number; surviving_confirmed: number }>();
-
-  const reviewsVerifiedSurvival =
-    reviewsSurvivalRow && reviewsSurvivalRow.total_confirmed > 0
-      ? reviewsSurvivalRow.surviving_confirmed
-      : null;
 
   let transferEffectiveAt: string | null = null;
   try {
@@ -419,6 +347,10 @@ export async function loadFellowCard(
     transferEffectiveAt = null;
   }
 
+  // Last awaited read: calibration revalidates scientific witnesses and current
+  // public cuts before release, just as the individual scientific faces do.
+  const outcomes = await loadFellowCalibration(db, fellow.fellow_id);
+
   return FellowCardResponseSchema.parse({
     fellow_id: fellow.fellow_id,
     name: fellow.name,
@@ -439,12 +371,12 @@ export async function loadFellowCard(
     calibration: {
       conjectures_promoted: totals.conjectures,
       theorems_attempted: totals.theorems,
-      refutations_self_corrected: refutationsSelfCorrected,
-      refutations_externally_refuted: refutationsExternallyRefuted,
-      reviews_verified_survival: reviewsVerifiedSurvival,
+      refutations_self_corrected: outcomes.selfCorrected,
+      refutations_externally_refuted: outcomes.externallyRefuted,
+      reviews_verified_survival: outcomes.survivingReviews,
     },
     omitted: [
-      "private and unlisted problems are excluded from contribution and review lists and all activity counts",
+      "private, unlisted and hidden problems are excluded from contribution and review lists and all activity counts",
       ...(transferEffectiveAt === null
         ? [
             "sponsor transfer history is unavailable; the current lifecycle log has no transfer event",
@@ -485,7 +417,9 @@ export async function loadFellowCard(
       "contributions and reviews without matching immutable event attribution are excluded",
       "contribution and review text with redacted, missing or mismatched event content is excluded",
       "review tiers describe publication provenance, not subsequent evidence availability or verification survival",
-      ...(refutationsSelfCorrected === null && reviewsVerifiedSurvival === null
+      "review survival counts only independent confirmations retaining current scientific support; this is not an accuracy rate or a claim of truth",
+      ...outcomes.omitted,
+      ...(outcomes.selfCorrected === null && outcomes.survivingReviews === null
         ? [
             "self-correction, external-refutation and review-survival outcomes unavailable; verdict counts do not establish these outcomes",
           ]

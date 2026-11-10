@@ -20,6 +20,7 @@ import {
 import { ReviewQueueResponseSchema } from "@asimposium/contracts/review-queue";
 import { createApp } from "../../src/app.ts";
 import { loadAreaDetail, loadAreasIndex } from "../../src/discovery/areas-service.ts";
+import { loadFellowCalibration } from "../../src/discovery/fellow-calibration.ts";
 import { loadFellowCard } from "../../src/discovery/fellow-service.ts";
 import { loadHonorsRecord } from "../../src/discovery/honors-service.ts";
 import { loadNowStrip } from "../../src/discovery/now-service.ts";
@@ -285,6 +286,69 @@ function seedScopeClaim(raw: Database, problem: string, claim: string, seq: numb
     payload,
   ]);
   return { eventId, statement };
+}
+
+/** Attributed immutable unit fixture; not HTTP admission or provider evidence. */
+function seedCalibrationPublication(
+  raw: Database,
+  problem: string,
+  seq: number,
+  kind: "review" | "retraction",
+  id: string,
+  payload: Record<string, unknown>,
+) {
+  const fellow = "F-01M0HCVW4XTFWMZCQ40EJ0S0J7";
+  const body = JSON.stringify(payload);
+  const digest = createHash("sha256").update(body).digest("hex");
+  const event = `E-CAL-${id}`;
+  const at = `2026-09-09T00:00:${String(seq).padStart(2, "0")}.000Z`;
+  raw.run("UPDATE problems SET public_seq=?,chain_digest='sha256:chain',updated_at=? WHERE id=?", [
+    seq,
+    at,
+    problem,
+  ]);
+  raw.run(
+    `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+    payload_sha256,row_digest,chain_digest,created_at,actor_fellow_id,actor_sponsor_id,
+    actor_session_id,model_string_self_declared,harness)
+    VALUES(?,?,?,?,?,?,1,?,'sha256:row','sha256:chain',?,?,'SPON-01','S-CAL','test/calibration','curl')`,
+    [
+      event,
+      problem,
+      seq,
+      kind === "review" ? "review.created" : "object.retracted",
+      kind,
+      id,
+      digest,
+      at,
+      fellow,
+    ],
+  );
+  raw.run("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)", [
+    event,
+    digest,
+    body,
+  ]);
+  if (kind === "review") {
+    raw.run(
+      `INSERT INTO reviews(review_id,problem_id,target_claim_id,target_version,
+      reviewer_fellow_id,tier,verdict,basis,body_md,created_at,source_event_id,source_seq,
+      capable_of_failure,rubric_json) VALUES(?,?,?,?,?,'T1',?,?,'Review fixture',?,?,?,?, '[]')`,
+      [
+        id,
+        problem,
+        String(payload.target_claim_id),
+        Number(payload.target_version),
+        fellow,
+        String(payload.verdict),
+        String(payload.basis),
+        at,
+        event,
+        seq,
+        typeof payload.capable_of_failure === "string" ? payload.capable_of_failure : null,
+      ],
+    );
+  }
 }
 
 function seedDiscoveryData(raw: Database, eventPayload?: string, eventDigest?: string) {
@@ -1985,7 +2049,7 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     expect(jsonData.promoted_contributions[0]?.statement).toBe(hostileStatement);
   });
 
-  test("Fellow calibration recomputes on demand from the ledger: self-corrected vs externally-refuted retractions and verified review survival", async () => {
+  test("Fellow correction credit requires attributed immutable publications, never naked projection rows", async () => {
     const { db, raw } = createMigratedDb();
     seedDiscoveryData(raw);
     const fellowId = "F-01M0HCVW4XTFWMZCQ40EJ0S0J7";
@@ -1999,79 +2063,188 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
       "self-correction, external-refutation and review-survival outcomes unavailable; verdict counts do not establish these outcomes",
     );
 
-    // 2. Add a self-corrected retraction on P-4DSP (update public_seq to 5)
-    raw.run("UPDATE problems SET public_seq = 5 WHERE id = 'P-4DSP'");
+    // A retained projection cannot manufacture correction credit.
     raw.run(`
       INSERT INTO retractions (retraction_id, problem_id, target_object, reason, author_fellow_id, created_at, seq, retraction_kind)
       VALUES ('RET-1', 'P-4DSP', 'C-1', 'Retracted early before any refutation.', '${fellowId}', '2026-08-03T00:00:00.000Z', 1, 'self-corrected')
     `);
-
-    const cardWithSelfCorrection = await loadFellowCard(db, "gauss-agent");
-    expect(cardWithSelfCorrection?.calibration.refutations_self_corrected).toBe(1);
-    expect(cardWithSelfCorrection?.calibration.refutations_externally_refuted).toBe(0);
-    expect(cardWithSelfCorrection?.calibration.reviews_verified_survival).toBeNull();
-    expect(cardWithSelfCorrection?.omitted).not.toContain(
-      "self-correction, external-refutation and review-survival outcomes unavailable; verdict counts do not establish these outcomes",
+    expect(
+      (await loadFellowCard(db, "gauss-agent"))?.calibration.refutations_self_corrected,
+    ).toBeNull();
+    for (const [sequence, id, kind] of [
+      [2, "R-SELF", "self-corrected"],
+      [3, "R-EXTERNAL", "externally-refuted"],
+    ] as const) {
+      seedCalibrationPublication(raw, "P-4DSP", sequence, "retraction", id, {
+        retraction_id: id,
+        target_object: "C-1@1",
+        retraction_kind: kind,
+        reason: "Correction classification from the immutable publication.",
+      });
+    }
+    const credited = await loadFellowCard(db, "gauss-agent");
+    expect(credited?.calibration.refutations_self_corrected).toBe(1);
+    expect(credited?.calibration.refutations_externally_refuted).toBe(1);
+    // Withheld history is unknown, never a smaller apparently complete tally.
+    raw.run(
+      "UPDATE event_content SET payload_json='{}',redacted_at='2026-09-10T00:00:00Z',redaction_reason='Fixture lawful removal' WHERE event_id='E-CAL-R-SELF'",
     );
+    expect(
+      (await loadFellowCard(db, "gauss-agent"))?.calibration.refutations_self_corrected,
+    ).toBeNull();
+  });
 
-    // 3. Add an externally-refuted retraction
-    raw.run(`
-      INSERT INTO retractions (retraction_id, problem_id, target_object, reason, author_fellow_id, created_at, seq, retraction_kind)
-      VALUES ('RET-2', 'P-4DSP', 'C-1@1', 'Retracted after external counterexample.', '${fellowId}', '2026-08-03T01:00:00.000Z', 2, 'externally-refuted')
-    `);
-
-    const cardWithBothRetractions = await loadFellowCard(db, "gauss-agent");
-    expect(cardWithBothRetractions?.calibration.refutations_self_corrected).toBe(1);
-    expect(cardWithBothRetractions?.calibration.refutations_externally_refuted).toBe(1);
-
-    // 4. Add a confirmed review by gauss-agent on C-2@1 (which is unretracted and unrefuted)
-    // Target claim C-2 with seq 2 (contiguous after E-1 at seq 1)
-    seedAttributedClaim(raw, "P-4DSP", "C-2", 2, "SPON-OTHER", "2026-08-02T00:00:00.000Z");
-
-    // Insert review event and review row with seq 3
-    const reviewPayload = JSON.stringify({
+  test("Fellow review survival shares scientific weight, version, objection and visibility semantics", async () => {
+    const { db, raw } = createMigratedDb();
+    seedDiscoveryData(raw);
+    seedScopeProblem(raw, "P-CALIBRATION");
+    seedScopeClaim(raw, "P-CALIBRATION", "C-2", 2);
+    const review = {
       target_claim_id: "C-2",
       target_version: 1,
       verdict: "confirm",
       tier: "T1",
-      basis: "Verified by direct proof.",
+      basis: "Every finite case was checked independently.",
+    };
+    seedCalibrationPublication(raw, "P-CALIBRATION", 3, "review", "R-LABEL", review);
+    // The previous implementation credited this verdict without any check that could fail.
+    expect((await loadFellowCard(db, "gauss-agent"))?.calibration.reviews_verified_survival).toBe(
+      0,
+    );
+    seedCalibrationPublication(raw, "P-CALIBRATION", 4, "review", "R-CHECK", {
+      ...review,
+      capable_of_failure: "A finite input violating the conclusion would refute it.",
     });
-    const reviewDigest = createHash("sha256").update(reviewPayload).digest("hex");
-    raw.run(
-      "UPDATE problems SET public_seq = 3, chain_digest = 'sha256:chain', updated_at = '2026-08-03T02:00:00.000Z' WHERE id = 'P-4DSP'",
+    expect((await loadFellowCard(db, "gauss-agent"))?.calibration.reviews_verified_survival).toBe(
+      1,
     );
-    raw.run(`
-      INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id)
-      VALUES ('E-REV-1', 'P-4DSP', 3, 'review.created', 'review', 'REV-1', 1, '${reviewDigest}', 'sha256:row', 'sha256:chain', '2026-08-03T02:00:00.000Z', '${fellowId}', 'SPON-01')
-    `);
-    raw.run(`
-      INSERT INTO event_content (event_id, payload_sha256, payload_json)
-      VALUES ('E-REV-1', '${reviewDigest}', '${reviewPayload}')
-    `);
-    raw.run(`
-      INSERT INTO reviews (review_id, problem_id, target_claim_id, target_version, reviewer_fellow_id, tier, verdict, basis, body_md, created_at, source_event_id, source_seq)
-      VALUES ('REV-1', 'P-4DSP', 'C-2', 1, '${fellowId}', 'T1', 'confirm', 'Verified by direct proof.', 'Proof body', '2026-08-03T02:00:00.000Z', 'E-REV-1', 3)
-    `);
-
-    const cardWithSurvivingReview = await loadFellowCard(db, "gauss-agent");
-    expect(cardWithSurvivingReview?.calibration.reviews_verified_survival).toBe(1);
-
-    // 5. Add a refuting review on C-2@1 by an independent reviewer (seq 4) -> review survival drops to 0!
-    raw.run(
-      "UPDATE problems SET public_seq = 4, chain_digest = 'sha256:chain', updated_at = '2026-08-03T03:00:00.000Z' WHERE id = 'P-4DSP'",
+    // A recorded objection contests the exact version even without positive weight.
+    seedCalibrationPublication(raw, "P-CALIBRATION", 5, "review", "R-OBJECTION", {
+      ...review,
+      verdict: "refute",
+      basis: "The edge case remains unresolved.",
+    });
+    expect((await loadFellowCard(db, "gauss-agent"))?.calibration.reviews_verified_survival).toBe(
+      0,
     );
-    raw.run(`
-      INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id)
-      VALUES ('E-REV-2', 'P-4DSP', 4, 'review.created', 'review', 'REV-2', 1, 'sha256:ref', 'sha256:row2', 'sha256:chain', '2026-08-03T03:00:00.000Z', 'F-OTHER', 'SPON-OTHER')
-    `);
-    raw.run(`
-      INSERT INTO reviews (review_id, problem_id, target_claim_id, target_version, reviewer_fellow_id, tier, verdict, basis, body_md, created_at, source_event_id, source_seq)
-      VALUES ('REV-2', 'P-4DSP', 'C-2', 1, 'F-OTHER', 'T1', 'refute', 'Counterexample found.', 'Refute body', '2026-08-03T03:00:00.000Z', 'E-REV-2', 4)
-    `);
-
-    const cardWithRefutedTarget = await loadFellowCard(db, "gauss-agent");
-    expect(cardWithRefutedTarget?.calibration.reviews_verified_survival).toBe(0);
+    raw.run(
+      "UPDATE event_content SET payload_json='{}',redacted_at='2026-09-10T00:00:00Z',redaction_reason='Fixture lawful removal' WHERE event_id='E-CAL-R-OBJECTION'",
+    );
+    expect(
+      (await loadFellowCard(db, "gauss-agent"))?.calibration.reviews_verified_survival,
+    ).toBeNull();
   });
+
+  test.each(["problem", "P-4DSP"])(
+    "Fellow profile suppresses all activity for hidden problem control %s",
+    async (target) => {
+      const { db, raw } = createMigratedDb();
+      seedDiscoveryData(raw);
+      const before = await loadFellowCard(db, "gauss-agent");
+      expect(before?.promoted_contributions.length).toBeGreaterThan(0);
+      expect(before?.calibration.conjectures_promoted).toBe(1);
+      raw.run(
+        `INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,version,
+      visibility,source,reason_category,reason,actor,created_at)
+      VALUES('CC-PROFILE','P-4DSP','problem',?,1,'hidden','operator','policy',
+        'Held pending review.','operator','2026-09-10T00:00:00Z')`,
+        [target],
+      );
+      const hidden = await loadFellowCard(db, "gauss-agent");
+      expect(hidden?.promoted_contributions).toEqual([]);
+      expect(hidden?.reviews).toEqual([]);
+      expect(hidden?.negative_history).toEqual([]);
+      expect(hidden?.sessions_count).toBe(0);
+      expect(hidden?.calibration.conjectures_promoted).toBe(0);
+    },
+  );
+
+  test.each(["correction hide", "new review"])(
+    "Fellow calibration releases one current snapshot after a concurrent %s",
+    async (change) => {
+      const { db, raw } = createMigratedDb();
+      seedDiscoveryData(raw);
+      seedScopeProblem(raw, "P-CALIBRATION");
+      seedScopeClaim(raw, "P-CALIBRATION", "C-2", 2);
+      seedScopeProblem(raw, "P-LATE");
+      seedScopeClaim(raw, "P-LATE", "C-2", 2);
+      const review = {
+        target_claim_id: "C-2",
+        target_version: 1,
+        verdict: "confirm",
+        tier: "T1",
+        basis: "Every finite case was checked independently.",
+        capable_of_failure: "A finite counterexample would refute this claim.",
+      };
+      seedCalibrationPublication(raw, "P-CALIBRATION", 3, "review", "R-CHECK", review);
+      seedCalibrationPublication(raw, "P-4DSP", 2, "retraction", "R-SELF", {
+        retraction_id: "R-SELF",
+        target_object: "C-1@1",
+        retraction_kind: "self-corrected",
+      });
+      const fellow = "F-01M0HCVW4XTFWMZCQ40EJ0S0J7";
+      const initial = await loadFellowCalibration(db, fellow);
+      expect(initial.selfCorrected).toBe(1);
+      expect(initial.survivingReviews).toBe(1);
+      let batches = 0;
+      const racing = {
+        ...db,
+        async batch(...args: Parameters<typeof db.batch>) {
+          const result = await db.batch(...args);
+          // Admissions have completed; the exact scientific snapshot has just
+          // been read. Mutate before the common final release transaction.
+          if (++batches === 2) {
+            if (change === "correction hide") {
+              raw.run(`INSERT INTO content_controls(control_id,problem_id,target_kind,
+                target_ref,version,visibility,source,reason_category,reason,actor,created_at)
+                VALUES('CC-RACE','P-4DSP','problem','problem',1,'hidden','operator',
+                  'policy','Held pending review.','operator','2026-09-10T00:00:00Z')`);
+            } else {
+              seedCalibrationPublication(raw, "P-LATE", 3, "review", "R-LATE", review);
+            }
+          }
+          return result;
+        },
+      } as Env["DB"];
+      const current = await loadFellowCalibration(racing, fellow);
+      expect(batches).toBe(3);
+      expect(current.selfCorrected).toBe(change === "correction hide" ? null : 1);
+      expect(current.survivingReviews).toBe(change === "new review" ? null : 1);
+      expect(current.omitted).toContain(
+        "calibration outcomes affected by changed public sources are unavailable; retry the current Fellow card",
+      );
+    },
+  );
+
+  test.each(["source count", "target count", "source bytes"])(
+    "Fellow calibration withholds incomplete histories at its %s budget",
+    async (budget) => {
+      const { db, raw } = createMigratedDb();
+      seedDiscoveryData(raw);
+      seedScopeProblem(raw, "P-CALIBRATION");
+      seedScopeClaim(raw, "P-CALIBRATION", "C-1", 2);
+      const count = budget === "source count" ? 101 : budget === "target count" ? 17 : 1;
+      for (let index = 0; index < count; index++) {
+        const claim = budget === "target count" ? `C-${index + 1}` : "C-1";
+        if (index > 0 && budget === "target count")
+          seedScopeClaim(raw, "P-CALIBRATION", claim, index * 2 + 2);
+        const seq = budget === "target count" ? index * 2 + 3 : index + 3;
+        seedCalibrationPublication(raw, "P-CALIBRATION", seq, "review", `R-${index}`, {
+          target_claim_id: claim,
+          target_version: 1,
+          verdict: "confirm",
+          tier: "T1",
+          basis: budget === "source bytes" ? "x".repeat(65_536) : "Finite checks completed.",
+          capable_of_failure: "A finite counterexample would refute the result.",
+        });
+      }
+      const outcome = await loadFellowCalibration(db, "F-01M0HCVW4XTFWMZCQ40EJ0S0J7");
+      expect(outcome.survivingReviews).toBeNull();
+      expect(outcome.omitted).toContain(
+        "review survival unavailable: complete current scientific support was not established within the read budget",
+      );
+    },
+  );
 
   test("Honors record (/results) recomputes on demand, mechanically gates settled items, and serves Diptych faces", async () => {
     const { db, raw } = createMigratedDb();

@@ -217,6 +217,18 @@ export default async function FellowPage({ params, searchParams }: FellowPagePro
               </span>
               <span className="stat-label">Externally Refuted</span>
             </div>
+            <div className="stat-card">
+              <span className="stat-count">
+                {fellow.calibration.reviews_verified_survival ?? "Unavailable"}
+              </span>
+              <span className="stat-label">
+                Confirmations retaining support
+                <small className="stat-subtext">
+                  Independent confirmations with current scientific support; a count, not an
+                  accuracy rate.
+                </small>
+              </span>
+            </div>
           </div>
         </section>
 
