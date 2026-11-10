@@ -17,6 +17,38 @@ observed.
 Updated 2026-11-10. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+**Core request recovery at `ea5c11c3`:** session open, workshop push, and
+promotion now return bounded canonical `suggested_fields` for a mistyped
+top-level key, for example `problemId` → `problem_id`. The refused request
+makes no corresponding write. The client uses the hint to construct a new
+request; neither the rejected name nor its private value is echoed. Opaque
+policy refusals forbid the field. The existing session middleware continues
+to supply the standalone request schema links.
+
+Pinned typecheck and lint pass all eight groups. Both agents pass 1,016 contract
+tests, 86 owning Worker tests, 190 HTTP contracts, 33 security tests, and the
+real local Workerd/D1/R2 journey through promotion and handback. Independent
+full renderer verification passes 601 tests. The native
+client follows all three request schema links. Omitting or misdirecting the
+session hint, or serving the workshop schema at session open, fails the
+unchanged native assertions. Exact restoration passes. Each fault changes
+one private producer or route-map file; all other source hashes and the SDK
+match. The original full root suite passes all eight groups, including 7,278
+Worker and 1,073 Agora tests. It ends at 22:57:51 UTC after 1,494 seconds,
+with all 2,690 source hashes and the pinned SDK unchanged.
+
+The first bundle overrun is retained; the unchanged S-3 cap passes after
+sharing the existing schema URL. The old module URL control passes because
+the middleware already narrows that URL. Two superseded full runs were stopped
+and retain exit 143; one cleanup revision also failed lint on import order.
+The final revision passed lint before its full run started. Scoped UBS ran and
+its elevated findings were reviewed; full incoming scanner coverage remains
+open. The local classifier and sponsor setup remain fixtures; deployment,
+Google, G0, live-harness G-C, token-budget, and Rust acceptance are separate.
+Independent verification closed `asimposiumorg-but.5` at 23:00 UTC, with
+the criterion and evidence map in Beads comment 3088. The original error
+catalog parent `asimposiumorg-but` remains open.
+
 **Route recovery qualified at 21:17 UTC:** `bc4750cd` supplies canonical typed
 `next_actions` for common static route typos and API/version-prefix mistakes,
 including the six disclosed enrollment, device and flow operations. The existing
