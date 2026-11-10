@@ -2888,10 +2888,36 @@ async function sessionReplayRace(
   await awaitBothSessionReplayArrivals(scope);
   await releaseSessionReplayBarrier(scope);
   const results = await requests;
+  const outcomes = results.map((result) => {
+    const problem = ProblemDocumentSchema.safeParse(result.payload);
+    return { status: result.response.status, code: problem.success ? problem.data.code : null };
+  });
+  let pendingRecoveryCount = 0;
+  if (scope === "workshop_push") {
+    // Both initial requests have finished, so a 201 owner has committed. Only
+    // recover the documented identical-request pending response, exactly once.
+    const pendingIndex = results.findIndex((result) => result.response.status === 409);
+    if (pendingIndex !== -1) {
+      const pending = results[pendingIndex];
+      const committed = results.find((result) => result.response.status === 201);
+      assert(pending !== undefined && committed !== undefined, "workshop-pending-has-one-commit");
+      const parsedProblem = ProblemDocumentSchema.safeParse(pending.payload);
+      assert(parsedProblem.success, "workshop-pending-problem-shape");
+      assert(parsedProblem.data.status === 409, "workshop-pending-problem-status");
+      assert(parsedProblem.data.code === "IDEMPOTENCY_CONFLICT", "workshop-pending-typed-conflict");
+      assert(pending.response.headers.get("retry-after") === "1", "workshop-pending-retry-after");
+      assert(pending.response.headers.get("cache-control") === "private, no-store", "workshop-pending-private-response");
+      const replay = await sessionPost(token, path, body, idempotencyKey);
+      assert(replay.response.status === 200, "workshop-pending-recovery-is-replay");
+      assert(replay.text === committed.text, "workshop-pending-recovery-exact-bytes");
+      results[pendingIndex] = replay;
+      pendingRecoveryCount = 1;
+    }
+  }
   const statuses = results.map((result) => result.response.status).sort((left, right) => left - right);
   assert(
     statuses.length === 2 && statuses[0] === 200 && statuses[1] === 201,
-    `${scope}-one-commit-one-replay`,
+    `${scope}-one-commit-one-replay:${JSON.stringify(outcomes)}`,
   );
   assert(results[0]?.text === results[1]?.text, `${scope}-exact-response-replay`);
   const committed = results.find((result) => result.response.status === 201);
@@ -2901,6 +2927,9 @@ async function sessionReplayRace(
       suite: "token-lifecycle-local",
       assertion: `concurrent_http_same_key_${scope}_exact_replay`,
       deterministic_barrier: true,
+      initial_statuses: outcomes.map((result) => result.status).sort((left, right) => left - right),
+      initial_problem_codes: outcomes.map((result) => result.code),
+      pending_recovery_count: pendingRecoveryCount,
       store_gate: scope === "workshop_push"
         ? "immediately_before_real_d1_workshop_admission_batch"
         : "immediately_before_real_d1_batch",
