@@ -17,27 +17,44 @@ observed.
 Updated 2026-11-10. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-**Route recovery candidate, 20:11 UTC:** `a47675ce` adds bounded canonical
-`next_actions` for obvious static route mistakes, derived from the existing
-disclosure manifest. Misses remain 404s; canonical authentication and strict
-policy refusals remain enforced. Local Workerd/D1/R2 exercises follow the
-returned directives and session URLs through the existing workshop, public
-promotion and handback flow. Independent contracts (1,011), gateway/discovery
-(82), HTTP contracts (190), security (33), native positives and exact restores
-pass. Removing the session hint and misdirecting it each fail the unchanged
-native assertion; only the private producer changes in those counterfactuals.
-Primary post-review native and 82/190/33 checks also pass, with all 2,685 source
-hashes and the pinned SDK unchanged. The original full root suite passed all
-eight groups at `a47675ce` in 1,539 seconds. Before closure, a further coverage
-gap was found: its hint filter omitted the six already disclosed enrollment,
-device and flow operations. The follow-up includes those operations and public
-API/version-prefix recovery. A new native case proves a missed registration
-creates no proposal or secret reflection, missing-secret canonical registration
-still fails, and following the returned URL creates exactly one proposal before
-the existing sponsor approval, token delivery and full session journey. The
-old filter fails that new unit and real-binding case; corrected native and
-contracts pass. The updated revision still needs its own frozen qualification;
-`asimposiumorg-but.4` stays in progress. This is no deployed or G-C claim.
+**Route recovery qualified at 21:17 UTC:** `bc4750cd` supplies canonical typed
+`next_actions` for common static route typos and API/version-prefix mistakes,
+including the six disclosed enrollment, device and flow operations. The existing
+disclosure manifest supplies the destinations. Misses remain 404s; handlers
+retain their authorization and validation, and policy refusals forbid the new
+field. No alias executes and no new endpoint, table or error code is introduced.
+
+The original full root suite passes all eight groups at this revision: 7,278
+Worker tests (37,885 assertions), 1,073 Agora tests, and zero failed groups. Its
+terminal is 21:17:17 UTC after 1,526 seconds. Pinned typecheck and lint preflights
+also pass all eight groups. Both agents execute full contracts (1,011), complete
+gateway/discovery owning files (83), HTTP contracts (190), security (33), and the
+real local Workerd/D1/R2 recovery journey. The full renderer package passes 601
+tests. All 2,685 source hashes and the pinned SDK match before and after final runs.
+
+The native journey proves zero proposals and no secret or private enrollment-ID
+reflection on a registration miss, preserves the missing-secret canonical 400,
+then follows the returned URL to exactly one proposal, sponsor approval and
+token delivery. It also follows directives and session hints through private
+workshop, falsifiable public promotion and close with handback. Four independent
+producer faults omit or misdirect registration/session hints; all fail the
+unchanged native assertions. Exact restoration passes, and the primary
+reexecutes every named positive after reviewing the raw evidence. Only private
+`app.ts` differs in each fault; tests and all other 2,684 source files stay fixed.
+
+The earlier `a47675ce` full pass remains a separate receipt. Its omitted
+pre-enrollment hints were caught and repaired before closure; the old filter
+fails the added unit and native cases. The strict problem-schema index changes
+only its measured byte count, and the existing file-backed schema census now
+requires all 23 schemas, including workshop-directory. Original limits remain.
+Scoped UBS completes with reviewed findings (24 critical, 39 warning); its two
+new critical sites are an explicitly synthetic test secret and that test's
+declaration. This is not a scanner-clean or complete `g4b4` result.
+Independent verifier WhiteRaven closed only `asimposiumorg-but.4` at 21:20 UTC,
+with the criterion/evidence map in Beads comment 3086. Native screening and
+sponsor setup use existing fixtures: no deployed,
+Google, G0, live-harness G-C, token-budget, broad security or Rust acceptance is
+earned by these local results. The original parent `asimposiumorg-but` stays open.
 
 **ASImposium has a substantial working local research workflow, but it has not
 delivered the public instrument promised by Fable.**
@@ -107,17 +124,20 @@ leaves: `asimposiumorg-df71.3.1` through `.6` and `asimposiumorg-x77k.1`.
 Their broader parents keep every unmet criterion. The independent full Rust
 test prerequisite remains unfinished under `asimposiumorg-l1yg.1`.
 
-The optional Rust CLI now executes its original locked suite remotely: 45
+The optional Rust CLI's earlier receipt executes its original locked suite remotely: 45
 library tests, 16 CLI surface tests and one canonical-JSON test pass. Its two
 ignored HTTP tests are then exercised through their real local Worker drivers:
 25 workshop reads plus four next reads, and nine search cases. The compiler
 source receipt matches all 2,681 source files at `5a42c6bd`; remote-before, downloaded
 and remote-after library-test hashes agree. The build ran from working source
-before the final commit, whose bytes match the frozen candidate; its original
+before the final commit, whose bytes match `5a42c6bd`; its original
 execution label is retained. This is CLI and local-HTTP proof, not complete W11,
 TLS, deployment or launch acceptance. Independent formatting, check, Clippy and
-both local HTTP consumers pass. Independent full Rust tests are blocked before
-Cargo by remote-worker availability; the alternate worker lacks required space.
+both local HTTP consumers passed at their named inputs. The independent full
+Rust suite has not executed: the last recorded worker-admission check found
+insufficient eligible space before Cargo. This does not assert current capacity.
+At `bc4750cd`, CLI files are unchanged but eight contract files differ from that
+older source map. The earlier receipt is not fresh CLI/contracts qualification.
 
 Current raw results, exact source/SDK maps and original failures are retained in
 `e2e/artifacts/current-rust-20261110-coppertiger/`; independent executions use
