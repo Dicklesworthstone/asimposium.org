@@ -222,7 +222,7 @@ export async function scientificCollectionsBrowsing({ page, agora, target, fixtu
   }
 }
 
-export async function scientificCollectionsWithdrawal({ target, browser, agora, fixture, record }) {
+export async function scientificCollectionsWithdrawal({ target, browser, agora, fixture, record, diagnose }) {
   const { problemId, conflicts, questions, cursor, sourceEvents } = fixture;
   const controls = await target.worker.getExport();
   for (const eventId of sourceEvents) await controls.redactPublicContent(eventId);
@@ -237,15 +237,36 @@ export async function scientificCollectionsWithdrawal({ target, browser, agora, 
     const context = await browser.newContext({ javaScriptEnabled });
     const page = await context.newPage();
     const mode = javaScriptEnabled ? "js" : "no-js";
+    const readableNotFound = async (response) => response?.status() === 404 &&
+      await page.locator("main").count() === 1 &&
+      await page.getByRole("heading", { name: "Nothing is served at this address", level: 1, exact: true }).count() === 1 &&
+      await page.locator("html").getAttribute("lang") === "en" &&
+      await page.locator("script[nonce]").count() > 0 &&
+      await page.locator('meta[name="robots"]').evaluateAll(nodes => nodes.some(node =>
+        /\bnoindex\b/.test(node.getAttribute("content") ?? "")));
+    let response;
+    let collection = "conflicts";
     try {
-      await page.goto(`${agora.origin}${conflictsListPath(problemId, "human", { through: cursor, target: conflicts[8] })}`, { waitUntil: "load" });
+      response = await page.goto(`${agora.origin}${conflictsListPath(problemId, "human", { through: cursor, target: conflicts[8] })}`, { waitUntil: "load" });
+      record(`${mode} conflicts: unavailable source retains readable HTML 404, noindex and root chrome`,
+        await readableNotFound(response));
       record(`${mode} conflicts: a withdrawn source cannot reappear at an earlier snapshot`,
         await page.locator("main .claim-card").count() === 0 &&
           !(await page.locator("main").innerText()).includes("Comparison 9 isolates"));
-      await page.goto(`${agora.origin}${questionsListPath(problemId, "human", { through: cursor, target: questions[8] })}`, { waitUntil: "load" });
+      collection = "questions";
+      response = await page.goto(`${agora.origin}${questionsListPath(problemId, "human", { through: cursor, target: questions[8] })}`, { waitUntil: "load" });
+      record(`${mode} questions: unavailable source retains readable HTML 404, noindex and root chrome`,
+        await readableNotFound(response));
       record(`${mode} questions: a withdrawn exact source cannot substitute another question`,
         await page.locator("main .claim-card").count() === 0 &&
           !(await page.locator("main").innerText()).includes("Research question 9."));
+    } catch (error) {
+      console.log(JSON.stringify({
+        kind: "scientific-collection-withdrawal-failure", mode, collection,
+        status: response?.status() ?? null,
+        observation: await diagnose(page, "main"),
+      }));
+      throw error;
     } finally {
       await context.close();
     }

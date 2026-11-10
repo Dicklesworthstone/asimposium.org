@@ -14,6 +14,9 @@
     "e2e*",
     "e2e/*"
   ],
+  "patchedDependencies": {
+    "next@16.4.5": "patches/next@16.4.5.patch"
+  },
   "scripts": {
     "suite": "bun scripts/suite/cli.ts",
     "check": "bun scripts/suite/cli.ts --all --require-executed",

@@ -28,6 +28,38 @@ bound to `151469e3`. Broad incoming JavaScript scanner coverage remains
 incomplete and prevents complete integration acceptance. Deployed acceptance
 remains separate.**
 
+### Exact Honors reads, encoded citations and readable recovery
+
+Honors claim items now retain their assessed version and problem-local cursor;
+the shared Markdown/HTML renderer and Agora link to that same immutable read.
+The implementation is `214d8b4d`. A bare claim URL remains a valid latest read;
+the observed defect was a saved Honors link drifting after a later review.
+Current content hiding still withholds bytes at earlier cuts. Scientific
+withdrawal affects the latest state without rewriting a historical assessment.
+`86dc18d7` then fixes the actual Agora consumer of encoded exact citation
+selectors: decode once before strict validation, with malformed and double
+encoding still refused before source access.
+
+The complete production-browser journey reaches a separate Next.js 16.4.5
+defect: source-unavailable 404s can contain an empty JavaScript recovery shell.
+The pinned Bun patch in `patches/next@16.4.5.patch` changes only the compiled
+production Turbopack error payload for ordinary root-layout/not-found pages.
+It reuses the normal server payload and existing site recovery component;
+other error shells remain byte-identical. This is a local dependency patch,
+not an upstream release fix or a claim about development, webpack, experimental
+rendering or global-not-found. Retire it only after a clean upstream install
+passes the original JavaScript-disabled recovery and privacy journey.
+
+A first frozen patched install in a private checkout passes all 438 original
+browser checks plus stronger 404/status/noindex/root-layout assertions. Three
+stale fixture defects encountered later in that journey are corrected: supply
+the saved brief version, follow the report queue's real detail link, and give
+the moderation scenario its own board without raising the eight-writer cap.
+Main's pre-existing installed dependency tree is retained untouched. Final
+frozen root qualification and independent causal verification remain pending;
+these observations do not close the three repair leaves or their parents.
+Receipts are in `e2e/artifacts/honors-links-20261110-coppertiger/`.
+
 ### Canonical local gauntlet command — `e4b21525`
 
 The existing real-harness runner is now reachable through

@@ -151,6 +151,9 @@ async function nativeClickFailureState(page, selector) {
           })),
           animation_count: document.getAnimations().length,
           source_count: sources.length,
+          body_child_tags: [...document.body.children].slice(0, 32).map((element) => element.tagName),
+          next_error_document: document.documentElement.id === "__next_error__",
+          not_found_templates: document.querySelectorAll('template[data-dgst="NEXT_HTTP_ERROR_FALLBACK;404"]').length,
           sources: sources.slice(0, 8).map((element) => {
             const box = element.getBoundingClientRect();
             return { x: box.x, y: box.y, width: box.width, height: box.height, connected: element.isConnected };
@@ -741,7 +744,11 @@ async function commentaryJourney({
   const proposed = await fellowPost(
     target,
     "/v1/problems",
-    { ...draftProblem, brief_id: brief.body.brief.id },
+    {
+      ...draftProblem,
+      brief_id: brief.body.brief.id,
+      expected_brief_version: brief.body.brief.version,
+    },
     steward.token,
   );
   assert.equal(proposed.status, 201);
@@ -1276,7 +1283,7 @@ async function main() {
       await citationsBrowsing({ page, agora, target, fixture: citations, mode, record });
       await context.close();
     }
-    await scientificCollectionsWithdrawal({ target, browser, agora, fixture: scientificCollections, record });
+    await scientificCollectionsWithdrawal({ target, browser, agora, fixture: scientificCollections, record, diagnose: nativeClickFailureState });
     await citationsWithdrawal({ target, browser, agora, fixture: citations, record });
     await claimsListWithdrawal({ target, browser, agora, fixture: claimsList, record });
     await hypothesisPublicationWithdrawal({ target, browser, agora, problemId, fixture: hypothesisLifecycle, record });
@@ -2450,8 +2457,12 @@ async function main() {
 
     // Accessibility and keyboard, with JavaScript on. Reduced motion, so axe
     // measures final colours rather than the body's 0.5 s fade-in.
+    // The moderation journey publishes fresh work in both browser modes. Its
+    // own board preserves the normal writer cap without borrowing seats from
+    // all the earlier, independent research and lifecycle scenarios.
+    const moderationProblemId = await setUpProblem(target, 2);
     await operatorModerationJourney({
-      browser, agora, target, problemId, record, privateToCaches,
+      browser, agora, target, problemId: moderationProblemId, record, privateToCaches,
       authSecret: AUTH_SECRET, sessionCookie: SESSION_COOKIE,
       encode: (await import(createRequire(`${root}apps/web/package.json`).resolve("next-auth/jwt"))).encode,
     });

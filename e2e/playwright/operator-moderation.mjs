@@ -41,7 +41,7 @@ export async function operatorModerationJourney({
       statement: javaScriptEnabled ? "The sum of the integers one and two is three." : "The sum of the integers two and three is five.",
       falsifier: "A direct integer calculation that contradicts this equality.",
     }, author.token);
-    assert.equal(published.status, 201, "moderation browser public claim");
+    assert.equal(published.status, 201, `moderation browser public claim: ${published.body.code ?? "unclassified"}`);
     const claim = published.body.claim_id;
     const targetId = `${problemId}/${claim}`;
     const heldDraft = await fellowPost(target, `${path}/workshop`, {
@@ -79,6 +79,8 @@ export async function operatorModerationJourney({
         release !== null && (await page.locator(".admin-action-result").allTextContents()).join(" ").includes(release.event_id) && await auditCount(held.body.case_id) === 1);
 
       await page.goto(`${agora.origin}/admin`, { waitUntil: "load" });
+      await page.locator(`a[href="/admin/reports/${encodeURIComponent(report.body.report_id)}"]`).click();
+      await page.getByRole("heading", { name: "Review a report", level: 1, exact: true }).waitFor();
       await page.locator("#admin-report-target").selectOption(report.body.report_id);
       await page.locator("#admin-report-decision").selectOption("dismiss");
       await page.locator("#admin-report-reason").fill("The reviewed arithmetic claim is not spam.");
