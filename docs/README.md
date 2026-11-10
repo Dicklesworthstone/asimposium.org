@@ -12,17 +12,63 @@ provisioned provider resource, a completed recovery exercise, or a green launch
 gate. Each report and runbook must state which of those proof levels it actually
 observed.
 
-## Current reality check — 2026-11-09
+## Current reality check
+
+Updated 2026-11-10. Runtime qualification below is pinned to its named source
+revision; later documentation and tracker commits do not imply another test run.
 
 **ASImposium has a substantial working local research workflow, but it has not
 delivered the public instrument promised by Fable. The main obstacle is now
 finishing and deploying a qualified candidate, then earning the external
 collaboration, safety and operational evidence. Rebuilding the existing source
-subsystems would miss that obstacle. The current candidate, `151469e3`, passes
-the full root suite, typecheck, lint, full contracts/render and HTTP contracts.
-Independent repetition of those gates also passes. Broad JavaScript scanner
-coverage remains incomplete and prevents complete integration acceptance.
-Deployed acceptance remains separate.**
+subsystems would miss that obstacle. The latest local-runner source,
+`e4b21525`, passes typecheck, lint and the full root suite in both primary and
+independent executions. Earlier contract/render and HTTP qualifications remain
+bound to `151469e3`. Broad incoming JavaScript scanner coverage remains
+incomplete and prevents complete integration acceptance. Deployed acceptance
+remains separate.**
+
+### Canonical local gauntlet command — `e4b21525`
+
+The existing real-harness runner is now reachable through
+`bash e2e/gauntlet/run.sh --target local --agents harness:codex`. Explicit
+reference selections work through the same command; omitting `--agents` keeps
+all ten original scripted oracle cases. Valid repeated selectors remain fresh
+attempts. Malformed or unknown selections fail with usage exit 64 before target
+startup and never echo arbitrary caller text. Staging still refuses this local
+selection option.
+
+The shell preserves the runner's exit 78 for unavailable privacy, auth or quota
+prerequisites, and preserves actual runner failures. Real-harness execution is
+labeled `MEASUREMENT_COMPLETE`: that means a measurement finished, not that the
+agent completed the research loop. The scorer, scientific admission, original
+thresholds, provider accounting and staging runner are unchanged.
+
+Primary and independent executions at the exact source pass all eight
+typecheck and lint groups and all eight unfiltered root-unit groups. The two
+root runs take 1,465.20 and 1,448.27 seconds, with normal owner exit zero and
+2,661 unchanged input hashes. Worker passes 7,240 tests; Agora 1,053; the affected
+gauntlet package passes 99 tests and 319 expectations plus its original shell
+self-test. Actual local Workerd/D1/R2 runs preserve all ten oracle outcomes
+(three scripted positives and seven negatives), and an explicit two-reference
+selection completes both. The existing Gemini privacy prerequisite returns
+blocked 78 with zero agent requests. No model trial was performed in this block.
+
+The original unit assertions catch two independent source faults: dropping the
+forwarded selection and collapsing blocked 78 to failure 1. Companion native
+observations show the resulting wrong route and wrong exit; they are not extra
+caught native faults or model successes. Exact restored controls pass. Both
+required stock UBS scans completely cover the three changed code files:
+109 findings, zero critical, 13 reviewed warnings and 96 information records,
+with identical records and no missing locations, truncation or suppression.
+Independent scoped repetition agrees. This does not complete the older broad
+incoming scan. Evidence is under `e2e/artifacts/canonical-gauntlet-20261109-coppertiger/`
+and `e2e/artifacts/independent-20261109-zai4-e4b21525/`; the requested granular
+TODO remains in the existing `hello-actions-20261109-coppertiger/TODO.md`.
+WhiteRaven independently closes only `zai.4`; comment 3017 maps its original
+criteria to source and observed evidence. Parent `zai` remains open for
+the provisioned staging orchestrator, ten fresh sessions across three harnesses,
+the eight-completion bar, move-following and first-promotion token measurement.
 
 ### Executable first writes, lossless claims and integration repairs — `151469e3`
 
@@ -65,7 +111,7 @@ These are local fault experiments, not observed production exploits. The
 verifier's separate typecheck, lint and package/HTTP gates pass. Its unfiltered
 root rerun also passes all eight groups in 1,461.55 seconds, normal owner exit
 zero at 23:25:25.129 UTC, with the same Worker and Agora test counts. All 2,661
-before/after hashes match the current source in both full-root runs.
+before/after hashes match the `151469e3` source in both full-root runs.
 
 Scanning remains incomplete. The normal staged command reproduced a
 `FREE_SLOTS` scheduler crash; documented serial mode completely covers the six
@@ -85,8 +131,8 @@ is stopped, `g4b4` remains open, and the global scanner remains unchanged.
 No default repair, full-scan acceptance, security-clean result or issue closure
 follows from these experiments.
 
-The two product leaves have a separate applicable source scope. Current stock
-UBS executes all 35 paths changed by their four feature/recovery commits,
+The two product leaves have a separate applicable source scope. At `151469e3`,
+stock UBS executes all 35 paths changed by their four feature/recovery commits,
 including dependency and lockfile context: 23 actual module inputs, complete
 2,147-location output, finding exit 1 in 14.10 seconds. All critical/warning
 sites and information classes are reviewed; no additional product defect is
@@ -180,11 +226,12 @@ authority/lineage, the unfinished staging gauntlet orchestrator, real external
 screening and browser/Rust acceptance remain separate. No deployment, push,
 provisioning, deletion or history rewrite was performed.
 
-Project-identified public reads at 20:26 UTC still return the old production and
-staging `0.1.0-draft` capability bytes. This identifies the observed interface,
-not provider revision or deployment history. The four required Cloudflare and
-staging variables are absent from this command environment; that is not a stored
-OAuth authority audit. Operator bead `rs5n` still requires the sanctioned Workers
+Project-identified public reads at 00:14 UTC on November 10 return the older
+production and staging `0.1.0-draft` capability bytes, identical to the retained
+earlier responses. This identifies the observed interface, not provider revision
+or deployment history. A 00:20 UTC presence-only check finds the four required
+Cloudflare and staging variables absent from this command environment; that is
+not a stored OAuth authority audit. Operator bead `rs5n` still requires the sanctioned Workers
 Builds configuration, an explicit decision about existing staging D1 lineage,
 and retained staging receipts before production reconciliation.
 

@@ -49,7 +49,7 @@
 > responsive Vercel pages show unavailable ledger data. Real Google approval,
 > hosted screening accuracy, the full fresh-agent gauntlet, external cost/load,
 > full recovery and G0–G3 remain unearned. See the
-> [current assessment, vision checklist and ordered bridge](docs/README.md#current-reality-check--2026-11-07).
+> [current assessment, vision checklist and ordered bridge](docs/README.md#current-reality-check).
 > Older inventories below include source features since implemented; they are
 > not a current absence census.
 >
@@ -273,7 +273,7 @@
 > `0.1.0-draft` Worker surface; the current source API has not been deployed there.
 > Live Google approval, hosted screening accuracy, the protected hard-reject corpus, warning
 > notices, complete recovery/cost evidence and G0–G3 remain incomplete.
-> The [current assessment](docs/README.md#current-reality-check--2026-11-07) provides the current
+> The [current assessment](docs/README.md#current-reality-check) provides the current
 > vision checklist, executed checks and repair backlog. Older detailed inventories below are dated
 > implementation notes, not a current absence census. `/capabilities` describes its running deployment;
 > source presence, a healthy endpoint or a local fixture-classifier pass does not certify launch readiness.
@@ -424,7 +424,7 @@ acceptance and deployed verification remain open.
 
 The diagram is the target topology. The component notes below accumulated during
 implementation and include work since completed in source. Use the
-[current assessment](docs/README.md#current-reality-check--2026-11-07) for the
+[current assessment](docs/README.md#current-reality-check) for the
 current implementation and proof census.
 
 ```
@@ -901,7 +901,7 @@ does not prove that either provider environment is provisioned or current.
 
 All six steps have source implementations, including workshop pages and director controls.
 The complete deployed paired-browser workflow remains unproven. The
-[current reality check](docs/README.md#current-reality-check--2026-11-07)
+[current reality check](docs/README.md#current-reality-check)
 records current source defects, deployed observations, gates and the bridge backlog.
 
 1. Open [asimposium.org](https://asimposium.org) and sign in with Google.

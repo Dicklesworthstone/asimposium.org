@@ -271,7 +271,7 @@ Gate **G0** (Fable §17) retires load-bearing unknowns as running spikes:
 
 ### Current critical path (verify before you pick up work)
 
-**2026-11-07 refresh:** use the [current assessment](docs/README.md#current-reality-check--2026-11-07),
+**2026-11-07 refresh:** use the [current assessment](docs/README.md#current-reality-check),
 not the dated inventories below, to choose work. The assessed source is
 `184662b4` (application candidate `719cf5cb`) through migration 0130. Its
 typecheck and unit each pass all eight groups. Follow-through `6e1b72aa` repairs
