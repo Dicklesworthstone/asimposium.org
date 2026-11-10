@@ -109,6 +109,35 @@ test("policy refusal contains neither secret nor uploaded prose", async () => {
   }
 });
 
+test("generic credentials are refused from verified text bytes and compressed source members", async () => {
+  for (const value of [
+    "DB_PASSWORD=synthetic-artifact-password",
+    "AWS_SECRET_ACCESS_KEY=synthetic-artifact-api-key",
+    "postgres://reader:synthetic-artifact-uri-password@db.invalid/research",
+    String.raw`{"DB_PASS\u0057ORD":"synthetic-artifact-json-password"}`,
+    String.raw`{"url":"postgres:\/\/reader:synthetic-artifact-json-uri@db.invalid/research"}`,
+    '{\n  "DB_PASSWORD"\n  :\n  "synthetic-artifact-multiline-password"\n}',
+  ]) {
+    await refuses(utf8(value), "ARTIFACT_SECRET_SHAPED");
+    await refuses(
+      archive([{ name: "Project/reproduction.txt", body: value }]),
+      "ARTIFACT_SECRET_SHAPED",
+      true,
+    );
+  }
+});
+
+test("credential placeholders and environment-reading source remain valid artifact bytes", async () => {
+  for (const value of [
+    "DB_PASSWORD=${DB_PASSWORD}",
+    String.raw`{"DB_PASS\u0057ORD":"<redacted>"}`,
+    "const password = process.env.DB_PASSWORD;",
+    "const token = nextToken(input);\nconst password = await fetchSecret();",
+  ]) {
+    assert.equal((await inspect(utf8(value))).contentType, "text/plain; charset=utf-8");
+  }
+});
+
 test("portable USTAR lake source is inspected member-by-member without execution", async () => {
   const result = await inspect(
     archive([

@@ -57,6 +57,151 @@ export const CREDENTIAL_PATTERNS: readonly CredentialPattern[] = Object.freeze([
   },
 ]);
 
+/** Match whole credential-name segments, never words such as token_count or
+ * secreted. An underscore prefix is common in copied environment settings. */
+const CREDENTIAL_LABEL_SOURCE = String.raw`(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:password|passwd|pwd|secret|token|api_?key|private_key|secret_access_key)`;
+const CREDENTIAL_LABEL = new RegExp(`^${CREDENTIAL_LABEL_SOURCE}$`, "i");
+
+function credentialLabelKind(label: string): CredentialKind | null {
+  if (!CREDENTIAL_LABEL.test(label)) return null;
+  return /(?:^|_)(?:api_?key|secret_access_key)$/i.test(label) ? "api-key" : "access-token";
+}
+
+/** Exempt only explicit placeholders and references, not weak or short secrets.
+ * These are useful in reproducibility instructions without publishing authority. */
+function inertCredentialValue(value: string): boolean {
+  const text = value.trim();
+  return (
+    text.length === 0 ||
+    /^(?:\*{3,}|x{4,}|\.{3,}|…+|\[redacted\]|<redacted>|redacted|\[removed\]|<removed>|\[masked\]|<masked>)$/i.test(
+      text,
+    ) ||
+    /^<(?:your[_ -]?)?(?:password|passwd|pwd|secret|token|api[_ -]?key|private[_ -]?key|replace[_ -]?me)>$/i.test(
+      text,
+    ) ||
+    /^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$/.test(text) ||
+    /^%[A-Za-z_][A-Za-z0-9_]*%$/.test(text) ||
+    /^\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}$/.test(text)
+  );
+}
+
+function sourceCredentialReference(value: string): boolean {
+  return (
+    /^(?:process\.env\.[A-Za-z_][A-Za-z0-9_]*|(?:process\.env|os\.environ)\[\s*["'][A-Za-z_][A-Za-z0-9_]*["']\s*\])$/.test(
+      value,
+    ) || /^(?:os\.)?getenv\(\s*["'][A-Za-z_][A-Za-z0-9_]*["']\s*\)$/.test(value)
+  );
+}
+
+function decodeLiteral(value: string): string {
+  if (value.startsWith('"')) {
+    try {
+      return JSON.parse(value) as string;
+    } catch {
+      // Shell-style quotes need not be valid JSON. Escapes still belong to the
+      // literal; malformed JSON must not turn a credential into a clean body.
+    }
+  }
+  return value.slice(1, -1).replace(/\\([\\"'])/g, "$1");
+}
+
+export interface CredentialRun {
+  readonly kind: CredentialKind;
+  readonly start: number;
+  readonly end: number;
+}
+
+/** Shared literal detection for ledger/workshop and artifact bodies. A run
+ * exposes offsets only, never a matched value. Limits bound the diagnostic
+ * caller; the artifact predicate can stop at its first run. */
+export function* credentialRuns(
+  lineText: string,
+  maxPerPattern = Number.POSITIVE_INFINITY,
+): Generator<CredentialRun> {
+  for (const { kind, pattern } of CREDENTIAL_PATTERNS) {
+    const matcher = new RegExp(pattern.source, pattern.flags.replaceAll("g", "") + "g");
+    let count = 0;
+    for (const hit of lineText.matchAll(matcher)) {
+      yield { kind, start: hit.index, end: hit.index + hit[0].length };
+      if (++count === maxPerPattern) break;
+    }
+  }
+
+  // A scheme plus a password-bearing userinfo component is authority even
+  // when its password has no vendor prefix. Bound the scheme grammar so a
+  // long dotted scientific identifier cannot induce quadratic backtracking.
+  const uri = /\b[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/([^\s/?#"'`\\]+)/g;
+  let uriCount = 0;
+  for (const hit of lineText.matchAll(uri)) {
+    const authority = hit[1]!;
+    const at = authority.lastIndexOf("@");
+    const colon = authority.indexOf(":");
+    if (colon < 0 || at <= colon + 1 || at === authority.length - 1) continue;
+    const encodedPassword = authority.slice(colon + 1, at);
+    let password = encodedPassword;
+    try {
+      password = decodeURIComponent(password);
+    } catch {
+      // Invalid percent encoding is still a nonempty password-shaped literal.
+    }
+    if (inertCredentialValue(password)) continue;
+    const start = hit.index + hit[0].indexOf("://") + 3 + colon + 1;
+    yield { kind: "access-token", start, end: start + encodedPassword.length };
+    if (++uriCount === maxPerPattern) break;
+  }
+
+  // '=' accepts .env/shell/code assignments; ':' requires a quoted key or
+  // quoted value, avoiding ordinary source annotations such as token: String.
+  // Recognize spaced environment lookups as complete source expressions; the
+  // ordinary unquoted alternative ends at whitespace so an inert assignment
+  // cannot swallow a later credential on the same line.
+  const assignment = new RegExp(
+    String.raw`(?:^|[^A-Za-z0-9_$])(?:"(${CREDENTIAL_LABEL_SOURCE})"|'(${CREDENTIAL_LABEL_SOURCE})'|(${CREDENTIAL_LABEL_SOURCE}))[ \t]*(=(?!=|>)|:(?![=:]))[ \t]*("(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|(?:process\.env|os\.environ)\[[^\r\n]*?\](?=[ \t]*(?:$|[;,#}]))|(?:os\.)?getenv\([^\r\n]*?\)(?=[ \t]*(?:$|[;,#}]))|\$\{[A-Za-z_][A-Za-z0-9_]*\}(?=$|[\s;,}])|\{\{[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*\}\}(?=$|[\s;,}])|[^\s;,}"']+)`,
+    "gi",
+  );
+  let assignmentCount = 0;
+  for (const hit of lineText.matchAll(assignment)) {
+    const label = hit[1] ?? hit[2] ?? hit[3]!;
+    const kind = credentialLabelKind(label);
+    if (kind === null) continue;
+    const raw = hit[5]!.trimEnd();
+    const quoted = raw.startsWith('"') || raw.startsWith("'");
+    if (hit[4] === ":" && !hit[1] && !hit[2] && !quoted) continue;
+    const offset = hit.index + hit[0].lastIndexOf(hit[5]!);
+    const rest = lineText.slice(hit.index + hit[0].length);
+    const continued = /^[ \t]*[+|&?]/.test(rest) || (quoted && /^[^\s;,}\]]/.test(rest));
+    if (!continued && !quoted && sourceCredentialReference(raw)) continue;
+    if (!continued && !quoted && inertCredentialValue(raw)) continue;
+    // Bare lowercase token/secret are also common mathematical or parser
+    // variables. Calls and operator expressions are source, not literal keys.
+    // Keep this ambiguity rule off explicit prefixed/uppercase env names so
+    // a weak .env password is not excused merely for containing punctuation.
+    if (
+      !quoted &&
+      !continued &&
+      (/^(?:token|secret|password|passwd|pwd|api_?key)$/.test(label) ||
+        /\b(?:const|let|var)[ \t]+$/.test(lineText.slice(0, hit.index + 1))) &&
+      /^(?:await[ \t]+|new[ \t]+|[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*[ \t]*\(|[A-Za-z_$][A-Za-z0-9_$]*\.[A-Za-z_$][A-Za-z0-9_$]*|[A-Za-z_$][A-Za-z0-9_$]*[ \t]*[+*/%<>=!?|&-])/.test(
+        lineText.slice(offset),
+      )
+    )
+      continue;
+    const literal = quoted ? decodeLiteral(raw) : raw;
+    if (!continued && inertCredentialValue(literal)) continue;
+    const start = offset + (quoted ? 1 : 0);
+    yield { kind, start, end: start + Math.max(1, quoted ? raw.length - 2 : literal.length) };
+    if (++assignmentCount === maxPerPattern) break;
+  }
+}
+
+export function hasCredentialShape(text: string): boolean {
+  return hasRawCredentialShape(text) || !structuredCredentialRuns(text).next().done;
+}
+
+function hasRawCredentialShape(text: string): boolean {
+  return !credentialRuns(text, 1).next().done;
+}
+
 export interface CredentialFinding {
   /** Where the text came from: a request field or JSON path, never content. */
   readonly path: string;
@@ -77,11 +222,7 @@ const NESTED_PATH = "[nested-field]";
 /** JSON property names are authored content too. They must not become a
  * second route for echoing a credential through an otherwise redacted error. */
 function diagnosticPath(path: string): string {
-  if (
-    path.length > MAX_PATH_LENGTH ||
-    /[\r\n\t]/.test(path) ||
-    CREDENTIAL_PATTERNS.some(({ pattern }) => pattern.test(path))
-  )
+  if (path.length > MAX_PATH_LENGTH || /[\r\n\t]/.test(path) || hasRawCredentialShape(path))
     return REDACTED_PATH;
   return path || "[root]";
 }
@@ -93,10 +234,7 @@ function appendPath(parent: string, suffix: string): string {
 }
 
 function memberPath(parent: string, key: string, index: number): string {
-  if (
-    /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key) &&
-    !CREDENTIAL_PATTERNS.some(({ pattern }) => pattern.test(key))
-  )
+  if (/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key) && !hasRawCredentialShape(key))
     return appendPath(parent, `${parent ? "." : ""}${key}`);
   return appendPath(parent, `[entry:${index}]`);
 }
@@ -123,19 +261,10 @@ export function scanTextForCredentials(path: string, text: string): CredentialFi
     // inside an already-reported run is the same credential, not a second one.
     const spans: Array<readonly [number, number]> = [];
     const lineFindings: Array<{ kind: CredentialKind; start: number }> = [];
-    for (const { kind, pattern } of CREDENTIAL_PATTERNS) {
-      const matcher = new RegExp(pattern.source, "g");
-      let admitted = 0;
-      for (const hit of lineText.matchAll(matcher)) {
-        const start = hit.index;
-        const end = start + hit[0].length;
-        if (spans.some(([from, to]) => start < to && end > from)) continue;
-        spans.push([start, end]);
-        lineFindings.push({ kind, start });
-        // Later matches of this shape cannot enter the first twenty locations.
-        // Bound accumulation before allocating findings or counting columns.
-        if (++admitted === MAX_FINDINGS) break;
-      }
+    for (const { kind, start, end } of credentialRuns(lineText, MAX_FINDINGS)) {
+      if (spans.some(([from, to]) => start < to && end > from)) continue;
+      spans.push([start, end]);
+      lineFindings.push({ kind, start });
     }
     lineFindings.sort((left, right) => left.start - right.start);
     for (const finding of lineFindings) {
@@ -156,6 +285,7 @@ interface JsonFrame {
   path: string;
   index: number;
   keyPath?: string;
+  credentialKind?: CredentialKind | null;
   expectingKey: boolean;
 }
 
@@ -197,7 +327,8 @@ export function scanFieldForCredentials(field: string, text: string): Credential
           ? appendPath(frame.path, `[${frame.index}]`)
           : (frame.keyPath ?? frame.path);
     };
-    const tokens = /"(?:\\[\s\S]|[^"\\])*"|[{}[\],:]/g;
+    const tokens =
+      /"(?:\\[\s\S]|[^"\\])*"|[{}[\],:]|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null/g;
     for (const token of current.text.matchAll(tokens)) {
       const value = token[0];
       const frame = frames.at(-1);
@@ -214,27 +345,99 @@ export function scanFieldForCredentials(field: string, text: string): Credential
         frame.index++;
         frame.expectingKey = frame.kind === "object";
         frame.keyPath = undefined;
+        frame.credentialKind = null;
       } else if (value.startsWith('"')) {
         const decoded = JSON.parse(value) as string;
         let path: string;
         if (frame?.kind === "object" && frame.expectingKey) {
           path = appendPath(frame.path, `[key:${frame.index}]`);
           frame.keyPath = memberPath(frame.path, decoded, frame.index);
+          frame.credentialKind = credentialLabelKind(decoded);
           frame.expectingKey = false;
         } else {
           path = valuePath();
         }
-        findings.push(...scanTextForCredentials(path, decoded));
+        const shaped = scanTextForCredentials(path, decoded);
+        if (
+          frame?.kind === "object" &&
+          path === frame.keyPath &&
+          frame.credentialKind &&
+          shaped.length === 0 &&
+          !inertCredentialValue(decoded)
+        ) {
+          shaped.push({
+            path,
+            kind: frame.credentialKind,
+            line: 1,
+            column: 1,
+          });
+        }
+        findings.push(...shaped);
         // A workshop field or JSON key can itself contain encoded source.
         // Process shorter decoded strings iteratively, without recursive depth.
         const nested = decoded.trimStart()[0];
         if (nested === "{" || nested === "[" || nested === '"')
           pending.push({ field: path, text: decoded, root: false });
+      } else if (frame?.kind === "object" && frame.credentialKind && /^-?\d/.test(value)) {
+        findings.push({
+          path: frame.keyPath ?? frame.path,
+          kind: frame.credentialKind,
+          line: 1,
+          column: 1,
+        });
       }
       if (findings.length >= MAX_FINDINGS) return findings.slice(0, MAX_FINDINGS);
     }
   }
   return findings.slice(0, MAX_FINDINGS);
+}
+
+/** JSON artifact fallback. Escaped keys, encoded URI separators and multiline
+ * key/value pairs use the same decoded-field scanner as request bodies. The
+ * diagnostic location is the containing source token, never an offset into
+ * decoded bytes that do not physically exist in the artifact. */
+export function* structuredCredentialRuns(text: string): Generator<CredentialRun> {
+  if (!['"', "{", "["].includes(text.trimStart()[0] ?? "")) return;
+  try {
+    JSON.parse(text);
+  } catch {
+    return;
+  }
+  const frames: Array<{ object: boolean; expectingKey: boolean; kind: CredentialKind | null }> = [];
+  const tokens =
+    /"(?:\\[\s\S]|[^"\\])*"|[{}[\],:]|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null/g;
+  let count = 0;
+  for (const token of text.matchAll(tokens)) {
+    const value = token[0];
+    const frame = frames.at(-1);
+    if (value === "{" || value === "[") {
+      frames.push({ object: value === "{", expectingKey: value === "{", kind: null });
+    } else if (value === "}" || value === "]") {
+      frames.pop();
+    } else if (value === "," && frame) {
+      frame.expectingKey = frame.object;
+      frame.kind = null;
+    } else if (value.startsWith('"')) {
+      const decoded = JSON.parse(value) as string;
+      const key = frame?.object && frame.expectingKey;
+      if (key) {
+        frame.kind = credentialLabelKind(decoded);
+        frame.expectingKey = false;
+      }
+      const kinds = new Set(
+        scanFieldForCredentials("artifact", decoded).map((finding) => finding.kind),
+      );
+      if (!key && frame?.object && frame.kind && !inertCredentialValue(decoded))
+        kinds.add(frame.kind);
+      for (const kind of kinds) {
+        yield { kind, start: token.index + 1, end: token.index + value.length - 1 };
+        if (++count === MAX_FINDINGS) return;
+      }
+    } else if (frame?.object && frame.kind && /^-?\d/.test(value)) {
+      yield { kind: frame.kind, start: token.index, end: token.index + value.length };
+      if (++count === MAX_FINDINGS) return;
+    }
+  }
 }
 
 /** Scan several named fields; absent fields are skipped. */

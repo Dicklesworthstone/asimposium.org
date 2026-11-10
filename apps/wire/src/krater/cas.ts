@@ -26,7 +26,12 @@
  * testable without a binding.
  */
 
-import { CREDENTIAL_PATTERNS, type CredentialKind } from "../screening/credential-scan";
+import {
+  type CredentialKind,
+  credentialRuns,
+  hasCredentialShape,
+  structuredCredentialRuns,
+} from "../screening/credential-scan";
 
 /** The R2 key prefix every CAS object lives under. */
 export const CAS_KEY_PREFIX = "cas/sha256/";
@@ -98,16 +103,7 @@ export interface SecretFinding {
 // The credential classes are shared with the ledger/workshop body scan
 // (screening/credential-scan.ts) so both walls refuse the same shapes; only
 // artifacts additionally refuse personal addresses.
-const SECRET_PATTERNS: ReadonlyArray<{
-  readonly kind: SecretFinding["kind"];
-  readonly pattern: RegExp;
-}> = [
-  ...CREDENTIAL_PATTERNS,
-  {
-    kind: "personal-address",
-    pattern: /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,63}/,
-  },
-];
+const PERSONAL_ADDRESS_PATTERN = /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,63}/;
 
 /** Any UTF-16 code unit that can only appear as half of a surrogate pair. */
 const SURROGATE_UNIT = /[\uD800-\uDFFF]/;
@@ -153,13 +149,32 @@ export function scanBodyForSecrets(body: string): readonly SecretFinding[] {
   const lines = body.split("\n");
   for (const [lineIndex, lineText] of lines.entries()) {
     const columns = codePointColumnsFor(lineText);
-    for (const { kind, pattern } of SECRET_PATTERNS) {
-      const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
-      const matcher = new RegExp(pattern.source, flags);
-      for (const hit of lineText.matchAll(matcher)) {
-        const column = (columns === undefined ? hit.index : (columns[hit.index] ?? 0)) + 1;
-        findings.push({ kind, line: lineIndex + 1, column });
+    for (const { kind, start } of credentialRuns(lineText)) {
+      const column = (columns === undefined ? start : (columns[start] ?? 0)) + 1;
+      findings.push({ kind, line: lineIndex + 1, column });
+    }
+    for (const hit of lineText.matchAll(new RegExp(PERSONAL_ADDRESS_PATTERN.source, "g"))) {
+      const column = (columns === undefined ? hit.index : (columns[hit.index] ?? 0)) + 1;
+      findings.push({ kind: "personal-address", line: lineIndex + 1, column });
+    }
+  }
+  // A raw scan cannot see a JSON key encoded as DB_PASS\u0057ORD. If no raw
+  // credential was found, use the shared decoded-field wall and point at the
+  // actual source token containing it. Bound these recovery diagnostics just
+  // as request diagnostics are bounded; admission still stops at the first hit.
+  if (!findings.some((finding) => finding.kind !== "personal-address")) {
+    let lineIndex = 0;
+    let lineStart = 0;
+    let columns = codePointColumnsFor(lines[0] ?? "");
+    for (const { kind, start } of structuredCredentialRuns(body)) {
+      while (lineIndex < lines.length - 1 && start >= lineStart + lines[lineIndex]!.length + 1) {
+        lineStart += lines[lineIndex]!.length + 1;
+        lineIndex += 1;
+        columns = codePointColumnsFor(lines[lineIndex]!);
       }
+      const offset = start - lineStart;
+      const column = (columns === undefined ? offset : (columns[offset] ?? 0)) + 1;
+      findings.push({ kind, line: lineIndex + 1, column });
     }
   }
   return findings.sort((left, right) => {
@@ -175,7 +190,7 @@ export function bodyLooksSecretShaped(body: string): boolean {
   // Admission needs only a yes/no wall. Do not construct the exhaustive
   // diagnostic array here: a body containing many repeated matches could
   // otherwise amplify one upload into millions of finding objects.
-  return SECRET_PATTERNS.some(({ pattern }) => pattern.test(body));
+  return hasCredentialShape(body) || PERSONAL_ADDRESS_PATTERN.test(body);
 }
 
 /**
