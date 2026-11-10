@@ -76,9 +76,8 @@ import {
 import { expireIdleSessions } from "../../src/sessions/idle";
 import { warnExpiringLeases } from "../../src/sessions/lease-warnings";
 import {
-  type PackClaimHead,
-  preparePackClaimHeads,
   readDeadEndPack,
+  readPackClaimHeads,
   readReviewQueuePack,
 } from "../../src/sessions/ledger-pack.ts";
 import { checkAndReserveQuota, parseSponsorLimit } from "../../src/sessions/quota.ts";
@@ -617,15 +616,10 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
   }
 
   async packClaimBoardAt(problemId: string, cursor: number) {
-    const heads = await preparePackClaimHeads(
-      this.env.DB,
-      problemId,
-      cursor,
-      128,
-    ).all<PackClaimHead>();
+    const heads = await readPackClaimHeads(this.env.DB, problemId, cursor, 128);
     const dispositions = await readScientificDispositions(this.env.DB, problemId, cursor, 128);
     return JSON.stringify({
-      heads: heads.results,
+      heads,
       dispositions: [...dispositions].map(([id, fold]) => ({
         id,
         version: fold.currentVersion,

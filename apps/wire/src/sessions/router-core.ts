@@ -272,10 +272,9 @@ import {
 import { expireIdleSessions } from "./idle";
 import { releaseDirectAppendSessions, trackDirectAppendSession } from "./implicit-session";
 import {
-  type PackClaimHead,
-  preparePackClaimHeads,
   readDeadEndPack,
   readLedgerPackSection,
+  readPackClaimHeads,
   readReviewQueuePack,
   readTargetClaimPack,
   workingRetryDeadEndMove,
@@ -4281,13 +4280,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
 
     if (profile !== "hello" && profile !== "review-queue" && targetParam === null) {
-      const claims = await preparePackClaimHeads(
+      const claimRows = await readPackClaimHeads(
         db,
         session.problem_id,
         cursor,
         PACK_CLAIM_CANDIDATE_LIMIT + 1,
-      ).all<PackClaimHead>();
-      const claimRows = claims.results ?? [];
+      );
       claimsTruncated = claimRows.length > PACK_CLAIM_CANDIDATE_LIMIT;
       if (claimRows.length === 0) {
         candidates.push({
