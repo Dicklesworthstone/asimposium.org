@@ -17,6 +17,57 @@ observed.
 Updated 2026-11-11. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+### Area rename follow-through — 2026-11-11
+
+The implementation at `e39b2a5c` postdates the assessment below. The existing
+operator area command now persists an append-only rename event and its audit
+entry atomically, retains the immutable slug, and returns an exact replayable
+receipt. The admin form uses the signed Worker path with current operator and
+recent-auth checks. Area Markdown/JSON and the human area/Explore pages consume
+the same label projection; a confirmed receipt invalidates both human caches.
+The public notice is taxonomy `label_change` event/time provenance, not a
+scientific `moderation_log` action. Private audit reasons are excluded.
+
+The real local native lane covers hidden/private targets, principal and auth
+refusals, replay after a later rename, concurrent writers, immutable history,
+audit-trigger rollback and retry, and unchanged scientific events/membership.
+Production Next/Chromium with Workerd/D1/R2 passes all 459 checks in both primary
+and independent runs; the final independent `e39b2a5c` run exits normally in
+139.917 seconds with unchanged source/SDK. Removing only the two cache
+invalidations completes that same browser journey with exactly four human-cache parity failures; Worker
+faces remain correct. Exact restoration passes all 459. These local runs use
+explicit identity/signing/screening fixtures; they do not establish Google,
+staging, provider authority or G-C acceptance.
+
+The final frozen source has fresh typecheck/lint passes (eight groups each),
+1,021 contract-package tests, 605 renderer tests, 190 Worker contract tests,
+the complete 68-case repaired unit set, native area and Stoa lanes, and the
+schema/trigger and registered-source-plant checks. **The full root suite passes
+all eight groups**, normal exit 0 at 09:32:53 UTC in 1,550.182 seconds, including
+7,375 Worker tests and 1,081 Agora tests. Its existing 54 individual toolchain
+skips remain disclosed in the raw output; no whole group is skipped. All 2,711
+source hashes and the pinned SDK are unchanged before/after and match current
+main. Its preceding `6821a028` run completed with seven groups passing and 16
+Worker unit failures. The repairs supply three missing
+immutable-review fixture fields and replace the operator test's obsolete
+unavailable expectation with a typed receipt plus persisted event/audit checks;
+production scientific rules and the original race/rollback assertions remain.
+Earlier browser, receiver-capacity and trigger-catalog failures are retained.
+Raw source/SDK-bound receipts are under
+`e2e/artifacts/area-renames-20261111-coppertiger/` and the independent paths cited
+in Beads. Different-agent acceptance closes only `0ht.1` and supporting fixture/
+gate repairs `df71.3.7`–`df71.3.10`. The broader admin and hosted requirements
+remain separate. The current tracker has 619 issues: 475 closed and 144
+unfinished; the dependency graph remains acyclic.
+
+The literal final changed-file UBS scans complete with no critical findings
+and seven reviewed warnings in existing test JSON parses. Broader incoming
+coverage still belongs to `g4b4`; the failed scheduler/timeout scans are not
+security passes. `0ht` retains its wider admin/hosted criteria. Cost remains
+blocked at 78 `S2_COST_MEASUREMENT_UNAVAILABLE`, and deployed reconciliation,
+protected screening material, whole-system recovery, fresh-harness G-C and
+optional Rust qualification retain their original owners and acceptance.
+
 ### Fresh end-to-end assessment — 2026-11-11
 
 ASImposium has a substantial, tested local implementation of its scientific
@@ -79,7 +130,7 @@ implementation from work that exists but still needs original acceptance.
 | Provisioned G-C runner and measurement | `e2e/gauntlet/run.sh:139` still returns 70 for a supplied join-file input. Local verdicts prove pack retrieval and persistence past an injected refusal, not move following or error-body comprehension. Harness usage is explicitly `whole_session`; served bytes to first promotion are a separate measure. | `zai`, `pcsn`, `mn7`: implement the actual staging journey and authoritative first-promotion usage boundary, then meet ten fresh sessions, three harnesses, eight completions and the 25K-token median. Missing usage or a planted incomplete journey must withhold acceptance. |
 | Safety accuracy and the protected corpus | `e2e/screening/s4-corpus.ts:921,1107` reserves 50 absent protected bodies. The 150 legitimate examples and local fixture screen cannot establish hard-reject recall or hosted accuracy. | `xeg`, `axq`, `drv`, `ip3`: material, digest-bound protected corpus; hosted FP/FN and aggregation tests; bare/inoculated probe trials; actual independent operator decisions and Google verification. |
 | Whole-system recovery | `krater/backup-scheduler.ts:7` explicitly archives published problem ledgers. `restore.ts` restores one verified problem and projections, with provider execution remaining separate. Signed public exports do not restore all account/global/private state. | `p4b`, `zr9`, `79n`, `24q`: complete original backup scope and scratch drills, proving revoked rights and redactions survive; corrupt input must refuse before writes. |
-| Area rename | `enrollment/router.ts:3158` returns unavailable after validation; `apps/web/app/admin/page.tsx:288` disables the control. | `0ht`: durable reasoned, audited mutation with principal/step-up protection, real UI success and unauthorized/replay failures. |
+| Area rename | Implemented after this audit in `moderation/area-renames.ts`, migration 0143 and the existing admin action/form; shared faces carry the new label and public change provenance. | `0ht.1`: local native/browser, adverse controls, full-root and independent acceptance are recorded above. Parent `0ht` retains wider admin/hosted criteria. |
 | Remaining optional CLI | `cli/src/lib.rs:44,46`, `enrollment.rs` and `credentials.rs` now implement connect, device enrollment, approval resume and keychain storage. Browser PKCE, validate/scrub parity, spool/sync/watch/pull/doctor, negotiation and release remain incomplete. | `il7`, `l3b`, `psl`, `jsj`, `85s`, `l1yg.1`: original current-source Rust, parity, native and release criteria; old binaries and compile-only checks cannot substitute. |
 | Deployed configuration and evidence | Source implements receipt-bound readiness, Herald/outbox, rate budgets, artifact publication and scientific consumers. Public deployment and provider behavior remain unqualified. | `rs5n`, `tgu`, `doa`, `irg`, `rhg`, `z2j`, W7: reconcile existing bindings/migrations, preserve Worker-before-Agora order, exercise actual Google/sponsor/anonymous paths and retain load, cost, cache and storage receipts. |
 
@@ -1804,8 +1855,9 @@ Tier 2 and expressly refused features are not extra launch requirements.
    false science and a private-content canary that must fail.
 5. **Finish the remaining original breadth and operation.** W1–W9 keep their
    every-kind/error/face, notice/outbox, warning, materiality, roster, recovery
-   and human experience criteria. Complete durable area rename (`0ht`), full
-   SQL/global/private recovery (`p4b`/`zr9`) and original optional CLI breadth
+   and human experience criteria. Finish wider admin/hosted acceptance (`0ht`)
+   around the implemented local area rename, full SQL/global/private recovery
+   (`p4b`/`zr9`) and original optional CLI breadth
    without misclassifying its existing connect/device/keychain implementation.
    `9lqv` maps outdated acceptance command names to existing real runners;
    a missing script name alone does not establish an absent subsystem.
@@ -1845,8 +1897,10 @@ bridge as follows:
 | Refinement 5 | Reconcile every result with source/revision and denominator: fresh 3-positive/7-incomplete scripted oracle controls, retained 439-browser/full-root results, absent protected hard-reject bodies, cost78 and Gallery78. No product gate or implementation issue is closed by this assessment. |
 | Final recheck | Independent coverage review finds the same implementation/proof split. The report and README are original status writing; no private-skill prompts, alternative architecture, application changes, new acceptance bypass or provider operation is introduced. |
 
-The current keyword, structural and behavioral inspection finds the explicit
-area-rename and provisioned-G-C refusal paths described above. Rust AST searches
+This audit's keyword, structural and behavioral inspection found the explicit
+area-rename and provisioned-G-C refusal paths described above. The later area
+implementation is qualified separately in the follow-through above;
+provisioned G-C remains unfinished. Rust AST searches
 for `todo!` and `unimplemented!` return empty arrays (ordinary no-match exit 1).
 This does not implement absent CLI commands or prove the rest of the code
 correct. The earlier broad TypeScript census and all older counts below are
