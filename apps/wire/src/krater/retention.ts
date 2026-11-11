@@ -17,6 +17,15 @@ import {
   type CheckpointVerifyKey,
   checkpointSigningKey,
 } from "./checkpoint-signing.ts";
+import {
+  CONTENT_CONTROL_COLUMNS,
+  type ContentControlSnapshot,
+  ContentControlSnapshotSchema,
+  contentControlJournalCoverageSql,
+  contentControlRecoverySnapshot,
+  contentControlResurrections,
+  prepareContentControlReplay,
+} from "./content-control-retention.ts";
 import { parseProblemExport } from "./export.ts";
 import { canonicalJson, sha256Hex } from "./krater.ts";
 import {
@@ -41,6 +50,7 @@ export class RetentionError extends Error {
 }
 
 export type RetentionControlAction =
+  | "content-control"
   | "suspend-sponsor"
   | "delete-private-draft"
   | "revoke-credential"
@@ -50,6 +60,7 @@ export type RetentionControlAction =
   | "unbind-private-cas";
 
 export type RetentionTargetType =
+  | "content_control"
   | "sponsor"
   | "problem"
   | "credential"
@@ -190,6 +201,7 @@ export async function verifyRetentionControlRecord(
   if (
     typeof r.action !== "string" ||
     ![
+      "content-control",
       "suspend-sponsor",
       "delete-private-draft",
       "revoke-credential",
@@ -207,6 +219,7 @@ export async function verifyRetentionControlRecord(
   if (
     typeof r.targetType !== "string" ||
     ![
+      "content_control",
       "sponsor",
       "problem",
       "credential",
@@ -237,6 +250,13 @@ export async function verifyRetentionControlRecord(
     payload: r.payload as Record<string, unknown>,
     controlDigest: r.controlDigest,
   };
+  if (typedRecord.action === "content-control") {
+    try {
+      contentControlRecoverySnapshot(typedRecord);
+    } catch {
+      return { valid: false, reason: "invalid content-control recovery identity or payload" };
+    }
+  }
 
   const recomputedDigest = await computeRetentionControlDigest(typedRecord);
   if (recomputedDigest !== typedRecord.controlDigest) {
@@ -466,6 +486,70 @@ export function deletionJournalStatement(
     );
 }
 
+/** The exact visibility decision commits with its private recovery authority.
+ * A mismatched inserted row aborts the batch, never silently omits its journal.
+ * Stable identities let publication backfill preexisting immutable decisions. */
+export async function contentControlJournalStatements(
+  db: D1Database,
+  input: ContentControlSnapshot,
+  onlyIfMissing = false,
+): Promise<D1PreparedStatement[]> {
+  const snapshot = ContentControlSnapshotSchema.parse(input);
+  const unsigned: Omit<RetentionControlRecord, "controlDigest"> = {
+    controlId: `RC-${snapshot.control_id}`,
+    action: "content-control",
+    targetId: snapshot.control_id,
+    targetType: "content_control",
+    issuedAt: snapshot.created_at,
+    payload: snapshot,
+  };
+  const record = { ...unsigned, controlDigest: await computeRetentionControlDigest(unsigned) };
+  const exact = CONTENT_CONTROL_COLUMNS.map((column) => `${column} IS ?`).join(" AND ");
+  return [
+    db
+      .prepare(`SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM content_controls WHERE control_id = ?)
+        OR EXISTS (SELECT 1 FROM content_controls WHERE ${exact})
+        THEN 1 ELSE abs(-9223372036854775808) END AS journal_control_matches`)
+      .bind(snapshot.control_id, ...CONTENT_CONTROL_COLUMNS.map((column) => snapshot[column])),
+    deletionJournalStatement(db, record, {
+      sql: `EXISTS (SELECT 1 FROM content_controls WHERE control_id = ?)${
+        onlyIfMissing ? " AND NOT EXISTS (SELECT 1 FROM deletion_journal WHERE control_id = ?)" : ""
+      }`,
+      bindings: [snapshot.control_id, ...(onlyIfMissing ? [record.controlId] : [])],
+    }),
+  ];
+}
+
+const CONTENT_CONTROL_BACKFILL_LIMIT = 100;
+
+/** Bound each publication attempt's upgrade work. No partially covered head
+ * is published: a later tick continues from the remaining immutable rows. */
+async function backfillContentControlJournal(db: D1Database): Promise<void> {
+  const missing = await db
+    .prepare(`SELECT ${CONTENT_CONTROL_COLUMNS.map((column) => `c.${column}`).join(", ")}
+      FROM content_controls c WHERE NOT EXISTS (
+        SELECT 1 FROM deletion_journal j WHERE j.control_id = 'RC-' || c.control_id)
+      ORDER BY c.problem_id, c.target_ref, c.version LIMIT ?`)
+    .bind(CONTENT_CONTROL_BACKFILL_LIMIT + 1)
+    .all<ContentControlSnapshot>();
+  if (!missing.success) throw new Error("CONTENT_CONTROL_JOURNAL_UNAVAILABLE");
+  const statements = (
+    await Promise.all(
+      missing.results
+        .slice(0, CONTENT_CONTROL_BACKFILL_LIMIT)
+        .map((row) => contentControlJournalStatements(db, row, true)),
+    )
+  ).flat();
+  if (statements.length > 0) await db.batch(statements);
+  if (missing.results.length > CONTENT_CONTROL_BACKFILL_LIMIT)
+    throw new Error("CONTENT_CONTROL_JOURNAL_BACKFILL_PENDING");
+  const uncovered = await db
+    .prepare(`SELECT 1 AS uncovered FROM content_controls c WHERE NOT EXISTS (
+      SELECT 1 FROM deletion_journal j WHERE ${contentControlJournalCoverageSql("c", "j")}) LIMIT 1`)
+    .first();
+  if (uncovered !== null) throw new Error("CONTENT_CONTROL_JOURNAL_CONFLICT");
+}
+
 /** Persist the exact journal authority before the atomic content erasure.
  * Migration 0112 preserves only the identity needed by immutable audit/quota
  * records; all other draft rows are removed. Restore uses this same path. */
@@ -616,6 +700,7 @@ export async function publishDeletionJournal(
 ): Promise<DeletionJournalPublication> {
   const key = await checkpointSigningKey(rawSigningKey);
   if (key === null) return { enabled: false, recordCount: 0, published: false };
+  await backfillContentControlJournal(db);
   const records = await readDeletionJournalRecords(db);
   // A signed empty head is necessary too: absence of a journal cannot
   // establish that the source has never committed a retention control.
@@ -883,6 +968,7 @@ export interface DeletionJournalReplay {
 // this restore. Every action must explicitly support both replay and readback
 // before recovery can report completion. Service cutover is a separate operation.
 const RETENTION_CONTROL_REPLAY_SUPPORTED = {
+  "content-control": true,
   "suspend-sponsor": true,
   "delete-private-draft": true,
   "revoke-credential": true,
@@ -908,7 +994,7 @@ export async function findResurrectedTargets(
   records: readonly RetentionControlRecord[],
 ): Promise<string[]> {
   assertReplayableControls(records);
-  const resurrected: string[] = [];
+  const resurrected = await contentControlResurrections(db, records);
   for (const control of records) {
     if (control.action === "suspend-sponsor") {
       const row = await db
@@ -997,7 +1083,13 @@ export async function applyDeletionJournal(options: {
     options.verifyKeys,
     options.readCurrentJournal,
   );
-  const applied = await replayControls(options.db, records, options.revokeCredential);
+  const contentControls = await prepareContentControlReplay(options.db, records);
+  const applied = await replayControls(
+    options.db,
+    records,
+    options.revokeCredential,
+    contentControls,
+  );
   const resurrected = await findResurrectedTargets(options.db, records);
   if (resurrected.length > 0) {
     throw new KraterRestoreRefusedError(
@@ -1071,8 +1163,10 @@ async function replayControls(
   db: D1Database,
   records: readonly RetentionControlRecord[],
   revokeCredential: CredentialRevoker | undefined,
+  contentControls: Awaited<ReturnType<typeof prepareContentControlReplay>>,
 ): Promise<number> {
-  let applied = 0;
+  await contentControls.apply();
+  let applied = contentControls.count;
   for (const control of records) {
     if (control.action === "suspend-sponsor") {
       // A snapshot predating the reviewed case cannot reconstruct its human
@@ -1182,6 +1276,8 @@ export async function deletionSafeRestore(options: {
     options.verifyKeys,
     options.readCurrentJournal,
   );
+  // Detect a conflicting control history before even creating the scratch log.
+  const contentControls = await prepareContentControlReplay(options.db, records);
 
   const parsedSnapshot = parseProblemExport(options.snapshotNdjson);
   const snapshotProblem = parsedSnapshot.ok ? parsedSnapshot.header.problem : "";
@@ -1197,7 +1293,12 @@ export async function deletionSafeRestore(options: {
   const restoreResult = await restoreProblemExport(options.db, options.snapshotNdjson, {
     targetIdentifier: options.targetIdentifier,
   });
-  const appliedControlsCount = await replayControls(options.db, records, options.revokeCredential);
+  const appliedControlsCount = await replayControls(
+    options.db,
+    records,
+    options.revokeCredential,
+    contentControls,
+  );
   const resurrected = await findResurrectedTargets(options.db, records);
   if (resurrected.length > 0) {
     throw new KraterRestoreRefusedError(

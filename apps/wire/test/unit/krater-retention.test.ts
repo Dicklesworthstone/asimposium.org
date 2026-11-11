@@ -11,6 +11,10 @@ import {
   checkpointSigningKey,
 } from "../../src/krater/checkpoint-signing.ts";
 import {
+  CONTENT_CONTROL_COLUMNS,
+  prepareContentControlReplay,
+} from "../../src/krater/content-control-retention.ts";
+import {
   canonicalJson,
   checkpointDigest,
   eventChainDigest,
@@ -21,6 +25,7 @@ import {
 import { KraterRestoreRefusedError } from "../../src/krater/restore.ts";
 import {
   applyDeletionJournal,
+  computeRetentionControlDigest,
   createRetentionControlRecord,
   deletionJournalObjectKey,
   deletionSafeRestore,
@@ -38,6 +43,8 @@ import {
   validateScratchTarget,
   verifyRetentionControlRecord,
 } from "../../src/krater/retention.ts";
+import { hideSponsorProblem } from "../../src/moderation/problem-hide.ts";
+import { applyOperatorControl, fileReport, resolveReport } from "../../src/moderation/store.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 const NOW = "2026-08-20T00:00:00Z";
@@ -951,6 +958,277 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
           .prepare("SELECT problem_id FROM private_draft_erasures ORDER BY problem_id")
           .all(),
       ).toEqual([{ problem_id: first.targetId }, { problem_id: second.targetId }]);
+    });
+  });
+
+  describe("visibility control recovery", () => {
+    const problem = "P-VISIBILITY-RECOVERY";
+    const reason = "PRIVATE-CONTROL-RATIONALE: withdraw these bytes pending review.";
+    const control = (visibility: "hidden" | "visible", targetRef = "problem") => ({
+      problemId: problem,
+      targetKind: targetRef === "problem" ? "problem" : "claim",
+      targetRef,
+      visibility,
+      reason,
+    });
+    const rows = (sqlite: Database) =>
+      sqlite
+        .prepare(`SELECT ${CONTENT_CONTROL_COLUMNS.join(", ")} FROM content_controls
+        ORDER BY problem_id, target_ref, version`)
+        .all();
+
+    test("every visibility writer journals its exact control and journal failure rolls back the decision", async () => {
+      const source = freshDb();
+      await seedClaimProblem(source.db, problem, 2);
+      await applyOperatorControl(source.db, "operator-fixture", control("hidden"));
+      await applyOperatorControl(source.db, "operator-fixture", control("visible"));
+      const claim = `C-1-${problem}`;
+      const reports = [];
+      for (let index = 0; index < 3; index += 1) {
+        reports.push(
+          await fileReport(source.db, {
+            problemId: problem,
+            targetKind: "claim",
+            targetRef: claim,
+            reason: "unsafe-content",
+            note: null,
+            reporterClass: "sponsor",
+            reporterFellowId: null,
+            reporterSponsorId: `usr_reporter_${index}`,
+          }),
+        );
+      }
+      expect(reports.at(-1)?.targetHidden).toBe(true);
+      const firstReport = reports[0];
+      if (!firstReport) throw new Error("Expected the first independent report");
+      expect(
+        await resolveReport(source.db, "operator-fixture", {
+          reportId: firstReport.reportId,
+          resolution: "dismiss",
+          reason: "Reviewed the reported source and dismissed this concern.",
+        }),
+      ).toMatchObject({ ok: true });
+      source.sqlite.run(
+        "INSERT INTO sponsors(sponsor_id,created_at,last_seen_at) VALUES('usr_sponsor_1',?,?)",
+        [Date.now(), Date.now()],
+      );
+      await hideSponsorProblem(
+        source.db,
+        "usr_sponsor_1",
+        {
+          problem_id: problem,
+          reason,
+          step_up_authenticated_at: Math.floor(Date.now() / 1000),
+        },
+        "recovery-sponsor-hide",
+      );
+      const records = await readDeletionJournalRecords(source.db);
+      expect(records).toHaveLength(5);
+      for (const row of rows(source.sqlite) as Record<string, unknown>[]) {
+        const record = records.find((entry) => entry.targetId === row.control_id);
+        expect(record?.payload).toEqual(row);
+        expect((await verifyRetentionControlRecord(record)).valid).toBe(true);
+      }
+      expect(
+        JSON.stringify(source.sqlite.prepare("SELECT * FROM moderation_log").all()),
+      ).not.toContain(reason);
+      const before = rows(source.sqlite);
+      const beforeCursor = source.sqlite.prepare("SELECT cursor FROM public_cursor").all();
+      source.sqlite.run(`CREATE TRIGGER refuse_visibility_journal BEFORE INSERT ON deletion_journal
+        BEGIN SELECT RAISE(ABORT, 'PLANTED_JOURNAL_FAILURE'); END`);
+      await expect(
+        applyOperatorControl(source.db, "operator-fixture", control("visible")),
+      ).rejects.toThrow("PLANTED_JOURNAL_FAILURE");
+      expect(rows(source.sqlite)).toEqual(before);
+      expect(source.sqlite.prepare("SELECT cursor FROM public_cursor").all()).toEqual(beforeCursor);
+      expect(await readDeletionJournalRecords(source.db)).toEqual(records);
+    });
+
+    test("a pre-hide snapshot replays exact decisions and a later authenticated restore remains visible", async () => {
+      const source = freshDb();
+      await seedClaimProblem(source.db, problem, 2);
+      const backups = fakeBucket();
+      const backup = await backupProblem(source.db, backups, problem, "Visibility recovery", DATE);
+      expect(backup).not.toBeNull();
+      if (!backup) throw new Error("Expected a completed pre-hide snapshot");
+      const snapshotNdjson = backups.writes.get(backup.key);
+      if (!snapshotNdjson) throw new Error("Expected the pre-hide snapshot bytes");
+      await applyOperatorControl(source.db, "operator-fixture", control("hidden"));
+      await applyOperatorControl(
+        source.db,
+        "operator-fixture",
+        control("hidden", `C-1-${problem}`),
+      );
+      const keys = await journalKeys();
+      const store = journalBucket();
+      const signing = JSON.stringify({ kid: keys.signing.kid, seedHex: "11".repeat(32) });
+      await publishDeletionJournal(source.db, store.bucket, signing, () => NOW);
+      const current = await fetchLatestDeletionJournal(store.bucket, keys.verify);
+      if (!current) throw new Error("Expected current signed visibility controls");
+      const scratch = freshDb();
+      const options = {
+        db: scratch.db,
+        targetIdentifier: "scratch-visibility-recovery",
+        verifyKeys: keys.verify,
+        readCurrentJournal: async () =>
+          (await fetchLatestDeletionJournal(store.bucket, keys.verify))?.head ?? null,
+      };
+      await deletionSafeRestore({
+        ...options,
+        snapshotNdjson,
+        deletionJournalNdjson: current.ndjson,
+      });
+      expect(rows(scratch.sqlite)).toEqual(rows(source.sqlite));
+      expect(
+        await findResurrectedTargets(scratch.db, await readDeletionJournalRecords(source.db)),
+      ).toEqual([]);
+      await applyOperatorControl(source.db, "operator-fixture", control("visible"));
+      await publishDeletionJournal(source.db, store.bucket, signing, () => NOW);
+      const newer = await fetchLatestDeletionJournal(store.bucket, keys.verify);
+      if (!newer) throw new Error("Expected the authenticated restoration decision");
+      await applyDeletionJournal({ ...options, deletionJournalNdjson: newer.ndjson });
+      await applyDeletionJournal({ ...options, deletionJournalNdjson: newer.ndjson });
+      expect(rows(scratch.sqlite)).toEqual(rows(source.sqlite));
+      expect(
+        scratch.sqlite
+          .prepare(`SELECT visibility FROM content_controls
+        WHERE target_ref = 'problem' ORDER BY version DESC LIMIT 1`)
+          .get(),
+      ).toEqual({ visibility: "visible" });
+      const before = scratch.sqlite.prepare("SELECT total_changes() AS n").get();
+      await expect(
+        applyDeletionJournal({ ...options, deletionJournalNdjson: current.ndjson }),
+      ).rejects.toThrow("DELETION_JOURNAL_STALE");
+      expect(scratch.sqlite.prepare("SELECT total_changes() AS n").get()).toEqual(before);
+    });
+
+    test("conflicting source identities refuse before any writes and concurrent controls roll back the whole replay batch", async () => {
+      const source = freshDb();
+      await seedClaimProblem(source.db, problem, 2);
+      await applyOperatorControl(source.db, "source-operator", control("hidden"));
+      await applyOperatorControl(source.db, "source-operator", control("hidden", `C-1-${problem}`));
+      const records = await readDeletionJournalRecords(source.db);
+      const scratch = freshDb();
+      await seedClaimProblem(scratch.db, problem, 2);
+      const replay = await prepareContentControlReplay(scratch.db, records);
+      await applyOperatorControl(
+        scratch.db,
+        "scratch-operator",
+        control("hidden", `C-1-${problem}`),
+      );
+      const before = rows(scratch.sqlite);
+      // The problem group precedes the claim group, so a later predecessor
+      // conflict must undo even the earlier group's successful INSERT.
+      await expect(replay.apply()).rejects.toThrow();
+      expect(rows(scratch.sqlite)).toEqual(before);
+      const keys = await journalKeys();
+      const journal = await serializeDeletionJournal(records, NOW, keys.signing);
+      const beforeChanges = scratch.sqlite.prepare("SELECT total_changes() AS n").get();
+      await expect(
+        applyDeletionJournal({
+          db: scratch.db,
+          targetIdentifier: "scratch-conflicting-visibility",
+          deletionJournalNdjson: journal,
+          verifyKeys: keys.verify,
+          readCurrentJournal: await fixedJournalReader(journal, keys.verify),
+        }),
+      ).rejects.toThrow("CONTENT_CONTROL_RECOVERY_CONFLICT");
+      expect(scratch.sqlite.prepare("SELECT total_changes() AS n").get()).toEqual(beforeChanges);
+    });
+
+    test("publication rejects matching metadata that conceals a different authenticated journal action", async () => {
+      const source = freshDb();
+      await seedClaimProblem(source.db, problem, 1);
+      const legacy = {
+        control_id: "CC-ENVELOPE-MISMATCH",
+        problem_id: problem,
+        target_kind: "problem",
+        target_ref: "problem",
+        visibility: "hidden",
+        source: "operator",
+        reason_category: "operator-review",
+        actor: "historic-operator",
+        reason,
+        version: 1,
+        created_at: NOW,
+        actor_kind: null,
+      };
+      source.sqlite.run(
+        `INSERT INTO content_controls (${CONTENT_CONTROL_COLUMNS.join(", ")})
+        VALUES (${CONTENT_CONTROL_COLUMNS.map(() => "?").join(", ")})`,
+        CONTENT_CONTROL_COLUMNS.map((column) => legacy[column]),
+      );
+      const concealed = {
+        ...(await createRetentionControlRecord({
+          action: "cancel-enrollment",
+          targetId: legacy.control_id,
+          targetType: "enrollment",
+          issuedAt: NOW,
+          payload: legacy,
+        })),
+        controlId: `RC-${legacy.control_id}`,
+      };
+      concealed.controlDigest = await computeRetentionControlDigest(concealed);
+      expect((await verifyRetentionControlRecord(concealed)).valid).toBe(true);
+      source.sqlite.run(
+        `INSERT INTO deletion_journal
+        (control_id,action,target_type,target_id,control_digest,record_json,created_at)
+        VALUES (?,'content-control','content_control',?,?,?,?)`,
+        [
+          concealed.controlId,
+          legacy.control_id,
+          concealed.controlDigest,
+          JSON.stringify(concealed),
+          NOW,
+        ],
+      );
+      const store = journalBucket();
+      const before = source.sqlite.prepare("SELECT total_changes() AS n").get();
+      await expect(
+        publishDeletionJournal(
+          source.db,
+          store.bucket,
+          JSON.stringify({ kid: "journal-test-1", seedHex: "11".repeat(32) }),
+          () => NOW,
+        ),
+      ).rejects.toThrow("CONTENT_CONTROL_JOURNAL_CONFLICT");
+      expect(store.bodies.size).toBe(0);
+      expect(source.sqlite.prepare("SELECT total_changes() AS n").get()).toEqual(before);
+    });
+
+    test("publication backfills historical decisions in bounded steps and never publishes partial coverage", async () => {
+      const source = freshDb();
+      await seedClaimProblem(source.db, problem, 1);
+      // Historical controls precede journaling support, but remain immutable
+      // source authority. Do not remove or disable the journal's own guards.
+      for (let version = 1; version <= 101; version += 1) {
+        source.sqlite.run(
+          `INSERT INTO content_controls
+          (control_id,problem_id,target_kind,target_ref,visibility,source,
+           reason_category,actor,reason,version,created_at)
+          VALUES (?,?,'problem','problem','hidden','operator','operator-review',
+            'historic-operator',?,?,?)`,
+          [`CC-HISTORICAL-${version}`, problem, reason, version, NOW],
+        );
+      }
+      const store = journalBucket();
+      const keys = await journalKeys();
+      const signing = JSON.stringify({ kid: keys.signing.kid, seedHex: "11".repeat(32) });
+      await expect(
+        publishDeletionJournal(source.db, store.bucket, signing, () => NOW),
+      ).rejects.toThrow("CONTENT_CONTROL_JOURNAL_BACKFILL_PENDING");
+      expect(store.bodies.size).toBe(0);
+      expect(await readDeletionJournalRecords(source.db)).toHaveLength(100);
+      expect(
+        await publishDeletionJournal(source.db, store.bucket, signing, () => NOW),
+      ).toMatchObject({ published: true, recordCount: 101 });
+      expect((await fetchLatestDeletionJournal(store.bucket, keys.verify))?.head.recordCount).toBe(
+        101,
+      );
+      expect(
+        await publishDeletionJournal(source.db, store.bucket, signing, () => NOW),
+      ).toMatchObject({ published: false, recordCount: 101 });
+      expect(rows(source.sqlite)).toHaveLength(101);
     });
   });
 

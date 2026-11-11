@@ -1390,6 +1390,30 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     }
   }
 
+  /** Continue current retention controls on an already restored, quarantined
+   * SCRATCH_DB without asking the log importer to overwrite controlled history. */
+  async replayDeletionJournalIntoScratch(ndjson: string | null) {
+    const db = this.#scratchBindings().scratchDb;
+    try {
+      return {
+        ok: true as const,
+        ...(await applyDeletionJournal({
+          db,
+          targetIdentifier: "scratch-restore-proof",
+          deletionJournalNdjson: ndjson,
+          verifyKeys: checkpointVerifyKeys(this.env.CHECKPOINT_VERIFY_KEYS),
+          readCurrentJournal: () => this.#currentDeletionJournalHead(),
+          revokeCredential: retentionCredentialRevoker(new D1EnrollmentStore(db)),
+        })),
+      };
+    } catch (error) {
+      return {
+        ok: false as const,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   /** A public GET served from the primary and from the scratch database
    * (the same routes and renderers, only the DB binding differs). */
   async compareFaces(path: string) {

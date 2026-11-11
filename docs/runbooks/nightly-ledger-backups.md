@@ -133,6 +133,26 @@ service to accept requests. A journal signature alone is never proof of freshnes
 An empty source publishes a signed zero-record head; no journal means unavailable
 authority, not permission to restore.
 
+The private journal also carries each exact visibility control: operator hides
+and restorations, community holds and their reviewed resolutions, and sponsor
+problem withdrawals. The control and its journal entry commit together. Original
+control IDs, versions, attribution and private rationale survive recovery; the
+public moderation log and public faces do not acquire that rationale. Existing
+immutable controls are backfilled before publication, at most 100 per attempt.
+If more remain, that attempt publishes no new journal and the next tick continues.
+
+Recovery checks all affected existing control histories before changing the
+target and repeats their predecessor checks inside the replay transaction.
+Conflicting identities or concurrent decisions refuse replay; they are never
+overwritten by a backup. The original control version determines current
+visibility even when historical backfill arrives later in journal order.
+Controls for absent problems remain unapplied until those problems are restored.
+After an initial restore has installed controls, apply a newer journal with
+`applyDeletionJournal` on the same quarantined scratch binding. Do not ask the
+log importer to overwrite an already controlled history. This handles visibility
+decisions, not physical redaction, public artifact copying, cache purging, or
+copies already downloaded by third parties.
+
 Require the projection result to contain `inserted` before treating the problem
 rebuild as complete; a `refused` projection result leaves work unfinished.
 Large recovery is a host operation, not a Worker restore RPC. This remains a

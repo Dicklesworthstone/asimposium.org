@@ -10,6 +10,7 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { validatedProblem } from "../http/envelope.ts";
+import { contentControlJournalStatements } from "../krater/retention.ts";
 import {
   scanFieldsForCredentials,
   secretShapedContentProblem,
@@ -144,6 +145,20 @@ export async function hideSponsorProblem(
           request.problem_id,
           current?.control_id ?? "",
         ),
+      ...(await contentControlJournalStatements(db, {
+        control_id: controlId,
+        problem_id: request.problem_id,
+        target_kind: "problem",
+        target_ref: "problem",
+        visibility: "hidden",
+        source: "operator",
+        reason_category: "sponsor-requested",
+        actor: sponsorId,
+        reason: request.reason,
+        version: receipt.version,
+        created_at: appliedAt,
+        actor_kind: "sponsor",
+      })),
       db
         .prepare(`INSERT INTO moderation_log
         (entry_id, seq, action, category, subject, problem_id, created_at)

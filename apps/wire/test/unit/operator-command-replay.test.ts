@@ -23,6 +23,9 @@ function fixture() {
   const sql = new Database(":memory:", { strict: true });
   databases.push(sql);
   sql.exec(`PRAGMA foreign_keys = ON;
+    CREATE TABLE sponsors(sponsor_id TEXT PRIMARY KEY);
+    CREATE TABLE public_cursor(singleton INTEGER PRIMARY KEY, cursor INTEGER);
+    INSERT INTO public_cursor VALUES(1, 0);
     CREATE TABLE enrollment_fellows(fellow_id TEXT PRIMARY KEY, sponsor_id TEXT NOT NULL);
     CREATE TABLE problems(id TEXT PRIMARY KEY, status TEXT, unlisted INTEGER, public_seq INTEGER);
     CREATE TABLE events(id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, type TEXT,
@@ -32,9 +35,11 @@ function fixture() {
     INSERT INTO problems VALUES('P-REPLAY', 'active', 0, 2);`);
   for (const name of [
     "0064_inbox_and_follows.sql",
+    "0080_deletion_journal.sql",
     "0091_moderation_plane.sql",
     "0133_operator_command_receipts.sql",
     "0135_report_source_pins.sql",
+    "0145_sponsor_problem_hides.sql",
   ])
     sql.exec(readFileSync(new URL(`../../../../db/migrations/${name}`, import.meta.url), "utf8"));
   const payload = JSON.stringify({

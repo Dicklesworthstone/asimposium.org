@@ -33,7 +33,11 @@ function fixture() {
     INSERT INTO enrollment_fellows VALUES('FEL-CONTRIBUTOR', '${OWNER}');
     INSERT INTO problems VALUES('${PROBLEM}', '${OWNER}', 'active', 0, 7);
     INSERT INTO public_cursor VALUES(1, 0);`);
-  for (const name of ["0091_moderation_plane.sql", "0145_sponsor_problem_hides.sql"]) {
+  for (const name of [
+    "0080_deletion_journal.sql",
+    "0091_moderation_plane.sql",
+    "0145_sponsor_problem_hides.sql",
+  ]) {
     sql.exec(readFileSync(new URL(`../../../../db/migrations/${name}`, import.meta.url), "utf8"));
   }
 
