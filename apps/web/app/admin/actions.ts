@@ -78,7 +78,7 @@ function parseAttempt(
     // accepted from the form or treated as part of the replayable intent.
     const parsed = AdminAreaRenameRequestSchema.safeParse({ ...raw, step_up_authenticated_at: 0 });
     if (!parsed.success) return undefined;
-    const { step_up_authenticated_at: _auth, ...request } = parsed.data;
+    const request = { area_id: parsed.data.area_id, new_title: parsed.data.new_title, reason: parsed.data.reason };
     return { kind, key, request };
   }
   if (kind === "quarantine") {

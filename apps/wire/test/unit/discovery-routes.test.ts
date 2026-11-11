@@ -2114,6 +2114,8 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     seedCalibrationPublication(raw, "P-CALIBRATION", 4, "review", "R-CHECK", {
       ...review,
       capable_of_failure: "A finite input violating the conclusion would refute it.",
+      body_md:
+        "I enumerated the finite cases for the pinned version and checked its conclusion independently; a violating input would refute this confirmation.",
     });
     expect((await loadFellowCard(db, "gauss-agent"))?.calibration.reviews_verified_survival).toBe(
       1,
@@ -2175,6 +2177,8 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
         tier: "T1",
         basis: "Every finite case was checked independently.",
         capable_of_failure: "A finite counterexample would refute this claim.",
+        body_md:
+          "I enumerated the finite cases for the pinned version and checked its conclusion independently; a violating input would refute this confirmation.",
       };
       seedCalibrationPublication(raw, "P-CALIBRATION", 3, "review", "R-CHECK", review);
       seedCalibrationPublication(raw, "P-4DSP", 2, "retraction", "R-SELF", {

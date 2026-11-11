@@ -617,6 +617,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/screening/types.ts
   apps/wire/src/screening/workers-ai.ts
   apps/wire/src/moderation/operator-http.ts
+  apps/wire/src/moderation/area-renames.ts
   apps/wire/src/moderation/operator-command.ts
   apps/wire/src/moderation/report-detail.ts
   apps/wire/src/moderation/target.ts

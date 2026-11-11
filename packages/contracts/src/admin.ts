@@ -405,12 +405,12 @@ export const AdminAreaRenameRequestSchema = z
       .string()
       .min(2)
       .max(120)
-      .refine((value) => value.trim() === value),
+      .regex(/^\S(?:[^\r\n]*\S)?$/),
     reason: z
       .string()
       .min(10)
       .max(1000)
-      .refine((value) => value.trim().length >= 10),
+      .regex(/\S[\s\S]{8,}\S/),
     step_up_authenticated_at: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   })
   .strict();

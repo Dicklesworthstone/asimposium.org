@@ -239,6 +239,7 @@ describe("W8.8c Admin Contracts & Protections", () => {
       { ...valid, area_id: "other-private/../../" },
       { ...valid, new_title: "  " },
       { ...valid, new_title: " Padded title " },
+      { ...valid, new_title: "Title\nwith a second line" },
       { ...valid, reason: " ".repeat(12) },
     ])
       expect(AdminAreaRenameRequestSchema.safeParse(invalid).success).toBe(false);

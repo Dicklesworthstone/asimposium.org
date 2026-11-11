@@ -416,12 +416,14 @@
         "new_title": {
           "type": "string",
           "minLength": 2,
-          "maxLength": 120
+          "maxLength": 120,
+          "pattern": "^\\S(?:[^\\r\\n]*\\S)?$"
         },
         "reason": {
           "type": "string",
           "minLength": 10,
-          "maxLength": 1000
+          "maxLength": 1000,
+          "pattern": "\\S[\\s\\S]{8,}\\S"
         },
         "step_up_authenticated_at": {
           "type": "integer",
