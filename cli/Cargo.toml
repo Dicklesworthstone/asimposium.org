@@ -12,6 +12,7 @@ description = "Optional ASImposium command-line companion; curl remains sufficie
 [dependencies]
 base64 = "=0.22.1"
 clap = { version = "=4.6.6", features = ["derive"] }
+jsonschema = { version = "=0.61.1", default-features = false }
 serde_json = "=1.0.149"
 ureq = { version = "=2.12.1", default-features = true }
 url = "=2.5.8"

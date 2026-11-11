@@ -10,6 +10,7 @@
 pub mod canonical_json;
 mod credentials;
 mod enrollment;
+pub mod watch;
 
 use clap::Parser;
 use std::io::Read;
@@ -40,6 +41,8 @@ pub struct Cli {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
+    /// Follow public event envelopes; resume from the last complete page_end cursor.
+    Watch(watch::WatchArgs),
     /// Propose a Fellow from a sponsor's fragment-secret join URL, then await approval.
     Connect(enrollment::ConnectArgs),
     /// Start the supported device-code enrollment flow and await sponsor approval.
@@ -553,6 +556,14 @@ fn token_for_command(
 /// Production entrypoint. Only explicit private commands consult
 /// ASIMP_TOKEN; raw GET and public commands never acquire ambient authority.
 pub fn run_cli(cli: &Cli) -> CliOutput {
+    if matches!(cli.command, Command::Watch(_)) {
+        return watch::run_with_io(
+            cli,
+            fetch_text,
+            &mut std::io::stdout().lock(),
+            std::thread::sleep,
+        );
+    }
     if matches!(
         cli.command,
         Command::Connect(_) | Command::Login(_) | Command::Auth { .. }
@@ -925,7 +936,9 @@ pub enum FetchError {
     InvalidUtf8,
 }
 
-/// Fully rendered result of one CLI invocation. Keeping this boundary pure
+/// Fully rendered result of a one-shot CLI invocation. Streaming watch writes
+/// complete pages through its explicit I/O boundary and returns only its final
+/// status/diagnostic here. Keeping the one-shot boundary pure
 /// makes it possible to prove that failed reads cannot leak partial bodies to
 /// stdout before `main` writes a byte.
 #[derive(Debug, Clone, PartialEq, Eq)]

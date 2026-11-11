@@ -17,6 +17,53 @@ observed.
 Updated 2026-11-11. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+### Public CLI watch continuation — implementation in progress
+
+`l3b.12` connects the planned `asimp watch` command to existing event tails.
+The working source checks generated envelope/footer JSON Schemas offline,
+preserves complete NDJSON pages and resume cursors, and uses the mounted global
+`/cursor` solely as an invalidation hint. Global hints never become a problem's
+`since` or `through`. The native event-tail journey retains its existing checks
+and adds four one-shot CLI cases plus a continuous reader with a real publication
+and an explicit, deliberate transport interruption after catch-up.
+
+**This new command is not yet runtime-qualified.** Original full Rust attempts
+on hz2 and vmi1149989, and test-executable preparation on the latter, stop before
+Cargo at the unchanged worker disk-reservation guard (120/`started:false`).
+One all-targets compiler check actually passes on vmi1149989 at the preceding
+working source, including the new schema dependency and test code; it executes
+no tests and predates the global-hint correction. Current-source denied-warning
+Clippy passes remotely with a 2,729-file receipt matching all 969 CLI/contracts
+inputs. Full pinned formatting passes locally without compilation. The first
+formatter attempt's missing remote checkout remains a separate retained failure.
+
+Current-source TypeScript typecheck and lint pass all eight groups. The original
+full root suite completes normally at 19:50:20 UTC: eight groups pass, including
+7,375 Worker and 1,081 Agora tests, with the original 54 individual toolchain
+skips. All 2,712 before/after/current source hashes and the pinned Next SDK match.
+Separate complete contracts (1,021) and render (605) suites pass, as does the
+original real Workerd/D1/R2 event-tail control **with CLI mode off**. Literal
+`ubs --diff` completes both modules with findings (5 critical, 724 warnings,
+259 information items), not a clean scan. The changed security contexts and
+runtime receive independent read-only review with no additional blocker found;
+the scanner's unprinted Rust findings are not all individually reviewed.
+
+The later thread-aware capacity observation still cannot fit a full Rust test
+reservation: 98.7 GB free against 120.3 GB required, including active build
+reservations and the protected floor. No new test attempt follows that result.
+**No current Rust tests or new CLI-native cases have executed.** Matching-binary
+native positive, producer-fault/restoration and independent executed acceptance
+remain unfinished. `l3b.12` stays in progress; the implementation is uncommitted
+work in progress. Earlier `73f4936d` results below do not qualify this source.
+
+The alternate worker received an additive copy of the already verified Rust
+1.93.1 toolchain: all 139 file hashes/modes match; its 26 old toolchains and
+nightly default remain. A guarded move was refused; the safer actual copy
+retains both source and staging. No default, fleet policy, cache, admission
+guard or project pin changed. The old failure receipts and all new evidence
+remain under `e2e/artifacts/asimp-watch-20261111-coppertiger/`. Parent W11,
+advisory, deployed/TLS/Google, G0/G-C and launch requirements remain open.
+
 ### Current Rust qualification — 2026-11-11
 
 Recovered remote capacity allowed the original CLI qualification to execute at
@@ -30,7 +77,7 @@ journeys: 25 workshop reads, four next-move reads and nine search cases all pass
 in both agents' executions against real local Workerd, D1 and R2.
 
 Each successful RCH command has a worker-verified 2,728-file source receipt;
-all 968 current CLI/contracts inputs match. The test receipts also match all
+all 968 CLI/contracts inputs at that revision match. The test receipts also match all
 2,711 frozen native inputs. Before/after source maps and the pinned Next SDK
 remain stable. The compiler-reported library executable has matching
 remote-before, downloaded and remote-after SHA-256 values, `47ec450c…d91ea`.
@@ -42,7 +89,7 @@ TLS, live OS-keychain behavior, Google approval or deployed participation.
 
 Fresh worker observations retain Rust 1.93.1, rustfmt/Clippy, the old toolchains
 and the original default, `nightly-2026-08-31`. No worker policy, cache, guard,
-toolchain pin or application code changes in this continuation. An impossible
+toolchain pin or application code changed during that qualification. An impossible
 `+99.99.99` request returns 103/`RCH-I006` before Cargo, with local fallback
 refused. The primary private-checkout attempt's separate topology refusal is
 retained; accepted commands run from the canonical project root without an

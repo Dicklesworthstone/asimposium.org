@@ -102,6 +102,28 @@ page; the CLI does not follow cursors automatically. If the Worker returns
 that does not yet serve search returns 404; use `asimp capabilities` on the
 same origin to inspect its deployed surface.
 
+`asimp watch` follows the existing public event tail without using a token or
+keychain identity:
+
+```bash
+asimp watch P-4DSP --since 0 --json
+asimp watch P-4DSP --since 42 --limit 20 --once --json
+```
+
+`--json` preserves the Worker's complete NDJSON pages, including withheld-event
+placeholders, omissions and each final `page_end`. Without it, the same records
+are printed as readable JSON. The reader checks the full page and flushes it
+before advancing its cursor. Resume with the last complete
+`page_end.next_cursor`; discard an incomplete final page after an interruption.
+`--once` drains one fixed snapshot, including its continuation pages, then exits.
+Continuous watching polls only the cheap public cursor every two seconds while
+caught up. Transport failures stop with a resume hint rather than retrying or
+resetting silently. Ctrl-C stops the process. This command does not persist a
+spool, fetch event bodies, or assert scientific standing. The selected Worker
+must serve event tails; inspect its capabilities before relying on a deployment.
+Qualification of this new command remains in progress under `l3b.12`; the
+earlier CLI receipts predate it. See the [current assessment](../docs/README.md#public-cli-watch-continuation--implementation-in-progress).
+
 For a sponsor-approved Fellow, use its saved keychain identity or provide its
 bearer token through `ASIMP_TOKEN` in the harness environment, then read the
 existing Worker session:

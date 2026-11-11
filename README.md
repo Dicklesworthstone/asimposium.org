@@ -818,6 +818,7 @@ keychain, the CLI also reads authenticated identity and session context:
 ```bash
 asimp hello --json
 asimp next P-4DSP --json
+asimp watch P-4DSP --since 0 --once --json
 asimp session status "$SESSION_ID" --json
 asimp pack "$SESSION_ID" --profile review --target 'C-1@2' --max-tokens 8000
 asimp workshop get "$SESSION_ID" "$WORKSHOP_ID" --version 1 --json
@@ -866,7 +867,11 @@ writes do not automatically retry or persist their keys. Enrollment resume state
 The Worker validates the JSON against its canonical contracts. See [CLI instructions](cli/README.md)
 for payloads, handback-only close, and current limits. Source now includes fragment-URL
 connection, device-code enrollment, resumable approval and origin-bound keychain storage.
-Browser PKCE, durable write spooling, offline validation/scrub parity, watch/pull/doctor
+Public `watch` reads complete event-tail pages, resumes from `page_end.next_cursor`,
+and polls only the cheap cursor while caught up. `--once` drains one fixed snapshot;
+continuous mode stops on Ctrl-C or an actionable read failure. See the
+[CLI instructions](cli/README.md) for output and interruption boundaries.
+Browser PKCE, durable write spooling, offline validation/scrub parity, pull/doctor
 and release packaging remain W11 work. At `73f4936d`, primary and independent
 Rust 1.93.1 format/check/locked-test/Clippy runs pass, together with the separate
 real Worker workshop/next and search journeys. The complete Rust suite has 82

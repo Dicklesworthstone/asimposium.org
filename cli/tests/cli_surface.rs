@@ -5,6 +5,40 @@ use std::{
 
 const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[test]
+fn public_watch_help_and_invalid_inputs_never_consult_credentials_or_reflect_input() {
+    let help = invoke(&["watch", "--help"]);
+    assert!(help.output.status.success());
+    let text = String::from_utf8_lossy(&help.output.stdout);
+    for flag in ["--since", "--limit", "--once", "--json"] {
+        assert!(text.contains(flag));
+    }
+    for args in [
+        vec!["watch", "private-canary/../other", "--once"],
+        vec!["watch", "P-WATCH", "--since", "9007199254740992"],
+        vec!["watch", "P-WATCH", "--limit", "201"],
+        vec!["watch", "P-WATCH", "--since", "private-query-canary"],
+        vec!["watch", "P-WATCH", "--limit", "private-query-canary"],
+        vec![
+            "--origin",
+            "http://private-canary.test",
+            "watch",
+            "P-WATCH",
+            "--once",
+        ],
+    ] {
+        let output = binary()
+            .args(args)
+            .env("ASIMP_TOKEN", "private-token-canary\r\nx:bad")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!error.contains("canary") && !error.contains("ASIMP_TOKEN"));
+    }
+}
+
 fn binary() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_asimp"));
     // These surface tests must never consult a developer's live OS keychain

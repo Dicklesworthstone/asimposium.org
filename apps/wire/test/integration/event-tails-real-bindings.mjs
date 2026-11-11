@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { createServer } from "node:http";
+import { promisify } from "node:util";
 import { gunzipSync } from "node:zlib";
 import { EventTailResponseSchema } from "../../../../packages/contracts/src/event-tail.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
@@ -16,6 +19,10 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // external RSS/Atom validator, edge caching.
 
 const CANARY = "PRIVATE-WORKSHOP-CANARY-7f3a";
+const cliMode = process.argv[2] === "cli";
+const cliBinary = process.env.ASIMP_WATCH_TEST_BINARY;
+if (cliMode) assert.ok(cliBinary, "CLI mode requires the source-bound Rust library test binary");
+const execute = promisify(execFile);
 
 await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, userAgent }) => {
   const author = await enroll("tails-author", "usr_tails_author");
@@ -136,6 +143,127 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     full.events.slice(firstUndisclosed + 1).some((event) => event.event !== null),
     "a material event follows the undisclosed one",
   );
+
+  if (cliMode) {
+    // Actual HTTP and production Rust reader; only its configured HTTPS origin
+    // maps to loopback. Fixture identity/screening are not Google/TLS proof.
+    let requests = [];
+    const bridge = createServer(async (request, response) => {
+      requests.push({
+        method: request.method,
+        path: request.url,
+        ua: request.headers["user-agent"],
+        auth: request.headers.authorization,
+      });
+      const result = await worker.fetch(`${origin}${request.url}`, {
+        headers: { "User-Agent": request.headers["user-agent"] ?? "" },
+      });
+      response.writeHead(result.status, Object.fromEntries(result.headers));
+      response.end(Buffer.from(await result.arrayBuffer()));
+    });
+    await new Promise((resolve) => bridge.listen(0, "127.0.0.1", resolve));
+    const local = `http://127.0.0.1:${bridge.address().port}`;
+    try {
+      for (const item of [
+        { since: 0, limit: 2, json: true },
+        { since: firstUndisclosed, limit: 2, json: true },
+        { since: 0, limit: 1, json: false },
+        { since: full.page_end.next_cursor, limit: 2, json: true },
+      ]) {
+        const pages = [];
+        const paths = [];
+        const seen = [];
+        let since = item.since;
+        let through;
+        for (let page = 0; page < 50; page++) {
+          const path = `/p/${problem}/events.ndjson?since=${since}&limit=${item.limit}${through === undefined ? "" : `&through=${through}`}`;
+          const { stdout } = await execute(
+            "curl",
+            [
+              "--disable",
+              "--silent",
+              "--show-error",
+              "--fail",
+              "--max-time",
+              "5",
+              "--user-agent",
+              userAgent,
+              `${local}${path}`,
+            ],
+            { timeout: 6000, maxBuffer: 1024 * 1024 },
+          );
+          pages.push(stdout);
+          paths.push(path);
+          bodies.push(stdout);
+          const records = stdout
+            .trimEnd()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          const { omitted, ...end } = records.pop();
+          const typed = EventTailResponseSchema.parse({
+            schema: end.schema,
+            events: records,
+            page_end: end,
+            omitted,
+          });
+          seen.push(...typed.events.map((event) => event.seq));
+          since = typed.page_end.next_cursor;
+          through = typed.page_end.through;
+          if (!typed.page_end.has_more) break;
+          assert.ok(page < 49, "the independently fetched snapshot must finish");
+        }
+        assert.deepEqual(
+          seen,
+          reference.filter((seq) => seq > item.since),
+          "curl snapshot preserves the independently read full sequence, including withheld placeholders",
+        );
+        requests = [];
+        const { stdout } = await execute(
+          cliBinary,
+          ["--exact", "watch::tests::watch_real_http", "--ignored"],
+          {
+            env: {
+              ...process.env,
+              ASIMP_TOKEN: "private-ambient-token-canary",
+              ASIMP_WATCH_PROBE: JSON.stringify({
+                ...item,
+                origin: local,
+                problem,
+                pages,
+                canary: CANARY,
+              }),
+            },
+            timeout: 20000,
+            maxBuffer: 256 * 1024,
+          },
+        ).catch((error) => {
+          if (error.stdout) process.stdout.write(error.stdout);
+          if (error.stderr) process.stderr.write(error.stderr);
+          throw new assert.AssertionError({
+            message: `asimp watch diverged for since=${item.since}, limit=${item.limit}, json=${item.json}`,
+          });
+        });
+        assert.match(stdout, /test result: ok\. 1 passed; 0 failed; 0 ignored;/);
+        assert.deepEqual(
+          requests,
+          paths.map((path) => ({ method: "GET", path, ua: userAgent, auth: undefined })),
+          "the parsed public command follows exactly the pinned pages, without credential or extra reads",
+        );
+      }
+      console.log(
+        JSON.stringify({
+          stage: "asimp-watch-real-bindings",
+          status: "pass",
+          cases: 4,
+          cursor_snapshot: full.page_end.next_cursor,
+          boundary:
+            "parsed Rust streaming reader over real Workerd/D1/R2 via explicit loopback mapping; no TLS/Google/staging claim",
+        }),
+      );
+    } finally {
+      await new Promise((resolve) => bridge.close(resolve));
+    }
+  }
 
   // Page every format with limit=2 and resume from its own cursor.
   const pageThrough = async (format) => {
@@ -296,6 +424,174 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
   const quiet = await get(`/p/${problem}/events.json?since=${quietHead}&wait=1`);
   assert.equal(quiet.response.headers.get("x-asimposium-wait"), "timeout");
   assert.equal(EventTailResponseSchema.parse(JSON.parse(quiet.text)).events.length, 0);
+
+  if (cliMode) {
+    // Exercise the default continuous path with the real site-wide /cursor.
+    // After it observes a new committed publication, deliberately close its
+    // next read so the infinite watcher terminates with an explicit resume hint.
+    const initial = EventTailResponseSchema.parse(
+      JSON.parse((await get(`/p/${problem}/events.json?since=0&limit=200`)).text),
+    );
+    const initialHead = initial.page_end.next_cursor;
+    let hintReads = 0;
+    let published = false;
+    let caughtUp = false;
+    let resume = 0;
+    let bridgeError;
+    const expectedPages = [];
+    const cliRequests = [];
+    const bridge = createServer(async (request, response) => {
+      try {
+        const oracle = request.headers["x-asimp-test-oracle"] === "1";
+        if (!oracle) {
+          cliRequests.push(request.url);
+          assert.equal(request.method, "GET");
+          assert.equal(request.headers.authorization, undefined);
+          assert.equal(request.headers["user-agent"], userAgent);
+          if (request.url === "/cursor") {
+            hintReads++;
+            if (caughtUp) {
+              request.destroy();
+              return;
+            }
+            if (hintReads === 2) {
+              const draft = await call(
+                `/v1/sessions/${session}/workshop`,
+                {
+                  type: "claim-draft",
+                  title: "Live reader update",
+                  body_md: "Public-bound live update.",
+                },
+                author,
+                201,
+              );
+              await call(
+                `/v1/sessions/${session}/promote`,
+                {
+                  workshop_id: draft.workshop_id,
+                  kind: "conjecture",
+                  statement: "11 squared is odd, like 11.",
+                  falsifier: "11 squared is even.",
+                },
+                author,
+                201,
+              );
+              published = true;
+            }
+          }
+        }
+        const result = await worker.fetch(`${origin}${request.url}`, {
+          headers: { "User-Agent": userAgent },
+        });
+        const bytes = Buffer.from(await result.arrayBuffer());
+        if (!oracle && request.url.startsWith(`/p/${problem}/events.ndjson?`)) {
+          assert.equal(result.status, 200);
+          const { stdout } = await execute(
+            "curl",
+            [
+              "--disable",
+              "--silent",
+              "--show-error",
+              "--fail",
+              "--max-time",
+              "5",
+              "--user-agent",
+              userAgent,
+              "--header",
+              "x-asimp-test-oracle: 1",
+              `http://127.0.0.1:${bridge.address().port}${request.url}`,
+            ],
+            { timeout: 6000, maxBuffer: 1024 * 1024 },
+          );
+          assert.equal(bytes.toString(), stdout, "live page is stable against independent curl");
+          expectedPages.push(stdout);
+          bodies.push(stdout);
+          const records = stdout
+            .trimEnd()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          const { omitted, ...end } = records.pop();
+          const typed = EventTailResponseSchema.parse({
+            schema: end.schema,
+            events: records,
+            page_end: end,
+            omitted,
+          });
+          resume = typed.page_end.next_cursor;
+          caughtUp = published && resume > initialHead && !typed.page_end.has_more;
+        }
+        response.writeHead(result.status, Object.fromEntries(result.headers));
+        response.end(bytes);
+      } catch (error) {
+        bridgeError = error;
+        response.writeHead(500);
+        response.end("Test bridge failed.");
+      }
+    });
+    await new Promise((resolve) => bridge.listen(0, "127.0.0.1", resolve));
+    try {
+      const { stdout } = await execute(
+        cliBinary,
+        ["--exact", "watch::tests::watch_real_http", "--ignored", "--nocapture"],
+        {
+          env: {
+            ...process.env,
+            ASIMP_TOKEN: "private-ambient-token-canary",
+            ASIMP_WATCH_PROBE: JSON.stringify({
+              origin: `http://127.0.0.1:${bridge.address().port}`,
+              problem,
+              since: 0,
+              limit: 2,
+              json: true,
+              live: true,
+              canary: CANARY,
+            }),
+          },
+          timeout: 20000,
+          maxBuffer: 256 * 1024,
+        },
+      );
+      if (bridgeError) throw bridgeError;
+      assert.match(stdout, /test result: ok\. 1 passed; 0 failed; 0 ignored;/);
+      const encoded = /^ASIMP_WATCH_BYTES=(.+)$/m.exec(stdout)?.[1];
+      assert.ok(encoded, "the live reader must return its actual public bytes");
+      assert.equal(Buffer.from(encoded, "base64url").toString(), expectedPages.join(""));
+      assert.ok(
+        published && caughtUp && resume > initialHead,
+        "the live reader observes the real committed publication",
+      );
+      assert.match(
+        stdout,
+        new RegExp(`ASIMP_WATCH_RESUME=Resume the same watch command with --since ${resume}\\.`),
+      );
+      assert.equal(
+        cliRequests[0],
+        "/cursor",
+        "capture the global hint before the first problem snapshot",
+      );
+      assert.ok(
+        hintReads >= 3,
+        "initial hint, publication wake, and deliberate final read failure all execute",
+      );
+      assert.ok(
+        cliRequests.every(
+          (path) => path === "/cursor" || path.startsWith(`/p/${problem}/events.ndjson?`),
+        ),
+        "only mounted public read routes are used",
+      );
+      console.log(
+        JSON.stringify({
+          stage: "asimp-watch-live-real-bindings",
+          status: "pass",
+          hint_reads: hintReads,
+          resume_cursor: resume,
+          termination: "deliberately closed bridge after observed publication",
+        }),
+      );
+    } finally {
+      await new Promise((resolve) => bridge.close(resolve));
+    }
+  }
 
   for (const body of bodies) {
     assert.ok(!body.includes(CANARY), "no workshop byte reaches any tail, feed or export");
