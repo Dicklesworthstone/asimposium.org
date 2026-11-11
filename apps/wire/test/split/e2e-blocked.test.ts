@@ -130,15 +130,16 @@ const S3_OWNED_STREAM_BYTES = 1_000_000;
 const S3_OWNED_OUTPUT_BYTES = 1_000_000;
 /**
  * The isolated graph proof retains the complete build output for the parent
- * to scan. After the artifact merge at c72f78ca, the original builds emitted
- * 3,747,282 production and 3,781,957 counterfactual evidence bytes. The
- * 3,760,000-byte receiver rejected the counterfactual (x77k.2).
+ * to scan. With the area rename writer at 41badf04, independent executions
+ * of the unchanged child emit 3,760,631 production and 3,795,298 counterfactual
+ * evidence bytes. The 3,785,000-byte receiver rejects that full counterfactual.
  *
- * The 3,785,000-byte receiver preserves both full arrays. Nesting canonical
- * JSON in the result can at most double the encoded evidence bytes. The bound
+ * The 3,900,000-byte receiver preserves both arrays with 104,702 bytes of
+ * transport headroom for source growth. Nesting canonical JSON in the result
+ * can at most double the encoded evidence bytes. The bound
  * below verifies that the complete record fits the 8,000,000-byte result cap.
  */
-const S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES = 3_785_000;
+const S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES = 3_900_000;
 const S3_FRESH_RUNTIME_FIXED_GRACE_MS = 5_000;
 const S3_FRESH_RUNTIME_RESULT_MAX_BYTES = 8 * S3_OWNED_OUTPUT_BYTES;
 const S3_FRESH_RUNTIME_DIAGNOSTIC_MAX_BYTES = 1_024;
@@ -2418,6 +2419,7 @@ async function isolatedProductionBundle(
 test("measured S3 graph evidence fits its explicitly reviewed capacity", () => {
   for (const bytes of [
     3_500_001, 3_747_282, 3_750_000, 3_750_001, 3_756_005, 3_760_000, 3_781_957, 3_785_000,
+    3_785_001, 3_795_298, 3_900_000,
   ]) {
     const body = "x".repeat(bytes - Buffer.byteLength('[""]', "utf8"));
     const raw = JSON.stringify([body]);
@@ -2428,9 +2430,9 @@ test("measured S3 graph evidence fits its explicitly reviewed capacity", () => {
       createHash("sha256").update(body, "utf8").digest("hex"),
     );
   }
-  const oversized = JSON.stringify(["x".repeat(3_785_001 - Buffer.byteLength('[""]', "utf8"))]);
+  const oversized = JSON.stringify(["x".repeat(3_900_001 - Buffer.byteLength('[""]', "utf8"))]);
   expect(() => decodeIsolatedProductionBuildOutputEvidence(oversized)).toThrow(
-    "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_OVERRUN:3785001",
+    "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_OVERRUN:3900001",
   );
 });
 
