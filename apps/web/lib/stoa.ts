@@ -71,6 +71,10 @@ import {
   OperatorFellowCapOverrideResponseSchema,
   type OperatorFellowCapStateResponse,
   OperatorFellowCapStateResponseSchema,
+  type SponsorProblemHideRequest,
+  SponsorProblemHideRequestSchema,
+  type SponsorProblemHideReceipt,
+  SponsorProblemHideReceiptSchema,
   type ProblemCode,
   ProblemCodeSchema,
   ProblemDocumentSchema,
@@ -1171,6 +1175,40 @@ export function stoaPublishProblem(
       if (receipt.problem.id !== problemId || receipt.problem.status !== "sharpening" ||
           receipt.problem.current_statement_version !== publication.reviewed_statement_version) {
         throw new Error("Problem publication receipt does not match the reviewed formulation.");
+      }
+      return receipt;
+    },
+  });
+}
+
+/** Owner-only hiding uses the signed problem id and an immutable receipt.
+ * A replay confirms the original decision, never the problem's later visibility. */
+export function stoaHideProblem(
+  principalId: string,
+  problemId: string,
+  request: SponsorProblemHideRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<SponsorProblemHideReceipt>> {
+  const command = SponsorProblemHideRequestSchema.safeParse(request);
+  if (
+    !command.success ||
+    command.data.problem_id !== problemId ||
+    !/^[A-Za-z0-9._-]{1,160}$/.test(idempotencyKey)
+  )
+    return Promise.resolve({ ok: false, reason: "refused", status: 422 });
+  const path = `/v1/sponsors/problems/${encodeURIComponent(problemId)}/hide`;
+  return callStoa({
+    method: "POST",
+    route: path,
+    path,
+    action: "problem.hide",
+    principalId,
+    body: JSON.stringify(command.data),
+    idempotencyKey,
+    parse: (value) => {
+      const receipt = SponsorProblemHideReceiptSchema.parse(value);
+      if (receipt.problem_id !== problemId) {
+        throw new Error("The hide receipt does not match this problem.");
       }
       return receipt;
     },

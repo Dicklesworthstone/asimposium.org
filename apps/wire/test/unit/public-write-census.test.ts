@@ -429,6 +429,10 @@ const CENSUS: Readonly<Record<string, Class>> = {
   },
   "POST /v1/operators/quarantine/decision": { kind: "identity-admin", why: "operator" },
   "POST /v1/operators/reports/resolution": { kind: "identity-admin", why: "operator" },
+  "POST /v1/sponsors/problems/:id/hide": {
+    kind: "identity-admin",
+    why: "owner visibility control; the credential-scanned reason stays private and only a coarse category is public",
+  },
   "POST /v1/sponsors/account/delete": { kind: "identity-admin", why: "account" },
   "POST /v1/sponsors/bootstrap": { kind: "identity-admin", why: "account" },
   "POST /v1/sponsors/panic": { kind: "identity-admin", why: "account" },

@@ -25,6 +25,7 @@ import { validatedProblem } from "../http/envelope";
 import { hardDeletePrivateDraft, RetentionError } from "../krater/retention";
 import { readPublishedProblemFormulation } from "../ledger/problem-formulation-read.ts";
 import { readPublishedProblemResolution } from "../ledger/problem-resolution-read.ts";
+import { sponsorProblemHideHttp } from "../moderation/problem-hide.ts";
 import { type PublicCandidateScreener, screenPublicCandidate } from "../screening/public-candidate";
 import { screenPromotionWithWorkersAI, type WorkersAiBinding } from "../screening/workers-ai";
 import { parseSponsorLimit } from "../sessions/quota";
@@ -849,6 +850,30 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     "/v1/sponsors/problems/:id/governance/after/:cursor/stewards/after/:stewardCursor",
     readGovernance,
   );
+
+  // An owner hide is a visibility command, separate from scientific lifecycle authority.
+  app.post("/v1/sponsors/problems/:id/hide", async (c) => {
+    const verified = await options.verifiedSponsor(c.req.raw, c.req.path, "problem.hide");
+    if (verified instanceof Response) return verified;
+    let body: unknown;
+    try {
+      // Parse only the bytes authenticated by the service envelope. Bound the
+      // private command and reject malformed UTF-8 or JSON before any write.
+      body =
+        verified.rawBody.byteLength <= 16 * 1024
+          ? parseExactJsonBytes(verified.rawBody)
+          : undefined;
+    } catch {
+      body = undefined;
+    }
+    return sponsorProblemHideHttp({
+      db: c.env.DB,
+      sponsorId: verified.principal.sponsorId,
+      problemId: c.req.param("id"),
+      body,
+      idempotencyKey: c.req.header("Idempotency-Key") ?? "",
+    });
+  });
 
   // --- POST /v1/sponsors/problems/:id/lifecycle ----------------------------
   app.post("/v1/sponsors/problems/:id/lifecycle", async (c) => {

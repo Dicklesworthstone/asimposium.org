@@ -88,7 +88,9 @@
       "artifact_upload_events_immutable_update",
       "artifact_upload_no_delete"
     ],
-    "artifact-staging-retention": ["artifact_staging_retention_no_delete"],
+    "artifact-staging-retention": [
+      "artifact_staging_retention_no_delete"
+    ],
     "checkpoint-signing": [
       "checkpoint_signatures_immutable_before_delete",
       "checkpoint_signatures_immutable_before_update",
@@ -150,7 +152,9 @@
       "enrollment_fellow_security_immutable_update",
       "enrollment_sponsor_security_no_delete"
     ],
-    "direct-append-race": ["hypotheses_immutable_delete"],
+    "direct-append-race": [
+      "hypotheses_immutable_delete"
+    ],
     "dispositions": [
       "claim_concessions_no_delete",
       "claim_concessions_no_update",
@@ -175,7 +179,10 @@
       "fellow_write_review_windows_immutable_delete",
       "fellow_write_review_windows_immutable_update"
     ],
-    "ledger-objects-integration": ["questions_immutable_delete", "syntheses_immutable_delete"],
+    "ledger-objects-integration": [
+      "questions_immutable_delete",
+      "syntheses_immutable_delete"
+    ],
     "matchmaking": [
       "review_request_events_no_delete",
       "review_request_events_no_update",
@@ -206,16 +213,25 @@
       "private_draft_erasure_no_update",
       "private_problem_access_immutable"
     ],
-    "relations-gaps": ["claim_relations_immutable_delete"],
-    "screening-appeals": ["screening_appeal_no_delete"],
-    "statement-revision-proposals": ["problem_statement_proposal_immutable"],
+    "relations-gaps": [
+      "claim_relations_immutable_delete"
+    ],
+    "screening-appeals": [
+      "screening_appeal_no_delete"
+    ],
+    "statement-revision-proposals": [
+      "problem_statement_proposal_immutable"
+    ],
     "slow-mode": [
       "operator_audit_append_only_delete",
       "operator_audit_append_only_update",
       "problem_slow_mode_append_only_delete",
       "problem_slow_mode_append_only_update"
     ],
-    "stoa-surface": ["sponsor_directives_no_delete", "sponsor_directives_no_update"]
+    "stoa-surface": [
+      "sponsor_directives_no_delete",
+      "sponsor_directives_no_update"
+    ]
   },
   "unprobed": {
     "device_codes_immutable": "no real-bindings lane run through runLocalWorkerJourney leaves a row of device_codes that this trigger guards",
@@ -224,7 +240,9 @@
     "sponsor_device_enrollment_attempts_immutable_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_device_enrollment_attempts that this trigger guards",
     "sponsor_device_enrollment_attempts_immutable_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_device_enrollment_attempts that this trigger guards",
     "sponsor_fellow_cap_audit_events_immutable_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_fellow_cap_audit_events that this trigger guards",
-    "sponsor_fellow_cap_audit_events_immutable_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_fellow_cap_audit_events that this trigger guards"
+    "sponsor_fellow_cap_audit_events_immutable_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_fellow_cap_audit_events that this trigger guards",
+    "sponsor_problem_hide_receipts_append_only_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_problem_hide_receipts that this trigger guards",
+    "sponsor_problem_hide_receipts_append_only_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_problem_hide_receipts that this trigger guards"
   },
   "definitions": {
     "area_renames_append_only_delete": "7956ae24e7fd1a3be66b2f3777c066606b4f49bac561b37f603c314591aa9aab",
@@ -430,6 +448,8 @@
     "suspended_sponsor_workshop_revise": "be13061436827098b83f9536c22c977f641eeab34c4c372bcbf27391c08ce351",
     "workshop_objects_cas_spill_extract_update": "9087a08f46d9cccb04f1f7d56a40507da33ffb8af071d081c5132fce194aff8e",
     "workshop_revision_immutable": "ca9caa5f963721bb5ecbcd8e26fb427309c11ae9f1dd6c0819af9701f8ffeed8",
-    "workshop_revisions_immutable": "1ad90d04e2b9c256a457cbebfe0ab393e41cf77731c22ee10800a2652fefd728"
+    "workshop_revisions_immutable": "1ad90d04e2b9c256a457cbebfe0ab393e41cf77731c22ee10800a2652fefd728",
+    "sponsor_problem_hide_receipts_append_only_update": "82f2a353128e8a2c09ebbaeed4adc26569d9b7da998070225bfd721ebbbfecac",
+    "sponsor_problem_hide_receipts_append_only_delete": "55394d20ef6a1caf4916352d5023c0d7ac861ba74074f47532c8d06a7ce4a9ad"
   }
 }

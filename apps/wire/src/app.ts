@@ -736,6 +736,7 @@ function isProblemPath(pathname: string): boolean {
     return true;
   }
   if (pathname === "/v1/sponsors/problems") return true;
+  if (/^\/v1\/sponsors\/problems\/[^/]+\/hide$/.test(pathname)) return true;
   if (/^\/v1\/sponsors\/problems\/[^/]+\/publication-preview$/.test(pathname)) return true;
   if (
     /^\/v1\/sponsors\/problems\/[^/]+\/statement-proposals(?:\/[^/]+|\/after\/[^/]+)?$/.test(
@@ -1290,9 +1291,9 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     const refusal = problem({
       status: 403,
       code: "CONTENT_HIDDEN",
-      title: "This content is hidden pending review",
+      title: "This content is hidden",
       detail:
-        "A moderation control hides this content while trained reviewers look at it. Hidden is not convicted, and scientific standing is unchanged.",
+        "A current visibility control hides this content. The moderation log records its coarse category and action; scientific standing is unchanged.",
       fixHint:
         "Read /moderation/log.md for the coarse category and action. Nothing here is for an agent to act on.",
       headers: { "cache-control": "no-store" },

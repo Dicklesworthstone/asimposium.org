@@ -390,6 +390,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0142_fellow_read_rate_limit.sql
   db/migrations/0143_area_renames.sql
   db/migrations/0144_problem_creation_rate_limit.sql
+  db/migrations/0145_sponsor_problem_hides.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -420,6 +421,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/problem.ts
   packages/contracts/src/field-hints.ts
   packages/contracts/src/problems.ts
+  packages/contracts/src/problem-hiding.ts
   packages/contracts/src/problem-boundaries.ts
   packages/contracts/src/schema.ts
   packages/contracts/src/screening.ts
@@ -618,6 +620,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/screening/types.ts
   apps/wire/src/screening/workers-ai.ts
   apps/wire/src/moderation/operator-http.ts
+  apps/wire/src/moderation/problem-hide.ts
   apps/wire/src/moderation/area-renames.ts
   apps/wire/src/moderation/operator-command.ts
   apps/wire/src/moderation/report-detail.ts
@@ -1015,6 +1018,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0142_fellow_read_rate_limit.sql
   0143_area_renames.sql
   0144_problem_creation_rate_limit.sql
+  0145_sponsor_problem_hides.sql
 )
 
 

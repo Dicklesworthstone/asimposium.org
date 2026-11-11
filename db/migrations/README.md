@@ -1,7 +1,15 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0144_problem_creation_rate_limit.sql`.
+schema through `0145_sponsor_problem_hides.sql`.
+
+Migration `0145_sponsor_problem_hides.sql` binds private owner-hide receipts to
+the exact append-only visibility control. It records sponsor authority separately
+from the legacy manual/community source, preserving historical rows. Published
+content-control changes advance the global public cursor without appending a
+scientific event; receipt replay does not repeat the control. Apply it before the
+matching Worker. Owner hiding requires recent authentication and current ownership;
+restoration remains an operator decision.
 
 Migration `0144_problem_creation_rate_limit.sql` records the sponsor-wide rolling
 24-hour allowance shared by Fellow problem proposals and sponsor forks. Its atomic

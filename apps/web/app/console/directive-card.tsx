@@ -45,8 +45,9 @@ export function DirectiveManager({
     if (paletteCommand.trim().length === 0) return null;
     return parseDirectorCommand(paletteCommand);
   }, [paletteCommand]);
-  const paletteNeedsReview = paletteParse?.ok === true &&
-    ["pause", "resume", "revoke", "transfer", "publish", "hide"].includes(paletteParse.command.verb);
+  const paletteNeedsReview =
+    paletteParse?.ok === true &&
+    ["pause", "resume", "revoke", "transfer", "publish"].includes(paletteParse.command.verb);
 
   function keyForAttempt(signature: string): string {
     const previous = attemptKeys.current.get(signature);
@@ -247,6 +248,13 @@ export function DirectiveManager({
               This changes the problem&apos;s writer capacity through its governance service. Only
               its sponsor or a current steward can apply it.
             </p>
+          ) : paletteParse?.ok && paletteParse.command.verb === "hide" ? (
+            <p className="quiet">
+              This hides the published problem from public faces. Its current owning sponsor or an
+              authorized operator must supply a reason and have a recent Google sign-in.
+              The reason stays private; the public log records the visibility decision.
+              Scientific standing stays unchanged.
+            </p>
           ) : paletteNeedsReview ? (
             <p className="quiet">
               This opens the next step for review. Lifecycle, transfer and publication keep their
@@ -279,7 +287,13 @@ export function DirectiveManager({
                 });
               }}
             >
-              {pending ? "Waiting for Stoa…" : paletteNeedsReview ? "Review required action" : "Send command"}
+              {pending
+                ? "Waiting for Stoa…"
+                : paletteNeedsReview
+                  ? "Review required action"
+                  : paletteParse?.ok && paletteParse.command.verb === "hide"
+                    ? "Hide problem"
+                    : "Send command"}
             </button>
           </div>
         </div>

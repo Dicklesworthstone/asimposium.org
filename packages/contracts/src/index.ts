@@ -1356,3 +1356,13 @@ export {
 } from "./syntheses.ts";
 export * from "./workshop-directory.ts";
 export * from "./workshop-search.ts";
+
+export {
+  PROBLEM_HIDE_AUTH_WINDOW_SECONDS,
+  PROBLEM_HIDE_AUTH_CLOCK_SKEW_SECONDS,
+  problemHideAuthIsRecent,
+  type SponsorProblemHideRequest,
+  SponsorProblemHideRequestSchema,
+  type SponsorProblemHideReceipt,
+  SponsorProblemHideReceiptSchema,
+} from "./problem-hiding.ts";
