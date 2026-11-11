@@ -17,7 +17,7 @@ observed.
 Updated 2026-11-11. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-### Merged HEAD repair — qualification in progress
+### Merged HEAD repair — independently verified
 
 Another session committed the watch work as `55f54f65` and merged substantial
 protocol-conflict, retention and problem-policy work into `35cd51b0`. Both
@@ -27,23 +27,41 @@ one toolchain failure and three Worker failures (7,438 Worker tests pass).
 All 2,738 source inputs and the pinned Next SDK remain stable. The earlier
 2,712-input green result does not qualify this merge.
 
-`aj4j` owns these four failures. The current repairs preserve the original
+Repair source `e61556e3` preserves the original
 800-token cap and declared provenance by shortening only three compact-fallback
 labels; the measured response is 3,197 bytes with every effective permission
 retained. Replay and search tests now account for migration 0145's append-only
 content-control cursor changes, checking exact post-hide state, restored public
 content and fresh ETags rather than accepting stale pre-control validators.
 The restore fault is reanchored to the current verified journal/head seam while
-still discarding replay records, so the original resurrection checks must catch
-it. All 333 tests across the three owning files and all six explicit registry
-checks pass. Actual restore fault/restoration, final root and independent
-acceptance remain pending; neither `aj4j` nor the dependent watch leaf is closed.
+still discarding replay records. All 333 tests across the three owning files
+and all six explicit registry checks pass in primary and independent executions.
+The registered native fault is caught; its direct replay fails the original
+source identity/version control assertion, before the later resurrection
+assertion. Exact restoration passes. The independent old-label fault breaks the
+unchanged provenance assertion; disabling only migration 0145's cursor increment
+breaks both updated unit expectations. All source and SDK maps remain stable.
+The primary original complete root finishes normally at 22:19:03 UTC in
+1,576.736 seconds: all eight groups pass, including 7,441 Worker and 1,093 Agora
+tests. The original 54 individual toolchain skips remain; no whole group is
+skipped. All 2,738 source inputs and the pinned Next SDK stay unchanged.
+The independent original complete root also passes at 22:40:09 UTC in
+1,522.785 seconds, with the same group/test counts and unchanged source/SDK.
+WhiteRaven independently closes only `aj4j` at 22:42:04 UTC, with the original
+criterion/source/evidence map in comment 3151. The tracker has 622 issues:
+478 closed and 144 unfinished. The watch leaf's original independent Rust
+requirement remains unmet.
 
-Merged-source typecheck and lint pass all eight groups. Primary and independent
-complete contract (1,028) and renderer (605) suites pass at the merged source.
+Final-source typecheck and lint pass all eight groups. Primary and independent
+complete contract (1,028) and renderer (605) suites pass at `e61556e3`.
 The real local protocol-conflict and problem-proposal/creation-quota journeys
 also pass. These are local fixture-identity/screening results, not hosted OAuth,
 provider accuracy, browser or deployment acceptance.
+
+The scoped code UBS scans complete with 97 critical and 138 warning findings.
+Both reviewers inspect all 235 elevated contexts and establish no additional
+changed-code defect. These are finding exits, not security-clean results;
+broader scanner task `g4b4` remains open.
 
 ### Public CLI watch continuation — runtime checks now execute
 
@@ -53,13 +71,15 @@ cursors, and uses global `/cursor` only as an invalidation hint. Errors stop
 with a resume hint; human mode prints full pretty JSON. The earlier commit
 description's automatic-retry and human-summary wording is inaccurate.
 
-The original locked Rust 1.93.1 suite now actually passes remotely at 21:19 UTC:
+The primary original locked Rust 1.93.1 suite passes remotely at 21:19 UTC:
 71 library, one canonical-vector and 20 compiled-CLI tests, **92 passes with
 zero failures**. Three HTTP tests are explicitly ignored there and execute in
 their real local Workerd/D1/R2 journeys. The 2,755-file RCH receipt matches all
 974 CLI/contracts inputs. Its library executable is the warm compiler artifact
 from build `30103802359054357`; remote-before, downloaded and remote-after
-SHA-256 values match `d5054f77…f7d18a5`. This is not an independent compilation.
+SHA-256 values match `d5054f77…f7d18a5`. All 974 compiled inputs still match the
+frozen candidate. This is not an independent compilation or independent full
+test reexecution.
 
 The original native oracle first failed before invoking Rust because it applied
 JSON-link validation directly to NDJSON footers. The repaired adapter validates
@@ -69,7 +89,8 @@ and independent watch journeys pass all four snapshot cases and actual live
 publication/catch-up. A private Worker footer fault is caught by the strict JS
 oracle before Rust, and exact restoration passes; it is not a Rust-reader
 negative result. The original 25 workshop, four next-move and nine search cases
-also pass with the attributed current binary.
+also pass with the attributed current binary. All these native journeys pass
+again in both agents' final-source executions at `e61556e3`.
 
 Earlier disk-admission refusals (120 before Cargo), source-change refusals
 (103), and a relocated direct-library invocation with one missing embedded
@@ -81,9 +102,16 @@ source guards remain enforced. No worker policy, default, cache or admission
 guard was changed. Evidence remains under
 `e2e/artifacts/asimp-watch-20261111-coppertiger/`.
 
-Final-source formatting/check/Clippy, independent full Rust reexecution and the
-repaired HEAD's complete root gate still govern closure. Parent W11, advisory,
-deployed/TLS/Google, G0/G-C and launch requirements remain open.
+Final-source pinned formatting, strict remote check and denied-warning Clippy
+pass for both agents. Their worker source receipts match every frozen input.
+The independent original full Cargo attempt is refused for reserved disk
+capacity before Cargo starts (exit 120); it executes no tests. One later
+read-only observation predicts a fit, but actual admission refuses the next
+original attempt after available space falls. Both refusals remain retained;
+no further attempt, policy change or admission override follows. Independent
+full Rust reexecution still governs watch closure; both complete root gates
+now pass. Parent W11, advisory, deployed/TLS/Google, G0/G-C and launch
+requirements remain open.
 
 ### Current Rust qualification — 2026-11-11
 
