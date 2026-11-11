@@ -78,13 +78,17 @@ function templateFor(move: "review" | "add-refuter"): MoveTemplate {
 }
 function fixture(problems = ["P-DEMO"]) {
   const sqlite = new Database(":memory:");
-  sqlite.exec(`CREATE TABLE problems(id TEXT, status TEXT, unlisted INTEGER, public_seq INTEGER);
+  sqlite.exec(`CREATE TABLE problems(id TEXT, status TEXT, unlisted INTEGER, public_seq INTEGER,
+      admission_mode TEXT DEFAULT 'open', sponsor_id TEXT);
     CREATE TABLE problem_memberships(problem_id TEXT, fellow_id TEXT, role TEXT);
+    CREATE TABLE problem_stewards(problem_id TEXT, sponsor_id TEXT);
     CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     CREATE TABLE events(id TEXT, problem_id TEXT, object_id TEXT, object_kind TEXT, type TEXT, seq INTEGER, actor_fellow_id TEXT, writer_credential_id TEXT);
     CREATE TABLE reviews(problem_id TEXT, review_id TEXT, source_event_id TEXT, source_seq INTEGER, reviewer_fellow_id TEXT, target_claim_id TEXT, target_version INTEGER);`);
   for (const problem of problems) {
-    sqlite.query("INSERT INTO problems VALUES (?, 'active', 0, 10)").run(problem);
+    sqlite
+      .query("INSERT INTO problems (id, status, unlisted, public_seq) VALUES (?, 'active', 0, 10)")
+      .run(problem);
     sqlite
       .query("INSERT INTO problem_memberships VALUES (?, 'F-READER', 'contributor')")
       .run(problem);
@@ -430,6 +434,96 @@ test("queue failures return a coarse unavailable result without private exceptio
     f.sqlite.close();
   }
 });
+for (const mode of ["open", "approval-required", "invite-only", "archived-read-only"] as const)
+  for (const authority of ["outsider", "owner", "steward"] as const)
+    test(`nonmember ${authority} receives truthful session admission on ${mode}`, async () => {
+      const f = fixture();
+      try {
+        f.sqlite.exec("UPDATE problem_memberships SET fellow_id='F-OTHER'");
+        f.sqlite
+          .query("UPDATE problems SET admission_mode = ?, sponsor_id = ?")
+          .run(mode, authority === "owner" ? credential.sponsorId : "SP-OWNER");
+        if (authority === "steward")
+          f.sqlite
+            .query("INSERT INTO problem_stewards VALUES ('P-DEMO', ?)")
+            .run(credential.sponsorId);
+        const result = await new LedgerMovesProvider(f.dependencies).nextMoves(next(f.db));
+        assert.equal(result.degraded, false);
+        assert.equal(
+          result.effectivePermissions?.session_open,
+          mode !== "archived-read-only" && (mode === "open" || authority !== "outsider"),
+        );
+        for (const operation of ["workshop_push", "promote", "evidence", "dead_end", "review"])
+          assert.equal(result.effectivePermissions?.[operation], false);
+        assert.equal(result.primaryMove, null);
+        assert.deepEqual(result.alternatives, []);
+        assert.equal(f.queueReads(), 0);
+      } finally {
+        f.sqlite.close();
+      }
+    });
+
+test("a nonmember cannot spend an exhausted credential grant by opening a new problem", async () => {
+  const f = fixture();
+  try {
+    f.sqlite.exec(`UPDATE problem_memberships SET fellow_id='F-OTHER';
+      INSERT INTO events (writer_credential_id, problem_id) VALUES ('FC-READER','P-OTHER')`);
+    const result = await new LedgerMovesProvider(f.dependencies).nextMoves(
+      next(f.db, { ...credential, grantedResources: { eventBudget: 1 } }),
+    );
+    assert.equal(result.degraded, false);
+    assert.equal(result.effectivePermissions?.session_open, false);
+    assert.equal(f.queueReads(), 0);
+    assert.ok(
+      f.calls.some((call) => call.effect === "session.open" && call.usage.eventsRecorded === 1),
+      "new admission uses the credential's actual committed usage",
+    );
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("archiving a member's workspace preserves private drafting without scientific moves", async () => {
+  const f = fixture();
+  try {
+    f.sqlite.exec("UPDATE problems SET admission_mode='archived-read-only'");
+    const provider = new LedgerMovesProvider(f.dependencies);
+    const result = await provider.nextMoves({ ...next(f.db), capturedCursor: 10 });
+    assert.equal(result.degraded, false);
+    assert.equal(result.capturedCursor, 10);
+    assert.equal(result.primaryMove, null);
+    assert.deepEqual(result.alternatives, []);
+    assert.deepEqual(result.effectivePermissions, {
+      read: true,
+      session_open: false,
+      workshop_push: true,
+      promote: false,
+      evidence: false,
+      dead_end: false,
+      review: false,
+    });
+    const triage = await provider.triageMove({
+      db: f.db,
+      credential,
+      fellowId: credential.fellowId,
+      assignments: [assignment("P-DEMO")],
+    });
+    assert.equal(triage.move, null);
+    assert.equal(triage.degraded, false);
+    assert.equal(f.queueReads(), 0, "read-only work does not enter scientific move selection");
+    f.sqlite.exec(
+      "INSERT INTO events (writer_credential_id, problem_id) VALUES ('FC-READER','P-OTHER')",
+    );
+    const exhausted = await provider.nextMoves(
+      next(f.db, { ...credential, grantedResources: { eventBudget: 1 } }),
+    );
+    assert.equal(exhausted.effectivePermissions?.workshop_push, false);
+    assert.equal(f.queueReads(), 0);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
 test("triage chooses higher-consequence eligible work across assigned problems", async () => {
   const f = fixture(["P-AAA", "P-BBB"]);
   try {

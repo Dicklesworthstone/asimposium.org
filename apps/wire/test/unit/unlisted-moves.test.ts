@@ -83,8 +83,10 @@ function page(
 function fixture() {
   const sql = new Database(":memory:");
   sql.exec(`
-    CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, unlisted INTEGER, status TEXT);
+    CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, unlisted INTEGER, status TEXT,
+      admission_mode TEXT DEFAULT 'open', sponsor_id TEXT);
     CREATE TABLE problem_memberships(problem_id TEXT, fellow_id TEXT, role TEXT);
+    CREATE TABLE problem_stewards(problem_id TEXT, sponsor_id TEXT);
     CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     CREATE TABLE events(id TEXT, problem_id TEXT, object_id TEXT, object_kind TEXT, type TEXT,
       seq INTEGER, actor_fellow_id TEXT, writer_credential_id TEXT);
@@ -127,7 +129,9 @@ function fixture() {
     },
   };
   function problem(id = "P-DEMO", unlisted = 1, role = "contributor", claims = true) {
-    sql.query("INSERT INTO problems VALUES (?,10,?,'active')").run(id, unlisted);
+    sql
+      .query("INSERT INTO problems(id, public_seq, unlisted, status) VALUES (?,10,?,'active')")
+      .run(id, unlisted);
     sql.query("INSERT INTO problem_memberships VALUES (?,'F-READER',?)").run(id, role);
     if (claims)
       sql

@@ -61,17 +61,21 @@ function fixture(
     advanceDuringRead?: boolean;
     hideDuringRead?: boolean;
     unlistDuringRead?: boolean;
+    archiveDuringRead?: boolean;
   } = {},
 ) {
   const sqlite = new Database(":memory:");
-  sqlite.exec(`CREATE TABLE problems(id TEXT, public_seq INTEGER, unlisted INTEGER, status TEXT);
+  sqlite.exec(`CREATE TABLE problems(id TEXT, public_seq INTEGER, unlisted INTEGER, status TEXT,
+      admission_mode TEXT DEFAULT 'open', sponsor_id TEXT);
     CREATE TABLE problem_memberships(problem_id TEXT, fellow_id TEXT, role TEXT);
+    CREATE TABLE problem_stewards(problem_id TEXT, sponsor_id TEXT);
     CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     CREATE TABLE events(id TEXT, problem_id TEXT, seq INTEGER, object_kind TEXT, type TEXT,
       object_id TEXT, actor_fellow_id TEXT, writer_credential_id TEXT);
     CREATE TABLE reviews(problem_id TEXT,review_id TEXT,source_event_id TEXT,source_seq INTEGER,
       reviewer_fellow_id TEXT,target_claim_id TEXT,target_version INTEGER);
-    INSERT INTO problems VALUES ('P-DEMO',50,0,'active'),('P-OTHER',90,0,'active');
+    INSERT INTO problems (id, public_seq, unlisted, status)
+      VALUES ('P-DEMO',50,0,'active'),('P-OTHER',90,0,'active');
     INSERT INTO problem_memberships VALUES ('P-DEMO','F-viewer','observer'),('P-OTHER','F-viewer','observer');
     INSERT INTO events VALUES('EV-1','P-DEMO',1,'claim','claim.created','C-1','F-author',NULL),
       ('EV-2','P-OTHER',1,'claim','claim.created','C-1','F-author',NULL);`);
@@ -112,6 +116,10 @@ function fixture(
           .run(query.problem);
       if (options.unlistDuringRead)
         sqlite.query("UPDATE problems SET unlisted = 1 WHERE id = ?").run(query.problem);
+      if (options.archiveDuringRead)
+        sqlite
+          .query("UPDATE problems SET admission_mode = 'archived-read-only' WHERE id = ?")
+          .run(query.problem);
       const latest = sqlite
         .query("SELECT public_seq FROM problems WHERE id = ?")
         .get(query.problem) as { public_seq: number };
@@ -165,6 +173,21 @@ test("an empty first page does not advance the captured problem cursor", async (
     assert.equal(f.calls.length, 2);
     assert.ok(f.calls.every((c) => c.snapshot?.through === 50));
     assert.match(JSON.stringify(result.primaryMove), /through=50/);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("archiving during selection cannot release stale write recommendations", async () => {
+  const f = fixture({ advanceDuringRead: false, archiveDuringRead: true });
+  try {
+    const result = await f.next();
+    assert.equal(result.primaryMove, null);
+    assert.deepEqual(result.alternatives, []);
+    assert.equal(result.degradedReason, "MOVES_CURSOR_CHANGED");
+    assert.equal(result.effectivePermissions?.session_open, false);
+    assert.equal(result.effectivePermissions?.review, false);
+    assert.equal(f.calls.length, 1, "the authority changes after a real candidate was selected");
   } finally {
     f.sqlite.close();
   }

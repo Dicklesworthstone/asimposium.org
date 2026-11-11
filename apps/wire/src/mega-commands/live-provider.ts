@@ -64,7 +64,8 @@ export interface LiveMovesDependencies extends LedgerMovesDependencies {
   readonly deadEnds?: { load: typeof selectRecordDeadEndMove };
 }
 
-export const MOVE_MEMBERSHIP_SQL = `SELECT m.role, p.public_seq AS cursor, p.status AS status, p.unlisted,
+export const MOVE_MEMBERSHIP_SQL = `SELECT m.role, p.public_seq AS cursor, p.status AS status,
+    p.unlisted, p.admission_mode,
     EXISTS (SELECT 1 FROM events e WHERE e.problem_id = p.id AND e.seq <= p.public_seq
       AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')) AS has_claims
   FROM problems p JOIN problem_memberships m ON m.problem_id = p.id AND m.fellow_id = ?
@@ -72,8 +73,12 @@ export const MOVE_MEMBERSHIP_SQL = `SELECT m.role, p.public_seq AS cursor, p.sta
     AND p.status IN ('active', 'dormant', 'under-result-review', 'sharpening')
     AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}`;
 export const MOVE_JOINABLE_SQL = `SELECT 1 AS joinable FROM problems
-  WHERE id = ? AND unlisted = 0
+  WHERE id = ?1 AND unlisted = 0
     AND status IN ('active', 'dormant', 'under-result-review', 'sharpening')
+    AND (admission_mode IS NULL OR admission_mode = 'open'
+      OR (admission_mode IN ('approval-required', 'invite-only')
+        AND (sponsor_id = ?2 OR EXISTS (SELECT 1 FROM problem_stewards
+          WHERE problem_id = problems.id AND sponsor_id = ?2))))
     AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
 export const MOVE_USAGE_SQL = "SELECT COUNT(*) AS count FROM events WHERE writer_credential_id = ?";
 const NO_PERMISSIONS = {
@@ -209,6 +214,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
         has_claims: number;
         status?: string;
         unlisted: number;
+        admission_mode: string | null;
       }>();
     const role: ProblemRole | "none" =
       row?.role === "contributor" || row?.role === "steward" || row?.role === "observer"
@@ -222,20 +228,31 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       if (row.cursor !== capturedCursor) throw new MoveSnapshotError("MOVES_CURSOR_CHANGED");
     }
     if (role === "none") {
-      // Opening a session is how a Fellow joins (§6.8), and session admission
-      // already passed preflight. A listed problem in a working status is
-      // therefore joinable; every other permission waits for membership.
+      // Match explicit/implicit session admission (0116): open boards admit
+      // newcomers, while restricted boards require the owner's or a current
+      // steward's sponsorship. Archive admission never grants a new session.
+      // Preflight used zero usage; recheck the actual credential grant before
+      // advertising autojoin. Every other permission waits for membership.
       const joinable = await db
         .prepare(MOVE_JOINABLE_SQL)
-        .bind(problemId)
+        .bind(problemId, fellowBinding.sponsorId)
         .first<{ joinable: number }>();
+      const sessionAllowed =
+        joinable?.joinable === 1 &&
+        this.dependencies.authorize({
+          effect: "session.open",
+          credential: fellowBinding,
+          target: { kind: "session-admission", problemId },
+          usage: { eventsRecorded, artifactBytesRecorded: 0 },
+          now,
+        }).decision === "allow";
       return {
         items: [] as ReviewQueueItem[],
         moves: [] as NextMoveCandidate[],
         degraded: false,
         continuation: null,
         role,
-        effectivePermissions: { ...NO_PERMISSIONS, session_open: joinable?.joinable === 1 },
+        effectivePermissions: { ...NO_PERMISSIONS, session_open: sessionAllowed },
       };
     }
     if (
@@ -266,6 +283,22 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
         usage,
         now,
       }).decision === "allow";
+    // Archival stops fresh sessions and public scientific work. Existing
+    // sessions retain private drafting when current membership and grant allow it.
+    if (row.admission_mode === "archived-read-only")
+      return {
+        cursor: row.cursor,
+        items: [] as ReviewQueueItem[],
+        moves: [] as NextMoveCandidate[],
+        degraded: false,
+        continuation: null,
+        role,
+        effectivePermissions: {
+          ...NO_PERMISSIONS,
+          workshop_push: allowed("workshop.push"),
+        },
+      };
+
     const effectivePermissions = {
       read: true,
       session_open:
@@ -578,6 +611,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
         has_claims: number;
         status?: string;
         unlisted: number;
+        admission_mode: string | null;
       }>();
     if (!current) throw new MoveSnapshotError("MOVES_SCOPE_UNAVAILABLE");
     if (
@@ -585,6 +619,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       current.role !== row.role ||
       current.status !== row.status ||
       current.unlisted !== row.unlisted ||
+      current.admission_mode !== row.admission_mode ||
       current.has_claims !== row.has_claims
     )
       throw new MoveSnapshotError("MOVES_CURSOR_CHANGED");
