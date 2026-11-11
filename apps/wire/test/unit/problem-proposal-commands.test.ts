@@ -323,9 +323,9 @@ test("two creations are shared by a sponsor's Fellows; replays remain free and e
     remaining: 0,
     window_seconds: 86_400,
   });
-  expect(
-    f.sql.query("SELECT COUNT(*) AS n FROM problem_creation_admissions").get(),
-  ).toEqual({ n: 2 });
+  expect(f.sql.query("SELECT COUNT(*) AS n FROM problem_creation_admissions").get()).toEqual({
+    n: 2,
+  });
   expect(f.sql.query("SELECT * FROM problem_proposal_command_receipts").all()).toHaveLength(2);
   expect((await f.propose(formulation, "quota-first")).status).toBe(404);
   expect(await getProblemCreationBudget(f.baseDb, f.receiver.sponsorId)).toEqual({
@@ -369,9 +369,9 @@ test("a concurrent final-slot winner rolls back the losing proposal and leaves i
   expect(await loser.json()).toMatchObject({ code: "RATE_LIMITED", remaining: 0 });
   expect(winnerId).toBeDefined();
   expect(drafts(f)).toHaveLength(2);
-  expect(
-    f.sql.query("SELECT * FROM sponsor_problem_briefs WHERE id=?").get(brief.id),
-  ).toEqual(beforeBrief);
+  expect(f.sql.query("SELECT * FROM sponsor_problem_briefs WHERE id=?").get(brief.id)).toEqual(
+    beforeBrief,
+  );
   expect(f.sql.query("SELECT * FROM problem_proposal_command_receipts").all()).toHaveLength(2);
   expect(f.sql.query("SELECT * FROM problem_creation_admissions").all()).toHaveLength(2);
   expect(f.sql.query("PRAGMA foreign_key_check").all()).toEqual([]);
@@ -380,22 +380,27 @@ test("a concurrent final-slot winner rolls back the losing proposal and leaves i
 test("rolling capacity recovers exactly at expiry and backwards clocks remain conservative", async () => {
   const f = await fixture();
   const now = Date.now();
-  for (const [offset, key] of [[0, "window-first"], [1_100, "window-second"]] as const) {
+  for (const [offset, key] of [
+    [0, "window-first"],
+    [1_100, "window-second"],
+  ] as const) {
     expect(
-      (await runProblemProposalCommand(
-        f.baseDb,
-        f.binding,
-        key,
-        {
-          ...formulation,
-          title: key,
-          statement:
-            offset === 0
-              ? formulation.statement
-              : "Every finite simple cycle has equally many edges and vertices.",
-        },
-        now + offset,
-      )).status,
+      (
+        await runProblemProposalCommand(
+          f.baseDb,
+          f.binding,
+          key,
+          {
+            ...formulation,
+            title: key,
+            statement:
+              offset === 0
+                ? formulation.statement
+                : "Every finite simple cycle has equally many edges and vertices.",
+          },
+          now + offset,
+        )
+      ).status,
     ).toBe(201);
   }
   expect(
@@ -404,12 +409,12 @@ test("rolling capacity recovers exactly at expiry and backwards clocks remain co
   expect(
     await getProblemCreationBudget(f.baseDb, f.principal.sponsorId, now + 86_400_000 - 1),
   ).toMatchObject({ remaining: 0, retry_after_seconds: 1 });
-  expect(
-    await getProblemCreationBudget(f.baseDb, f.principal.sponsorId, now + 86_400_000),
-  ).toEqual({ limit: 2, remaining: 1, window_seconds: 86_400 });
-  expect(
-    await getProblemCreationBudget(f.baseDb, f.principal.sponsorId, now + 86_401_100),
-  ).toEqual({ limit: 2, remaining: 2, window_seconds: 86_400 });
+  expect(await getProblemCreationBudget(f.baseDb, f.principal.sponsorId, now + 86_400_000)).toEqual(
+    { limit: 2, remaining: 1, window_seconds: 86_400 },
+  );
+  expect(await getProblemCreationBudget(f.baseDb, f.principal.sponsorId, now + 86_401_100)).toEqual(
+    { limit: 2, remaining: 2, window_seconds: 86_400 },
+  );
 });
 
 test("an unreadable creation allowance fails closed without writing a draft", async () => {

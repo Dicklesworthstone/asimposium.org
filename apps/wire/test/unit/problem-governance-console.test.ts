@@ -861,12 +861,14 @@ test("competing forks of different parents cannot both consume the final sponsor
   await publishLineageProblem(f);
   await publishLineageProblem(f, "P-OTHER-PARENT");
   expect(
-    (await lineageAction(
-      f,
-      PROBLEM,
-      { action: "fork", title: "First occupied slot" },
-      "fork-race-first",
-    )).status,
+    (
+      await lineageAction(
+        f,
+        PROBLEM,
+        { action: "fork", title: "First occupied slot" },
+        "fork-race-first",
+      )
+    ).status,
   ).toBe(200);
   let afterRace: ReturnType<typeof lineageState> | undefined;
   const race = beforeLineageBatch(f, async () => {

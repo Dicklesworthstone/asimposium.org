@@ -519,9 +519,7 @@ export async function problemLifecycleJourney({
 
   // The erasure scenario starts in a later creation window. Only fixture
   // timestamps move; the production two-per-sponsor guard remains installed.
-  await env.DB.prepare(
-    "UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?",
-  )
+  await env.DB.prepare("UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?")
     .bind(Date.now() - 86_400_000, sponsorA)
     .run();
 
@@ -1317,9 +1315,7 @@ export async function problemLifecycleJourney({
   );
   // Independent byte-admission scenarios take place after the earlier
   // erasure and retirement creations have left the rolling daily window.
-  await env.DB.prepare(
-    "UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?",
-  )
+  await env.DB.prepare("UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?")
     .bind(Date.now() - 86_400_000, sponsorA)
     .run();
   const boundaryReviewProblem = await call(

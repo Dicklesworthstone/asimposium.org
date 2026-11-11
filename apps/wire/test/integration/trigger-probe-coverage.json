@@ -88,9 +88,7 @@
       "artifact_upload_events_immutable_update",
       "artifact_upload_no_delete"
     ],
-    "artifact-staging-retention": [
-      "artifact_staging_retention_no_delete"
-    ],
+    "artifact-staging-retention": ["artifact_staging_retention_no_delete"],
     "checkpoint-signing": [
       "checkpoint_signatures_immutable_before_delete",
       "checkpoint_signatures_immutable_before_update",
@@ -152,9 +150,7 @@
       "enrollment_fellow_security_immutable_update",
       "enrollment_sponsor_security_no_delete"
     ],
-    "direct-append-race": [
-      "hypotheses_immutable_delete"
-    ],
+    "direct-append-race": ["hypotheses_immutable_delete"],
     "dispositions": [
       "claim_concessions_no_delete",
       "claim_concessions_no_update",
@@ -179,10 +175,7 @@
       "fellow_write_review_windows_immutable_delete",
       "fellow_write_review_windows_immutable_update"
     ],
-    "ledger-objects-integration": [
-      "questions_immutable_delete",
-      "syntheses_immutable_delete"
-    ],
+    "ledger-objects-integration": ["questions_immutable_delete", "syntheses_immutable_delete"],
     "matchmaking": [
       "review_request_events_no_delete",
       "review_request_events_no_update",
@@ -213,25 +206,16 @@
       "private_draft_erasure_no_update",
       "private_problem_access_immutable"
     ],
-    "relations-gaps": [
-      "claim_relations_immutable_delete"
-    ],
-    "screening-appeals": [
-      "screening_appeal_no_delete"
-    ],
-    "statement-revision-proposals": [
-      "problem_statement_proposal_immutable"
-    ],
+    "relations-gaps": ["claim_relations_immutable_delete"],
+    "screening-appeals": ["screening_appeal_no_delete"],
+    "statement-revision-proposals": ["problem_statement_proposal_immutable"],
     "slow-mode": [
       "operator_audit_append_only_delete",
       "operator_audit_append_only_update",
       "problem_slow_mode_append_only_delete",
       "problem_slow_mode_append_only_update"
     ],
-    "stoa-surface": [
-      "sponsor_directives_no_delete",
-      "sponsor_directives_no_update"
-    ]
+    "stoa-surface": ["sponsor_directives_no_delete", "sponsor_directives_no_update"]
   },
   "unprobed": {
     "device_codes_immutable": "no real-bindings lane run through runLocalWorkerJourney leaves a row of device_codes that this trigger guards",

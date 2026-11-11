@@ -105,17 +105,22 @@ function localD1(sqlite: Database) {
     },
     prepare: (query: string) => {
       const bound = (...values: unknown[]) => ({
-        all: async <T>() => ({ results: sqlite.prepare(query).all(...(values as never)) as T[] }),
+        all: async <T>() => ({
+          success: true,
+          results: sqlite.prepare(query).all(...(values as never)) as T[],
+          meta: { changes: 0 },
+        }),
         first: async <T>() => (sqlite.prepare(query).get(...(values as never)) as T) ?? null,
         run: async () => {
           if (/^\s*SELECT\b/i.test(query)) {
             return {
+              success: true,
               results: sqlite.prepare(query).all(...(values as never)),
               meta: { changes: 0 },
             };
           }
           const result = sqlite.prepare(query).run(...(values as never));
-          return { meta: { changes: result.changes } };
+          return { success: true, results: [], meta: { changes: result.changes } };
         },
       });
       return { ...bound(), bind: bound };
@@ -784,18 +789,21 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
           targetId: "P-OLD-CONTROL",
           targetType: "problem",
           issuedAt: NOW,
+          payload: { sponsor_id: "usr_sponsor_1" },
         });
         const second = await createRetentionControlRecord({
           action: "delete-private-draft",
           targetId: "P-NEW-CONTROL",
           targetType: "problem",
           issuedAt: NOW,
+          payload: { sponsor_id: "usr_sponsor_1" },
         });
         const different = await createRetentionControlRecord({
           action: "delete-private-draft",
           targetId: "P-DIFFERENT-CONTROL",
           targetType: "problem",
           issuedAt: NOW,
+          payload: { sponsor_id: "usr_sponsor_1" },
         });
         const keys = await journalKeys();
         const old = await serializeDeletionJournal([first], NOW, keys.signing);
@@ -886,9 +894,7 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
 
         expect((await restore(current)).appliedControlsCount).toBe(2);
         expect(
-          scratch.sqlite
-            .prepare("SELECT id FROM problems WHERE status = 'private-draft'")
-            .all(),
+          scratch.sqlite.prepare("SELECT id FROM problems WHERE status = 'private-draft'").all(),
         ).toEqual([]);
         expect(scratch.sqlite.prepare("SELECT COUNT(*) AS n FROM events").get()).toEqual({
           n: operation === "problem restore" ? 2 : 0,
@@ -903,12 +909,14 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
         targetId: "P-DURING-REPLAY-1",
         targetType: "problem",
         issuedAt: NOW,
+        payload: { sponsor_id: "usr_sponsor_1" },
       });
       const second = await createRetentionControlRecord({
         action: "delete-private-draft",
         targetId: "P-DURING-REPLAY-2",
         targetType: "problem",
         issuedAt: NOW,
+        payload: { sponsor_id: "usr_sponsor_1" },
       });
       const keys = await journalKeys();
       const old = await serializeDeletionJournal([first], NOW, keys.signing);
@@ -933,9 +941,9 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
         applyDeletionJournal({ ...options, deletionJournalNdjson: old }),
       ).rejects.toThrow("DELETION_JOURNAL_STALE");
       expect(reads).toBe(2);
-      expect(
-        scratch.sqlite.prepare("SELECT problem_id FROM private_draft_erasures").all(),
-      ).toEqual([{ problem_id: first.targetId }]);
+      expect(scratch.sqlite.prepare("SELECT problem_id FROM private_draft_erasures").all()).toEqual(
+        [{ problem_id: first.targetId }],
+      );
       const replay = await applyDeletionJournal({ ...options, deletionJournalNdjson: current });
       expect(replay.appliedControlsCount).toBe(2);
       expect(

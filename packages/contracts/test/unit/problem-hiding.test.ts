@@ -25,9 +25,12 @@ const receipt = {
 };
 const ajv = new Ajv2020({ strict: true, allErrors: true });
 addFormats(ajv);
-ajv.addSchema(JSON.parse(readFileSync(
-  new URL("../../generated/problems.schema.json", import.meta.url), "utf8",
-)), "problems");
+ajv.addSchema(
+  JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  ),
+  "problems",
+);
 
 test("the runtime and advertised hide contract reject authority and scientific overrides", () => {
   const validate = ajv.compile({ $ref: "problems#/properties/sponsor_problem_hide_request" });
@@ -48,8 +51,9 @@ test("the runtime and advertised hide contract reject authority and scientific o
     expect(SponsorProblemHideRequestSchema.safeParse(input).success).toBe(false);
     expect(validate(input)).toBe(false);
   }
-  expect(SponsorProblemHideRequestSchema.safeParse({ ...command, reason: "   " }).success)
-    .toBe(false);
+  expect(SponsorProblemHideRequestSchema.safeParse({ ...command, reason: "   " }).success).toBe(
+    false,
+  );
 });
 
 test("strict receipts identify sponsor authority without publishing the private reason", () => {
@@ -75,7 +79,13 @@ test("both planes use the same inclusive 15-minute freshness window and 60-secon
     expect(problemHideAuthIsRecent(issuedAt, now)).toBe(true);
   }
   for (const issuedAt of [
-    undefined, now + 61, now - 961, -1, 0.5, Number.NaN, Number.POSITIVE_INFINITY,
+    undefined,
+    now + 61,
+    now - 961,
+    -1,
+    0.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
   ]) {
     expect(problemHideAuthIsRecent(issuedAt, now)).toBe(false);
   }

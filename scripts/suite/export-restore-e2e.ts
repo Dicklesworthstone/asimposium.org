@@ -77,16 +77,28 @@ function localD1(sqlite: Database) {
         throw error;
       }
     },
-    prepare: (query: string) => ({
-      bind: (...values: unknown[]) => ({
-        all: async <T>() => ({ results: sqlite.prepare(query).all(...(values as never)) as T[] }),
+    prepare: (query: string) => {
+      const bound = (...values: unknown[]) => ({
+        all: async <T>() => ({
+          success: true,
+          results: sqlite.prepare(query).all(...(values as never)) as T[],
+          meta: { changes: 0 },
+        }),
         first: async <T>() => (sqlite.prepare(query).get(...(values as never)) as T) ?? null,
         run: async () => {
+          if (/^\s*SELECT\b/i.test(query)) {
+            return {
+              success: true,
+              results: sqlite.prepare(query).all(...(values as never)),
+              meta: { changes: 0 },
+            };
+          }
           const result = sqlite.prepare(query).run(...(values as never));
-          return { meta: { changes: result.changes } };
+          return { success: true, results: [], meta: { changes: result.changes } };
         },
-      }),
-    }),
+      });
+      return { ...bound(), bind: bound };
+    },
   } as never;
 }
 
@@ -555,6 +567,7 @@ async function runE2E() {
     targetId: "P-OLD-RESTORED-DRAFT",
     targetType: "problem",
     issuedAt: NOW,
+    payload: { sponsor_id: sponsorId },
   });
   const journalKey = await checkpointSigningKey(
     JSON.stringify({ kid: "export-restore-e2e", seedHex: "33".repeat(32) }),
@@ -563,7 +576,6 @@ async function runE2E() {
   const verifyKeys = [{ kid: journalKey.kid, publicKeyHex: journalKey.publicKeyHex }];
   const deletionJournalNdjson = await serializeDeletionJournal([deleteControl], NOW, journalKey);
   const verifiedJournal = await parseAndVerifyDeletionJournal(deletionJournalNdjson, verifyKeys);
-  assert.equal(verifiedJournal.valid, true);
   if (!verifiedJournal.valid) throw new Error(verifiedJournal.reason);
 
   const scratchReplay = freshDb();

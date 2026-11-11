@@ -92,12 +92,7 @@ function fixture() {
     loseNextResponse() {
       loseResponse = true;
     },
-    hide(
-      key = "owner-hide",
-      sponsor = OWNER,
-      command: unknown = body(),
-      problem = PROBLEM,
-    ) {
+    hide(key = "owner-hide", sponsor = OWNER, command: unknown = body(), problem = PROBLEM) {
       return sponsorProblemHideHttp({
         db,
         sponsorId: sponsor,
@@ -107,16 +102,22 @@ function fixture() {
       });
     },
     counts() {
-      return sql.query(`SELECT
+      return sql
+        .query(`SELECT
         (SELECT COUNT(*) FROM content_controls) AS controls,
         (SELECT COUNT(*) FROM moderation_log) AS logs,
         (SELECT COUNT(*) FROM operator_audit) AS operator_audits,
         (SELECT COUNT(*) FROM sponsor_problem_hide_receipts) AS receipts,
-        (SELECT cursor FROM public_cursor WHERE singleton = 1) AS cursor`).get();
+        (SELECT cursor FROM public_cursor WHERE singleton = 1) AS cursor`)
+        .get();
     },
     publicVisible() {
-      return sql.query(`SELECT id FROM problems p WHERE p.id = ?
-        AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}`).get(PROBLEM) !== null;
+      return (
+        sql
+          .query(`SELECT id FROM problems p WHERE p.id = ?
+        AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}`)
+          .get(PROBLEM) !== null
+      );
     },
     operator(visibility: "hidden" | "visible") {
       return applyOperatorControl(db, "operator-fixture", {
@@ -141,18 +142,31 @@ describe("owner problem hiding", () => {
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     const receipt = SponsorProblemHideReceiptSchema.parse(await response.json());
     expect(receipt).toMatchObject({
-      problem_id: PROBLEM, actor_kind: "sponsor", visibility: "hidden", version: 1,
+      problem_id: PROBLEM,
+      actor_kind: "sponsor",
+      visibility: "hidden",
+      version: 1,
     });
     expect(f.publicVisible()).toBe(false);
     expect(f.counts()).toEqual({
-      controls: 1, logs: 1, operator_audits: 0, receipts: 1, cursor: 1,
+      controls: 1,
+      logs: 1,
+      operator_audits: 0,
+      receipts: 1,
+      cursor: 1,
     });
-    expect(f.sql.query("SELECT public_seq FROM problems WHERE id = ?").get(PROBLEM))
-      .toEqual({ public_seq: 7 });
-    expect(f.sql.query("SELECT actor_kind, actor, reason_category FROM content_controls").get())
-      .toEqual({ actor_kind: "sponsor", actor: OWNER, reason_category: "sponsor-requested" });
+    expect(f.sql.query("SELECT public_seq FROM problems WHERE id = ?").get(PROBLEM)).toEqual({
+      public_seq: 7,
+    });
+    expect(
+      f.sql.query("SELECT actor_kind, actor, reason_category FROM content_controls").get(),
+    ).toEqual({ actor_kind: "sponsor", actor: OWNER, reason_category: "sponsor-requested" });
     const log = f.sql.query("SELECT * FROM moderation_log").get();
-    expect(log).toMatchObject({ category: "sponsor-requested", action: "hidden", problem_id: PROBLEM });
+    expect(log).toMatchObject({
+      category: "sponsor-requested",
+      action: "hidden",
+      problem_id: PROBLEM,
+    });
     expect(JSON.stringify(log)).not.toContain(PRIVATE_REASON);
     expect(JSON.stringify(log)).not.toContain(OWNER);
     expect(JSON.stringify(receipt)).not.toContain(PRIVATE_REASON);
@@ -162,8 +176,10 @@ describe("owner problem hiding", () => {
     const f = fixture();
     f.sql.exec("UPDATE problems SET unlisted = 1");
     expect((await f.hide()).status).toBe(200);
-    expect(f.sql.query("SELECT problem_id, category FROM moderation_log").get())
-      .toEqual({ problem_id: null, category: "sponsor-requested" });
+    expect(f.sql.query("SELECT problem_id, category FROM moderation_log").get()).toEqual({
+      problem_id: null,
+      category: "sponsor-requested",
+    });
     expect(f.publicVisible()).toBe(false);
   });
 
@@ -172,8 +188,9 @@ describe("owner problem hiding", () => {
     f.sql.query("UPDATE problems SET sponsor_id = ?").run(OTHER);
     f.sql.query("INSERT INTO problem_stewards VALUES(?, ?)").run(PROBLEM, OWNER);
     expect((await f.hide()).status).toBe(404);
-    expect((await f.hide("absent", OWNER, { ...f.body(), problem_id: "P-ABSENT" }, "P-ABSENT")).status)
-      .toBe(404);
+    expect(
+      (await f.hide("absent", OWNER, { ...f.body(), problem_id: "P-ABSENT" }, "P-ABSENT")).status,
+    ).toBe(404);
     f.sql.query("UPDATE problems SET sponsor_id = ?, status = 'private-draft'").run(OWNER);
     expect((await f.hide()).status).toBe(404);
     f.sql.exec("UPDATE problems SET status = 'active', public_seq = 0");
@@ -189,7 +206,9 @@ describe("owner problem hiding", () => {
       "UPDATE problems SET status = 'private-draft'",
     ]) {
       const f = fixture();
-      f.beforeNextBatch(() => { f.sql.exec(change); });
+      f.beforeNextBatch(() => {
+        f.sql.exec(change);
+      });
       expect((await f.hide()).status).toBe(404);
       expect(f.counts()).toEqual(EMPTY);
     }
@@ -208,9 +227,14 @@ describe("owner problem hiding", () => {
     const f = fixture();
     const now = Math.floor(Date.now() / 1000);
     for (const time of [now - 2000, now + 2000]) {
-      expect((await f.hide("stale", OWNER, {
-        ...f.body(), step_up_authenticated_at: time,
-      })).status).toBe(403);
+      expect(
+        (
+          await f.hide("stale", OWNER, {
+            ...f.body(),
+            step_up_authenticated_at: time,
+          })
+        ).status,
+      ).toBe(403);
     }
     for (const command of [
       { ...f.body(), problem_id: "P-OTHER" },
@@ -233,17 +257,28 @@ describe("owner problem hiding", () => {
     const restored = f.counts();
     expect(f.publicVisible()).toBe(true);
     const replay = await f.hide("owner-hide", OWNER, {
-      ...f.body(), step_up_authenticated_at: Math.floor(Date.now() / 1000) - 1,
+      ...f.body(),
+      step_up_authenticated_at: Math.floor(Date.now() / 1000) - 1,
     });
     expect(await replay.json()).toEqual(first);
     expect(f.publicVisible()).toBe(true);
     expect(f.counts()).toEqual(restored);
-    expect(f.sql.query(`SELECT version, COALESCE(actor_kind,
+    expect(
+      f.sql
+        .query(`SELECT version, COALESCE(actor_kind,
       CASE source WHEN 'operator' THEN 'operator' ELSE 'community' END) AS actor_kind
-      FROM content_controls ORDER BY version`).all())
-      .toEqual([{ version: 1, actor_kind: "sponsor" }, { version: 2, actor_kind: "operator" }]);
+      FROM content_controls ORDER BY version`)
+        .all(),
+    ).toEqual([
+      { version: 1, actor_kind: "sponsor" },
+      { version: 2, actor_kind: "operator" },
+    ]);
     expect(restored).toEqual({
-      controls: 2, logs: 2, operator_audits: 1, receipts: 1, cursor: 2,
+      controls: 2,
+      logs: 2,
+      operator_audits: 1,
+      receipts: 1,
+      cursor: 2,
     });
   });
 
@@ -252,14 +287,25 @@ describe("owner problem hiding", () => {
     expect((await f.hide()).status).toBe(200);
     const before = f.counts();
     const conflict = await f.hide("owner-hide", OWNER, {
-      ...f.body(), reason: "A different private decision.",
+      ...f.body(),
+      reason: "A different private decision.",
     });
     expect(conflict.status).toBe(409);
-    expect((await conflict.json()).code).toBe("IDEMPOTENCY_CONFLICT");
+    expect(await conflict.json()).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     f.sql.query("INSERT INTO problems VALUES('P-SECOND', ?, 'active', 0, 1)").run(OWNER);
-    expect((await f.hide("owner-hide", OWNER, {
-      ...f.body(), problem_id: "P-SECOND",
-    }, "P-SECOND")).status).toBe(409);
+    expect(
+      (
+        await f.hide(
+          "owner-hide",
+          OWNER,
+          {
+            ...f.body(),
+            problem_id: "P-SECOND",
+          },
+          "P-SECOND",
+        )
+      ).status,
+    ).toBe(409);
     expect(f.counts()).toEqual(before);
   });
 
@@ -268,7 +314,11 @@ describe("owner problem hiding", () => {
     lost.loseNextResponse();
     expect((await lost.hide()).status).toBe(200);
     expect(lost.counts()).toEqual({
-      controls: 1, logs: 1, operator_audits: 0, receipts: 1, cursor: 1,
+      controls: 1,
+      logs: 1,
+      operator_audits: 0,
+      receipts: 1,
+      cursor: 1,
     });
     const racing = fixture();
     let winner: unknown;
@@ -288,7 +338,11 @@ describe("owner problem hiding", () => {
     });
     expect((await f.hide()).status).toBe(409);
     expect(f.counts()).toEqual({
-      controls: 1, logs: 1, operator_audits: 1, receipts: 0, cursor: 1,
+      controls: 1,
+      logs: 1,
+      operator_audits: 1,
+      receipts: 0,
+      cursor: 1,
     });
   });
 
@@ -304,14 +358,18 @@ describe("owner problem hiding", () => {
   test("accepted receipts are append-only and cannot claim another authority", async () => {
     const f = fixture();
     expect((await f.hide()).status).toBe(200);
-    expect(() => f.sql.exec("UPDATE sponsor_problem_hide_receipts SET control_version = 99"))
-      .toThrow("SPONSOR_PROBLEM_HIDE_RECEIPT_IMMUTABLE");
-    expect(() => f.sql.exec("DELETE FROM sponsor_problem_hide_receipts"))
-      .toThrow("SPONSOR_PROBLEM_HIDE_RECEIPT_IMMUTABLE");
-    expect(() => f.sql.exec(`INSERT INTO sponsor_problem_hide_receipts
+    expect(() =>
+      f.sql.exec("UPDATE sponsor_problem_hide_receipts SET control_version = 99"),
+    ).toThrow("SPONSOR_PROBLEM_HIDE_RECEIPT_IMMUTABLE");
+    expect(() => f.sql.exec("DELETE FROM sponsor_problem_hide_receipts")).toThrow(
+      "SPONSOR_PROBLEM_HIDE_RECEIPT_IMMUTABLE",
+    );
+    expect(() =>
+      f.sql.exec(`INSERT INTO sponsor_problem_hide_receipts
       SELECT sponsor_id, '${"d".repeat(64)}', request_digest, problem_id, control_id,
         control_version, step_up_authenticated_at,
         json_set(receipt_json, '$.actor_kind', 'operator'), created_at
-      FROM sponsor_problem_hide_receipts`)).toThrow("SPONSOR_PROBLEM_HIDE_RECEIPT_MISMATCH");
+      FROM sponsor_problem_hide_receipts`),
+    ).toThrow("SPONSOR_PROBLEM_HIDE_RECEIPT_MISMATCH");
   });
 });

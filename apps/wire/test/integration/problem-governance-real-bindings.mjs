@@ -690,9 +690,7 @@ export async function problemGovernanceJourney({
   assert.equal((await env.DB.prepare("SELECT COUNT(*) AS n FROM problem_forks").first()).n, 0);
   // Move only the original admission into history, then retry the exact
   // refused command. This is fixture time, not a production quota bypass.
-  await env.DB.prepare(
-    "UPDATE problem_creation_admissions SET created_at = ? WHERE problem_id = ?",
-  )
+  await env.DB.prepare("UPDATE problem_creation_admissions SET created_at = ? WHERE problem_id = ?")
     .bind(Date.now() - 86_400_000, problem1Id)
     .run();
   const forkRes = await sponsorCall(
@@ -787,9 +785,7 @@ export async function problemGovernanceJourney({
 
   // 10. Merge & 308 Permanent Redirect
   // Create Problem 2 to merge into after the neighbour's admission expires.
-  await env.DB.prepare(
-    "UPDATE problem_creation_admissions SET created_at = ? WHERE problem_id = ?",
-  )
+  await env.DB.prepare("UPDATE problem_creation_admissions SET created_at = ? WHERE problem_id = ?")
     .bind(Date.now() - 86_400_000, lineageNeighbour)
     .run();
   const prop2 = await call(
@@ -954,9 +950,7 @@ export async function problemGovernanceJourney({
   // competing write on the real D1 after the route's reads and before its
   // write batch commits.
   // The independent publication-race scenarios run in a later daily window.
-  await env.DB.prepare(
-    "UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?",
-  )
+  await env.DB.prepare("UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?")
     .bind(Date.now() - 86_400_000, sponsorA)
     .run();
   const proposeDraft = async (title) =>
@@ -1035,9 +1029,7 @@ export async function problemGovernanceJourney({
   console.log(JSON.stringify({ stage: "governance-races-verified" }));
 
   // The next independent pair of creations belongs to a later daily window.
-  await env.DB.prepare(
-    "UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?",
-  )
+  await env.DB.prepare("UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?")
     .bind(Date.now() - 86_400_000, sponsorA)
     .run();
 
@@ -1120,9 +1112,7 @@ export async function problemGovernanceJourney({
 
   // Allow a new-day fork so the following refusal reaches the intended
   // concurrent-parent guard instead of an already exhausted creation budget.
-  await env.DB.prepare(
-    "UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?",
-  )
+  await env.DB.prepare("UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?")
     .bind(Date.now() - 86_400_000, sponsorA)
     .run();
 

@@ -398,9 +398,11 @@ await runLocalWorkerJourney(
       "problem_proposal_command_receipts",
     ]) {
       assert.equal(
-        (await env.DB.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE sponsor_id = ?`)
-          .bind(raceSponsor)
-          .first()).n,
+        (
+          await env.DB.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE sponsor_id = ?`)
+            .bind(raceSponsor)
+            .first()
+        ).n,
         2,
       );
     }

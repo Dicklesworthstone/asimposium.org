@@ -57,9 +57,7 @@ export async function getProblemCreationBudget(
       ? {
           retry_after_seconds: Math.max(
             1,
-            Math.ceil(
-              ((row.recovery_at ?? now) + PROBLEM_CREATION_WINDOW_MS - now) / 1000,
-            ),
+            Math.ceil(((row.recovery_at ?? now) + PROBLEM_CREATION_WINDOW_MS - now) / 1000),
           ),
         }
       : {}),
@@ -81,9 +79,7 @@ export function problemCreationAccountingStatements(
   checkedNow(now);
   return [
     db
-      .prepare(
-        "DELETE FROM problem_creation_admissions WHERE sponsor_id = ? AND created_at <= ?",
-      )
+      .prepare("DELETE FROM problem_creation_admissions WHERE sponsor_id = ? AND created_at <= ?")
       .bind(sponsorId, now - PROBLEM_CREATION_WINDOW_MS),
     db
       .prepare(`INSERT INTO problem_creation_admissions (problem_id, sponsor_id, created_at)

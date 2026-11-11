@@ -1053,10 +1053,7 @@ async function assertCurrentJournalHead(
     throw new KraterRestoreRefusedError(
       "DELETION_JOURNAL_CURRENT_HEAD_INVALID: the independent journal head is invalid",
     );
-  if (
-    current.recordCount !== expected.recordCount ||
-    current.finalDigest !== expected.finalDigest
-  )
+  if (current.recordCount !== expected.recordCount || current.finalDigest !== expected.finalDigest)
     throw new KraterRestoreRefusedError(
       "DELETION_JOURNAL_STALE: journal differs from the current published controls; keep the target quarantined and retry",
     );

@@ -178,8 +178,7 @@ export async function hideSponsorProblem(
     await requireOwner(db, request.problem_id, sponsorId);
     if (!problemHideAuthIsRecent(request.step_up_authenticated_at))
       throw new ProblemHideError("STEP_UP");
-    if ((control?.meta.changes ?? 0) === 1)
-      throw new Error("SPONSOR_PROBLEM_HIDE_RECEIPT_MISSING");
+    if ((control?.meta.changes ?? 0) === 1) throw new Error("SPONSOR_PROBLEM_HIDE_RECEIPT_MISSING");
     throw new ProblemHideError("CONFLICT");
   } catch (error) {
     // A lost response or a concurrently accepted identical key is recoverable.
@@ -233,12 +232,7 @@ export async function sponsorProblemHideHttp(input: {
   try {
     return privateResponse(
       Response.json(
-        await hideSponsorProblem(
-          input.db,
-          input.sponsorId,
-          parsed.data,
-          input.idempotencyKey,
-        ),
+        await hideSponsorProblem(input.db, input.sponsorId, parsed.data, input.idempotencyKey),
       ),
     );
   } catch (error) {
