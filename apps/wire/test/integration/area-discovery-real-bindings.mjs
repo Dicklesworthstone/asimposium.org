@@ -53,6 +53,14 @@ async function areaDiscoveryJourney({
     "Private drafts cannot alter public counts or ETags",
   );
   await call("/area/other-path-enumeration.json", undefined, undefined, 404);
+  const renamePath = "/v1/operators/areas/rename";
+  const renameAction = "operator.area.rename";
+  const renameBody = (area, title) => ({ area_id: area, new_title: title,
+    reason: "AREA_RENAME_PRIVATE_AUDIT_REASON: reviewed the public taxonomy scope.",
+    step_up_authenticated_at: Math.floor(Date.now() / 1000) });
+  const rename = (body, expected = 200, key) => operatorCall("POST", renamePath,
+    renameAction, body, expected, renamePath, key);
+  assert.equal((await rename(renameBody("other-path-enumeration", "Private-only title"), 404)).code, "MODERATION_TARGET_NOT_FOUND");
   for (const suffix of ["json", "md"]) {
     const hidden = await face(`/p/${problemId}.${suffix}`);
     const unknown = await face(`/p/P-UNKNOWN.${suffix}`);
@@ -143,6 +151,83 @@ async function areaDiscoveryJourney({
   assert.ok(index.areas.every((area) => area.active_needs.length === 0));
   assert.equal((await face("/areas.json", initialEtag)).status, 200);
   const detail = AreaDetailResponseSchema.parse(await call("/area/combinatorics.json"));
+  const scienceBeforeRename = JSON.stringify((await env.DB.prepare("SELECT * FROM events ORDER BY problem_id, seq").all()).results);
+  const renamePaths = ["/areas.json", "/areas.md", "/area/other-path-enumeration.json", "/area/other-path-enumeration.md"];
+  const renameEtags = new Map();
+  for (const path of renamePaths) renameEtags.set(path, (await face(path)).headers.get("etag"));
+  const intent = renameBody("other-path-enumeration", "Finite Path Enumeration");
+  const accepted = await rename(intent, 200, "area-rename-first");
+  assert.equal(accepted.new_title, intent.new_title);
+  const renamed = AreaDetailResponseSchema.parse(await call("/area/other-path-enumeration.json"));
+  assert.equal(renamed.area.slug, intent.area_id);
+  assert.equal(renamed.area.label, intent.new_title);
+  assert.equal(renamed.area.label_change.event_id, accepted.audit_event_id);
+  assert.equal(renamed.problems[0].id, problemId);
+  for (const path of renamePaths) {
+    const response = await face(path, renameEtags.get(path));
+    assert.equal(response.status, 200, "A durable rename must invalidate every area face");
+    const raw = await response.text();
+    assert.ok(raw.includes(intent.new_title) && raw.includes(accepted.audit_event_id));
+    assert.ok(!raw.includes("AREA_RENAME_PRIVATE_AUDIT_REASON") && !raw.includes("usr_local_operator"));
+    assert.ok(!raw.includes("pending review") || path.startsWith("/areas."));
+    assert.equal((await face(path, response.headers.get("etag"))).status, 304);
+  }
+  const next = await rename(renameBody(intent.area_id, "Reviewed Path Enumeration"));
+  assert.notEqual(next.audit_event_id, accepted.audit_event_id);
+  assert.deepEqual(await rename({ ...intent, step_up_authenticated_at: Math.floor(Date.now() / 1000) }, 200, "area-rename-first"), accepted);
+  assert.equal((await call(`/area/${intent.area_id}.json`)).area.label, next.new_title, "An old receipt never reverts a later rename");
+  assert.equal((await rename({ ...intent, new_title: "Different intent" }, 409, "area-rename-first")).code, "IDEMPOTENCY_CONFLICT");
+  assert.equal((await rename(renameBody(intent.area_id, next.new_title), 409)).code, "MODERATION_STATE_CONFLICT");
+  assert.equal((await rename(renameBody("other-unknown-taxonomy", "Unknown area"), 404)).code, "MODERATION_TARGET_NOT_FOUND");
+  for (const offset of [-901, 60]) assert.equal((await rename({ ...intent,
+    step_up_authenticated_at: Math.floor(Date.now() / 1000) + offset }, 403)).code, "STEP_UP_REQUIRED");
+  const malformed = await rename({ ...intent, new_title: "  " }, 422);
+  assert.equal(malformed.code, "SCHEMA_INVALID");
+  assert.ok(malformed.rule && malformed.fix_hint && malformed.schema && malformed.example);
+  assert.ok((await (await face(new URL(malformed.schema).pathname)).json()).properties.area_rename_request);
+  await call(renamePath, intent, token, 403);
+  await rename(renameBody("algebra", "Algebra and Representations"));
+  assert.equal((await call("/area/algebra.json")).area.label, "Algebra and Representations");
+  const eventCount = async () => (await env.DB.prepare("SELECT COUNT(*) AS n FROM area_rename_events").first()).n;
+  const beforeRace = await eventCount();
+  const raced = await Promise.all([rename(renameBody(intent.area_id, "First concurrent path label"), [200, 409]),
+    rename(renameBody(intent.area_id, "Second concurrent path label"), [200, 409])]);
+  const raceSuccesses = raced.filter((result) => result.ok === true).length;
+  assert.ok(raceSuccesses >= 1 && raceSuccesses <= 2);
+  assert.equal(await eventCount(), beforeRace + raceSuccesses, "Each success has exactly one durable event");
+  const chain = (await env.DB.prepare("SELECT event_id, seq, previous_event_id FROM area_rename_events WHERE area_slug = ? ORDER BY seq").bind(intent.area_id).all()).results;
+  chain.forEach((event, index) => { assert.equal(event.seq, index + 1); assert.equal(event.previous_event_id, chain[index - 1]?.event_id ?? null); });
+  // Fail the real audit trigger: the title/event/receipt must roll back together.
+  await env.DB.prepare("CREATE TABLE area_rename_lane_fault (enabled INTEGER NOT NULL)").run();
+  await env.DB.prepare("INSERT INTO area_rename_lane_fault VALUES (1)").run();
+  await env.DB.prepare(`CREATE TRIGGER area_rename_lane_audit_failure BEFORE INSERT ON operator_audit
+    WHEN NEW.action = 'area.rename' AND (SELECT enabled FROM area_rename_lane_fault) = 1
+    BEGIN SELECT RAISE(ABORT, 'AREA_RENAME_NATIVE_AUDIT_FAULT'); END`).run();
+  const faultIntent = renameBody(intent.area_id, "Recovered atomic path label");
+  const beforeFault = await eventCount();
+  const titleBeforeFault = (await call(`/area/${intent.area_id}.json`)).area.label;
+  await rename(faultIntent, 503, "area-rename-atomic-fault");
+  assert.equal(await eventCount(), beforeFault);
+  assert.equal((await call(`/area/${intent.area_id}.json`)).area.label, titleBeforeFault);
+  await env.DB.prepare("UPDATE area_rename_lane_fault SET enabled = 0").run();
+  const recovered = await rename(faultIntent, 200, "area-rename-atomic-fault");
+  assert.equal(await eventCount(), beforeFault + 1);
+  assert.equal((await env.DB.prepare("SELECT reason FROM operator_audit WHERE event_id = ?").bind(recovered.audit_event_id).first()).reason, faultIntent.reason);
+  await assert.rejects(env.DB.prepare("UPDATE area_rename_events SET new_title = 'forged' WHERE event_id = ?").bind(recovered.audit_event_id).run(), /AREA_RENAME_APPEND_ONLY/);
+  const hideArea = (action) => operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+    target_id: problemId, target_kind: "problem", action,
+    reason: "Check renamed custom taxonomy visibility against current public authority.",
+  });
+  await hideArea("hide");
+  await call(`/area/${intent.area_id}.json`, undefined, undefined, 404);
+  assert.ok(!(await call("/areas.json")).areas.some((area) => area.slug === intent.area_id));
+  assert.equal((await rename(renameBody(intent.area_id, "Hidden-only renamed area"), 404)).code, "MODERATION_TARGET_NOT_FOUND");
+  assert.deepEqual(await rename(intent, 200, "area-rename-first"), accepted, "Receipt recovery precedes current custom-area visibility");
+  await hideArea("restore");
+  assert.equal((await call(`/area/${intent.area_id}.json`)).area.label, recovered.new_title);
+  assert.equal(JSON.stringify((await env.DB.prepare("SELECT * FROM events ORDER BY problem_id, seq").all()).results), scienceBeforeRename);
+  assert.deepEqual((await call(`/v1/problems/${problemId}`, undefined, token)).problem.areas, proposal.areas);
+  console.log(JSON.stringify({ stage: "area-renames", status: "pass", replay: true, atomic_audit: true, private_taxonomy_excluded: true }));
   assert.equal(detail.area.problem_count, 1);
   assert.equal(detail.problems[0].id, problemId);
   assert.equal(detail.problems[0].title, proposal.title);
@@ -542,6 +627,8 @@ await runLocalWorkerJourney(areaDiscoveryJourney, {
   console.error(
     JSON.stringify({
       stage: "area-discovery",
+      error_location: error?.stack?.match(/area-discovery-real-bindings\.mjs:\d+:\d+/)?.[0] ?? null,
+      observed_code: typeof error?.actual === "string" && /^[A-Z_]{1,80}$/.test(error.actual) ? error.actual : null,
       status: "fail",
       // The error class tells an assertion failure from a broken harness.
       error_code: typeof error?.code === "string" ? error.code : (error?.name ?? null),

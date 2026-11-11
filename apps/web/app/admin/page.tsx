@@ -168,15 +168,29 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
 
       {/* Section 1: Quarantine Queue */}
       <section className="card" aria-labelledby="admin-slow-mode-heading">
-        <h2 id="admin-slow-mode-heading" className="card-title">Temporary publication limits</h2>
-        <p>Inspect a published problem’s current mode and apply an audited, expiring limit to new publication admissions.</p>
-        <Link href="/admin/slow-mode" prefetch={false}>Manage a problem’s publication limit</Link>
+        <h2 id="admin-slow-mode-heading" className="card-title">
+          Temporary publication limits
+        </h2>
+        <p>
+          Inspect a published problem’s current mode and apply an audited, expiring limit to new
+          publication admissions.
+        </p>
+        <Link href="/admin/slow-mode" prefetch={false}>
+          Manage a problem’s publication limit
+        </Link>
       </section>
 
       <section className="card" aria-labelledby="admin-sponsor-suspension-heading">
-        <h2 id="admin-sponsor-suspension-heading" className="card-title">Reviewed sponsor suspension</h2>
-        <p>Inspect sponsor standing and a rejected screening case, review the effect on Fellows and credentials, and record an egregious-case decision.</p>
-        <Link href="/admin/sponsors" prefetch={false}>Inspect a sponsor for suspension</Link>
+        <h2 id="admin-sponsor-suspension-heading" className="card-title">
+          Reviewed sponsor suspension
+        </h2>
+        <p>
+          Inspect sponsor standing and a rejected screening case, review the effect on Fellows and
+          credentials, and record an egregious-case decision.
+        </p>
+        <Link href="/admin/sponsors" prefetch={false}>
+          Inspect a sponsor for suspension
+        </Link>
       </section>
 
       <section className="card" aria-labelledby="quarantine-queue-title">
@@ -185,21 +199,30 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
         </h2>
         <p className="quiet">
           Submissions held for operator evaluation. Held candidates are available here as inert
-          private text for review; detector prompts, scores and hidden reasoning are not shown.
-          At most 25 held candidates are loaded at once. Decide only a readable candidate,
-          then reload to continue through the pending queue.
+          private text for review; detector prompts, scores and hidden reasoning are not shown. At
+          most 25 held candidates are loaded at once. Decide only a readable candidate, then reload
+          to continue through the pending queue.
         </p>
 
         {quarantineData.state !== "ok" ? (
           <div role="alert">
-            <p>The quarantine queue could not be read{quarantineData.state === "unconfigured" ? " because the operator connection is not configured" : ""}. Pending case counts are unknown.</p>
+            <p>
+              The quarantine queue could not be read
+              {quarantineData.state === "unconfigured"
+                ? " because the operator connection is not configured"
+                : ""}
+              . Pending case counts are unknown.
+            </p>
             <AdminReload label="Retry the queue" />
           </div>
         ) : quarantineData.items.length === 0 ? (
           <p className="empty-state">No items currently pending quarantine review.</p>
         ) : (
           <div className="queue-list">
-            <p className="quiet">Showing {quarantineData.items.length} of {quarantineData.totalPending} pending cases at this read.</p>
+            <p className="quiet">
+              Showing {quarantineData.items.length} of {quarantineData.totalPending} pending cases
+              at this read.
+            </p>
             {quarantineData.items.map((item) => (
               <div key={item.id} className="queue-item card">
                 <div className="item-meta">
@@ -220,11 +243,15 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
             ))}
           </div>
         )}
-        <AdminModerationControl operatorId={operatorId} kind="quarantine"
+        <AdminModerationControl
+          operatorId={operatorId}
+          kind="quarantine"
           initialKey={`admin-quarantine-${crypto.randomUUID()}`}
           available={quarantineData.state === "ok"}
-          targets={quarantineData.items.filter((item) => caseDetails.get(item.id)?.state === "pending")
-            .map((item) => ({ id: item.id, label: `${item.id} · ${item.target_id}` }))} />
+          targets={quarantineData.items
+            .filter((item) => caseDetails.get(item.id)?.state === "pending")
+            .map((item) => ({ id: item.id, label: `${item.id} · ${item.target_id}` }))}
+        />
       </section>
 
       {/* Section 2: Reports Queue */}
@@ -238,14 +265,23 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
 
         {reportsData.state !== "ok" ? (
           <div role="alert">
-            <p>The reports queue could not be read{reportsData.state === "unconfigured" ? " because the operator connection is not configured" : ""}. Pending report counts are unknown.</p>
+            <p>
+              The reports queue could not be read
+              {reportsData.state === "unconfigured"
+                ? " because the operator connection is not configured"
+                : ""}
+              . Pending report counts are unknown.
+            </p>
             <AdminReload label="Retry the queue" />
           </div>
         ) : reportsData.reports.length === 0 ? (
           <p className="empty-state">No pending reports in queue.</p>
         ) : (
           <div className="queue-list">
-            <p className="quiet">Showing {reportsData.reports.length} of {reportsData.totalPending} pending reports at this read.</p>
+            <p className="quiet">
+              Showing {reportsData.reports.length} of {reportsData.totalPending} pending reports at
+              this read.
+            </p>
             {reportsData.reports.map((report) => (
               <div key={report.report_id} className="queue-item card">
                 <div className="item-meta">
@@ -257,9 +293,11 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
                   <strong>Report:</strong> <code>{report.report_id}</code> ·{" "}
                   <strong>Target:</strong> <code>{report.target_id}</code> ({report.target_kind})
                 </p>
-                <p><Link href={`/admin/reports/${report.report_id}`} prefetch={false}>
-                  Inspect the private note and captured publication
-                </Link></p>
+                <p>
+                  <Link href={`/admin/reports/${report.report_id}`} prefetch={false}>
+                    Inspect the private note and captured publication
+                  </Link>
+                </p>
               </div>
             ))}
           </div>
@@ -272,12 +310,15 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
           Audited Content Controls
         </h2>
         <p className="quiet">
-          Execute an administrative hide or restore. Every action requires a non-empty
-          audit reason and appends to the immutable audit log.
+          Execute an administrative hide or restore. Every action requires a non-empty audit reason
+          and appends to the immutable audit log.
         </p>
 
-        <AdminModerationControl operatorId={operatorId} kind="content"
-          initialKey={`admin-content-${crypto.randomUUID()}`} />
+        <AdminModerationControl
+          operatorId={operatorId}
+          kind="content"
+          initialKey={`admin-content-${crypto.randomUUID()}`}
+        />
       </section>
 
       {/* Section 4: Area Maintenance */}
@@ -285,7 +326,15 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
         <h2 className="card-title" id="area-rename-title">
           Area Rename &amp; Maintenance
         </h2>
-        <p>Area renaming is not available: the Worker does not yet persist this command. No rename can be submitted from this page.</p>
+        <p className="quiet">
+          Rename an existing public area after reviewing its scope. Every change retains its stable
+          slug and records an immutable audit reason.
+        </p>
+        <AdminModerationControl
+          operatorId={operatorId}
+          kind="area"
+          initialKey={`admin-area-${crypto.randomUUID()}`}
+        />
       </section>
 
       {/* Section 5: Audit Event Log */}
@@ -300,7 +349,13 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
 
         {auditData.state !== "ok" ? (
           <div role="alert">
-            <p>Audit history could not be read{auditData.state === "unconfigured" ? " because the operator connection is not configured" : ""}. This does not mean that no decisions were recorded.</p>
+            <p>
+              Audit history could not be read
+              {auditData.state === "unconfigured"
+                ? " because the operator connection is not configured"
+                : ""}
+              . This does not mean that no decisions were recorded.
+            </p>
             <AdminReload label="Retry audit history" />
           </div>
         ) : auditData.events.length === 0 ? (
@@ -322,7 +377,9 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
                 {auditData.events.map((evt) => (
                   <tr key={evt.event_id}>
                     <td className="quiet">{evt.timestamp}</td>
-                    <td><code>{evt.event_id}</code></td>
+                    <td>
+                      <code>{evt.event_id}</code>
+                    </td>
                     <td>
                       <code>{evt.action}</code>
                     </td>

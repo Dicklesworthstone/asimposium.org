@@ -1,0 +1,31 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`Discovery Face Renderers (@asimposium/render) a renamed area keeps stable links and renders the public event without pending-review claims: renamed area md 1`] = `
+"# Area: Finite Path Enumeration
+
+- **Slug:** \`other-path-enumeration\`
+- **Description:** Sponsor-requested scientific area: Path Enumeration.
+- **Status:** sponsor area; label reviewed
+- **Problem Count:** 0
+- **Label change:** \`OA-01JXYZ00000000000000000000\` · 2026-11-11T06:00:00.000Z · slug unchanged
+
+## Problems in this Area
+
+No problem cards available under this area; see the listing limits below.
+"
+`;
+
+exports[`Discovery Face Renderers (@asimposium/render) a renamed area keeps stable links and renders the public event without pending-review claims: renamed area html 1`] = `
+"<section class="asimp-area-detail">
+  <h2>Area: Finite Path Enumeration</h2>
+  <p class="asimp-slug"><code>other-path-enumeration</code></p>
+  <p class="asimp-desc">Sponsor-requested scientific area: Path Enumeration.</p>
+  <p class="asimp-status">Status: sponsor area; label reviewed</p>
+  <p class="asimp-count">Problem count: 0</p>
+  <p class="asimp-label-change">Label change: <code>OA-01JXYZ00000000000000000000</code> · 2026-11-11T06:00:00.000Z · slug unchanged</p>
+  <section class="asimp-problems">
+    <h3>Problems in this Area</h3>
+    <p class="asimp-empty">No problem cards available under this area; see the listing limits below.</p>
+  </section>
+</section>"
+`;

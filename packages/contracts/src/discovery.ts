@@ -154,6 +154,13 @@ export const AreaSummarySchema = z
     // An absent assignment projection cannot establish that an area has zero problems.
     problem_count: z.number().int().min(0).nullable(),
     active_needs: z.array(ScientificNeedTypeSchema),
+    label_change: z
+      .object({
+        event_id: z.string().regex(/^OA-[0-9A-HJKMNP-TV-Z]{26}$/),
+        renamed_at: z.string().datetime({ offset: true }).max(40),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

@@ -98,6 +98,7 @@ import {
 } from "../krater/projection-replay.ts";
 import { hiddenByContentControlSql } from "../krater/public-content";
 import { logMegaCommand } from "../mega-commands/ops-log.ts";
+import { areaRenameProblem, operatorRenameArea } from "../moderation/area-renames.ts";
 import {
   operatorAuditHistory,
   operatorContentControl,
@@ -1022,9 +1023,8 @@ function enrollmentUnavailableResponse(): Response {
 
 /** Rule A4: the operator console must never report an action it did not
  * durably take. Quarantine, reports, content controls and audit history have
- * a durable store (src/moderation); area renames do not yet,
- * so those still refuse instead of returning a fabricated success. Without a
- * D1 binding every operator control refuses the same way. */
+ * a durable store (src/moderation), including append-only area renames.
+ * Without a D1 binding every operator control refuses the same way. */
 function operatorControlUnavailableResponse(): Response {
   return problem(
     503,
@@ -3123,9 +3123,10 @@ function mountSponsorRoutes(app: Hono<{ Bindings: Env }>, options: EnrollmentRou
       return sponsorPathOnlyResponse(c.req.raw, "/v1/operators/areas/rename");
     }
     const example = {
-      area_id: "area-topology",
+      area_id: "topology-and-geometry",
       new_title: "Geometric Topology & 4-Manifolds",
       reason: "Community consensus title update.",
+      step_up_authenticated_at: 1794380000,
     };
     if (!hasJsonContentType(c.req.raw)) {
       cancelUnconsumedRequestBody(c.req.raw);
@@ -3143,19 +3144,21 @@ function mountSponsorRoutes(app: Hono<{ Bindings: Env }>, options: EnrollmentRou
       try {
         body = verifiedJson(authenticated.rawBody) as Record<string, unknown>;
       } catch {
-        return enrollmentErrorResponse(
-          new EnrollmentError("OPERATOR_FELLOW_CAP_BODY_INVALID"),
-          c.req.raw,
-        );
+        return areaRenameProblem(422, "SCHEMA_INVALID");
       }
       const parsed = AdminAreaRenameRequestSchema.safeParse(body);
       if (!parsed.success) {
-        return enrollmentErrorResponse(
-          new EnrollmentError("OPERATOR_FELLOW_CAP_BODY_INVALID"),
-          c.req.raw,
-        );
+        return areaRenameProblem(422, "SCHEMA_INVALID");
       }
-      return operatorControlUnavailableResponse();
+      if (options.db === undefined) return operatorControlUnavailableResponse();
+      const replay = idempotencyOptions(c.req.raw);
+      if (replay instanceof Response) return replay;
+      return await operatorRenameArea(
+        options.db,
+        authenticated.principal.operatorId,
+        parsed.data,
+        replay.idempotencyKey,
+      );
     } catch {
       return enrollmentUnavailableResponse();
     }

@@ -41,6 +41,38 @@ function expectVisibleScreeningNotice(md: string, html: string) {
 }
 
 describe("Discovery Face Renderers (@asimposium/render)", () => {
+  test("a renamed area keeps stable links and renders the public event without pending-review claims", async () => {
+    const fixture: AreaDetailResponse = await Bun.file(
+      new URL("../../../contracts/test/fixtures/valid/area-detail-renamed.json", import.meta.url),
+    ).json();
+    const index = { areas: [fixture.area], total_areas: 1, total_problems: 0, omitted: [] };
+    expect(renderAreaDetailMarkdown(fixture)).toMatchSnapshot("renamed area md");
+    expect(renderAreaDetailHtmlFragment(fixture)).toMatchSnapshot("renamed area html");
+    for (const face of [
+      renderAreasIndexMarkdown(index),
+      renderAreasIndexHtmlFragment(index),
+      renderAreaDetailMarkdown(fixture),
+      renderAreaDetailHtmlFragment(fixture),
+    ]) {
+      expect(face).toContain(fixture.area.label);
+      expect(face).toContain(fixture.area.label_change?.event_id ?? "MISSING");
+      expect(face).not.toContain("pending review");
+      expect(face).not.toContain("provisional");
+      expect(face).not.toContain("private operator review");
+    }
+    expect(renderAreasIndexMarkdown(index)).toContain("/area/other-path-enumeration.md");
+    const hostile = {
+      ...fixture,
+      area: {
+        ...fixture.area,
+        label: "<script>alert(1)</script> [fake](https://attacker.invalid)",
+      },
+    };
+    expect(renderAreaDetailHtmlFragment(hostile)).not.toContain("<script>");
+    expect(Bun.markdown.html(renderAreaDetailMarkdown(hostile))).not.toContain(
+      'href="https://attacker.invalid"',
+    );
+  });
   describe("safeCodeSpan & safeInlineProse", () => {
     test("safeCodeSpan formats ordinary code without modification", () => {
       expect(safeCodeSpan("claude-3-7-sonnet")).toBe("`claude-3-7-sonnet`");

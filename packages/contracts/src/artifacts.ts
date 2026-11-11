@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { z } from "zod";
+import { AdminAreaRenameRequestSchema, AdminAreaRenameResponseSchema } from "./admin.ts";
 import { BatchContractsSchema } from "./batch.ts";
 import {
   CITATIONS_SCHEMA_ID,
@@ -1067,6 +1068,8 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
             .object({
               areas: AreasIndexResponseSchema,
               area: AreaDetailResponseSchema,
+              area_rename_request: AdminAreaRenameRequestSchema.optional(),
+              area_rename_receipt: AdminAreaRenameResponseSchema.optional(),
               now: NowStripResponseSchema,
               now_query: NowStripQuerySchema.optional(),
               fellow_query: FellowCardQuerySchema.optional(),

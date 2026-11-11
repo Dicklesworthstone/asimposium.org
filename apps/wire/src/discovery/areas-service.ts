@@ -28,9 +28,10 @@ const PROBLEM_LIMIT = 50;
 // All counts and memberships use the same visibility predicate. Unlisted
 // problems remain accessible by their direct URL, never through discovery.
 // A problem an operator or community hide controls is not discoverable (f3v1).
-const VISIBLE = `p.unlisted = 0 AND p.status NOT IN ('private-draft', 'dormant')
+export const AREA_PROBLEM_VISIBILITY_SQL = `p.unlisted = 0 AND p.status NOT IN ('private-draft', 'dormant')
   AND NOT ${offScopeProblemSql("p.id", "p.public_seq")}
   AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}`;
+const VISIBLE = AREA_PROBLEM_VISIBILITY_SQL;
 const SEEDS_SQL = SEED_AREA_SLUGS.map((slug) => `'${slug}'`).join(", ");
 const OMITTED = [
   "private, unlisted, dormant and off-scope problems are excluded from area discovery",
@@ -162,16 +163,24 @@ export function getAreaInfo(
   slug: AreaSlug,
   problemCount: number | null,
   activeNeeds: ScientificNeedType[],
+  rename?: { new_title: string; event_id: string; created_at: string },
 ): AreaSummary {
+  const change =
+    rename === undefined
+      ? {}
+      : {
+          label_change: { event_id: rename.event_id, renamed_at: rename.created_at },
+        };
   const seed = SEED_AREAS.find((a) => a.slug === slug);
   if (seed) {
     return AreaSummarySchema.parse({
       slug: seed.slug,
-      label: seed.label,
+      label: rename?.new_title ?? seed.label,
       description: seed.description,
       is_seed: true,
       problem_count: problemCount,
       active_needs: activeNeeds,
+      ...change,
     });
   }
 
@@ -184,11 +193,15 @@ export function getAreaInfo(
 
   return AreaSummarySchema.parse({
     slug,
-    label: `Other: ${rawLabel}`,
-    description: `Sponsor-requested area pending administrator taxonomy review: ${rawLabel}.`,
+    label: rename?.new_title ?? `Other: ${rawLabel}`,
+    description:
+      rename === undefined
+        ? `Sponsor-requested area pending administrator taxonomy review: ${rawLabel}.`
+        : `Sponsor-requested scientific area: ${rawLabel}.`,
     is_seed: false,
     problem_count: problemCount,
     active_needs: activeNeeds,
+    ...change,
   });
 }
 
@@ -210,6 +223,18 @@ export async function loadAreasIndex(db: D1Database): Promise<AreasIndexResponse
       LIMIT ${SEED_AREA_SLUGS.length + AREA_LIMIT}`),
     reviewMemberships(db, queue),
   ]);
+  // Read only the bounded, already-public taxonomy, never every private slug.
+  const slugs = [
+    ...SEED_AREA_SLUGS,
+    ...((areaResult?.results ?? []) as { slug: string }[]).map((row) => row.slug),
+  ];
+  const renames = await db
+    .prepare(`SELECT area_slug, new_title, event_id, created_at
+    FROM area_rename_events e WHERE area_slug IN (SELECT value FROM json_each(?))
+    AND seq = (SELECT MAX(seq) FROM area_rename_events latest WHERE latest.area_slug = e.area_slug)`)
+    .bind(JSON.stringify(slugs))
+    .all<{ area_slug: string; new_title: string; event_id: string; created_at: string }>();
+  const latest = new Map(renames.results.map((row) => [row.area_slug, row]));
   const needs = areaReviewNeeds(queue, reviewResult?.results as unknown as ReviewMembership[]);
   const counts = countResult?.results[0] as unknown as VisibleCounts | undefined;
   if (!counts) throw new Error("Problem count unavailable");
@@ -224,13 +249,16 @@ export async function loadAreasIndex(db: D1Database): Promise<AreasIndexResponse
       slug,
       recorded.find((row) => row.slug === slug)?.count ?? 0,
       needs.areas.get(slug) ?? [],
+      latest.get(slug),
     ),
   );
   const custom = recorded.filter((row) => !SEED_AREA_SLUGS.some((seed) => seed === row.slug));
   summaries.push(
     ...custom
       .slice(0, AREA_LIMIT)
-      .map((row) => getAreaInfo(row.slug, row.count, needs.areas.get(row.slug) ?? [])),
+      .map((row) =>
+        getAreaInfo(row.slug, row.count, needs.areas.get(row.slug) ?? [], latest.get(row.slug)),
+      ),
   );
   summaries.sort((a, b) => a.label.localeCompare(b.label));
   const customTotal = recorded[0]?.custom_total ?? 0;
@@ -288,6 +316,11 @@ export async function loadAreaDetail(
   if (!visible || !count) throw new Error("Area count unavailable");
   // A private-only or arbitrary other-* URL must not reveal a taxonomy entry.
   if (count.total === 0 && !SEED_AREA_SLUGS.some((known) => known === slug)) return null;
+  const rename = await db
+    .prepare(`SELECT new_title, event_id, created_at
+    FROM area_rename_events WHERE area_slug = ? ORDER BY seq DESC LIMIT 1`)
+    .bind(slug)
+    .first<{ new_title: string; event_id: string; created_at: string }>();
   const rows = problemResult?.results as unknown as {
     id: string;
     public_seq: number;
@@ -329,7 +362,7 @@ export async function loadAreaDetail(
   const remaining = count.total - count.missing - rows.length;
 
   return AreaDetailResponseSchema.parse({
-    area: getAreaInfo(slug, count.total, needs.areas.get(slug) ?? []),
+    area: getAreaInfo(slug, count.total, needs.areas.get(slug) ?? [], rename ?? undefined),
     problems,
     omitted: [
       ...omissions(visible, needs),

@@ -10,6 +10,11 @@ export async function operatorModerationJourney({
 }) {
   const fixtures = await target.worker.getExport();
   const operator = ADMIN_OPERATORS[0];
+  await target.env.DB.prepare("CREATE TABLE browser_area_fault (enabled INTEGER NOT NULL)").run();
+  await target.env.DB.prepare("INSERT INTO browser_area_fault VALUES (0)").run();
+  await target.env.DB.prepare(`CREATE TRIGGER browser_area_audit_fault BEFORE INSERT ON operator_audit
+    WHEN NEW.action = 'area.rename' AND (SELECT enabled FROM browser_area_fault) = 1
+    BEGIN SELECT RAISE(ABORT, 'BROWSER_AREA_AUDIT_FAULT'); END`).run();
   const signedInAs = async (context, sub, authTime = Math.floor(Date.now() / 1000)) => {
     await context.clearCookies();
     await context.addCookies([{
@@ -136,6 +141,56 @@ export async function operatorModerationJourney({
       await page.getByText("Content restore recorded.", { exact: false }).waitFor({ state: "visible" });
       record(`admin ${mode}: explicit restore recovers the public claim without changing science`,
         await auditCount(targetId) === before + 2 && await publicStatus(claim) === 200);
+
+      await page.goto(`${agora.origin}/admin`, { waitUntil: "load" });
+      const areaForm = page.locator("#admin-area-target").locator("xpath=ancestor::form");
+      const label = `Algebra and Representations (${mode})`;
+      const privateReason = `BROWSER_PRIVATE_AREA_REASON_${mode}: reviewed this public taxonomy label.`;
+      await page.locator("#admin-area-target").fill("algebra");
+      await page.locator("#admin-area-title").fill(label);
+      await page.locator("#admin-area-reason").fill(privateReason);
+      await page.locator("#admin-area-confirm").check();
+      const areaKey = await areaForm.locator('[name="idempotency_key"]').inputValue();
+      const areaBefore = await auditCount("algebra");
+      await target.env.DB.prepare("UPDATE browser_area_fault SET enabled = 1").run();
+      try {
+        await areaForm.getByRole("button", { name: "Record decision", exact: true }).click();
+        await page.getByRole("button", { name: "Retry the exact pending decision", exact: true }).waitFor();
+        record(`area ${mode}: audit failure retains the exact intent and key without committing a title`,
+          await auditCount("algebra") === areaBefore && await areaForm.locator('[name="idempotency_key"]').inputValue() === areaKey &&
+          (await target.env.DB.prepare("SELECT COUNT(*) AS n FROM area_rename_events WHERE new_title = ?").bind(label).first()).n === 0);
+      } finally { await target.env.DB.prepare("UPDATE browser_area_fault SET enabled = 0").run(); }
+      await page.getByRole("button", { name: "Retry the exact pending decision", exact: true }).click();
+      await page.getByText("Area rename recorded.", { exact: false }).waitFor();
+      const areaReceipt = await auditReceipt("algebra", "area.rename");
+      record(`area ${mode}: reviewed browser retry records one durable rename and matching receipt`,
+        areaReceipt !== null && await auditCount("algebra") === areaBefore + 1 &&
+        (await page.locator(".admin-action-result").allTextContents()).join(" ").includes(areaReceipt.event_id));
+      for (const path of ["/areas.json", "/areas.md", "/area/algebra.json", "/area/algebra.md"]) {
+        const response = await fetch(`${target.origin}${path}`, { headers: { "user-agent": USER_AGENT } });
+        const text = await response.text();
+        record(`area ${mode}: ${path} projects the shared title and public change record`,
+          response.status === 200 && text.includes(label) && text.includes(areaReceipt.event_id) && !text.includes(privateReason));
+      }
+      for (const path of ["/area/algebra", "/explore"]) {
+        await page.goto(`${agora.origin}${path}`, { waitUntil: "load" });
+        const body = await page.locator("body").innerText();
+        record(`area ${mode}: ${path} shows the same human title and public notice`,
+          body.includes(label) && body.includes(areaReceipt.event_id) && !body.includes(privateReason));
+      }
+      for (const [account, authTime] of [[ADMIN_OPERATORS[1], Math.floor(Date.now() / 1000)], [operator, Math.floor(Date.now() / 1000) - 3600]]) {
+        await signedInAs(context, operator);
+        await page.goto(`${agora.origin}/admin`, { waitUntil: "load" });
+        await page.locator("#admin-area-target").fill("algebra");
+        await page.locator("#admin-area-title").fill("Unapproved account change");
+        await page.locator("#admin-area-reason").fill(privateReason);
+        await page.locator("#admin-area-confirm").check();
+        await signedInAs(context, account, authTime);
+        await areaForm.getByRole("button", { name: "Record decision", exact: true }).click();
+        await page.getByText("Re-authenticate as the same operator", { exact: false }).waitFor();
+        record(`area ${mode}: ${account === operator ? "stale auth" : "account switch"} cannot rename the reviewed area`,
+          await auditCount("algebra") === areaBefore + 1);
+      }
 
       await signedInAs(context, "usr_non_operator_moderation_browser");
       await page.goto(`${agora.origin}/admin`, { waitUntil: "load" });

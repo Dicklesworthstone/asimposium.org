@@ -225,14 +225,35 @@ describe("W8.8c Admin Contracts & Protections", () => {
 
   test("AdminAreaRenameRequestSchema requires valid area ID, title length, and reason", () => {
     const valid = {
-      area_id: "area-topology",
+      area_id: "topology-and-geometry",
       new_title: "Geometric Topology & 4-Manifolds",
       reason: "Clarifying area scope according to community consensus.",
+      step_up_authenticated_at: 1794380000,
     };
     expect(AdminAreaRenameRequestSchema.safeParse(valid).success).toBe(true);
 
     const invalid = { ...valid, reason: "short" };
     expect(AdminAreaRenameRequestSchema.safeParse(invalid).success).toBe(false);
+    for (const invalid of [
+      { ...valid, area_id: "area-topology" },
+      { ...valid, area_id: "other-private/../../" },
+      { ...valid, new_title: "  " },
+      { ...valid, new_title: " Padded title " },
+      { ...valid, reason: " ".repeat(12) },
+    ])
+      expect(AdminAreaRenameRequestSchema.safeParse(invalid).success).toBe(false);
+  });
+
+  test("rename golden corpus admits canonical intent and rejects malformed input", async () => {
+    for (const [directory, valid] of [
+      ["valid", true],
+      ["invalid", false],
+    ] as const) {
+      const fixture = await Bun.file(
+        new URL(`../fixtures/${directory}/admin-area-rename.json`, import.meta.url),
+      ).json();
+      expect(AdminAreaRenameRequestSchema.safeParse(fixture).success).toBe(valid);
+    }
   });
 
   test("AdminAuditEventSchema enforces immutable audit event structure", () => {

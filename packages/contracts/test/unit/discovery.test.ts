@@ -158,6 +158,23 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
   });
 
   describe("Areas responses", () => {
+    test("rename provenance is public-safe structured data from the golden corpus", async () => {
+      const fixture = await Bun.file(
+        new URL("../fixtures/valid/area-detail-renamed.json", import.meta.url),
+      ).json();
+      expect(AreaDetailResponseSchema.parse(fixture).area.label_change?.event_id).toStartWith(
+        "OA-",
+      );
+      expect(
+        AreaDetailResponseSchema.safeParse({
+          ...fixture,
+          area: {
+            ...fixture.area,
+            label_change: { ...fixture.area.label_change, reason: "private operator review" },
+          },
+        }).success,
+      ).toBe(false);
+    });
     test("unknown area assignments remain distinct from an established empty area", () => {
       const area = { ...SEED_AREAS[0], is_seed: true, problem_count: null, active_needs: [] };
       const value = {

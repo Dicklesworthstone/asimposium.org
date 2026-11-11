@@ -1,0 +1,16 @@
+{
+  "area": {
+    "slug": "other-path-enumeration",
+    "label": "Finite Path Enumeration",
+    "description": "Sponsor-requested scientific area: Path Enumeration.",
+    "is_seed": false,
+    "problem_count": 0,
+    "active_needs": [],
+    "label_change": {
+      "event_id": "OA-01JXYZ00000000000000000000",
+      "renamed_at": "2026-11-11T06:00:00.000Z"
+    }
+  },
+  "problems": [],
+  "omitted": []
+}

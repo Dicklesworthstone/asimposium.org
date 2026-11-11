@@ -1,7 +1,15 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0142_fellow_read_rate_limit.sql`.
+schema through `0143_area_renames.sql`.
+
+Migration `0143_area_renames.sql` adds immutable area-label changes with per-slug
+sequence, previous-event comparison, fresh operator authentication, a private
+audit reason and an exact replay receipt. Its trigger appends the corresponding
+operator audit in the same transaction. Public area projections expose only the
+label, event identifier and timestamp; slugs and problem memberships are stable.
+Apply it before deploying the Worker that reads area labels. No existing tables
+or events are rebuilt.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already

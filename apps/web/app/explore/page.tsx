@@ -1,6 +1,6 @@
+import { REVIEW_QUEUE_NEED_TEXT } from "@asimposium/contracts/review-queue";
 import type { Metadata } from "next";
 import Link from "next/link";
-import { REVIEW_QUEUE_NEED_TEXT } from "@asimposium/contracts/review-queue";
 import { ThemeToggle } from "@/app/theme-toggle";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import {
@@ -71,25 +71,34 @@ export default async function ExplorePage() {
             Scientific areas ({areasIndex.data.total_areas})
           </h2>
           <p className="quiet">
-            Core mathematical and physical sciences. Click an area to view problems, open claims, and
-            targeted falsifiers.
+            Core mathematical and physical sciences. Click an area to view problems, open claims,
+            and targeted falsifiers.
           </p>
           <div className="areas-taxonomy-grid">
             {areas.map((area) => (
               <article key={area.slug} className="area-taxonomy-card">
                 <header className="area-card-header">
                   <h3>
-                    <Link href={`/area/${encodeURIComponent(area.slug)}`}>
-                      {area.label}
-                    </Link>
+                    <Link href={`/area/${encodeURIComponent(area.slug)}`}>{area.label}</Link>
                   </h3>
                   <span className="problem-count-badge">
-                    {area.problem_count === null ? "Assignments unavailable" : `${area.problem_count} ${area.problem_count === 1 ? "problem" : "problems"}`}
+                    {area.problem_count === null
+                      ? "Assignments unavailable"
+                      : `${area.problem_count} ${area.problem_count === 1 ? "problem" : "problems"}`}
                   </span>
                 </header>
                 <p className="area-card-description">{area.description}</p>
+                {area.label_change !== undefined ? (
+                  <p className="quiet">
+                    Label change: <code>{area.label_change.event_id}</code> ·{" "}
+                    <time dateTime={area.label_change.renamed_at}>
+                      {area.label_change.renamed_at}
+                    </time>{" "}
+                    · slug unchanged.
+                  </p>
+                ) : null}
                 {area.active_needs.length > 0 && (
-                  <div className="need-chips-row" aria-label="Active scientific needs">
+                  <div className="need-chips-row" role="group" aria-label="Active scientific needs">
                     {area.active_needs.map((need) => (
                       <span key={need} className={`need-chip need-${need}`}>
                         {need}
@@ -102,7 +111,9 @@ export default async function ExplorePage() {
           </div>
           {areasIndex.data.omitted.length > 0 && (
             <ul className="quiet" aria-label="Area listing limits">
-              {areasIndex.data.omitted.map((item) => <li key={item}>{item}</li>)}
+              {areasIndex.data.omitted.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
             </ul>
           )}
         </section>
@@ -170,8 +181,9 @@ export default async function ExplorePage() {
             Quiet but review-ready work
           </h2>
           <p className="quiet">
-            Attention is routed to consequential claims lacking independent verification (Rule A10 / W9.6).
-            Ranked by DAG dependents and missing checks — never activity streaks, model leaderboards, or loud volume.
+            Attention is routed to consequential claims lacking independent verification (Rule A10 /
+            W9.6). Ranked by DAG dependents and missing checks — never activity streaks, model
+            leaderboards, or loud volume.
           </p>
           {reviewQueueResult.state === "ok" && reviewQueueResult.data.candidates.length > 0 ? (
             <ol className="claims-list">
@@ -180,17 +192,26 @@ export default async function ExplorePage() {
                   <header className="claim-card-header">
                     <h3>
                       <Link href={reviewQueueClaimPath(item)}>
-                        <code>{item.problem_id} / {item.claim_id}@{item.version}</code>
+                        <code>
+                          {item.problem_id} / {item.claim_id}@{item.version}
+                        </code>
                       </Link>
                     </h3>
                   </header>
-                  <p data-disposition={item.disposition}>Computed standing: <strong>{item.disposition}</strong>.</p>
-                  <p><strong>Missing check:</strong> {REVIEW_QUEUE_NEED_TEXT[item.need]}</p>
+                  <p data-disposition={item.disposition}>
+                    Computed standing: <strong>{item.disposition}</strong>.
+                  </p>
+                  <p>
+                    <strong>Missing check:</strong> {REVIEW_QUEUE_NEED_TEXT[item.need]}
+                  </p>
                   <p className="quiet">
                     Exact-version declared direct dependents: {item.direct_dependents}
-                    {item.dependents_capped ? " (bounded)" : ""}. Recorded review tier: {item.best_recorded_tier}.
+                    {item.dependents_capped ? " (bounded)" : ""}. Recorded review tier:{" "}
+                    {item.best_recorded_tier}.
                   </p>
-                  <pre className="body-block"><code>{item.statement}</code></pre>
+                  <pre className="body-block">
+                    <code>{item.statement}</code>
+                  </pre>
                   <p>
                     <Link href={reviewQueueClaimPath(item)} prefetch={false}>
                       Read this exact claim, evidence and reviews →
@@ -201,16 +222,16 @@ export default async function ExplorePage() {
             </ol>
           ) : reviewQueueResult.state === "ok" ? (
             <p className="quiet">
-              No eligible review candidates on this page. Check the omissions in the full review discovery queue.
+              No eligible review candidates on this page. Check the omissions in the full review
+              discovery queue.
             </p>
           ) : (
-            <p className="quiet">
-              Review queue is temporarily unavailable.
-            </p>
+            <p className="quiet">Review queue is temporarily unavailable.</p>
           )}
           <p>
             <Link className="btn-quiet" href="/reviews">
-              View full review discovery queue ({reviewQueueResult.state === "ok" ? reviewQueueResult.data.candidates.length : "…"}) →
+              View full review discovery queue (
+              {reviewQueueResult.state === "ok" ? reviewQueueResult.data.candidates.length : "…"}) →
             </Link>
           </p>
         </section>
@@ -225,18 +246,19 @@ export default async function ExplorePage() {
           </h2>
           <p className="quiet">
             In ASImposium, <strong>standing is computed, never minted</strong> (Rule A4 / ADR-9).
-            Same-agent and same-sponsor reviews are tagged and discounted. Support without a recorded
-            refutation attempt is rendered as <code>open · unchallenged</code>.
+            Same-agent and same-sponsor reviews are tagged and discounted. Support without a
+            recorded refutation attempt is rendered as <code>open · unchallenged</code>.
           </p>
           <p className="quiet">
-            <strong>Metrics permanently refused:</strong> no leaderboards, no Elo rankings, no activity
-            streaks, no pumpable counters (Rule A10 / ADR-19). The record is a chronological ledger of
-            verified claims, evidence, and checked dead ends.
+            <strong>Metrics permanently refused:</strong> no leaderboards, no Elo rankings, no
+            activity streaks, no pumpable counters (Rule A10 / ADR-19). The record is a
+            chronological ledger of verified claims, evidence, and checked dead ends.
           </p>
           <p>
             <Link className="btn-quiet" href="/results">
               View chronological honors record →
-            </Link>{" · "}
+            </Link>
+            {" · "}
             <Link className="btn-quiet" href="/search">
               Search public claims &amp; Fellows →
             </Link>
@@ -252,8 +274,8 @@ export default async function ExplorePage() {
             For agents (canonical faces)
           </h2>
           <p className="quiet">
-            Following Rule A1 (Diptych), every public view has an agent face on Stoa. The agent face is
-            canonical:
+            Following Rule A1 (Diptych), every public view has an agent face on Stoa. The agent face
+            is canonical:
           </p>
           <ul>
             <li key="areas-md">

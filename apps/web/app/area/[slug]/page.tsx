@@ -15,7 +15,10 @@ export async function generateMetadata({ params }: AreaPageProps): Promise<Metad
   const { slug } = await params;
   const result = await stoaFetchAreaDetail(slug);
   if (result.state !== "ok") {
-    return { title: `Area ${result.state === "not_found" ? "Not Found" : "Unavailable"} — ${SITE.name}`, robots: { index: false } };
+    return {
+      title: `Area ${result.state === "not_found" ? "Not Found" : "Unavailable"} — ${SITE.name}`,
+      robots: { index: false },
+    };
   }
   const detail = result.data;
   return {
@@ -29,7 +32,12 @@ export default async function AreaPage({ params }: AreaPageProps) {
   const result = await stoaFetchAreaDetail(slug);
   if (result.state === "not_found") notFound();
   if (result.state === "unavailable") {
-    return <PublicReadUnavailable title="Scientific area" retryPath={`/area/${encodeURIComponent(slug)}`} />;
+    return (
+      <PublicReadUnavailable
+        title="Scientific area"
+        retryPath={`/area/${encodeURIComponent(slug)}`}
+      />
+    );
   }
   const detail = result.data;
 
@@ -55,18 +63,29 @@ export default async function AreaPage({ params }: AreaPageProps) {
           </p>
           <h1>{area.label}</h1>
           <p className="quiet">{area.description}</p>
+          {area.label_change !== undefined ? (
+            <p className="quiet">
+              Label change: <code>{area.label_change.event_id}</code> ·{" "}
+              <time dateTime={area.label_change.renamed_at}>{area.label_change.renamed_at}</time> ·
+              slug unchanged.
+            </p>
+          ) : null}
           <div className="area-meta-row">
             <span className="problem-count-badge">
-              {area.problem_count === null ? "Problem assignments unavailable" : `${area.problem_count} ${area.problem_count === 1 ? "problem" : "problems"}`}
+              {area.problem_count === null
+                ? "Problem assignments unavailable"
+                : `${area.problem_count} ${area.problem_count === 1 ? "problem" : "problems"}`}
             </span>
             {area.is_seed ? (
               <span className="seed-badge">Core Foundation Area</span>
             ) : (
-              <span className="other-badge">Sponsor-Requested Area</span>
+              <span className="other-badge">
+                Sponsor-Requested Area{area.label_change !== undefined ? " · label reviewed" : ""}
+              </span>
             )}
           </div>
           {area.active_needs.length > 0 && (
-            <div className="need-chips-row" aria-label="Active scientific needs in this area">
+            <div className="need-chips-row" role="group" aria-label="Active scientific needs in this area">
               {area.active_needs.map((need) => (
                 <span key={need} className={`need-chip need-${need}`}>
                   {need}
@@ -89,7 +108,10 @@ export default async function AreaPage({ params }: AreaPageProps) {
           </h2>
 
           {area.problem_count === null ? (
-            <p role="status">Problem assignments and scientific needs are unavailable. <Link href="/problems">Browse the public problem index.</Link></p>
+            <p role="status">
+              Problem assignments and scientific needs are unavailable.{" "}
+              <Link href="/problems">Browse the public problem index.</Link>
+            </p>
           ) : problems.length === 0 ? (
             <div className="empty-state" role="status">
               <p>
@@ -140,7 +162,9 @@ export default async function AreaPage({ params }: AreaPageProps) {
           )}
           {detail.omitted.length > 0 && (
             <ul className="quiet" aria-label="Area listing limits">
-              {detail.omitted.map((item) => <li key={item}>{item}</li>)}
+              {detail.omitted.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
             </ul>
           )}
         </section>

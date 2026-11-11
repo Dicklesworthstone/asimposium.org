@@ -1,4 +1,6 @@
 import type {
+  AdminAreaRenameRequest,
+  AdminAreaRenameResponse,
   AdminContentControlRequest,
   AdminContentControlResponse,
   AdminQuarantineDecisionRequest,
@@ -7,14 +9,32 @@ import type {
   AdminReportResolutionResponse,
 } from "@asimposium/contracts";
 
-export type AdminModerationKind = "quarantine" | "report" | "content";
+export type AdminModerationKind = "quarantine" | "report" | "content" | "area";
 
 export type AdminModerationAttempt =
-  | { readonly kind: "quarantine"; readonly key: string; readonly request: AdminQuarantineDecisionRequest }
-  | { readonly kind: "report"; readonly key: string; readonly request: AdminReportResolutionRequest }
-  | { readonly kind: "content"; readonly key: string; readonly request: AdminContentControlRequest };
+  | {
+      readonly kind: "area";
+      readonly key: string;
+      readonly request: Omit<AdminAreaRenameRequest, "step_up_authenticated_at">;
+    }
+  | {
+      readonly kind: "quarantine";
+      readonly key: string;
+      readonly request: AdminQuarantineDecisionRequest;
+    }
+  | {
+      readonly kind: "report";
+      readonly key: string;
+      readonly request: AdminReportResolutionRequest;
+    }
+  | {
+      readonly kind: "content";
+      readonly key: string;
+      readonly request: AdminContentControlRequest;
+    };
 
 export type AdminModerationReceipt =
+  | { readonly kind: "area"; readonly result: AdminAreaRenameResponse }
   | { readonly kind: "quarantine"; readonly result: AdminQuarantineDecisionResponse }
   | { readonly kind: "report"; readonly result: AdminReportResolutionResponse }
   | { readonly kind: "content"; readonly result: AdminContentControlResponse };
@@ -52,6 +72,13 @@ export function moderationReceiptSummary(receipt: AdminModerationReceipt): {
   readonly at: string;
 } {
   switch (receipt.kind) {
+    case "area":
+      return {
+        target: receipt.result.area_id,
+        decision: receipt.result.new_title,
+        auditEventId: receipt.result.audit_event_id,
+        at: receipt.result.renamed_at,
+      };
     case "quarantine":
       return {
         target: receipt.result.case_id,

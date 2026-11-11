@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AreaSlugSchema } from "./discovery.ts";
 import { SponsorIdSchema } from "./enrollment.ts";
 import { ReportReasonSchema } from "./moderation.ts";
 import {
@@ -399,9 +400,18 @@ export type AdminReportResolutionResponse = z.infer<typeof AdminReportResolution
 
 export const AdminAreaRenameRequestSchema = z
   .object({
-    area_id: z.string().min(1).max(128),
-    new_title: z.string().min(2).max(120),
-    reason: z.string().min(10).max(1000),
+    area_id: AreaSlugSchema,
+    new_title: z
+      .string()
+      .min(2)
+      .max(120)
+      .refine((value) => value.trim() === value),
+    reason: z
+      .string()
+      .min(10)
+      .max(1000)
+      .refine((value) => value.trim().length >= 10),
+    step_up_authenticated_at: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   })
   .strict();
 export type AdminAreaRenameRequest = z.infer<typeof AdminAreaRenameRequestSchema>;
@@ -409,7 +419,7 @@ export type AdminAreaRenameRequest = z.infer<typeof AdminAreaRenameRequestSchema
 export const AdminAreaRenameResponseSchema = z
   .object({
     ok: z.literal(true),
-    area_id: z.string().min(1).max(128),
+    area_id: AreaSlugSchema,
     new_title: z.string().min(2).max(120),
     audit_event_id: z.string().min(1).max(128),
     renamed_at: z.string().datetime({ offset: true }).max(40),

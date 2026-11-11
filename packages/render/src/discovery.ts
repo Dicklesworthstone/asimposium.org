@@ -80,12 +80,20 @@ export function renderAreasIndexMarkdown(data: AreasIndexResponse): string {
   lines.push("");
 
   for (const area of data.areas) {
-    const seedNote = area.is_seed ? "" : " *(sponsor-requested pending review)*";
+    const seedNote = area.is_seed
+      ? ""
+      : area.label_change === undefined
+        ? " *(sponsor-requested pending review)*"
+        : " *(sponsor-requested; label reviewed)*";
     lines.push(
       `## [${safeInlineProse(area.label)}](/area/${encodeURIComponent(area.slug)}.md)${seedNote}`,
     );
     lines.push(`- **Slug:** ${safeCodeSpan(area.slug)}`);
     lines.push(`- **Description:** ${safeInlineProse(area.description)}`);
+    if (area.label_change !== undefined)
+      lines.push(
+        `- **Label change:** ${safeCodeSpan(area.label_change.event_id)} · ${safeInlineProse(area.label_change.renamed_at)} · slug unchanged`,
+      );
     lines.push(`- **Problems:** ${area.problem_count ?? "assignments unavailable"}`);
     if (area.active_needs.length > 0) {
       lines.push(`- **Active needs:** ${area.active_needs.map((n) => safeCodeSpan(n)).join(", ")}`);
@@ -116,13 +124,19 @@ export function renderAreasIndexHtmlFragment(data: AreasIndexResponse): string {
   for (const area of data.areas) {
     const seedBadge = area.is_seed
       ? ""
-      : ' <span class="asimp-badge asimp-provisional">provisional</span>';
+      : area.label_change === undefined
+        ? ' <span class="asimp-badge asimp-provisional">provisional</span>'
+        : ' <span class="asimp-badge">label reviewed</span>';
     lines.push('    <li class="asimp-area-card">');
     lines.push(
       `      <h3><a href="/area/${encodeURIComponent(area.slug)}.md">${escapeHtml(area.label)}</a>${seedBadge}</h3>`,
     );
     lines.push(`      <p class="asimp-slug"><code>${escapeHtml(area.slug)}</code></p>`);
     lines.push(`      <p class="asimp-desc">${escapeHtml(area.description)}</p>`);
+    if (area.label_change !== undefined)
+      lines.push(
+        `      <p class="asimp-label-change">Label change: <code>${escapeHtml(area.label_change.event_id)}</code> · ${escapeHtml(area.label_change.renamed_at)} · slug unchanged</p>`,
+      );
     lines.push(
       `      <p class="asimp-count">Problems: ${area.problem_count ?? "assignments unavailable"}</p>`,
     );
@@ -158,9 +172,13 @@ export function renderAreaDetailMarkdown(data: AreaDetailResponse): string {
   lines.push(`- **Slug:** ${safeCodeSpan(data.area.slug)}`);
   lines.push(`- **Description:** ${safeInlineProse(data.area.description)}`);
   lines.push(
-    `- **Status:** ${data.area.is_seed ? "canonical seed taxonomy" : "provisional sponsor area"}`,
+    `- **Status:** ${data.area.is_seed ? "canonical seed taxonomy" : data.area.label_change === undefined ? "provisional sponsor area" : "sponsor area; label reviewed"}`,
   );
   lines.push(`- **Problem Count:** ${data.area.problem_count ?? "assignments unavailable"}`);
+  if (data.area.label_change !== undefined)
+    lines.push(
+      `- **Label change:** ${safeCodeSpan(data.area.label_change.event_id)} · ${safeInlineProse(data.area.label_change.renamed_at)} · slug unchanged`,
+    );
   lines.push("");
 
   lines.push("## Problems in this Area");
@@ -214,11 +232,15 @@ export function renderAreaDetailHtmlFragment(data: AreaDetailResponse): string {
   lines.push(`  <p class="asimp-slug"><code>${escapeHtml(data.area.slug)}</code></p>`);
   lines.push(`  <p class="asimp-desc">${escapeHtml(data.area.description)}</p>`);
   lines.push(
-    `  <p class="asimp-status">Status: ${data.area.is_seed ? "canonical seed taxonomy" : "provisional sponsor area"}</p>`,
+    `  <p class="asimp-status">Status: ${data.area.is_seed ? "canonical seed taxonomy" : data.area.label_change === undefined ? "provisional sponsor area" : "sponsor area; label reviewed"}</p>`,
   );
   lines.push(
     `  <p class="asimp-count">Problem count: ${data.area.problem_count ?? "assignments unavailable"}</p>`,
   );
+  if (data.area.label_change !== undefined)
+    lines.push(
+      `  <p class="asimp-label-change">Label change: <code>${escapeHtml(data.area.label_change.event_id)}</code> · ${escapeHtml(data.area.label_change.renamed_at)} · slug unchanged</p>`,
+    );
   lines.push('  <section class="asimp-problems">');
   lines.push("    <h3>Problems in this Area</h3>");
   if (data.area.problem_count === null) {
