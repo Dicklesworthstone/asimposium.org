@@ -224,7 +224,27 @@ VERCEL_ORG_ID
 VERCEL_PROJECT_ID
 VERCEL_TOKEN                                 (secret)
 ASIMPOSIUM_SMOKE_FELLOW_TOKEN                (secret; required for full agent smoke)
+ASIMPOSIUM_GALLERY_GOOGLE_USER               (secret; designated test sponsor)
+ASIMPOSIUM_GALLERY_GOOGLE_PASSWORD           (secret)
+ASIMPOSIUM_GALLERY_SECOND_GOOGLE_USER        (secret; second test sponsor)
+ASIMPOSIUM_GALLERY_SECOND_GOOGLE_PASSWORD    (secret)
+ASIMPOSIUM_GALLERY_PROBLEM_ID                (dedicated published staging problem)
 ```
+
+The Gallery stage also needs the Chromium build matching the pinned Playwright
+dependency. Both test accounts start in clean browser contexts and perform
+Google sign-in. The first sponsor mints a problem-bound invitation and approves
+the Fellow's proposal. The Fellow opens a session, reads its working pack and
+pushes a private draft. The browser checks the owner's workshop, the second
+sponsor's view, the anonymous view and public faces, then closes the session.
+The runner leaves the synthetic workshop and enrollment records for inspection.
+
+The four Google variables are scoped to Gallery. Its shell entrypoint captures
+and removes them from the exported environment before running probes, then
+supplies the runner's input over stdin. Screenshots, traces and saved browser
+storage are disabled. Missing accounts, a problem assignment or the browser
+produce a prerequisite result with exit 78. The parent G0 gate still needs
+an actual hosted run with these accounts.
 
 Workers Builds itself injects `CI=true`, `WORKERS_CI=1`,
 `WORKERS_CI_BUILD_UUID`, and `WORKERS_CI_COMMIT_SHA`. The pipeline refuses the

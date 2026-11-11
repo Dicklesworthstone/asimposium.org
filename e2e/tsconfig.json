@@ -6,6 +6,7 @@
   "include": [
     "playwright.config.ts",
     "playwright/**/*.ts",
+    "tests/**/*.ts",
     "screening/**/*.ts",
     "gauntlet/**/*.ts"
   ]

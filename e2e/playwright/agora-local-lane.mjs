@@ -59,6 +59,7 @@ import { hypothesisLifecycleBrowsing, hypothesisPublicationWithdrawal, seedHypot
 import { scientificCollectionsBrowsing, scientificCollectionsWithdrawal, seedScientificCollections } from "./scientific-collections-browsing.mjs";
 import { citationsBrowsing, citationsWithdrawal, seedCitations } from "./citations-browsing.mjs";
 import { ADMIN_OPERATORS, operatorModerationJourney } from "./operator-moderation.mjs";
+import { runGalleryJourney } from "./gallery-runner.ts";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const require = createRequire(`${root}e2e/package.json`);
@@ -966,6 +967,52 @@ async function main() {
     );
     agora = await startAgora(target.origin, await target.agoraSigningEnv());
     browser = await chromium.launch(browserOptions);
+
+    {
+      const { encode } = await import(require.resolve("next-auth/jwt", {
+        paths: [`${root}apps/web`],
+      }));
+      const contexts = [];
+      try {
+        const pages = [];
+        for (const sponsorId of ["usr_gallery_owner", "usr_gallery_other"]) {
+          const bootstrap = await target.sponsor(
+            sponsorId, "POST", "/v1/sponsors/bootstrap", "sponsor.bootstrap", {},
+          );
+          assert.ok(bootstrap.status === 200 || bootstrap.status === 201);
+          const context = await browser.newContext();
+          contexts.push(context);
+          await context.addCookies([{
+            name: SESSION_COOKIE,
+            value: await encode({
+              token: { sub: sponsorId, name: "Local Gallery sponsor", authTime: Math.floor(Date.now() / 1000) },
+              secret: AUTH_SECRET,
+              salt: SESSION_COOKIE,
+            }),
+            url: agora.origin,
+            httpOnly: true,
+            sameSite: "Lax",
+          }]);
+          const page = await context.newPage();
+          page.setDefaultTimeout(20_000);
+          pages.push(page);
+        }
+        const anonymous = await browser.newContext();
+        contexts.push(anonymous);
+        const completed = await runGalleryJourney({
+          sponsorPage: pages[0],
+          otherSponsorPage: pages[1],
+          anonymousPage: await anonymous.newPage(),
+          agoraOrigin: agora.origin,
+          workerOrigin: target.origin,
+          problemId,
+          runId: "gallery-local-product",
+        });
+        record("Gallery shared journey completes with two local sponsor sessions", completed.length === 10);
+      } finally {
+        await Promise.all(contexts.map((context) => context.close()));
+      }
+    }
 
     // Detector self-test: each check below must flag a deliberately bad page,
     // or a green run would prove nothing (planted negatives).

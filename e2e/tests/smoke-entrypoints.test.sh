@@ -285,6 +285,21 @@ if [[ "$traced_self_test_status" -ne 0 || "$traced_self_test_output" == *"$synth
   exit 1
 fi
 
+set +e
+gallery_trace="$(
+  ASIMPOSIUM_GALLERY_GOOGLE_USER="gallery-owner-test@example.invalid" \
+    ASIMPOSIUM_GALLERY_GOOGLE_PASSWORD="gallery-owner-secret-canary" \
+    ASIMPOSIUM_GALLERY_SECOND_GOOGLE_USER="gallery-other-test@example.invalid" \
+    ASIMPOSIUM_GALLERY_SECOND_GOOGLE_PASSWORD="gallery-other-secret-canary" \
+    bash -x "$repository_root/scripts/smoke-gallery.sh" --self-test 2>&1
+)"
+gallery_trace_status=$?
+set -e
+if [[ "$gallery_trace_status" -ne 0 || "$gallery_trace" == *"gallery-owner-"* || "$gallery_trace" == *"gallery-other-"* ]]; then
+  emit "fail" "GALLERY_XTRACE_LEAKED_CREDENTIAL"
+  exit 1
+fi
+
 for smoke_source in \
   "$repository_root/scripts/smoke-agent.sh" \
   "$repository_root/scripts/smoke-gallery.sh"; do
@@ -1022,5 +1037,27 @@ if [[ "$missing_surface_output" == *"127.0.0.1:1"* ]] || [[ "$missing_surface_ou
   emit "fail" "MISSING_STAGING_SURFACE_ORIGIN_LEAKED"
   exit 1
 fi
+
+for gallery_input_case in empty production production-dot; do
+  if [[ "$gallery_input_case" == empty ]]; then
+    gallery_input='{}'
+    gallery_expected="GALLERY_INPUT_INVALID"
+  else
+    gallery_input='{"agoraOrigin":"https://asimposium.org","workerOrigin":"https://a-staging.asimposium.org","problemId":"P-4DSP","runId":"gallery-input-test","user":"owner@example.invalid","password":"gallery-input-secret-canary","secondUser":"other@example.invalid","secondPassword":"gallery-input-other-canary"}'
+    gallery_expected="GALLERY_TARGET_OR_ACCOUNTS_INVALID"
+    if [[ "$gallery_input_case" == production-dot ]]; then
+      gallery_input="${gallery_input/https:\/\/asimposium.org/https:\/\/asimposium.org.}"
+    fi
+  fi
+  set +e
+  gallery_output="$(printf '%s' "$gallery_input" | bun "$repository_root/e2e/playwright/gallery-runner.ts" 2>&1)"
+  gallery_status=$?
+  set -e
+  if [[ "$gallery_status" -ne 1 || "$gallery_output" != *"\"code\":\"$gallery_expected\""* \
+    || "$gallery_output" == *"gallery-input-secret-canary"* || "$gallery_output" == *"gallery-input-other-canary"* ]]; then
+    emit "fail" "GALLERY_RUNNER_INPUT_REFUSAL_INVALID"
+    exit 1
+  fi
+done
 
 emit "pass" "ENTRYPOINT_NEGATIVE_CONTRACT_OK"

@@ -971,6 +971,11 @@ ${name}
     // stage boundary before executing the ordinary pass plants.
     const run = runPipeline("smoke-gallery", "pass", false, {
       ASIMP_CI_PROCESS_SCOPE_PLANT: "1",
+      ASIMPOSIUM_GALLERY_GOOGLE_USER: "scope-gallery-owner",
+      ASIMPOSIUM_GALLERY_GOOGLE_PASSWORD: "scope-gallery-owner-secret",
+      ASIMPOSIUM_GALLERY_SECOND_GOOGLE_USER: "scope-gallery-other",
+      ASIMPOSIUM_GALLERY_SECOND_GOOGLE_PASSWORD: "scope-gallery-other-secret",
+      ASIMPOSIUM_GALLERY_PROBLEM_ID: "P-GALLERY",
       CLOUDFLARE_API_TOKEN: "scope-cloudflare-token",
       CLOUDFLARE_ACCOUNT_ID: "scope-cloudflare-account",
       ASIMP_D1_DATABASE_ID_STAGING: "scope-d1-id",

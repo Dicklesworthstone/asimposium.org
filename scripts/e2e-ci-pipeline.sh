@@ -687,6 +687,19 @@ plant_stage() {
   # that boundary and the plant must fail closed.
   [[ -z "${ASIMP_CI_PROCESS_AMBIENT_CANARY:-}" ]] || return 97
   if [[ "${ASIMP_CI_PROCESS_SCOPE_PLANT:-0}" == "1" ]]; then
+    if [[ "$stage" == smoke-gallery ]]; then
+      [[ "${ASIMPOSIUM_GALLERY_GOOGLE_USER:-}" == scope-gallery-owner ]] || return 98
+      [[ "${ASIMPOSIUM_GALLERY_GOOGLE_PASSWORD:-}" == scope-gallery-owner-secret ]] || return 98
+      [[ "${ASIMPOSIUM_GALLERY_SECOND_GOOGLE_USER:-}" == scope-gallery-other ]] || return 98
+      [[ "${ASIMPOSIUM_GALLERY_SECOND_GOOGLE_PASSWORD:-}" == scope-gallery-other-secret ]] || return 98
+      [[ "${ASIMPOSIUM_GALLERY_PROBLEM_ID:-}" == P-GALLERY ]] || return 98
+    else
+      [[ "${ASIMPOSIUM_GALLERY_GOOGLE_USER+present}" != present ]] || return 98
+      [[ "${ASIMPOSIUM_GALLERY_GOOGLE_PASSWORD+present}" != present ]] || return 98
+      [[ "${ASIMPOSIUM_GALLERY_SECOND_GOOGLE_USER+present}" != present ]] || return 98
+      [[ "${ASIMPOSIUM_GALLERY_SECOND_GOOGLE_PASSWORD+present}" != present ]] || return 98
+      [[ "${ASIMPOSIUM_GALLERY_PROBLEM_ID+present}" != present ]] || return 98
+    fi
     case "$stage" in
       root-gate | smoke-gallery)
         [[ "${CLOUDFLARE_API_TOKEN+present}" != present ]] || return 98
@@ -1401,6 +1414,9 @@ for name in $(builtin compgen -e); do
     ASIMPOSIUM_SMOKE_FELLOW_TOKEN)
       [[ "$1" == smoke-agent ]] || builtin unset "$name"
       ;;
+    ASIMPOSIUM_GALLERY_GOOGLE_USER|ASIMPOSIUM_GALLERY_GOOGLE_PASSWORD|ASIMPOSIUM_GALLERY_SECOND_GOOGLE_USER|ASIMPOSIUM_GALLERY_SECOND_GOOGLE_PASSWORD|ASIMPOSIUM_GALLERY_PROBLEM_ID|PLAYWRIGHT_BROWSERS_PATH)
+      [[ "$1" == smoke-gallery ]] || builtin unset "$name"
+      ;;
     *) builtin unset "$name" ;;
   esac
 done
@@ -1460,6 +1476,7 @@ stage_command() {
     smoke-gallery)
       printf '%s\0' /usr/bin/env \
         ASIMPOSIUM_STAGING_AGORA_BASE_URL="$STAGING_AGORA_ORIGIN" \
+        ASIMPOSIUM_STAGING_AGENT_BASE_URL="$STAGING_WORKER_ORIGIN" \
         bash "$repository_root/scripts/smoke-gallery.sh" --write-artifacts --run-id "smoke-gallery-${REVISION:0:12}-$$"
       ;;
     *) return 64 ;;

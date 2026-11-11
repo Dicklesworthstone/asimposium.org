@@ -236,8 +236,9 @@ scripts/smoke-agent.sh     # target: join → hello → session → pack → wor
                            #        ASIMPOSIUM_SMOKE_FELLOW_TOKEN it blocks at exit 75 rather than
                            #        skipping or claiming the product flow passed.
 scripts/smoke-gallery.sh   # target: Google test login → mint pairing → workshop visible, public page omits it
-                           # today:  public preflight + /approve surface probe (exit 69 GALLERY_APPROVE_SURFACE_UNAVAILABLE),
-                           #         then exit 70 GALLERY_PRODUCT_FLOW_NOT_IMPLEMENTED
+                           # today:  public preflight + two Google test sponsors, actual mint/claim/approve,
+                           #         session/pack/private push and owner/other-sponsor/anonymous checks.
+                           #         Missing designated accounts, problem or browser blocks at exit 78.
 ```
 
 Human E2E (staging, mock-free):

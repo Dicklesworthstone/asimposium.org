@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set +x
+unset DEBUG PWDEBUG
+
+gallery_user="${ASIMPOSIUM_GALLERY_GOOGLE_USER:-}"
+gallery_password="${ASIMPOSIUM_GALLERY_GOOGLE_PASSWORD:-}"
+gallery_second_user="${ASIMPOSIUM_GALLERY_SECOND_GOOGLE_USER:-}"
+gallery_second_password="${ASIMPOSIUM_GALLERY_SECOND_GOOGLE_PASSWORD:-}"
+export -n gallery_user gallery_password gallery_second_user gallery_second_password
+unset ASIMPOSIUM_GALLERY_GOOGLE_USER ASIMPOSIUM_GALLERY_GOOGLE_PASSWORD
+unset ASIMPOSIUM_GALLERY_SECOND_GOOGLE_USER ASIMPOSIUM_GALLERY_SECOND_GOOGLE_PASSWORD
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=e2e/lib/run-diagnostics.sh
@@ -115,8 +125,46 @@ if ! printf '%s' "$console_anonymous" \
   exit 89
 fi
 
-# The authenticated sponsor + anonymous-public comparison belongs to W3. This
-# entry point deliberately refuses to claim that a workshop/private-cache test
-# has passed until the staging flow and test principals exist.
-e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "GALLERY_PRODUCT_FLOW_NOT_IMPLEMENTED" "$reproduce"
-exit 70
+if ! e2e_validate_staging_origin "ASIMPOSIUM_STAGING_AGENT_BASE_URL"; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GALLERY_AGENT_ORIGIN_UNAVAILABLE" "$reproduce"
+  exit 78
+fi
+if [[ -z "$gallery_user" || -z "$gallery_password" || -z "$gallery_second_user" || -z "$gallery_second_password" ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GALLERY_GOOGLE_TEST_ACCOUNTS_MISSING" "$reproduce"
+  exit 78
+fi
+if [[ -z "${ASIMPOSIUM_GALLERY_PROBLEM_ID:-}" ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GALLERY_PROBLEM_ID_MISSING" "$reproduce"
+  exit 78
+fi
+if ! command -v bun >/dev/null 2>&1; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GALLERY_BUN_UNAVAILABLE" "$reproduce"
+  exit 78
+fi
+
+set +e
+printf '%s\0' "$ASIMPOSIUM_STAGING_AGORA_BASE_URL" "$ASIMPOSIUM_STAGING_AGENT_BASE_URL" \
+  "$ASIMPOSIUM_GALLERY_PROBLEM_ID" "$run_id" \
+  "$gallery_user" "$gallery_password" "$gallery_second_user" "$gallery_second_password" \
+  | python3 -c '
+import json, sys
+parts = sys.stdin.buffer.read().split(b"\0")
+if len(parts) != 9 or parts[-1] != b"":
+    sys.exit(64)
+keys = ["agoraOrigin", "workerOrigin", "problemId", "runId",
+        "user", "password", "secondUser", "secondPassword"]
+try:
+    payload = dict(zip(keys, (value.decode("utf-8") for value in parts[:-1])))
+except UnicodeError:
+    sys.exit(64)
+sys.stdout.write(json.dumps(payload))
+' | bun "$repository_root/e2e/playwright/gallery-runner.ts"
+gallery_status=$?
+set -e
+case "$gallery_status" in
+  0) gallery_state="pass"; gallery_code="GALLERY_PRODUCT_FLOW_GREEN" ;;
+  78) gallery_state="blocked"; gallery_code="GALLERY_PREREQUISITE_UNAVAILABLE" ;;
+  *) gallery_state="fail"; gallery_code="GALLERY_PRODUCT_FLOW_FAILED" ;;
+esac
+e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "$gallery_state" "$gallery_code" "$reproduce"
+exit "$gallery_status"
