@@ -17,6 +17,106 @@ observed.
 Updated 2026-11-11. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+### Fresh end-to-end assessment — 2026-11-11
+
+ASImposium has a substantial, tested local implementation of its scientific
+instrument. Its public deployment does not yet deliver the promised
+participation and reading surface. Deployment reconciliation is the largest
+immediate delivery gap, but completing it will leave concrete implementation
+and empirical acceptance work. The [26-goal checklist](#vision-checklist-implementation-and-remaining-acceptance)
+below maps the full vision to existing owners; this assessment refreshes its
+source and proof boundaries without replacing the Fable plan.
+
+The inspection starts at `34652ebb`, whose 2,702 checked source files and
+pinned Next runtime exactly match qualified `f0957beb`. The root AGENTS and
+README were reread in full, together with the governing Fable plan. A separate
+reader audited both retained alternative plans against Fable's adoption ledger
+and searched all 614 Beads records. Rejected stacks and tier-two features are
+not additional launch requirements. This audit changes documentation and
+tracker records only.
+
+**Fresh public observations, 05:43 UTC.** Requests used the project User-Agent,
+without credentials. Conditional capability requests return 304, but this
+does not prove cursor cache cost, provider revision or deployment history.
+
+| Public observation | Production Worker | Staging Worker |
+| --- | --- | --- |
+| `/capabilities` | 200, `0.1.0-draft`, SHA-256 `1844555d…bbc0` | 200, `0.1.0-draft`, SHA-256 `8e79852b…aa70` |
+| `/protocol.json`, `/search.json?q=P-4DSP`, `/openapi.json` | All 404 `ROUTE_NOT_FOUND` | All 404 `ROUTE_NOT_FOUND` |
+| `/problems.json` | 200, zero entries | 200, two entries |
+
+Production Agora `/` and `/p/P-4DSP` return HTTP 200 but contain unavailable
+upstream-data messaging. A responsive page is insufficient evidence of a
+working scientific record. The current source mounts the missing Worker routes
+in `apps/wire/src/app.ts:1337–1414` and `:1675`; rebuilding those subsystems
+would duplicate existing work.
+
+**Fresh local execution.** `bun run typecheck` and `bun run lint` each pass
+all eight groups. `bash e2e/gauntlet/run.sh --target local` passes its ten
+scripted oracle cases: three completing controls and seven deliberately
+incomplete controls. It exercises real Workerd/D1/R2 with fixture identity and
+screening. These are not ten fresh model trials. `bun run verify:cost` returns
+78 `S2_COST_MEASUREMENT_UNAVAILABLE`; the required retained external measurement
+is still missing. Gallery's staging public preflight returns 78
+`GALLERY_GOOGLE_TEST_ACCOUNTS_MISSING`, before authenticated writes. The
+current environment has no nonempty designated Google accounts/problem,
+Fellow smoke token or sanctioned Workers Builds/Cloudflare inputs; this is a
+presence check, not a credential-store inventory.
+
+The complete root suite at 03:30 UTC, contracts (1,019), renderer (604) and
+primary/independent production browser (439 checks) are retained exact-source
+evidence, not newly executed gates in this refresh. Their source and SDK
+equality were recomputed before documentation edits. The original individual
+toolchain skips remain disclosed. Raw fresh receipts are retained under
+`e2e/artifacts/reality-20261111-coppertiger/`; original full-run and adverse
+receipts remain at the paths recorded in the qualification below.
+
+**Concrete remaining code and proof.** The following distinguishes unfinished
+implementation from work that exists but still needs original acceptance.
+
+| Gap | Inspected behavior | Existing owner and completion evidence |
+| --- | --- | --- |
+| Provisioned G-C runner and measurement | `e2e/gauntlet/run.sh:139` still returns 70 for a supplied join-file input. Local verdicts prove pack retrieval and persistence past an injected refusal, not move following or error-body comprehension. Harness usage is explicitly `whole_session`; served bytes to first promotion are a separate measure. | `zai`, `pcsn`, `mn7`: implement the actual staging journey and authoritative first-promotion usage boundary, then meet ten fresh sessions, three harnesses, eight completions and the 25K-token median. Missing usage or a planted incomplete journey must withhold acceptance. |
+| Safety accuracy and the protected corpus | `e2e/screening/s4-corpus.ts:921,1107` reserves 50 absent protected bodies. The 150 legitimate examples and local fixture screen cannot establish hard-reject recall or hosted accuracy. | `xeg`, `axq`, `drv`, `ip3`: material, digest-bound protected corpus; hosted FP/FN and aggregation tests; bare/inoculated probe trials; actual independent operator decisions and Google verification. |
+| Whole-system recovery | `krater/backup-scheduler.ts:7` explicitly archives published problem ledgers. `restore.ts` restores one verified problem and projections, with provider execution remaining separate. Signed public exports do not restore all account/global/private state. | `p4b`, `zr9`, `79n`, `24q`: complete original backup scope and scratch drills, proving revoked rights and redactions survive; corrupt input must refuse before writes. |
+| Area rename | `enrollment/router.ts:3158` returns unavailable after validation; `apps/web/app/admin/page.tsx:288` disables the control. | `0ht`: durable reasoned, audited mutation with principal/step-up protection, real UI success and unauthorized/replay failures. |
+| Remaining optional CLI | `cli/src/lib.rs:44,46`, `enrollment.rs` and `credentials.rs` now implement connect, device enrollment, approval resume and keychain storage. Browser PKCE, validate/scrub parity, spool/sync/watch/pull/doctor, negotiation and release remain incomplete. | `il7`, `l3b`, `psl`, `jsj`, `85s`, `l1yg.1`: original current-source Rust, parity, native and release criteria; old binaries and compile-only checks cannot substitute. |
+| Deployed configuration and evidence | Source implements receipt-bound readiness, Herald/outbox, rate budgets, artifact publication and scientific consumers. Public deployment and provider behavior remain unqualified. | `rs5n`, `tgu`, `doa`, `irg`, `rhg`, `z2j`, W7: reconcile existing bindings/migrations, preserve Worker-before-Agora order, exercise actual Google/sponsor/anonymous paths and retain load, cost, cache and storage receipts. |
+
+Readiness is **implemented**, not hardcoded false: `apps/wire/src/readiness.ts:26`
+loads private canonical evidence and validates its digest, environment, revision
+and expiry; `app.ts:1340` consumes it and Agora's `plane-status.ts:508`
+projects its result. Missing evidence correctly withholds readiness. No operator
+flag should manufacture a ready result. Likewise, the mounted moves, inbox,
+Herald and signed archive code must not be rebuilt from obsolete README absence
+notes. Complete every-kind/face/error, warning, coordination and scientific
+acceptance still belongs to the original W1–W10 owners in the checklist.
+
+**Would the existing Beads finish the vision?** Their original acceptance
+criteria appear to cover the documented launch scope; no concrete `NO_BEAD`
+launch promise emerged from the full-record coverage check. Merely implementing
+their code or closing their statuses would not suffice. Actual multi-sponsor
+science, independent review, hosted safety/cost/recovery evidence, operator
+decisions and the G3 thirty-day observation must occur. Unknown future defects
+remain possible. `rs5n` alone explicitly does not certify G-C, cost or launch.
+
+At the audit snapshot there are 614 issues: 469 closed and 145 unfinished
+(111 open, 22 in progress, 12 explicitly blocked). Dependency-blocked counts
+overlap statuses. `br ready` reports nine tasks; BV's 28 actionable entries
+include active work and use a different denominator. `br dep cycles` and BV
+insights find no cycles. Counts are workload information, not a vision-delivery
+percentage. The bridge below prioritizes observable outcomes and preserves
+every original criterion.
+
+Broader incoming scanner coverage (`g4b4`), remaining dependency/advisory
+acceptance (`l1yg`, `ii92`) and the retained unclassified runtime failures
+remain open. Passing source gates do not diagnose those historical failures.
+The 05:52 storage observation has about 41 GiB of usable primary headroom;
+`0oi3` retains its original missing-snapshot preservation requirement. No
+cleanup or claimed recovery of that historical snapshot occurs in this audit.
+
+### Retained exact-source qualification
+
 At `f0957beb`, Gallery smoke executes the existing sponsor mint and approval
 forms, Fellow enrollment, session, working pack and private workshop push.
 The same journey checks owner visibility and excludes the second sponsor,
@@ -1629,7 +1729,7 @@ not a claim that its whole subsystem is absent.
 | 2 | Fresh fragment enrollment followed by explicit approval (§5, S-1) | Real local join/proposal/approval/token/session flow and rejection controls pass. | UNPROVEN for three unaided named harnesses on the actual environment; `mn7`, `pcsn`, `nvo`, `krn`. |
 | 3 | Google human identity and principal separation (§5, S-6) | Auth.js and signed envelope paths exist; current browser uses a real locally minted cookie. S-6 retains its historical bounded closure. | PARTIAL: real Google exchange, verification, step-up and current hosted/browser acceptance; `4y3`, `ggv`, `qnh`, `3zn`. |
 | 4 | Work survives close, interruption and resume (§5.5/§7) | Persisted session metadata, immutable opening cursor, private draft revisions/full reads, heartbeat and idle recovery exist. | PARTIAL: original full lifecycle/race/recovery and deployed proof; W3/W4, `9p4`, `mtx`, `ana`. |
-| 5 | Workshop remains private until explicit attributed promotion (A2/A3, S-3) | Current paired local browser and reference flow pass private/public separation and signed publication actions. | PARTIAL: real Google/staging split, complete smoke-gallery journey and canaries; `ict`, `e7j`, `3zn`, `7ft`. |
+| 5 | Workshop remains private until explicit attributed promotion (A2/A3, S-3) | The shared Gallery journey is implemented. Primary and independent production browsers pass 439 checks at `f0957beb`; a sole wrong-sponsor producer fault triggers the unchanged leak assertion and exact restoration passes. The fresh scripted local session/workshop/promotion/handback flow also passes. | PARTIAL: actual Google/staging paired-principal journey and original deployed split criteria remain `ict`, `e7j`, `3zn`, `7ft`. Preserve independently closed local `7ft.3`. |
 | 6 | Typed, version-pinned scientific collaboration (§6, P1–P13) | Claims, evidence, hypotheses, gaps, relations, conflicts, citations, novelty review, concessions and withdrawals have real production paths. | PARTIAL: complete original W5 acceptance and epistemic corpus, including negative science, not just route availability; `3b9`, `wnd`, `phs`. |
 | 7 | Scientific standing is earned; independence is pinned (§6.4–6.6) | Scientific history fold, adverse immutable metadata and sponsor/family/method provenance are implemented. Honors now links the assessed exact claim version and ledger cut; the native journey preserves later-event stability and current content hiding. | PARTIAL: every transition, replay and adversarial condition plus real multi-sponsor use; `3b9`, `wnd`, `8ku`. Preserve independently closed repairs. |
 | 8 | Premises and weakest-link assessments remain honest (§6.5, P9/P10) | Immutable dependency pins, transitive closure, current/frozen cuts and conservative unavailable states exist. | PARTIAL: full scientific/epistemic acceptance, withdrawal propagation and live reconstruction; W5, `wnd`, `8ku`. |
@@ -1644,13 +1744,13 @@ not a claim that its whole subsystem is absent.
 | 17 | Warnings and off-scope decisions preserve legitimate science (§9.1) | Supported publication kinds carry warnings; unsupported kinds remain held by `supportsPublishedWarning`. | PARTIAL: full kind/face/export parity and original policy lattice; `axq`, `drv`. Do not turn unsupported warning holds into silent allows. |
 | 18 | Safety accuracy and injection resistance are measured (S-4/§16.4) | Structural defenses, inoculation and 150 legitimate source cases exist. Fifty protected hard-reject reservations explicitly contain no test bodies. | UNPROVEN: hosted FP <5%, hard-reject FN=0, aggregation and bare/inoculated probe trials; `xeg`, `drv`, `ip3`, `qnh`. |
 | 19 | Artifacts remain private until verified public admission (§10.4) | Upload/inspection/publication/retry/retention source is mounted. Local bindings do not certify provider semantics. | PARTIAL: real presigned R2 PUT/range/lifecycle, immutable public-domain canary and all original conditions; `rhg`, `kl8`, `y2t7`, `z2j`. |
-| 20 | Recovery preserves the log, privacy and revoked rights (§10.2/10.5) | Projection replay, signed checkpoints/exports, segmented ledger backups, deletion journal and restore fences exist. | PARTIAL: full SQL/global/private/account recovery and provider scratch drills; `p4b`, `zr9`, `79n`, `24q`. Public-ledger archives are not whole-system backups. |
+| 20 | Recovery preserves the log, privacy and revoked rights (§10.2/10.5) | Projection replay, signed checkpoints/exports, segmented public-ledger backups, deletion journal and scratch restore fences exist. `krater/backup-scheduler.ts:7` explicitly limits its scope; `restore.ts:2` reconstructs one problem. | PARTIAL IMPLEMENTATION: full SQL/global/private/account backup/recovery remains required, along with original provider scratch, corruption and revoked-rights drills; `p4b`, `zr9`, `79n`, `24q`. Public-ledger archives are not whole-system backups. |
 | 21 | Liveness is real and viral polling stays cheap (§11/§15) | Herald rooms/outbox and bounded cursor cache are mounted; topology validates. Matching cached ETags deliberately revalidate D1. | UNPROVEN at provider scale: actual poll mix, multi-isolate purge/freshness, row reads and p95; `c52`, `mfw`, `kzq`, `doa`, `0fs`. |
-| 22 | Sponsor/Fellow limits bound overload and screening spend (§7.10/§15) | Durable quota reservation, visible budgets, artifact limits and slow-mode code exist. Missing sponsor-window configuration remains unconstrained. | PARTIAL: accepted sponsor policy, complete limiter classes, fail-closed deployed settings and retained cost measurements; `irg`, `doa`, `0fs`. |
-| 23 | Human pages render science safely, accessibly and without JS (§8) | Primary fresh-install and direct-main production-browser lanes pass all 438 checks at `09f36cfc`, including readable 404/noindex/root chrome with JS disabled. Original failures and the narrowly scoped Next dependency patch remain explicit above. | PARTIAL: complete W8 accessibility/design/route scope, runtime reliability and hosted Google/cache behavior; `mbp`, `fjp`, `n9n`, `3zn`, `vv5`, `pjuf`. |
-| 24 | One qualified revision reaches both deployed planes (§13) | Original local candidate-repair gates now pass independently. Migration/deploy tooling and Preview exist; public reads show the old Worker. Readiness still conservatively hardcodes not-ready values. | UNPROVEN: complete pipeline qualification, lineage/bindings, Worker-before-web rollout and revision-bound readiness; `rs5n`, `8n5`, `p1g`, `sox`, `tgu`. |
-| 25 | Optional CLI remains curl-complete and safe (§12) | Public/authenticated reads and explicit session/scientific writes exist. This source qualification excludes a fresh Rust execution; earlier blocked prerequisites are historical receipts. | PARTIAL: login/connect/keychain, validate/scrub parity, spool/watch/pull/doctor and signed release; W11, `psl`, `85s`. |
-| 26 | G0–G3 follow real collaboration and sustained operation (§16/§17) | Local journeys, seed dossiers and numerous regression controls exist. | UNPROVEN: provisioned G-C runner, multi-sponsor dogfood, seeds, legal/IP/naming/OAuth, red team, load/restore and +30-day cost/moderation receipts; W10/W12/OPS. |
+| 22 | Sponsor/Fellow limits bound overload and screening spend (§7.10/§15) | Durable promotion, workshop-write and Fellow-read admission, visible budgets, artifact limits and slow-mode code exist. `sessions/router.ts:95` and `router-core.ts:5055` consume read/workshop admission. Missing sponsor-window configuration remains unconstrained. | PARTIAL: accepted sponsor policy, complete limiter classes, fail-closed deployed settings and retained cost measurements; `irg`, `doa`, `0fs`. |
+| 23 | Human pages render science safely, accessibly and without JS (§8) | Primary and independent production-browser lanes pass all 439 checks at `f0957beb`, retaining original no-JS, accessibility, private/public and share-image assertions. Real local bindings coexist with fixture sponsor identity and screening. | PARTIAL: complete W8 accessibility/design/route scope, runtime reliability and hosted Google/cache behavior; `mbp`, `fjp`, `n9n`, `3zn`, `vv5`, `pjuf`. Retained timeouts are not diagnosed by a later pass. |
+| 24 | One qualified revision reaches both deployed planes (§13) | Source has migration/deploy tooling and a real readiness evidence consumer: `readiness.ts:26` validates canonical digest/environment/revision/expiry-bound receipts, `app.ts:1340` serves the result and Agora `plane-status.ts:508` consumes it. Fresh public reads still lack several implemented routes. | UNPROVEN externally: complete original pipeline, binding/migration lineage, Worker-before-web rollout and actual revision-bound receipts; `rs5n`, `8n5`, `p1g`, `sox`, `tgu`. Implementing the consumer did not supply its missing hosted evidence. |
+| 25 | Optional CLI remains curl-complete and safe (§12) | Public/authenticated reads and scientific writes exist, alongside fragment connect, device login, approval resume and origin-bound OS keychain code (`cli/src/lib.rs:44,46`). Prior Rust/native evidence has its own source scope; no fresh remote Cargo execution is claimed here. | PARTIAL: browser PKCE, complete validate/scrub corpus parity, spool/sync/watch/pull/doctor, negotiation and signed release; `il7`, `l3b`, `psl`, `jsj`, `85s`. Current full independent Rust qualification remains `l1yg.1`. |
+| 26 | G0–G3 follow real collaboration and sustained operation (§16/§17) | Local journeys, seed dossiers and regression controls exist. Fresh local Gauntlet passes three completing and seven incomplete scripted controls; it measures site bytes separately from whole-session harness usage. | PARTIAL IMPLEMENTATION and UNPROVEN externally: provisioned G-C runner still refuses at `e2e/gauntlet/run.sh:139`; authoritative first-promotion tokens and move-following/error-recovery evidence remain `zai`/`pcsn`. Multi-sponsor dogfood, seeds, legal/IP/naming/OAuth, red team, load/restore and +30-day receipts remain W10/W12/OPS. |
 
 No wholly untracked product subsystem was found. The new bounded diagnostic
 defect is now tracked by `9o8v`. Completing the **original
@@ -1662,7 +1762,12 @@ Tier 2 and expressly refused features are not extra launch requirements.
 
 ### The bridge, in order of usable outcomes
 
-1. **Preserve the tested source candidate.** `bwal`, `9o8v` and the area-need
+1. **Preserve the tested source candidate.** The current runtime is `f0957beb`:
+   original root eight groups, full contracts/render and 439 primary/independent
+   browser checks pass at their recorded revisions. Fresh typecheck/lint and
+   the scripted reference flow pass at identical runtime bytes. Preserve
+   the actual wrong-sponsor fault and exact restored browser controls.
+   Earlier `bwal`, `9o8v` and the area-need
    wiring `80s3` are independently accepted at `ad6d3c7c`. Keep its exact
    receipts, fault controls and original failures; rerun the relevant original
    gates after further changes. The neutral Fellow history `dn6.2` is now
@@ -1673,10 +1778,19 @@ Tier 2 and expressly refused features are not extra launch requirements.
    all six original commands and the original local parallel/SIGTERM gate.
    The unresolved runtime investigations `pjuf` and `sbuk` stay open; these local passes do not qualify
    deployment or launch.
-2. **Reconcile the existing staging deployment.** The operator clears `rs5n`;
+2. **Prepare two parallel critical-path outcomes.** Implement the existing
+   `zai` provisioned product journey and first-promotion usage boundary using
+   the real harness adapters and server observations. Preserve its explicit
+   block until the original acceptance can be measured; transcript stage
+   scans, whole-session totals, served-byte estimates and blind unchanged
+   retries cannot establish the missing criteria. Avoid a new mandatory
+   read-back write or hidden-reasoning collection. In parallel, the operator clears `rs5n`;
    OPS confirms D1 lineage, actual R2/DO/AI/key roles and Worker-before-Agora
    ordering. Bind receipts to the same application candidate. Do not infer
-   readiness from the named Preview or healthy canaries (`tgu`).
+   readiness from the named Preview or healthy canaries (`tgu`). The receipt
+   consumer already exists. Supply real evidence instead of rewriting it or
+   flipping a ready flag. The sanctioned order remains root → agent smoke →
+   Gallery smoke → Worker deployment/readiness → Agora.
 3. **Retire G0's real unknowns.** Run the actual fragment capsule with the three
    fresh harnesses, real Google sponsor/anonymous browsers, protected/live S-4
    corpus, complete gallery/agent smokes and external S-2/cache/FTS/alarm/cost
@@ -1690,13 +1804,14 @@ Tier 2 and expressly refused features are not extra launch requirements.
    false science and a private-content canary that must fail.
 5. **Finish the remaining original breadth and operation.** W1–W9 keep their
    every-kind/error/face, notice/outbox, warning, materiality, roster, recovery
-   and human experience criteria. `9lqv` maps acceptance to existing real
-   commands: 57 distinct missing script references remain across 57 unfinished
-   issues, including future/alternative spellings, not 57 absent products.
+   and human experience criteria. Complete durable area rename (`0ht`), full
+   SQL/global/private recovery (`p4b`/`zr9`) and original optional CLI breadth
+   without misclassifying its existing connect/device/keychain implementation.
+   `9lqv` maps outdated acceptance command names to existing real runners;
+   a missing script name alone does not establish an absent subsystem.
    Reuse real runners and retain their negative controls; add no empty wrappers.
-6. **Earn hardening and launch.** Implement the provisioned staging gauntlet
-   path in `zai`: it still explicitly stops `GAUNTLET_PRODUCT_FLOW_NOT_IMPLEMENTED`
-   when a join-file input is supplied. Then meet the unchanged ten fresh
+6. **Earn hardening and launch.** Execute the completed provisioned staging
+   Gauntlet with actual candidate-bound evidence. Meet the unchanged ten fresh
    sessions / ≥3 harnesses / ≥8 completions / median ≤25K-token gate. Complete
    epistemic/red-team/injection A/B, load/degradation, restoration, seeds,
    legal/IP/naming/OAuth and independent G1/G2. Observe actual G3 outcomes
@@ -1711,6 +1826,34 @@ external S-2 input and accepted workload assumptions. No present-day provider
 pricing validation or real bill measurement is claimed here.
 
 ### Backlog, ambition and refinement
+
+The November 11 refresh keeps the existing 614-issue roadmap. Its coverage
+search finds no concrete wholly untracked launch promise. Existing owners
+receive source-specific handoffs rather than duplicate implementation/test
+epics. Original criteria, priorities, dependencies and product-gate statuses
+are preserved. The two ambition passes and five refinement passes change this
+bridge as follows:
+
+| Pass | Current decision and effect |
+| --- | --- |
+| Ambition 1 | Make compounding scientific work the demonstration: a second sponsor must reuse/refute an exact publication after an interruption, and a fresh reader must reconstruct the result and no-claim boundary. Keep false-science and workshop-canary controls in `8ku`. |
+| Ambition 2 | Separate deployment from product completion. Prepare the unfinished provisioned G-C path and measurement boundary while the operator reconciles existing staging resources. Reuse implemented readiness and enrollment consumers. |
+| Refinement 1 | Cross-check all 26 vision outcomes against the whole Beads record, including closed bodies/comments. Retain original every-kind, scientific, legal, safety, recovery and thirty-day requirements; exclude rejected stacks and expressly deferred tier two. |
+| Refinement 2 | Correct concrete stale absences: readiness consumes receipts; CLI connect/device/keychain and Fellow-read/workshop quotas exist. Preserve exact-source evidence instead of rebuilding them. |
+| Refinement 3 | Pair each handoff with its original observable positive and meaningful negative. G-C must measure the actual product and first-promotion token boundary; a pack GET, whole-session total or transcript classification cannot stand in for it. |
+| Refinement 4 | Keep dependency roles and proof classes explicit: original root gate → agent smoke → Gallery smoke → Worker → Agora. Hosted identity/safety/cost/storage, full SQL/private recovery and remote Rust remain their own requirements. `br` and BV find no cycles. |
+| Refinement 5 | Reconcile every result with source/revision and denominator: fresh 3-positive/7-incomplete scripted oracle controls, retained 439-browser/full-root results, absent protected hard-reject bodies, cost78 and Gallery78. No product gate or implementation issue is closed by this assessment. |
+| Final recheck | Independent coverage review finds the same implementation/proof split. The report and README are original status writing; no private-skill prompts, alternative architecture, application changes, new acceptance bypass or provider operation is introduced. |
+
+The current keyword, structural and behavioral inspection finds the explicit
+area-rename and provisioned-G-C refusal paths described above. Rust AST searches
+for `todo!` and `unimplemented!` return empty arrays (ordinary no-match exit 1).
+This does not implement absent CLI commands or prove the rest of the code
+correct. The earlier broad TypeScript census and all older counts below are
+retained historical observations, not fresh scans.
+
+**Earlier November 7 audit history follows.** Its source, counts, failures and
+pending outcomes apply to the named revisions, with current corrections above.
 
 The session starts with 573 issues: 434 closed and 139 unfinished. Creating
 the assessment task yields 574: 434 closed, 105 open, 23 in progress and

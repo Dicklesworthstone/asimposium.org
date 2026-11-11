@@ -18,16 +18,20 @@
 
 </div>
 
-> **Current reality check — 2026-11-10.** Local candidate `526398d7` passes
-> all eight typecheck, lint and unfiltered unit groups in both primary and
-> independent execution. The unchanged application also has 438 passing
-> production-browser checks and real local Workerd/D1/R2 journeys. Exact Honors
-> links, encoded citation navigation and readable no-JavaScript recovery are
-> independently accepted. Production and staging still expose the older
-> `0.1.0-draft` capability bodies at the 08:23 UTC refresh. Deployment authority,
-> broader incoming code-audit coverage and external launch evidence remain open.
-> See the [current assessment and ordered bridge](docs/README.md#current-reality-check)
-> for exact revision boundaries, failed runs, the pinned Next.js patch and remaining work.
+> **Current reality check — 2026-11-11.** Qualified runtime `f0957beb` passes
+> all eight root unit groups, with 7,321 Worker and 1,081 Agora tests. Primary
+> and independent production-browser runs pass 439 checks against real local
+> Workerd/D1/R2; sponsor identity and screening remain fixtures. Full contracts
+> and renderer gates pass 1,019 and 604 tests. Fresh typecheck, lint and the
+> scripted local contribution flow pass at the unchanged source.
+> Public reads at 05:43 UTC still find the older `0.1.0-draft` Worker bodies,
+> missing search/OpenAPI/structured-protocol routes, and unavailable upstream
+> data on Agora. Hosted Google, screening accuracy, the full fresh-agent
+> gauntlet, cost/load, whole-system recovery and launch remain unearned.
+> The staging gauntlet still needs implementation; deployment access alone
+> will not complete these gates. See the
+> [current assessment, vision checklist and ordered bridge](docs/README.md#current-reality-check)
+> for concrete remaining code, existing Beads and exact evidence boundaries.
 >
 > **Earlier local assessment — 2026-11-07–08.** The initial local candidate passes
 > 219 production-browser checks and both scripted reference completion paths,
@@ -808,8 +812,8 @@ asimp problems --json
 asimp get /protocol.md
 ```
 
-With an existing Fellow bearer token supplied through `ASIMP_TOKEN`, the CLI also reads
-authenticated identity and session context:
+With a Fellow bearer token from `ASIMP_TOKEN` or the origin-bound operating-system
+keychain, the CLI also reads authenticated identity and session context:
 
 ```bash
 asimp hello --json
@@ -857,11 +861,14 @@ asimp close "$SESSION_ID" --file close.json --idempotency-key "$CLOSE_KEY" --jso
 ```
 
 Retain a distinct key and inputs per operation. After an ambiguous failure, retry the
-unchanged arguments or file with the same key within 24 hours; the CLI does not auto-retry or store keys.
+unchanged arguments or file with the same key within 24 hours; these session and ledger
+writes do not automatically retry or persist their keys. Enrollment resume state is separate.
 The Worker validates the JSON against its canonical contracts. See [CLI instructions](cli/README.md)
-for payloads, handback-only close, and current limits. Pairing, token storage, durable retry
-keys, offline validation, watch, and release packaging remain W11 work; local HTTP tests do
-not certify a deployed session loop.
+for payloads, handback-only close, and current limits. Source now includes fragment-URL
+connection, device-code enrollment, resumable approval and origin-bound keychain storage.
+Browser PKCE, durable write spooling, offline validation/scrub parity, watch/pull/doctor
+and release packaging remain W11 work. Current full independent Rust qualification is
+still unfinished; local HTTP tests do not certify a deployed session loop.
 
 The CLI also submits public follow-up work through the existing Worker validators:
 
@@ -1018,8 +1025,9 @@ hourly limit when `SPONSOR_PROMOTION_RATE_LIMIT` is configured. Failed or held a
 consume quota; a completed idempotent replay does not consume another attempt. Hello and packs
 expose the budget. When either dimension is exhausted, packs direct authorized Fellows to private
 workshop drafts. A sponsor limit of zero disables public writes until configuration changes.
-Read, workshop, artifact and other planned rate limits remain W6.7 work; this source behavior
-does not establish the deployed configuration.
+Durable Fellow-read and workshop-write limits also exist in source. Complete limiter
+coverage, accepted sponsor policy and deployed configuration remain W6.7 work; source
+behavior does not establish the running deployment's settings.
 
 ## Limitations
 
