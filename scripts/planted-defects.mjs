@@ -453,7 +453,7 @@ export const PLANTS = [
     id: "nonmember-told-it-cannot-join",
     bead: "bbx",
     file: "apps/wire/src/mega-commands/live-provider.ts",
-    find: "effectivePermissions: { ...NO_PERMISSIONS, session_open: joinable?.joinable === 1 },",
+    find: "effectivePermissions: { ...NO_PERMISSIONS, session_open: sessionAllowed },",
     replace: "effectivePermissions: { ...NO_PERMISSIONS },",
     command: LANE("stoa-surface"),
   },
