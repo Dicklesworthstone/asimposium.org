@@ -389,6 +389,9 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0141_workshop_write_rate_limit.sql
   db/migrations/0142_fellow_read_rate_limit.sql
   db/migrations/0143_area_renames.sql
+  db/migrations/0144_problem_creation_rate_limit.sql
+  db/migrations/0145_sponsor_problem_hides.sql
+  db/migrations/0146_protocol_conflicts.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -419,6 +422,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/problem.ts
   packages/contracts/src/field-hints.ts
   packages/contracts/src/problems.ts
+  packages/contracts/src/problem-hiding.ts
   packages/contracts/src/problem-boundaries.ts
   packages/contracts/src/schema.ts
   packages/contracts/src/screening.ts
@@ -492,6 +496,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger-face.ts
   apps/wire/src/krater/citation.ts
   apps/wire/src/discovery/discovery.ts
+  apps/wire/src/discovery/protocol-conflicts-discovery.ts
   apps/wire/src/discovery/commentary-discovery.ts
   apps/wire/src/discovery/citations-discovery.ts
   apps/wire/src/discovery/scientific-collections-discovery.ts
@@ -590,6 +595,9 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/scientific-withdrawals.ts
   apps/wire/src/ledger/stale-route.ts
   apps/wire/src/directives/router.ts
+  apps/wire/src/directives/protocol-conflict-router.ts
+  apps/wire/src/directives/protocol-conflicts.ts
+  apps/wire/src/directives/protocol-conflict-public.ts
   apps/wire/src/commentary/router.ts
   apps/wire/src/commentary/service.ts
   apps/wire/src/krater/export.ts
@@ -605,6 +613,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/krater/restore.ts
   apps/wire/src/krater/projection-replay.ts
   apps/wire/src/krater/retention.ts
+  apps/wire/src/krater/content-control-retention.ts
   apps/wire/src/krater/checkpoint-face.ts
   apps/wire/src/krater/checkpoint-signing.ts
   apps/wire/src/screening/aggregate.ts
@@ -617,6 +626,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/screening/types.ts
   apps/wire/src/screening/workers-ai.ts
   apps/wire/src/moderation/operator-http.ts
+  apps/wire/src/moderation/problem-hide.ts
   apps/wire/src/moderation/area-renames.ts
   apps/wire/src/moderation/operator-command.ts
   apps/wire/src/moderation/report-detail.ts
@@ -666,6 +676,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/problems/router.ts
   apps/wire/src/problems/boundaries.ts
   apps/wire/src/problems/brief-commands.ts
+  apps/wire/src/problems/creation-quota.ts
   apps/wire/src/problems/fellow-briefs.ts
   apps/wire/src/problems/proposal-commands.ts
   apps/wire/src/problems/problem-intent-authority.ts
@@ -1012,6 +1023,9 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0141_workshop_write_rate_limit.sql
   0142_fellow_read_rate_limit.sql
   0143_area_renames.sql
+  0144_problem_creation_rate_limit.sql
+  0145_sponsor_problem_hides.sql
+  0146_protocol_conflicts.sql
 )
 
 

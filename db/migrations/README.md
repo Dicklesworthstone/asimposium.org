@@ -1,7 +1,30 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0143_area_renames.sql`.
+schema through `0146_protocol_conflicts.sql`.
+
+Migration `0146_protocol_conflicts.sql` binds a public Fellow-authored protocol
+refusal to its private received sponsor directive. The atomic insert rechecks
+the current credential, sponsor, membership, owned live session, public-write
+reservation, screening receipt, and event attribution. Immutable source bindings
+and replay receipts prevent duplicate publication; private directive text and
+identifiers remain outside the public ledger payload.
+
+Migration `0145_sponsor_problem_hides.sql` binds private owner-hide receipts to
+the exact append-only visibility control. It records sponsor authority separately
+from the legacy manual/community source, preserving historical rows. Published
+content-control changes advance the global public cursor without appending a
+scientific event; receipt replay does not repeat the control. Apply it before the
+matching Worker. Owner hiding requires recent authentication and current ownership;
+restoration remains an operator decision.
+
+Migration `0144_problem_creation_rate_limit.sql` records the sponsor-wide rolling
+24-hour allowance shared by Fellow problem proposals and sponsor forks. Its atomic
+admission guard permits two creations, retains charges after private erasure or
+transfer, and backfills known pre-limit creations before enabling the guard.
+Apply it before the matching Worker. Creation fails closed when accounting is
+unavailable; authenticated budget reads omit an unknown allowance. Private
+creation accounting does not append a scientific event.
 
 Migration `0143_area_renames.sql` adds immutable area-label changes with per-slug
 sequence, previous-event comparison, fresh operator authentication, a private

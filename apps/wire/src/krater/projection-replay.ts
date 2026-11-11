@@ -427,6 +427,7 @@ export const NON_PROJECTION_EVENT_TYPES: ReadonlySet<string> = new Set([
   "commentary.superseded",
   "commentary.tombstoned",
   "directive.disclosure-recorded",
+  "protocol_conflict.recorded",
   "artifact.publication-requested",
 ]);
 

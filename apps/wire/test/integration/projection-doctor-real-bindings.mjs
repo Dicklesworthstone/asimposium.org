@@ -591,6 +591,10 @@ await runLocalWorkerJourney(
     // 10. On a fresh, unredacted problem: a lost row whose only source is an
     //     edited payload is refused, never rebuilt from the edit; then an
     //     event without its v2 chain row reads as unverifiable, not tampered.
+    //     This unrelated phase uses a separate sponsor; deleting the prior
+    //     draft does not refund the original sponsor's creation allowance.
+    const freshSponsor = "usr_doctor_integrity";
+    const freshAuthor = await enroll("doctor-integrity", freshSponsor);
     const fresh = (
       await call(
         "/v1/problems",
@@ -601,12 +605,12 @@ await runLocalWorkerJourney(
           motivation: "Exercise integrity refusal on a clean log.",
           areas: ["number-theory"],
         },
-        author,
+        freshAuthor,
         201,
       )
     ).problem.id;
     await sponsorCall(
-      SPONSOR,
+      freshSponsor,
       "POST",
       `/v1/sponsors/problems/${fresh}/lifecycle`,
       "problem-lifecycle",
@@ -626,12 +630,12 @@ await runLocalWorkerJourney(
       reviewer,
     );
     const freshSession = (
-      await call("/v1/sessions", { problem_id: fresh, intent: "prove" }, author, 201)
+      await call("/v1/sessions", { problem_id: fresh, intent: "prove" }, freshAuthor, 201)
     ).session_id;
     const freshDraft = await call(
       `/v1/sessions/${freshSession}/workshop`,
       { type: "claim-draft", title: "Draft", body_md: "Private." },
-      author,
+      freshAuthor,
       201,
     );
     const freshClaim = await call(
@@ -642,7 +646,7 @@ await runLocalWorkerJourney(
         statement: "Four squared is even.",
         falsifier: "Four squared being odd.",
       },
-      author,
+      freshAuthor,
       201,
     );
     const freshDryRun = async (expected = 200) =>

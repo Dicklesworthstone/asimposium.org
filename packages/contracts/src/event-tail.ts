@@ -32,7 +32,7 @@ const PathSchema = z
   .min(1)
   .max(512)
   .regex(
-    /^\/p\/[^\s?#]+\/(?:events\.(?:json|ndjson)|claims\/[^\s?#]+\.json|citations\/[^\s?#]+\.json|syntheses\/[^\s?#]+\.json|(?:dead-ends|questions|conflicts|retractions)\.json)(?:\?[^\s#]*)?$/,
+    /^\/p\/[^\s?#]+\/(?:events\.(?:json|ndjson)|claims\/[^\s?#]+\.json|citations\/[^\s?#]+\.json|syntheses\/[^\s?#]+\.json|disclosures\/DD-[a-f0-9]{32}\.json|protocol-conflicts\/PC-[a-f0-9]{32}\.json|(?:dead-ends|questions|conflicts|retractions)\.json)(?:\?[^\s#]*)?$/,
   );
 
 export const EventTailQuerySchema = z

@@ -517,6 +517,12 @@ export async function problemLifecycleJourney({
   );
   await call(`/p/${nonLatin.problem.id}.json`, undefined, undefined, 404);
 
+  // The erasure scenario starts in a later creation window. Only fixture
+  // timestamps move; the production two-per-sponsor guard remains installed.
+  await env.DB.prepare("UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?")
+    .bind(Date.now() - 86_400_000, sponsorA)
+    .run();
+
   // Use the actual signed deletion route on a separate never-public draft.
   // The retained access receipt above must remain a subject for its guard.
   const erasureCanary = "PRIVATE-ERASURE-CANARY-local-journey";
@@ -1307,6 +1313,11 @@ export async function problemLifecycleJourney({
     boundaryProposal,
     201,
   );
+  // Independent byte-admission scenarios take place after the earlier
+  // erasure and retirement creations have left the rolling daily window.
+  await env.DB.prepare("UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?")
+    .bind(Date.now() - 86_400_000, sponsorA)
+    .run();
   const boundaryReviewProblem = await call(
     "/v1/problems",
     {

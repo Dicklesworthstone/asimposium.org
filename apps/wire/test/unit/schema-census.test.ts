@@ -80,6 +80,9 @@ const CENSUS_TABLES = [
   "sponsor_fellow_transfers",
   "problem_follows",
   "screening_publications",
+  "problem_creation_admissions",
+  "sponsor_problem_hide_receipts",
+  "protocol_conflicts",
   "artifact_uploads",
   "artifact_publications",
 ] as const;
@@ -98,6 +101,16 @@ const CENSUS_TRIGGERS = [
   "enrollment_credentials_revocation_monotonic",
   "enrollment_credentials_authority_immutable",
   "enrollment_credentials_no_delete",
+  // Sponsor proposals and forks elect their two shared daily slots atomically.
+  "problem_creation_admissions_capacity",
+  "sponsor_problem_hide_receipts_bound_control",
+  "sponsor_problem_hide_receipts_append_only_update",
+  "sponsor_problem_hide_receipts_append_only_delete",
+  "content_controls_public_cursor",
+  "protocol_conflicts_authorized",
+  "protocol_conflicts_no_update",
+  "protocol_conflicts_no_delete",
+  "protocol_conflicts_cursor",
   // Ledger objects are append-only (Rule A6). Projection repair
   // (krater/projection-replay.ts) is insert-only because of these: a dropped
   // trigger would let a rebuild or a bug rewrite published history.
@@ -246,6 +259,7 @@ describe("W2.1 schema census", () => {
       "enrollment_credentials_token_idx",
       "enrollment_proposals_status_idx",
       "enrollment_fellows_sponsor_status_idx",
+      "problem_creation_admissions_sponsor_time",
     ];
     for (const index of required) {
       expect(indexes, `missing census index ${index}`).toContain(index);

@@ -1,14 +1,30 @@
 "use server";
 
-import { DIRECTOR_GRAMMAR_VERBS, parseDirectorCommand } from "@asimposium/contracts";
+import {
+  AdminContentControlRequestSchema,
+  AdminContentControlResponseSchema,
+  DIRECTOR_GRAMMAR_VERBS,
+  parseDirectorCommand,
+  problemHideAuthIsRecent,
+  type SponsorProblemHideReceipt,
+  SponsorProblemHideReceiptSchema,
+} from "@asimposium/contracts";
 import {
   type SponsorDirectiveReceipt,
   type SponsorDirectiveRequest,
   SponsorDirectiveRequestSchema,
 } from "@asimposium/contracts/directives";
+import { revalidatePath } from "next/cache";
 import { auth } from "@/auth";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
-import { stoaIssueDirective, stoaSetProblemWriterCap, type SponsorWriterCapReceipt } from "@/lib/stoa";
+import {
+  operatorPrincipalIsAllowed,
+  stoaAdminContentControl,
+  stoaHideProblem,
+  stoaIssueDirective,
+  stoaSetProblemWriterCap,
+  type SponsorWriterCapReceipt,
+} from "@/lib/stoa";
 
 export type DirectiveActionResult =
   | { readonly ok: true; readonly receipt: SponsorDirectiveReceipt }
@@ -21,6 +37,7 @@ export type DirectorExecutionResult =
       readonly message: string;
       readonly receipt?: SponsorDirectiveReceipt;
       readonly writerCap?: SponsorWriterCapReceipt;
+      readonly problemHide?: SponsorProblemHideReceipt;
     }
   | {
       readonly ok: false;
@@ -173,16 +190,76 @@ export async function executeDirectorCommand(
         handoff: { href: "#problems-title", label: "Review problem publication" },
       };
 
-    case "hide":
+    case "hide": {
+      const authenticatedAt = session.authIssuedAt;
+      if (!problemHideAuthIsRecent(authenticatedAt))
+        return {
+          ok: false,
+          code: "STEP_UP_REQUIRED",
+          message:
+            "Sign in again with Google before hiding a problem, then retry this unchanged command.",
+        };
+      let receipt: SponsorProblemHideReceipt | undefined;
+      let appliedAt: string;
+      if (operatorPrincipalIsAllowed(session.user.id)) {
+        // Operator authority stays on the existing operator-signed route and allowlist.
+        const request = AdminContentControlRequestSchema.safeParse({
+          target_id: cmd.problem_id,
+          target_kind: "problem",
+          action: "hide",
+          reason: cmd.reason,
+        });
+        if (!request.success)
+          return {
+            ok: false,
+            message: "An operator hide requires an audit reason of 10 to 1,000 characters.",
+          };
+        const result = await stoaAdminContentControl(
+          session.user.id,
+          request.data,
+          idempotencyKey,
+        );
+        if (!result.ok) return hideFailure(result);
+        const matched = AdminContentControlResponseSchema.safeParse(result.data);
+        if (
+          !matched.success ||
+          matched.data.target_id !== cmd.problem_id ||
+          matched.data.action !== "hide"
+        )
+          return hideReceiptMismatch();
+        appliedAt = matched.data.applied_at;
+      } else {
+        const result = await stoaHideProblem(
+          session.user.id,
+          cmd.problem_id,
+          {
+            problem_id: cmd.problem_id,
+            reason: cmd.reason,
+            step_up_authenticated_at: authenticatedAt,
+          },
+          idempotencyKey,
+        );
+        if (!result.ok) return hideFailure(result);
+        const matched = SponsorProblemHideReceiptSchema.safeParse(result.data);
+        if (!matched.success || matched.data.problem_id !== cmd.problem_id)
+          return hideReceiptMismatch();
+        receipt = matched.data;
+        appliedAt = matched.data.applied_at;
+      }
+      // Problem content also appears in directory, review and other aggregate faces.
+      // Invalidate their cached reads only after a matching authoritative receipt.
+      try {
+        revalidatePath("/", "layout");
+      } catch {
+        // A cache failure cannot erase the receipt.
+      }
       return {
-        ok: false,
-        code: "DIRECTOR_ACTION_UNAVAILABLE",
-        message: "Sponsor hiding is not available through the current governance service. Nothing has been hidden. Open the problem and use Report content if operator review is needed.",
-        handoff: {
-          href: `/p/${encodeURIComponent(cmd.problem_id)}`,
-          label: "Open the problem to report content",
-        },
+        ok: true,
+        verb: "hide",
+        message: `Hide recorded for ${cmd.problem_id} at ${appliedAt}. This receipt confirms the decision; later operator decisions may change current visibility. Scientific standing is unchanged.`,
+        ...(receipt === undefined ? {} : { problemHide: receipt }),
       };
+    }
 
     case "cap": {
       const changed = await stoaSetProblemWriterCap(
@@ -209,4 +286,31 @@ export async function executeDirectorCommand(
       };
     }
   }
+}
+
+function hideReceiptMismatch(): DirectorExecutionResult {
+  return {
+    ok: false,
+    message:
+      "The hide receipt did not match this command. Keep the problem, reason and retry key unchanged to recover the recorded decision.",
+  };
+}
+
+function hideFailure(result: {
+  readonly reason: string;
+  readonly status?: number;
+  readonly problemCode?: string;
+}): DirectorExecutionResult {
+  return {
+    ok: false,
+    ...(result.problemCode ? { code: result.problemCode } : {}),
+    message:
+      result.reason === "unconfigured"
+        ? "Problem hiding is not configured on this deployment."
+        : result.status === 409
+          ? "Stoa refused a conflicting hide command. Inspect current visibility before making a new decision; retry a previously accepted command unchanged to recover its receipt."
+          : result.status === 401 || result.status === 403 || result.status === 404
+            ? "Stoa refused this hide command. Only the current owning sponsor or an authorized operator can hide a published problem; sign in again if recent authentication is required."
+            : "The hide could not be confirmed. Retry the unchanged problem and reason to reuse its Idempotency-Key.",
+  };
 }

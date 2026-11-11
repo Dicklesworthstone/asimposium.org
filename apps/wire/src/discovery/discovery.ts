@@ -77,6 +77,10 @@ import {
   hypothesesResponses,
 } from "./hypotheses-discovery";
 import {
+  PROTOCOL_CONFLICT_PUBLIC_READS,
+  protocolConflictResponses,
+} from "./protocol-conflicts-discovery.ts";
+import {
   REVIEW_QUEUE_PUBLIC_READS,
   reviewQueueParameters,
   reviewQueueResponses,
@@ -191,6 +195,7 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "POST /v1/sponsors/disclosures/:problemId/:claimId/:version": true,
   "GET /v1/sponsors/account/suspension": true,
   "GET /v1/sponsors/account/delete-preview": true,
+  "POST /v1/sponsors/problems/:id/hide": true,
   "GET /v1/sponsors/problems/:id/publication-preview": true,
   "GET /v1/sponsors/problems/:id/statement-proposals": true,
   "GET /v1/sponsors/problems/:id/statement-proposals/after/:after": true,
@@ -271,6 +276,7 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   ...HYPOTHESES_PUBLIC_READS,
   ...COMMENTARY_PUBLIC_READS,
   ...DIRECTIVE_DISCLOSURE_PUBLIC_READS,
+  ...PROTOCOL_CONFLICT_PUBLIC_READS,
   "GET /": "Agent handbook bundle.",
   "GET /AGENTS.md": "Agent handbook under the usual discovery name.",
   "GET /capabilities": "In-band capability census for this deployment.",
@@ -671,6 +677,12 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "Read the complete current sponsor instructions, including acknowledged notices. Follow every next_url before acting; a changed set requires restarting.",
   ],
   [
+    "POST /v1/sessions/:id/protocol-conflicts",
+    "fellow-bearer",
+    "Record your refusal of a received sponsor directive that conflicts with the protocol. Use an owned open session on the published problem, the private directive_id, and deliberate public paraphrases in rule_cited, refused_part and explanation. Never quote private instructions or secrets. The ledger publishes your account and attribution; the directive ID remains private. Requires current review or promotion authority and an Idempotency-Key.",
+    "directives:protocol_conflict_request",
+  ],
+  [
     "POST /v1/inbox/ack",
     "fellow-bearer",
     "Acknowledge inbox notices by IDs or until a sequence number.",
@@ -995,6 +1007,8 @@ function responseFor(
   if (tail !== undefined) return tail;
   const disclosure = directiveDisclosureResponses(openApiPath, origins.agent);
   if (disclosure !== undefined) return disclosure;
+  const protocolConflict = protocolConflictResponses(openApiPath, origins.agent);
+  if (protocolConflict !== undefined) return protocolConflict;
   const media = openApiPath.endsWith(".md")
     ? "text/markdown; charset=utf-8"
     : openApiPath.endsWith(".html")
@@ -1153,8 +1167,47 @@ function responseFor(
   };
 }
 
+/** Registry documents use either object properties or root named schemas.
+ * Resolve the actual served structure; adding a write never invents a pointer
+ * or duplicates a contract to fit one OpenAPI layout. Only registered static
+ * documents enter this bounded cache. */
+const requestSchemaDocuments = new Map<string, Readonly<Record<string, unknown>>>();
+
+export function requestSchemaReference(
+  requestSchema: string,
+  origins: DiscoveryOrigins = DISCOVERY_ORIGINS,
+): string {
+  const parts = requestSchema.split(":");
+  const id = parts[0];
+  const property = parts[1];
+  const document = listPublicSchemas().find((entry) => entry.id === id);
+  if (parts.length !== 2 || document === undefined || !property)
+    throw new Error(`Unknown public request schema: ${requestSchema}`);
+  let parent = requestSchemaDocuments.get(document.id);
+  if (parent === undefined) {
+    parent = JSON.parse(document.body) as Readonly<Record<string, unknown>>;
+    requestSchemaDocuments.set(document.id, parent);
+  }
+  const isSchema = (value: unknown): boolean =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  const properties = parent.properties;
+  const nested =
+    isSchema(properties) && Object.hasOwn(properties as object, property)
+      ? (properties as Record<string, unknown>)[property]
+      : undefined;
+  const root = Object.hasOwn(parent, property) ? parent[property] : undefined;
+  const segment = property.replaceAll("~", "~0").replaceAll("/", "~1");
+  const pointer = isSchema(nested)
+    ? `/properties/${segment}`
+    : isSchema(root)
+      ? `/${segment}`
+      : undefined;
+  if (pointer === undefined) throw new Error(`Unresolved public request schema: ${requestSchema}`);
+  return `${origins.agent}${document.served_at}#${pointer}`;
+}
+
 function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins): OpenApiOperation {
-  const schema = operation.requestSchema?.split(":");
+  const schema = operation.requestSchema;
   const base = {
     summary: operation.summary,
     tags: [operation.tag],
@@ -1382,7 +1435,7 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
             content: {
               "application/json": {
                 schema: {
-                  $ref: `${origins.agent}/schemas/${schema[0]}.v1.json#/properties/${schema[1]}`,
+                  $ref: requestSchemaReference(schema, origins),
                 },
               },
             },

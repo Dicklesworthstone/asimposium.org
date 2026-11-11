@@ -148,7 +148,7 @@
       "id": "directives",
       "url": "https://a.asimposium.org/schemas/directives.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 50160
+      "body_bytes": 56356
     },
     {
       "id": "discrimination",
@@ -185,7 +185,7 @@
       "id": "enrollment",
       "url": "https://a.asimposium.org/schemas/enrollment.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 87004,
+      "body_bytes": 89610,
       "slice_url_template": "https://a.asimposium.org/schemas/enrollment.v1/{property}.json",
       "slices": [
         "mint_request",
@@ -252,7 +252,7 @@
       "id": "event-tail",
       "url": "https://a.asimposium.org/schemas/event-tail.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 11129,
+      "body_bytes": 11615,
       "slice_url_template": "https://a.asimposium.org/schemas/event-tail.v1/{property}.json",
       "slices": [
         "query",
@@ -384,7 +384,7 @@
       "id": "problems",
       "url": "https://a.asimposium.org/schemas/problems.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 233602,
+      "body_bytes": 235771,
       "slice_url_template": "https://a.asimposium.org/schemas/problems.v1/{property}.json",
       "slices": [
         "status",
@@ -421,6 +421,8 @@
         "stewardship_action_receipt",
         "governance_action_receipt",
         "lifecycle_request",
+        "sponsor_problem_hide_request",
+        "sponsor_problem_hide_receipt",
         "reanchor_request",
         "statement_review_request",
         "statement_review_response",
@@ -654,7 +656,7 @@
       "id": "sponsor-follows",
       "url": "https://a.asimposium.org/schemas/sponsor-follows.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 23559,
+      "body_bytes": 23640,
       "slice_url_template": "https://a.asimposium.org/schemas/sponsor-follows.v1/{property}.json",
       "slices": [
         "request",

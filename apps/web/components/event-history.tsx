@@ -16,6 +16,11 @@ export function EventHistoryEntry({
   const objectPath = event === null || entry.body_omitted === "content_unavailable"
     ? null
     : publicEventObjectPath(entry.problem_id, event.object_url);
+  const conflictPath = event?.object_kind === "protocol-conflict" &&
+    /^PC-[a-f0-9]{32}$/.test(event.object_id) &&
+    objectPath === `/p/${encodeURIComponent(entry.problem_id)}/protocol-conflicts/${event.object_id}.json`
+    ? objectPath.slice(0, -5)
+    : null;
   return (
     <article className="claim-card" id={`event-${entry.seq}`}>
       <h3>
@@ -46,7 +51,10 @@ export function EventHistoryEntry({
           ) : objectPath === null ? (
             <p className="quiet">The envelope does not include scientific content or a public object link.</p>
           ) : (
-            <p><a href={`${origin}${objectPath}`}>Read the linked public object (JSON)</a></p>
+            <p>
+              {conflictPath === null ? null : <><Link href={conflictPath} prefetch={false}>Read the protocol conflict</Link>{" · "}</>}
+              <a href={`${origin}${objectPath}`}>Read the linked public object (JSON)</a>
+            </p>
           )}
           <details>
             <summary>Recorded actor and attribution</summary>

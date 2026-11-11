@@ -114,9 +114,49 @@ problem. The scheduled Worker never assembles a whole large history in memory.
 Use the existing guarded scratch restore with the latest signed deletion journal;
 assembly alone does not authorize service cutover or bypass retained controls.
 Run `deletionSafeRestore` from the offline operator process against its separately
-validated scratch D1 binding. Require its projection result to contain `inserted`
-before treating recovery as complete; a `refused` projection result leaves work
-unfinished. Large recovery is a host operation, not a Worker restore RPC.
+validated scratch D1 binding. Its required `readCurrentJournal` callback must
+re-read `fetchLatestDeletionJournal(currentPrivateBucket, independentlyPinnedKeys)`
+and return that result's `head` (or `null` when unavailable). Use the current
+private bucket outside the point-in-time snapshot; never construct the authority
+from the candidate journal or cache its first result. The reader authenticates
+the journal and binds its signed count to its canonical storage key. Recovery
+checks this count/digest before writes and again before returning success.
+An authentic older journal is refused before any write. Publication during
+recovery withholds completion; keep the target quarantined and retry with the
+new journal. The credential revoker must also use the scratch D1 binding.
+
+This comparison establishes the newest **published** journal. It does not close
+the interval between a source deletion and its scheduled journal publication,
+nor the interval after the final comparison. The separate cutover procedure must
+hold an authoritative source publication boundary before allowing the recovered
+service to accept requests. A journal signature alone is never proof of freshness.
+An empty source publishes a signed zero-record head; no journal means unavailable
+authority, not permission to restore.
+
+The private journal also carries each exact visibility control: operator hides
+and restorations, community holds and their reviewed resolutions, and sponsor
+problem withdrawals. The control and its journal entry commit together. Original
+control IDs, versions, attribution and private rationale survive recovery; the
+public moderation log and public faces do not acquire that rationale. Existing
+immutable controls are backfilled before publication, at most 100 per attempt.
+If more remain, that attempt publishes no new journal and the next tick continues.
+
+Recovery checks all affected existing control histories before changing the
+target and repeats their predecessor checks inside the replay transaction.
+Conflicting identities or concurrent decisions refuse replay; they are never
+overwritten by a backup. The original control version determines current
+visibility even when historical backfill arrives later in journal order.
+Controls for absent problems remain unapplied until those problems are restored.
+After an initial restore has installed controls, apply a newer journal with
+`applyDeletionJournal` on the same quarantined scratch binding. Do not ask the
+log importer to overwrite an already controlled history. This handles visibility
+decisions, not physical redaction, public artifact copying, cache purging, or
+copies already downloaded by third parties.
+
+Require the projection result to contain `inserted` before treating the problem
+rebuild as complete; a `refused` projection result leaves work unfinished.
+Large recovery is a host operation, not a Worker restore RPC. This remains a
+problem-ledger restore, not whole-system SQL/account/private-state recovery.
 
 ## Local verification
 

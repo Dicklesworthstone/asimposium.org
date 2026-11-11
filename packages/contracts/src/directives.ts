@@ -1,13 +1,16 @@
 import { z } from "zod";
 import { FellowIdSchema, SponsorIdSchema } from "./enrollment.ts";
-import { ProblemIdSchema } from "./sessions.ts";
+import { ProblemIdSchema, SessionIdSchema } from "./sessions.ts";
 
 export const DIRECTIVES_SCHEMA_ID = "https://a.asimposium.org/schemas/directives.v1.json";
 export const DIRECTIVE_VERBS = ["focus", "forbid", "unfocus"] as const;
 export const SponsorDirectiveVerbSchema = z.enum(DIRECTIVE_VERBS);
 export type SponsorDirectiveVerb = z.infer<typeof SponsorDirectiveVerbSchema>;
 
-const DirectiveIdSchema = z.string().regex(/^DIR-[a-f0-9]{32}$/);
+const DirectiveIdSchema = z
+  .string()
+  .length(36)
+  .regex(/^DIR-[a-f0-9]{32}$/);
 
 export const SponsorDirectiveRequestSchema = z
   .object({
@@ -64,6 +67,53 @@ export const SponsorDirectiveListResponseSchema = z
   })
   .strict();
 export type SponsorDirectiveListResponse = z.infer<typeof SponsorDirectiveListResponseSchema>;
+
+export const ProtocolConflictIdSchema = z
+  .string()
+  .length(35)
+  .regex(/^PC-[a-f0-9]{32}$/);
+const ProtocolConflictPublicFields = {
+  rule_cited: z.string().trim().min(1).max(100),
+  refused_part: z.string().trim().min(1).max(500),
+  explanation: z.string().trim().min(10).max(2000),
+};
+
+/** The directive pin is private. All three prose fields are deliberate public
+ * paraphrases supplied by the Fellow; stored directive text is never copied. */
+export const ProtocolConflictRequestSchema = z
+  .object({ directive_id: DirectiveIdSchema, ...ProtocolConflictPublicFields })
+  .strict();
+export type ProtocolConflictRequest = z.infer<typeof ProtocolConflictRequestSchema>;
+
+export const ProtocolConflictPayloadSchema = z
+  .object({ conflict_id: ProtocolConflictIdSchema, ...ProtocolConflictPublicFields })
+  .strict();
+export type ProtocolConflictPayload = z.infer<typeof ProtocolConflictPayloadSchema>;
+
+const ProtocolConflictIdentityFields = {
+  schema: z.literal(DIRECTIVES_SCHEMA_ID),
+  conflict_id: ProtocolConflictIdSchema,
+  problem_id: ProblemIdSchema,
+  session_id: SessionIdSchema,
+  fellow_id: FellowIdSchema,
+  sponsor_id: SponsorIdSchema,
+  event_id: z.string().regex(/^[A-Za-z][A-Za-z0-9-]{0,79}$/),
+  seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  created_at: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
+};
+
+/** Public attribution is derived from the committed event, never request data.
+ * A conflict records a refusal; it does not adjudicate scientific standing. */
+export const ProtocolConflictRecordSchema = z
+  .object({ ...ProtocolConflictIdentityFields, ...ProtocolConflictPublicFields })
+  .strict();
+export type ProtocolConflictRecord = z.infer<typeof ProtocolConflictRecordSchema>;
+
+/** A durable private receipt retains identity without republishing hidden prose. */
+export const ProtocolConflictReceiptSchema = z
+  .object({ ...ProtocolConflictIdentityFields, ok: z.literal(true) })
+  .strict();
+export type ProtocolConflictReceipt = z.infer<typeof ProtocolConflictReceiptSchema>;
 
 /** A continuation is a read cursor, never an authority or an inbox cursor. */
 export const ACTIVE_DIRECTIVE_CURSOR_PATTERN = /^ad1\.[a-f0-9]{64}\.[0-9]{1,16}\.[1-9][0-9]{0,15}$/;
@@ -163,6 +213,10 @@ export function generateDirectivesSchema(): string {
       list: z.toJSONSchema(SponsorDirectiveListResponseSchema),
       active_query: z.toJSONSchema(ActiveDirectiveQuerySchema),
       active_response: z.toJSONSchema(ActiveDirectiveResponseSchema),
+      protocol_conflict_request: z.toJSONSchema(ProtocolConflictRequestSchema),
+      protocol_conflict_payload: z.toJSONSchema(ProtocolConflictPayloadSchema),
+      protocol_conflict_record: z.toJSONSchema(ProtocolConflictRecordSchema),
+      protocol_conflict_receipt: z.toJSONSchema(ProtocolConflictReceiptSchema),
     },
     null,
     2,

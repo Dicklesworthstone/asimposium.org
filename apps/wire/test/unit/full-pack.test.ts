@@ -600,6 +600,68 @@ function fixture() {
 }
 
 describe("full public ledger packs", () => {
+  test("protocol conflicts retain public refusal prose and source controls in full agent reads", async () => {
+    const f = fixture();
+    const id = `PC-${"a".repeat(32)}`;
+    const payload = {
+      conflict_id: id,
+      rule_cited: "A4",
+      refused_part: "Presenting unsupported work as certified.",
+      explanation: "I will keep the uncertainty visible and request independent review.",
+    };
+    try {
+      await f.append("protocol_conflict.recorded", "protocol-conflict", id, payload);
+      const result = await f.read();
+      expect(result.records[0]).toMatchObject({
+        content: payload,
+        content_omitted: null,
+        content_url: `/p/P-DEMO/protocol-conflicts/${id}.json`,
+      });
+      expect(result.body).not.toContain(PRIVATE);
+      expect(f.queries.some((query) => /\bsponsor_directives\b/.test(query))).toBe(false);
+      f.control(id, "hidden");
+      const hidden = await f.read();
+      expect(hidden.records[0]).toMatchObject({
+        content: null,
+        content_omitted: "content_unavailable",
+      });
+      expect(hidden.body).not.toContain(payload.explanation);
+      f.control(id, "visible");
+      expect((await f.read()).records[0].content).toEqual(payload);
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test("full reads withhold mismatched or privately contaminated protocol conflict payloads", async () => {
+    const id = `PC-${"a".repeat(32)}`;
+    const payload = {
+      conflict_id: id,
+      rule_cited: "A4",
+      refused_part: "Presenting unsupported work as certified.",
+      explanation: "A public explanation that must not be shown for a malformed record.",
+    };
+    for (const [body, version] of [
+      [{ ...payload, conflict_id: `PC-${"b".repeat(32)}` }, 1],
+      [{ ...payload, directive_id: PRIVATE }, 1],
+      [payload, 2],
+    ] as const) {
+      const f = fixture();
+      try {
+        await f.append("protocol_conflict.recorded", "protocol-conflict", id, body, version);
+        const result = await f.read();
+        expect(result.records[0]).toMatchObject({
+          content: null,
+          content_omitted: "content_unavailable",
+        });
+        expect(result.body).not.toContain(payload.explanation);
+        expect(result.body).not.toContain(PRIVATE);
+      } finally {
+        f.sql.close();
+      }
+    }
+  });
+
   test("a hidden public scope is distinguished from a source failure and restored at the same cut", async () => {
     const f = fixture();
     try {

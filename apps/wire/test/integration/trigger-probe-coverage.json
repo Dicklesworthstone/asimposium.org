@@ -1,5 +1,6 @@
 {
   "lanes": {
+    "protocol-conflicts": ["protocol_conflicts_no_delete", "protocol_conflicts_no_update"],
     "area-discovery": [
       "area_renames_append_only_delete",
       "area_renames_append_only_update",
@@ -224,7 +225,9 @@
     "sponsor_device_enrollment_attempts_immutable_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_device_enrollment_attempts that this trigger guards",
     "sponsor_device_enrollment_attempts_immutable_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_device_enrollment_attempts that this trigger guards",
     "sponsor_fellow_cap_audit_events_immutable_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_fellow_cap_audit_events that this trigger guards",
-    "sponsor_fellow_cap_audit_events_immutable_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_fellow_cap_audit_events that this trigger guards"
+    "sponsor_fellow_cap_audit_events_immutable_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_fellow_cap_audit_events that this trigger guards",
+    "sponsor_problem_hide_receipts_append_only_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_problem_hide_receipts that this trigger guards",
+    "sponsor_problem_hide_receipts_append_only_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_problem_hide_receipts that this trigger guards"
   },
   "definitions": {
     "area_renames_append_only_delete": "7956ae24e7fd1a3be66b2f3777c066606b4f49bac561b37f603c314591aa9aab",
@@ -352,6 +355,8 @@
     "problem_statement_versions_immutable_update": "791f0cd8b66acd7a7a136e46b2a5e4c3197cd2a0e00ae899af2fe30f640ded88",
     "proof_gaps_immutable_delete": "f31518e11f9370714ebc69ccf909b40fdcc8ca95346acbb2ebefa1903ea4381b",
     "proof_gaps_immutable_update": "1b404831a94e0db899fc26a6fbdc576c0a1776ae5e8b6b4f6d3bef60e90832b4",
+    "protocol_conflicts_no_delete": "c7c828154d784f8c971056a127320623e25d0a3045d2305e4951275fea9dc1ae",
+    "protocol_conflicts_no_update": "46ea95a6b09d9b2b7e06116a83bf33dc1cf4a6bd644f8b75cb234db23f1579f6",
     "public_write_reservations_no_delete": "519095d978e9e286898dbb337df9e70b04f52f83313f1e94fd38ee5c15982fec",
     "public_write_reservations_update_guard": "20b3af9710e1016c0191faa6a47e439bfceec4aa9cd22e68896ec624a90165d3",
     "questions_immutable_delete": "6554f9bc3e0bc5c9e9d4956d6d75ec89a07a85d6bf6af27586b6b873620e6179",
@@ -430,6 +435,8 @@
     "suspended_sponsor_workshop_revise": "be13061436827098b83f9536c22c977f641eeab34c4c372bcbf27391c08ce351",
     "workshop_objects_cas_spill_extract_update": "9087a08f46d9cccb04f1f7d56a40507da33ffb8af071d081c5132fce194aff8e",
     "workshop_revision_immutable": "ca9caa5f963721bb5ecbcd8e26fb427309c11ae9f1dd6c0819af9701f8ffeed8",
-    "workshop_revisions_immutable": "1ad90d04e2b9c256a457cbebfe0ab393e41cf77731c22ee10800a2652fefd728"
+    "workshop_revisions_immutable": "1ad90d04e2b9c256a457cbebfe0ab393e41cf77731c22ee10800a2652fefd728",
+    "sponsor_problem_hide_receipts_append_only_update": "82f2a353128e8a2c09ebbaeed4adc26569d9b7da998070225bfd721ebbbfecac",
+    "sponsor_problem_hide_receipts_append_only_delete": "55394d20ef6a1caf4916352d5023c0d7ac861ba74074f47532c8d06a7ce4a9ad"
   }
 }

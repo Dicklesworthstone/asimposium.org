@@ -14,6 +14,7 @@ import type { Env } from "../../src/env.ts";
 import { checkpointSigningKey } from "../../src/krater/checkpoint-signing.ts";
 import {
   applyDeletionJournal,
+  parseAndVerifyDeletionJournal,
   readDeletionJournalRecords,
   serializeDeletionJournal,
 } from "../../src/krater/retention.ts";
@@ -542,10 +543,14 @@ describe("reviewed sponsor suspension", () => {
       );
       if (!signing) throw new Error("fixture signing unavailable");
       const journal = await serializeDeletionJournal(controls, new Date().toISOString(), signing);
+      const verifyKeys = [{ kid: signing.kid, publicKeyHex: signing.publicKeyHex }];
+      const verified = await parseAndVerifyDeletionJournal(journal, verifyKeys);
+      if (!verified.valid) throw new Error(verified.reason);
       const options = {
         targetIdentifier: "scratch_suspension_restore",
         deletionJournalNdjson: journal,
-        verifyKeys: [{ kid: signing.kid, publicKeyHex: signing.publicKeyHex }],
+        verifyKeys,
+        readCurrentJournal: async () => verified.head,
       };
       await expect(applyDeletionJournal({ ...options, db: old.db })).rejects.toThrow(
         "SPONSOR_SUSPENSION_RESTORE_REQUIRED",

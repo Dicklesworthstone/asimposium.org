@@ -3,6 +3,7 @@ import type {
   SponsorDirectiveReceipt,
   SponsorDirectiveRequest,
 } from "@asimposium/contracts/directives";
+import type { AdminContentControlResponse, SponsorProblemHideReceipt } from "@asimposium/contracts";
 import type { SponsorWriterCapReceipt, StoaCall } from "../../lib/stoa.ts";
 
 mock.module("server-only", () => ({}));
@@ -28,6 +29,34 @@ describe("issueSponsorDirective server action", () => {
   let realStoa: typeof import("../../lib/stoa.ts");
   let realAuth: typeof import("../../auth.ts");
   let currentAuthSponsorId: string | null = VALID_SPONSOR_ID;
+  let currentAuthIssuedAt: number | undefined = Math.floor(Date.now() / 1000);
+  let realCache: typeof import("next/cache");
+  let operatorAllowed = false;
+  const hideCalls: unknown[][] = [];
+  const operatorCalls: unknown[][] = [];
+  const revalidatedPaths: unknown[][] = [];
+  const hideReceipt: SponsorProblemHideReceipt = {
+    ok: true,
+    problem_id: "P-SP4D",
+    action: "hide",
+    visibility: "hidden",
+    actor_kind: "sponsor",
+    control_id: `CC-${"0".repeat(26)}`,
+    version: 1,
+    applied_at: "2026-11-11T12:00:00.000Z",
+  };
+  let hideResult: StoaCall<SponsorProblemHideReceipt> = { ok: true, data: hideReceipt };
+  const operatorReceipt: AdminContentControlResponse = {
+    ok: true,
+    target_id: "P-SP4D",
+    action: "hide",
+    audit_event_id: "OA-operator-fixture",
+    applied_at: hideReceipt.applied_at,
+  };
+  let operatorResult: StoaCall<AdminContentControlResponse> = {
+    ok: true,
+    data: operatorReceipt,
+  };
   const capture: {
     lastStoaCallArgs: {
       principalId: string;
@@ -55,13 +84,29 @@ describe("issueSponsorDirective server action", () => {
   beforeAll(async () => {
     realStoa = { ...(await import("../../lib/stoa.ts")) };
     realAuth = { ...(await import("../../auth.ts")) };
+    realCache = { ...(await import("next/cache")) };
+    mock.module("next/cache", () => ({
+      ...realCache,
+      revalidatePath: (...args: unknown[]) => { revalidatedPaths.push(args); },
+    }));
 
     mock.module("@/auth", () => ({
       auth: async () =>
-        currentAuthSponsorId ? { user: { id: currentAuthSponsorId } } : null,
+        currentAuthSponsorId
+          ? { user: { id: currentAuthSponsorId }, authIssuedAt: currentAuthIssuedAt }
+          : null,
     }));
 
     mock.module("@/lib/stoa", () => ({
+      operatorPrincipalIsAllowed: () => operatorAllowed,
+      stoaHideProblem: async (...args: unknown[]) => {
+        hideCalls.push(args);
+        return hideResult;
+      },
+      stoaAdminContentControl: async (...args: unknown[]) => {
+        operatorCalls.push(args);
+        return operatorResult;
+      },
       stoaIssueDirective: async (
         principalId: string,
         request: SponsorDirectiveRequest,
@@ -86,6 +131,7 @@ describe("issueSponsorDirective server action", () => {
   afterAll(() => {
     mock.module("@/lib/stoa", () => realStoa);
     mock.module("@/auth", () => realAuth);
+    mock.module("next/cache", () => realCache);
   });
 
   test("rejects when unauthenticated", async () => {
@@ -440,15 +486,119 @@ describe("issueSponsorDirective server action", () => {
       expect(writerCapCalls).toHaveLength(0);
     });
 
-    test("unsupported hiding does not claim a governance change or expose the reason", async () => {
+    test("hide sends the owner command with server authentication and preserves reason privacy", async () => {
       currentAuthSponsorId = VALID_SPONSOR_ID;
-      const result = await executeDirectorCommand("hide P-SP4D private moderation context", VALID_IDEMPOTENCY_KEY);
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.code).toBe("DIRECTOR_ACTION_UNAVAILABLE");
+      currentAuthIssuedAt = Math.floor(Date.now() / 1000);
+      operatorAllowed = false;
+      hideResult = { ok: true, data: hideReceipt };
+      hideCalls.length = 0;
+      operatorCalls.length = 0;
+      revalidatedPaths.length = 0;
+      const result = await executeDirectorCommand(
+        "hide P-SP4D private moderation context", VALID_IDEMPOTENCY_KEY,
+      );
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.problemHide).toEqual(hideReceipt);
+        expect(result.message).toContain("Hide recorded for P-SP4D");
+        expect(result.message).toContain("later operator decisions");
         expect(result.message).not.toContain("private moderation context");
-        expect(result.handoff?.href).toBe("/p/P-SP4D");
       }
+      expect(hideCalls).toEqual([[
+        VALID_SPONSOR_ID,
+        "P-SP4D",
+        {
+          problem_id: "P-SP4D",
+          reason: "private moderation context",
+          step_up_authenticated_at: currentAuthIssuedAt,
+        },
+        VALID_IDEMPOTENCY_KEY,
+      ]]);
+      expect(operatorCalls).toHaveLength(0);
+      expect(revalidatedPaths).toEqual([["/", "layout"]]);
+    });
+
+    test("hide requires recent Google authentication before either authority path", async () => {
+      currentAuthSponsorId = VALID_SPONSOR_ID;
+      hideCalls.length = 0;
+      operatorCalls.length = 0;
+      revalidatedPaths.length = 0;
+      const now = Math.floor(Date.now() / 1000);
+      for (const isOperator of [false, true]) {
+        operatorAllowed = isOperator;
+        for (const time of [undefined, now - 2000, now + 2000, Number.NaN]) {
+          currentAuthIssuedAt = time;
+          const result = await executeDirectorCommand(
+            "hide P-SP4D private moderation context", VALID_IDEMPOTENCY_KEY,
+          );
+          expect(result.ok).toBe(false);
+          if (!result.ok) expect(result.code).toBe("STEP_UP_REQUIRED");
+        }
+      }
+      expect(hideCalls).toHaveLength(0);
+      expect(operatorCalls).toHaveLength(0);
+      expect(revalidatedPaths).toHaveLength(0);
+      operatorAllowed = false;
+      currentAuthIssuedAt = now;
+    });
+
+    test("authorized operators retain the existing strict signed content-control path", async () => {
+      currentAuthSponsorId = VALID_SPONSOR_ID;
+      currentAuthIssuedAt = Math.floor(Date.now() / 1000);
+      operatorAllowed = true;
+      operatorResult = { ok: true, data: operatorReceipt };
+      operatorCalls.length = 0;
+      hideCalls.length = 0;
+      revalidatedPaths.length = 0;
+      const result = await executeDirectorCommand(
+        "hide P-SP4D private operator reason", VALID_IDEMPOTENCY_KEY,
+      );
+      expect(result.ok).toBe(true);
+      expect(hideCalls).toHaveLength(0);
+      expect(operatorCalls).toEqual([[
+        VALID_SPONSOR_ID,
+        {
+          target_id: "P-SP4D",
+          target_kind: "problem",
+          action: "hide",
+          reason: "private operator reason",
+        },
+        VALID_IDEMPOTENCY_KEY,
+      ]]);
+      expect(revalidatedPaths).toEqual([["/", "layout"]]);
+      operatorCalls.length = 0;
+      expect((await executeDirectorCommand("hide P-SP4D short", VALID_IDEMPOTENCY_KEY)).ok)
+        .toBe(false);
+      expect(operatorCalls).toHaveLength(0);
+      operatorAllowed = false;
+    });
+
+    test("hide refusals, transport loss and mismatched receipts never claim success or clear caches", async () => {
+      currentAuthSponsorId = VALID_SPONSOR_ID;
+      currentAuthIssuedAt = Math.floor(Date.now() / 1000);
+      operatorAllowed = false;
+      revalidatedPaths.length = 0;
+      for (const failure of [
+        { ok: false, reason: "unconfigured" },
+        { ok: false, reason: "unreachable" },
+        { ok: false, reason: "refused", status: 404 },
+        { ok: false, reason: "refused", status: 409 },
+        { ok: true, data: { ...hideReceipt, problem_id: "P-OTHER" } },
+      ] as const) {
+        hideResult = failure;
+        expect((await executeDirectorCommand(
+          "hide P-SP4D private moderation context", VALID_IDEMPOTENCY_KEY,
+        )).ok).toBe(false);
+      }
+      operatorAllowed = true;
+      operatorResult = { ok: true, data: { ...operatorReceipt, action: "restore" } };
+      expect((await executeDirectorCommand(
+        "hide P-SP4D private moderation context", VALID_IDEMPOTENCY_KEY,
+      )).ok).toBe(false);
+      expect(revalidatedPaths).toHaveLength(0);
+      operatorAllowed = false;
+      hideResult = { ok: true, data: hideReceipt };
+      operatorResult = { ok: true, data: operatorReceipt };
     });
 
     test("invalid commands and retry keys never reach a mutation", async () => {

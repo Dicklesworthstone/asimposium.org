@@ -3736,6 +3736,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       packProblem.admission_mode !== "archived-read-only" &&
       packProblem.status !== "resolved" &&
       packProblem.status !== "retired";
+    const protocolConflictAvailable =
+      packProblem !== null &&
+      !isPrivateDraft &&
+      packProblem.admission_mode !== "archived-read-only";
     const currentCursor = await readCursor(db, session.problem_id);
     let cursor = currentCursor;
     let fullAfter = 0;
@@ -4200,7 +4204,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     try {
       // Every contextual profile uses the current Fellow's instruction channel.
       // The public full export returns above and never reads private steering.
-      directiveContext = await readActiveSponsorDirectives(db, auth.binding, session.problem_id);
+      directiveContext = await readActiveSponsorDirectives(
+        db,
+        auth.binding,
+        session.problem_id,
+        protocolConflictAvailable && profile !== "digest" ? session.session_id : undefined,
+      );
     } catch {
       return privateNoStore(
         validatedProblem({
@@ -4775,6 +4784,25 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         usage: authorizationUsage,
         now: authorizationObservedAt,
       }).decision === "allow";
+    if (
+      protocolConflictAvailable &&
+      !promotionLimited &&
+      (authorizeFellowWrite({
+        effect: "review",
+        credential: auth.binding,
+        target: { ...authorizationTarget, action: "protocol-conflict" },
+        usage: authorizationUsage,
+        now: authorizationObservedAt,
+      }).decision === "allow" ||
+        authorizeFellowWrite({
+          effect: "promote",
+          credential: auth.binding,
+          target: { ...authorizationTarget, action: "protocol-conflict" },
+          usage: authorizationUsage,
+          now: authorizationObservedAt,
+        }).decision === "allow")
+    )
+      actionPermissions.push("protocol-conflict:write");
     const workingMoves =
       profile === "working"
         ? await readWorkingMovesPack({

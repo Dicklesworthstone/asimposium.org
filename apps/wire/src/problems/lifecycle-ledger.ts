@@ -62,6 +62,13 @@ import {
 } from "./access-actions.ts";
 import { problemBoundariesRequired, problemBoundaryFields } from "./boundaries.ts";
 import {
+  getProblemCreationBudget,
+  isProblemCreationRateLimitError,
+  problemCreationAccountingStatements,
+  problemCreationQuotaUnavailableProblem,
+  problemCreationRateLimitedProblem,
+} from "./creation-quota.ts";
+import {
   loadProblemPublicationSnapshot,
   type ProblemPublicationSnapshot,
   problemPublicationGuard,
@@ -627,6 +634,13 @@ export async function applyPublicProblemGovernance(
       )
     )
       return problemBoundariesRequired();
+    try {
+      const budget = await getProblemCreationBudget(db, sponsorId, Date.parse(now));
+      if (budget.remaining === 0)
+        return (await replay()) ?? problemCreationRateLimitedProblem(budget);
+    } catch {
+      return problemCreationQuotaUnavailableProblem();
+    }
     forkedProblemId = `P-${crypto.randomUUID().replaceAll("-", "").slice(0, 26).toUpperCase()}`;
   }
 
@@ -1373,6 +1387,12 @@ export async function applyPublicProblemGovernance(
                   "[]",
                   eventId,
                 ),
+              ...problemCreationAccountingStatements(
+                db,
+                sponsorId,
+                forkedProblemId,
+                Date.parse(now),
+              ),
               db
                 .prepare(`
                   INSERT INTO problem_statement_versions (
@@ -1479,6 +1499,15 @@ export async function applyPublicProblemGovernance(
     if (reservationId !== undefined)
       await settleQuotaReservation(db, reservationId, "settled_failed");
     if (winner) return winner;
+    if (isProblemCreationRateLimitError(error)) {
+      try {
+        const budget = await getProblemCreationBudget(db, sponsorId, Date.parse(now));
+        if (budget.remaining === 0) return problemCreationRateLimitedProblem(budget);
+      } catch {
+        return problemCreationQuotaUnavailableProblem();
+      }
+      return problemCreationQuotaUnavailableProblem();
+    }
     if (isScreeningDecisionChangedError(error))
       return screeningHoldResponse("provider-unavailable");
     if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();

@@ -44,7 +44,8 @@ function sampleFor(honoPath: string): string {
     if (name === "publicationId") return `AP-${"b".repeat(32)}`;
     if (name === "evidenceId") return "E-1";
     if (name === "eventId") return `DD-${"a".repeat(32)}`;
-    if (name === "document") return `DD-${"a".repeat(32)}.json`;
+    if (name === "document")
+      return `${honoPath.includes("/protocol-conflicts/") ? "PC" : "DD"}-${"a".repeat(32)}.json`;
     if (name === "target") {
       if (honoPath.includes("/syntheses/")) return "SYNTH-1.json";
       if (honoPath.includes("/citations/")) return "L-1.json";
@@ -374,14 +375,35 @@ describe("discovery generators (W1.6)", () => {
   });
 
   test("every request reference resolves to the public Zod-generated schema", () => {
+    const openapi = JSON.parse(generateOpenApiDocument());
     for (const operation of DISCLOSED_OPERATIONS) {
       if (operation.requestSchema === undefined) continue;
       const [id, property] = operation.requestSchema.split(":");
       const schema = listPublicSchemas().find((doc) => doc.id === id);
       expect(schema, operation.honoPath).toBeDefined();
-      const parsed = JSON.parse(schema?.body ?? "{}") as { properties?: Record<string, unknown> };
-      expect(parsed.properties?.[property ?? ""], operation.honoPath).toBeDefined();
+      if (schema === undefined) throw new Error("Missing registered request schema");
+      const reference = openapi.paths[operation.openApiPath][operation.method.toLowerCase()]
+        .requestBody.content["application/json"].schema.$ref as string;
+      const [documentUrl, pointer] = reference.split("#");
+      expect(documentUrl).toBe(`${DISCOVERY_ORIGINS.agent}${schema.served_at}`);
+      expect(pointer?.startsWith("/")).toBe(true);
+      const segments = (pointer ?? "")
+        .slice(1)
+        .split("/")
+        .map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"));
+      expect(segments.at(-1)).toBe(property);
+      let selected: unknown = JSON.parse(schema.body);
+      for (const segment of segments) {
+        expect(selected !== null && typeof selected === "object", reference).toBe(true);
+        selected = (selected as Record<string, unknown>)[segment];
+      }
+      expect(selected, reference).toBeDefined();
     }
+    expect(
+      openapi.paths["/v1/sessions/{id}/protocol-conflicts"].post.requestBody.content[
+        "application/json"
+      ].schema.$ref,
+    ).toBe(`${DISCOVERY_ORIGINS.agent}/schemas/directives.v1.json#/protocol_conflict_request`);
   });
 
   test("pre-credential operations require their flow material; private reads require bearer", () => {

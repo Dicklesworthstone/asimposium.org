@@ -297,7 +297,7 @@ function renderModerationLogMarkdown(
     `<!-- asimp schema=${MODERATION_LOG_SCHEMA_ID} cursor=${nextCursor} -->`,
     "# Moderation log",
     "",
-    "Every screening hold, release, rejection, hide, restore and report outcome, in quarantine notation: the coarse category and the action, never the content, the matched pattern, or who reported it. A hidden object is under review, not convicted. Scientific dispositions are never moderated.",
+    "Every screening hold, release, rejection, hide, restore and report outcome, in quarantine notation: the coarse category and the action, never the content, the matched pattern, or who reported it. Hiding may follow sponsor withdrawal or moderation review. Scientific dispositions are unchanged.",
     "",
   ];
   if (entries.length === 0) {

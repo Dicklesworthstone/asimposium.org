@@ -1,6 +1,7 @@
 import { PackResponseSchema, PackTargetQuerySchema } from "@asimposium/contracts";
 import { Hono } from "hono";
 import { cancelUnconsumedRequestBody } from "../auth/http.ts";
+import { createProtocolConflictRouter } from "../directives/protocol-conflict-router.ts";
 import type { Env } from "../env.ts";
 import { validatedProblem } from "../http/envelope.ts";
 import { createReviewRequestRouter } from "../review-requests/router.ts";
@@ -158,6 +159,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   });
   app.route("/", createSponsorWorkshopIndexRouter(options));
+  app.route("/", createProtocolConflictRouter(options));
   app.route("/", createScientificWithdrawalRouter(options));
   app.route("/", createReviewRequestRouter(options));
   app.route("/", createFrictionRouter(ledger));

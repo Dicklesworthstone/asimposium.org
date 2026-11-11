@@ -21,6 +21,7 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { inboxNoticeStatement } from "../inbox/notice-write.ts";
+import { contentControlJournalStatements } from "../krater/retention.ts";
 import { type OperatorCommand, operatorReceiptStatements } from "./operator-command.ts";
 import {
   REPORT_SOURCE_PIN_AVAILABLE_SQL,
@@ -484,7 +485,7 @@ export async function hiddenTargets(db: D1Database, problemId: string): Promise<
   return new Set((rows.results ?? []).map((row) => row.target_ref));
 }
 
-function contentControlStatement(
+async function contentControlStatements(
   db: D1Database,
   input: {
     readonly controlId: string;
@@ -497,16 +498,20 @@ function contentControlStatement(
     readonly actor: string;
     readonly reason: string;
     readonly createdAt: string;
+    readonly previous: ContentControlRow | undefined;
   },
   guardSql?: { readonly sql: string; readonly bindings: readonly unknown[] },
-): D1PreparedStatement {
+): Promise<D1PreparedStatement[]> {
   const guard = guardSql === undefined ? "" : ` WHERE ${guardSql.sql}`;
-  return db
+  const version = (input.previous?.version ?? 0) + 1;
+  const control = db
     .prepare(
       `INSERT INTO content_controls
          (control_id, problem_id, target_kind, target_ref, visibility, source, reason_category, actor, reason, version, created_at)
        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?,
-              (SELECT COALESCE(MAX(version), 0) + 1 FROM content_controls WHERE problem_id = ? AND target_ref = ?), ?${guard}`,
+              CASE WHEN COALESCE((SELECT control_id FROM content_controls
+                WHERE problem_id = ? AND target_ref = ? ORDER BY version DESC LIMIT 1), '') = ?
+                THEN ? ELSE abs(-9223372036854775808) END, ?${guard}`,
     )
     .bind(
       input.controlId,
@@ -520,9 +525,28 @@ function contentControlStatement(
       input.reason,
       input.problemId,
       input.targetRef,
+      input.previous?.control_id ?? "",
+      version,
       input.createdAt,
       ...(guardSql?.bindings ?? []),
     );
+  return [
+    control,
+    ...(await contentControlJournalStatements(db, {
+      control_id: input.controlId,
+      problem_id: input.problemId,
+      target_kind: input.targetKind,
+      target_ref: input.targetRef,
+      visibility: input.visibility,
+      source: input.source,
+      reason_category: input.reasonCategory,
+      actor: input.actor,
+      reason: input.reason,
+      version,
+      created_at: input.createdAt,
+      actor_kind: null,
+    })),
+  ];
 }
 
 /** Operator hide/restore. A no-op transition (already in that state) is refused. */
@@ -555,7 +579,7 @@ export async function applyOperatorControl(
     bindings: [controlId],
   };
   const [control] = await db.batch([
-    contentControlStatement(
+    ...(await contentControlStatements(
       db,
       {
         controlId,
@@ -568,6 +592,7 @@ export async function applyOperatorControl(
         actor: operatorId,
         reason: input.reason,
         createdAt: appliedAt,
+        previous: current,
       },
       {
         // A stale pre-read must not overwrite another operator's newer decision.
@@ -581,7 +606,7 @@ export async function applyOperatorControl(
           ...targetGuard.bindings,
         ],
       },
-    ),
+    )),
     operatorAuditStatement(
       db,
       {
@@ -652,6 +677,7 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
   const createdAt = new Date().toISOString();
   const windowStart = new Date(Date.parse(createdAt) - REPORT_WINDOW_MS).toISOString();
   const controlId = mintModerationId("CC");
+  const current = await currentContentControl(db, input.problemId, input.targetRef);
   const sourceGuard =
     input.source === undefined
       ? input.requireSource
@@ -714,26 +740,23 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
         REPORTS_PER_SPONSOR_PER_DAY,
         ...sourceBindings,
       ),
-    db
-      .prepare(
-        `INSERT INTO content_controls
-           (control_id, problem_id, target_kind, target_ref, visibility, source, reason_category, actor, reason, version, created_at)
-         SELECT ?, ?, ?, ?, 'hidden', 'community-reports', ?, 'platform:symposiarch',
-                'Hidden pending review: reports from ${COMMUNITY_HIDE_THRESHOLD} independent sponsors.',
-                (SELECT COALESCE(MAX(version), 0) + 1 FROM content_controls WHERE problem_id = ? AND target_ref = ?), ?
-         WHERE ${crossesThreshold}`,
-      )
-      .bind(
+    ...(await contentControlStatements(
+      db,
+      {
         controlId,
-        input.problemId,
-        input.targetKind,
-        input.targetRef,
-        input.reason,
-        input.problemId,
-        input.targetRef,
+        problemId: input.problemId,
+        targetKind: input.targetKind,
+        targetRef: input.targetRef,
+        visibility: "hidden",
+        source: "community-reports",
+        reasonCategory: input.reason,
+        actor: "platform:symposiarch",
+        reason: `Hidden pending review: reports from ${COMMUNITY_HIDE_THRESHOLD} independent sponsors.`,
         createdAt,
-        ...thresholdBindings,
-      ),
+        previous: current,
+      },
+      { sql: crossesThreshold, bindings: thresholdBindings },
+    )),
     moderationLogStatement(
       db,
       {
@@ -950,6 +973,7 @@ export async function resolveReport(
       { requirePublication: false },
     );
     const controlId = mintModerationId("CC");
+    const previous = await currentContentControl(db, report.problem_id, report.target_ref);
     const visibility = status === "upheld" ? "hidden" : "visible";
     const latestControl = `c.problem_id = ? AND c.target_ref = ?
       AND c.version = (SELECT MAX(latest.version) FROM content_controls latest
@@ -965,7 +989,7 @@ export async function resolveReport(
           WHERE remaining.problem_id = ? AND remaining.target_ref = ?
             AND remaining.status IN ('pending', 'upheld'))`;
     statements.push(
-      contentControlStatement(
+      ...(await contentControlStatements(
         db,
         {
           controlId,
@@ -978,6 +1002,7 @@ export async function resolveReport(
           actor: operatorId,
           reason: input.reason,
           createdAt: resolvedAt,
+          previous,
         },
         {
           sql: `${audited.sql} AND ${mayChange} AND (${targetGuard.sql})`,
@@ -989,7 +1014,7 @@ export async function resolveReport(
             ...targetGuard.bindings,
           ],
         },
-      ),
+      )),
       moderationLogStatement(
         db,
         {

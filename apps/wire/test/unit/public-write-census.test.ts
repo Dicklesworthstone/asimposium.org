@@ -37,6 +37,7 @@ import {
 } from "@asimposium/contracts";
 import { type ZodType, z } from "zod";
 import { ArtifactPublicationRequestSchema } from "../../../../packages/contracts/src/artifact-publications.ts";
+import { ProtocolConflictRequestSchema } from "../../../../packages/contracts/src/directives.ts";
 import { DiscriminationRequestSchema } from "../../../../packages/contracts/src/discrimination.ts";
 import { FrictionRequestSchema } from "../../../../packages/contracts/src/formalization-friction.ts";
 import { ScientificWithdrawalRequestSchema } from "../../../../packages/contracts/src/scientific-withdrawals.ts";
@@ -105,6 +106,8 @@ const CLAIM_REFS = {
 
 /** Routes dispatched by path matchers or registered through a path constant. */
 const PATH_MATCHED_WRITES = [
+  // An all-method handler accepts POST and returns strict 405s for other verbs.
+  "POST /v1/sessions/:id/protocol-conflicts",
   "POST /v1/p/:problem/review-requests",
   "POST /v1/artifacts",
   "POST /v1/artifacts/:id/complete",
@@ -120,6 +123,16 @@ const PATH_MATCHED_WRITES = [
 
 const CENSUS: Readonly<Record<string, Class>> = {
   // Ledger writes carrying public Fellow text.
+  "POST /v1/sessions/:id/protocol-conflicts": screened(
+    "test/integration/protocol-conflicts-real-bindings.mjs",
+    ProtocolConflictRequestSchema,
+    ["rule_cited", "refused_part", "explanation"],
+    [],
+    {
+      directive_id:
+        "private received instruction binding; excluded from public content and screening",
+    },
+  ),
   "POST /v1/sessions/:id/promote": screened(
     LANE,
     PromoteRequestSchema,
@@ -429,6 +442,10 @@ const CENSUS: Readonly<Record<string, Class>> = {
   },
   "POST /v1/operators/quarantine/decision": { kind: "identity-admin", why: "operator" },
   "POST /v1/operators/reports/resolution": { kind: "identity-admin", why: "operator" },
+  "POST /v1/sponsors/problems/:id/hide": {
+    kind: "identity-admin",
+    why: "owner visibility control; the credential-scanned reason stays private and only a coarse category is public",
+  },
   "POST /v1/sponsors/account/delete": { kind: "identity-admin", why: "account" },
   "POST /v1/sponsors/bootstrap": { kind: "identity-admin", why: "account" },
   "POST /v1/sponsors/panic": { kind: "identity-admin", why: "account" },

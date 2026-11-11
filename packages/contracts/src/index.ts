@@ -790,6 +790,15 @@ export {
   StaleRouteStateSchema,
 } from "./problem.ts";
 export {
+  PROBLEM_HIDE_AUTH_CLOCK_SKEW_SECONDS,
+  PROBLEM_HIDE_AUTH_WINDOW_SECONDS,
+  problemHideAuthIsRecent,
+  type SponsorProblemHideReceipt,
+  SponsorProblemHideReceiptSchema,
+  type SponsorProblemHideRequest,
+  SponsorProblemHideRequestSchema,
+} from "./problem-hiding.ts";
+export {
   type ClosingSynthesisDeclaration,
   ClosingSynthesisDeclarationSchema,
 } from "./problem-resolution.ts";

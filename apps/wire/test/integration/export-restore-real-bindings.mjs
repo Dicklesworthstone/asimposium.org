@@ -25,7 +25,7 @@ const DRAFT_MARKER = "PRIVATE-DRAFT-MARKER-9b2d";
 const TARGET = "scratch-restore-proof";
 
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, reviseStatement, fixtures }) => {
+  async ({ call, enroll, sponsorCall, operatorCall, reviseStatement, fixtures }) => {
     const SPONSOR = "usr_restore_author";
     const author = await enroll("restore-author", SPONSOR);
     const reviewer = await enroll("restore-reviewer", "usr_restore_reviewer");
@@ -162,6 +162,9 @@ await runLocalWorkerJourney(
       author,
       201,
     );
+    await fixtures.publishDeletionJournalTick();
+    const historicalJournal = await fixtures.fetchDeletionJournal();
+    assert.ok(historicalJournal, "retain an authentic journal from before the deletion");
     const privateDraft = (
       await call(
         "/v1/problems",
@@ -225,7 +228,8 @@ await runLocalWorkerJourney(
     // 1b. The paged backup primitive (what a scheduled job calls) survives an
     //     interruption: a one-problem page stops the run, resuming from its
     //     cursor finishes it, and re-running from the start rewrites the same
-    //     content-addressed objects.
+    //     content-addressed objects. A separate sponsor owns this unrelated
+    //     problem; the author's erased draft still consumes its creation slot.
     const second = (
       await call(
         "/v1/problems",
@@ -236,12 +240,12 @@ await runLocalWorkerJourney(
           motivation: "Exercise a resumed backup run.",
           areas: ["number-theory"],
         },
-        author,
+        reviewer,
         201,
       )
     ).problem.id;
     await sponsorCall(
-      SPONSOR,
+      "usr_restore_reviewer",
       "POST",
       `/v1/sponsors/problems/${second}/lifecycle`,
       "problem-lifecycle",
@@ -328,7 +332,24 @@ await runLocalWorkerJourney(
     });
     assert.equal(badJournal.ok, false);
     assert.match(badJournal.message, /DELETION_JOURNAL_VERIFICATION_FAILED/);
+    const historicalVerification = await verifyDeletionJournalOffline({
+      ndjson: historicalJournal,
+      trustedKeys: pinned,
+    });
+    assert.equal(historicalVerification.ok, true, "the older journal is authentically signed");
+    const staleJournal = await fixtures.restoreIntoScratch({
+      key: backup.key,
+      targetIdentifier: TARGET,
+      journal: historicalJournal,
+    });
+    assert.equal(staleJournal.ok, false);
+    assert.match(staleJournal.message, /DELETION_JOURNAL_STALE/);
     assert.equal(await scratchEvents(), 0, "refused restores wrote nothing");
+    assert.deepEqual(
+      (await fixtures.compareRows("SELECT id FROM problems ORDER BY id", [])).scratch,
+      [],
+      "an authentic stale journal cannot write even the scratch problem head",
+    );
 
     // 3. The verified restore lands only in the scratch database.
     const restored = await fixtures.restoreIntoScratch({
@@ -477,12 +498,96 @@ await runLocalWorkerJourney(
       assert.deepEqual(rows.scratch, [{ n: 1 }], `${table} not duplicated`);
     }
 
+    // 6. A source withdrawal after the backup must survive recovery. The
+    // original journal is authentic but predates the visibility decision.
+    const secondBackup = [...firstPage.written, ...resumed.written].find(
+      (entry) => entry.problemId === second,
+    );
+    assert.ok(secondBackup, "the second problem has a completed pre-hide archive");
+    const privateReason =
+      "PRIVATE-RECOVERY-CONTROL: sponsor withdrawal pending independent review.";
+    await sponsorCall(
+      "usr_restore_reviewer",
+      "POST",
+      `/v1/sponsors/problems/${second}/hide`,
+      "problem.hide",
+      {
+        problem_id: second,
+        reason: privateReason,
+        step_up_authenticated_at: Math.floor(Date.now() / 1000),
+      },
+    );
+    await fixtures.publishDeletionJournalTick();
+    const hiddenJournal = await fixtures.fetchDeletionJournal();
+    assert.ok(
+      hiddenJournal?.includes(privateReason),
+      "private authority retains the exact rationale",
+    );
+    const staleVisibility = await fixtures.restoreIntoScratch({
+      key: secondBackup.key,
+      targetIdentifier: TARGET,
+      journal,
+    });
+    assert.equal(staleVisibility.ok, false);
+    assert.match(staleVisibility.message, /DELETION_JOURNAL_STALE/);
+    assert.deepEqual(
+      (await fixtures.compareRows("SELECT id FROM problems WHERE id = ?", [second])).scratch,
+      [],
+      "stale visibility authority writes no restored problem",
+    );
+    const hiddenRestore = await fixtures.restoreIntoScratch({
+      key: secondBackup.key,
+      targetIdentifier: TARGET,
+      journal: hiddenJournal,
+    });
+    assert.equal(hiddenRestore.ok, true, hiddenRestore.message);
+    assert.ok("inserted" in hiddenRestore.projections, "the hidden problem's projections rebuilt");
+    const visibilityRows = () =>
+      fixtures.compareRows(
+        `SELECT control_id, problem_id, target_kind, target_ref, visibility, source,
+        reason_category, actor, reason, version, created_at, actor_kind
+       FROM content_controls WHERE problem_id = ? ORDER BY target_ref, version`,
+        [second],
+      );
+    let visibility = await visibilityRows();
+    assert.deepEqual(
+      visibility.scratch,
+      visibility.primary,
+      "source identity and version survive exactly",
+    );
+    for (const path of [`/p/${second}.md`, `/v1/problems/${second}`]) {
+      const faces = await fixtures.compareFaces(path);
+      assert.equal(faces.primary.status, 404);
+      assert.equal(faces.scratch.status, 404, "recovery cannot resurrect a withdrawn public face");
+      assert.ok(!faces.scratch.body.includes("Every integer in 0..80"));
+      assert.ok(!faces.scratch.body.includes(privateReason));
+    }
+    await operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+      target_id: second,
+      target_kind: "problem",
+      action: "restore",
+      reason: "Independent review permits this problem to return to public display.",
+    });
+    await fixtures.publishDeletionJournalTick();
+    const visibleJournal = await fixtures.fetchDeletionJournal();
+    const visibleReplay = await fixtures.replayDeletionJournalIntoScratch(visibleJournal);
+    assert.equal(visibleReplay.ok, true, visibleReplay.message);
+    assert.equal((await fixtures.replayDeletionJournalIntoScratch(visibleJournal)).ok, true);
+    visibility = await visibilityRows();
+    assert.deepEqual(visibility.scratch, visibility.primary);
+    assert.equal(visibility.scratch.length, 2, "retry never creates another control version");
+    const visibleFaces = await fixtures.compareFaces(`/p/${second}.md`);
+    assert.equal(visibleFaces.primary.status, 200);
+    assert.deepEqual(visibleFaces.scratch, visibleFaces.primary);
+    assert.ok(!visibleFaces.scratch.body.includes(privateReason));
+
     console.log(
       JSON.stringify({
         stage: "export-restore-journey-passed",
         kind: "export-restore-real-bindings",
         status: "pass",
         events: backup.eventCount,
+        visibility_controls_recovered: true,
         boundary:
           "local Workerd/D1/R2; production backup writer into a BACKUPS bucket; deletion-safe restore into a separately migrated SCRATCH_DB; no production bucket, lifecycle rule, Time Travel or cron",
       }),

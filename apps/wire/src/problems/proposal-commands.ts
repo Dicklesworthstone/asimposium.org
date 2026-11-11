@@ -11,6 +11,12 @@ import { genesisChainDigest, sha256Hex } from "../krater/krater.ts";
 import { normHash } from "../split/policy.ts";
 import { problemBoundariesRequired, problemBoundaryFields } from "./boundaries.ts";
 import { privateBriefResponse } from "./brief-commands.ts";
+import {
+  getProblemCreationBudget,
+  isProblemCreationRateLimitError,
+  problemCreationAccountingStatements,
+  problemCreationRateLimitedProblem,
+} from "./creation-quota.ts";
 import { problemIntentAuthoritySql } from "./problem-intent-authority.ts";
 
 const SCHEMA = "https://a.asimposium.org/schemas/problems.v1.json";
@@ -274,6 +280,10 @@ export async function runProblemProposalCommand(
       );
     }
 
+    const creationBudget = await getProblemCreationBudget(db, binding.sponsorId, now);
+    if (creationBudget.remaining === 0)
+      return (await readReceipt()) ?? problemCreationRateLimitedProblem(creationBudget);
+
     const problemId = `P-${crypto.randomUUID().replace(/-/g, "").slice(0, 26).toUpperCase()}`;
     const timestamp = new Date(now).toISOString();
     const genesis = await genesisChainDigest(problemId);
@@ -299,6 +309,7 @@ export async function runProblemProposalCommand(
           timestamp,
           JSON.stringify(areas),
         ),
+      ...problemCreationAccountingStatements(db, binding.sponsorId, problemId, now),
       // NOT NULL failure aborts every effect, including the draft above, when
       // grant authority, exact brief version or boundaries changed in flight.
       db
@@ -374,16 +385,22 @@ export async function runProblemProposalCommand(
           now + REPLAY_MILLISECONDS,
         ),
     );
+    let creationRateLimited = false;
     try {
       await db.batch(statements);
-    } catch {
+    } catch (error) {
       // The batch may have committed before its transport failed. Recovery
       // must precede mutable brief/duplicate checks, including after failure.
+      creationRateLimited = isProblemCreationRateLimitError(error);
     }
     const committed = await readReceipt();
     if (committed !== null) return committed;
     const changed = await inspectBrief();
     if (changed !== null) return (await readReceipt()) ?? changed;
+    if (creationRateLimited) {
+      const budget = await getProblemCreationBudget(db, binding.sponsorId, now);
+      if (budget.remaining === 0) return problemCreationRateLimitedProblem(budget);
+    }
     throw new Error("PROBLEM_PROPOSAL_RECEIPT_UNCONFIRMED");
   } catch {
     return refusal({

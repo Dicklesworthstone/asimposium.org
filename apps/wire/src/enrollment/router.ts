@@ -119,6 +119,7 @@ import { operatorReportDetail } from "../moderation/report-detail.ts";
 import { fileReportRequest } from "../moderation/router.ts";
 import { problemSlowModeHttp } from "../moderation/slow-mode-http.ts";
 import { sponsorSuspensionHttp } from "../moderation/sponsor-suspension-http.ts";
+import { getProblemCreationBudget } from "../problems/creation-quota.ts";
 import { fellowMayReadAssignedBriefs } from "../problems/fellow-briefs.ts";
 import { rebuildSearchIndex, searchIndexHealth } from "../search/index-health";
 import { getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
@@ -1380,6 +1381,7 @@ export async function buildHelloResponse(input: {
   const { binding, service, db, sponsorPromotionRateLimit } = input;
 
   let promotionBudget: RateLimitBudget | undefined;
+  let problemCreationBudget: RateLimitBudget | undefined;
   let workshopBudget: RateLimitBudget | undefined;
   if (db !== undefined) {
     try {
@@ -1392,6 +1394,11 @@ export async function buildHelloResponse(input: {
       });
     } catch {
       // Safe reads remain usable even if quota storage is unavailable
+    }
+    try {
+      problemCreationBudget = await getProblemCreationBudget(db, binding.sponsorId);
+    } catch {
+      // Omitted capacity is unknown; draft and fork admission still fail closed.
     }
     try {
       workshopBudget = await getWorkshopBudget(db, binding.fellowId);
@@ -1643,6 +1650,9 @@ export async function buildHelloResponse(input: {
         : { fellow_grant_expires_at: binding.grantedResources.fellowGrantExpiresAt }),
     },
     ...(promotionBudget === undefined ? {} : { promotion_budget: promotionBudget }),
+    ...(problemCreationBudget === undefined
+      ? {}
+      : { problem_creation_budget: problemCreationBudget }),
     ...(workshopBudget === undefined ? {} : { workshop_budget: workshopBudget }),
     ...(input.readBudget === undefined ? {} : { read_budget: input.readBudget }),
     ...(assignments !== undefined ? { assignments } : {}),

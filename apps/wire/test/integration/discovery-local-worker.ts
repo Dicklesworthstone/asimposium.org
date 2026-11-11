@@ -1226,8 +1226,20 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     return (await readDeletionJournalRecords(this.env.DB)).length;
   }
 
-  fetchDeletionJournal(): Promise<string | null> {
-    return fetchLatestDeletionJournal(this.env.ARTIFACTS);
+  async fetchDeletionJournal(): Promise<string | null> {
+    const latest = await fetchLatestDeletionJournal(
+      this.env.ARTIFACTS,
+      checkpointVerifyKeys(this.env.CHECKPOINT_VERIFY_KEYS),
+    );
+    return latest?.ndjson ?? null;
+  }
+
+  async #currentDeletionJournalHead() {
+    const latest = await fetchLatestDeletionJournal(
+      this.env.ARTIFACTS,
+      checkpointVerifyKeys(this.env.CHECKPOINT_VERIFY_KEYS),
+    );
+    return latest?.head ?? null;
   }
 
   /** Export/restore journeys only (runLocalWorkerJourney with scratch): the
@@ -1358,7 +1370,10 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
           : snapshot,
         deletionJournalNdjson: input.journal,
         verifyKeys: checkpointVerifyKeys(this.env.CHECKPOINT_VERIFY_KEYS),
-        revokeCredential: retentionCredentialRevoker(new D1EnrollmentStore(this.env.DB)),
+        readCurrentJournal: () => this.#currentDeletionJournalHead(),
+        revokeCredential: retentionCredentialRevoker(
+          new D1EnrollmentStore(this.#scratchBindings().scratchDb),
+        ),
       });
       return {
         ok: true as const,
@@ -1366,6 +1381,30 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
         eventCount: result.eventCount,
         appliedControlsCount: result.appliedControlsCount,
         projections: result.projections,
+      };
+    } catch (error) {
+      return {
+        ok: false as const,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /** Continue current retention controls on an already restored, quarantined
+   * SCRATCH_DB without asking the log importer to overwrite controlled history. */
+  async replayDeletionJournalIntoScratch(ndjson: string | null) {
+    const db = this.#scratchBindings().scratchDb;
+    try {
+      return {
+        ok: true as const,
+        ...(await applyDeletionJournal({
+          db,
+          targetIdentifier: "scratch-restore-proof",
+          deletionJournalNdjson: ndjson,
+          verifyKeys: checkpointVerifyKeys(this.env.CHECKPOINT_VERIFY_KEYS),
+          readCurrentJournal: () => this.#currentDeletionJournalHead(),
+          revokeCredential: retentionCredentialRevoker(new D1EnrollmentStore(db)),
+        })),
       };
     } catch (error) {
       return {
@@ -1473,6 +1512,7 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
           targetIdentifier: "scratch-local-workerd-d1",
           deletionJournalNdjson: ndjson,
           verifyKeys: checkpointVerifyKeys(this.env.CHECKPOINT_VERIFY_KEYS),
+          readCurrentJournal: () => this.#currentDeletionJournalHead(),
           revokeCredential: retentionCredentialRevoker(new D1EnrollmentStore(this.env.DB)),
         })),
       };

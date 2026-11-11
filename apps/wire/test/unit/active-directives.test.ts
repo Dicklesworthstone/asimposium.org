@@ -126,8 +126,8 @@ function fixture() {
     db,
     add,
     seedCredential,
-    read: (problem = "P-ONE", sponsor = "SP-ONE", fellow = "F-ONE") =>
-      readActiveSponsorDirectives(d1, fixtureBinding(fellow, sponsor), problem),
+    read: (problem = "P-ONE", sponsor = "SP-ONE", fellow = "F-ONE", sessionId?: string) =>
+      readActiveSponsorDirectives(d1, fixtureBinding(fellow, sponsor), problem, sessionId),
     counts: () => ({ reads, returnedRows }),
   };
 }
@@ -136,7 +136,12 @@ type Active = Awaited<ReturnType<typeof readActiveSponsorDirectives>>;
 const instructions = (value: Active) =>
   value.candidates.filter((row) => row.kind === "sponsor-directive");
 const ids = (value: Active) => instructions(value).map((row) => row.id);
-const pack = (value: Active, budget = 8000, compact = false) => {
+const pack = (
+  value: Active,
+  budget = 8000,
+  compact = false,
+  permissions: readonly string[] = [],
+) => {
   const input: Parameters<typeof composePack>[0] = {
     schema: "asimposium.pack.v1",
     session: "S-FIXTURE",
@@ -144,7 +149,7 @@ const pack = (value: Active, budget = 8000, compact = false) => {
     profile: "working",
     cursor: 1,
     requested_max_tokens: budget,
-    viewer: { audience: "session", membership: "contributor", effective_permissions: [] },
+    viewer: { audience: "session", membership: "contributor", effective_permissions: permissions },
     candidates: value.candidates,
     action_candidates: compact ? [] : value.actions,
     omitted: value.omitted === null ? [] : [{ reason: "candidate_limit", detail: value.omitted }],
@@ -156,6 +161,28 @@ test("an empty current instruction state adds no invented steering", async () =>
   const f = fixture();
   expect(await f.read()).toEqual({ candidates: [], actions: [], omitted: null });
   expect(f.counts()).toEqual({ reads: 1, returnedRows: 1 });
+});
+
+test("protocol-conflict action requires a received instruction, session and explicit write permission", async () => {
+  const f = fixture();
+  const sessionId = `S-${"A".repeat(26)}`;
+  const read = () => f.read("P-ONE", "SP-ONE", "F-ONE", sessionId);
+  expect((await read()).actions).toEqual([]);
+  f.add("D-CLEAR", "unfocus");
+  expect((await read()).actions.some((action) => action.method === "POST")).toBe(false);
+  f.add("D-FOCUS", "focus", { ack: 2000 });
+  const active = await read();
+  expect(active.actions.find((action) => action.method === "POST")).toMatchObject({
+    url: `/v1/sessions/${sessionId}/protocol-conflicts`,
+    requires: ["protocol-conflict:write"],
+  });
+  expect(pack(active).next_actions.some((action) => action.method === "POST")).toBe(false);
+  expect(
+    pack(active, 8000, false, ["protocol-conflict:write"]).next_actions.some((action) =>
+      action.url.endsWith("/protocol-conflicts"),
+    ),
+  ).toBe(true);
+  expect((await f.read()).actions.some((action) => action.method === "POST")).toBe(false);
 });
 
 test("ACK confirms a focus receipt without withdrawing its active instruction", async () => {

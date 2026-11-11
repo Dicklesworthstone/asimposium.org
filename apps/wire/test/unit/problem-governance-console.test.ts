@@ -15,6 +15,7 @@ import {
   applyPrivateProblemAccessAction,
   replayPrivateProblemAccessAction,
 } from "../../src/problems/access-actions.ts";
+import { getProblemCreationBudget } from "../../src/problems/creation-quota.ts";
 import { readSponsorProblemGovernance } from "../../src/problems/governance-read.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
 import { readProblemPublicationPreview } from "../../src/problems/publication-preview.ts";
@@ -534,6 +535,9 @@ function lineageState(f: Fixture) {
       .query("SELECT * FROM problem_statement_versions ORDER BY problem_id,version")
       .all(),
     forks: f.sql.query("SELECT * FROM problem_forks ORDER BY problem_id").all(),
+    creationAdmissions: f.sql
+      .query("SELECT * FROM problem_creation_admissions ORDER BY problem_id")
+      .all(),
     merges: f.sql.query("SELECT * FROM problem_merges ORDER BY problem_id").all(),
     idempotency: f.sql.query("SELECT * FROM idempotency ORDER BY problem_id,idempotency_key").all(),
     checkpoints: f.sql
@@ -813,4 +817,80 @@ test("reciprocal merges cannot both commit after each target passed preflight", 
   expect(lineageProblem(f, PROBLEM).canonical_problem_id).toBeNull();
   expect(lineageProblem(f, "P-CANONICAL").canonical_problem_id).toBe(PROBLEM);
   expect(f.sql.query("SELECT COUNT(*) AS n FROM problem_merges").get()).toEqual({ n: 1 });
+});
+
+test("forks consume the shared sponsor creation allowance and replay remains free after exhaustion", async () => {
+  const f = await fixture();
+  await publishLineageProblem(f);
+  const action = { action: "fork", title: "First quota variant" } as const;
+  const first = await lineageAction(f, PROBLEM, action, "fork-quota-first");
+  expect(first.status, await first.clone().text()).toBe(200);
+  const accepted = await first.json();
+  const second = await lineageAction(
+    f,
+    PROBLEM,
+    { action: "fork", title: "Second quota variant" },
+    "fork-quota-second",
+  );
+  expect(second.status, await second.clone().text()).toBe(200);
+  const before = lineageState(f);
+  const refused = await lineageAction(
+    f,
+    PROBLEM,
+    { action: "fork", title: "Third quota variant" },
+    "fork-quota-third",
+  );
+  expect(refused.status).toBe(429);
+  expect(Number(refused.headers.get("retry-after"))).toBeGreaterThan(0);
+  expect(await refused.json()).toMatchObject({
+    code: "RATE_LIMITED",
+    limit: 2,
+    remaining: 0,
+    window_seconds: 86_400,
+  });
+  expect(lineageState(f)).toEqual(before);
+  expect(await (await lineageAction(f, PROBLEM, action, "fork-quota-first")).json()).toEqual(
+    accepted,
+  );
+  expect(lineageState(f)).toEqual(before);
+  expect(await getProblemCreationBudget(f.db, SPONSOR)).toMatchObject({ remaining: 0 });
+});
+
+test("competing forks of different parents cannot both consume the final sponsor slot", async () => {
+  const f = await fixture();
+  await publishLineageProblem(f);
+  await publishLineageProblem(f, "P-OTHER-PARENT");
+  expect(
+    (
+      await lineageAction(
+        f,
+        PROBLEM,
+        { action: "fork", title: "First occupied slot" },
+        "fork-race-first",
+      )
+    ).status,
+  ).toBe(200);
+  let afterRace: ReturnType<typeof lineageState> | undefined;
+  const race = beforeLineageBatch(f, async () => {
+    const winner = await lineageAction(
+      f,
+      "P-OTHER-PARENT",
+      { action: "fork", title: "Concurrent final slot" },
+      "fork-race-winner",
+    );
+    expect(winner.status, await winner.clone().text()).toBe(200);
+    afterRace = lineageState(f);
+  });
+  const loser = await lineageAction(
+    f,
+    PROBLEM,
+    { action: "fork", title: "Losing final slot" },
+    "fork-race-loser",
+    race.db,
+  );
+  expect(race.happened()).toBe(true);
+  expect(loser.status, await loser.clone().text()).toBe(429);
+  expect(await loser.json()).toMatchObject({ code: "RATE_LIMITED", remaining: 0 });
+  assert.ok(afterRace);
+  expect(lineageState(f)).toEqual(afterRace);
 });

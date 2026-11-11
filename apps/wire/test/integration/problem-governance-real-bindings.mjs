@@ -664,6 +664,35 @@ export async function problemGovernanceJourney({
     "SELECT cursor FROM public_cursor WHERE singleton=1",
   ).first();
   assert.notEqual(parentBeforeFork.public_seq, globalBeforeFork.cursor);
+  // The two Fellow proposals exhausted this sponsor's creation allowance.
+  // A sponsor fork shares it and must append neither lineage nor an event.
+  const limitedFork = await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${problem1Id}/lifecycle`,
+    "problem-lifecycle",
+    { action: "fork", title: "Forked Variant of Problem 1" },
+    429,
+    undefined,
+    "governance-fork-local-cursor",
+  );
+  assert.equal(limitedFork.code, "RATE_LIMITED");
+  assert.equal(limitedFork.limit, 2);
+  assert.equal(limitedFork.remaining, 0);
+  assert.deepEqual(
+    await env.DB.prepare("SELECT public_seq FROM problems WHERE id=?").bind(problem1Id).first(),
+    parentBeforeFork,
+  );
+  assert.deepEqual(
+    await env.DB.prepare("SELECT cursor FROM public_cursor WHERE singleton=1").first(),
+    globalBeforeFork,
+  );
+  assert.equal((await env.DB.prepare("SELECT COUNT(*) AS n FROM problem_forks").first()).n, 0);
+  // Move only the original admission into history, then retry the exact
+  // refused command. This is fixture time, not a production quota bypass.
+  await env.DB.prepare("UPDATE problem_creation_admissions SET created_at = ? WHERE problem_id = ?")
+    .bind(Date.now() - 86_400_000, problem1Id)
+    .run();
   const forkRes = await sponsorCall(
     sponsorA,
     "POST",
@@ -755,7 +784,10 @@ export async function problemGovernanceJourney({
   console.log(JSON.stringify({ stage: "problem-fork-verified" }));
 
   // 10. Merge & 308 Permanent Redirect
-  // Create Problem 2 to merge into
+  // Create Problem 2 to merge into after the neighbour's admission expires.
+  await env.DB.prepare("UPDATE problem_creation_admissions SET created_at = ? WHERE problem_id = ?")
+    .bind(Date.now() - 86_400_000, lineageNeighbour)
+    .run();
   const prop2 = await call(
     "/v1/problems",
     {
@@ -917,6 +949,10 @@ export async function problemGovernanceJourney({
   // 13. ism6: governance writes that race publication. The fixture runs one
   // competing write on the real D1 after the route's reads and before its
   // write batch commits.
+  // The independent publication-race scenarios run in a later daily window.
+  await env.DB.prepare("UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?")
+    .bind(Date.now() - 86_400_000, sponsorA)
+    .run();
   const proposeDraft = async (title) =>
     (
       await call(
@@ -991,6 +1027,11 @@ export async function problemGovernanceJourney({
   );
   await assertProjectionsRebuild(env.DB, pinned);
   console.log(JSON.stringify({ stage: "governance-races-verified" }));
+
+  // The next independent pair of creations belongs to a later daily window.
+  await env.DB.prepare("UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?")
+    .bind(Date.now() - 86_400_000, sponsorA)
+    .run();
 
   // 14. 0a5p: two concurrent steward removals never empty the steward set.
   // The armed write stands in for the other removal committing first.
@@ -1068,6 +1109,12 @@ export async function problemGovernanceJourney({
     assert.deepEqual(await stewardsOf(id), [sponsorA], "a steward always remains");
   }
   console.log(JSON.stringify({ stage: "steward-removal-races-verified" }));
+
+  // Allow a new-day fork so the following refusal reaches the intended
+  // concurrent-parent guard instead of an already exhausted creation budget.
+  await env.DB.prepare("UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?")
+    .bind(Date.now() - 86_400_000, sponsorA)
+    .run();
 
   // 15. A fork cannot silently advance its frozen lineage when another
   // genuine chained parent event commits after the route's reads.

@@ -21,7 +21,7 @@
       },
       {
         "id": "handbook",
-        "sha256": "23ec650d3afc68519fa9bcd7691f71a94a682cbc88c6d5b6ab5e5ac09553d053"
+        "sha256": "917645bd64a5a27e8b05a91150526a760c9a4bea8bf6bca9dca4b7b27aeb13c9"
       },
       {
         "id": "inoculation",
@@ -41,7 +41,7 @@
       },
       {
         "id": "skill",
-        "sha256": "0740816fffd2c55ea76e13ffe751e689ba54a82b992071d0678f15315db1a0f3"
+        "sha256": "2c74c1997af98ca1c30b0a862b9baa352630a43ee94b1a15839e068676b0efd5"
       }
     ]
   },

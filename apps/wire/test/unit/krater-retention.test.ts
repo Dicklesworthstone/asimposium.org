@@ -2,11 +2,18 @@ import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { D1Database } from "@cloudflare/workers-types";
+import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
 import { retentionCredentialRevoker } from "../../src/enrollment/service.ts";
 import { type BackupBucket, backupProblem } from "../../src/krater/backup.ts";
-import { checkpointSigningKey } from "../../src/krater/checkpoint-signing.ts";
+import {
+  type CheckpointVerifyKey,
+  checkpointSigningKey,
+} from "../../src/krater/checkpoint-signing.ts";
+import {
+  CONTENT_CONTROL_COLUMNS,
+  prepareContentControlReplay,
+} from "../../src/krater/content-control-retention.ts";
 import {
   canonicalJson,
   checkpointDigest,
@@ -18,12 +25,17 @@ import {
 import { KraterRestoreRefusedError } from "../../src/krater/restore.ts";
 import {
   applyDeletionJournal,
+  computeRetentionControlDigest,
   createRetentionControlRecord,
+  deletionJournalObjectKey,
   deletionSafeRestore,
   expireSecurityRecords,
+  fetchLatestDeletionJournal,
   findResurrectedTargets,
   hardDeletePrivateDraft,
   parseAndVerifyDeletionJournal,
+  publishDeletionJournal,
+  type ReadCurrentDeletionJournal,
   RetentionError,
   readDeletionJournalRecords,
   serializeDeletionJournal,
@@ -31,6 +43,8 @@ import {
   validateScratchTarget,
   verifyRetentionControlRecord,
 } from "../../src/krater/retention.ts";
+import { hideSponsorProblem } from "../../src/moderation/problem-hide.ts";
+import { applyOperatorControl, fileReport, resolveReport } from "../../src/moderation/store.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 const NOW = "2026-08-20T00:00:00Z";
@@ -40,6 +54,46 @@ async function journalKeys(seedByte = "11", kid = "journal-test-1") {
   const signing = await checkpointSigningKey(JSON.stringify({ kid, seedHex: seedByte.repeat(32) }));
   if (signing === null) throw new Error("test signing key did not parse");
   return { signing, verify: [{ kid, publicKeyHex: signing.publicKeyHex }] };
+}
+
+/** Static authority for the existing isolated SQL unit fixtures. Native
+ * journeys acquire this independently from the current private R2 binding. */
+async function fixedJournalReader(
+  sourceJournal: string,
+  keys: readonly CheckpointVerifyKey[],
+): Promise<ReadCurrentDeletionJournal> {
+  const verified = await parseAndVerifyDeletionJournal(sourceJournal, keys);
+  if (!verified.valid) throw new Error(verified.reason);
+  return async () => verified.head;
+}
+
+/** Storage-shaped unit fixture only. The native journey uses real R2. */
+function journalBucket() {
+  const bodies = new Map<string, string>();
+  const bucket = {
+    async list(options: { prefix: string }) {
+      return {
+        objects: [...bodies.keys()]
+          .filter((key) => key.startsWith(options.prefix))
+          .sort()
+          .map((key) => ({ key })),
+        truncated: false,
+      };
+    },
+    async get(key: string) {
+      const body = bodies.get(key);
+      return body === undefined ? null : { text: async () => body };
+    },
+    async head(key: string) {
+      return bodies.has(key) ? { key } : null;
+    },
+    async put(key: string, body: string) {
+      if (bodies.has(key)) return null;
+      bodies.set(key, body);
+      return { key };
+    },
+  } as unknown as R2Bucket;
+  return { bucket, bodies };
 }
 
 function localD1(sqlite: Database) {
@@ -58,17 +112,22 @@ function localD1(sqlite: Database) {
     },
     prepare: (query: string) => {
       const bound = (...values: unknown[]) => ({
-        all: async <T>() => ({ results: sqlite.prepare(query).all(...(values as never)) as T[] }),
+        all: async <T>() => ({
+          success: true,
+          results: sqlite.prepare(query).all(...(values as never)) as T[],
+          meta: { changes: 0 },
+        }),
         first: async <T>() => (sqlite.prepare(query).get(...(values as never)) as T) ?? null,
         run: async () => {
           if (/^\s*SELECT\b/i.test(query)) {
             return {
+              success: true,
               results: sqlite.prepare(query).all(...(values as never)),
               meta: { changes: 0 },
             };
           }
           const result = sqlite.prepare(query).run(...(values as never));
-          return { meta: { changes: result.changes } };
+          return { success: true, results: [], meta: { changes: result.changes } };
         },
       });
       return { ...bound(), bind: bound };
@@ -628,6 +687,7 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
         targetIdentifier: "scratch_brief_receipt_erasure",
         deletionJournalNdjson: journal,
         verifyKeys: keys.verify,
+        readCurrentJournal: await fixedJournalReader(journal, keys.verify),
       });
       expect(replay.appliedControlsCount).toBe(1);
       expect(sqlite.prepare("SELECT * FROM sponsor_brief_command_receipts").all()).toEqual(
@@ -637,6 +697,538 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
         sqlite.prepare("SELECT tombstoned_at FROM sponsors WHERE sponsor_id = ?").get(owner),
       ).toEqual({ tombstoned_at: nowMs });
       expect(await findResurrectedTargets(db, [control])).toEqual([]);
+    });
+  });
+
+  describe("current deletion-journal authority", () => {
+    test("publishes and authenticates an empty head once instead of treating absence as authority", async () => {
+      const { db } = freshDb();
+      const store = journalBucket();
+      const keys = await journalKeys();
+      const rawKey = JSON.stringify({ kid: keys.signing.kid, seedHex: "11".repeat(32) });
+      expect(await publishDeletionJournal(db, store.bucket, rawKey, () => NOW)).toEqual({
+        enabled: true,
+        recordCount: 0,
+        published: true,
+      });
+      expect(await publishDeletionJournal(db, store.bucket, rawKey, () => NOW)).toEqual({
+        enabled: true,
+        recordCount: 0,
+        published: false,
+      });
+      const latest = await fetchLatestDeletionJournal(store.bucket, keys.verify);
+      expect(latest?.head).toEqual({
+        recordCount: 0,
+        finalDigest: await sha256Hex("genesis-deletion-journal"),
+      });
+    });
+
+    test("binds the authenticated count to a canonical storage key", async () => {
+      const keys = await journalKeys();
+      const empty = await serializeDeletionJournal([], NOW, keys.signing);
+      const store = journalBucket();
+      expect(await fetchLatestDeletionJournal(store.bucket, keys.verify)).toBeNull();
+      store.bodies.set(deletionJournalObjectKey(1), empty);
+      await expect(fetchLatestDeletionJournal(store.bucket, keys.verify)).rejects.toThrow(
+        "DELETION_JOURNAL_HEAD_MISMATCH",
+      );
+      store.bodies.clear();
+      store.bodies.set("journal/deletion/v1/1.ndjson", empty);
+      await expect(fetchLatestDeletionJournal(store.bucket, keys.verify)).rejects.toThrow(
+        "DELETION_JOURNAL_KEY_INVALID",
+      );
+      for (const count of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, 10_000_000_000]) {
+        expect(() => deletionJournalObjectKey(count)).toThrow("DELETION_JOURNAL_KEY_INVALID");
+      }
+    });
+
+    test("does not fall back to a historical journal when the newest object is missing or invalid", async () => {
+      const keys = await journalKeys();
+      const store = journalBucket();
+      store.bodies.set(
+        deletionJournalObjectKey(0),
+        await serializeDeletionJournal([], NOW, keys.signing),
+      );
+      store.bodies.set(deletionJournalObjectKey(1), "not a signed journal\n");
+      await expect(fetchLatestDeletionJournal(store.bucket, keys.verify)).rejects.toThrow(
+        "DELETION_JOURNAL_VERIFICATION_FAILED",
+      );
+      const missing = {
+        list: store.bucket.list.bind(store.bucket),
+        get: async () => null,
+      } as unknown as R2Bucket;
+      await expect(fetchLatestDeletionJournal(missing, keys.verify)).rejects.toThrow(
+        "DELETION_JOURNAL_OBJECT_MISSING",
+      );
+    });
+
+    test("refuses a publication racing acquisition instead of returning a known stale head", async () => {
+      const keys = await journalKeys();
+      const empty = await serializeDeletionJournal([], NOW, keys.signing);
+      const control = await createRetentionControlRecord({
+        action: "delete-private-draft",
+        targetId: "P-ACQUISITION-RACE",
+        targetType: "problem",
+        issuedAt: NOW,
+      });
+      const current = await serializeDeletionJournal([control], NOW, keys.signing);
+      const store = journalBucket();
+      store.bodies.set(deletionJournalObjectKey(0), empty);
+      const racing = {
+        list: store.bucket.list.bind(store.bucket),
+        get: async (key: string) => {
+          const object = await store.bucket.get(key);
+          store.bodies.set(deletionJournalObjectKey(1), current);
+          return object;
+        },
+      } as unknown as R2Bucket;
+      await expect(fetchLatestDeletionJournal(racing, keys.verify)).rejects.toThrow(
+        "DELETION_JOURNAL_CHANGED",
+      );
+      expect((await fetchLatestDeletionJournal(store.bucket, keys.verify))?.ndjson).toBe(current);
+    });
+
+    test.each(["journal replay", "problem restore"] as const)(
+      "%s refuses authentic old or divergent journals before any writes, then accepts the current head",
+      async (operation) => {
+        const first = await createRetentionControlRecord({
+          action: "delete-private-draft",
+          targetId: "P-OLD-CONTROL",
+          targetType: "problem",
+          issuedAt: NOW,
+          payload: { sponsor_id: "usr_sponsor_1" },
+        });
+        const second = await createRetentionControlRecord({
+          action: "delete-private-draft",
+          targetId: "P-NEW-CONTROL",
+          targetType: "problem",
+          issuedAt: NOW,
+          payload: { sponsor_id: "usr_sponsor_1" },
+        });
+        const different = await createRetentionControlRecord({
+          action: "delete-private-draft",
+          targetId: "P-DIFFERENT-CONTROL",
+          targetType: "problem",
+          issuedAt: NOW,
+          payload: { sponsor_id: "usr_sponsor_1" },
+        });
+        const keys = await journalKeys();
+        const old = await serializeDeletionJournal([first], NOW, keys.signing);
+        const current = await serializeDeletionJournal([first, second], NOW, keys.signing);
+        const divergent = await serializeDeletionJournal([first, different], NOW, keys.signing);
+        expect((await parseAndVerifyDeletionJournal(old, keys.verify)).valid).toBe(true);
+        expect((await parseAndVerifyDeletionJournal(divergent, keys.verify)).valid).toBe(true);
+        const store = journalBucket();
+        store.bodies.set(deletionJournalObjectKey(1), old);
+        store.bodies.set(deletionJournalObjectKey(2), current);
+        const readCurrentJournal = async () =>
+          (await fetchLatestDeletionJournal(store.bucket, keys.verify))?.head ?? null;
+
+        let snapshotNdjson = "";
+        if (operation === "problem restore") {
+          const origin = freshDb();
+          const backupBucket = fakeBucket();
+          await seedClaimProblem(origin.db, "P-CURRENT-JOURNAL", 2);
+          const backup = await backupProblem(
+            origin.db,
+            backupBucket,
+            "P-CURRENT-JOURNAL",
+            "Current journal restore",
+            DATE,
+          );
+          snapshotNdjson = backupBucket.writes.get(backup?.key ?? "") ?? "";
+        }
+        const scratch = freshDb();
+        for (const id of [first.targetId, second.targetId]) {
+          scratch.sqlite.run(
+            `INSERT INTO problems
+              (id, public_seq, status, unlisted, sponsor_id, title, created_at, updated_at)
+             VALUES (?, 0, 'private-draft', 1, 'usr_sponsor_1', 'Restored private draft', ?, ?)`,
+            [id, NOW, NOW],
+          );
+        }
+        const restore = (
+          deletionJournalNdjson: string,
+          reader: ReadCurrentDeletionJournal = readCurrentJournal,
+        ) => {
+          const options = {
+            db: scratch.db,
+            targetIdentifier: "scratch_current_journal",
+            deletionJournalNdjson,
+            verifyKeys: keys.verify,
+            readCurrentJournal: reader,
+          };
+          return operation === "journal replay"
+            ? applyDeletionJournal(options)
+            : deletionSafeRestore({ ...options, snapshotNdjson });
+        };
+        const before = scratch.sqlite.prepare("SELECT total_changes() AS n").get();
+        await expect(restore(old)).rejects.toThrow("DELETION_JOURNAL_STALE");
+        await expect(restore(divergent)).rejects.toThrow("DELETION_JOURNAL_STALE");
+        await expect(restore(current, async () => null)).rejects.toThrow(
+          "DELETION_JOURNAL_CURRENT_HEAD_MISSING",
+        );
+        await expect(
+          restore(current, async () => ({ recordCount: -1, finalDigest: "a".repeat(64) })),
+        ).rejects.toThrow("DELETION_JOURNAL_CURRENT_HEAD_INVALID");
+        await expect(restore(current, async () => undefined as never)).rejects.toThrow(
+          "DELETION_JOURNAL_CURRENT_HEAD_INVALID",
+        );
+        await expect(restore(current, async () => ({}) as never)).rejects.toThrow(
+          "DELETION_JOURNAL_CURRENT_HEAD_INVALID",
+        );
+        // JavaScript callers can omit or corrupt the new authority field;
+        // the required TypeScript field is not the runtime enforcement.
+        for (const reader of [undefined, null, "not-a-reader", {}]) {
+          const missingReader = {
+            db: scratch.db,
+            targetIdentifier: "scratch_current_journal",
+            deletionJournalNdjson: current,
+            verifyKeys: keys.verify,
+            readCurrentJournal: reader as unknown as ReadCurrentDeletionJournal,
+          };
+          await expect(
+            operation === "journal replay"
+              ? applyDeletionJournal(missingReader)
+              : deletionSafeRestore({ ...missingReader, snapshotNdjson }),
+          ).rejects.toThrow("DELETION_JOURNAL_CURRENT_HEAD_REQUIRED");
+        }
+        expect(scratch.sqlite.prepare("SELECT total_changes() AS n").get()).toEqual(before);
+        expect(scratch.sqlite.prepare("SELECT COUNT(*) AS n FROM events").get()).toEqual({ n: 0 });
+        expect(scratch.sqlite.prepare("SELECT COUNT(*) AS n FROM problems").get()).toEqual({
+          n: 2,
+        });
+
+        expect((await restore(current)).appliedControlsCount).toBe(2);
+        expect(
+          scratch.sqlite.prepare("SELECT id FROM problems WHERE status = 'private-draft'").all(),
+        ).toEqual([]);
+        expect(scratch.sqlite.prepare("SELECT COUNT(*) AS n FROM events").get()).toEqual({
+          n: operation === "problem restore" ? 2 : 0,
+        });
+        expect((await restore(current)).appliedControlsCount).toBe(2);
+      },
+    );
+
+    test("withholds completion when a newer journal is published during replay, and permits retry", async () => {
+      const first = await createRetentionControlRecord({
+        action: "delete-private-draft",
+        targetId: "P-DURING-REPLAY-1",
+        targetType: "problem",
+        issuedAt: NOW,
+        payload: { sponsor_id: "usr_sponsor_1" },
+      });
+      const second = await createRetentionControlRecord({
+        action: "delete-private-draft",
+        targetId: "P-DURING-REPLAY-2",
+        targetType: "problem",
+        issuedAt: NOW,
+        payload: { sponsor_id: "usr_sponsor_1" },
+      });
+      const keys = await journalKeys();
+      const old = await serializeDeletionJournal([first], NOW, keys.signing);
+      const current = await serializeDeletionJournal([first, second], NOW, keys.signing);
+      const store = journalBucket();
+      store.bodies.set(deletionJournalObjectKey(1), old);
+      const scratch = freshDb();
+      let reads = 0;
+      const readCurrentJournal = async () => {
+        // The independently held journal advances between preflight and the
+        // final serviceability decision, after replay has applied its controls.
+        if (++reads === 2) store.bodies.set(deletionJournalObjectKey(2), current);
+        return (await fetchLatestDeletionJournal(store.bucket, keys.verify))?.head ?? null;
+      };
+      const options = {
+        db: scratch.db,
+        targetIdentifier: "scratch_concurrent_journal",
+        verifyKeys: keys.verify,
+        readCurrentJournal,
+      };
+      await expect(
+        applyDeletionJournal({ ...options, deletionJournalNdjson: old }),
+      ).rejects.toThrow("DELETION_JOURNAL_STALE");
+      expect(reads).toBe(2);
+      expect(scratch.sqlite.prepare("SELECT problem_id FROM private_draft_erasures").all()).toEqual(
+        [{ problem_id: first.targetId }],
+      );
+      const replay = await applyDeletionJournal({ ...options, deletionJournalNdjson: current });
+      expect(replay.appliedControlsCount).toBe(2);
+      expect(
+        scratch.sqlite
+          .prepare("SELECT problem_id FROM private_draft_erasures ORDER BY problem_id")
+          .all(),
+      ).toEqual([{ problem_id: first.targetId }, { problem_id: second.targetId }]);
+    });
+  });
+
+  describe("visibility control recovery", () => {
+    const problem = "P-VISIBILITY-RECOVERY";
+    const reason = "PRIVATE-CONTROL-RATIONALE: withdraw these bytes pending review.";
+    const control = (visibility: "hidden" | "visible", targetRef = "problem") => ({
+      problemId: problem,
+      targetKind: targetRef === "problem" ? "problem" : "claim",
+      targetRef,
+      visibility,
+      reason,
+    });
+    const rows = (sqlite: Database) =>
+      sqlite
+        .prepare(`SELECT ${CONTENT_CONTROL_COLUMNS.join(", ")} FROM content_controls
+        ORDER BY problem_id, target_ref, version`)
+        .all();
+
+    test("every visibility writer journals its exact control and journal failure rolls back the decision", async () => {
+      const source = freshDb();
+      await seedClaimProblem(source.db, problem, 2);
+      await applyOperatorControl(source.db, "operator-fixture", control("hidden"));
+      await applyOperatorControl(source.db, "operator-fixture", control("visible"));
+      const claim = `C-1-${problem}`;
+      const reports = [];
+      for (let index = 0; index < 3; index += 1) {
+        reports.push(
+          await fileReport(source.db, {
+            problemId: problem,
+            targetKind: "claim",
+            targetRef: claim,
+            reason: "unsafe-content",
+            note: null,
+            reporterClass: "sponsor",
+            reporterFellowId: null,
+            reporterSponsorId: `usr_reporter_${index}`,
+          }),
+        );
+      }
+      expect(reports.at(-1)?.targetHidden).toBe(true);
+      const firstReport = reports[0];
+      if (!firstReport) throw new Error("Expected the first independent report");
+      expect(
+        await resolveReport(source.db, "operator-fixture", {
+          reportId: firstReport.reportId,
+          resolution: "dismiss",
+          reason: "Reviewed the reported source and dismissed this concern.",
+        }),
+      ).toMatchObject({ ok: true });
+      source.sqlite.run(
+        "INSERT INTO sponsors(sponsor_id,created_at,last_seen_at) VALUES('usr_sponsor_1',?,?)",
+        [Date.now(), Date.now()],
+      );
+      await hideSponsorProblem(
+        source.db,
+        "usr_sponsor_1",
+        {
+          problem_id: problem,
+          reason,
+          step_up_authenticated_at: Math.floor(Date.now() / 1000),
+        },
+        "recovery-sponsor-hide",
+      );
+      const records = await readDeletionJournalRecords(source.db);
+      expect(records).toHaveLength(5);
+      for (const row of rows(source.sqlite) as Record<string, unknown>[]) {
+        const record = records.find((entry) => entry.targetId === row.control_id);
+        expect(record?.payload).toEqual(row);
+        expect((await verifyRetentionControlRecord(record)).valid).toBe(true);
+      }
+      expect(
+        JSON.stringify(source.sqlite.prepare("SELECT * FROM moderation_log").all()),
+      ).not.toContain(reason);
+      const before = rows(source.sqlite);
+      const beforeCursor = source.sqlite.prepare("SELECT cursor FROM public_cursor").all();
+      source.sqlite.run(`CREATE TRIGGER refuse_visibility_journal BEFORE INSERT ON deletion_journal
+        BEGIN SELECT RAISE(ABORT, 'PLANTED_JOURNAL_FAILURE'); END`);
+      await expect(
+        applyOperatorControl(source.db, "operator-fixture", control("visible")),
+      ).rejects.toThrow("PLANTED_JOURNAL_FAILURE");
+      expect(rows(source.sqlite)).toEqual(before);
+      expect(source.sqlite.prepare("SELECT cursor FROM public_cursor").all()).toEqual(beforeCursor);
+      expect(await readDeletionJournalRecords(source.db)).toEqual(records);
+    });
+
+    test("a pre-hide snapshot replays exact decisions and a later authenticated restore remains visible", async () => {
+      const source = freshDb();
+      await seedClaimProblem(source.db, problem, 2);
+      const backups = fakeBucket();
+      const backup = await backupProblem(source.db, backups, problem, "Visibility recovery", DATE);
+      expect(backup).not.toBeNull();
+      if (!backup) throw new Error("Expected a completed pre-hide snapshot");
+      const snapshotNdjson = backups.writes.get(backup.key);
+      if (!snapshotNdjson) throw new Error("Expected the pre-hide snapshot bytes");
+      await applyOperatorControl(source.db, "operator-fixture", control("hidden"));
+      await applyOperatorControl(
+        source.db,
+        "operator-fixture",
+        control("hidden", `C-1-${problem}`),
+      );
+      const keys = await journalKeys();
+      const store = journalBucket();
+      const signing = JSON.stringify({ kid: keys.signing.kid, seedHex: "11".repeat(32) });
+      await publishDeletionJournal(source.db, store.bucket, signing, () => NOW);
+      const current = await fetchLatestDeletionJournal(store.bucket, keys.verify);
+      if (!current) throw new Error("Expected current signed visibility controls");
+      const scratch = freshDb();
+      const options = {
+        db: scratch.db,
+        targetIdentifier: "scratch-visibility-recovery",
+        verifyKeys: keys.verify,
+        readCurrentJournal: async () =>
+          (await fetchLatestDeletionJournal(store.bucket, keys.verify))?.head ?? null,
+      };
+      await deletionSafeRestore({
+        ...options,
+        snapshotNdjson,
+        deletionJournalNdjson: current.ndjson,
+      });
+      expect(rows(scratch.sqlite)).toEqual(rows(source.sqlite));
+      expect(
+        await findResurrectedTargets(scratch.db, await readDeletionJournalRecords(source.db)),
+      ).toEqual([]);
+      await applyOperatorControl(source.db, "operator-fixture", control("visible"));
+      await publishDeletionJournal(source.db, store.bucket, signing, () => NOW);
+      const newer = await fetchLatestDeletionJournal(store.bucket, keys.verify);
+      if (!newer) throw new Error("Expected the authenticated restoration decision");
+      await applyDeletionJournal({ ...options, deletionJournalNdjson: newer.ndjson });
+      await applyDeletionJournal({ ...options, deletionJournalNdjson: newer.ndjson });
+      expect(rows(scratch.sqlite)).toEqual(rows(source.sqlite));
+      expect(
+        scratch.sqlite
+          .prepare(`SELECT visibility FROM content_controls
+        WHERE target_ref = 'problem' ORDER BY version DESC LIMIT 1`)
+          .get(),
+      ).toEqual({ visibility: "visible" });
+      const before = scratch.sqlite.prepare("SELECT total_changes() AS n").get();
+      await expect(
+        applyDeletionJournal({ ...options, deletionJournalNdjson: current.ndjson }),
+      ).rejects.toThrow("DELETION_JOURNAL_STALE");
+      expect(scratch.sqlite.prepare("SELECT total_changes() AS n").get()).toEqual(before);
+    });
+
+    test("conflicting source identities refuse before any writes and concurrent controls roll back the whole replay batch", async () => {
+      const source = freshDb();
+      await seedClaimProblem(source.db, problem, 2);
+      await applyOperatorControl(source.db, "source-operator", control("hidden"));
+      await applyOperatorControl(source.db, "source-operator", control("hidden", `C-1-${problem}`));
+      const records = await readDeletionJournalRecords(source.db);
+      const scratch = freshDb();
+      await seedClaimProblem(scratch.db, problem, 2);
+      const replay = await prepareContentControlReplay(scratch.db, records);
+      await applyOperatorControl(
+        scratch.db,
+        "scratch-operator",
+        control("hidden", `C-1-${problem}`),
+      );
+      const before = rows(scratch.sqlite);
+      // The problem group precedes the claim group, so a later predecessor
+      // conflict must undo even the earlier group's successful INSERT.
+      await expect(replay.apply()).rejects.toThrow();
+      expect(rows(scratch.sqlite)).toEqual(before);
+      const keys = await journalKeys();
+      const journal = await serializeDeletionJournal(records, NOW, keys.signing);
+      const beforeChanges = scratch.sqlite.prepare("SELECT total_changes() AS n").get();
+      await expect(
+        applyDeletionJournal({
+          db: scratch.db,
+          targetIdentifier: "scratch-conflicting-visibility",
+          deletionJournalNdjson: journal,
+          verifyKeys: keys.verify,
+          readCurrentJournal: await fixedJournalReader(journal, keys.verify),
+        }),
+      ).rejects.toThrow("CONTENT_CONTROL_RECOVERY_CONFLICT");
+      expect(scratch.sqlite.prepare("SELECT total_changes() AS n").get()).toEqual(beforeChanges);
+    });
+
+    test("publication rejects matching metadata that conceals a different authenticated journal action", async () => {
+      const source = freshDb();
+      await seedClaimProblem(source.db, problem, 1);
+      const legacy = {
+        control_id: "CC-ENVELOPE-MISMATCH",
+        problem_id: problem,
+        target_kind: "problem",
+        target_ref: "problem",
+        visibility: "hidden",
+        source: "operator",
+        reason_category: "operator-review",
+        actor: "historic-operator",
+        reason,
+        version: 1,
+        created_at: NOW,
+        actor_kind: null,
+      };
+      source.sqlite.run(
+        `INSERT INTO content_controls (${CONTENT_CONTROL_COLUMNS.join(", ")})
+        VALUES (${CONTENT_CONTROL_COLUMNS.map(() => "?").join(", ")})`,
+        CONTENT_CONTROL_COLUMNS.map((column) => legacy[column]),
+      );
+      const concealed = {
+        ...(await createRetentionControlRecord({
+          action: "cancel-enrollment",
+          targetId: legacy.control_id,
+          targetType: "enrollment",
+          issuedAt: NOW,
+          payload: legacy,
+        })),
+        controlId: `RC-${legacy.control_id}`,
+      };
+      concealed.controlDigest = await computeRetentionControlDigest(concealed);
+      expect((await verifyRetentionControlRecord(concealed)).valid).toBe(true);
+      source.sqlite.run(
+        `INSERT INTO deletion_journal
+        (control_id,action,target_type,target_id,control_digest,record_json,created_at)
+        VALUES (?,'content-control','content_control',?,?,?,?)`,
+        [
+          concealed.controlId,
+          legacy.control_id,
+          concealed.controlDigest,
+          JSON.stringify(concealed),
+          NOW,
+        ],
+      );
+      const store = journalBucket();
+      const before = source.sqlite.prepare("SELECT total_changes() AS n").get();
+      await expect(
+        publishDeletionJournal(
+          source.db,
+          store.bucket,
+          JSON.stringify({ kid: "journal-test-1", seedHex: "11".repeat(32) }),
+          () => NOW,
+        ),
+      ).rejects.toThrow("CONTENT_CONTROL_JOURNAL_CONFLICT");
+      expect(store.bodies.size).toBe(0);
+      expect(source.sqlite.prepare("SELECT total_changes() AS n").get()).toEqual(before);
+    });
+
+    test("publication backfills historical decisions in bounded steps and never publishes partial coverage", async () => {
+      const source = freshDb();
+      await seedClaimProblem(source.db, problem, 1);
+      // Historical controls precede journaling support, but remain immutable
+      // source authority. Do not remove or disable the journal's own guards.
+      for (let version = 1; version <= 101; version += 1) {
+        source.sqlite.run(
+          `INSERT INTO content_controls
+          (control_id,problem_id,target_kind,target_ref,visibility,source,
+           reason_category,actor,reason,version,created_at)
+          VALUES (?,?,'problem','problem','hidden','operator','operator-review',
+            'historic-operator',?,?,?)`,
+          [`CC-HISTORICAL-${version}`, problem, reason, version, NOW],
+        );
+      }
+      const store = journalBucket();
+      const keys = await journalKeys();
+      const signing = JSON.stringify({ kid: keys.signing.kid, seedHex: "11".repeat(32) });
+      await expect(
+        publishDeletionJournal(source.db, store.bucket, signing, () => NOW),
+      ).rejects.toThrow("CONTENT_CONTROL_JOURNAL_BACKFILL_PENDING");
+      expect(store.bodies.size).toBe(0);
+      expect(await readDeletionJournalRecords(source.db)).toHaveLength(100);
+      expect(
+        await publishDeletionJournal(source.db, store.bucket, signing, () => NOW),
+      ).toMatchObject({ published: true, recordCount: 101 });
+      expect((await fetchLatestDeletionJournal(store.bucket, keys.verify))?.head.recordCount).toBe(
+        101,
+      );
+      expect(
+        await publishDeletionJournal(source.db, store.bucket, signing, () => NOW),
+      ).toMatchObject({ published: false, recordCount: 101 });
+      expect(rows(source.sqlite)).toHaveLength(101);
     });
   });
 
@@ -685,12 +1277,14 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
           [draftId, NOW, NOW],
         );
         const changesBefore = scratch.sqlite.prepare("SELECT total_changes() AS n").get();
+        const readCurrentJournal = await fixedJournalReader(signed, keys.verify);
         const restore = (deletionJournalNdjson: string) => {
           const options = {
             db: scratch.db,
             targetIdentifier: "scratch_unsupported_action",
             deletionJournalNdjson,
             verifyKeys: keys.verify,
+            readCurrentJournal,
           };
           return operation === "journal replay"
             ? applyDeletionJournal(options)
@@ -792,6 +1386,7 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
           targetIdentifier: "scratch_credential_replay",
           deletionJournalNdjson: journal,
           verifyKeys: keys.verify,
+          readCurrentJournal: await fixedJournalReader(journal, keys.verify),
         }),
       ).rejects.toThrow(/CREDENTIAL_REVOKER_REQUIRED/);
       const replay = await applyDeletionJournal({
@@ -799,6 +1394,7 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
         targetIdentifier: "scratch_credential_replay",
         deletionJournalNdjson: journal,
         verifyKeys: keys.verify,
+        readCurrentJournal: await fixedJournalReader(journal, keys.verify),
         revokeCredential: retentionCredentialRevoker(
           new D1EnrollmentStore(
             db as unknown as ConstructorParameters<typeof D1EnrollmentStore>[0],
@@ -866,6 +1462,7 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
         snapshotNdjson,
         deletionJournalNdjson: journalNdjson,
         verifyKeys: keys.verify,
+        readCurrentJournal: await fixedJournalReader(journalNdjson, keys.verify),
       });
 
       expect(restoreResult.restored).toBe(problemId);
@@ -894,6 +1491,7 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
           snapshotNdjson: "",
           deletionJournalNdjson: null,
           verifyKeys: [],
+          readCurrentJournal: async () => null,
         }),
       ).rejects.toThrow("RESTORE_NON_SCRATCH_TARGET_REFUSED");
     });
@@ -913,6 +1511,7 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
           snapshotNdjson,
           deletionJournalNdjson: undefined,
           verifyKeys: keys.verify,
+          readCurrentJournal: async () => null,
         }),
       ).rejects.toThrow("DELETION_JOURNAL_MISSING");
       const rows = scratch.sqlite.prepare("SELECT COUNT(*) AS n FROM problems").get() as {

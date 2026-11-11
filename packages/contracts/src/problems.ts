@@ -3,6 +3,10 @@ import { AreaSlugSchema } from "./discovery.ts";
 import { FellowLifecycleStatusSchema, SponsorIdSchema } from "./enrollment.ts";
 import { completeProblemBoundaries, OptionalProblemBoundaryFields } from "./problem-boundaries.ts";
 import {
+  SponsorProblemHideReceiptSchema,
+  SponsorProblemHideRequestSchema,
+} from "./problem-hiding.ts";
+import {
   ProblemNoClaimBoundarySchema,
   ProblemResolutionDirectionSchema,
 } from "./problem-resolution.ts";
@@ -1302,6 +1306,8 @@ export const ProblemLifecycleContractsSchema = z
     stewardship_action_receipt: ProblemStewardshipActionReceiptSchema,
     governance_action_receipt: ProblemGovernanceActionReceiptSchema,
     lifecycle_request: ProblemLifecycleActionRequestSchema,
+    sponsor_problem_hide_request: SponsorProblemHideRequestSchema.optional(),
+    sponsor_problem_hide_receipt: SponsorProblemHideReceiptSchema.optional(),
     reanchor_request: ClaimReanchorRequestSchema,
     statement_review_request: ProblemStatementReviewRequestSchema,
     statement_review_response: ProblemStatementReviewResponseSchema,

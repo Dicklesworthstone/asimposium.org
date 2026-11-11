@@ -399,7 +399,8 @@ export async function unlistedJourney({
     "a row in another table keyed like a redacted object is not excused",
   );
 
-  // A separate never-published draft stays invisible even when its URL is known.
+  // A separate sponsor's never-published draft stays invisible even when its URL
+  // is known. The first sponsor already used its two daily creations above.
   const draft = await call(
     "/v1/problems",
     {
@@ -408,7 +409,7 @@ export async function unlistedJourney({
       statement: "PRIVATE_FORMULATION_CANARY: A triangle has three vertices.",
       distinct_because: "The triangle domain differs from finite paths.",
     },
-    author,
+    reviewer,
     201,
   );
   for (const suffix of ["json", "md"]) {

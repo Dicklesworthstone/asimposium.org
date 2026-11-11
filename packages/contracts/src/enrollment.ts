@@ -932,6 +932,8 @@ export const EnrollmentHelloResponseSchema = z
     granted_scopes: z.array(RequestedScopeSchema).min(1).max(4),
     granted_resources: EnrollmentResourceGrantsSchema,
     promotion_budget: RateLimitBudgetSchema.optional(),
+    /** New drafts and forks share one rolling daily allowance across a sponsor's Fellows. */
+    problem_creation_budget: RateLimitBudgetSchema.optional(),
     /** Fellow-wide workshop creates/revisions, shared across all sessions. */
     workshop_budget: RateLimitBudgetSchema.optional(),
     /** Shared by hello, triage, next and session packs (including deltas),
