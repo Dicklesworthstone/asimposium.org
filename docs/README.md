@@ -17,52 +17,73 @@ observed.
 Updated 2026-11-11. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-### Public CLI watch continuation — implementation in progress
+### Merged HEAD repair — qualification in progress
 
-`l3b.12` connects the planned `asimp watch` command to existing event tails.
-The working source checks generated envelope/footer JSON Schemas offline,
-preserves complete NDJSON pages and resume cursors, and uses the mounted global
-`/cursor` solely as an invalidation hint. Global hints never become a problem's
-`since` or `through`. The native event-tail journey retains its existing checks
-and adds four one-shot CLI cases plus a continuous reader with a real publication
-and an explicit, deliberate transport interruption after catch-up.
+Another session committed the watch work as `55f54f65` and merged substantial
+protocol-conflict, retention and problem-policy work into `35cd51b0`. Both
+commits are preserved. The original complete root suite at that merged revision
+finishes normally at 21:14:36 UTC with **six passing and two failing groups**:
+one toolchain failure and three Worker failures (7,438 Worker tests pass).
+All 2,738 source inputs and the pinned Next SDK remain stable. The earlier
+2,712-input green result does not qualify this merge.
 
-**This new command is not yet runtime-qualified.** Original full Rust attempts
-on hz2 and vmi1149989, and test-executable preparation on the latter, stop before
-Cargo at the unchanged worker disk-reservation guard (120/`started:false`).
-One all-targets compiler check actually passes on vmi1149989 at the preceding
-working source, including the new schema dependency and test code; it executes
-no tests and predates the global-hint correction. Current-source denied-warning
-Clippy passes remotely with a 2,729-file receipt matching all 969 CLI/contracts
-inputs. Full pinned formatting passes locally without compilation. The first
-formatter attempt's missing remote checkout remains a separate retained failure.
+`aj4j` owns these four failures. The current repairs preserve the original
+800-token cap and declared provenance by shortening only three compact-fallback
+labels; the measured response is 3,197 bytes with every effective permission
+retained. Replay and search tests now account for migration 0145's append-only
+content-control cursor changes, checking exact post-hide state, restored public
+content and fresh ETags rather than accepting stale pre-control validators.
+The restore fault is reanchored to the current verified journal/head seam while
+still discarding replay records, so the original resurrection checks must catch
+it. All 333 tests across the three owning files and all six explicit registry
+checks pass. Actual restore fault/restoration, final root and independent
+acceptance remain pending; neither `aj4j` nor the dependent watch leaf is closed.
 
-Current-source TypeScript typecheck and lint pass all eight groups. The original
-full root suite completes normally at 19:50:20 UTC: eight groups pass, including
-7,375 Worker and 1,081 Agora tests, with the original 54 individual toolchain
-skips. All 2,712 before/after/current source hashes and the pinned Next SDK match.
-Separate complete contracts (1,021) and render (605) suites pass, as does the
-original real Workerd/D1/R2 event-tail control **with CLI mode off**. Literal
-`ubs --diff` completes both modules with findings (5 critical, 724 warnings,
-259 information items), not a clean scan. The changed security contexts and
-runtime receive independent read-only review with no additional blocker found;
-the scanner's unprinted Rust findings are not all individually reviewed.
+Merged-source typecheck and lint pass all eight groups. Primary and independent
+complete contract (1,028) and renderer (605) suites pass at the merged source.
+The real local protocol-conflict and problem-proposal/creation-quota journeys
+also pass. These are local fixture-identity/screening results, not hosted OAuth,
+provider accuracy, browser or deployment acceptance.
 
-The later thread-aware capacity observation still cannot fit a full Rust test
-reservation: 98.7 GB free against 120.3 GB required, including active build
-reservations and the protected floor. No new test attempt follows that result.
-**No current Rust tests or new CLI-native cases have executed.** Matching-binary
-native positive, producer-fault/restoration and independent executed acceptance
-remain unfinished. `l3b.12` stays in progress; the implementation is uncommitted
-work in progress. Earlier `73f4936d` results below do not qualify this source.
+### Public CLI watch continuation — runtime checks now execute
 
-The alternate worker received an additive copy of the already verified Rust
-1.93.1 toolchain: all 139 file hashes/modes match; its 26 old toolchains and
-nightly default remain. A guarded move was refused; the safer actual copy
-retains both source and staging. No default, fleet policy, cache, admission
-guard or project pin changed. The old failure receipts and all new evidence
-remain under `e2e/artifacts/asimp-watch-20261111-coppertiger/`. Parent W11,
-advisory, deployed/TLS/Google, G0/G-C and launch requirements remain open.
+`l3b.12` connects `asimp watch` to existing public tails. It checks generated
+event/footer JSON Schemas offline, preserves complete NDJSON pages and resume
+cursors, and uses global `/cursor` only as an invalidation hint. Errors stop
+with a resume hint; human mode prints full pretty JSON. The earlier commit
+description's automatic-retry and human-summary wording is inaccurate.
+
+The original locked Rust 1.93.1 suite now actually passes remotely at 21:19 UTC:
+71 library, one canonical-vector and 20 compiled-CLI tests, **92 passes with
+zero failures**. Three HTTP tests are explicitly ignored there and execute in
+their real local Workerd/D1/R2 journeys. The 2,755-file RCH receipt matches all
+974 CLI/contracts inputs. Its library executable is the warm compiler artifact
+from build `30103802359054357`; remote-before, downloaded and remote-after
+SHA-256 values match `d5054f77…f7d18a5`. This is not an independent compilation.
+
+The original native oracle first failed before invoking Rust because it applied
+JSON-link validation directly to NDJSON footers. The repaired adapter validates
+the strict footer, converts only the face for full sequence/link checks, then
+requires exact original NDJSON bytes through the canonical renderer. Primary
+and independent watch journeys pass all four snapshot cases and actual live
+publication/catch-up. A private Worker footer fault is caught by the strict JS
+oracle before Rust, and exact restoration passes; it is not a Rust-reader
+negative result. The original 25 workshop, four next-move and nine search cases
+also pass with the attributed current binary.
+
+Earlier disk-admission refusals (120 before Cargo), source-change refusals
+(103), and a relocated direct-library invocation with one missing embedded
+fixture remain retained. That direct run is not a green library result. A later
+real Cargo invocation provides the passing full suite above. The project RCH
+filter now excludes only ephemeral `e2e/.artifact-writer-leases/`, whose live
+directory changes caused an actual source-barrier refusal; code and schema
+source guards remain enforced. No worker policy, default, cache or admission
+guard was changed. Evidence remains under
+`e2e/artifacts/asimp-watch-20261111-coppertiger/`.
+
+Final-source formatting/check/Clippy, independent full Rust reexecution and the
+repaired HEAD's complete root gate still govern closure. Parent W11, advisory,
+deployed/TLS/Google, G0/G-C and launch requirements remain open.
 
 ### Current Rust qualification — 2026-11-11
 

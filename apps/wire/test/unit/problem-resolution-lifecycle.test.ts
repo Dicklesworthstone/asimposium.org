@@ -419,7 +419,9 @@ function ledgerState(f: Fixture) {
       resolution_summary,resolution_direction,resolution_no_claim_boundary,updated_at
       FROM problems WHERE id = ?`)
       .get(PROBLEM),
-    global: f.sql.query("SELECT cursor FROM public_cursor WHERE singleton = 1").get(),
+    global: f.sql.query("SELECT cursor FROM public_cursor WHERE singleton = 1").get() as {
+      cursor: number;
+    },
     events: f.sql.query("SELECT id,seq,payload_sha256 FROM events ORDER BY seq").all(),
     content: f.sql
       .query("SELECT event_id,payload_sha256 FROM event_content ORDER BY event_id")
@@ -508,16 +510,20 @@ test("ordinary result resolution commits through the actual lifecycle transactio
       result_claim: f.resultClaim,
     });
     f.hide("E-PROOF@1");
+    const afterHide = ledgerState(f);
+    // A new append-only content control invalidates public reads, while the
+    // scientific ledger and the already committed resolution stay unchanged.
+    expect(afterHide).toEqual({ ...after, global: { cursor: after.global.cursor + 1 } });
     const replay = await f.apply(f.resolve, "resolve-result");
     expect(replay.status).toBe(200);
     expect(await replay.json()).toEqual(receipt);
-    expect(ledgerState(f)).toEqual(after);
+    expect(ledgerState(f)).toEqual(afterHide);
     const different = await f.apply(
       { ...f.resolve, direction: "refuted-as-stated" },
       "resolve-result",
     );
     expect(different.status).toBe(409);
-    expect(ledgerState(f)).toEqual(after);
+    expect(ledgerState(f)).toEqual(afterHide);
   }));
 
 for (const [name, mutate] of [

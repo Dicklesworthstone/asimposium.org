@@ -8,5 +8,7 @@
 .beads/
 .claude/
 e2e/artifacts/
+# Runtime artifact-writer leases change during local gates; they are not source.
+e2e/.artifact-writer-leases/
 # Wrangler's local database, R2 and task-specific state are not build inputs.
 .wrangler/

@@ -214,8 +214,11 @@ export const PLANTS = [
     id: "safe-restore-ignores-journal",
     bead: "p4b",
     file: "apps/wire/src/krater/retention.ts",
-    find: "  const records = await verifiedJournalRecords(options.deletionJournalNdjson, options.verifyKeys);\n\n  const parsedSnapshot",
-    replace: "  const records: RetentionControlRecord[] = [];\n\n  const parsedSnapshot",
+    // Keep genuine head verification so this fault reaches the actual control
+    // replay/resurrection checks, rather than failing on a missing fake head.
+    find: "  const { records, head } = await verifiedJournalRecords(\n    options.deletionJournalNdjson,\n    options.verifyKeys,\n    options.readCurrentJournal,\n  );\n  // Detect a conflicting control history",
+    replace:
+      "  const { head } = await verifiedJournalRecords(\n    options.deletionJournalNdjson,\n    options.verifyKeys,\n    options.readCurrentJournal,\n  );\n  const records: RetentionControlRecord[] = [];\n  // Detect a conflicting control history",
     command: LANE("export-restore"),
   },
   {

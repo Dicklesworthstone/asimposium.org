@@ -695,6 +695,7 @@ describe("mounted reads of published screening warnings", () => {
       const path = `/search.json?${new URLSearchParams({ q: `${PROBLEM}#${f.original.claim_id}@1`, kind: "claim" })}`;
       const before = await publicBytes(f, path);
       const etag = requiredEtag(before.response);
+      const original = SearchResponseSchema.parse(JSON.parse(before.bytes));
       const expectUnavailable = async () => {
         const response = await f.request(path, { headers: { "if-none-match": etag } });
         expect(response.status).toBe(200);
@@ -703,7 +704,11 @@ describe("mounted reads of published screening warnings", () => {
         expect(bytes).not.toContain(ORIGINAL);
         expect(bytes).not.toContain("screening-warning");
       };
-      for (const target of [`${f.original.claim_id}@1`, `#${f.original.seq}`, "problem"]) {
+      for (const [index, target] of [
+        `${f.original.claim_id}@1`,
+        `#${f.original.seq}`,
+        "problem",
+      ].entries()) {
         f.visibility(target, false);
         await expectUnavailable();
         expect(await findScientificClaim(f.db, PROBLEM, f.original.claim_id, 1)).toBeNull();
@@ -713,7 +718,24 @@ describe("mounted reads of published screening warnings", () => {
           expect(await findScientificClaim(f.db, PROBLEM, f.original.claim_id, 2)).not.toBeNull();
         }
         f.visibility(target, true);
-        expect((await f.request(path, { headers: { "if-none-match": etag } })).status).toBe(304);
+        const restored = await f.request(path, { headers: { "if-none-match": etag } });
+        expect(restored.status).toBe(200);
+        const restoredPage = SearchResponseSchema.parse(await restored.json());
+        expect(restoredPage.items).toEqual(original.items);
+        expect(restoredPage.total_matches).toBe(original.total_matches);
+        expect(restoredPage.q).toBe(original.q);
+        expect(restoredPage.source_cursor).toBe(original.source_cursor + 2 * (index + 1));
+        const currentEtag = requiredEtag(restored);
+        expect(currentEtag).not.toBe(etag);
+        expect((await f.request(path, { headers: { "if-none-match": currentEtag } })).status).toBe(
+          304,
+        );
+        const head = await f.request(path, {
+          method: "HEAD",
+          headers: { "if-none-match": currentEtag },
+        });
+        expect(head.status).toBe(304);
+        expect(await head.text()).toBe("");
       }
       f.sql.query("UPDATE problems SET unlisted=1 WHERE id=?").run(PROBLEM);
       await expectUnavailable();

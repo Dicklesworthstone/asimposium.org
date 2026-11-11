@@ -3966,7 +3966,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           ...selection,
           candidates: selection.candidates.map((candidate) =>
             candidate.id === "SYS-inoculation"
-              ? { ...candidate, why_included: "instruction hierarchy" }
+              ? { ...candidate, why_included: "hierarchy" }
               : candidate.id === "SYS-identity" && provenance !== null
                 ? {
                     ...candidate,
@@ -3975,7 +3975,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                         ? `\n${sessionPackProvenanceReference(session.session_id, provenance)}`
                         : ""
                     }`,
-                    why_included: "Fellow identity",
+                    why_included: "identity",
                   }
                 : candidate,
           ),
@@ -3987,9 +3987,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   ? `/v1/sessions/${session.session_id}`
                   : `${larger.pathname}${larger.search}`,
               why:
-                nextBucket === undefined
-                  ? "Read the complete session snapshot."
-                  : "Read a larger pack.",
+                nextBucket === undefined ? "Read the complete session snapshot." : "Larger pack.",
               public_read: false,
             },
           ],

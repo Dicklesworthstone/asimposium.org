@@ -3,7 +3,11 @@ import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
 import { gunzipSync } from "node:zlib";
-import { EventTailResponseSchema } from "../../../../packages/contracts/src/event-tail.ts";
+import {
+  EventTailNdjsonPageEndSchema,
+  EventTailResponseSchema,
+  renderEventTail,
+} from "../../../../packages/contracts/src/event-tail.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Event-tail formats and feeds on real local Workerd/D1 (bead asimposiumorg-yv6).
@@ -23,6 +27,29 @@ const cliMode = process.argv[2] === "cli";
 const cliBinary = process.env.ASIMP_WATCH_TEST_BINARY;
 if (cliMode) assert.ok(cliBinary, "CLI mode requires the source-bound Rust library test binary");
 const execute = promisify(execFile);
+
+function readNdjsonPage(text) {
+  const records = text
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const { omitted, ...end } = EventTailNdjsonPageEndSchema.parse(records.pop());
+  // The response schema checks canonical JSON links. Normalize just that face
+  // for its complete sequence/link validation, then require the original bytes
+  // to round-trip through the canonical NDJSON renderer, including its footer.
+  const page = EventTailResponseSchema.parse({
+    schema: end.schema,
+    events: records,
+    page_end: {
+      ...end,
+      next: end.next?.replace("/events.ndjson?", "/events.json?") ?? null,
+      poll: end.poll.replace("/events.ndjson?", "/events.json?"),
+    },
+    omitted,
+  });
+  assert.equal(renderEventTail(page, "ndjson"), text, "complete canonical NDJSON page");
+  return page;
+}
 
 await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, userAgent }) => {
   const author = await enroll("tails-author", "usr_tails_author");
@@ -195,17 +222,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
           pages.push(stdout);
           paths.push(path);
           bodies.push(stdout);
-          const records = stdout
-            .trimEnd()
-            .split("\n")
-            .map((line) => JSON.parse(line));
-          const { omitted, ...end } = records.pop();
-          const typed = EventTailResponseSchema.parse({
-            schema: end.schema,
-            events: records,
-            page_end: end,
-            omitted,
-          });
+          const typed = readNdjsonPage(stdout);
           seen.push(...typed.events.map((event) => event.seq));
           since = typed.page_end.next_cursor;
           through = typed.page_end.through;
@@ -506,17 +523,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
           assert.equal(bytes.toString(), stdout, "live page is stable against independent curl");
           expectedPages.push(stdout);
           bodies.push(stdout);
-          const records = stdout
-            .trimEnd()
-            .split("\n")
-            .map((line) => JSON.parse(line));
-          const { omitted, ...end } = records.pop();
-          const typed = EventTailResponseSchema.parse({
-            schema: end.schema,
-            events: records,
-            page_end: end,
-            omitted,
-          });
+          const typed = readNdjsonPage(stdout);
           resume = typed.page_end.next_cursor;
           caughtUp = published && resume > initialHead && !typed.page_end.has_more;
         }
