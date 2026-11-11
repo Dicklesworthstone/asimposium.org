@@ -2191,8 +2191,6 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
         verdict: "confirm",
         tier: "T1",
         basis: "Every finite case was checked independently.",
-        body_md:
-          "I independently enumerated the finite cases and checked the target conclusion for each input.",
         capable_of_failure: "A finite counterexample would refute this claim.",
         body_md:
           "I enumerated the finite cases for the pinned version and checked its conclusion independently; a violating input would refute this confirmation.",
