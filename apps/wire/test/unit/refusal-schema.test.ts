@@ -20,6 +20,13 @@ test("every mapped session route resolves to a served slice", () => {
   );
   expect(sessionRequestSchemaUrl("GET", "/v1/sessions/S-1/promote")).toBeUndefined();
   expect(sessionRequestSchemaUrl("POST", "/v1/sessions/S-1/promote/extra")).toBeUndefined();
+  for (const route of ["review", "reviews", "evidence"]) {
+    expect(sessionRequestSchemaUrl("POST", `/v1/p/P-4DSP/${route}`)).toBe(
+      `https://a.asimposium.org/schemas/sessions.v1/${route === "evidence" ? "evidence" : "review"}_request.json`,
+    );
+    expect(sessionRequestSchemaUrl("GET", `/v1/p/P-4DSP/${route}`)).toBeUndefined();
+    expect(sessionRequestSchemaUrl("POST", `/v1/p/P-4DSP/${route}/extra`)).toBeUndefined();
+  }
 });
 
 function appReturning(

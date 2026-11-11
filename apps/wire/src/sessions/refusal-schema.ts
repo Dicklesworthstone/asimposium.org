@@ -22,6 +22,8 @@ const ROUTE_REQUEST_SCHEMAS: readonly (readonly [string, RegExp, string])[] = [
   ["POST", new RegExp(`^/v1/sessions/${ID}/heartbeat$`), "session_heartbeat_request"],
   ["POST", new RegExp(`^/v1/sessions/${ID}/review$`), "review_request"],
   ["POST", new RegExp(`^/v1/sessions/${ID}/evidence$`), "evidence_request"],
+  ["POST", new RegExp(`^/v1/p/${ID}/reviews?$`), "review_request"],
+  ["POST", new RegExp(`^/v1/p/${ID}/evidence$`), "evidence_request"],
   ["POST", new RegExp(`^/v1/sessions/${ID}/hypotheses$`), "hypothesis_request"],
   ["POST", new RegExp(`^/v1/sessions/${ID}/hypotheses/${ID}/kill$`), "hypothesis_kill_request"],
   [

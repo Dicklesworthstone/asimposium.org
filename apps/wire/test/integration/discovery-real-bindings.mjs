@@ -287,7 +287,22 @@ async function runDiscovery() {
     return data;
   }
   async function correctBodyField(path, body, token, typo, expectedField, expectedCode) {
+    const state = () =>
+      env.DB.prepare(`SELECT
+      (SELECT COUNT(*) FROM sessions) AS sessions,
+      (SELECT COUNT(*) FROM workshop_objects) AS workshop,
+      (SELECT COUNT(*) FROM events) AS events,
+      (SELECT COUNT(*) FROM reviews) AS reviews,
+      (SELECT COUNT(*) FROM evidence) AS evidence`).first();
+    const before = await state();
+    const screens = await fixtures.screeningCalls();
     const refused = await call(path, body, token, 422);
+    assert.deepEqual(
+      await state(),
+      before,
+      "a field refusal cannot mutate scientific or private state",
+    );
+    assert.equal(await fixtures.screeningCalls(), screens, "a field refusal cannot run screening");
     assert.ok(
       ProblemDocumentSchema.safeParse(refused).success,
       "field refusal must match the public contract",
@@ -308,6 +323,8 @@ async function runDiscovery() {
       SESSION_OPEN_BODY_INVALID: "session_open_request",
       WORKSHOP_PUSH_BODY_INVALID: "workshop_push_request",
       PROMOTE_BODY_INVALID: "promote_request",
+      REVIEW_BODY_INVALID: "review_request",
+      EVIDENCE_BODY_INVALID: "evidence_request",
     }[expectedCode];
     assert.ok(
       refused.schema === `https://a.asimposium.org/schemas/sessions.v1/${property}.json`,
@@ -1126,20 +1143,43 @@ async function runDiscovery() {
         .neutralized.some((entry) => entry.marker === "asimp-control-comment"),
     );
     assert.equal(selectedClaim.falsifier, promotion.falsifier);
-    const reviewed = await call(
-      `/v1/sessions/${rs.session_id}/review`,
-      {
-        target_claim_id: selectedClaim.claim_id,
-        target_version: selectedClaim.version,
-        verdict: "inform",
-        basis: reviewBasis,
-        capable_of_failure: "A nonzero remainder would fail this check.",
-        rubric: [selectedCheck],
-        body_md: "Synthetic local review; this is no live model or research result.",
-      },
-      reviewer,
-      201,
-    );
+    const reviewRoute =
+      problem === "P-DISC-A" ? `/v1/sessions/${rs.session_id}/review` : `/v1/p/${problem}/reviews`;
+    let reviewBody = {
+      target_claim_id: selectedClaim.claim_id,
+      target_version: selectedClaim.version,
+      verdict: "inform",
+      basis: reviewBasis,
+      capable_of_failure: "A nonzero remainder would fail this check.",
+      rubric: [selectedCheck],
+      body_md: "Synthetic local review; this is no live model or research result.",
+    };
+    const { basis, ...reviewFields } = reviewBody;
+    for (const route of new Set([
+      reviewRoute,
+      `/v1/p/${problem}/review`,
+      `/v1/p/${problem}/reviews`,
+    ])) {
+      const forged = await call(
+        route,
+        { ...reviewFields, bassis: basis, [reviewer]: "private-key-probe" },
+        reviewer,
+        422,
+      );
+      assert.ok(
+        !JSON.stringify(forged).includes(reviewer),
+        "review refusal must not reflect a bearer used as a key",
+      );
+      reviewBody = await correctBodyField(
+        route,
+        { ...reviewFields, bassis: basis },
+        reviewer,
+        "bassis",
+        "basis",
+        "REVIEW_BODY_INVALID",
+      );
+    }
+    const reviewed = await call(reviewRoute, reviewBody, reviewer, 201);
     assert.match(reviewed.review_id, /^R-[A-Z0-9]+$/);
     const storedReview = await env.DB.prepare(
       "SELECT rubric_json FROM reviews WHERE review_id = ? AND problem_id = ?",
@@ -1148,22 +1188,39 @@ async function runDiscovery() {
       .first();
     assert.ok(storedReview);
     assert.deepEqual(JSON.parse(storedReview.rubric_json), [selectedCheck]);
-    await call(
-      `${path}/evidence`,
-      {
-        bears_on_kind: "claim",
-        bears_on_id: "C-1",
-        bears_on_version: 1,
-        direction: "informs",
-        kind: "argument",
-        source: { kind: "model_memory" },
-        mode: "exploratory",
-        body_md:
-          "Synthetic example: 2 = 2 times 1. Model-memory argument, not an external citation.",
-      },
-      author,
-      201,
-    );
+    const evidenceRoute = problem === "P-DISC-A" ? `${path}/evidence` : `/v1/p/${problem}/evidence`;
+    let evidenceBody = {
+      bears_on_kind: "claim",
+      bears_on_id: "C-1",
+      bears_on_version: 1,
+      direction: "informs",
+      kind: "argument",
+      source: { kind: "model_memory" },
+      mode: "exploratory",
+      body_md: "Synthetic example: 2 = 2 times 1. Model-memory argument, not an external citation.",
+    };
+    const { body_md, ...evidenceFields } = evidenceBody;
+    for (const route of new Set([evidenceRoute, `${path}/evidence`, `/v1/p/${problem}/evidence`])) {
+      const forged = await call(
+        route,
+        { ...evidenceFields, bodymd: body_md, [author]: "private-key-probe" },
+        author,
+        422,
+      );
+      assert.ok(
+        !JSON.stringify(forged).includes(author),
+        "evidence refusal must not reflect a bearer used as a key",
+      );
+      evidenceBody = await correctBodyField(
+        route,
+        { ...evidenceFields, bodymd: body_md },
+        author,
+        "bodymd",
+        "body_md",
+        "EVIDENCE_BODY_INVALID",
+      );
+    }
+    await call(evidenceRoute, evidenceBody, author, 201);
     await call(
       `${path}/close`,
       { handback: "Synthetic local proof completed; objects remain on the ledger." },

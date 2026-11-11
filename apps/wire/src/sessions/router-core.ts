@@ -827,6 +827,7 @@ function reviewBodyInvalidProblem(
         "A novelty review uses verdict 'inform' and a novelty block {verdict, searches[1..16] of {source, searched_on YYYY-MM-DD, terms[1..16]}, nearest_prior_art[0..16] of {locator, relation}, semantic_difference}. At least one recorded search is required.",
       rule: "A5",
       extensions: {
+        ...requestFieldHints(ReviewRequestSchema, rawBody),
         schema: SESSIONS_SCHEMA_URI,
         example: {
           target_claim_id: "C-1",
@@ -862,6 +863,7 @@ function reviewBodyInvalidProblem(
       "Send {target_claim_id, target_version, verdict, basis, capable_of_failure?, rubric?, body_md}.",
     rule: "A5",
     extensions: {
+      ...requestFieldHints(ReviewRequestSchema, rawBody),
       schema: SESSIONS_SCHEMA_URI,
       example: {
         target_claim_id: "C-1",
@@ -898,6 +900,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   // shape, never the whole 200 KB sessions document (refusal-schema.ts).
   app.use("/v1/sessions", narrowSessionRefusalSchema);
   app.use("/v1/sessions/*", narrowSessionRefusalSchema);
+  app.use("/v1/p/*", narrowSessionRefusalSchema);
   const privateNoStore = (response: Response): Response => {
     const headers = new Headers(response.headers);
     headers.set("cache-control", "private, no-store");
@@ -12493,6 +12496,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         fixHint: "Send {bears_on_kind, bears_on_id, direction, kind, source, mode, body_md, ...}.",
         rule: "A5",
         extensions: {
+          ...requestFieldHints(EvidenceRequestSchema, rawBody),
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           example: {
             bears_on_kind: "claim",
@@ -19923,6 +19927,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         fixHint: "Send {bears_on_kind, bears_on_id, direction, kind, source, mode, body_md, ...}.",
         rule: "A5",
         extensions: {
+          ...requestFieldHints(EvidenceRequestSchema, rawBody),
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           example: {
             bears_on_kind: "claim",
