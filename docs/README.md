@@ -17,6 +17,34 @@ observed.
 Updated 2026-11-11. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+At `f0957beb`, Gallery smoke executes the existing sponsor mint and approval
+forms, Fellow enrollment, session, working pack and private workshop push.
+The same journey checks owner visibility and excludes the second sponsor,
+anonymous visitors and public faces before closing with a handback. The hosted
+entrypoint requires two designated Google test accounts and a dedicated staging
+problem. Credentials enter over stdin, and its terminal result follows browser
+cleanup. The deployment stage order is unchanged.
+
+Both agents pass all 439 checks in the real local Chromium/production
+Next/Workerd lane. Sponsor cookies are explicitly local fixtures, with no
+Google OAuth exchange. Independent substitution of the owner's principal in
+the private workshop producer fails the unchanged cross-sponsor leak assertion;
+exact restoration passes all 439 checks. All 2,702 source hashes and the pinned
+SDK match. Complete pipeline tests (23), smoke-entrypoint checks and lifecycle
+units (3) also pass independently and on primary reexecution. Pinned typecheck
+and lint pass all eight groups. The original full root passes all eight groups
+at 03:30 UTC, including 7,321 Worker and 1,081 Agora tests. Its before/after
+source and SDK maps match current main and the independent browser inputs.
+The separate full contracts and renderer gates pass 1,019 and 604 tests.
+WhiteRaven independently closed `7ft.3` at 03:35 UTC, with the criterion and
+evidence map in Beads comment 3098. Parent `7ft` remains open.
+
+The exact-source read-only staging smoke stops at exit 78
+`GALLERY_GOOGLE_TEST_ACCOUNTS_MISSING`, after public preflight and before any
+authenticated write. This replaces the permanent implementation stop observed
+on November 10. It does not establish hosted Google, staging deployment or G0
+acceptance. Those requirements remain with `7ft` and `rs5n`.
+
 Merge `c72f78ca` introduced two local qualification failures. The S2 source
 walk named an unlisted import, `packages/render/src/artifact-publications.ts`.
 The original S3 sentinel test exhausted its 3,760,000-byte evidence receiver.
