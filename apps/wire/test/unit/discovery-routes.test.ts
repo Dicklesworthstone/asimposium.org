@@ -333,7 +333,7 @@ function seedCalibrationPublication(
     raw.run(
       `INSERT INTO reviews(review_id,problem_id,target_claim_id,target_version,
       reviewer_fellow_id,tier,verdict,basis,body_md,created_at,source_event_id,source_seq,
-      capable_of_failure,rubric_json) VALUES(?,?,?,?,?,'T1',?,?,'Review fixture',?,?,?,?, '[]')`,
+      capable_of_failure,rubric_json) VALUES(?,?,?,?,?,'T1',?,?,?,?,?,?,?, '[]')`,
       [
         id,
         problem,
@@ -342,6 +342,7 @@ function seedCalibrationPublication(
         fellow,
         String(payload.verdict),
         String(payload.basis),
+        typeof payload.body_md === "string" ? payload.body_md : "",
         at,
         event,
         seq,
@@ -2099,42 +2100,56 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     seedDiscoveryData(raw);
     seedScopeProblem(raw, "P-CALIBRATION");
     seedScopeClaim(raw, "P-CALIBRATION", "C-2", 2);
+    const app = createApp();
+    const env = mockEnv(db);
+    const readSurvivingReviews = async () => {
+      const response = await app.fetch(
+        new Request("https://a.asimposium.org/a/gauss-agent.json"),
+        env,
+      );
+      expect(response.status).toBe(200);
+      return FellowCardResponseSchema.parse(await response.json()).calibration
+        .reviews_verified_survival;
+    };
     const review = {
       target_claim_id: "C-2",
       target_version: 1,
       verdict: "confirm",
       tier: "T1",
       basis: "Every finite case was checked independently.",
+      body_md:
+        "I independently enumerated the finite cases and checked the target conclusion for each input.",
     };
     seedCalibrationPublication(raw, "P-CALIBRATION", 3, "review", "R-LABEL", review);
     // The previous implementation credited this verdict without any check that could fail.
-    expect((await loadFellowCard(db, "gauss-agent"))?.calibration.reviews_verified_survival).toBe(
-      0,
-    );
-    seedCalibrationPublication(raw, "P-CALIBRATION", 4, "review", "R-CHECK", {
+    expect(await readSurvivingReviews()).toBe(0);
+    seedCalibrationPublication(raw, "P-CALIBRATION", 4, "review", "R-IMPRESSION", {
+      ...review,
+      basis: "Looks right.",
+      capable_of_failure: "A finite input violating the conclusion would refute it.",
+      body_md: "A favorable impression without an independently recorded check.",
+    });
+    // A named failure condition cannot turn praise into public verification credit.
+    expect(await readSurvivingReviews()).toBe(0);
+    seedCalibrationPublication(raw, "P-CALIBRATION", 5, "review", "R-CHECK", {
       ...review,
       capable_of_failure: "A finite input violating the conclusion would refute it.",
       body_md:
         "I enumerated the finite cases for the pinned version and checked its conclusion independently; a violating input would refute this confirmation.",
     });
-    expect((await loadFellowCard(db, "gauss-agent"))?.calibration.reviews_verified_survival).toBe(
-      1,
-    );
+    expect(await readSurvivingReviews()).toBe(1);
     // A recorded objection contests the exact version even without positive weight.
-    seedCalibrationPublication(raw, "P-CALIBRATION", 5, "review", "R-OBJECTION", {
+    seedCalibrationPublication(raw, "P-CALIBRATION", 6, "review", "R-OBJECTION", {
       ...review,
       verdict: "refute",
       basis: "The edge case remains unresolved.",
+      body_md: "The boundary input still needs a check before the conclusion can be accepted.",
     });
-    expect((await loadFellowCard(db, "gauss-agent"))?.calibration.reviews_verified_survival).toBe(
-      0,
-    );
+    expect(await readSurvivingReviews()).toBe(0);
     raw.run(
       "UPDATE event_content SET payload_json='{}',redacted_at='2026-09-10T00:00:00Z',redaction_reason='Fixture lawful removal' WHERE event_id='E-CAL-R-OBJECTION'",
     );
-    expect(
-      (await loadFellowCard(db, "gauss-agent"))?.calibration.reviews_verified_survival,
-    ).toBeNull();
+    expect(await readSurvivingReviews()).toBeNull();
   });
 
   test.each(["problem", "P-4DSP"])(
@@ -2176,6 +2191,8 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
         verdict: "confirm",
         tier: "T1",
         basis: "Every finite case was checked independently.",
+        body_md:
+          "I independently enumerated the finite cases and checked the target conclusion for each input.",
         capable_of_failure: "A finite counterexample would refute this claim.",
         body_md:
           "I enumerated the finite cases for the pinned version and checked its conclusion independently; a violating input would refute this confirmation.",
@@ -2239,6 +2256,8 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
           verdict: "confirm",
           tier: "T1",
           basis: budget === "source bytes" ? "x".repeat(65_536) : "Finite checks completed.",
+          body_md:
+            "The finite inputs were independently enumerated and checked against the exact target conclusion.",
           capable_of_failure: "A finite counterexample would refute the result.",
         });
       }
