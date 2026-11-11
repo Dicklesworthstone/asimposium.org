@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PackResponseSchema, ProblemNextResponseSchema } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
@@ -25,6 +26,7 @@ export async function problemGovernanceJourney({
   const fellow1Token = await enroll("fellow-one", sponsorA);
   const fellow2Token = await enroll("fellow-two", sponsorB);
   const fellow3Token = await enroll("fellow-three", sponsorC);
+  const ownerPeerToken = await enroll("owner-admission-peer", sponsorA);
 
   // Helper to extract fellowId from enrollment_fellows by name
   const f1 = await env.DB.prepare("SELECT fellow_id FROM enrollment_fellows WHERE name = ?")
@@ -40,7 +42,7 @@ export async function problemGovernanceJourney({
   const f3 = await env.DB.prepare("SELECT fellow_id FROM enrollment_fellows WHERE name = ?")
     .bind("fellow-three")
     .first();
-  const _fellow3Id = f3.fellow_id;
+  const fellow3Id = f3.fellow_id;
 
   // 2. Propose Problem 1
   const propRes = await call(
@@ -56,6 +58,16 @@ export async function problemGovernanceJourney({
     201,
   );
   const problem1Id = propRes.problem.id;
+  const nextFor = async (token) =>
+    ProblemNextResponseSchema.parse(await call(`/v1/p/${problem1Id}/next`, undefined, token));
+  const packFor = async (sessionId, token) =>
+    PackResponseSchema.parse(
+      await call(
+        `/v1/sessions/${sessionId}/pack?profile=working&max_tokens=8000`,
+        undefined,
+        token,
+      ),
+    );
   assert.equal(propRes.problem.status, "private-draft");
 
   // Verify founding steward was recorded in problem_stewards
@@ -133,20 +145,40 @@ export async function problemGovernanceJourney({
 
   console.log(JSON.stringify({ stage: "problem-published-and-verified" }));
 
-  // 4. Admission Modes: approval-required vs open vs archived-read-only
-  // Sponsor A sets admission_mode to "approval-required"
-  await sponsorCall(
-    sponsorA,
-    "POST",
-    `/v1/sponsors/problems/${problem1Id}/lifecycle`,
-    "problem-lifecycle",
-    { action: "set-admission-mode", mode: "approval-required" },
-    200,
+  // 4. Canonical next guidance must agree with actual session admission.
+  for (const mode of ["approval-required", "invite-only"]) {
+    await sponsorCall(
+      sponsorA,
+      "POST",
+      `/v1/sponsors/problems/${problem1Id}/lifecycle`,
+      "problem-lifecycle",
+      { action: "set-admission-mode", mode },
+      200,
+    );
+    const blockedNext = await nextFor(fellow2Token);
+    assert.equal(blockedNext.viewer.effective_permissions.session_open, false);
+    assert.equal(blockedNext.primary_move, null);
+    assert.equal(blockedNext.degraded, false);
+    const deniedSession = await call("/v1/sessions", { problem_id: problem1Id }, fellow2Token, 403);
+    assert.equal(deniedSession.code, "WRITE_REFUSED");
+  }
+  // A newly enrolled Fellow with the owner's sponsorship is an actual
+  // admission exception even without existing membership.
+  assert.equal((await nextFor(ownerPeerToken)).viewer.effective_permissions.session_open, true);
+  const ownerPeerSession = await call(
+    "/v1/sessions",
+    { problem_id: problem1Id },
+    ownerPeerToken,
+    201,
   );
-
-  // Fellow 2 tries to open session on Problem 1 (mode is approval-required, Fellow 2 not a member)
-  const deniedSession = await call("/v1/sessions", { problem_id: problem1Id }, fellow2Token, 403);
-  assert.equal(deniedSession.code, "WRITE_REFUSED");
+  await call(
+    `/v1/sessions/${ownerPeerSession.session_id}/close`,
+    {
+      handback: "Owner sponsorship admission verified.",
+    },
+    ownerPeerToken,
+    201,
+  );
 
   // Sponsor A changes admission_mode to "open"
   const setOpenRes = await sponsorCall(
@@ -160,9 +192,67 @@ export async function problemGovernanceJourney({
   assert.equal(setOpenRes.problem.admission_mode, "open");
 
   // Fellow 2 now successfully opens session
+  assert.equal((await nextFor(fellow2Token)).viewer.effective_permissions.session_open, true);
   const openSessionRes = await call("/v1/sessions", { problem_id: problem1Id }, fellow2Token, 201);
   const session2Id = openSessionRes.session_id;
   assert.ok(session2Id);
+
+  // Removing a previous member on a restricted board must remove autojoin,
+  // while leaving that Fellow's global credential intact.
+  const thirdSession = await call("/v1/sessions", { problem_id: problem1Id }, fellow3Token, 201);
+  await call(
+    `/v1/sessions/${thirdSession.session_id}/close`,
+    {
+      handback: "Former member admission setup.",
+    },
+    fellow3Token,
+    201,
+  );
+  await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${problem1Id}/lifecycle`,
+    "problem-lifecycle",
+    { action: "set-admission-mode", mode: "invite-only" },
+  );
+  await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${problem1Id}/lifecycle`,
+    "problem-lifecycle",
+    { action: "manage-member", operation: "remove", target_fellow_id: fellow3Id },
+  );
+  assert.equal((await nextFor(fellow3Token)).viewer.effective_permissions.session_open, false);
+  assert.equal(
+    (await call("/v1/sessions", { problem_id: problem1Id }, fellow3Token, 403)).code,
+    "WRITE_REFUSED",
+  );
+  await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${problem1Id}/lifecycle`,
+    "problem-lifecycle",
+    { action: "set-admission-mode", mode: "open" },
+  );
+
+  // Activate through the ordinary independent statement review so the pack
+  // has a genuinely available promotion action before archival.
+  await call(
+    `/v1/problems/${problem1Id}/statement-review`,
+    {
+      session_id: session2Id,
+      statement_version: 1,
+      verdict: "statement-clear",
+      basis: "The governance investigation and counterexample boundary are explicit.",
+    },
+    fellow2Token,
+  );
+  const activePack = await packFor(session2Id, fellow2Token);
+  assert.ok(
+    activePack.next_actions.some(
+      (action) => action.method === "POST" && action.url === `/v1/sessions/${session2Id}/promote`,
+    ),
+  );
 
   // Sponsor A changes admission_mode to "archived-read-only"
   await sponsorCall(
@@ -177,6 +267,55 @@ export async function problemGovernanceJourney({
   // Fellow 3 tries to open session on archived problem -> refused 403
   const archivedSession = await call("/v1/sessions", { problem_id: problem1Id }, fellow3Token, 403);
   assert.equal(archivedSession.code, "WRITE_REFUSED");
+  for (const [token, member] of [
+    [fellow1Token, true],
+    [fellow2Token, true],
+    [fellow3Token, false],
+  ]) {
+    const archivedNext = await nextFor(token);
+    for (const operation of ["session_open", "promote", "review", "evidence", "dead_end"])
+      assert.equal(archivedNext.viewer.effective_permissions[operation], false);
+    assert.equal(archivedNext.viewer.effective_permissions.workshop_push, member);
+    assert.equal(archivedNext.primary_move, null);
+    assert.deepEqual(archivedNext.alternatives, []);
+    assert.equal(archivedNext.degraded, false);
+  }
+  const archivedPack = await packFor(session2Id, fellow2Token);
+  assert.deepEqual(
+    archivedPack.next_actions.filter(
+      (action) => action.method === "POST" && action.url !== `/v1/sessions/${session2Id}/workshop`,
+    ),
+    [],
+  );
+  assert.ok(
+    archivedPack.next_actions.some(
+      (action) => action.method === "POST" && action.url === `/v1/sessions/${session2Id}/workshop`,
+    ),
+  );
+  const retainedDraft = await call(
+    `/v1/sessions/${session2Id}/workshop`,
+    {
+      type: "claim-draft",
+      title: "Private work retained during archival",
+      body_md: "Keep the observation available for a later reopened workspace.",
+      relates_to: [],
+    },
+    fellow2Token,
+    201,
+  );
+  const archivedPromotion = await call(
+    `/v1/sessions/${session2Id}/promote`,
+    {
+      workshop_id: retainedDraft.workshop_id,
+      kind: "conjecture",
+      statement: "The recorded observation recurs on the next independent trial.",
+      falsifier: "The next trial records a different observation.",
+      relates_to: [],
+    },
+    fellow2Token,
+    403,
+  );
+  assert.equal(archivedPromotion.code, "WRITE_REFUSED");
 
   // Re-open admission_mode to "open"
   await sponsorCall(
@@ -189,6 +328,12 @@ export async function problemGovernanceJourney({
   );
 
   console.log(JSON.stringify({ stage: "admission-modes-verified" }));
+  assert.equal((await nextFor(fellow2Token)).viewer.effective_permissions.session_open, true);
+  assert.ok(
+    (await packFor(session2Id, fellow2Token)).next_actions.some(
+      (action) => action.method === "POST" && action.url === `/v1/sessions/${session2Id}/promote`,
+    ),
+  );
 
   // 5. Roles: Observer promotion refusal vs contributor allow (ADR-22 & Fable §9.3 hard boundary)
   // Sponsor A sets Fellow 2's role to "observer"
@@ -321,6 +466,38 @@ export async function problemGovernanceJourney({
   const stewardIds = stewardsList.results.map((r) => r.sponsor_id);
   assert.ok(stewardIds.includes(sponsorA));
   assert.ok(stewardIds.includes(sponsorB));
+
+  const stewardPeerToken = await enroll("steward-admission-peer", sponsorB);
+  await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${problem1Id}/lifecycle`,
+    "problem-lifecycle",
+    { action: "set-admission-mode", mode: "invite-only" },
+  );
+  assert.equal((await nextFor(stewardPeerToken)).viewer.effective_permissions.session_open, true);
+  assert.equal((await nextFor(fellow3Token)).viewer.effective_permissions.session_open, false);
+  const stewardPeerSession = await call(
+    "/v1/sessions",
+    { problem_id: problem1Id },
+    stewardPeerToken,
+    201,
+  );
+  await call(
+    `/v1/sessions/${stewardPeerSession.session_id}/close`,
+    {
+      handback: "Delegated sponsor stewardship admission verified.",
+    },
+    stewardPeerToken,
+    201,
+  );
+  await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${problem1Id}/lifecycle`,
+    "problem-lifecycle",
+    { action: "set-admission-mode", mode: "open" },
+  );
 
   // Sponsor B can now execute governance actions
   const capRes = await sponsorCall(
@@ -1016,6 +1193,8 @@ export async function problemGovernanceJourney({
       adr22_token_preservation: true,
       scientific_disposition_immutable_by_governance: true,
       merge_308_redirect_verified: true,
+      canonical_admission_guidance_verified: true,
+      archived_pack_preserves_private_drafting: true,
     }),
   );
 

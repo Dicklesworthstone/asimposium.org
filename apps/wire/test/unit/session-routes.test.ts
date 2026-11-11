@@ -11652,6 +11652,11 @@ describe("session protocol routes", () => {
       { kind: "first", sql: cursorSql, bindings: ["P-4DSP"] },
       {
         kind: "first",
+        sql: packSessionSql,
+        bindings: [targetSession.session_id, binding.fellowId],
+      },
+      {
+        kind: "first",
         sql: "SELECT status, unlisted, admission_mode FROM problems WHERE id = ?",
         bindings: ["P-4DSP"],
       },

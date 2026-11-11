@@ -3866,8 +3866,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
       // Governance can change while asynchronous sections are composed. Do
       // not publish stale write actions or endorse them with a cached 304.
+      // Published-problem packs also contain private workshop and handback
+      // material. Reauthenticate after composition just as their direct
+      // private read routes do; a former binding is not continuing authority.
+      const currentAuth = await authenticate(c.req.raw);
+      if (!currentAuth.ok) return privateNoStore(currentAuth.response);
       let problemStillCurrent = false;
       try {
+        const currentSession = await packSessionOf(
+          db,
+          session.session_id,
+          currentAuth.binding.fellowId,
+        );
+        if (currentSession instanceof Response) return privateNoStore(currentSession);
         const currentProblem = await db
           .prepare("SELECT status, unlisted, admission_mode FROM problems WHERE id = ?")
           .bind(session.problem_id)
@@ -3878,6 +3889,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           auth.binding.fellowId,
         );
         problemStillCurrent =
+          currentSession.problem_id === session.problem_id &&
+          currentAuth.binding.fellowId === auth.binding.fellowId &&
+          currentAuth.binding.sponsorId === auth.binding.sponsorId &&
+          currentAuth.binding.credentialId === auth.binding.credentialId &&
+          currentAuth.binding.tokenHash === auth.binding.tokenHash &&
+          currentAuth.binding.credentialProfile === auth.binding.credentialProfile &&
+          currentAuth.binding.fellowStatus === auth.binding.fellowStatus &&
+          (currentAuth.binding.grantedResources.problemBinding === undefined ||
+            currentAuth.binding.grantedResources.problemBinding === session.problem_id) &&
+          // Successful reauthentication changes lastUsedAt, not these grants.
+          JSON.stringify(currentAuth.binding.grantedScopes) ===
+            JSON.stringify(auth.binding.grantedScopes) &&
+          JSON.stringify(currentAuth.binding.grantedResources) ===
+            JSON.stringify(auth.binding.grantedResources) &&
           currentProblem !== null &&
           currentProblem.status === packProblem?.status &&
           currentProblem.unlisted === packProblem?.unlisted &&
