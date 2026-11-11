@@ -60,7 +60,7 @@ function fixture(
     CREATE TABLE evidence(evidence_id TEXT,problem_id TEXT,source_event_id TEXT,source_seq INTEGER,
       bears_on_kind TEXT,bears_on_id TEXT,bears_on_version INTEGER,direction TEXT);
     CREATE TABLE reviews(review_id TEXT,problem_id TEXT,source_event_id TEXT,source_seq INTEGER,
-      target_claim_id TEXT,target_version INTEGER,verdict TEXT,capable_of_failure TEXT,
+      target_claim_id TEXT,target_version INTEGER,verdict TEXT,capable_of_failure TEXT,basis TEXT,body_md TEXT,
       rubric_json TEXT DEFAULT '[]');
     CREATE TABLE retractions(problem_id TEXT,retraction_id TEXT,target_object TEXT,seq INTEGER,author_fellow_id TEXT);
     CREATE TABLE scientific_withdrawals(event_id TEXT,event_sha256 TEXT,problem_id TEXT,retraction_id TEXT,
@@ -240,7 +240,9 @@ function fixture(
       target_claim_id: pin.claim_id,
       target_version: pin.version,
       verdict: "confirm",
+      basis: "Both sides denote the integer two; reflexivity verifies the exact equality.",
       capable_of_failure: "The exact equality could fail.",
+      body_md: `${CANARY}: Comparing both finite values yields two on each side, establishing the claimed equality.`,
       rubric: [],
       tier: "T2",
       independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
@@ -249,7 +251,7 @@ function fixture(
     };
     const source = append("review.created", "review", id, body, 1, reviewer, `usr_${reviewer}`);
     sql
-      .query("INSERT INTO reviews VALUES(?,?,?,?,?,?,?,?,?)")
+      .query("INSERT INTO reviews VALUES(?,?,?,?,?,?,?,?,?,?,?)")
       .run(
         id,
         PROBLEM,
@@ -259,6 +261,8 @@ function fixture(
         pin.version,
         String(body.verdict),
         String(body.capable_of_failure),
+        String(body.basis),
+        String(body.body_md),
         JSON.stringify(body.rubric),
       );
     return source;

@@ -7,6 +7,7 @@
  */
 
 import { reviewerIsAuthor } from "./review-independence.ts";
+import { reviewCarriesWeight } from "./review-weight.ts";
 
 export type ReviewVerdict =
   | "confirm"
@@ -134,9 +135,7 @@ export function gateReviewSubmission(input: {
     };
   }
 
-  // P5: the capable-of-failure field is mandatory for the review to carry
-  // weight. Absent, the review is accepted but tagged assertion-only.
-  const carriesWeight =
-    submission.capableOfFailure !== undefined && submission.capableOfFailure.trim().length > 0;
-  return { ok: true, carriesWeight };
+  // P4/P5: impression-only bases and missing capable-of-failure fields remain
+  // accepted, but cannot supply verification weight.
+  return { ok: true, carriesWeight: reviewCarriesWeight(submission) };
 }

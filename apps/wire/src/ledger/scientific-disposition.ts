@@ -23,6 +23,7 @@ import {
   type ScientificEvidenceUse,
   scientificEvidenceClassEligible,
 } from "./evidence-grounding.ts";
+import { reviewCarriesWeight, reviewCarriesWeightSql } from "./review-weight.ts";
 import {
   assessScientificVerification,
   inspectFormalArtifact,
@@ -53,6 +54,8 @@ export interface ScientificRow {
   content_digest: string | null;
   statement: string | null;
   direction: string | null;
+  /** A completed objection remains contested even without verification weight. */
+  negative_review?: number;
   weighted_refutation?: number;
   /** Immutable review rubric/weight survives withholding its public body. */
   weighted_statement_defect?: number;
@@ -234,9 +237,11 @@ export function prepareScientificDispositions(
         "disclosure_cut.cursor",
       )} ELSE NULL END AS directive_disclosure,
       w.target_kind AS withdrawn_kind, w.source_sha256 AS withdrawn_sha256,
+      CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce') THEN 1 ELSE 0 END AS negative_review,
       CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce')
-        AND length(trim(coalesce(r.capable_of_failure, ''))) > 0 THEN 1 ELSE 0 END AS weighted_refutation,
-      CASE WHEN length(trim(coalesce(r.capable_of_failure, ''))) > 0
+        AND ${reviewCarriesWeightSql({ basis: "r.basis", capableOfFailure: "r.capable_of_failure", bodyMd: "r.body_md" })}
+        THEN 1 ELSE 0 END AS weighted_refutation,
+      CASE WHEN ${reviewCarriesWeightSql({ basis: "r.basis", capableOfFailure: "r.capable_of_failure", bodyMd: "r.body_md" })}
         AND json_type(r.rubric_json) = 'array'
         AND EXISTS (SELECT 1 FROM json_each(r.rubric_json) rubric
           WHERE rubric.type = 'text' AND rubric.value IN ('statement-defect', 'statement-fails-review'))
@@ -605,7 +610,10 @@ export async function foldScientificRows(
         row.type === "review.created" &&
         (isNegativeReview(payload) ||
           adverseNovelty ||
-          (!payload && (row.weighted_refutation === 1 || row.weighted_statement_defect === 1)));
+          (!payload &&
+            (row.negative_review === 1 ||
+              row.weighted_refutation === 1 ||
+              row.weighted_statement_defect === 1)));
       if (!adverseEvidence && !adverseReview) continue;
     }
     if (row.type === "claim.created" || row.type === "claim.revised") {
@@ -701,17 +709,23 @@ export async function foldScientificRows(
     const claim = claims.get(row.target_version);
     if (
       row.type === "review.created" &&
-      (row.weighted_refutation === 1 || row.weighted_statement_defect === 1) &&
+      (row.negative_review === 1 ||
+        row.weighted_refutation === 1 ||
+        row.weighted_statement_defect === 1) &&
       (!payload || !claim)
     ) {
       // Withholding an adverse review cannot resolve its recorded finding.
       // A statement defect clears only through a new version, not redaction.
+      const carriesWeight = row.weighted_refutation === 1 || row.weighted_statement_defect === 1;
+      const verdict =
+        row.negative_review === 1 || row.weighted_refutation === 1 ? "refute" : "cannot-verify";
+      reviewFacets.push({ targetVersion: row.target_version, verdict, carriesWeight, tier: "T0" });
       timeline.push({
         kind: "review-created",
         sequence: row.seq,
         targetVersion: row.target_version,
-        carriesWeight: true,
-        verdict: "refute",
+        carriesWeight,
+        verdict,
         rubric: row.weighted_statement_defect === 1 ? ["statement-defect"] : undefined,
         review: {
           review_id: row.object_id,
@@ -781,9 +795,11 @@ export async function foldScientificRows(
       continue;
     }
     if (row.type !== "review.created") continue;
-    let carriesWeight =
-      typeof payload.capable_of_failure === "string" &&
-      payload.capable_of_failure.trim().length > 0;
+    let carriesWeight = reviewCarriesWeight({
+      basis: payload.basis,
+      capableOfFailure: payload.capable_of_failure,
+      bodyMd: payload.body_md,
+    });
     const { tier, legacy } = recordedReviewIndependence(payload, claim.sponsorId, row.sponsor_id);
     if (legacy) legacyReviews++;
     let fullWriteUp = false;

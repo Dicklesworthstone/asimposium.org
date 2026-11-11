@@ -15,6 +15,7 @@ import {
 } from "./dependency-ceiling.ts";
 import { reviewStateFromRecordedReviews } from "./dispositions.ts";
 import type { EvidenceClass } from "./evidence-class.ts";
+import { reviewCarriesWeightSql } from "./review-weight.ts";
 import {
   assessScientificVerification,
   checkedScientificPayload,
@@ -86,9 +87,11 @@ source_rows AS (
     )} ELSE NULL END AS directive_disclosure,
     w.source_event_id AS withdrawn_event_id, w.target_kind AS withdrawn_kind,
     w.source_sha256 AS withdrawn_sha256,
+    CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce') THEN 1 ELSE 0 END AS negative_review,
     CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce')
-      AND length(trim(coalesce(r.capable_of_failure, ''))) > 0 THEN 1 ELSE 0 END AS weighted_refutation,
-    CASE WHEN length(trim(coalesce(r.capable_of_failure, ''))) > 0
+      AND ${reviewCarriesWeightSql({ basis: "r.basis", capableOfFailure: "r.capable_of_failure", bodyMd: "r.body_md" })}
+      THEN 1 ELSE 0 END AS weighted_refutation,
+    CASE WHEN ${reviewCarriesWeightSql({ basis: "r.basis", capableOfFailure: "r.capable_of_failure", bodyMd: "r.body_md" })}
       AND json_type(r.rubric_json) = 'array'
       AND EXISTS (SELECT 1 FROM json_each(r.rubric_json) rubric
         WHERE rubric.type = 'text' AND rubric.value IN ('statement-defect', 'statement-fails-review'))

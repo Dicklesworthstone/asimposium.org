@@ -4832,6 +4832,147 @@ describe("session protocol routes", () => {
     expect(advertisedWrites).toEqual([]);
   });
 
+  for (const [state, change, refusalStatus, refusalCode] of [
+    [
+      "archived",
+      "UPDATE problems SET admission_mode='archived-read-only' WHERE id='P-4DSP'",
+      403,
+      "WRITE_REFUSED",
+    ],
+    [
+      "resolved",
+      "UPDATE problems SET status='resolved' WHERE id='P-4DSP'",
+      422,
+      "CLAIMS_BOARD_LOCKED",
+    ],
+    [
+      "retired",
+      "UPDATE problems SET status='retired' WHERE id='P-4DSP'",
+      422,
+      "CLAIMS_BOARD_LOCKED",
+    ],
+  ] as const)
+    test(`${state} packs retain private drafting and stop advertising public writes`, async () => {
+      const { call, db } = await fixture();
+      const opened = await call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "admission-pack-open" },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+      });
+      expect(opened.status).toBe(201);
+      const { session_id: sessionId } = SessionOpenResponseSchema.parse(await opened.json());
+      const packUrl = `/v1/sessions/${sessionId}/pack?profile=working&max_tokens=8000`;
+      const before = await call(packUrl);
+      expect(before.status).toBe(200);
+      const initial = PackResponseSchema.parse(await before.json());
+      expect(
+        initial.next_actions.some(
+          (action) =>
+            action.method === "POST" && action.url === `/v1/sessions/${sessionId}/promote`,
+        ),
+      ).toBe(true);
+
+      await db.prepare(change).run();
+      const response = await call(packUrl, {
+        headers: { "if-none-match": before.headers.get("etag") ?? "" },
+      });
+      expect(response.status).toBe(200);
+      const pack = PackResponseSchema.parse(await response.json());
+      expect(
+        pack.next_actions.filter(
+          (action) =>
+            action.method === "POST" && action.url !== `/v1/sessions/${sessionId}/workshop`,
+        ),
+      ).toEqual([]);
+      expect(
+        pack.next_actions.some(
+          (action) =>
+            action.method === "POST" && action.url === `/v1/sessions/${sessionId}/workshop`,
+        ),
+      ).toBe(true);
+      expect(response.headers.get("etag")).not.toBe(before.headers.get("etag"));
+      expect(
+        (await call(packUrl, { headers: { "if-none-match": response.headers.get("etag") ?? "" } }))
+          .status,
+      ).toBe(304);
+
+      const pushed = await call(`/v1/sessions/${sessionId}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "admission-pack-draft" },
+        body: JSON.stringify({
+          type: "claim-draft",
+          title: "Retained private work",
+          body_md: "Keep this observation in the existing session's private workshop.",
+          relates_to: [],
+        }),
+      });
+      expect(pushed.status).toBe(201);
+      const { workshop_id: workshopId } = WorkshopPushResponseSchema.parse(await pushed.json());
+      const published = await call(`/v1/sessions/${sessionId}/promote`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "admission-pack-promote",
+        },
+        body: JSON.stringify({
+          workshop_id: workshopId,
+          kind: "conjecture",
+          statement: "The recorded observation recurs on the next independent trial.",
+          falsifier: "The next independent trial records a different observation.",
+          relates_to: [],
+        }),
+      });
+      expect(published.status).toBe(refusalStatus);
+      expect(((await published.json()) as { code: string }).code).toBe(refusalCode);
+    });
+
+  for (const conditional of [false, true])
+    for (const [transition, change] of [
+      ["archival", "UPDATE problems SET admission_mode='archived-read-only' WHERE id='P-4DSP'"],
+      ["resolution", "UPDATE problems SET status='resolved' WHERE id='P-4DSP'"],
+      ["membership", "UPDATE problem_memberships SET role='observer' WHERE problem_id='P-4DSP'"],
+    ] as const)
+      test(`pack ${conditional ? "conditional" : "ordinary"} response rechecks ${transition} after composition`, async () => {
+        let changeDuringRead: (() => Promise<void>) | undefined;
+        const { call, db } = await fixture({
+          afterFirstRead: async (query) => {
+            if (
+              changeDuringRead !== undefined &&
+              /^SELECT status, unlisted(?:, admission_mode)? FROM problems WHERE id = \?$/.test(
+                query,
+              )
+            ) {
+              const mutate = changeDuringRead;
+              changeDuringRead = undefined;
+              await mutate();
+            }
+          },
+        });
+        const opened = await call("/v1/sessions", {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": "pack-race-open" },
+          body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+        });
+        expect(opened.status).toBe(201);
+        const { session_id: sessionId } = SessionOpenResponseSchema.parse(await opened.json());
+        const packUrl = `/v1/sessions/${sessionId}/pack?profile=working&max_tokens=8000`;
+        const before = await call(packUrl);
+        expect(before.status).toBe(200);
+        changeDuringRead = async () => {
+          await db.prepare(change).run();
+        };
+        const response = await call(packUrl, {
+          ...(conditional
+            ? { headers: { "if-none-match": before.headers.get("etag") ?? "" } }
+            : {}),
+        });
+        expect(response.status).toBe(503);
+        expect(response.headers.get("cache-control")).toBe("private, no-store");
+        expect(response.headers.get("etag")).toBeNull();
+        expect(((await response.json()) as { code: string }).code).toBe("INTERNAL_ERROR");
+        expect((await call(packUrl)).status).toBe(200);
+      });
+
   test("concurrent same-key promotions with different bodies return a typed conflict", async () => {
     const barrier = stagedReadBarrier();
     const { call, db } = await fixture({
@@ -11505,10 +11646,25 @@ describe("session protocol routes", () => {
       },
       {
         kind: "first",
-        sql: "SELECT status, unlisted FROM problems WHERE id = ?",
+        sql: "SELECT status, unlisted, admission_mode FROM problems WHERE id = ?",
         bindings: ["P-4DSP"],
       },
       { kind: "first", sql: cursorSql, bindings: ["P-4DSP"] },
+      {
+        kind: "first",
+        sql: packSessionSql,
+        bindings: [targetSession.session_id, binding.fellowId],
+      },
+      {
+        kind: "first",
+        sql: "SELECT status, unlisted, admission_mode FROM problems WHERE id = ?",
+        bindings: ["P-4DSP"],
+      },
+      {
+        kind: "first",
+        sql: membershipSql,
+        bindings: ["P-4DSP", binding.fellowId],
+      },
     ]);
   });
 

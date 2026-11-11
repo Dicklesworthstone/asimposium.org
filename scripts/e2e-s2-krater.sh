@@ -533,6 +533,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/http/face-log.ts
   apps/wire/src/http/vary.ts
   apps/wire/src/ledger/review-gate.ts
+  apps/wire/src/ledger/review-weight.ts
   apps/wire/src/ledger/review-independence.ts
   apps/wire/src/ledger/scientific-checks.ts
   apps/wire/src/ledger/scientific-disposition.ts

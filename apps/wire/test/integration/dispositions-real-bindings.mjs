@@ -1594,6 +1594,190 @@ await runLocalWorkerJourney(async (context) => {
       );
     }
     console.log(JSON.stringify({ stage: "review-state-tier-floor", status: "pass" }));
+
+    // An impression does not acquire scientific weight merely by naming a
+    // failure condition. A real surviving check makes an incorrect review
+    // weight observable here: it would change open to corroborated.
+    const assertionDraft = await call(
+      `/v1/sessions/${authorSession.session_id}/workshop`,
+      {
+        type: "claim-draft",
+        title: "Cardinality of the empty finite set",
+        body_md: "The empty finite set has cardinality zero.",
+        relates_to: [],
+      },
+      tierAuthor,
+      201,
+    );
+    const assertionClaim = (
+      await call(
+        `/v1/sessions/${authorSession.session_id}/promote`,
+        {
+          workshop_id: assertionDraft.workshop_id,
+          kind: "lemma",
+          statement: "The empty finite set has cardinality zero.",
+          falsifier: "An element belonging to the empty finite set.",
+        },
+        tierAuthor,
+        201,
+      )
+    ).claim_id;
+    const argument = await call(
+      `/v1/sessions/${authorSession.session_id}/evidence`,
+      {
+        bears_on_kind: "claim",
+        bears_on_id: assertionClaim,
+        bears_on_version: 1,
+        direction: "supports",
+        kind: "argument",
+        mode: "confirmatory",
+        source: {
+          kind: "locator",
+          locator: "https://example.invalid/finite-sets/empty",
+          excerpt: "The empty set contains no elements, so its finite cardinality is zero.",
+        },
+        body_md: "Counting the elements of the empty finite set enumerates no elements.",
+      },
+      tierAuthor,
+      201,
+    );
+    const readAssertionPack = async () =>
+      PackResponseSchema.parse(
+        await call(
+          `/v1/sessions/${crossSession.session_id}/pack?${new URLSearchParams({
+            profile: "review",
+            target: `${assertionClaim}@1`,
+            max_tokens: "8000",
+          })}`,
+          undefined,
+          crossSponsor,
+        ),
+      );
+    const assertionPack = await readAssertionPack();
+    const claimDetail = safeJsonParse(
+      assertionPack.items.find((item) => item.kind === "claim-detail").body,
+    );
+    const argumentDetail = safeJsonParse(
+      assertionPack.items.find((item) => item.id === argument.evidence_id).body,
+    );
+    await call(
+      `/v1/sessions/${crossSession.session_id}/evidence`,
+      {
+        bears_on_kind: "claim",
+        bears_on_id: assertionClaim,
+        bears_on_version: 1,
+        direction: "informs",
+        kind: "computation",
+        mode: "confirmatory",
+        source: {
+          kind: "locator",
+          locator: "https://example.invalid/finite-sets/empty/check",
+          excerpt: "Enumerating the empty finite set produces no elements.",
+        },
+        computation_domain_or_floor: "Complete enumeration of the empty finite set.",
+        falsification_check: {
+          target_digest: claimDetail.content_digest,
+          attempted_falsifier: "An element belonging to the empty finite set.",
+          capable_of_failure: "Enumeration producing an element would contradict zero cardinality.",
+          result: "survived",
+          evidence: [{ evidence_id: argument.evidence_id, digest: argumentDetail.content_digest }],
+        },
+        body_md: "Exhaustive enumeration of the empty finite set returned zero elements.",
+      },
+      crossSponsor,
+      201,
+    );
+    const assertImpressionStanding = async (disposition, reviewState) => {
+      const face = ClaimFaceResponseSchema.parse(
+        await call(`/p/${tierProblem}/claims/${assertionClaim}.json`),
+      );
+      assert.equal(face.claim_state.disposition, disposition);
+      assert.equal(face.claim_state.review_state, reviewState);
+      assert.equal(face.claim_state.stale, false);
+      for (const format of ["md", "html"]) {
+        const response = await worker.fetch(
+          `${origin}/p/${tierProblem}/claims/${assertionClaim}.${format}`,
+          { headers: { "user-agent": userAgent } },
+        );
+        assert.equal(response.status, 200);
+        const body = await response.text();
+        assert.ok(body.includes(face.fingerprint), "all faces share the scientific assessment");
+        assert.ok(body.includes(reviewState), "visible review state agrees with JSON");
+      }
+      const pack = await readAssertionPack();
+      const detail = safeJsonParse(pack.items.find((item) => item.kind === "claim-detail").body);
+      assert.equal(detail.dependency_assessment.standing.disposition, disposition);
+      assert.equal(detail.dependency_assessment.standing.review_state, reviewState);
+    };
+    await assertImpressionStanding("open", "unreviewed");
+    for (const [index, basis] of ["Looks right.", "**LGTM**", "I agree."].entries()) {
+      const body = {
+        target_claim_id: assertionClaim,
+        target_version: 1,
+        verdict: "confirm",
+        basis,
+        capable_of_failure: "An element in the empty finite set would contradict the claim.",
+        body_md: "A general impression, with no object-level findings recorded.",
+      };
+      const path = `/v1/sessions/${crossSession.session_id}/review`;
+      const key = `assertion-review-${index}`;
+      const receipt = ReviewResponseSchema.parse(await call(path, body, crossSponsor, 201, key));
+      assert.equal(receipt.carries_weight, false, "an impression has no scientific weight");
+      assert.equal(receipt.tier, "T1", "independence does not turn praise into a check");
+      assert.deepEqual(
+        ReviewResponseSchema.parse(await call(path, body, crossSponsor, 200, key)),
+        receipt,
+      );
+      const count = await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM events WHERE problem_id = ? AND type = 'review.created' AND object_id = ?",
+      )
+        .bind(tierProblem, receipt.review_id)
+        .first();
+      assert.equal(count.n, 1, "replaying an assertion cannot mint another review");
+      await assertImpressionStanding("open", "unreviewed");
+    }
+    const substantive = ReviewResponseSchema.parse(
+      await call(
+        `/v1/sessions/${crossSession.session_id}/review`,
+        {
+          target_claim_id: assertionClaim,
+          target_version: 1,
+          verdict: "confirm",
+          basis:
+            "The count looks right because exhaustive enumeration of the empty set yielded zero elements.",
+          capable_of_failure:
+            "An element in the enumerated set would make its cardinality positive.",
+          body_md:
+            "The complete finite enumeration and the definition of cardinality agree at zero.",
+        },
+        crossSponsor,
+        201,
+      ),
+    );
+    assert.equal(
+      substantive.carries_weight,
+      true,
+      "phrases within actual findings remain eligible",
+    );
+    await assertImpressionStanding("corroborated", "independently-checked");
+    const objection = ReviewResponseSchema.parse(
+      await call(
+        `/v1/sessions/${crossSession.session_id}/review`,
+        {
+          target_claim_id: assertionClaim,
+          target_version: 1,
+          verdict: "refute",
+          basis: "Looks wrong.",
+          capable_of_failure: "An exhaustive enumeration might still establish zero cardinality.",
+          body_md: "An impression without a demonstrated counterexample.",
+        },
+        crossSponsor,
+        201,
+      ),
+    );
+    assert.equal(objection.carries_weight, false);
+    await assertImpressionStanding("corroborated", "contested");
+    console.log(JSON.stringify({ stage: "assertion-only-review-weight", status: "pass" }));
   }
 
   // A later revision must not rewrite the reduction bookkeeping of an exact

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { sha256Hex } from "../../src/krater/krater.ts";
+import { reviewStateFromRecordedReviews } from "../../src/ledger/dispositions.ts";
 import { SCIENTIFIC_INDEPENDENCE_POLICY } from "../../src/ledger/scientific-checks.ts";
 import { foldScientificRows } from "../../src/ledger/scientific-disposition.ts";
 
@@ -71,6 +72,8 @@ async function refutationCorpus(hours = 72): Promise<[Row, Row, Row]> {
     "review.created",
     {
       verdict: "refute",
+      basis: "Checked that the witness satisfies each hypothesis and violates the conclusion.",
+      body_md: "The recorded witness is a counterexample to this exact statement.",
       capable_of_failure: "The counterexample fails the statement's hypotheses.",
       tier: "T2",
       independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
@@ -147,6 +150,8 @@ async function noveltyReview(
       target_claim_id: "C-1",
       target_version: version,
       verdict: "inform",
+      basis: "Searched the literature index and compared the exact bound with its prior form.",
+      body_md: "The search and semantic comparison are recorded in the novelty block.",
       capable_of_failure: "An earlier equivalent statement would refute novelty.",
       tier: "T2",
       independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
@@ -497,7 +502,13 @@ test("an intervening answer blocks settlement; a second explicit refutation can 
     await row(
       3,
       "review.created",
-      { verdict: "confirm", capable_of_failure: "A failed assumption check.", tier: "T1" },
+      {
+        verdict: "confirm",
+        basis: "Checked the assumptions of the proposed witness.",
+        body_md: "The witness does not satisfy the statement's hypotheses.",
+        capable_of_failure: "A failed assumption check.",
+        tier: "T1",
+      },
       { created_at: "2026-09-01T02:00:00.000Z", fellow_id: "F-answer", sponsor_id: "S-answer" },
     ),
     await row(
@@ -537,7 +548,13 @@ test("settlement cannot revive withdrawn or malformed statements or cross a vers
   const malformed = await row(
     3,
     "review.created",
-    { verdict: "refute", capable_of_failure: "A precise statement", rubric: ["statement-defect"] },
+    {
+      verdict: "refute",
+      basis: "Checked the quantifier scope and found an unbound variable.",
+      body_md: "The statement uses n without quantifying it.",
+      capable_of_failure: "A precise statement",
+      rubric: ["statement-defect"],
+    },
     { created_at: "2026-09-01T02:00:00.000Z", fellow_id: "F-defect", sponsor_id: "S-defect" },
   );
   expect((await foldScientificRows([creation, evidence, malformed, later])).disposition).toBe(
@@ -649,6 +666,8 @@ async function corpus(legacy = false): Promise<Row[]> {
         "review.created",
         {
           tier: legacy ? "T3" : "T2",
+          basis: "Checked that reflexivity applies to the exact integer in the statement.",
+          body_md: "The statement follows from reflexivity of equality.",
           capable_of_failure: "An unequal result.",
           verdict: "confirm",
           ...(legacy
@@ -725,6 +744,40 @@ async function originalWriteUpCorpus(kind = "argument"): Promise<[Row, Row, Row,
   );
   return [claim, computation, check, proof, ...checked];
 }
+
+test("assertion-only reviews cannot upgrade standing or the positive review facet", async () => {
+  const rows = await corpus();
+  for (const basis of ["Looks right.", "**Looks correct!**", "I agree.", " ", undefined]) {
+    const reviews = await Promise.all(
+      rows.slice(3).map((review) => changedPayload(review, { basis, body_md: "Looks right." })),
+    );
+    const folded = await foldScientificRows([...rows.slice(0, 3), ...reviews]);
+    expect(folded.disposition).toBe("open");
+    expect(folded.context.verified_reviews).toHaveLength(0);
+    expect(reviewStateFromRecordedReviews(folded.reviewFacets)).toBe("unreviewed");
+  }
+  const substantive = await changedPayload(rows[3] as Row, {
+    basis: "The equality looks right because reflexivity applies to this exact integer.",
+    body_md: "Verified.",
+  });
+  const checked = await foldScientificRows([...rows.slice(0, 3), substantive]);
+  expect(checked.disposition).toBe("corroborated");
+  expect(reviewStateFromRecordedReviews(checked.reviewFacets)).toBe("independently-checked");
+});
+
+test("an assertion-only negative review contests its version without weighted disposition", async () => {
+  const rows = await corpus();
+  const review = await changedPayload(rows[3] as Row, {
+    basis: "Looks wrong.",
+    body_md: "I disagree.",
+    verdict: "refute",
+    verification: undefined,
+  });
+  const folded = await foldScientificRows([...rows.slice(0, 3), review]);
+  expect(folded.disposition).toBe("open");
+  expect(folded.context.verified_reviews).toHaveLength(0);
+  expect(reviewStateFromRecordedReviews(folded.reviewFacets)).toBe("contested");
+});
 
 test("original arguments and constructions gain standing through review, not a higher class", async () => {
   for (const kind of ["argument", "construction"]) {
@@ -1275,6 +1328,8 @@ test("author retraction transitions disputed claim to withdrawn, and terminal wi
     "review.created",
     {
       tier: "T2",
+      basis: "Checked the exact equality statement by reflexivity.",
+      body_md: "The exact integer equals itself.",
       capable_of_failure: "An unequal result.",
       verdict: "confirm",
       independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,

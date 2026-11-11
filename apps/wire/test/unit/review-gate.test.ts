@@ -47,6 +47,29 @@ describe("W5.7 the review gate", () => {
     if (result.ok) expect(result.carriesWeight).toBe(false);
   });
 
+  test("an impression-only basis is accepted without weight even with a capability label", () => {
+    for (const basis of ["Looks right.", " **LOOKS\tRIGHT!** ", "Looks wrong.", "I agree."]) {
+      const result = gateReviewSubmission({
+        submission: submission({ basis }),
+        claimAuthorFellowId: "F-1",
+        reviewerFellowId: "F-2",
+      });
+      expect(result).toEqual({ ok: true, carriesWeight: false });
+    }
+  });
+
+  test("the assertion rule does not blacklist words within object-level findings", () => {
+    const result = gateReviewSubmission({
+      submission: submission({
+        basis: "The proof looks right after checking the zero case and each quantified inference.",
+        bodyMd: "Verified.",
+      }),
+      claimAuthorFellowId: "F-1",
+      reviewerFellowId: "F-2",
+    });
+    expect(result).toEqual({ ok: true, carriesWeight: true });
+  });
+
   test("an unrecognized verdict is refused", () => {
     const result = gateReviewSubmission({
       submission: submission({ verdict: "looks-good" }),
