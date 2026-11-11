@@ -161,6 +161,7 @@ async function fixture() {
     target_version: 1,
     verdict: "confirm",
     tier: "T2",
+    basis: "checked-argument",
     capable_of_failure: "An omitted member could violate the claimed bound.",
     body_md: "Checked each step of the published finite argument independently.",
     independence_policy: "declared-family-and-grounded-method-v1",

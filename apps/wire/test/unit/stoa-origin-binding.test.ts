@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  AdminAreaRenameResponseSchema,
   AdminContentControlResponseSchema,
   OperatorFellowCapAuditPageResponseSchema,
   OperatorFellowCapOverrideResponseSchema,
@@ -527,8 +528,8 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
     });
   }
 
-  test("operator moderation controls reach the durable store; area rename still refuses (Rule A4)", async () => {
-    const { db } = latestD1();
+  test("operator moderation controls and area renames reach the durable store (Rule A4)", async () => {
+    const { db, sqlite } = latestD1();
     const keypair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
       "sign",
       "verify",
@@ -618,13 +619,39 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
       area_id: "number-theory",
       new_title: "Number theory",
       reason,
+      step_up_authenticated_at: Math.floor(Date.now() / 1_000),
     });
-    expect(rename.status).toBe(503);
-    expect(ProblemDocumentSchema.parse(await rename.json()).code).toBe(
-      "OPERATOR_CONTROL_UNAVAILABLE",
-    );
+    expect(rename.status).toBe(200);
+    const receipt = AdminAreaRenameResponseSchema.parse(await rename.json());
+    expect(receipt.area_id).toBe("number-theory");
+    expect(receipt.new_title).toBe("Number theory");
+    expect(
+      sqlite
+        .query(
+          "SELECT area_slug, new_title, operator_id, reason, seq FROM area_rename_events WHERE event_id = ?",
+        )
+        .get(receipt.audit_event_id),
+    ).toEqual({
+      area_slug: "number-theory",
+      new_title: "Number theory",
+      operator_id: OPERATOR_ID,
+      reason,
+      seq: 1,
+    });
+    expect(
+      sqlite
+        .query(
+          "SELECT action, target_id, operator_id, reason FROM operator_audit WHERE event_id = ?",
+        )
+        .get(receipt.audit_event_id),
+    ).toEqual({
+      action: "area.rename",
+      target_id: "number-theory",
+      operator_id: OPERATOR_ID,
+      reason,
+    });
     // Contract errors still teach: a malformed action body is refused before
-    // the capability refusal.
+    // any mutation.
     const malformed = await send(
       "POST",
       "/v1/operators/content-control",
