@@ -3724,10 +3724,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     const membership = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const packProblem = await db
-      .prepare("SELECT status, unlisted FROM problems WHERE id = ?")
+      .prepare("SELECT status, unlisted, admission_mode FROM problems WHERE id = ?")
       .bind(session.problem_id)
-      .first<{ status: string; unlisted: number }>();
+      .first<{ status: string; unlisted: number; admission_mode: string | null }>();
     const isPrivateDraft = packProblem?.status === "private-draft";
+    const publicWritesAvailable =
+      packProblem !== null &&
+      packProblem.admission_mode !== "archived-read-only" &&
+      packProblem.status !== "resolved" &&
+      packProblem.status !== "retired";
     const currentCursor = await readCursor(db, session.problem_id);
     let cursor = currentCursor;
     let fullAfter = 0;
@@ -3859,6 +3864,39 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             }),
           );
       }
+      // Governance can change while asynchronous sections are composed. Do
+      // not publish stale write actions or endorse them with a cached 304.
+      let problemStillCurrent = false;
+      try {
+        const currentProblem = await db
+          .prepare("SELECT status, unlisted, admission_mode FROM problems WHERE id = ?")
+          .bind(session.problem_id)
+          .first<{ status: string; unlisted: number; admission_mode: string | null }>();
+        const currentMembership = await membershipRoleOf(
+          db,
+          session.problem_id,
+          auth.binding.fellowId,
+        );
+        problemStillCurrent =
+          currentProblem !== null &&
+          currentProblem.status === packProblem?.status &&
+          currentProblem.unlisted === packProblem?.unlisted &&
+          currentProblem.admission_mode === packProblem?.admission_mode &&
+          currentMembership === membership;
+      } catch {
+        // An unavailable source cannot confirm the composed permissions.
+      }
+      if (!problemStillCurrent)
+        return privateNoStore(
+          validatedProblem({
+            status: 503,
+            code: "INTERNAL_ERROR",
+            title: "The session workspace changed",
+            detail:
+              "The current workspace and its write permissions could not be confirmed. No pack was returned.",
+            fixHint: "Refetch this same pack URL before continuing the session.",
+          }),
+        );
       const ifNoneMatch = c.req.header("if-none-match");
       if (ifNoneMatch?.split(",").some((v) => v.trim() === etag)) {
         return new Response(null, { status: 304, headers });
@@ -4682,6 +4720,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       actionPermissions.push("workshop:write");
     }
     if (
+      publicWritesAvailable &&
       packProblem?.status !== "sharpening" &&
       authorizeFellowWrite({
         effect: "promote",
@@ -4700,6 +4739,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ? "Sponsor public writes are disabled; continue drafting in your private workshop."
         : `Promotion rate limit reached; continue drafting privately and recheck the budget after ${promotionBudget?.retry_after_seconds ?? 3600}s.`;
     const reviewAllowed =
+      publicWritesAvailable &&
       authorizeFellowWrite({
         effect: "review",
         credential: auth.binding,
@@ -4720,6 +4760,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             effectivePermissions: {
               read: true,
               session_open:
+                publicWritesAvailable &&
                 authorizeFellowWrite({
                   effect: "session.open",
                   credential: auth.binding,
@@ -4730,6 +4771,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               workshop_push: actionPermissions.includes("workshop:write"),
               promote: actionPermissions.includes("promote:write"),
               evidence:
+                publicWritesAvailable &&
                 authorizeFellowWrite({
                   effect: "promote",
                   credential: auth.binding,
@@ -4738,6 +4780,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   now: authorizationObservedAt,
                 }).decision === "allow",
               dead_end:
+                publicWritesAvailable &&
                 authorizeFellowWrite({
                   effect: "promote",
                   credential: auth.binding,
@@ -4763,7 +4806,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           : undefined
         : reviewQueue.targets[0];
 
-    if (profile === "orient") {
+    if (profile === "orient" && publicWritesAvailable) {
       const firedTriggers = await loadFiredDeadEndTriggers(db, session.problem_id, 3, cursor);
       for (const trigger of firedTriggers) {
         const retryMove = workingRetryDeadEndMove(trigger);
