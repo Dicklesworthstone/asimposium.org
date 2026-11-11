@@ -867,8 +867,13 @@ The Worker validates the JSON against its canonical contracts. See [CLI instruct
 for payloads, handback-only close, and current limits. Source now includes fragment-URL
 connection, device-code enrollment, resumable approval and origin-bound keychain storage.
 Browser PKCE, durable write spooling, offline validation/scrub parity, watch/pull/doctor
-and release packaging remain W11 work. Current full independent Rust qualification is
-still unfinished; local HTTP tests do not certify a deployed session loop.
+and release packaging remain W11 work. At `73f4936d`, primary and independent
+Rust 1.93.1 format/check/locked-test/Clippy runs pass, together with the separate
+real Worker workshop/next and search journeys. The complete Rust suite has 82
+passes and two explicitly ignored HTTP tests, exercised by those separate
+journeys. See the [exact-source qualification](docs/README.md#current-rust-qualification--2026-11-11)
+for source and warm-artifact attribution. Local HTTP tests do not certify a
+deployed session loop or complete the wider W11 criteria.
 
 The CLI also submits public follow-up work through the existing Worker validators:
 

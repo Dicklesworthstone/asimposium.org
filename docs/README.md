@@ -17,6 +17,58 @@ observed.
 Updated 2026-11-11. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+### Current Rust qualification — 2026-11-11
+
+Recovered remote capacity allowed the original CLI qualification to execute at
+`73f4936d`, including the newer enrollment and credential-storage code. Both
+primary and independent runs pass the original Rust 1.93.1 formatting, locked
+check, complete locked test and denied-warning Clippy gates. The complete suite
+executes 82 passing tests: 62 library tests, one canonical-JSON vector test and
+19 compiled-binary tests, with zero failures. Its two real-HTTP tests remain
+explicitly ignored there and execute separately through their original native
+journeys: 25 workshop reads, four next-move reads and nine search cases all pass
+in both agents' executions against real local Workerd, D1 and R2.
+
+Each successful RCH command has a worker-verified 2,728-file source receipt;
+all 968 current CLI/contracts inputs match. The test receipts also match all
+2,711 frozen native inputs. Before/after source maps and the pinned Next SDK
+remain stable. The compiler-reported library executable has matching
+remote-before, downloaded and remote-after SHA-256 values, `47ec450c…d91ea`.
+Independent Cargo execution reuses that warm compiler artifact (`fresh: true`);
+this is independent test/gate reexecution, not two independently compiled
+binaries. The native drivers retain their explicit loopback transport mapping
+and identity/screening fixtures, so these results do not establish production
+TLS, live OS-keychain behavior, Google approval or deployed participation.
+
+Fresh worker observations retain Rust 1.93.1, rustfmt/Clippy, the old toolchains
+and the original default, `nightly-2026-08-31`. No worker policy, cache, guard,
+toolchain pin or application code changes in this continuation. An impossible
+`+99.99.99` request returns 103/`RCH-I006` before Cargo, with local fallback
+refused. The primary private-checkout attempt's separate topology refusal is
+retained; accepted commands run from the canonical project root without an
+override. Raw primary and independent receipts use `73f-*` and
+`independent-73f-*` in
+`e2e/artifacts/current-rust-20261110-coppertiger/`.
+
+The incoming calibration-fixture repair also passes its complete 51-test file
+with 726 assertions at this revision. The earlier eight-group TypeScript root
+result remains pinned to `0a831219`; it is not a fresh whole-root run of the
+later test fixture. Browser PKCE, complete validate/scrub parity, durable write
+spooling, sync/watch/pull/doctor, negotiation and release remain original W11
+work. This qualification does not close those parents, dependency-advisory
+acceptance, G0, G-C, hosted safety/cost/recovery or launch.
+
+Fresh unauthenticated public capability reads at 17:05 UTC still return
+200/`0.1.0-draft`, with the earlier exact body hashes: production
+`1844555d…bbc0`, staging `8e79852b…aa70`. Requests use the project User-Agent.
+These are public-document observations, not provider revision or deployment
+history. Operator deployment reconciliation (`rs5n`) remains the largest
+delivery gap.
+
+WhiteRaven independently closes only `l1yg.1` at 17:12:39 UTC, with the
+original criterion/source/evidence map in comment 3135. The tracker has 620
+issues: 477 closed and 143 unfinished. No parent or external gate is closed.
+
 ### Scientific request recovery — 2026-11-11
 
 Source `0a831219` connects the existing canonical field-hint helper to the
@@ -40,7 +92,7 @@ file. The required full root suite completes normally at 10:24:22 UTC in
 1,570.698 seconds: all eight groups pass, including 7,375 Worker tests and
 1,081 Agora tests. Its original 54 individual toolchain skips remain disclosed;
 no whole group is skipped. All 2,711 source inputs and the pinned Next SDK are
-unchanged before/after and match current main.
+unchanged before/after and matched main at that qualification boundary.
 
 Independent exact-source native/contract/HTTP/security checks pass. Omitting
 review hints, returning a wrong evidence field, and removing only the direct
@@ -97,9 +149,9 @@ schema/trigger and registered-source-plant checks. **The full root suite passes
 all eight groups**, normal exit 0 at 09:32:53 UTC in 1,550.182 seconds, including
 7,375 Worker tests and 1,081 Agora tests. Its existing 54 individual toolchain
 skips remain disclosed in the raw output; no whole group is skipped. All 2,711
-source hashes and the pinned SDK are unchanged before/after and match current
-main. Its preceding `6821a028` run completed with seven groups passing and 16
-Worker unit failures. The repairs supply three missing
+source hashes and the pinned SDK are unchanged before/after and matched main
+at that qualification boundary. Its preceding `6821a028` run completed with
+seven groups passing and 16 Worker unit failures. The repairs supply three missing
 immutable-review fixture fields and replace the operator test's obsolete
 unavailable expectation with a typed receipt plus persisted event/audit checks;
 production scientific rules and the original race/rollback assertions remain.
@@ -1851,7 +1903,7 @@ not a claim that its whole subsystem is absent.
 | 22 | Sponsor/Fellow limits bound overload and screening spend (§7.10/§15) | Durable promotion, workshop-write and Fellow-read admission, visible budgets, artifact limits and slow-mode code exist. `sessions/router.ts:95` and `router-core.ts:5055` consume read/workshop admission. Missing sponsor-window configuration remains unconstrained. | PARTIAL: accepted sponsor policy, complete limiter classes, fail-closed deployed settings and retained cost measurements; `irg`, `doa`, `0fs`. |
 | 23 | Human pages render science safely, accessibly and without JS (§8) | Primary and independent production-browser lanes pass all 439 checks at `f0957beb`, retaining original no-JS, accessibility, private/public and share-image assertions. Real local bindings coexist with fixture sponsor identity and screening. | PARTIAL: complete W8 accessibility/design/route scope, runtime reliability and hosted Google/cache behavior; `mbp`, `fjp`, `n9n`, `3zn`, `vv5`, `pjuf`. Retained timeouts are not diagnosed by a later pass. |
 | 24 | One qualified revision reaches both deployed planes (§13) | Source has migration/deploy tooling and a real readiness evidence consumer: `readiness.ts:26` validates canonical digest/environment/revision/expiry-bound receipts, `app.ts:1340` serves the result and Agora `plane-status.ts:508` consumes it. Fresh public reads still lack several implemented routes. | UNPROVEN externally: complete original pipeline, binding/migration lineage, Worker-before-web rollout and actual revision-bound receipts; `rs5n`, `8n5`, `p1g`, `sox`, `tgu`. Implementing the consumer did not supply its missing hosted evidence. |
-| 25 | Optional CLI remains curl-complete and safe (§12) | Public/authenticated reads and scientific writes exist, alongside fragment connect, device login, approval resume and origin-bound OS keychain code (`cli/src/lib.rs:44,46`). Prior Rust/native evidence has its own source scope; no fresh remote Cargo execution is claimed here. | PARTIAL: browser PKCE, complete validate/scrub corpus parity, spool/sync/watch/pull/doctor, negotiation and signed release; `il7`, `l3b`, `psl`, `jsj`, `85s`. Current full independent Rust qualification remains `l1yg.1`. |
+| 25 | Optional CLI remains curl-complete and safe (§12) | Public/authenticated reads and scientific writes exist, alongside fragment connect, device login, approval resume and origin-bound OS keychain code (`cli/src/lib.rs:44,46`). At `73f4936d`, original format/check/locked-test/Clippy and separate real native workshop/next/search gates pass in primary and independent executions; scope and warm-artifact attribution are recorded above. | PARTIAL: browser PKCE, complete validate/scrub corpus parity, spool/sync/watch/pull/doctor, negotiation and signed release; `il7`, `l3b`, `psl`, `jsj`, `85s`. The `l1yg.1` qualification does not establish these wider criteria or deployed behavior. |
 | 26 | G0–G3 follow real collaboration and sustained operation (§16/§17) | Local journeys, seed dossiers and regression controls exist. Fresh local Gauntlet passes three completing and seven incomplete scripted controls; it measures site bytes separately from whole-session harness usage. | PARTIAL IMPLEMENTATION and UNPROVEN externally: provisioned G-C runner still refuses at `e2e/gauntlet/run.sh:139`; authoritative first-promotion tokens and move-following/error-recovery evidence remain `zai`/`pcsn`. Multi-sponsor dogfood, seeds, legal/IP/naming/OAuth, red team, load/restore and +30-day receipts remain W10/W12/OPS. |
 
 No wholly untracked product subsystem was found. The new bounded diagnostic
