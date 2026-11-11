@@ -14,10 +14,34 @@ observed.
 
 ## Current reality check
 
-Updated 2026-11-10. Runtime qualification below is pinned to its named source
+Updated 2026-11-11. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-**Cold enrollment recovery at `97800ee9`:** strict fragment registration can
+Merge `c72f78ca` introduced two local qualification failures. The S2 source
+walk named an unlisted import, `packages/render/src/artifact-publications.ts`.
+The original S3 sentinel test exhausted its 3,760,000-byte evidence receiver.
+The same build script produced complete canonical arrays of 3,747,282 and
+3,781,957 bytes for production and the counterfactual.
+
+At `a66714e2`, the source inventory includes the renderer and the S3
+receiver holds 3,785,000 bytes. The tests accept the measured arrays, check
+the sentinel split, and reject a byte above the new receiver limit. Independent
+review calculated a worst-case wrapped result of 7,570,237 bytes within the
+original 8,000,000-byte envelope. Typecheck, lint, focused S2/S3, and the real
+local artifact journey pass. Serial UBS completed on both changed-file
+selections after the parallel scheduler failed. Exact-source contracts pass
+1,019 tests, the renderer passes 604, and the real enrollment journey still
+passes. Independent verification passes all 151 S2 and 65 S3 tests. Omitting
+the renderer pin reproduces the missing-source failure, and restoring only
+the old receiver reproduces the actual counterfactual overrun. Both restored
+focused suites pass. The original full root passes all eight groups with
+7,321 Worker tests and 1,081 Agora tests at 00:11 UTC. All 2,700 source hashes
+and the pinned SDK agree before and after, and current main matches.
+WhiteRaven independently closed `x77k.2` at 00:12 UTC, with the evidence
+map in Beads comment 3095. The parent and the deployed S2 and S3 gates remain
+open.
+
+At `97800ee9`, strict fragment registration can
 suggest `tools_note` for `toolsNote` after verifying the invitation. Device
 start can suggest `harness` for `harnes`. Missing or wrong invitation
 credentials and a malformed required registration declaration still return the
@@ -32,9 +56,13 @@ tests pass. Both agents pass the full contracts package, the two owning
 enrollment files, HTTP contracts, security, and the native journey at the
 frozen revision. Removing either hint from its producer fails the corresponding
 native assertion. Restoring the producer passes with all 2,690 source hashes
-and the pinned SDK verified. The original full root suite is running.
+and the pinned SDK verified. The full root at `97800ee9` passes all eight groups
+at 23:38 UTC, including 7,278 Worker tests and 1,073 Agora tests. WhiteRaven
+closed `but.6` at 23:40 UTC with the criterion map in Beads comment 3094.
+Merge `c72f78ca` preserves all three enrollment files byte for byte. Its
+additional runtime source has separate qualification.
 
-The staging Agora's anonymous checks reach exit 70
+On November 10 the staging Agora's anonymous checks reached exit 70
 `GALLERY_PRODUCT_FLOW_NOT_IMPLEMENTED`. The hosted pipeline requires Gallery
 smoke before Worker deploy, so completing the authenticated Gallery flow in
 `7ft` is required alongside the operator authority and staging lineage in
