@@ -3,7 +3,7 @@ import { assembleLedgerBackup } from "../../../../scripts/assemble-ledger-backup
 import { verifyExportOffline } from "../../../../scripts/verify-export.ts";
 import { BACKUP_RUN_KEY } from "../../src/krater/backup-scheduler.ts";
 import { backupManifestKey, backupSegmentKey } from "../../src/krater/backup-segments.ts";
-import { deletionSafeRestore } from "../../src/krater/retention.ts";
+import { deletionSafeRestore, fetchLatestDeletionJournal } from "../../src/krater/retention.ts";
 import {
   CHECKPOINT_KEY_ID,
   CHECKPOINT_PUBLIC_KEY_HEX,
@@ -162,6 +162,12 @@ await runLocalWorkerJourney(
       snapshotNdjson: await (await env.BACKUPS.get(recoveryKey)).text(),
       deletionJournalNdjson: journal,
       verifyKeys: [{ kid: CHECKPOINT_KEY_ID, publicKeyHex: CHECKPOINT_PUBLIC_KEY_HEX }],
+      readCurrentJournal: async () => {
+        const latest = await fetchLatestDeletionJournal(env.ARTIFACTS, [
+          { kid: CHECKPOINT_KEY_ID, publicKeyHex: CHECKPOINT_PUBLIC_KEY_HEX },
+        ]);
+        return latest?.head ?? null;
+      },
     });
     assert.ok("inserted" in restored.projections, JSON.stringify(restored.projections));
     assert.equal(restored.eventCount, pinned.cursor);

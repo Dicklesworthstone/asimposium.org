@@ -14,6 +14,7 @@ import {
   applyDeletionJournal,
   createRetentionControlRecord,
   hardDeletePrivateDraft,
+  parseAndVerifyDeletionJournal,
   privateDraftDeletionStatements,
   readDeletionJournalRecords,
   serializeDeletionJournal,
@@ -438,11 +439,16 @@ test("signed restore erases the restored content and fences deleted IDs absent f
     JSON.stringify({ kid: "erasure-test", seedHex: "11".repeat(32) }),
   );
   if (!key) throw new Error("Signing fixture failed");
+  const journal = await serializeDeletionJournal([erased, absent], ISO, key);
+  const verifyKeys = [{ kid: key.kid, publicKeyHex: key.publicKeyHex }];
+  const verified = await parseAndVerifyDeletionJournal(journal, verifyKeys);
+  if (!verified.valid) throw new Error(verified.reason);
   const options = {
     db: f.db,
     targetIdentifier: "scratch_erasure_restore",
-    deletionJournalNdjson: await serializeDeletionJournal([erased, absent], ISO, key),
-    verifyKeys: [{ kid: key.kid, publicKeyHex: key.publicKeyHex }],
+    deletionJournalNdjson: journal,
+    verifyKeys,
+    readCurrentJournal: async () => verified.head,
   };
   expect((await applyDeletionJournal(options)).appliedControlsCount).toBe(2);
   expect((await applyDeletionJournal(options)).appliedControlsCount).toBe(2);

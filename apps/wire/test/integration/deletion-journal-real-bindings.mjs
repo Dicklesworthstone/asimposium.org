@@ -128,7 +128,9 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
 
   assert.equal(await fixtures.deletionJournalRowCount(), 0);
   const idle = await tick(fixtures);
-  assert.deepEqual(idle, { enabled: true, recordCount: 0, published: false });
+  assert.deepEqual(idle, { enabled: true, recordCount: 0, published: true });
+  const emptyJournal = await fixtures.fetchDeletionJournal();
+  assert.ok(emptyJournal, "an empty source still publishes a signed current head");
 
   // 1. Real route: the deletion and its journal row commit together.
   const deleted = await sponsorCall(
@@ -166,6 +168,15 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
   );
   assert.equal(unsigned.ok, false);
   assert.match(unsigned.message, /journal is unsigned/);
+  // This older journal has a genuine valid signature, but it omits the
+  // deletion. Authenticity alone must not authorize a snapshot restore.
+  assert.deepEqual(await targets(fixtures, emptyJournal), []);
+  const rowsBeforeStaleReplay = await fixtures.snapshotRows("problems", "id", draft);
+  const stale = await fixtures.replayDeletionJournal(emptyJournal);
+  assert.equal(stale.ok, false);
+  assert.match(stale.message, /DELETION_JOURNAL_STALE/);
+  assert.deepEqual(await fixtures.snapshotRows("problems", "id", draft), rowsBeforeStaleReplay);
+  assert.equal(await fixtures.deletionJournalRowCount(), 1);
   assert.equal(
     (await fixtures.snapshotRows("problems", "id", draft)).length,
     1,
@@ -206,8 +217,40 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
   const revokedJournal = await fixtures.fetchDeletionJournal();
   assert.ok(revokedJournal.includes(`"targetId":"${credential.credential_id}"`));
   assert.ok(revokedJournal.includes('"action":"revoke-credential"'));
+  // Model a provider snapshot that predates this revocation, then restore
+  // through the real lifecycle command path with every SQL guard reinstated.
+  assert.equal(
+    await restoreRowValue(
+      env,
+      "fellow_tokens",
+      "UPDATE fellow_tokens SET revoked_at = NULL WHERE credential_id = ?",
+      [credential.credential_id],
+    ),
+    1,
+  );
+  const credentialBeforeStaleReplay = await fixtures.snapshotRows(
+    "fellow_tokens",
+    "credential_id",
+    credential.credential_id,
+  );
+  assert.equal(credentialBeforeStaleReplay[0].revoked_at, null);
+  const controlsBeforeStaleReplay = await fixtures.deletionJournalRowCount();
+  const staleRevocation = await fixtures.replayDeletionJournal(journal);
+  assert.equal(staleRevocation.ok, false);
+  assert.match(staleRevocation.message, /DELETION_JOURNAL_STALE/);
+  assert.deepEqual(
+    await fixtures.snapshotRows("fellow_tokens", "credential_id", credential.credential_id),
+    credentialBeforeStaleReplay,
+  );
+  assert.equal(await fixtures.deletionJournalRowCount(), controlsBeforeStaleReplay);
   const revokedReplay = await fixtures.replayDeletionJournal(revokedJournal);
   assert.equal(revokedReplay.ok, true, revokedReplay.message);
+  assert.notEqual(
+    (await fixtures.snapshotRows("fellow_tokens", "credential_id", credential.credential_id))[0]
+      .revoked_at,
+    null,
+  );
+  await call("/v1/hello", undefined, revokedFellow, 401);
 
   // 5c/5d. Fellow revocation and sponsor panic journal one revoke-credential
   //        control per credential live at that moment, in the command's batch.

@@ -564,6 +564,7 @@ async function runE2E() {
   const deletionJournalNdjson = await serializeDeletionJournal([deleteControl], NOW, journalKey);
   const verifiedJournal = await parseAndVerifyDeletionJournal(deletionJournalNdjson, verifyKeys);
   assert.equal(verifiedJournal.valid, true);
+  if (!verifiedJournal.valid) throw new Error(verifiedJournal.reason);
 
   const scratchReplay = freshDb();
   // Plant the old draft as if an older snapshot contained it
@@ -587,6 +588,9 @@ async function runE2E() {
     snapshotNdjson: exportedNdjson,
     deletionJournalNdjson,
     verifyKeys,
+    // Static authority for this in-process fixture; the native recovery lane
+    // reads and verifies the independent current R2 journal at both boundaries.
+    readCurrentJournal: async () => verifiedJournal.head,
   });
   assert.equal(safeRestoreRes.restored, publicProblemId);
   assert.equal(safeRestoreRes.appliedControlsCount, 1);

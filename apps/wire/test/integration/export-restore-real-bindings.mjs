@@ -162,6 +162,9 @@ await runLocalWorkerJourney(
       author,
       201,
     );
+    await fixtures.publishDeletionJournalTick();
+    const historicalJournal = await fixtures.fetchDeletionJournal();
+    assert.ok(historicalJournal, "retain an authentic journal from before the deletion");
     const privateDraft = (
       await call(
         "/v1/problems",
@@ -328,7 +331,24 @@ await runLocalWorkerJourney(
     });
     assert.equal(badJournal.ok, false);
     assert.match(badJournal.message, /DELETION_JOURNAL_VERIFICATION_FAILED/);
+    const historicalVerification = await verifyDeletionJournalOffline({
+      ndjson: historicalJournal,
+      trustedKeys: pinned,
+    });
+    assert.equal(historicalVerification.ok, true, "the older journal is authentically signed");
+    const staleJournal = await fixtures.restoreIntoScratch({
+      key: backup.key,
+      targetIdentifier: TARGET,
+      journal: historicalJournal,
+    });
+    assert.equal(staleJournal.ok, false);
+    assert.match(staleJournal.message, /DELETION_JOURNAL_STALE/);
     assert.equal(await scratchEvents(), 0, "refused restores wrote nothing");
+    assert.deepEqual(
+      (await fixtures.compareRows("SELECT id FROM problems ORDER BY id", [])).scratch,
+      [],
+      "an authentic stale journal cannot write even the scratch problem head",
+    );
 
     // 3. The verified restore lands only in the scratch database.
     const restored = await fixtures.restoreIntoScratch({

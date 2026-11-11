@@ -114,9 +114,29 @@ problem. The scheduled Worker never assembles a whole large history in memory.
 Use the existing guarded scratch restore with the latest signed deletion journal;
 assembly alone does not authorize service cutover or bypass retained controls.
 Run `deletionSafeRestore` from the offline operator process against its separately
-validated scratch D1 binding. Require its projection result to contain `inserted`
-before treating recovery as complete; a `refused` projection result leaves work
-unfinished. Large recovery is a host operation, not a Worker restore RPC.
+validated scratch D1 binding. Its required `readCurrentJournal` callback must
+re-read `fetchLatestDeletionJournal(currentPrivateBucket, independentlyPinnedKeys)`
+and return that result's `head` (or `null` when unavailable). Use the current
+private bucket outside the point-in-time snapshot; never construct the authority
+from the candidate journal or cache its first result. The reader authenticates
+the journal and binds its signed count to its canonical storage key. Recovery
+checks this count/digest before writes and again before returning success.
+An authentic older journal is refused before any write. Publication during
+recovery withholds completion; keep the target quarantined and retry with the
+new journal. The credential revoker must also use the scratch D1 binding.
+
+This comparison establishes the newest **published** journal. It does not close
+the interval between a source deletion and its scheduled journal publication,
+nor the interval after the final comparison. The separate cutover procedure must
+hold an authoritative source publication boundary before allowing the recovered
+service to accept requests. A journal signature alone is never proof of freshness.
+An empty source publishes a signed zero-record head; no journal means unavailable
+authority, not permission to restore.
+
+Require the projection result to contain `inserted` before treating the problem
+rebuild as complete; a `refused` projection result leaves work unfinished.
+Large recovery is a host operation, not a Worker restore RPC. This remains a
+problem-ledger restore, not whole-system SQL/account/private-state recovery.
 
 ## Local verification
 

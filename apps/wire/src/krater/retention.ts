@@ -72,6 +72,20 @@ export const DELETION_JOURNAL_FORMAT = "asimposium.deletion-journal.v1";
 export const DELETION_JOURNAL_HEADER_CONTROL = "deletion_journal_header";
 export const DELETION_JOURNAL_TRAILER_CONTROL = "deletion_journal_end";
 
+/** The head of the append-only retention journal, acquired independently of
+ * the point-in-time snapshot and candidate journal. The digest commits to the
+ * complete ordered control sequence; a signature alone does not prove recency. */
+export interface DeletionJournalHead {
+  readonly recordCount: number;
+  readonly finalDigest: string;
+}
+
+/** Re-read the current private journal store at both recovery boundaries.
+ * A newly published control withholds success: keep the scratch target
+ * quarantined and retry. This does not authorize service cutover or certify
+ * controls that have not yet been published. */
+export type ReadCurrentDeletionJournal = () => Promise<DeletionJournalHead | null>;
+
 export interface DeletionReceipt {
   readonly receiptId: string;
   readonly targetId: string;
@@ -305,7 +319,13 @@ export async function parseAndVerifyDeletionJournal(
   ndjson: string,
   verifyKeys: readonly CheckpointVerifyKey[],
 ): Promise<
-  | { valid: true; records: RetentionControlRecord[]; generatedAt: string; keyId: string }
+  | {
+      valid: true;
+      records: RetentionControlRecord[];
+      generatedAt: string;
+      keyId: string;
+      head: DeletionJournalHead;
+    }
   | { valid: false; reason: string }
 > {
   if (ndjson.length === 0) return { valid: false, reason: "empty deletion journal" };
@@ -410,7 +430,13 @@ export async function parseAndVerifyDeletionJournal(
     return { valid: false, reason: "journal signature does not verify" };
   }
 
-  return { valid: true, records, generatedAt: headerObj.generated_at, keyId };
+  return {
+    valid: true,
+    records,
+    generatedAt: headerObj.generated_at,
+    keyId,
+    head: { recordCount: records.length, finalDigest: chainDigest },
+  };
 }
 
 /** One append to the persisted deletion journal (migration 0080). Callers put
@@ -565,6 +591,8 @@ export async function readDeletionJournalRecords(
 export const DELETION_JOURNAL_R2_PREFIX = "journal/deletion/v1/";
 
 export function deletionJournalObjectKey(recordCount: number): string {
+  if (!Number.isSafeInteger(recordCount) || recordCount < 0 || recordCount > 9_999_999_999)
+    throw new RetentionError("DELETION_JOURNAL_KEY_INVALID", "invalid journal record count");
   return `${DELETION_JOURNAL_R2_PREFIX}${String(recordCount).padStart(10, "0")}.ndjson`;
 }
 
@@ -589,7 +617,8 @@ export async function publishDeletionJournal(
   const key = await checkpointSigningKey(rawSigningKey);
   if (key === null) return { enabled: false, recordCount: 0, published: false };
   const records = await readDeletionJournalRecords(db);
-  if (records.length === 0) return { enabled: true, recordCount: 0, published: false };
+  // A signed empty head is necessary too: absence of a journal cannot
+  // establish that the source has never committed a retention control.
   const objectKey = deletionJournalObjectKey(records.length);
   if ((await bucket.head(objectKey)) !== null) {
     return { enabled: true, recordCount: records.length, published: false };
@@ -602,20 +631,64 @@ export async function publishDeletionJournal(
   return { enabled: true, recordCount: records.length, published: written !== null };
 }
 
-/** The newest published journal (highest record count), or null if none. */
-export async function fetchLatestDeletionJournal(bucket: R2Bucket): Promise<string | null> {
+async function latestDeletionJournalKey(bucket: R2Bucket): Promise<string | null> {
   let newest: string | undefined;
   let cursor: string | undefined;
+  const seenCursors = new Set<string>();
   do {
     const page = await bucket.list({ prefix: DELETION_JOURNAL_R2_PREFIX, cursor });
     for (const object of page.objects) {
+      if (!/^journal\/deletion\/v1\/\d{10}\.ndjson$/.test(object.key))
+        throw new KraterRestoreRefusedError(
+          "DELETION_JOURNAL_KEY_INVALID: the current journal store contains a noncanonical key",
+        );
       if (newest === undefined || object.key > newest) newest = object.key;
     }
-    cursor = page.truncated ? page.cursor : undefined;
+    const next = page.truncated ? page.cursor : undefined;
+    if (page.truncated) {
+      if (typeof next !== "string" || next.length === 0 || seenCursors.has(next))
+        throw new KraterRestoreRefusedError(
+          "DELETION_JOURNAL_LIST_INCOMPLETE: cannot establish the newest published journal",
+        );
+      seenCursors.add(next);
+    }
+    cursor = next;
   } while (cursor !== undefined);
-  if (newest === undefined) return null;
+  return newest ?? null;
+}
+
+/** Fetch and authenticate the newest independently stored journal. Bind its
+ * signed count to the canonical storage key; a historical signed journal under
+ * a newer key cannot establish current authority. Refuse concurrent publication
+ * during acquisition rather than return a pin already known to be stale.
+ *
+ * This establishes the newest PUBLISHED controls only. Periodic publication
+ * cannot prove that no later D1 controls exist; the operator must keep a restore
+ * quarantined until its separate publication/cutover boundary is satisfied. */
+export async function fetchLatestDeletionJournal(
+  bucket: R2Bucket,
+  verifyKeys: readonly CheckpointVerifyKey[],
+): Promise<{ readonly ndjson: string; readonly head: DeletionJournalHead } | null> {
+  const newest = await latestDeletionJournalKey(bucket);
+  if (newest === null) return null;
   const object = await bucket.get(newest);
-  return object === null ? null : await object.text();
+  if (object === null)
+    throw new KraterRestoreRefusedError(
+      "DELETION_JOURNAL_OBJECT_MISSING: the newest published journal is unavailable",
+    );
+  const ndjson = await object.text();
+  const verified = await parseAndVerifyDeletionJournal(ndjson, verifyKeys);
+  if (!verified.valid)
+    throw new KraterRestoreRefusedError(`DELETION_JOURNAL_VERIFICATION_FAILED: ${verified.reason}`);
+  if (deletionJournalObjectKey(verified.head.recordCount) !== newest)
+    throw new KraterRestoreRefusedError(
+      "DELETION_JOURNAL_HEAD_MISMATCH: the signed journal does not match its published key",
+    );
+  if ((await latestDeletionJournalKey(bucket)) !== newest)
+    throw new KraterRestoreRefusedError(
+      "DELETION_JOURNAL_CHANGED: a newer journal was published during acquisition; retry",
+    );
+  return { ndjson, head: verified.head };
 }
 
 /**
@@ -808,7 +881,7 @@ export interface DeletionJournalReplay {
 
 // A recognized, authentic journal action is not necessarily implemented by
 // this restore. Every action must explicitly support both replay and readback
-// before it can allow a scratch database to become serviceable.
+// before recovery can report completion. Service cutover is a separate operation.
 const RETENTION_CONTROL_REPLAY_SUPPORTED = {
   "suspend-sponsor": true,
   "delete-private-draft": true,
@@ -904,19 +977,26 @@ export async function findResurrectedTargets(
 
 /**
  * Verify a signed deletion journal, reapply every control to a restored
- * scratch database, and refuse cutover if any deleted target is still
- * serviceable. A missing, unsigned, tampered or unverifiable journal refuses
- * before any write, as does a verified journal containing an unsupported action.
+ * scratch database, and withhold replay completion if any deleted target is
+ * still serviceable. Missing, stale, unsigned or unverifiable journals refuse
+ * before any write, as do unsupported controls or absent current-head authority.
+ * Recheck the independent published head after replay; changed authority leaves
+ * the target quarantined for retry. This function does not perform cutover.
  */
 export async function applyDeletionJournal(options: {
   readonly db: D1Database;
   readonly targetIdentifier: string;
   readonly deletionJournalNdjson: string | null | undefined;
   readonly verifyKeys: readonly CheckpointVerifyKey[];
+  readonly readCurrentJournal: ReadCurrentDeletionJournal;
   readonly revokeCredential?: CredentialRevoker;
 }): Promise<DeletionJournalReplay> {
   validateScratchTarget(options.targetIdentifier);
-  const records = await verifiedJournalRecords(options.deletionJournalNdjson, options.verifyKeys);
+  const { records, head } = await verifiedJournalRecords(
+    options.deletionJournalNdjson,
+    options.verifyKeys,
+    options.readCurrentJournal,
+  );
   const applied = await replayControls(options.db, records, options.revokeCredential);
   const resurrected = await findResurrectedTargets(options.db, records);
   if (resurrected.length > 0) {
@@ -924,13 +1004,15 @@ export async function applyDeletionJournal(options: {
       `DELETION_RESURRECTION_DETECTED: ${resurrected.length} deleted target(s) remain serviceable`,
     );
   }
+  await assertCurrentJournalHead(head, options.readCurrentJournal);
   return { records: records.length, appliedControlsCount: applied };
 }
 
 async function verifiedJournalRecords(
   ndjson: string | null | undefined,
   verifyKeys: readonly CheckpointVerifyKey[],
-): Promise<RetentionControlRecord[]> {
+  readCurrentJournal: ReadCurrentDeletionJournal,
+): Promise<{ records: RetentionControlRecord[]; head: DeletionJournalHead }> {
   if (ndjson === undefined || ndjson === null || ndjson.trim().length === 0) {
     throw new KraterRestoreRefusedError(
       "DELETION_JOURNAL_MISSING: restore requires the newest signed deletion journal",
@@ -940,10 +1022,44 @@ async function verifiedJournalRecords(
   if (!verified.valid) {
     throw new KraterRestoreRefusedError(`DELETION_JOURNAL_VERIFICATION_FAILED: ${verified.reason}`);
   }
+  await assertCurrentJournalHead(verified.head, readCurrentJournal);
   // Preflight the complete authenticated journal before restoring a snapshot
   // or applying even an earlier supported control from the same journal.
   assertReplayableControls(verified.records);
-  return verified.records;
+  return { records: verified.records, head: verified.head };
+}
+
+async function assertCurrentJournalHead(
+  expected: DeletionJournalHead,
+  readCurrentJournal: ReadCurrentDeletionJournal,
+): Promise<void> {
+  if (typeof readCurrentJournal !== "function")
+    throw new KraterRestoreRefusedError(
+      "DELETION_JOURNAL_CURRENT_HEAD_REQUIRED: recovery requires an independent current journal reader",
+    );
+  const current = await readCurrentJournal();
+  if (current === null)
+    throw new KraterRestoreRefusedError(
+      "DELETION_JOURNAL_CURRENT_HEAD_MISSING: cannot establish the current published controls",
+    );
+  if (
+    typeof current !== "object" ||
+    !Number.isSafeInteger(current.recordCount) ||
+    current.recordCount < 0 ||
+    current.recordCount > 9_999_999_999 ||
+    typeof current.finalDigest !== "string" ||
+    !/^[a-f0-9]{64}$/.test(current.finalDigest)
+  )
+    throw new KraterRestoreRefusedError(
+      "DELETION_JOURNAL_CURRENT_HEAD_INVALID: the independent journal head is invalid",
+    );
+  if (
+    current.recordCount !== expected.recordCount ||
+    current.finalDigest !== expected.finalDigest
+  )
+    throw new KraterRestoreRefusedError(
+      "DELETION_JOURNAL_STALE: journal differs from the current published controls; keep the target quarantined and retry",
+    );
 }
 
 /** Revokes one credential through the enrollment lifecycle command path. */
@@ -1046,11 +1162,13 @@ async function replayControls(
  * Deletion-safe restore of one problem export into a validated scratch target.
  *
  * 1. Refuses a non-scratch target.
- * 2. Verifies the signed deletion journal and support for every action BEFORE
- *    any write; missing, unverifiable or unsupported controls refuse (fail closed).
+ * 2. Verifies the signed journal against an independently acquired current
+ *    published head and checks every action BEFORE any snapshot write.
  * 3. Refuses to restore a problem the journal records as a deleted draft.
- * 4. Restores the verified export, reapplies every journal control, and
- *    refuses cutover if any deleted target is still serviceable.
+ * 4. Restores the verified export, reapplies every journal control, checks for
+ *    resurrection and rechecks current authority before reporting completion.
+ *    A changed head leaves the target quarantined for retry, never ready for
+ *    automatic service cutover.
  */
 export async function deletionSafeRestore(options: {
   readonly db: D1Database;
@@ -1058,10 +1176,15 @@ export async function deletionSafeRestore(options: {
   readonly snapshotNdjson: string;
   readonly deletionJournalNdjson: string | null | undefined;
   readonly verifyKeys: readonly CheckpointVerifyKey[];
+  readonly readCurrentJournal: ReadCurrentDeletionJournal;
   readonly revokeCredential?: CredentialRevoker;
 }): Promise<DeletionSafeRestoreResult> {
   validateScratchTarget(options.targetIdentifier);
-  const records = await verifiedJournalRecords(options.deletionJournalNdjson, options.verifyKeys);
+  const { records, head } = await verifiedJournalRecords(
+    options.deletionJournalNdjson,
+    options.verifyKeys,
+    options.readCurrentJournal,
+  );
 
   const parsedSnapshot = parseProblemExport(options.snapshotNdjson);
   const snapshotProblem = parsedSnapshot.ok ? parsedSnapshot.header.problem : "";
@@ -1085,6 +1208,7 @@ export async function deletionSafeRestore(options: {
     );
   }
 
+  await assertCurrentJournalHead(head, options.readCurrentJournal);
   return {
     ...restoreResult,
     appliedControlsCount,

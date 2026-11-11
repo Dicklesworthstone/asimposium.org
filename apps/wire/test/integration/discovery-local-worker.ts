@@ -1226,8 +1226,20 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     return (await readDeletionJournalRecords(this.env.DB)).length;
   }
 
-  fetchDeletionJournal(): Promise<string | null> {
-    return fetchLatestDeletionJournal(this.env.ARTIFACTS);
+  async fetchDeletionJournal(): Promise<string | null> {
+    const latest = await fetchLatestDeletionJournal(
+      this.env.ARTIFACTS,
+      checkpointVerifyKeys(this.env.CHECKPOINT_VERIFY_KEYS),
+    );
+    return latest?.ndjson ?? null;
+  }
+
+  async #currentDeletionJournalHead() {
+    const latest = await fetchLatestDeletionJournal(
+      this.env.ARTIFACTS,
+      checkpointVerifyKeys(this.env.CHECKPOINT_VERIFY_KEYS),
+    );
+    return latest?.head ?? null;
   }
 
   /** Export/restore journeys only (runLocalWorkerJourney with scratch): the
@@ -1358,7 +1370,10 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
           : snapshot,
         deletionJournalNdjson: input.journal,
         verifyKeys: checkpointVerifyKeys(this.env.CHECKPOINT_VERIFY_KEYS),
-        revokeCredential: retentionCredentialRevoker(new D1EnrollmentStore(this.env.DB)),
+        readCurrentJournal: () => this.#currentDeletionJournalHead(),
+        revokeCredential: retentionCredentialRevoker(
+          new D1EnrollmentStore(this.#scratchBindings().scratchDb),
+        ),
       });
       return {
         ok: true as const,
@@ -1473,6 +1488,7 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
           targetIdentifier: "scratch-local-workerd-d1",
           deletionJournalNdjson: ndjson,
           verifyKeys: checkpointVerifyKeys(this.env.CHECKPOINT_VERIFY_KEYS),
+          readCurrentJournal: () => this.#currentDeletionJournalHead(),
           revokeCredential: retentionCredentialRevoker(new D1EnrollmentStore(this.env.DB)),
         })),
       };
