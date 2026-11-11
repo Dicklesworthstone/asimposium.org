@@ -17,6 +17,57 @@ observed.
 Updated 2026-11-11. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+### Scientific request recovery — 2026-11-11
+
+Source `0a831219` connects the existing canonical field-hint helper to the
+strict review and evidence refusals, including session writes and the existing
+direct routes. For example, a rejected review containing `bassis` now names
+`basis` in `suggested_fields`. The client must correct and resubmit; acceptance
+is never coerced. Direct review/reviews and evidence refusals also link their
+existing standalone request schemas instead of the full sessions document.
+No contract, policy transparency rule or scientific validator was relaxed.
+
+The original native discovery journey now uses these hints and served schemas
+to publish the intended reviews/evidence through real local Workerd/D1/R2.
+Each correction refusal checks unchanged session/workshop/event/review/evidence
+counts and screening calls; credential-shaped unknown keys stay out of errors.
+The six original public events and the original privacy, replay, cursor and
+handback assertions remain. The new native check fails on the old producer.
+Frozen positive and policy-rejection journeys pass, as do all 321 tests in the
+three owning files, typecheck/lint (eight groups each), Worker contract/security,
+1,021 contract-package tests, 605 renderer tests and the complete S3 regression
+file. The required full root suite completes normally at 10:24:22 UTC in
+1,570.698 seconds: all eight groups pass, including 7,375 Worker tests and
+1,081 Agora tests. Its original 54 individual toolchain skips remain disclosed;
+no whole group is skipped. All 2,711 source inputs and the pinned Next SDK are
+unchanged before/after and match current main.
+
+Independent exact-source native/contract/HTTP/security checks pass. Omitting
+review hints, returning a wrong evidence field, and removing only the direct
+schema middleware each fail the intended unchanged native assertion. Exact
+restoration passes the complete native journey. A different agent closes only
+`but.7` at this revision, citing the original criteria and raw evidence in
+comment 3129. Parent `but` retains its original full catalog criteria. The live
+tracker has 620 issues, 476 closed and 144 unfinished, with no dependency cycles.
+
+Both literal changed-file UBS scans complete all four supported files with
+104 critical, 152 warning and 1,859 information findings. Root and the reviewer
+read every elevated context; no new defect was established. The two reported
+locations on added source lines are fixed route regexes; the other reported
+lines already exist in the baseline. These finding-exits
+are not clean-security results, and they do not resolve the broader incomplete
+coverage in `g4b4`. Raw receipts are under
+`e2e/artifacts/review-evidence-recovery-20261111-coppertiger/`; independent faults
+and restoration use the existing reviewer artifact directory cited in `but.7`.
+This bounded leaf leaves parent `but`, hosted Gauntlet/token measurement,
+deployment, screening/cost/recovery and optional Rust requirements open.
+
+Public capability reads at 10:07 UTC still return 200/`0.1.0-draft` and exactly
+the 05:43 body hashes: production `1844555d…bbc0`, staging `8e79852b…aa70`.
+Requests use the project User-Agent and no credentials. The raw two bodies and
+headers are retained in this block's artifact directory. This confirms unchanged
+public documents, not provider revision, deployment history or authorization.
+
 ### Area rename follow-through — 2026-11-11
 
 The implementation at `e39b2a5c` postdates the assessment below. The existing
