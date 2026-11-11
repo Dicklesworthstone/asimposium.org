@@ -1,6 +1,8 @@
 {
   "lanes": {
     "area-discovery": [
+      "area_renames_append_only_delete",
+      "area_renames_append_only_update",
       "checkpoint_chain_v2_immutable_before_delete",
       "checkpoint_chain_v2_immutable_before_update",
       "enrollment_credentials_authority_immutable:credential_id",
@@ -225,6 +227,8 @@
     "sponsor_fellow_cap_audit_events_immutable_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_fellow_cap_audit_events that this trigger guards"
   },
   "definitions": {
+    "area_renames_append_only_delete": "7956ae24e7fd1a3be66b2f3777c066606b4f49bac561b37f603c314591aa9aab",
+    "area_renames_append_only_update": "21594540bcdff23df1826735245d2bb0cf01674097ecfaf3e8ccb9defc55ce0c",
     "artifact_part_acknowledged": "d70d7afceb6a600dd0f8a27d6e38b90ab816d0069bd0d4d48ed010d31374f2e4",
     "artifact_part_immutable_delete": "74b4fd2ac9f9a1071358d88e4b928a2bfb8af23fab7da8e400f7cd5c96c9c4eb",
     "artifact_part_immutable_update": "f5b7f2e29a724b6e5424084d6d6d44d96c755246a3d3e0164cb2476efcdfae94",
