@@ -31,8 +31,10 @@ const plainMove = (move: NextMoveCandidate["move"], problem = "P-DEMO"): NextMov
 });
 function fixture() {
   const sql = new Database(":memory:");
-  sql.exec(`CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, unlisted INTEGER, status TEXT);
+  sql.exec(`CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, unlisted INTEGER, status TEXT,
+      admission_mode TEXT DEFAULT 'open', sponsor_id TEXT);
     CREATE TABLE problem_memberships(problem_id TEXT,fellow_id TEXT,role TEXT);
+    CREATE TABLE problem_stewards(problem_id TEXT, sponsor_id TEXT);
     CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,visibility TEXT,version INTEGER);
     CREATE TABLE events(id TEXT,problem_id TEXT,seq INTEGER,type TEXT,object_kind TEXT,object_id TEXT,
       actor_fellow_id TEXT,writer_credential_id TEXT);
@@ -135,7 +137,9 @@ function fixture() {
   };
   const provider = new LedgerMovesProvider(deps);
   function problem(id = "P-DEMO", claims = true, role = "contributor") {
-    sql.query("INSERT INTO problems VALUES(?,20,0,'active')").run(id);
+    sql
+      .query("INSERT INTO problems(id,public_seq,unlisted,status) VALUES(?,20,0,'active')")
+      .run(id);
     sql.query("INSERT INTO problem_memberships VALUES(?,'F-VIEWER',?)").run(id, role);
     if (claims)
       sql

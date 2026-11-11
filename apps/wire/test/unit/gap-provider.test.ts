@@ -47,12 +47,14 @@ function template(kind: "review" | "add-refuter" | "state-claim"): MoveTemplate 
 }
 function fixture() {
   const sqlite = new Database(":memory:");
-  sqlite.exec(`CREATE TABLE problems(id TEXT,public_seq INTEGER,status TEXT,unlisted INTEGER);
+  sqlite.exec(`CREATE TABLE problems(id TEXT,public_seq INTEGER,status TEXT,unlisted INTEGER,
+      admission_mode TEXT DEFAULT 'open', sponsor_id TEXT);
     CREATE TABLE problem_memberships(problem_id TEXT,fellow_id TEXT,role TEXT);
+    CREATE TABLE problem_stewards(problem_id TEXT, sponsor_id TEXT);
     CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,visibility TEXT,version INTEGER);
     CREATE TABLE events(problem_id TEXT,seq INTEGER,object_kind TEXT,type TEXT,writer_credential_id TEXT);
     CREATE TABLE reviews(source_event_id TEXT,problem_id TEXT,review_id TEXT,source_seq INTEGER,target_claim_id TEXT,target_version INTEGER,reviewer_fellow_id TEXT);
-    INSERT INTO problems VALUES('P-DEMO',12,'active',0);
+    INSERT INTO problems(id,public_seq,status,unlisted) VALUES('P-DEMO',12,'active',0);
     INSERT INTO problem_memberships VALUES('P-DEMO','F-reader','contributor');
     INSERT INTO events VALUES('P-DEMO',1,'claim','claim.created','CR-author');`);
   let prepares = 0;
@@ -273,7 +275,9 @@ test("triage chooses gap work ahead of empty boards and bounds per-problem concu
     f.sqlite.exec("DELETE FROM problems; DELETE FROM problem_memberships; DELETE FROM events");
     const ids = ["P-AA", "P-BB", "P-CC", "P-DD", "P-EE"];
     for (const id of ids) {
-      f.sqlite.query("INSERT INTO problems VALUES(?,12,'active',0)").run(id);
+      f.sqlite
+        .query("INSERT INTO problems(id,public_seq,status,unlisted) VALUES(?,12,'active',0)")
+        .run(id);
       f.sqlite.query("INSERT INTO problem_memberships VALUES(?,'F-reader','contributor')").run(id);
       if (id !== "P-AA")
         f.sqlite
