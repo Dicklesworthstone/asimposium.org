@@ -389,6 +389,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0141_workshop_write_rate_limit.sql
   db/migrations/0142_fellow_read_rate_limit.sql
   db/migrations/0143_area_renames.sql
+  db/migrations/0144_problem_creation_rate_limit.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -666,6 +667,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/problems/router.ts
   apps/wire/src/problems/boundaries.ts
   apps/wire/src/problems/brief-commands.ts
+  apps/wire/src/problems/creation-quota.ts
   apps/wire/src/problems/fellow-briefs.ts
   apps/wire/src/problems/proposal-commands.ts
   apps/wire/src/problems/problem-intent-authority.ts
@@ -1012,6 +1014,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0141_workshop_write_rate_limit.sql
   0142_fellow_read_rate_limit.sql
   0143_area_renames.sql
+  0144_problem_creation_rate_limit.sql
 )
 
 

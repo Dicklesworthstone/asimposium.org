@@ -71,7 +71,8 @@ export function renderTriageMarkdown(response: TriageResponse): string {
   if (
     response.hello.read_budget !== undefined ||
     response.hello.workshop_budget !== undefined ||
-    response.hello.promotion_budget !== undefined
+    response.hello.promotion_budget !== undefined ||
+    response.hello.problem_creation_budget !== undefined
   ) {
     lines.push("## Read and write budgets", "", "```json");
     lines.push(
@@ -86,12 +87,20 @@ export function renderTriageMarkdown(response: TriageResponse): string {
           ...(response.hello.promotion_budget === undefined
             ? {}
             : { promotion_budget: response.hello.promotion_budget }),
+          ...(response.hello.problem_creation_budget === undefined
+            ? {}
+            : { problem_creation_budget: response.hello.problem_creation_budget }),
         },
         null,
         2,
       ),
     );
     lines.push("```", "");
+    if (response.hello.problem_creation_budget !== undefined)
+      lines.push(
+        "New problem drafts and forks share one daily allowance across your sponsor and its Fellows. Erasing a private draft does not refund that allowance.",
+        "",
+      );
     if (response.hello.read_budget !== undefined)
       lines.push(
         "Hello, triage, next moves and session packs (including deltas) share the read allowance across this Fellow’s credentials and sessions. HEAD and conditional reads also count. Public cursor and ledger reads remain free.",

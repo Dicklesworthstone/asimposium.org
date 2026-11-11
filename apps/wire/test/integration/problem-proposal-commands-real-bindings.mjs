@@ -76,6 +76,11 @@ await runLocalWorkerJourney(
     assert.equal(created.problem.status, "private-draft");
     assert.equal(created.problem.public_seq, 0);
     assert.equal(await problemCount(), 1);
+    assert.deepEqual((await call("/v1/hello", undefined, author)).problem_creation_budget, {
+      limit: 2,
+      remaining: 1,
+      window_seconds: 86_400,
+    });
     assert.equal((await receipt(keys.parallel)).problem_id, created.problem.id);
     for (const table of ["problem_memberships", "problem_stewards", "problem_statement_versions"]) {
       assert.equal(
@@ -128,6 +133,55 @@ await runLocalWorkerJourney(
     assert.equal(recovered.problem.id, accepted.problem_id);
     assert.equal(await problemCount(), 2);
     assert.equal(fingerprint(await propose(uncertainBody, keys.uncertain)), fingerprint(recovered));
+
+    const exhausted = (await call("/v1/hello", undefined, author)).problem_creation_budget;
+    assert.equal(exhausted.limit, 2);
+    assert.equal(exhausted.remaining, 0);
+    assert.equal(exhausted.window_seconds, 86_400);
+    assert.ok(exhausted.retry_after_seconds > 0 && exhausted.retry_after_seconds <= 86_400);
+    const peer = await enroll("problem-proposal-peer", sponsor);
+    const quotaBody = {
+      ...proposal,
+      title: "Another Fellow cannot buy a separate allowance",
+      statement: "Every nonempty finite tree has at least one leaf.",
+    };
+    const quotaRefusal = await worker.fetch(`${origin}/v1/problems`, {
+      method: "POST",
+      headers: {
+        "User-Agent": userAgent,
+        authorization: `Bearer ${peer}`,
+        "content-type": "application/json",
+        "Idempotency-Key": "problem-proposal-shared-limit",
+      },
+      body: JSON.stringify(quotaBody),
+    });
+    assert.equal(quotaRefusal.status, 429);
+    assert.equal(quotaRefusal.headers.get("cache-control"), "private, no-store");
+    assert.equal(quotaRefusal.headers.get("x-robots-tag"), "noindex, nofollow");
+    assert.equal(quotaRefusal.headers.get("ratelimit-limit"), "2");
+    assert.equal(quotaRefusal.headers.get("ratelimit-remaining"), "0");
+    assert.ok(Number(quotaRefusal.headers.get("retry-after")) > 0);
+    assert.equal((await quotaRefusal.json()).code, "RATE_LIMITED");
+    assert.equal(await problemCount(), 2);
+    assert.equal(
+      (await call("/v1/hello", undefined, foreign)).problem_creation_budget.remaining,
+      2,
+    );
+    const triage = await worker.fetch(`${origin}/v1/triage.md`, {
+      headers: { "User-Agent": userAgent, authorization: `Bearer ${author}` },
+    });
+    assert.equal(triage.status, 200);
+    const triageText = await triage.text();
+    const triageBudget = /"problem_creation_budget":\s*(\{[^}]+\})/.exec(triageText);
+    assert.ok(triageBudget);
+    const markdownBudget = JSON.parse(triageBudget[1]);
+    assert.equal(markdownBudget.limit, 2);
+    assert.equal(markdownBudget.remaining, 0);
+    assert.equal(markdownBudget.window_seconds, 86_400);
+    assert.match(triageText, /"limit": 2/);
+    assert.match(triageText, /"window_seconds": 86400/);
+    assert.match(triageText, /sponsor/i);
+    assert.match(triageText, /forks/i);
 
     // A sponsor can keep the same assignee while changing the actual intent.
     // Adoption must pin the version read, not merely the brief's identity.
@@ -188,6 +242,19 @@ await runLocalWorkerJourney(
     });
     const { assigned_fellow_id: _revisedAssignee, ...freshFormulation } = revised;
     const adoption = { ...freshFormulation, ...freshAction.body_prefill };
+    const beforeLimitedAdoption = fingerprint(await briefState(saved.brief.id));
+    assert.equal((await propose(adoption, keys.adoption, 429)).code, "RATE_LIMITED");
+    assert.equal(fingerprint(await briefState(saved.brief.id)), beforeLimitedAdoption);
+    assert.equal(await receipt(keys.adoption), null);
+
+    // The remainder is the next rolling-window scenario. Age one historical
+    // admission explicitly; production admission and its guard remain active.
+    await env.DB.prepare(
+      "UPDATE problem_creation_admissions SET created_at = ? WHERE problem_id = ?",
+    )
+      .bind(Date.now() - 86_400_000, created.problem.id)
+      .run();
+    assert.equal((await call("/v1/hello", undefined, author)).problem_creation_budget.remaining, 1);
     const adopted = await propose(adoption, keys.adoption);
     assert.equal(adopted.problem.status, "private-draft");
     assert.equal(adopted.problem.scope, revised.scope);
@@ -273,6 +340,72 @@ await runLocalWorkerJourney(
       0,
     );
 
+    // Erasing a still-charged draft retains its original creation admission.
+    await sponsorCall(
+      sponsor,
+      "DELETE",
+      `/v1/sponsors/problems/${recovered.problem.id}`,
+      "delete-problem-draft",
+    );
+    assert.equal((await call("/v1/hello", undefined, author)).problem_creation_budget.remaining, 0);
+    assert.equal(
+      (await propose(quotaBody, "problem-proposal-after-erasure", 429)).code,
+      "RATE_LIMITED",
+    );
+    assert.ok(
+      await env.DB.prepare("SELECT 1 FROM problem_creation_admissions WHERE problem_id = ?")
+        .bind(recovered.problem.id)
+        .first(),
+    );
+
+    // Two independent commands compete for one real D1 slot. Their entire
+    // private creation batches must agree with the single durable admission.
+    const raceSponsor = "usr_problem_creation_race";
+    const raceToken = await enroll("problem-creation-racer", raceSponsor);
+    await propose(
+      { ...proposal, statement: "Every finite simple path is acyclic." },
+      "quota-race-first",
+      201,
+      raceToken,
+    );
+    const candidates = [
+      { ...proposal, statement: "Every finite simple cycle has degree two at every vertex." },
+      { ...proposal, statement: "Every finite tree is connected and acyclic." },
+    ];
+    const competing = await Promise.all(
+      candidates.map((body, index) =>
+        worker.fetch(`${origin}/v1/problems`, {
+          method: "POST",
+          headers: {
+            "User-Agent": userAgent,
+            authorization: `Bearer ${raceToken}`,
+            "content-type": "application/json",
+            "Idempotency-Key": `quota-race-${index}`,
+          },
+          body: JSON.stringify(body),
+        }),
+      ),
+    );
+    assert.deepEqual(competing.map((response) => response.status).sort(), [201, 429]);
+    for (const response of competing) {
+      const body = await response.json();
+      if (response.status === 201) ProposeProblemResponseSchema.parse(body);
+      else assert.equal(body.code, "RATE_LIMITED");
+    }
+    for (const table of [
+      "problems",
+      "problem_creation_admissions",
+      "problem_proposal_command_receipts",
+    ]) {
+      assert.equal(
+        (await env.DB.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE sponsor_id = ?`)
+          .bind(raceSponsor)
+          .first()).n,
+        2,
+      );
+    }
+    assert.equal(await call("/cursor"), initialCursor);
+
     const receipts = await env.DB.prepare(
       "SELECT * FROM problem_proposal_command_receipts WHERE fellow_id = ? ORDER BY key_digest",
     )
@@ -325,6 +458,10 @@ await runLocalWorkerJourney(
         adoption_replay: true,
         erased_draft_not_recreated: true,
         scope_and_privacy_preserved: true,
+        sponsor_shared_creation_limit: true,
+        concurrent_final_slot: true,
+        erased_creation_still_charged: true,
+        hello_and_triage_budget: true,
         committed_receipts: receipts.results.length,
         public_events: 0,
         boundary:

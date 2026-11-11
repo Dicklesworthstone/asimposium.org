@@ -58,6 +58,15 @@ await runLocalWorkerJourney(
       ["quarantine", 202, "SCREENING_HOLD"],
       ["unavailable", 202, "SCREENING_HOLD"],
     ]) {
+      // The third independent screening fixture belongs to a later day;
+      // rejected publication still consumes its original creation slot.
+      if (mode === "unavailable") {
+        await env.DB.prepare(
+          "UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?",
+        )
+          .bind(Date.now() - 86_400_000, OWNER)
+          .run();
+      }
       const problem = await propose(`Screened proposal (${mode})`);
       await fixtures.setScreenMode(mode);
       const refused = await lifecycle(problem, { action: "publish" }, status);
@@ -121,6 +130,12 @@ await runLocalWorkerJourney(
       authoritative_references: ["Guardrail reference marker."],
       standing_banner: "Guardrail standing banner marker.",
     };
+    // Start a later creation window for the separate guardrail scenario.
+    await env.DB.prepare(
+      "UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?",
+    )
+      .bind(Date.now() - 86_400_000, OWNER)
+      .run();
     const guarded = await propose("Screened proposal (guardrail)", {
       famous_guardrail: guardrail,
       areas: ["number-theory", "other-proposed-area-marker"],
@@ -151,8 +166,22 @@ await runLocalWorkerJourney(
     // otherwise-valid terminal actions, not refusals at an earlier precondition.
     await fixtures.setScreenMode("pass");
     await clearScreeningPosture(OWNER);
+    // Terminal-action fixtures start on another day. Their screening checks
+    // keep normal creation enforcement and accounting enabled.
+    await env.DB.prepare(
+      "UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?",
+    )
+      .bind(Date.now() - 86_400_000, OWNER)
+      .run();
     const retiring = await propose("Screened retirement");
     const merging = await propose("Screened merge source");
+    // The canonical investigation is created after the two source admissions
+    // expire; the retained source problems remain valid merge/retire targets.
+    await env.DB.prepare(
+      "UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?",
+    )
+      .bind(Date.now() - 86_400_000, OWNER)
+      .run();
     const canonical = await propose("Screened merge destination");
     for (const id of [retiring, merging, canonical])
       await lifecycle(id, { action: "publish" }, 200);

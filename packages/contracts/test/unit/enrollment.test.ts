@@ -87,6 +87,25 @@ test("hello workshop budget is optional and rejects invalid remaining capacity",
   expect(EnrollmentHelloResponseSchema.parse(withoutBudget)).toEqual(withoutBudget);
 });
 
+test("hello exposes shared creation capacity and rejects a negative balance", async () => {
+  const valid = await fixture(
+    new URL("../fixtures/valid/hello-problem-creation-budget.json", import.meta.url),
+  );
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/hello-problem-creation-budget-negative.json", import.meta.url),
+  );
+  const parsed = EnrollmentHelloResponseSchema.parse(valid);
+  expect(parsed.problem_creation_budget).toEqual({
+    limit: 2,
+    remaining: 0,
+    window_seconds: 86400,
+    retry_after_seconds: 120,
+  });
+  expect(EnrollmentHelloResponseSchema.safeParse(invalid).success).toBe(false);
+  const { problem_creation_budget: _budget, ...unknownCapacity } = parsed;
+  expect(EnrollmentHelloResponseSchema.parse(unknownCapacity)).toEqual(unknownCapacity);
+});
+
 test("hello first-write action fixtures are additive, POST-only and object-valued", async () => {
   const valid = await fixture(new URL("../fixtures/valid/hello-next-action.json", import.meta.url));
   const invalid = await fixture(

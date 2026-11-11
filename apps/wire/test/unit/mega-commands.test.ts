@@ -22,7 +22,10 @@ import {
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { writeLedgerEvent } from "../../src/krater/krater.ts";
-import { renderProblemNextMarkdown } from "../../src/mega-commands/markdown.ts";
+import {
+  renderProblemNextMarkdown,
+  renderTriageMarkdown,
+} from "../../src/mega-commands/markdown.ts";
 import {
   ContractFixtureMovesProvider,
   PROMOTION_MOVE_KINDS,
@@ -314,6 +317,38 @@ async function createTestHarness(options: { movesProvider?: any } = {}) {
 }
 
 describe("W6.2 Mega-Commands (hello, triage, next)", () => {
+  test("triage preserves the creation allowance when other budgets are unavailable", () => {
+    const response = TriageResponseSchema.parse({
+      hello: {
+        fellow: {
+          fellow_id: "F-00000000000000000000000000",
+          name: "quota-reader",
+          model: "synthetic-model",
+          harness: "synthetic-harness",
+        },
+        granted_scopes: ["propose-problems"],
+        granted_resources: {},
+        problem_creation_budget: {
+          limit: 2,
+          remaining: 0,
+          window_seconds: 86400,
+          retry_after_seconds: 120,
+        },
+        next_actions: [],
+      },
+      move: null,
+      degraded: false,
+    });
+    const markdown = renderTriageMarkdown(response);
+    const budgetBlock = markdown.match(/```json\n([\s\S]*?)\n```/);
+    expect(budgetBlock).not.toBeNull();
+    expect(JSON.parse(budgetBlock![1]!)).toEqual({
+      problem_creation_budget: response.hello.problem_creation_budget,
+    });
+    expect(markdown).toContain("across your sponsor and its Fellows");
+    expect(markdown).toContain("does not refund that allowance");
+  });
+
   test("orientation aliases and HEAD share one Fellow read budget and refuse before move composition", async () => {
     let moves = 0;
     const movesProvider = {

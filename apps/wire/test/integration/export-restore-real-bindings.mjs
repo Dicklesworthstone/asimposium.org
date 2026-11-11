@@ -228,7 +228,8 @@ await runLocalWorkerJourney(
     // 1b. The paged backup primitive (what a scheduled job calls) survives an
     //     interruption: a one-problem page stops the run, resuming from its
     //     cursor finishes it, and re-running from the start rewrites the same
-    //     content-addressed objects.
+    //     content-addressed objects. A separate sponsor owns this unrelated
+    //     problem; the author's erased draft still consumes its creation slot.
     const second = (
       await call(
         "/v1/problems",
@@ -239,12 +240,12 @@ await runLocalWorkerJourney(
           motivation: "Exercise a resumed backup run.",
           areas: ["number-theory"],
         },
-        author,
+        reviewer,
         201,
       )
     ).problem.id;
     await sponsorCall(
-      SPONSOR,
+      "usr_restore_reviewer",
       "POST",
       `/v1/sponsors/problems/${second}/lifecycle`,
       "problem-lifecycle",

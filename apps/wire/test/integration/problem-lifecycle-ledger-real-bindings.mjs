@@ -788,6 +788,13 @@ await runLocalWorkerJourney(
       ),
     );
 
+    // This independent private-governance scenario occurs on a later day.
+    // Age the earlier admissions without weakening the live capacity trigger.
+    await env.DB.prepare(
+      "UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?",
+    )
+      .bind(Date.now() - 86_400_000, sponsor)
+      .run();
     const privateCreated = await call(
       "/v1/problems",
       { ...proposal, title: "Private governance", statement: "Private unique formulation" },

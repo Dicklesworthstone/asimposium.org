@@ -430,7 +430,8 @@ export async function sessionLifecycleJourney({ call, enroll, sponsorCall }) {
 
   // Now Fellow A has 2 concurrent open sessions: sessionId2 (on Prob 1) and sessionIdProb2 (on Prob 2).
 
-  // 10c. Setup Problem 3
+  // 10c. Another sponsor creates Problem 3 within its own creation allowance.
+  // Fellow A still exercises its unchanged global two-session cap.
   const createdProb3 = await call(
     "/v1/problems",
     {
@@ -440,16 +441,25 @@ export async function sessionLifecycleJourney({ call, enroll, sponsorCall }) {
       motivation: "Global session cap refusal verification.",
       areas: ["number-theory"],
     },
-    fellowAToken,
+    fellowBToken,
     201,
   );
   const problemId3 = createdProb3.problem.id;
   await sponsorCall(
-    sponsorA,
+    sponsorB,
     "POST",
     `/v1/sponsors/problems/${problemId3}/lifecycle`,
     "problem-lifecycle",
     { action: "publish" },
+    200,
+  );
+
+  await sponsorCall(
+    sponsorB,
+    "POST",
+    `/v1/sponsors/problems/${problemId3}/lifecycle`,
+    "problem-lifecycle",
+    { action: "set-admission-mode", mode: "open" },
     200,
   );
 

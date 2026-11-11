@@ -367,6 +367,13 @@ await runLocalWorkerJourney(
       ...fourth,
       scope: "Finite rooted trees with one explicitly distinguished vertex.",
     };
+    // The changed-boundary fork is a later-day investigation; the first
+    // proposal and inherited fork already consumed the original two slots.
+    await env.DB.prepare(
+      "UPDATE problem_creation_admissions SET created_at = ? WHERE sponsor_id = ?",
+    )
+      .bind(Date.now() - 86_400_000, owner)
+      .run();
     const fork = await govern({
       action: "fork",
       title: "Rooted tree boundary investigation",

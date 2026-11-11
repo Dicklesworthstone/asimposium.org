@@ -6,6 +6,7 @@ import {
 import type { D1PreparedStatement } from "@cloudflare/workers-types";
 import { expireSecurityRecords, hardDeletePrivateDraft } from "../../src/krater/retention.ts";
 import { runSponsorBriefCommand } from "../../src/problems/brief-commands.ts";
+import { getProblemCreationBudget } from "../../src/problems/creation-quota.ts";
 import { runProblemProposalCommand } from "../../src/problems/proposal-commands.ts";
 import { problemProposalFixture } from "../support/problem-proposal.ts";
 
@@ -171,6 +172,7 @@ test("brief adoption pins the reviewed intent both before and inside the creatio
     });
     expect(drafts(f)).toEqual([]);
     expect(f.sql.query("SELECT * FROM problem_proposal_command_receipts").all()).toEqual([]);
+    expect(f.sql.query("SELECT * FROM problem_creation_admissions").all()).toEqual([]);
     const current = {
       ...formulation,
       motivation: "I reconsidered the newly edited sponsor intent.",
@@ -209,6 +211,7 @@ test("a revoked credential between admission and commit leaves neither draft nor
   expect(await response.json()).toMatchObject({ code: "WRITE_REFUSED" });
   expect(drafts(f)).toEqual([]);
   expect(f.sql.query("SELECT * FROM problem_proposal_command_receipts").all()).toEqual([]);
+  expect(f.sql.query("SELECT * FROM problem_creation_admissions").all()).toEqual([]);
 });
 
 test("erasure keeps the command identity but never reconstructs erased private content", async () => {
@@ -259,4 +262,179 @@ test("missing or malformed keys and unpinned brief bodies produce no private dra
     expect(await response.json()).toMatchObject({ code: "PROBLEM_PROPOSE_BODY_INVALID" });
   }
   expect(drafts(f)).toEqual([]);
+});
+
+test("two creations are shared by a sponsor's Fellows; replays remain free and erasure cannot refund a slot", async () => {
+  const f = await fixture();
+  const grant = await f.service.mint(f.principal, { requested_scopes: ["propose-problems"] });
+  const claimed = await f.service.claim({
+    enrollment_id: grant.enrollmentId,
+    secret: grant.secret,
+    name: "second-proposer",
+    model: "test/second-proposer",
+    harness: "curl",
+  });
+  await f.service.decide(f.principal, grant.enrollmentId, {
+    enrollment_id: grant.enrollmentId,
+    decision: "approve",
+    step_up_authenticated_at: Math.floor(Date.now() / 1000),
+  });
+  const issued = await f.service.poll({ flow_handle: claimed.flowHandle });
+  if (!("token" in issued)) throw new Error("Second proposer was not legally enrolled.");
+
+  const first = await f.propose(formulation, "quota-first");
+  expect(first.status).toBe(201);
+  const firstBody = ProposeProblemResponseSchema.parse(await first.json());
+  expect(await getProblemCreationBudget(f.baseDb, f.principal.sponsorId)).toEqual({
+    limit: 2,
+    remaining: 1,
+    window_seconds: 86_400,
+  });
+  const second = await f.propose(
+    {
+      ...formulation,
+      title: "Independent second proposal",
+      statement: "Every finite simple cycle has equally many edges and vertices.",
+    },
+    "quota-second",
+    issued.token,
+  );
+  expect(second.status).toBe(201);
+  expect(await (await f.propose(formulation, "quota-first")).json()).toEqual(firstBody);
+
+  await hardDeletePrivateDraft(f.baseDb, firstBody.problem.id, f.principal.sponsorId);
+  const refused = await f.propose(
+    {
+      ...formulation,
+      title: "No replacement slot after erasure",
+      statement: "Each vertex of a finite rooted tree has a unique simple path to its root.",
+    },
+    "quota-third",
+  );
+  expect(refused.status).toBe(429);
+  expect(refused.headers.get("cache-control")).toBe("private, no-store");
+  expect(refused.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+  expect(Number(refused.headers.get("retry-after"))).toBeGreaterThan(0);
+  expect(refused.headers.get("ratelimit-limit")).toBe("2");
+  expect(refused.headers.get("ratelimit-remaining")).toBe("0");
+  expect(await refused.json()).toMatchObject({
+    code: "RATE_LIMITED",
+    limit: 2,
+    remaining: 0,
+    window_seconds: 86_400,
+  });
+  expect(
+    f.sql.query("SELECT COUNT(*) AS n FROM problem_creation_admissions").get(),
+  ).toEqual({ n: 2 });
+  expect(f.sql.query("SELECT * FROM problem_proposal_command_receipts").all()).toHaveLength(2);
+  expect((await f.propose(formulation, "quota-first")).status).toBe(404);
+  expect(await getProblemCreationBudget(f.baseDb, f.receiver.sponsorId)).toEqual({
+    limit: 2,
+    remaining: 2,
+    window_seconds: 86_400,
+  });
+});
+
+test("a concurrent final-slot winner rolls back the losing proposal and leaves its brief unadopted", async () => {
+  const f = await fixture();
+  const first = await f.propose(
+    {
+      ...formulation,
+      title: "First slot",
+      statement: "Every finite simple path has one fewer edge than vertices.",
+    },
+    "slot-first",
+  );
+  expect(first.status).toBe(201);
+  const brief = await saveBrief(f);
+  const beforeBrief = f.sql.query("SELECT * FROM sponsor_problem_briefs WHERE id=?").get(brief.id);
+  let winnerId: string | undefined;
+  f.beforeCommit(async () => {
+    const winner = await f.propose(
+      {
+        ...formulation,
+        title: "Concurrent final slot",
+        statement: "Every finite simple cycle has equally many edges and vertices.",
+      },
+      "slot-winner",
+    );
+    expect(winner.status).toBe(201);
+    winnerId = ProposeProblemResponseSchema.parse(await winner.json()).problem.id;
+  });
+  const loser = await f.propose(
+    { ...formulation, brief_id: brief.id, expected_brief_version: brief.version },
+    "slot-loser",
+  );
+  expect(loser.status).toBe(429);
+  expect(await loser.json()).toMatchObject({ code: "RATE_LIMITED", remaining: 0 });
+  expect(winnerId).toBeDefined();
+  expect(drafts(f)).toHaveLength(2);
+  expect(
+    f.sql.query("SELECT * FROM sponsor_problem_briefs WHERE id=?").get(brief.id),
+  ).toEqual(beforeBrief);
+  expect(f.sql.query("SELECT * FROM problem_proposal_command_receipts").all()).toHaveLength(2);
+  expect(f.sql.query("SELECT * FROM problem_creation_admissions").all()).toHaveLength(2);
+  expect(f.sql.query("PRAGMA foreign_key_check").all()).toEqual([]);
+});
+
+test("rolling capacity recovers exactly at expiry and backwards clocks remain conservative", async () => {
+  const f = await fixture();
+  const now = Date.now();
+  for (const [offset, key] of [[0, "window-first"], [1_100, "window-second"]] as const) {
+    expect(
+      (await runProblemProposalCommand(
+        f.baseDb,
+        f.binding,
+        key,
+        {
+          ...formulation,
+          title: key,
+          statement:
+            offset === 0
+              ? formulation.statement
+              : "Every finite simple cycle has equally many edges and vertices.",
+        },
+        now + offset,
+      )).status,
+    ).toBe(201);
+  }
+  expect(
+    await getProblemCreationBudget(f.baseDb, f.principal.sponsorId, now - 1_000),
+  ).toMatchObject({ remaining: 0, retry_after_seconds: 86_401 });
+  expect(
+    await getProblemCreationBudget(f.baseDb, f.principal.sponsorId, now + 86_400_000 - 1),
+  ).toMatchObject({ remaining: 0, retry_after_seconds: 1 });
+  expect(
+    await getProblemCreationBudget(f.baseDb, f.principal.sponsorId, now + 86_400_000),
+  ).toEqual({ limit: 2, remaining: 1, window_seconds: 86_400 });
+  expect(
+    await getProblemCreationBudget(f.baseDb, f.principal.sponsorId, now + 86_401_100),
+  ).toEqual({ limit: 2, remaining: 2, window_seconds: 86_400 });
+});
+
+test("an unreadable creation allowance fails closed without writing a draft", async () => {
+  const f = await fixture();
+  const db = new Proxy(f.baseDb, {
+    get(target, property) {
+      if (property === "prepare")
+        return (query: string) => {
+          if (query.includes("FROM problem_creation_admissions"))
+            throw new Error("QUOTA_READ_TRANSPORT_UNAVAILABLE");
+          return target.prepare(query);
+        };
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const response = await runProblemProposalCommand(
+    db,
+    f.binding,
+    "quota-read-failure",
+    formulation,
+  );
+  expect(response.status).toBe(503);
+  expect(await response.json()).toMatchObject({ code: "INTERNAL_ERROR" });
+  expect(drafts(f)).toEqual([]);
+  expect(f.sql.query("SELECT * FROM problem_creation_admissions").all()).toEqual([]);
+  expect(f.sql.query("SELECT * FROM problem_proposal_command_receipts").all()).toEqual([]);
 });

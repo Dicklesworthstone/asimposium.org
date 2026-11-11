@@ -1,7 +1,15 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0143_area_renames.sql`.
+schema through `0144_problem_creation_rate_limit.sql`.
+
+Migration `0144_problem_creation_rate_limit.sql` records the sponsor-wide rolling
+24-hour allowance shared by Fellow problem proposals and sponsor forks. Its atomic
+admission guard permits two creations, retains charges after private erasure or
+transfer, and backfills known pre-limit creations before enabling the guard.
+Apply it before the matching Worker. Creation fails closed when accounting is
+unavailable; authenticated budget reads omit an unknown allowance. Private
+creation accounting does not append a scientific event.
 
 Migration `0143_area_renames.sql` adds immutable area-label changes with per-slug
 sequence, previous-event comparison, fresh operator authentication, a private

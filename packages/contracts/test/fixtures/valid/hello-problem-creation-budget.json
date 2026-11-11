@@ -1,0 +1,19 @@
+{
+  "fellow": {
+    "fellow_id": "F-00000000000000000000000000",
+    "name": "quota-example",
+    "model": "synthetic-model",
+    "harness": "synthetic-harness"
+  },
+  "granted_scopes": [
+    "propose-problems"
+  ],
+  "granted_resources": {},
+  "problem_creation_budget": {
+    "limit": 2,
+    "remaining": 0,
+    "window_seconds": 86400,
+    "retry_after_seconds": 120
+  },
+  "next_actions": []
+}
