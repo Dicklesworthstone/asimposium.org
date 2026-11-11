@@ -145,6 +145,7 @@ export async function operatorModerationJourney({
       await page.goto(`${agora.origin}/admin`, { waitUntil: "load" });
       const areaForm = page.locator("#admin-area-target").locator("xpath=ancestor::form");
       const label = `Algebra and Representations (${mode})`;
+      const markdownLabel = "Algebra and Representations \\(" + mode + "\\)";
       const privateReason = `BROWSER_PRIVATE_AREA_REASON_${mode}: reviewed this public taxonomy label.`;
       await page.locator("#admin-area-target").fill("algebra");
       await page.locator("#admin-area-title").fill(label);
@@ -152,6 +153,13 @@ export async function operatorModerationJourney({
       await page.locator("#admin-area-confirm").check();
       const areaKey = await areaForm.locator('[name="idempotency_key"]').inputValue();
       const areaBefore = await auditCount("algebra");
+      // Warm the actual public Next caches immediately before the write. A
+      // passing read after the receipt must not depend on a 15/30s TTL expiry.
+      for (const path of ["/area/algebra", "/explore"]) {
+        const warm = await fetch(`${agora.origin}${path}`, { headers: { "user-agent": USER_AGENT } });
+        assert.equal(warm.status, 200, "area browser public cache warmup");
+        await warm.arrayBuffer();
+      }
       await target.env.DB.prepare("UPDATE browser_area_fault SET enabled = 1").run();
       try {
         await areaForm.getByRole("button", { name: "Record decision", exact: true }).click();
@@ -170,13 +178,14 @@ export async function operatorModerationJourney({
         const response = await fetch(`${target.origin}${path}`, { headers: { "user-agent": USER_AGENT } });
         const text = await response.text();
         record(`area ${mode}: ${path} projects the shared title and public change record`,
-          response.status === 200 && text.includes(label) && text.includes(areaReceipt.event_id) && !text.includes(privateReason));
+          response.status === 200 && text.includes(path.endsWith(".md") ? markdownLabel : label) && text.includes(areaReceipt.event_id) && !text.includes(privateReason));
       }
       for (const path of ["/area/algebra", "/explore"]) {
         await page.goto(`${agora.origin}${path}`, { waitUntil: "load" });
         const body = await page.locator("body").innerText();
         record(`area ${mode}: ${path} shows the same human title and public notice`,
-          body.includes(label) && body.includes(areaReceipt.event_id) && !body.includes(privateReason));
+          body.includes(label) && body.includes(areaReceipt.event_id) && !body.includes(privateReason),
+          { hasLabel: body.includes(label), hasChangeEvent: body.includes(areaReceipt.event_id), privateReasonAbsent: !body.includes(privateReason) });
       }
       for (const [account, authTime] of [[ADMIN_OPERATORS[1], Math.floor(Date.now() / 1000)], [operator, Math.floor(Date.now() / 1000) - 3600]]) {
         await signedInAs(context, operator);
@@ -187,9 +196,15 @@ export async function operatorModerationJourney({
         await page.locator("#admin-area-confirm").check();
         await signedInAs(context, account, authTime);
         await areaForm.getByRole("button", { name: "Record decision", exact: true }).click();
-        await page.getByText("Re-authenticate as the same operator", { exact: false }).waitFor();
+        if (account === operator && !javaScriptEnabled) {
+          await page.getByRole("heading", { name: "Recent Authentication Required", exact: true }).waitFor();
+          assert.equal(await page.locator("#admin-area-target").count(), 0, "stale no-JS authentication exposes no operator control");
+        } else {
+          await page.getByText("Re-authenticate as the same operator", { exact: false }).waitFor();
+        }
         record(`area ${mode}: ${account === operator ? "stale auth" : "account switch"} cannot rename the reviewed area`,
-          await auditCount("algebra") === areaBefore + 1);
+          await auditCount("algebra") === areaBefore + 1 &&
+          (await target.env.DB.prepare("SELECT new_title FROM area_rename_events WHERE area_slug = 'algebra' ORDER BY seq DESC LIMIT 1").first()).new_title === label);
       }
 
       await signedInAs(context, "usr_non_operator_moderation_browser");

@@ -12,6 +12,7 @@ import {
   assertNoScientificDispositionOverride,
   parseModerationControlTarget,
 } from "@asimposium/contracts";
+import { revalidatePath } from "next/cache";
 
 import { requireOperatorSession } from "@/lib/admin";
 import type {
@@ -224,6 +225,15 @@ async function applyModeration(
       return unconfirmed(
         "The Worker response did not contain a valid receipt for this exact target and decision. No success was confirmed. Retry unchanged to recover the receipt, or inspect the audit log.",
       );
+    if (receipt.kind === "area") {
+      // Both faces read the same Worker projection. Invalidate the human
+      // routes after a confirmed receipt, including an exact receipt replay.
+      // A cache failure cannot erase a committed, authoritative receipt.
+      try {
+        revalidatePath(`/area/${encodeURIComponent(receipt.result.area_id)}`);
+        revalidatePath("/explore");
+      } catch { /* A subsequent read can still revalidate the recorded change. */ }
+    }
     return {
       status: "committed",
       attempt,
