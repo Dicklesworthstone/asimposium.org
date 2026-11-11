@@ -47,6 +47,7 @@ const LANES = [
   "problem-stewardship-commands",
   "projection-doctor",
   "projection-legacy-backfill",
+  "protocol-conflicts",
   "publication-context",
   "questions-retractions",
   "read-quota",

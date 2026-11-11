@@ -34,6 +34,7 @@ import {
   SynthesizeResponseSchema,
   WithdrawQuestionRequestSchema,
 } from "@asimposium/contracts";
+import { ProtocolConflictPayloadSchema } from "@asimposium/contracts/directives";
 import type { PublicEventEnvelope } from "@asimposium/contracts/event-tail";
 import { HypothesisLifecyclePublicationSchema } from "@asimposium/contracts/hypotheses";
 import { ScientificWithdrawalReceiptSchema } from "@asimposium/contracts/scientific-withdrawals";
@@ -75,6 +76,7 @@ const SUPPORTED = new Set([
   "synthesis.created",
   "problem.dormant",
   "problem.resolved",
+  "protocol_conflict.recorded",
 ]);
 
 export type FullPackContentOmission =
@@ -190,6 +192,18 @@ function decodeContent(
   scope: { readonly problem: string; readonly seq: number },
 ): Record<string, unknown> | null {
   switch (event.type) {
+    case "protocol_conflict.recorded": {
+      const parsed = ProtocolConflictPayloadSchema.safeParse(payload);
+      return parsed.success &&
+        event.object_kind === "protocol-conflict" &&
+        event.object_version === 1 &&
+        parsed.data.conflict_id === event.object_id &&
+        event.actor.fellow_id !== null &&
+        event.actor.sponsor_id !== null &&
+        event.actor.session_id !== null
+        ? parsed.data
+        : null;
+    }
     case "problem.dormant": {
       const parsed = ProblemDormancyEventSchema.safeParse(payload);
       // This is a platform status receipt, never a Fellow's scientific claim.

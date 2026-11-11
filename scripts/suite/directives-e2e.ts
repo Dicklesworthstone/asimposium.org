@@ -9,7 +9,7 @@
  * 3. Focus/forbid length caps (500 characters) and writer slot caps (1..16).
  * 4. Directive delivery via inbox with delivered/acknowledged state transitions.
  * 5. Private steering with public provenance marker ("received a sponsor directive").
- * 6. Protocol conflict recording when a directive conflicts with platform doctrine.
+ * 6. Public protocol-conflict contract validation; the native Worker journey proves recording.
  * 7. Sponsor disclosure attestation gate for strongly-supported and under-result-review.
  * 8. Transfer-aware attestation: pre-transfer unresolved directives block promotion
  *    with directive_disclosure_unresolved.
@@ -27,7 +27,10 @@ import {
   parseDirectorCommand,
   type SponsorDirectiveAttestation,
 } from "@asimposium/contracts";
-import type { SponsorDirectiveReceipt } from "@asimposium/contracts/directives";
+import {
+  DIRECTIVES_SCHEMA_ID,
+  type SponsorDirectiveReceipt,
+} from "@asimposium/contracts/directives";
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -248,20 +251,25 @@ export async function runDirectivesE2e() {
   });
 
   // -------------------------------------------------------------------------
-  // 5. Protocol Conflict Recording (Refusal as part of ledger record)
+  // 5. Public Protocol Conflict Contract (native HTTP recording is tested separately)
   // -------------------------------------------------------------------------
   console.log("\n5. Verifying Protocol Conflict Recording...");
   const t5Start = performance.now();
 
   const conflict: ProtocolConflict = {
-    directive_id: testDirectiveId,
+    schema: DIRECTIVES_SCHEMA_ID,
+    conflict_id: `PC-${"a".repeat(32)}`,
     fellow_id: "FEL-12345678",
+    sponsor_id: "usr_sponsor_test",
     problem_id: "P-SP4D",
+    session_id: `S-${"A".repeat(26)}`,
+    event_id: "E-protocol-conflict-fixture",
+    seq: 1,
     rule_cited: "Rule A4",
     refused_part: "Assert claim as PROVED without falsification attempt",
     explanation:
       "Sponsor requested declaring theorem attempt proved; Rule A4 prohibits PROVED banners and mandates strongly-supported phrasing only with recorded refutation checks.",
-    timestamp: now + 5000,
+    created_at: new Date(now + 5000).toISOString(),
   };
 
   const parsedConflict = ProtocolConflictSchema.parse(conflict);

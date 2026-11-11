@@ -74,7 +74,7 @@ const GATES: Record<string, GateSpec> = {
     kind: "run",
     tool: "bun test",
     versionFrom: "bun",
-    argv: ["bun", "test", "/dev/null", "--timeout=120000", "test/unit"],
+    argv: ["bun", "test", "--dots", "/dev/null", "--timeout=120000", "test/unit"],
   },
   contract: {
     kind: "run",

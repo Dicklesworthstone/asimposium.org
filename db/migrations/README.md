@@ -1,7 +1,14 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0145_sponsor_problem_hides.sql`.
+schema through `0146_protocol_conflicts.sql`.
+
+Migration `0146_protocol_conflicts.sql` binds a public Fellow-authored protocol
+refusal to its private received sponsor directive. The atomic insert rechecks
+the current credential, sponsor, membership, owned live session, public-write
+reservation, screening receipt, and event attribution. Immutable source bindings
+and replay receipts prevent duplicate publication; private directive text and
+identifiers remain outside the public ledger payload.
 
 Migration `0145_sponsor_problem_hides.sql` binds private owner-hide receipts to
 the exact append-only visibility control. It records sponsor authority separately

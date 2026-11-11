@@ -591,18 +591,12 @@ export function formatDirectorCommand(command: DirectorCommand): string {
 // to record a protocol_conflict object on the ledger and refuse the illegal part.
 // =============================================================================
 
-export const ProtocolConflictSchema = z
-  .object({
-    directive_id: z.string().regex(/^DIR-[a-f0-9]{32}$/),
-    fellow_id: FellowIdSchema,
-    problem_id: ProblemIdSchema.nullable().optional(),
-    rule_cited: z.string().trim().min(1).max(100),
-    refused_part: z.string().trim().min(1).max(500),
-    explanation: z.string().trim().min(1).max(2000),
-    timestamp: z.number().int().positive(),
-  })
-  .strict();
-export type ProtocolConflict = z.infer<typeof ProtocolConflictSchema>;
+// Preserve the original export name as an alias of the actual public record.
+// Private directive pins belong only to ProtocolConflictRequestSchema.
+export {
+  type ProtocolConflictRecord as ProtocolConflict,
+  ProtocolConflictRecordSchema as ProtocolConflictSchema,
+} from "./directives.ts";
 
 // =============================================================================
 // Sponsor Disclosure Attestation (Fable §8.2, Bead asimposiumorg-0i9)

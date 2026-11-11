@@ -81,6 +81,7 @@ const PUBLIC_TYPES: Readonly<Record<string, readonly string[]>> = {
   gap: ["gap.filed", "gap.closed-by", "gap.withdrawn"],
   relation: ["relation.asserted", "relation.disputed"],
   "directive-disclosure": ["directive.disclosure-recorded"],
+  "protocol-conflict": ["protocol_conflict.recorded"],
   problem: [
     "problem.admitted",
     "problem.published",
@@ -190,6 +191,8 @@ function publicObjectUrl(problemId: string, row: TailRow, through: number): stri
   if (row.object_kind === "directive-disclosure" && /^DD-[a-f0-9]{32}$/.test(row.id ?? "")) {
     return `${prefix}/disclosures/${row.id}.json`;
   }
+  if (row.object_kind === "protocol-conflict" && /^PC-[a-f0-9]{32}$/.test(row.object_id ?? ""))
+    return `${prefix}/protocol-conflicts/${row.object_id}.json`;
   if (
     row.object_kind === "claim" &&
     (row.object_id?.length ?? 0) <= 47 &&

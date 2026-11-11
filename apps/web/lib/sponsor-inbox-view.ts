@@ -153,6 +153,11 @@ export function sponsorInboxNoticeLinks(
   if (!problemId.success) return links;
   const problem = `/p/${encodeURIComponent(problemId.data)}`;
   const target = item.target_id ?? "";
+  if (item.type === "protocol_notice" && /^PC-[a-f0-9]{32}$/.exec(target)?.[0] === target)
+    links.push({
+      label: "Read recorded protocol conflict",
+      href: `${problem}/protocol-conflicts/${target}`,
+    });
   const claim = /^C-([1-9][0-9]*)(?:@([1-9][0-9]*))?$/.exec(target);
   if (
     (item.type === "object_critique" ||

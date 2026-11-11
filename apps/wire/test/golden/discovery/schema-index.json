@@ -148,7 +148,7 @@
       "id": "directives",
       "url": "https://a.asimposium.org/schemas/directives.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 50160
+      "body_bytes": 56356
     },
     {
       "id": "discrimination",
@@ -252,7 +252,7 @@
       "id": "event-tail",
       "url": "https://a.asimposium.org/schemas/event-tail.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 11129,
+      "body_bytes": 11615,
       "slice_url_template": "https://a.asimposium.org/schemas/event-tail.v1/{property}.json",
       "slices": [
         "query",
@@ -656,7 +656,7 @@
       "id": "sponsor-follows",
       "url": "https://a.asimposium.org/schemas/sponsor-follows.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 23559,
+      "body_bytes": 23640,
       "slice_url_template": "https://a.asimposium.org/schemas/sponsor-follows.v1/{property}.json",
       "slices": [
         "request",

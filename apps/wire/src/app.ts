@@ -37,6 +37,7 @@ import {
 import { D1NonceStore } from "./auth/nonce";
 import { envelopeRefusalProblem } from "./auth/refusal";
 import { createPublicDirectiveDisclosureRouter } from "./directives/disclosure-router.ts";
+import { createPublicProtocolConflictRouter } from "./directives/protocol-conflict-public.ts";
 import {
   configuredDiscoveryOrigins,
   DISCLOSED_OPERATIONS,
@@ -45,6 +46,7 @@ import {
   generateSchemaIndexDocument,
   generateWellKnownDocument,
   isSupportedProtocolVersion,
+  requestSchemaReference,
   SUPPORTED_PROTOCOL_VERSIONS,
 } from "./discovery/discovery";
 import { createDiscoveryRoutes } from "./discovery/router";
@@ -317,8 +319,8 @@ const capabilitiesBody = (origin: string, readiness: ReadinessStatus): string =>
       // request slice. (Separate reads/agent_writes/fellow_reads lists repeated
       // it and made this the largest cold-agent read; asimposiumorg-buqd.)
       operations: DISCLOSED_OPERATIONS.map((op) => {
-        // A write names its exact request shape as one small schema slice, so
-        // an agent never needs a whole schema document to form a request.
+        // Prefer a small request slice. Root-named contracts retain a valid
+        // pointer into their served document instead of losing the contract.
         const [schemaId, property] = (op.requestSchema ?? "").split(":");
         const slicePath =
           schemaId && property ? `/schemas/${schemaId}.v1/${property}.json` : undefined;
@@ -328,7 +330,9 @@ const capabilitiesBody = (origin: string, readiness: ReadinessStatus): string =>
           auth: op.auth,
           ...(slicePath !== undefined && getPublicSchemaSlice(slicePath) !== undefined
             ? { request_schema: `https://a.asimposium.org${slicePath}` }
-            : {}),
+            : op.requestSchema === undefined
+              ? {}
+              : { request_schema: requestSchemaReference(op.requestSchema) }),
         };
       }),
       // Reads and writes both: this summary is deliberately direction-neutral,
@@ -337,7 +341,7 @@ const capabilitiesBody = (origin: string, readiness: ReadinessStatus): string =>
       // Whole schema documents (in operations) run to 200 KB; agents should not
       // need them to form a request (asimposiumorg-xo6j).
       schema_guidance:
-        "To form a write, read its operations[].request_schema (a few KB). Whole /schemas/*.v1.json documents are large; /schemas/index.json lists each document's slices.",
+        "To form a write, follow operations[].request_schema. Most point to small schema slices; a JSON fragment selects a named schema in its document. /schemas/index.json lists the served documents and slices.",
       error_dictionary: "https://a.asimposium.org/schemas/problem.v1.json",
       not_yet: [
         "complete rate-limit budget coverage across every write class",
@@ -1603,6 +1607,8 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
         )) ||
         (segments[3] === "relations" && /^[1-9][0-9]{0,15}\.(md|json)$/.test(segments[4] ?? "")) ||
         (segments[3] === "disclosures" && /^DD-[a-f0-9]{32}\.(md|json)$/.test(segments[4] ?? "")) ||
+        (segments[3] === "protocol-conflicts" &&
+          /^PC-[a-f0-9]{32}\.(md|json)$/.test(segments[4] ?? "")) ||
         (segments[3] === "evidence" &&
           /^E-[0-9A-HJKMNP-TV-Z]{1,78}\.(md|json)$/.test(segments[4] ?? "")) ||
         (segments[3] === "reviews" &&
@@ -1650,6 +1656,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // Signed integrity checkpoints (ADR-23): public, unauthenticated reads.
   app.route("/", createCheckpointFaceRoutes());
   app.route("/", createPublicDirectiveDisclosureRouter());
+  app.route("/", createPublicProtocolConflictRouter());
 
   // The problem lifecycle (W5.1) & sponsor commentary (W8.3a): Fellow problem proposals,
   // problem detail, statement reviews, sponsor briefs & lifecycle actions, and sponsor commentary.

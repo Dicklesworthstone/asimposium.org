@@ -391,6 +391,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0143_area_renames.sql
   db/migrations/0144_problem_creation_rate_limit.sql
   db/migrations/0145_sponsor_problem_hides.sql
+  db/migrations/0146_protocol_conflicts.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -495,6 +496,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger-face.ts
   apps/wire/src/krater/citation.ts
   apps/wire/src/discovery/discovery.ts
+  apps/wire/src/discovery/protocol-conflicts-discovery.ts
   apps/wire/src/discovery/commentary-discovery.ts
   apps/wire/src/discovery/citations-discovery.ts
   apps/wire/src/discovery/scientific-collections-discovery.ts
@@ -593,6 +595,9 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/scientific-withdrawals.ts
   apps/wire/src/ledger/stale-route.ts
   apps/wire/src/directives/router.ts
+  apps/wire/src/directives/protocol-conflict-router.ts
+  apps/wire/src/directives/protocol-conflicts.ts
+  apps/wire/src/directives/protocol-conflict-public.ts
   apps/wire/src/commentary/router.ts
   apps/wire/src/commentary/service.ts
   apps/wire/src/krater/export.ts
@@ -1020,6 +1025,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0143_area_renames.sql
   0144_problem_creation_rate_limit.sql
   0145_sponsor_problem_hides.sql
+  0146_protocol_conflicts.sql
 )
 
 

@@ -82,6 +82,7 @@ const CENSUS_TABLES = [
   "screening_publications",
   "problem_creation_admissions",
   "sponsor_problem_hide_receipts",
+  "protocol_conflicts",
   "artifact_uploads",
   "artifact_publications",
 ] as const;
@@ -106,6 +107,10 @@ const CENSUS_TRIGGERS = [
   "sponsor_problem_hide_receipts_append_only_update",
   "sponsor_problem_hide_receipts_append_only_delete",
   "content_controls_public_cursor",
+  "protocol_conflicts_authorized",
+  "protocol_conflicts_no_update",
+  "protocol_conflicts_no_delete",
+  "protocol_conflicts_cursor",
   // Ledger objects are append-only (Rule A6). Projection repair
   // (krater/projection-replay.ts) is insert-only because of these: a dropped
   // trigger would let a rebuild or a bug rewrite published history.

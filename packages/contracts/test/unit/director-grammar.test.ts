@@ -302,20 +302,25 @@ describe("Director Grammar Parser & Serializer", () => {
 describe("Protocol Conflict Contract (Fable §8.2)", () => {
   test("valid protocol conflict parses and passes validation", () => {
     const valid = {
-      directive_id: "DIR-0123456789abcdef0123456789abcdef",
+      schema: "https://a.asimposium.org/schemas/directives.v1.json",
+      conflict_id: "PC-0123456789abcdef0123456789abcdef",
       fellow_id: "FEL-12345678",
+      sponsor_id: "usr_protocol_sponsor",
       problem_id: "P-SP4D",
+      session_id: `S-${"A".repeat(26)}`,
+      event_id: "E-refusal",
+      seq: 2,
       rule_cited: "Rule A4",
       refused_part: "assert PROVED without counterexample search",
       explanation:
         "Sponsor directive requested asserting a proved status without independent refutation check.",
-      timestamp: 1786000000000,
+      created_at: "2026-08-06T04:26:40.000Z",
     };
     const parsed = ProtocolConflictSchema.safeParse(valid);
     expect(parsed.success).toBe(true);
   });
 
-  test("rejects protocol conflict with malformed directive ID", () => {
+  test("rejects the obsolete public shape with a private directive ID and caller timestamp", () => {
     const invalid = {
       directive_id: "not-a-dir-id",
       fellow_id: "FEL-12345678",
