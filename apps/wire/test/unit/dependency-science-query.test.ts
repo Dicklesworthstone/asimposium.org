@@ -38,7 +38,7 @@ function fixture() {
       bears_on_kind TEXT, bears_on_id TEXT, bears_on_version INTEGER, direction TEXT);
     CREATE TABLE reviews (review_id TEXT, problem_id TEXT, source_event_id TEXT, source_seq INTEGER,
       target_claim_id TEXT, target_version INTEGER, verdict TEXT, capable_of_failure TEXT,
-      rubric_json TEXT DEFAULT '[]');
+      rubric_json TEXT DEFAULT '[]', basis TEXT, body_md TEXT);
     CREATE TABLE retractions (problem_id TEXT, retraction_id TEXT, target_object TEXT, seq INTEGER, author_fellow_id TEXT);
     CREATE TABLE scientific_withdrawals (event_id TEXT, event_sha256 TEXT, problem_id TEXT,
       retraction_id TEXT, target_object TEXT, fellow_id TEXT, seq INTEGER, source_event_id TEXT,
@@ -161,16 +161,22 @@ for (const rubric of ["statement-defect", "statement-fails-review"]) {
       target_claim_id: "C-1",
       target_version: 1,
       verdict: "cannot-verify",
+      basis: "Checked the variable scope in the exact statement.",
+      body_md: "The statement uses n without quantifying it.",
       capable_of_failure: "The statement could be well-defined.",
       rubric: [rubric],
     });
     f.db
-      .prepare("INSERT INTO reviews VALUES ('R-defect','P-READ',?,?, 'C-1',1,'cannot-verify',?,?)")
+      .prepare(
+        "INSERT INTO reviews VALUES ('R-defect','P-READ',?,?, 'C-1',1,'cannot-verify',?,?,?,?)",
+      )
       .run(
         review.event,
         review.seq,
         "The statement could be well-defined.",
         JSON.stringify([rubric]),
+        "Checked the variable scope in the exact statement.",
+        "The statement uses n without quantifying it.",
       );
     assert.equal((await f.read()).at(-1)?.weighted_statement_defect, 1);
     f.db.prepare("UPDATE event_content SET redacted_at='now' WHERE event_id=?").run(review.event);
@@ -180,6 +186,40 @@ for (const rubric of ["statement-defect", "statement-fails-review"]) {
     assert.equal(withheld?.weighted_refutation, 0);
   });
 }
+
+test("dependency metadata retains an impression-only objection without weighted authority", async () => {
+  const f = fixture();
+  await f.chain();
+  const payload = {
+    target_claim_id: "C-1",
+    target_version: 1,
+    verdict: "refute",
+    basis: "**Looks wrong!**",
+    body_md: "I disagree.",
+    capable_of_failure: "The statement could be correct.",
+    rubric: ["statement-defect"],
+  };
+  const review = await f.addEvent("review", "review.created", "R-impression", 1, payload);
+  f.db
+    .prepare("INSERT INTO reviews VALUES ('R-impression','P-READ',?,?,'C-1',1,'refute',?,?,?,?)")
+    .run(
+      review.event,
+      review.seq,
+      payload.capable_of_failure,
+      JSON.stringify(payload.rubric),
+      payload.basis,
+      payload.body_md,
+    );
+  for (const redacted of [false, true]) {
+    if (redacted)
+      f.db.prepare("UPDATE event_content SET redacted_at='now' WHERE event_id=?").run(review.event);
+    const source = (await f.read()).find((row) => row.event_id === review.event);
+    assert.equal(source?.negative_review, 1);
+    assert.equal(source?.weighted_refutation, 0);
+    assert.equal(source?.weighted_statement_defect, 0);
+    if (redacted) assert.equal(source?.payload_json, null);
+  }
+});
 
 test("science query observes the cursor and independent publication boundary", async () => {
   const f = fixture();

@@ -74,6 +74,8 @@ function fixture(reaches = "corroborated") {
       target_claim_id: "C-1",
       target_version: 1,
       verdict: "confirm",
+      basis: "Checked the boundary case under the exact statement's assumptions.",
+      body_md: "The boundary case remains within the proposed bound.",
       capable_of_failure: "A boundary case might exceed the proposed bound.",
       tier: "T1",
       independence_policy: "declared-family-and-grounded-method-v1",
@@ -123,7 +125,7 @@ function fixture(reaches = "corroborated") {
     if (kind === "review")
       statements.push(
         f.db
-          .prepare("INSERT INTO reviews VALUES('P-DEMO',?,?,?,?,?,?,?,?,?)")
+          .prepare("INSERT INTO reviews VALUES('P-DEMO',?,?,?,?,?,?,?,?,?,?,?)")
           .bind(
             event.objectId,
             settlement.eventId,
@@ -134,6 +136,8 @@ function fixture(reaches = "corroborated") {
             payload.verdict,
             payload.capable_of_failure,
             JSON.stringify(payload.rubric ?? []),
+            payload.basis,
+            payload.body_md,
           ),
       );
     return statements;
@@ -170,6 +174,29 @@ test("a later batch review sees the earlier falsification attempt and fires one 
     expect(f.sql.query("SELECT dead_end_id,event_id FROM dead_end_fired_triggers").all()).toEqual([
       { dead_end_id: "DE-route", event_id: review.eventId },
     ]);
+  } finally {
+    f.close();
+  }
+});
+
+test("an impression-only pending review cannot fire a claim-reaches retry trigger", async () => {
+  const f = fixture();
+  try {
+    const candidate = f.review();
+    if (!candidate.event) throw new Error("Expected the prospective review event.");
+    const payloadJson = JSON.stringify({
+      ...JSON.parse(candidate.event.payloadJson),
+      basis: "Looks right.",
+      body_md: "I agree.",
+    });
+    const impression = {
+      ...candidate,
+      event: { ...candidate.event, payloadJson, payloadSha256: sha(payloadJson) },
+    };
+    expect(await prepareDeadEndTriggers(f.db, "P-DEMO", impression, [f.check()])).toEqual([]);
+    expect(
+      (await prepareDeadEndTriggers(f.db, "P-DEMO", candidate, [f.check()])).length,
+    ).toBeGreaterThan(0);
   } finally {
     f.close();
   }
@@ -230,6 +257,8 @@ test("the prospective immutable review time can settle a refutation at exactly 7
           target_claim_id: "C-1",
           target_version: 1,
           verdict: "refute",
+          basis: "Checked the counterexample against every hypothesis of the exact statement.",
+          body_md: "The hypotheses hold at the witness, but the conclusion fails.",
           tier: "T1",
           capable_of_failure: "The counterexample might not satisfy a stated hypothesis.",
           independence_policy: "declared-family-and-grounded-method-v1",

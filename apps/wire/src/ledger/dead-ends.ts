@@ -19,6 +19,7 @@ import type { KraterAtomicSettlement } from "../krater/krater";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 import { normalizeClaimStatement, sha256Hex } from "../split/policy";
+import { reviewCarriesWeight } from "./review-weight.ts";
 import { scientificContentGuards } from "./scientific-checks";
 import {
   foldScientificRows,
@@ -781,10 +782,15 @@ async function pendingScientificRow(
         : null),
     statement: claimWrite && typeof payload.statement === "string" ? payload.statement : null,
     direction: typeof payload.direction === "string" ? payload.direction : null,
+    negative_review:
+      payload.verdict === "refute" || payload.verdict === "fails-to-reproduce" ? 1 : 0,
     weighted_refutation:
       (payload.verdict === "refute" || payload.verdict === "fails-to-reproduce") &&
-      typeof payload.capable_of_failure === "string" &&
-      payload.capable_of_failure.trim().length > 0
+      reviewCarriesWeight({
+        basis: payload.basis,
+        capableOfFailure: payload.capable_of_failure,
+        bodyMd: payload.body_md,
+      })
         ? 1
         : 0,
   };

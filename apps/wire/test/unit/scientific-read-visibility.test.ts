@@ -10,6 +10,7 @@ import {
   type DependencyClosureRow,
   prepareDependencyClosure,
 } from "../../src/ledger/claim-dependency-closure.ts";
+import { reviewStateFromRecordedReviews } from "../../src/ledger/dispositions.ts";
 import {
   foldScientificRows,
   prepareScientificDispositions,
@@ -156,6 +157,49 @@ for (const kind of ["evidence", "review"] as const) {
         null,
       );
     }));
+}
+
+for (const verdict of ["refute", "fails-to-reproduce"]) {
+  for (const visibility of ["hidden", "redacted", "withdrawn-hidden"]) {
+    test(`an impression-only ${verdict} stays contested without gaining weight when ${visibility}`, () =>
+      using(async (f) => {
+        support(f);
+        const source = f.source("review", "R-impression", {
+          verdict,
+          basis: "**Looks wrong!**",
+          body_md: "I disagree.",
+          rubric: ["statement-defect"],
+        });
+        for (const withheld of [false, true]) {
+          if (withheld) {
+            if (visibility === "redacted")
+              f.sql
+                .query("UPDATE event_content SET redacted_at=? WHERE event_id=?")
+                .run(iso(), source.event.id);
+            else {
+              if (visibility === "withdrawn-hidden")
+                await withdrawScientificInput(
+                  f.options,
+                  f.actor,
+                  SESSION,
+                  "review",
+                  source.id,
+                  source.request,
+                  "negative-withdrawal",
+                );
+              control(f, `#${source.event.seq}`);
+            }
+          }
+          const after = await fold(f);
+          assert.equal(after.disposition, "corroborated");
+          assert.equal(reviewStateFromRecordedReviews(after.reviewFacets), "contested");
+          const review = (await rows(f)).find((row) => row.event_id === source.event.id);
+          assert.equal(review?.weighted_refutation, 0);
+          assert.equal(review?.weighted_statement_defect, 0);
+          if (withheld) assert.equal(review?.payload_json, null);
+        }
+      }));
+  }
 }
 
 for (const rubric of ["statement-defect", "statement-fails-review"]) {

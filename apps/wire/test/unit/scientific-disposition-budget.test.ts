@@ -25,7 +25,8 @@ async function fixture() {
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY, payload_sha256 TEXT,
       payload_json TEXT, redacted_at TEXT);
     CREATE TABLE reviews(source_event_id TEXT, problem_id TEXT, review_id TEXT, source_seq INTEGER,
-      target_claim_id TEXT, target_version INTEGER, verdict TEXT, capable_of_failure TEXT, rubric_json TEXT);
+      target_claim_id TEXT, target_version INTEGER, verdict TEXT, capable_of_failure TEXT, rubric_json TEXT,
+      basis TEXT, body_md TEXT);
     CREATE TABLE evidence(source_event_id TEXT, problem_id TEXT, evidence_id TEXT, source_seq INTEGER,
       bears_on_kind TEXT, bears_on_id TEXT, bears_on_version INTEGER, direction TEXT);
     CREATE TABLE retractions(problem_id TEXT, retraction_id TEXT, seq INTEGER,
