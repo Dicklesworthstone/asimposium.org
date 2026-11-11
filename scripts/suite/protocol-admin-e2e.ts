@@ -471,9 +471,10 @@ export async function runProtocolAdminE2e(): Promise<void> {
 
   // 3.4 Area Rename Schema Validation
   const areaReq = AdminAreaRenameRequestSchema.parse({
-    area_id: "area_number_theory",
+    area_id: "number-theory",
     new_title: "Algebraic & Analytic Number Theory",
     reason: "Consolidate scope to match current active problem formulations.",
+    step_up_authenticated_at: Math.floor(Date.now() / 1000),
   });
   if (areaReq.new_title !== "Algebraic & Analytic Number Theory")
     throw new Error("Invalid parsed area rename");
