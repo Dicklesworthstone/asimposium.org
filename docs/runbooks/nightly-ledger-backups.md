@@ -106,6 +106,70 @@ authority before considering cutover. The original whole-system recovery item
 remains open for that integrated procedure and its provider drill. A successful
 raw SQL round-trip does not establish deletion-safe service recovery.
 
+### Recovering SQL with current published controls
+
+`restoreDatabaseBackup` connects SQL verification/import to the existing signed
+retention journal. Invoke it from operator code holding actual Worker bindings.
+The target must be a separately identified empty, unmigrated scratch database,
+kept off all service routes. Acquire trusted public keys and the expected source
+origin independently of the downloaded archive. Use the independently current
+private R2 journal namespace, outside the restored point-in-time database:
+
+```ts
+import { restoreDatabaseBackup } from "../../apps/wire/src/krater/database-backup.ts";
+import { applyDeletionJournal, fetchLatestDeletionJournal } from "../../apps/wire/src/krater/retention.ts";
+import { D1EnrollmentStore } from "../../apps/wire/src/enrollment/d1-store.ts";
+import { retentionCredentialRevoker } from "../../apps/wire/src/enrollment/service.ts";
+
+const current = await fetchLatestDeletionJournal(currentPrivateBucket, trustedKeys);
+const readCurrentJournal = async () =>
+  (await fetchLatestDeletionJournal(currentPrivateBucket, trustedKeys))?.head ?? null;
+const revokeCredential = retentionCredentialRevoker(new D1EnrollmentStore(scratchDb));
+const recovered = await restoreDatabaseBackup({
+  db: scratchDb,
+  targetIdentifier: "scratch-quarterly-drill",
+  expectedSourceOrigin: configuredStoaOrigin,
+  manifest: parsedManifest,
+  sql: downloadedSql,
+  verifyKeys: trustedKeys,
+  deletionJournalNdjson: current?.ndjson,
+  readCurrentJournal,
+  revokeCredential,
+});
+// recovered.status === "controls-replayed"; recovered.serviceReady === false.
+```
+
+The enrollment-store imports belong in Worker-compiled operator code. A host
+driver instead calls the scratch Worker's lifecycle RPC, as the native lane
+does; the revoker must operate on the scratch binding, never the source store.
+No public import route or provider orchestration is installed by this primitive.
+
+Before import, the operation authenticates the SQL signature/digest, checks the
+source origin, verifies the journal against independently current authority,
+preflights every control action and requires the lifecycle revoker when needed.
+An empty-target fence runs inside the same transaction as every SQL statement,
+so a concurrently created unrelated table aborts the import. After import, it
+recaptures and compares the complete logical SQL, schema and table counts, then
+replays current controls through the existing lifecycle paths. Missing, stale
+or unverifiable journal authority and unsupported CAS-unbind controls refuse.
+
+A failure after import leaves the target quarantined. If a newer journal was
+published during recovery, acquire it afresh and call `applyDeletionJournal`
+with the same scratch binding, trusted keys, current reader and lifecycle revoker;
+do not reimport historical SQL over that occupied database. The native lane
+demonstrates actual post-snapshot draft erasure and credential revocation,
+changing published authority, replay resumption and nonempty-target refusal:
+
+```sh
+node apps/wire/test/integration/full-database-backup-real-bindings.mjs
+```
+
+This establishes replay of supported, currently **published** controls. Periodic
+journal publication can lag D1 writes. Keep the target quarantined until the
+separate publication/cutover boundary is established; complete current rights,
+private CAS bodies/unbinds, provider binding identity and restore drills remain
+original whole-system recovery requirements. No result authorizes service cutover.
+
 Apply the disclosed 90-day lifecycle to dated `backups/sql/` objects, including
 interrupted uploads. Do not expire the lease or deletion journal with a broad
 bucket rule. Cron emits `nightly-database-backup` with counts/status or a coarse

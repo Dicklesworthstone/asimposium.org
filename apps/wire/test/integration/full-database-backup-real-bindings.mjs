@@ -5,12 +5,23 @@ import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createTestHarness } from "wrangler";
+import { checkpointSigningKey } from "../../src/krater/checkpoint-signing.ts";
 import {
   captureDatabaseSql,
   DATABASE_BACKUP_LEASE_KEY,
+  restoreDatabaseBackup,
   verifyDatabaseBackup,
 } from "../../src/krater/database-backup.ts";
 import { validateScratchTarget } from "../../src/krater/restore.ts";
+import {
+  applyDeletionJournal,
+  computeRetentionControlDigest,
+  createRetentionControlRecord,
+  fetchLatestDeletionJournal,
+  findResurrectedTargets,
+  parseAndVerifyDeletionJournal,
+  serializeDeletionJournal,
+} from "../../src/krater/retention.ts";
 import {
   CHECKPOINT_KEY_ID,
   CHECKPOINT_PUBLIC_KEY_HEX,
@@ -134,6 +145,7 @@ try {
         { action: "publish" },
       );
       const reviewer = await enroll("full-backup-reviewer", "usr_full_backup_reviewer");
+      const lateFellow = await enroll("full-backup-late-control", "usr_full_backup_late");
       const reviewSession = (
         await call("/v1/sessions", { problem_id: publicProblem, intent: "review" }, reviewer, 201)
       ).session_id;
@@ -150,6 +162,27 @@ try {
       const privateProblem = await create(
         "Full database private problem",
         "Adding two nonnegative integers produces a nonnegative sum.",
+      );
+      const privateSession = (
+        await call(
+          "/v1/sessions",
+          {
+            problem_id: privateProblem,
+            intent: "prove",
+          },
+          author,
+          201,
+        )
+      ).session_id;
+      await call(
+        `/v1/sessions/${privateSession}/workshop`,
+        {
+          type: "claim-draft",
+          title: "Recoverable private draft",
+          body_md: "erasedsnapshotcanary",
+        },
+        author,
+        201,
       );
       const session = (
         await call("/v1/sessions", { problem_id: publicProblem, intent: "prove" }, author, 201)
@@ -532,6 +565,503 @@ try {
       } finally {
         await env.ARTIFACTS.put(destinationKey, destinationMarker);
       }
+
+      // Recover the SAME signed historical snapshot under independently current
+      // controls. These are actual sponsor writes and actual R2 publication;
+      // the original raw snapshot/schema/value/FTS assertions above remain.
+      const historicalJournal = await fetchLatestDeletionJournal(env.ARTIFACTS, keys);
+      assert.ok(historicalJournal);
+      const credential = await env.DB.prepare(
+        "SELECT credential_id, fellow_id, token_hash, credential_profile FROM fellow_tokens WHERE sponsor_id = ? AND revoked_at IS NULL",
+      )
+        .bind(sponsor)
+        .first();
+      const laterCredential = await env.DB.prepare(
+        "SELECT credential_id, fellow_id, token_hash, credential_profile FROM fellow_tokens WHERE sponsor_id = ? AND revoked_at IS NULL",
+      )
+        .bind("usr_full_backup_late")
+        .first();
+      assert.ok(credential && laterCredential);
+      const revoke = async (row, owner) => {
+        await sponsorCall(
+          owner,
+          "POST",
+          "/v1/fellows/credentials/revoke",
+          "fellow.credential.revoke",
+          {
+            credential_id: row.credential_id,
+            fellow_id: row.fellow_id,
+            confirm: "revoke-credential",
+            step_up_authenticated_at: Math.floor(Date.now() / 1000),
+          },
+        );
+      };
+      await sponsorCall(
+        sponsor,
+        "DELETE",
+        `/v1/sponsors/problems/${privateProblem}`,
+        "delete-problem-draft",
+      );
+      await revoke(credential, sponsor);
+      await call("/v1/hello", undefined, author, 401);
+      await fixtures.publishDeletionJournalTick();
+      const currentJournal = await fetchLatestDeletionJournal(env.ARTIFACTS, keys);
+      assert.ok(
+        currentJournal && currentJournal.head.recordCount > historicalJournal.head.recordCount,
+      );
+      const currentHead = async () =>
+        (await fetchLatestDeletionJournal(env.ARTIFACTS, keys))?.head ?? null;
+      const controls = await parseAndVerifyDeletionJournal(currentJournal.ndjson, keys);
+      assert.ok(controls.valid);
+      assert.ok(controls.records.some((record) => record.action === "delete-private-draft"));
+      assert.ok(controls.records.some((record) => record.action === "revoke-credential"));
+      const rawPolicy = await scratch.getWorker().getExport();
+      const privateContents = async (db) =>
+        db
+          .prepare(`SELECT
+        (SELECT count(*) FROM problem_statement_versions WHERE problem_id = ?1) AS statements,
+        (SELECT count(*) FROM workshop_objects WHERE problem_id = ?1) AS workshops,
+        (SELECT count(*) FROM workshop_revisions WHERE problem_id = ?1) AS revisions,
+        (SELECT count(*) FROM problems WHERE id = ?1 AND
+          (title <> '' OR sponsor_id IS NOT NULL OR created_by_fellow_id IS NOT NULL)) AS identity`)
+          .bind(privateProblem)
+          .first();
+      const archivedPrivate = await privateContents(scratchDb);
+      assert.ok(
+        archivedPrivate.statements > 0 &&
+          archivedPrivate.workshops > 0 &&
+          archivedPrivate.identity > 0,
+        "raw SQL actually contains the later-erased private state",
+      );
+      assert.ok(
+        await rawPolicy.restoredCredentialIsActive(
+          credential.token_hash,
+          credential.credential_profile,
+        ),
+        "the raw historical import really contains a live credential before replay",
+      );
+      const scratchHarness = (suffix) =>
+        createTestHarness({
+          root,
+          workers: [
+            {
+              config: {
+                name: `scratch-database-controls-${suffix}`,
+                main: `${root}/apps/wire/test/integration/discovery-local-worker.ts`,
+                compatibility_date: "2026-08-13",
+                compatibility_flags: ["nodejs_compat"],
+                d1_databases: [
+                  {
+                    binding: "DB",
+                    database_name: `scratch-database-controls-${suffix}`,
+                    database_id: `00000000-0000-0000-0000-${String(suffix).padStart(12, "0")}`,
+                  },
+                ],
+                r2_buckets: [
+                  { binding: "CONTROL_JOURNAL", bucket_name: `scratch-current-journal-${suffix}` },
+                ],
+                rules: [{ type: "Text", globs: ["**/*.md", "**/*.txt"], fallthrough: true }],
+              },
+            },
+          ],
+        });
+      const applicationTables = async (db) =>
+        (
+          await db
+            .prepare(
+              "SELECT count(*) AS n FROM sqlite_schema WHERE name NOT GLOB '_cf_*' AND name NOT GLOB 'sqlite_*'",
+            )
+            .first()
+        ).n;
+      let preflightRefusals = 0;
+      const guarded = scratchHarness(3);
+      try {
+        await guarded.listen();
+        const bindings = await guarded.getWorker().getEnv();
+        const db = bindings.DB;
+        const targetPolicy = await guarded.getWorker().getExport();
+        const restoreOptions = {
+          db,
+          targetIdentifier: "scratch-database-controls-3",
+          expectedSourceOrigin: env.STOA_ORIGIN,
+          manifest,
+          sql,
+          verifyKeys: keys,
+          deletionJournalNdjson: currentJournal.ndjson,
+          readCurrentJournal: currentHead,
+          revokeCredential: (control) => targetPolicy.replayRestoredCredential(control),
+        };
+        const rejectBeforeImport = async (overrides, expected) => {
+          await assert.rejects(
+            restoreDatabaseBackup({ ...restoreOptions, ...overrides }),
+            expected,
+          );
+          assert.equal(
+            await applicationTables(db),
+            0,
+            "a refused preflight must leave the actual target EMPTY",
+          );
+          preflightRefusals++;
+        };
+        await rejectBeforeImport(
+          { targetIdentifier: "production-main" },
+          /RESTORE_NON_SCRATCH_TARGET_REFUSED/,
+        );
+        await rejectBeforeImport(
+          { expectedSourceOrigin: "https://different-source.asimposium.invalid" },
+          /DATABASE_RESTORE_SOURCE_MISMATCH/,
+        );
+        await rejectBeforeImport({ sql: sql.slice(0, -1) }, /DATABASE_BACKUP_DIGEST_INVALID/);
+        await rejectBeforeImport(
+          { manifest: { ...manifest, sql_sha256: "0".repeat(64) } },
+          /DATABASE_BACKUP_SIGNATURE_INVALID/,
+        );
+        await rejectBeforeImport({ verifyKeys: [] }, /DATABASE_BACKUP_UNTRUSTED_KEY/);
+        await rejectBeforeImport({ deletionJournalNdjson: null }, /DELETION_JOURNAL_MISSING/);
+        await rejectBeforeImport(
+          {
+            deletionJournalNdjson: currentJournal.ndjson.replace('"signature":"', '"signature":"0'),
+          },
+          /DELETION_JOURNAL_VERIFICATION_FAILED/,
+        );
+        await rejectBeforeImport(
+          { deletionJournalNdjson: historicalJournal.ndjson },
+          /DELETION_JOURNAL_STALE/,
+        );
+        await rejectBeforeImport(
+          {
+            readCurrentJournal: async () =>
+              (await fetchLatestDeletionJournal(bindings.CONTROL_JOURNAL, keys))?.head ?? null,
+          },
+          /DELETION_JOURNAL_CURRENT_HEAD_MISSING/,
+        );
+        await rejectBeforeImport({ revokeCredential: undefined }, /CREDENTIAL_REVOKER_REQUIRED/);
+        const unsupported = await serializeDeletionJournal(
+          [
+            await createRetentionControlRecord({
+              action: "unbind-private-cas",
+              targetId: "synthetic-cas-binding",
+              targetType: "cas_artifact",
+            }),
+          ],
+          undefined,
+          await checkpointSigningKey(env.CHECKPOINT_SIGNING_KEY),
+        );
+        await bindings.CONTROL_JOURNAL.put("journal/deletion/v1/0000000001.ndjson", unsupported);
+        await rejectBeforeImport(
+          {
+            deletionJournalNdjson: unsupported,
+            readCurrentJournal: async () =>
+              (await fetchLatestDeletionJournal(bindings.CONTROL_JOURNAL, keys))?.head ?? null,
+          },
+          /DELETION_CONTROL_UNSUPPORTED/,
+        );
+        const wrongType = await serializeDeletionJournal(
+          [
+            ...controls.records,
+            await createRetentionControlRecord({
+              action: "delete-private-draft",
+              targetId: privateProblem,
+              targetType: "credential",
+            }),
+          ],
+          undefined,
+          await checkpointSigningKey(env.CHECKPOINT_SIGNING_KEY),
+        );
+        await bindings.CONTROL_JOURNAL.put(
+          `journal/deletion/v1/${String(controls.records.length + 1).padStart(10, "0")}.ndjson`,
+          wrongType,
+        );
+        await rejectBeforeImport(
+          {
+            deletionJournalNdjson: wrongType,
+            readCurrentJournal: async () =>
+              (await fetchLatestDeletionJournal(bindings.CONTROL_JOURNAL, keys))?.head ?? null,
+          },
+          /DELETION_CONTROL_INVALID/,
+        );
+        const badContent = await serializeDeletionJournal(
+          [
+            ...controls.records,
+            await createRetentionControlRecord({
+              action: "cancel-enrollment",
+              targetId: "synthetic-absent-proposal",
+              targetType: "enrollment",
+            }),
+            await createRetentionControlRecord({
+              action: "content-control",
+              targetId: "CC-synthetic-invalid",
+              targetType: "content_control",
+              payload: {},
+            }),
+          ],
+          undefined,
+          await checkpointSigningKey(env.CHECKPOINT_SIGNING_KEY),
+        );
+        await bindings.CONTROL_JOURNAL.put(
+          `journal/deletion/v1/${String(controls.records.length + 2).padStart(10, "0")}.ndjson`,
+          badContent,
+        );
+        await rejectBeforeImport(
+          {
+            deletionJournalNdjson: badContent,
+            readCurrentJournal: async () =>
+              (await fetchLatestDeletionJournal(bindings.CONTROL_JOURNAL, keys))?.head ?? null,
+          },
+          /DELETION_JOURNAL_VERIFICATION_FAILED/,
+        );
+        const payload = {
+          control_id: "CC-synthetic-recovery-conflict",
+          problem_id: publicProblem,
+          target_kind: "claim",
+          target_ref: "claim:synthetic-recovery-target",
+          visibility: "hidden",
+          source: "operator",
+          reason_category: "integrity",
+          actor: "local-recovery-fixture",
+          reason: "Reject an inconsistent signed history.",
+          version: 1,
+          created_at: new Date().toISOString(),
+          actor_kind: "operator",
+        };
+        const unsigned = {
+          controlId: `RC-${payload.control_id}`,
+          action: "content-control",
+          targetId: payload.control_id,
+          targetType: "content_control",
+          issuedAt: payload.created_at,
+          payload,
+        };
+        const conflictingControl = {
+          ...unsigned,
+          controlDigest: await computeRetentionControlDigest(unsigned),
+        };
+        const conflictingJournal = await serializeDeletionJournal(
+          [
+            ...controls.records,
+            await createRetentionControlRecord({
+              action: "cancel-enrollment",
+              targetId: "synthetic-absent-proposal",
+              targetType: "enrollment",
+            }),
+            conflictingControl,
+            conflictingControl,
+          ],
+          undefined,
+          await checkpointSigningKey(env.CHECKPOINT_SIGNING_KEY),
+        );
+        assert.ok(
+          (await parseAndVerifyDeletionJournal(conflictingJournal, keys)).valid,
+          "each record and the signature are valid; replay history is inconsistent",
+        );
+        await bindings.CONTROL_JOURNAL.put(
+          `journal/deletion/v1/${String(controls.records.length + 3).padStart(10, "0")}.ndjson`,
+          conflictingJournal,
+        );
+        await rejectBeforeImport(
+          {
+            deletionJournalNdjson: conflictingJournal,
+            readCurrentJournal: async () =>
+              (await fetchLatestDeletionJournal(bindings.CONTROL_JOURNAL, keys))?.head ?? null,
+          },
+          /DELETION_CONTROL_INVALID/,
+        );
+        const badSuspension = await serializeDeletionJournal(
+          [
+            ...controls.records,
+            ...(await Promise.all(
+              ["A", "B", "C"].map((suffix) =>
+                createRetentionControlRecord({
+                  action: "cancel-enrollment",
+                  targetId: `synthetic-absent-proposal-${suffix}`,
+                  targetType: "enrollment",
+                }),
+              ),
+            )),
+            await createRetentionControlRecord({
+              action: "suspend-sponsor",
+              targetId: sponsor,
+              targetType: "sponsor",
+              payload: {},
+            }),
+          ],
+          undefined,
+          await checkpointSigningKey(env.CHECKPOINT_SIGNING_KEY),
+        );
+        assert.ok((await parseAndVerifyDeletionJournal(badSuspension, keys)).valid);
+        await bindings.CONTROL_JOURNAL.put(
+          `journal/deletion/v1/${String(controls.records.length + 4).padStart(10, "0")}.ndjson`,
+          badSuspension,
+        );
+        await rejectBeforeImport(
+          {
+            deletionJournalNdjson: badSuspension,
+            readCurrentJournal: async () =>
+              (await fetchLatestDeletionJournal(bindings.CONTROL_JOURNAL, keys))?.head ?? null,
+          },
+          /DELETION_CONTROL_INVALID/,
+        );
+        const recovered = await restoreDatabaseBackup(restoreOptions);
+        assert.equal(recovered.status, "controls-replayed");
+        assert.equal(recovered.serviceReady, false, "SQL replay never authorizes service cutover");
+        assert.equal(recovered.tables, manifest.tables.length);
+        assert.equal(recovered.snapshotSha256, manifest.sql_sha256);
+        const remainingPrivate = await privateContents(db);
+        assert.ok(
+          remainingPrivate.statements === 0 &&
+            remainingPrivate.workshops === 0 &&
+            remainingPrivate.revisions === 0 &&
+            remainingPrivate.identity === 0,
+          "newer erasure removes actual statement/workshop content and private identity",
+        );
+        assert.equal(
+          (
+            await db
+              .prepare(
+                "SELECT count(*) AS n FROM private_workshop_search WHERE private_workshop_search MATCH 'erasedsnapshotcanary'",
+              )
+              .first()
+          ).n,
+          0,
+          "erased draft content is absent from private search too",
+        );
+        assert.ok(
+          !(await targetPolicy.restoredCredentialIsActive(
+            credential.token_hash,
+            credential.credential_profile,
+          )),
+          "restored credential is actually rejected by the real enrollment policy",
+        );
+        assert.ok(recovered.appliedControlsCount >= 2);
+        assert.deepEqual(await findResurrectedTargets(db, controls.records), []);
+        assert.deepEqual(
+          await db
+            .prepare("SELECT public_seq, chain_digest FROM problems WHERE id = ?")
+            .bind(publicProblem)
+            .first(),
+          await scratchDb
+            .prepare("SELECT public_seq, chain_digest FROM problems WHERE id = ?")
+            .bind(publicProblem)
+            .first(),
+          "current private controls preserve the captured public ledger head",
+        );
+        await assert.rejects(
+          restoreDatabaseBackup(restoreOptions),
+          /DATABASE_RESTORE_IMPORT_FAILED/,
+        );
+        assert.deepEqual(await findResurrectedTargets(db, controls.records), []);
+      } finally {
+        await guarded.close();
+      }
+      const changing = scratchHarness(4);
+      try {
+        await changing.listen();
+        const db = (await changing.getWorker().getEnv()).DB;
+        const changingPolicy = await changing.getWorker().getExport();
+        let reads = 0;
+        const restoreOptions = {
+          db,
+          targetIdentifier: "scratch-database-controls-4",
+          expectedSourceOrigin: env.STOA_ORIGIN,
+          manifest,
+          sql,
+          verifyKeys: keys,
+          deletionJournalNdjson: currentJournal.ndjson,
+          revokeCredential: (control) => changingPolicy.replayRestoredCredential(control),
+          readCurrentJournal: async () => {
+            reads++;
+            if (reads === 3) {
+              await revoke(laterCredential, "usr_full_backup_late");
+              await call("/v1/hello", undefined, lateFellow, 401);
+              await fixtures.publishDeletionJournalTick();
+            }
+            return currentHead();
+          },
+        };
+        await assert.rejects(restoreDatabaseBackup(restoreOptions), /DELETION_JOURNAL_STALE/);
+        assert.ok(
+          (await applicationTables(db)) > 0,
+          "changed authority leaves the imported database quarantined",
+        );
+        assert.ok(
+          await changingPolicy.restoredCredentialIsActive(
+            laterCredential.token_hash,
+            laterCredential.credential_profile,
+          ),
+          "the newly journaled credential is still live in quarantine before explicit resume",
+        );
+        const newest = await fetchLatestDeletionJournal(env.ARTIFACTS, keys);
+        assert.ok(newest && newest.head.recordCount > currentJournal.head.recordCount);
+        const replayed = await applyDeletionJournal({
+          ...restoreOptions,
+          deletionJournalNdjson: newest.ndjson,
+          readCurrentJournal: currentHead,
+        });
+        assert.ok(replayed.appliedControlsCount >= 3);
+        const verifiedNewest = await parseAndVerifyDeletionJournal(newest.ndjson, keys);
+        assert.ok(verifiedNewest.valid);
+        assert.deepEqual(await findResurrectedTargets(db, verifiedNewest.records), []);
+        assert.ok(
+          !(await changingPolicy.restoredCredentialIsActive(
+            laterCredential.token_hash,
+            laterCredential.credential_profile,
+          )),
+          "explicit current-journal resume rejects the newer credential too",
+        );
+      } finally {
+        await changing.close();
+      }
+      const occupied = scratchHarness(5);
+      try {
+        await occupied.listen();
+        const db = (await occupied.getWorker().getEnv()).DB;
+        const occupiedPolicy = await occupied.getWorker().getExport();
+        let occupiedNow = false;
+        await assert.rejects(
+          restoreDatabaseBackup({
+            db,
+            targetIdentifier: "scratch-database-controls-5",
+            expectedSourceOrigin: env.STOA_ORIGIN,
+            manifest,
+            sql,
+            verifyKeys: keys,
+            deletionJournalNdjson: (await fetchLatestDeletionJournal(env.ARTIFACTS, keys)).ndjson,
+            revokeCredential: (control) => occupiedPolicy.replayRestoredCredential(control),
+            readCurrentJournal: async () => {
+              if (!occupiedNow) {
+                await db.batch([
+                  db.prepare("CREATE TABLE scratch_existing_data (value TEXT)"),
+                  db.prepare("INSERT INTO scratch_existing_data VALUES ('preserve-me')"),
+                ]);
+                occupiedNow = true;
+              }
+              return currentHead();
+            },
+          }),
+          /DATABASE_RESTORE_IMPORT_FAILED/,
+        );
+        assert.equal(
+          (await db.prepare("SELECT value FROM scratch_existing_data").first()).value,
+          "preserve-me",
+        );
+        assert.equal(
+          await applicationTables(db),
+          1,
+          "atomic empty-target fence imports NO snapshot tables",
+        );
+      } finally {
+        await occupied.close();
+      }
+      console.log(
+        JSON.stringify({
+          stage: "full-database-current-controls-passed",
+          status: "pass",
+          tables: manifest.tables.length,
+          preflight_empty_refusals: preflightRefusals,
+          boundary:
+            "real local SQL/current-journal replay and resume; quarantined; no CAS completeness, provider or cutover claim",
+        }),
+      );
 
       // Current implementation refuses unsupported persisted FTS options rather
       // than silently restoring default ranking/search behavior.

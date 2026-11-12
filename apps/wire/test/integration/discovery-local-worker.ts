@@ -5,6 +5,7 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import {
   canonicalJson,
+  type FellowCredentialProfile,
   ProblemGovernanceEventSchema,
   ProblemStatementReviewEventSchema,
   type RequestedScope,
@@ -1221,6 +1222,27 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
   /** One cron tick of the production deletion-journal publisher (index.ts scheduled). */
   publishDeletionJournalTick() {
     return publishDeletionJournal(this.env.DB, this.env.ARTIFACTS, this.env.CHECKPOINT_SIGNING_KEY);
+  }
+
+  /** Real lifecycle operations on THIS scratch Worker's own restored binding.
+   * Return only a boolean; never serialize token hashes or credential bindings. */
+  async restoredCredentialIsActive(tokenHash: string, profile: FellowCredentialProfile) {
+    return (
+      (await new D1EnrollmentStore(this.env.DB).authenticateCredential(
+        tokenHash,
+        Date.now(),
+        profile,
+      )) !== undefined
+    );
+  }
+
+  replayRestoredCredential(input: {
+    credentialId: string;
+    fellowId: string;
+    sponsorId: string;
+    controlId: string;
+  }) {
+    return retentionCredentialRevoker(new D1EnrollmentStore(this.env.DB))(input);
   }
 
   async deletionJournalRowCount(): Promise<number> {

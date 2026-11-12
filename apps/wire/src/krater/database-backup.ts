@@ -13,6 +13,13 @@ import {
   checkpointVerifyKeys,
 } from "./checkpoint-signing.ts";
 import { canonicalJson, sha256Hex } from "./krater.ts";
+import { KraterRestoreRefusedError, validateScratchTarget } from "./restore.ts";
+import {
+  applyDeletionJournal,
+  type CredentialRevoker,
+  type ReadCurrentDeletionJournal,
+  verifiedJournalRecords,
+} from "./retention.ts";
 
 export const DATABASE_BACKUP_LIMITS = {
   tables: 256,
@@ -298,6 +305,101 @@ export async function verifyDatabaseBackup(
   }
   if (offset !== encoded.byteLength) throw new Error("DATABASE_BACKUP_STATEMENTS_INVALID");
   return { metadata, statements };
+}
+
+/** Operator primitive over real Worker bindings, never an HTTP import route.
+ * The target must be a separately provisioned, quarantined, EMPTY database.
+ * Authenticate current retention authority before importing any historical
+ * state; verify the whole imported snapshot before replaying newer controls.
+ * A failure after import leaves quarantine in place. Resume with the existing
+ * applyDeletionJournal API, never by overwriting an occupied target. Successful
+ * replay is not authority for service cutover or complete CAS/rights recovery.
+ */
+export async function restoreDatabaseBackup(options: {
+  readonly db: D1Database;
+  readonly targetIdentifier: string;
+  readonly expectedSourceOrigin: string;
+  readonly manifest: unknown;
+  readonly sql: string;
+  readonly verifyKeys: readonly CheckpointVerifyKey[];
+  readonly deletionJournalNdjson: string | null | undefined;
+  readonly readCurrentJournal: ReadCurrentDeletionJournal;
+  readonly revokeCredential?: CredentialRevoker;
+}) {
+  validateScratchTarget(options.targetIdentifier);
+  const verified = await verifyDatabaseBackup(options.manifest, options.sql, options.verifyKeys);
+  if (verified.metadata.source.origin !== options.expectedSourceOrigin)
+    throw new KraterRestoreRefusedError(
+      "DATABASE_RESTORE_SOURCE_MISMATCH: signed snapshot is from a different source environment",
+    );
+  const { records } = await verifiedJournalRecords(
+    options.deletionJournalNdjson,
+    options.verifyKeys,
+    options.readCurrentJournal,
+  );
+  if (
+    records.some((record) => record.action === "revoke-credential") &&
+    typeof options.revokeCredential !== "function"
+  )
+    throw new KraterRestoreRefusedError(
+      "CREDENTIAL_REVOKER_REQUIRED: SQL recovery requires the lifecycle revoker before import",
+    );
+  try {
+    await options.db.batch([
+      // Same transaction as EVERY snapshot write: an outside emptiness probe
+      // would race another connection creating an unrelated table. The guarded
+      // integer overflow aborts the entire batch before any historical import.
+      options.db.prepare(`SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM sqlite_schema
+        WHERE name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*'
+      ) THEN 1 ELSE abs(-9223372036854775808) END AS empty_scratch_target`),
+      options.db.prepare("PRAGMA defer_foreign_keys = ON"),
+      ...verified.statements.map((statement) => options.db.prepare(statement)),
+    ]);
+  } catch {
+    throw new KraterRestoreRefusedError(
+      "DATABASE_RESTORE_IMPORT_FAILED: target must be empty and import must commit atomically; keep it quarantined",
+    );
+  }
+  let imported: Awaited<ReturnType<typeof captureDatabaseSql>>;
+  try {
+    imported = await captureDatabaseSql(options.db);
+  } catch {
+    throw new KraterRestoreRefusedError(
+      "DATABASE_RESTORE_SNAPSHOT_UNREADABLE: imported state cannot be verified; keep target quarantined",
+    );
+  }
+  if (
+    (await sha256Hex(imported.sql)) !== verified.metadata.sql_sha256 ||
+    imported.schemaSha256 !== verified.metadata.schema_sha256 ||
+    canonicalJson(imported.tables) !== canonicalJson(verified.metadata.tables)
+  )
+    throw new KraterRestoreRefusedError(
+      "DATABASE_RESTORE_SNAPSHOT_MISMATCH: imported logical state differs; keep target quarantined",
+    );
+  let replay: Awaited<ReturnType<typeof applyDeletionJournal>>;
+  try {
+    replay = await applyDeletionJournal({
+      db: options.db,
+      targetIdentifier: options.targetIdentifier,
+      deletionJournalNdjson: options.deletionJournalNdjson,
+      verifyKeys: options.verifyKeys,
+      readCurrentJournal: options.readCurrentJournal,
+      revokeCredential: options.revokeCredential,
+    });
+  } catch (error) {
+    if (error instanceof KraterRestoreRefusedError) throw error;
+    throw new KraterRestoreRefusedError(
+      "DATABASE_RESTORE_CONTROL_REPLAY_FAILED: current controls did not complete; keep target quarantined",
+    );
+  }
+  return {
+    status: "controls-replayed" as const,
+    serviceReady: false as const,
+    snapshotSha256: verified.metadata.sql_sha256,
+    tables: verified.metadata.tables.length,
+    ...replay,
+  };
 }
 
 type BackupEnv = Pick<

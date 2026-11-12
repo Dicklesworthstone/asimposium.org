@@ -18,6 +18,7 @@ import {
   checkpointSigningKey,
 } from "./checkpoint-signing.ts";
 import {
+  assertContentControlReplayable,
   CONTENT_CONTROL_COLUMNS,
   type ContentControlSnapshot,
   ContentControlSnapshotSchema,
@@ -978,6 +979,17 @@ const RETENTION_CONTROL_REPLAY_SUPPORTED = {
   "unbind-private-cas": false,
 } as const satisfies Record<RetentionControlAction, boolean>;
 
+const RETENTION_CONTROL_REPLAY_TARGET = {
+  "content-control": "content_control",
+  "suspend-sponsor": "sponsor",
+  "delete-private-draft": "problem",
+  "revoke-credential": "credential",
+  "cancel-enrollment": "enrollment",
+  "cancel-transfer": "transfer",
+  "delete-account-private-data": "user_private_data",
+  "unbind-private-cas": "cas_artifact",
+} as const satisfies Record<RetentionControlAction, RetentionTargetType>;
+
 function assertReplayableControls(records: readonly RetentionControlRecord[]): void {
   for (const control of records) {
     if (RETENTION_CONTROL_REPLAY_SUPPORTED[control.action] !== true) {
@@ -985,6 +997,24 @@ function assertReplayableControls(records: readonly RetentionControlRecord[]): v
         `DELETION_CONTROL_UNSUPPORTED: this restore cannot replay or verify '${control.action}'`,
       );
     }
+    if (RETENTION_CONTROL_REPLAY_TARGET[control.action] !== control.targetType)
+      throw new KraterRestoreRefusedError(
+        "DELETION_CONTROL_INVALID: action and target type do not agree",
+      );
+    if (
+      control.action === "suspend-sponsor" &&
+      (typeof control.payload.event_id !== "string" || control.payload.event_id.trim().length === 0)
+    )
+      throw new KraterRestoreRefusedError(
+        "DELETION_CONTROL_INVALID: sponsor suspension requires its reviewed event identity",
+      );
+  }
+  try {
+    assertContentControlReplayable(records);
+  } catch {
+    throw new KraterRestoreRefusedError(
+      "DELETION_CONTROL_INVALID: content-control history cannot be replayed",
+    );
   }
 }
 
@@ -1100,7 +1130,9 @@ export async function applyDeletionJournal(options: {
   return { records: records.length, appliedControlsCount: applied };
 }
 
-async function verifiedJournalRecords(
+/** Authenticate current authority and preflight every action before a caller
+ * imports historical SQL or applies its first retention write. */
+export async function verifiedJournalRecords(
   ndjson: string | null | undefined,
   verifyKeys: readonly CheckpointVerifyKey[],
   readCurrentJournal: ReadCurrentDeletionJournal,

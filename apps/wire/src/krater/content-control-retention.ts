@@ -113,6 +113,12 @@ async function storedControls(db: D1Database, row: ContentControlSnapshot) {
   return result.results.map((value) => ContentControlSnapshotSchema.parse(value));
 }
 
+/** Pure preflight before an empty database has even received its schema. Reuse
+ * the same identity, payload and duplicate-version checks as actual replay. */
+export function assertContentControlReplayable(records: readonly RetentionControlRecord[]): void {
+  groups(records);
+}
+
 /** Preflight all affected targets before any restore or retention mutation.
  * The returned batch repeats the exact predecessor check transactionally:
  * a new control between preflight and replay aborts every visibility insertion.
