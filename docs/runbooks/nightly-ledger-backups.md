@@ -55,12 +55,35 @@ Storage keys:
 - `backups/sql/YYYY-MM-DD/complete.json`: signed digest, source binding/origin,
   statement byte boundaries and table counts. It is private too.
 
-The configured physical bucket roles remain an operator/deployment trust
-boundary. The code uses only `ARTIFACTS` and rejects identical bucket handles;
-that identity check cannot establish that two distinct deployed buckets have
-the right roles. Validate the generated environment and actual provider bindings
-before enabling keys. Local binding tests do not certify a public hostname's
-deployment topology. No public resource serves these archives.
+SQL snapshots are disabled until an independent destination pin is configured.
+Prepare a fresh marker locally for each environment:
+
+```sh
+bun scripts/verify-database-backup.ts \
+  --prepare-destination ./new-private-destination.bin
+```
+
+The command exclusively creates a 32-byte file with mode `0600`; an existing
+destination is refused. Its output contains the SHA-256 pin and the reserved,
+content-addressed `marker_key`, never the marker bytes. Independently verify the
+actual private bucket's provider identity and lack of public delivery, then
+upload those exact bytes to that new key in `ARTIFACTS`. Never replace an
+existing designation or copy a marker to another bucket/environment. Configure
+the Worker variable `DATABASE_BACKUP_DESTINATION_SHA256` with the printed digest.
+This source change provisions neither the object nor the variable remotely.
+
+Before SQL access or publication, including an existing-completion check, the
+Worker requires the designated 32 bytes in `ARTIFACTS` and their absence from
+`PUBLIC_ARTIFACTS`. It never creates the marker. Missing pins disable the job;
+invalid pins, missing/changed markers, distinct swapped destinations, aliases
+and public-side marker copies refuse. Storage lookup errors fail closed.
+
+The independent provisioning step is a trust boundary: a pin designates a
+physical namespace, not proof that a provider administrator will never attach a
+public domain to it later. Validate actual provider bindings and topology before
+provisioning. Local tests establish the destination guard, not deployed DNS or
+bucket policy. No public resource serves these archives. Keep the marker prefix
+outside the dated archive lifecycle and outside point-in-time SQL recovery.
 
 Download SQL and its completion manifest through the private operator channel,
 using exclusive local destinations and restricted filesystem permissions. Verify

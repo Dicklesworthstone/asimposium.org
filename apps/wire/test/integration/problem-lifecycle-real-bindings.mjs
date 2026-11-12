@@ -47,6 +47,7 @@ export const CHECKPOINT_PUBLIC_KEY_HEX = checkpointPublicHex;
 function createLocalWorkerHarness({
   scratch = false,
   operatorPrincipalIds = [LOCAL_OPERATOR_ID],
+  databaseBackupDestinationSha256,
 } = {}) {
   return createTestHarness({
     root,
@@ -55,6 +56,9 @@ function createLocalWorkerHarness({
         // Wrangler's test secret overrides take precedence over workstation
         // .dev.vars. The signer must match this run's fresh public keyring.
         secrets: {
+          ...(databaseBackupDestinationSha256
+            ? { DATABASE_BACKUP_DESTINATION_SHA256: databaseBackupDestinationSha256 }
+            : {}),
           SERVICE_ENVELOPE_KEYS: JSON.stringify([{ kid: keyId, publicKeyHex, notBefore: 0 }]),
           CHECKPOINT_SIGNING_KEY: JSON.stringify({
             kid: CHECKPOINT_KEY_ID,

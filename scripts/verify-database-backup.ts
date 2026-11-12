@@ -1,18 +1,42 @@
-/** Offline verification only. This command never imports SQL or contacts a
- * service. An independently supplied public key is required. */
-import { readFile, stat } from "node:fs/promises";
+/** Offline verification and explicit destination-marker preparation. Never
+ * imports SQL or contacts a service; marker output is create-only and private. */
+import { createHash } from "node:crypto";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import {
   DATABASE_BACKUP_LIMITS,
   verifyDatabaseBackup,
 } from "../apps/wire/src/krater/database-backup.ts";
 
 const usage =
-  "bun scripts/verify-database-backup.ts --manifest <complete.json> --sql <snapshot.sql> --key <kid>=<trusted-public-key-hex>";
+  "bun scripts/verify-database-backup.ts --manifest <complete.json> --sql <snapshot.sql> --key <kid>=<trusted-public-key-hex>\n" +
+  "bun scripts/verify-database-backup.ts --prepare-destination <new-private-marker-file>";
 
 async function main() {
   const args = process.argv.slice(2);
   if (args.length === 1 && args[0] === "--help") {
     console.log(usage);
+    return;
+  }
+  if (args.length === 2 && args[0] === "--prepare-destination") {
+    const output = args[1];
+    if (!output || output.startsWith("--")) throw new Error("DATABASE_BACKUP_ARGUMENTS_INVALID");
+    const marker = crypto.getRandomValues(new Uint8Array(32));
+    try {
+      await writeFile(output, marker, { flag: "wx", mode: 0o600 });
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "EEXIST")
+        throw new Error("DATABASE_BACKUP_DESTINATION_OUTPUT_EXISTS");
+      throw new Error("DATABASE_BACKUP_DESTINATION_PREPARATION_FAILED");
+    }
+    const sha256 = createHash("sha256").update(marker).digest("hex");
+    console.log(
+      JSON.stringify({
+        status: "prepared",
+        sha256,
+        marker_key: `backups/control/database-destinations/${sha256}.bin`,
+        pin_variable: "DATABASE_BACKUP_DESTINATION_SHA256",
+      }),
+    );
     return;
   }
   let manifestPath: string | undefined;

@@ -49,6 +49,9 @@ export interface Env {
    * so older signatures stay verifiable.
    */
   CHECKPOINT_VERIFY_KEYS?: string;
+  /** Independent SHA-256 pin for a pre-provisioned private backup-destination
+   * marker. The Worker never creates that marker. Absent: SQL backups disabled. */
+  DATABASE_BACKUP_DESTINATION_SHA256?: string;
   /**
    * Comma-separated opaque Google-subject-derived ids permitted to perform the
    * operator Fellow-cap command. Absent, blank, duplicated, or malformed

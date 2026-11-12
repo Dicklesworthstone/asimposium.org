@@ -1279,11 +1279,17 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     return runScheduledBackup(this.env, now);
   }
 
-  async databaseBackupTick(now: number, aliasBuckets = false) {
-    return runDatabaseBackup(
-      aliasBuckets ? { ...this.env, PUBLIC_ARTIFACTS: this.env.ARTIFACTS } : this.env,
-      now,
-    );
+  async databaseBackupTick(
+    now: number,
+    mode: "private" | "aliased" | "swapped" | "unconfigured" | "invalid-pin" = "private",
+  ) {
+    let env = this.env;
+    if (mode === "aliased") env = { ...env, PUBLIC_ARTIFACTS: env.ARTIFACTS };
+    if (mode === "swapped")
+      env = { ...env, ARTIFACTS: this.env.PUBLIC_ARTIFACTS, PUBLIC_ARTIFACTS: this.env.ARTIFACTS };
+    if (mode === "unconfigured") env = { ...env, DATABASE_BACKUP_DESTINATION_SHA256: undefined };
+    if (mode === "invalid-pin") env = { ...env, DATABASE_BACKUP_DESTINATION_SHA256: "invalid" };
+    return runDatabaseBackup(env, now);
   }
 
   /** Bulk history fixture for archive bounds, through the production chained

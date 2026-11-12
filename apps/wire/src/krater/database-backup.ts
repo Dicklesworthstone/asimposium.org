@@ -308,6 +308,7 @@ type BackupEnv = Pick<
   | "STOA_ORIGIN"
   | "CHECKPOINT_SIGNING_KEY"
   | "CHECKPOINT_VERIFY_KEYS"
+  | "DATABASE_BACKUP_DESTINATION_SHA256"
 >;
 export const DATABASE_BACKUP_LEASE_KEY = "backups/control/database-v1.json";
 const LeaseSchema = z.object({ owner: z.uuid(), expiresAt: count }).strict();
@@ -343,6 +344,26 @@ export async function runDatabaseBackup(env: BackupEnv, now = Date.now()) {
     throw new Error("DATABASE_BACKUP_KEYS_INVALID");
   if (env.ARTIFACTS === env.PUBLIC_ARTIFACTS)
     throw new Error("DATABASE_BACKUP_PRIVATE_NAMESPACE_REQUIRED");
+  if (env.DATABASE_BACKUP_DESTINATION_SHA256 === undefined)
+    return {
+      enabled: false,
+      status: "disabled" as const,
+      reason: "destination-pin-missing" as const,
+    };
+  const destination = digest.safeParse(env.DATABASE_BACKUP_DESTINATION_SHA256);
+  if (!destination.success) throw new Error("DATABASE_BACKUP_DESTINATION_PIN_INVALID");
+  // Provisioned outside the archive and never created by this Worker. A
+  // mistaken distinct public destination cannot bootstrap its own designation.
+  // The operator must independently validate the private bucket before placing
+  // the marker; this is a destination pin, not a claim about future DNS changes.
+  const destinationKey = `backups/control/database-destinations/${destination.data}.bin`;
+  const marker = await env.ARTIFACTS.get(destinationKey);
+  if (marker?.size !== 32) throw new Error("DATABASE_BACKUP_PRIVATE_DESTINATION_UNVERIFIED");
+  if (
+    hex(await crypto.subtle.digest("SHA-256", await marker.arrayBuffer())) !== destination.data ||
+    (await env.PUBLIC_ARTIFACTS.head(destinationKey))
+  )
+    throw new Error("DATABASE_BACKUP_PRIVATE_DESTINATION_UNVERIFIED");
   const origin = z.url().parse(env.STOA_ORIGIN);
   const date = new Date(now).toISOString().slice(0, 10);
   const manifestKey = `backups/sql/${date}/complete.json`;
