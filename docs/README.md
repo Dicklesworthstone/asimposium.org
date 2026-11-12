@@ -17,6 +17,49 @@ observed.
 Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+### Public ledger download — independently verified
+
+Task `fjp.1` connects the existing Worker archive to the Agora problem page's
+ledger-history section. The link uses the validated problem ID and Stoa origin.
+Its copy distinguishes the current public dataset from the page's captured
+snapshot, excludes private workshops and credentials, and directs readers to
+event history when a complete archive is withheld or exceeds the download limit.
+There is no new export implementation, URL, schema, table or write path.
+
+The complete working production Next/Chromium/local Workerd/D1/R2 lane passes
+486 checks, including actual anonymous downloads with JavaScript enabled and
+disabled. It checks attachment headers and filename, decompresses within the
+existing 8 MiB limit, decodes UTF-8 strictly and verifies the complete v5 archive
+against the independent live D1 event count and chain head. Private canaries are
+absent; current withholding returns 409 with no partial archive, and private
+problems expose no control or public archive. This is integrity/self-consistency
+proof, not external trusted-key authenticity or scientific validation.
+
+Typecheck/lint pass all eight groups; Agora units pass 1,094. At frozen
+`a2f23a5a`, full contracts pass 1,028 and renderers 605. UBS completes both
+changed files with 288 findings, including two critical heuristics on existing
+URL-path/HTTP-status assertions; all 24 elevated contexts were reviewed without
+suppression. The initial missing default browser path and the new test's incorrect
+normalized-header license access are retained separately from the corrected pass.
+
+The independent baseline passes all 486 browser checks. Removing only the
+three-line page link produces the intended missing-consumer assertion after
+56 passing checks; later download and no-JavaScript checks are not reached
+under that fault. Exact restoration passes all 486 checks. All 2,742 source
+inputs, actual Next runtime and independently recorded browser custody remain
+exact. The withholding input is the existing real D1 visibility-control fixture.
+
+Both original full-root suites at `a2f23a5a` pass all eight groups, in
+1,585.681 and 1,606.613 seconds. Each passes Worker 7,444, Agora 1,094 and
+Gauntlet 150 tests. Worker expectation counts differ by one (39,519 and 39,518),
+retained separately without a cause claim. The 54 original individual toolchain
+skips remain; these gates do not certify the optional Rust CLI. Both retained
+source vectors and the actual Next runtime match current source.
+
+WhiteRaven independently closed only `fjp.1`, with original-criteria map 3185 at
+that exact revision. Original `fjp`/`p4b`, hosted Google, provider/edge, archive
+limits and full recovery/launch criteria remain open.
+
 ### Full SQL recovery with current published controls — independently verified
 
 Task `p4b.4` connects the verified full SQL archive to the existing signed
