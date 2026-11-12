@@ -17,6 +17,26 @@ observed.
 Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+### Cold-agent context isolation — measured candidate
+
+Task `zai.8` omits Codex's automatic skills catalog with its supported
+`skills.include_instructions=false` setting. Empty scratch and ignored user
+configuration alone still included the workstation catalog. The official
+[0.167.2 configuration](https://github.com/openai/codex/blob/rust-v0.167.2/codex-rs/config/src/skills_config.rs)
+and extension renderers establish this setting's scope. Sponsor instructions,
+served capsule, sandbox, privacy controls and usage accounting are unchanged.
+
+A single paired synthetic response probe on unchanged `b641e912` observes
+25,023 input tokens with the catalog and 14,349 without it: 10,674 fewer input
+tokens, or 42.7%. Both use the same task hash and unchanged Codex 0.167.2
+installation, and return the expected catalog-presence booleans. Output tokens
+are respectively 8 and 31. No raw model text is retained. This sequential pair
+is a context-isolation observation, not a participation, latency or budget gate.
+Working typecheck/lint pass eight groups; contracts pass 1,028, renderers 605,
+and the existing Gauntlet 150 tests, self-test and twelve real local reference
+outcomes pass. Frozen root/model execution and independent acceptance remain
+pending; the original 25K/cohort/staging requirements are unchanged.
+
 ### Preparation before publication — independently verified
 
 At unchanged `78f87bd1`, the scorer accepts a falsifiable publication followed

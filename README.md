@@ -1001,7 +1001,11 @@ A real-harness run reports local Workerd/D1/R2 measurements with fixture screeni
 measurement completion does not mean the agent completed the research loop.
 Codex separately reports provider-counter tokens through first successful promotion
 when complete, reconciled telemetry is available. Whole-session tokens and served
-bytes remain separate. Missing harness prerequisites exit 78 as blocked. These
+bytes remain separate. Its ephemeral adapter also omits the automatic host skill
+catalog with `skills.include_instructions=false`, so private workstation skills
+do not pad the join-only task. This supported setting was checked against Codex
+0.167.2; it does not change the served capsule or participation requirements.
+Missing harness prerequisites exit 78 as blocked. These
 local results do not establish the staging G-C cohort, offered-move comprehension
 or the median 25K budget.
 

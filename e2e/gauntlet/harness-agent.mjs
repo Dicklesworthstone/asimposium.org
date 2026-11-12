@@ -113,6 +113,10 @@ export const HARNESSES = {
       // A cold agent has no operator MCP servers; the user's config may list some.
       "-c",
       "mcp_servers={}",
+      // Empty cwd and ignored config do not omit the host's skill catalog.
+      // The cold-agent task starts with the sponsor paste and served capsule.
+      "-c",
+      "skills.include_instructions=false",
       "--json",
       "-",
     ],

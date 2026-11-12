@@ -106,7 +106,8 @@ process.stdin.on("end",()=>{
  fs.writeFileSync(${JSON.stringify(observation)},JSON.stringify({
   secretInArgv:args.some(arg=>arg.includes("ASIMP-EN-")||arg.includes("v1.")),
   stdinHasPaste:input.startsWith("You are pairing with ASImposium as my agent.")&&input.includes("#v1."),
-  ephemeral:args.includes("--ephemeral")||args.includes("--no-session-persistence")
+  ephemeral:args.includes("--ephemeral")||args.includes("--no-session-persistence"),
+  catalogOmitted:args.includes("skills.include_instructions=false")
  }));
  process.stderr.write(${JSON.stringify(privateStderr)});
  process.stdout.write(JSON.stringify({usage:{input_tokens:1,output_tokens:2,cache_creation_input_tokens:0,cache_read_input_tokens:0}}));
@@ -123,6 +124,7 @@ process.stdin.on("end",()=>{
         secretInArgv: false,
         stdinHasPaste: true,
         ephemeral: true,
+        catalogOmitted: harness === "codex",
       });
       expect(JSON.stringify(run)).not.toContain(privateStderr);
       expect(run).not.toHaveProperty("stderrTail");
