@@ -265,16 +265,17 @@ export function createMegaCommandsRouter(
       credential: auth,
     });
 
+    const selectedRole = movesResult.viewerRole ?? role;
     const response: ProblemNextResponse = ProblemNextResponseSchema.parse({
       problem_id: problemId,
       viewer: {
-        role,
+        role: selectedRole,
         effective_permissions: movesResult.effectivePermissions ?? effectivePermissions,
         role_suggestion: await readRosterRoleSuggestion({
           db,
           problemId,
           fellowId: auth.fellowId,
-          role,
+          role: selectedRole,
           cursor:
             movesResult.degraded || auth.fellowStatus !== "active"
               ? undefined

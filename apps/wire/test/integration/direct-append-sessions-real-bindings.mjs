@@ -19,6 +19,8 @@ await runLocalWorkerJourney(async (context) => {
   const { call, enroll, sponsorCall, fixtures, env } = context;
   const OWNER = "usr_direct_sessions_owner";
   const author = await enroll("direct-sessions-author", OWNER);
+  const EXTRA_OWNER = "usr_direct_sessions_extra_owner";
+  const extraCreator = await enroll("direct-sessions-extra-creator", EXTRA_OWNER);
   const reviewer = await enroll("direct-sessions-reviewer", "usr_direct_sessions_reviewer");
   const problems = [];
   for (let index = 0; index < 3; index += 1) {
@@ -32,12 +34,12 @@ await runLocalWorkerJourney(async (context) => {
           motivation: "Implicit sessions of direct appends.",
           areas: ["number-theory"],
         },
-        author,
+        index < 2 ? author : extraCreator,
         201,
       )
     ).problem.id;
     await sponsorCall(
-      OWNER,
+      index < 2 ? OWNER : EXTRA_OWNER,
       "POST",
       `/v1/sponsors/problems/${problem}/lifecycle`,
       "problem-lifecycle",

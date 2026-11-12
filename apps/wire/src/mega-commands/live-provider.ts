@@ -712,6 +712,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
         ...(result.degraded ? { degradedReason: "MOVES_PARTIAL" } : {}),
         selectionBoundary: `${LIVE_MOVES_BOUNDARY}${result.continuation ? ` Continue discovery: ${result.continuation}` : ""}`,
         ...(result.cursor === undefined ? {} : { capturedCursor: result.cursor }),
+        viewerRole: result.role,
         effectivePermissions: result.effectivePermissions,
       };
     } catch (error) {

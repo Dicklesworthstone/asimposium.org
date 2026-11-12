@@ -58,6 +58,9 @@ export interface ProblemMovesResult {
   readonly selectionBoundary?: string;
   /** Public cut used by the canonical selector; internal composition metadata. */
   readonly capturedCursor?: number;
+  /** Membership read and rechecked with effectivePermissions by production.
+   * The router's earlier role is only an input hint, not this policy snapshot. */
+  readonly viewerRole?: ProblemRole | "none";
   /** Production's current central-policy snapshot replaces coarse UI hints. */
   readonly effectivePermissions?: Record<string, boolean>;
 }

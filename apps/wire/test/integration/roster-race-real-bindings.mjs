@@ -13,7 +13,7 @@ const RACERS = 8;
 const OPEN_SLOTS = 3;
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall, env, worker, origin, userAgent } = context;
+  const { call, enroll, sponsorCall, env, worker, fixtures, origin, userAgent } = context;
   const OWNER = "usr_roster_owner";
   const author = await enroll("roster-author", OWNER);
   const reviewer = await enroll("roster-reviewer", "usr_roster_reviewer");
@@ -252,6 +252,157 @@ await runLocalWorkerJourney(async (context) => {
     "uncapping alone does not change recorded membership",
   );
   assert.equal(vacant.viewer.effective_permissions.promote, false);
+
+  // Control only the interleaving: return the actual initial membership row,
+  // then commit a real membership change before the canonical selector reads.
+  const changingToken = racers[observerIndex];
+  const changingId = (await call("/v1/hello", undefined, changingToken)).fellow.fellow_id;
+  const initialRoleRead =
+    "SELECT role FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?";
+  const changeRole = async (role) => {
+    await fixtures.armRaceAfterNextRead(
+      "UPDATE problem_memberships SET role=? WHERE problem_id=? AND fellow_id=?",
+      [role, problem, changingId],
+      initialRoleRead,
+    );
+  };
+  await changeRole("contributor");
+  const upgraded = await call(`/v1/p/${problem}/next`, undefined, changingToken);
+  assert.equal(
+    await fixtures.raceStillArmed(),
+    false,
+    "the real competing membership commit fired",
+  );
+  assert.equal(
+    (
+      await env.DB.prepare(
+        "SELECT role FROM problem_memberships WHERE problem_id=? AND fellow_id=?",
+      )
+        .bind(problem, changingId)
+        .first()
+    ).role,
+    "contributor",
+  );
+  assert.equal(
+    upgraded.viewer.effective_permissions.promote,
+    true,
+    "canonical authorization already sees the upgraded member",
+  );
+  assert.equal(
+    upgraded.viewer.role,
+    "contributor",
+    "next role must match the canonical permissions after an upgrade",
+  );
+  assert.ok(upgraded.viewer.role_suggestion);
+  assert.notEqual(upgraded.viewer.role_suggestion.suggested_role, "observer");
+  const roleSession = opened[observerIndex].session_id;
+  const roleDraft = await call(
+    `/v1/sessions/${roleSession}/workshop`,
+    {
+      type: "claim-draft",
+      title: "Consecutive parity",
+      body_md: "Private changed-role canary.",
+    },
+    changingToken,
+    201,
+  );
+  const roleClaim = await call(
+    `/v1/sessions/${roleSession}/promote`,
+    {
+      workshop_id: roleDraft.workshop_id,
+      kind: "conjecture",
+      statement: "Among integers from zero through sixty, every odd integer has an even successor.",
+      falsifier: "An odd integer in this range whose successor is also odd.",
+    },
+    changingToken,
+    201,
+  );
+  assert.equal(
+    typeof roleClaim.claim_id,
+    "string",
+    "the upgraded recorded member can actually publish",
+  );
+  const committedRoleClaim =
+    await env.DB.prepare(`SELECT c.id, c.source_seq, e.type, e.actor_fellow_id
+    FROM claims c JOIN events e ON e.problem_id=c.problem_id AND e.seq=c.source_seq
+      AND e.object_id=c.id AND e.object_kind='claim'
+    WHERE c.problem_id=? AND c.id=? AND c.source_seq=?`)
+      .bind(problem, roleClaim.claim_id, roleClaim.seq)
+      .first();
+  assert.deepEqual(
+    committedRoleClaim,
+    {
+      id: roleClaim.claim_id,
+      source_seq: roleClaim.seq,
+      type: "claim.created",
+      actor_fellow_id: changingId,
+    },
+    "the upgraded publication is stored and attributed in the real ledger",
+  );
+
+  await changeRole("observer");
+  const downgraded = await call(`/v1/p/${problem}/next`, undefined, changingToken);
+  assert.equal(await fixtures.raceStillArmed(), false);
+  assert.equal(
+    downgraded.viewer.role,
+    "observer",
+    "next role must match denied permissions after a downgrade",
+  );
+  assert.equal(downgraded.viewer.effective_permissions.promote, false);
+  assert.equal(downgraded.viewer.role_suggestion?.suggested_role, "observer");
+  const deniedDraft = await call(
+    `/v1/sessions/${roleSession}/workshop`,
+    {
+      type: "claim-draft",
+      title: "Observer check",
+      body_md: "Private observer work remains possible.",
+    },
+    changingToken,
+    201,
+  );
+  const publicationState = () =>
+    env.DB.prepare(`SELECT p.public_seq,
+    (SELECT COUNT(*) FROM claims c WHERE c.problem_id=p.id) AS claims
+    FROM problems p WHERE p.id=?`)
+      .bind(problem)
+      .first();
+  const beforeDenied = await publicationState();
+  const deniedClaim = await call(
+    `/v1/sessions/${roleSession}/promote`,
+    {
+      workshop_id: deniedDraft.workshop_id,
+      kind: "conjecture",
+      statement: "Every even integer from two through sixty has an odd predecessor.",
+      falsifier: "An even integer in the range with an even predecessor.",
+    },
+    changingToken,
+    422,
+  );
+  assert.equal(deniedClaim.code, "ROSTER_FULL", "the downgraded member cannot actually publish");
+  assert.deepEqual(
+    await publicationState(),
+    beforeDenied,
+    "a refused promotion appends no public claim or event",
+  );
+
+  await changeRole("contributor");
+  const changedMarkdown = await worker.fetch(`${origin}/v1/p/${problem}/next.md`, {
+    headers: { authorization: `Bearer ${changingToken}`, "user-agent": userAgent },
+  });
+  assert.equal(changedMarkdown.status, 200);
+  assert.equal(await fixtures.raceStillArmed(), false);
+  const changedText = await changedMarkdown.text();
+  assert.match(changedText, /^role: contributor$/m);
+  assert.match(changedText, /^ {2}promote: true$/m);
+  assert.ok(!changedText.includes("Suggested role: observer"));
+
+  // Restore controlled operational membership; its genuine publication stays
+  // in history and the original projection/search/log assertions still run.
+  await env.DB.prepare(
+    "UPDATE problem_memberships SET role='observer' WHERE problem_id=? AND fellow_id=?",
+  )
+    .bind(problem, changingId)
+    .run();
 
   console.log(
     JSON.stringify({

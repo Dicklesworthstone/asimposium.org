@@ -274,6 +274,15 @@ let raceBeforeNextBatch: {
   readonly matchSql?: string;
 } | null = null;
 
+/** A one-shot competing commit after a specified real read has completed.
+ * The caller receives that original row while later production reads see the
+ * committed change. This controls scheduling, never supplies a fabricated row. */
+let raceAfterNextRead: {
+  readonly sql: string;
+  readonly bindings: unknown[];
+  readonly matchSql: string;
+} | null = null;
+
 /**
  * A real event the competing write commits instead of the stand-in, so the
  * problem stays replayable and the projection-parity sweep still compares its
@@ -391,23 +400,37 @@ function racingDb(db: D1Database): D1Database {
     get(target, property) {
       if (property === "prepare") {
         return (query: string) => {
-          const statement = target.prepare(query);
-          sqlOf.set(statement, query);
-          const wrapped = new Proxy(statement, {
-            get(inner, key) {
-              if (key === "bind") {
-                return (...values: unknown[]) => {
-                  const bound = inner.bind(...values);
-                  sqlOf.set(bound, query);
-                  return bound;
-                };
-              }
-              const value = Reflect.get(inner, key);
-              return typeof value === "function" ? value.bind(inner) : value;
-            },
-          });
-          nativeOf.set(wrapped, statement);
-          return wrapped;
+          const wrap = (statement: D1PreparedStatement): D1PreparedStatement => {
+            sqlOf.set(statement, query);
+            const wrapped = new Proxy(statement, {
+              get(inner, key) {
+                if (key === "bind") {
+                  return (...values: unknown[]) => {
+                    return wrap(inner.bind(...values));
+                  };
+                }
+                const value = Reflect.get(inner, key);
+                if (key === "first" && typeof value === "function") {
+                  return async (...args: unknown[]) => {
+                    const result = await Reflect.apply(value, inner, args);
+                    const race = raceAfterNextRead;
+                    if (race !== null && query.includes(race.matchSql)) {
+                      raceAfterNextRead = null;
+                      await target
+                        .prepare(race.sql)
+                        .bind(...race.bindings)
+                        .run();
+                    }
+                    return result;
+                  };
+                }
+                return typeof value === "function" ? value.bind(inner) : value;
+              },
+            });
+            nativeOf.set(wrapped, statement);
+            return wrapped;
+          };
+          return wrap(target.prepare(query));
         };
       }
       if (property === "batch") {
@@ -539,8 +562,13 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     raceBeforeNextBatch = { sql, bindings, ...(matchSql === undefined ? {} : { matchSql }) };
   }
 
+  armRaceAfterNextRead(sql: string, bindings: unknown[], matchSql: string): void {
+    if (matchSql.length === 0) throw new Error("Read scheduling requires an exact SQL marker");
+    raceAfterNextRead = { sql, bindings, matchSql };
+  }
+
   raceStillArmed(): boolean {
-    return raceBeforeNextBatch !== null;
+    return raceBeforeNextBatch !== null || raceAfterNextRead !== null;
   }
 
   lastRaceBatch(): string[] {
@@ -549,6 +577,7 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
 
   disarmRace(): void {
     raceBeforeNextBatch = null;
+    raceAfterNextRead = null;
     competingLedgerWriteBeforeNextBatch = null;
   }
 
@@ -711,6 +740,7 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
                       : heldPrivateBodyBucket(this.env.ARTIFACTS),
                   DB:
                     raceBeforeNextBatch === null &&
+                    raceAfterNextRead === null &&
                     competingLedgerWriteBeforeNextBatch === null &&
                     !captureDependencyGuardErrors
                       ? this.env.DB

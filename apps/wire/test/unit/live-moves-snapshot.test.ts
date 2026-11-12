@@ -62,6 +62,7 @@ function fixture(
     hideDuringRead?: boolean;
     unlistDuringRead?: boolean;
     archiveDuringRead?: boolean;
+    roleDuringRead?: "observer" | "contributor";
   } = {},
 ) {
   const sqlite = new Database(":memory:");
@@ -120,6 +121,10 @@ function fixture(
         sqlite
           .query("UPDATE problems SET admission_mode = 'archived-read-only' WHERE id = ?")
           .run(query.problem);
+      if (options.roleDuringRead)
+        sqlite
+          .query("UPDATE problem_memberships SET role=? WHERE problem_id=? AND fellow_id=?")
+          .run(options.roleDuringRead, query.problem, credential.fellowId);
       const latest = sqlite
         .query("SELECT public_seq FROM problems WHERE id = ?")
         .get(query.problem) as { public_seq: number };
@@ -159,7 +164,58 @@ test("production provider sends the captured membership cursor into the canonica
     assert.deepEqual(f.calls[0]?.snapshot, { problemId: "P-DEMO", through: 50 });
     assert.match(JSON.stringify(result.primaryMove), /through=50/);
     assert.equal(result.effectivePermissions?.promote, false);
+    assert.equal(result.viewerRole, "observer", "the caller's steward hint is not the stored role");
     assert.equal(result.degraded, false);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("canonical role metadata comes from the checked membership, including no membership", async () => {
+  const f = fixture({ advanceDuringRead: false });
+  try {
+    const next = (hint: "observer" | "contributor") =>
+      f.provider.nextMoves({
+        problemId: "P-DEMO",
+        fellowId: credential.fellowId,
+        credential,
+        db: f.db,
+        role: hint,
+        effectivePermissions: { promote: true },
+      });
+    for (const stored of ["observer", "contributor", "steward"] as const) {
+      f.sqlite.query("UPDATE problem_memberships SET role=? WHERE problem_id='P-DEMO'").run(stored);
+      const result = await next(stored === "observer" ? "contributor" : "observer");
+      assert.equal(result.viewerRole, stored);
+      assert.equal(result.capturedCursor, 50);
+      assert.equal(
+        result.effectivePermissions?.promote,
+        false,
+        "a contributor label cannot override the policy fixture's denied grant",
+      );
+      assert.equal(result.degraded, false);
+    }
+    f.sqlite
+      .query("UPDATE problem_memberships SET fellow_id='F-other' WHERE problem_id='P-DEMO'")
+      .run();
+    const absent = await next("contributor");
+    assert.equal(absent.viewerRole, "none");
+    assert.equal(absent.effectivePermissions?.promote, false);
+    assert.equal(absent.effectivePermissions?.review, false);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("a role change during canonical selection withholds stale permissions and role metadata", async () => {
+  const f = fixture({ advanceDuringRead: false, roleDuringRead: "contributor" });
+  try {
+    const result = await f.next();
+    assert.equal(result.primaryMove, null);
+    assert.equal(result.degradedReason, "MOVES_CURSOR_CHANGED");
+    assert.equal(result.viewerRole, undefined);
+    assert.equal(result.effectivePermissions?.promote, false);
+    assert.equal(result.effectivePermissions?.review, false);
   } finally {
     f.sqlite.close();
   }
