@@ -48,6 +48,8 @@ function createLocalWorkerHarness({
   scratch = false,
   operatorPrincipalIds = [LOCAL_OPERATOR_ID],
   databaseBackupDestinationSha256,
+  artifactUploadSigning,
+  stoaOrigin = origin,
 } = {}) {
   return createTestHarness({
     root,
@@ -56,6 +58,9 @@ function createLocalWorkerHarness({
         // Wrangler's test secret overrides take precedence over workstation
         // .dev.vars. The signer must match this run's fresh public keyring.
         secrets: {
+          ...(artifactUploadSigning
+            ? { ARTIFACT_UPLOAD_SIGNING: JSON.stringify(artifactUploadSigning) }
+            : {}),
           ...(databaseBackupDestinationSha256
             ? { DATABASE_BACKUP_DESTINATION_SHA256: databaseBackupDestinationSha256 }
             : {}),
@@ -110,7 +115,7 @@ function createLocalWorkerHarness({
           },
           rules: [{ type: "Text", globs: ["**/*.md", "**/*.txt"], fallthrough: true }],
           vars: {
-            STOA_ORIGIN: origin,
+            STOA_ORIGIN: stoaOrigin,
             AGORA_ORIGIN: "https://staging.asimposium.org",
             SPONSOR_PROMOTION_RATE_LIMIT: "100",
             // Journeys requiring independent review opt into a second operator.
@@ -147,6 +152,7 @@ export const LOCAL_OPERATOR_ID = "usr_local_operator";
 // Reuse this real binding/signed-request setup for related product journeys.
 // Importing it never starts a journey or certifies another product surface.
 export async function runLocalWorkerJourney(journey, options = {}) {
+  const origin = options.stoaOrigin ?? "http://127.0.0.1:8787";
   const server = createLocalWorkerHarness(options);
   const releaseWranglerBuilder = retainWranglerBuilder();
   try {
@@ -245,7 +251,11 @@ export async function runLocalWorkerJourney(journey, options = {}) {
     }
 
     async function enroll(name, sponsor = "usr_sponsor_problems", declaration = {}) {
-      const minted = await fixtures.mint(sponsor, undefined, declaration.problem_binding);
+      const minted = await fixtures.mint(
+        sponsor,
+        declaration.requested_scopes,
+        declaration.problem_binding,
+      );
       mintedSecrets.push(minted.secret);
       const claimed = await call(
         discoveredRequest("fellow_registration_request"),

@@ -1,7 +1,7 @@
 # Nightly database snapshots and ledger archives
 
 The existing five-minute Worker cron creates a bounded daily SQL database
-snapshot and advances a separate archive of published problem ledgers.
+snapshot, its bounded private CAS companion, and a separate archive of published problem ledgers.
 Both write only to the private `ARTIFACTS` R2 binding; the
 public artifact bucket never receives backup files. Deployment and the
 provider's actual cron delivery remain operator responsibilities.
@@ -9,7 +9,7 @@ provider's actual cron delivery remain operator responsibilities.
 The SQL snapshot includes application accounts, credentials, private drafts,
 workshops and operational tables. The separate **published-problem ledger
 archive** excludes that private state. Neither replaces D1 Time Travel,
-current deletion-control replay, CAS body retention/inventory, guarded recovery
+complete current deletion-control replay, scalable CAS retention, guarded recovery
 or provider restore drills. Those remain requirements of W2.8 and OPS.6.
 
 ## Complete SQL snapshot
@@ -53,7 +53,9 @@ Storage keys:
 - `backups/control/database-v1.json`: the bounded lease, outside dated retention.
 - `backups/sql/YYYY-MM-DD/<uuid>.sql`: confidential SQL, including private data.
 - `backups/sql/YYYY-MM-DD/complete.json`: signed digest, source binding/origin,
-  statement byte boundaries and table counts. It is private too.
+  statement byte boundaries, table counts and snapshot CAS inventory. It is private too.
+- The SQL object's adjacent `.cas.json`: separately signed body completion.
+- The SQL object's adjacent `.cas/<sha256>`: private exact body copies.
 
 SQL snapshots are disabled until an independent destination pin is configured.
 Prepare a fresh marker locally for each environment:
@@ -167,8 +169,74 @@ node apps/wire/test/integration/full-database-backup-real-bindings.mjs
 This establishes replay of supported, currently **published** controls. Periodic
 journal publication can lag D1 writes. Keep the target quarantined until the
 separate publication/cutover boundary is established; complete current rights,
-private CAS bodies/unbinds, provider binding identity and restore drills remain
+private CAS unbinds, provider binding identity and restore drills remain
 original whole-system recovery requirements. No result authorizes service cutover.
+
+### Recovering snapshot-referenced private bodies
+
+SQL alone retains only extracts for R2-spilled workshop bodies. Internal SQL
+manifest version 2 binds a distinct, sorted inventory of all nonnull `cas_hash`
+columns, including historical revisions, and verified artifact digests. The
+inventory is read in the same D1 transaction as the SQL rows. Unverified uploads,
+staging keys and unrelated bucket objects are excluded. Above 1,024 references,
+or with malformed references, the signed inventory says `unavailable` with its
+reason; SQL remains valid, but no body completion can be produced. References
+are never silently truncated. Earlier version-1 receipts are historical proof
+of the earlier source, not acceptance of this format.
+
+After SQL completion, the same cron archives at most eight distinct referenced
+objects, at most 20 MiB each and 32 MiB combined. Size checks precede allocation;
+copies are serial. Each object is digest-verified, created conditionally and
+actually read back. The separately signed `.cas.json` binds the source origin,
+SQL key and digest, and exact ordered object hashes and sizes. Its publication
+means those bounded bodies completed; `complete.json` alone means only SQL did.
+Later ticks resume from that signed SQL inventory, even if current D1 changed.
+Correct partial archive bytes are reused after verification; conflicting bytes
+are never overwritten. Missing/corrupt/oversized bodies and limits leave SQL
+recoverable and CAS incomplete. Retain that distinction when monitoring failures.
+
+The operator primitive `restoreDatabaseCasBackup`, exported alongside the SQL
+restorer, accepts actual `archive`, `target`, and `publicBucket` R2 bindings,
+`targetIdentifier`, an independently provisioned `destinationSha256`, expected
+source origin, SQL manifest/text, CAS manifest, and independently trusted keys.
+For example, after acquiring the inputs through a private operator channel:
+
+```ts
+const bodies = await restoreDatabaseCasBackup({
+  archive: archiveOnlyPrivateBucket,
+  target: scratchPrivateBucket,
+  publicBucket: publicArtifactBucket,
+  targetIdentifier: "scratch-quarterly-drill",
+  destinationSha256: independentlyConfiguredScratchPin,
+  expectedSourceOrigin: configuredStoaOrigin,
+  manifest: parsedManifest,
+  sql: downloadedSql,
+  casManifest: parsedCasManifest,
+  verifyKeys: trustedKeys,
+});
+// bodies.status === "cas-restored"; bodies.serviceReady === false.
+```
+
+Prepare the scratch marker with the existing `--prepare-destination` command,
+using a fresh exclusive file and independently verified private bucket. Its
+exact 32 bytes must exist only in the designated target: the same marker in
+the archive or public bucket refuses recovery. Handle aliases also refuse;
+provider identity and topology still require independent operator verification.
+The restorer needs no access to live source CAS. It authenticates the complete
+SQL and body manifests, preflights objects and conflicts, then verifies actual
+bytes before and after each conditional copy into canonical private CAS keys.
+Optional R2 checksum metadata may accelerate checks; missing metadata requires
+actual bounded hashing and never makes correct existing bytes a conflict.
+
+An interrupted attempt leaves only quarantined private partial objects; retry
+verifies and retains correct bytes. A conflict is an operator investigation,
+not permission to overwrite. No bodies are copied to public delivery. The
+native lane above proves exact current and historical owning workshop reads
+and verified artifact bytes from an archive-only bucket, plus public/foreign
+exclusion, corruption, limits and retry. Its staging input is a local fixture,
+not a successful provider presigned upload. This is snapshot body recovery;
+unpublished rights changes, CAS unbinds, public re-publication, whole-bucket loss,
+scaling beyond the caps and service cutover remain separate unfinished work.
 
 Apply the disclosed 90-day lifecycle to dated `backups/sql/` objects, including
 interrupted uploads. Do not expire the lease or deletion journal with a broad

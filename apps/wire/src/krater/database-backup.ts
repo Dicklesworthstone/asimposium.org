@@ -4,7 +4,7 @@
  * never copy engine shadow tables. These private archives are not public ledger
  * exports and do not authorize recovery/cutover without current deletion controls.
  */
-import type { D1Database } from "@cloudflare/workers-types";
+import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
 import { z } from "zod";
 import type { Env } from "../env.ts";
 import {
@@ -28,6 +28,13 @@ export const DATABASE_BACKUP_LIMITS = {
   bytes: 8 * 1024 * 1024,
   statements: 16000,
 } as const;
+export const DATABASE_CAS_BACKUP_LIMITS = {
+  references: 1024,
+  objects: 8,
+  objectBytes: 20 * 1024 * 1024,
+  bytes: 32 * 1024 * 1024,
+  manifestBytes: 16 * 1024,
+} as const;
 const schemaQuery = `SELECT type, name, tbl_name, sql FROM sqlite_schema
   WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*'
   ORDER BY type, name LIMIT 2001`;
@@ -36,9 +43,28 @@ type Column = { name: string; hidden: number; pk: number };
 type Table = { name: string; type: string; wr: number; schema: string };
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
+const CasInventorySchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      status: z.literal("complete"),
+      hashes: z
+        .array(digest)
+        .max(DATABASE_CAS_BACKUP_LIMITS.references)
+        .refine((hashes) =>
+          hashes.every((hash, index) => index === 0 || hash > (hashes[index - 1] ?? "")),
+        ),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("unavailable"),
+      reason: z.enum(["reference-limit", "invalid-reference"]),
+    })
+    .strict(),
+]);
 const MetadataSchema = z
   .object({
-    format: z.literal("asimposium.database-backup.v1"),
+    format: z.literal("asimposium.database-backup.v2"),
     source: z.object({ binding: z.literal("DB"), origin: z.url() }).strict(),
     created_at: z.iso.datetime(),
     sql_key: z.string().regex(/^backups\/sql\/\d{4}-\d{2}-\d{2}\/[a-f0-9-]{36}\.sql$/),
@@ -50,11 +76,33 @@ const MetadataSchema = z
       .array(z.object({ name: z.string().min(1).max(200), rows: count }).strict())
       .max(DATABASE_BACKUP_LIMITS.tables),
     rebuilt_fts: z.array(z.string().min(1).max(200)).max(DATABASE_BACKUP_LIMITS.tables),
+    cas_inventory: CasInventorySchema,
     key_id: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/),
   })
   .strict();
 const ManifestSchema = MetadataSchema.extend({ signature: z.string().regex(/^[a-f0-9]{128}$/) });
 type Metadata = z.infer<typeof MetadataSchema>;
+const CasMetadataSchema = z
+  .object({
+    format: z.literal("asimposium.database-cas-backup.v1"),
+    source: MetadataSchema.shape.source,
+    created_at: z.iso.datetime(),
+    sql_key: MetadataSchema.shape.sql_key,
+    sql_sha256: digest,
+    objects: z
+      .array(
+        z
+          .object({
+            sha256: digest,
+            bytes: count.positive().max(DATABASE_CAS_BACKUP_LIMITS.objectBytes),
+          })
+          .strict(),
+      )
+      .max(DATABASE_CAS_BACKUP_LIMITS.objects),
+    key_id: MetadataSchema.shape.key_id,
+  })
+  .strict();
+const CasManifestSchema = CasMetadataSchema.extend({ signature: ManifestSchema.shape.signature });
 const identifier = (name: string) => `"${name.replaceAll('"', '""')}"`;
 const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
 const utf8 = new TextEncoder();
@@ -62,7 +110,10 @@ const bytes = (hex: string) =>
   Uint8Array.from(hex.match(/../g) ?? [], (s) => Number.parseInt(s, 16));
 const hex = (value: ArrayBuffer) =>
   Array.from(new Uint8Array(value), (b) => b.toString(16).padStart(2, "0")).join("");
-const message = (metadata: Metadata) => utf8.encode(canonicalJson(metadata));
+const message = (metadata: object) => utf8.encode(canonicalJson(metadata));
+export const databaseCasManifestKey = (sqlKey: string) => `${sqlKey}.cas.json`;
+const casArchiveKey = (sqlKey: string, hash: string) => `${sqlKey}.cas/${hash}`;
+const privateCasKey = (hash: string) => `cas/sha256/${hash}`;
 
 /** SQLite formats the values, so int64, BLOBs, NULs and multiline text never
  * round-trip through JavaScript numbers or quote-sensitive SQL strings. */
@@ -183,6 +234,19 @@ export async function captureDatabaseSql(db: D1Database) {
   const allocations = budgets.map((size) =>
     Math.min(DATABASE_BACKUP_LIMITS.tableBytes, size + slack),
   );
+  const referenceQueries = data.flatMap(({ table, columns }) => {
+    const names = new Set(columns.map((column) => column.name));
+    const queries: string[] = [];
+    if (names.has("cas_hash"))
+      queries.push(
+        `SELECT CASE WHEN typeof(cas_hash) = 'text' THEN cas_hash ELSE '[invalid-reference]' END AS reference FROM ${identifier(table.name)} WHERE cas_hash IS NOT NULL`,
+      );
+    if (table.name === "artifact_uploads" && names.has("sha256") && names.has("state"))
+      queries.push(
+        `SELECT 'sha256:' || sha256 AS reference FROM ${identifier(table.name)} WHERE state = 'verified'`,
+      );
+    return queries;
+  });
   const queries = [
     db.prepare(schemaQuery),
     db.prepare("PRAGMA table_list"),
@@ -195,6 +259,16 @@ export async function captureDatabaseSql(db: D1Database) {
     ),
     ...virtual.map((name) =>
       db.prepare(`SELECT count(*) AS n FROM ${identifier(`${name}_config`)} WHERE k <> 'version'`),
+    ),
+    db.prepare(
+      referenceQueries.length
+        ? // VALUES avoids D1's low compound-SELECT limit across the CAS-bearing
+          // tables. JSON stays inside SQLite; only the bounded distinct inventory
+          // crosses the binding, in this same snapshot transaction.
+          `WITH refs(items) AS (VALUES ${referenceQueries.map((query) => `((SELECT json_group_array(reference) FROM (${query})))`).join(",")})
+          SELECT DISTINCT item.value AS reference FROM refs, json_each(refs.items) AS item
+          ORDER BY reference COLLATE BINARY LIMIT ${DATABASE_CAS_BACKUP_LIMITS.references + 1}`
+        : "SELECT NULL AS reference WHERE 0",
     ),
   ];
   // D1 batch is a single transaction. All data and the schema/roster fence
@@ -209,6 +283,22 @@ export async function captureDatabaseSql(db: D1Database) {
     if ((result[data.length + 2 + index]?.results[0] as { n: number } | undefined)?.n !== 0)
       throw new Error("DATABASE_BACKUP_FTS_CONFIG_UNSUPPORTED");
   }
+  const references = (result[data.length + virtual.length + 2]?.results ?? []) as {
+    reference: unknown;
+  }[];
+  const casInventory = CasInventorySchema.parse(
+    references.length > DATABASE_CAS_BACKUP_LIMITS.references
+      ? { status: "unavailable", reason: "reference-limit" }
+      : references.some(
+            (row) =>
+              typeof row.reference !== "string" || !/^sha256:[a-f0-9]{64}$/.test(row.reference),
+          )
+        ? { status: "unavailable", reason: "invalid-reference" }
+        : {
+            status: "complete",
+            hashes: references.map((row) => (row.reference as string).slice(7)),
+          },
+  );
   const statements = schema.filter((s) => s.type === "table").map((s) => `${s.sql};`);
   const sequenceStatements: string[] = [];
   const counts: { name: string; rows: number }[] = [];
@@ -261,6 +351,7 @@ export async function captureDatabaseSql(db: D1Database) {
     tables: counts,
     rebuiltFts: rebuilt,
     schemaSha256: await sha256Hex(canonicalJson(schema)),
+    casInventory,
   };
 }
 
@@ -269,6 +360,15 @@ export async function captureDatabaseSql(db: D1Database) {
  * is still only for an empty, quarantined scratch DB under current controls. */
 async function verifyManifest(input: unknown, trustedKeys: readonly CheckpointVerifyKey[]) {
   const { signature, ...metadata } = ManifestSchema.parse(input);
+  await verifySignature(metadata, signature, trustedKeys);
+  return metadata;
+}
+
+async function verifySignature(
+  metadata: { key_id: string },
+  signature: string,
+  trustedKeys: readonly CheckpointVerifyKey[],
+) {
   const key = trustedKeys.find((k) => k.kid === metadata.key_id);
   if (!key || !/^[a-f0-9]{64}$/.test(key.publicKeyHex))
     throw new Error("DATABASE_BACKUP_UNTRUSTED_KEY");
@@ -281,7 +381,6 @@ async function verifyManifest(input: unknown, trustedKeys: readonly CheckpointVe
   );
   if (!(await crypto.subtle.verify("Ed25519", publicKey, bytes(signature), message(metadata))))
     throw new Error("DATABASE_BACKUP_SIGNATURE_INVALID");
-  return metadata;
 }
 
 export async function verifyDatabaseBackup(
@@ -372,7 +471,8 @@ export async function restoreDatabaseBackup(options: {
   if (
     (await sha256Hex(imported.sql)) !== verified.metadata.sql_sha256 ||
     imported.schemaSha256 !== verified.metadata.schema_sha256 ||
-    canonicalJson(imported.tables) !== canonicalJson(verified.metadata.tables)
+    canonicalJson(imported.tables) !== canonicalJson(verified.metadata.tables) ||
+    canonicalJson(imported.casInventory) !== canonicalJson(verified.metadata.cas_inventory)
   )
     throw new KraterRestoreRefusedError(
       "DATABASE_RESTORE_SNAPSHOT_MISMATCH: imported logical state differs; keep target quarantined",
@@ -414,6 +514,244 @@ type BackupEnv = Pick<
 >;
 export const DATABASE_BACKUP_LEASE_KEY = "backups/control/database-v1.json";
 const LeaseSchema = z.object({ owner: z.uuid(), expiresAt: count }).strict();
+
+async function privateDestination(
+  target: R2Bucket,
+  publicBucket: R2Bucket,
+  pin: string,
+  archive?: R2Bucket,
+) {
+  if (target === publicBucket || target === archive)
+    throw new Error("DATABASE_BACKUP_PRIVATE_NAMESPACE_REQUIRED");
+  if (!digest.safeParse(pin).success) throw new Error("DATABASE_BACKUP_DESTINATION_PIN_INVALID");
+  const key = `backups/control/database-destinations/${pin}.bin`;
+  const marker = await target.get(key);
+  if (marker?.size !== 32) throw new Error("DATABASE_BACKUP_PRIVATE_DESTINATION_UNVERIFIED");
+  if (
+    hex(await crypto.subtle.digest("SHA-256", await marker.arrayBuffer())) !== pin ||
+    (await publicBucket.head(key)) ||
+    (archive && (await archive.head(key)))
+  )
+    throw new Error("DATABASE_BACKUP_PRIVATE_DESTINATION_UNVERIFIED");
+}
+
+async function casBody(
+  bucket: R2Bucket,
+  key: string,
+  hash: string,
+  remaining: number,
+  size?: number,
+) {
+  const object = await bucket.get(key);
+  if (!object) throw new Error("DATABASE_CAS_BODY_MISSING");
+  if (
+    object.size <= 0 ||
+    object.size > DATABASE_CAS_BACKUP_LIMITS.objectBytes ||
+    object.size > remaining ||
+    (size !== undefined && object.size !== size)
+  ) {
+    await object.body.cancel();
+    throw new Error("DATABASE_CAS_SIZE_INVALID");
+  }
+  const body = await object.arrayBuffer();
+  if (body.byteLength !== object.size || hex(await crypto.subtle.digest("SHA-256", body)) !== hash)
+    throw new Error("DATABASE_CAS_DIGEST_INVALID");
+  return body;
+}
+
+async function verifyCasManifest(
+  input: unknown,
+  sql: Metadata,
+  keys: readonly CheckpointVerifyKey[],
+) {
+  const { signature, ...metadata } = CasManifestSchema.parse(input);
+  await verifySignature(metadata, signature, keys);
+  if (
+    sql.cas_inventory.status !== "complete" ||
+    metadata.source.origin !== sql.source.origin ||
+    metadata.sql_key !== sql.sql_key ||
+    metadata.sql_sha256 !== sql.sql_sha256 ||
+    metadata.created_at !== sql.created_at ||
+    canonicalJson(metadata.objects.map((object) => object.sha256)) !==
+      canonicalJson(sql.cas_inventory.hashes) ||
+    metadata.objects.reduce((total, object) => total + object.bytes, 0) >
+      DATABASE_CAS_BACKUP_LIMITS.bytes
+  )
+    throw new Error("DATABASE_CAS_MANIFEST_MISMATCH");
+  return metadata;
+}
+
+async function archiveDatabaseCas(
+  bucket: R2Bucket,
+  sql: Metadata,
+  signing: NonNullable<Awaited<ReturnType<typeof checkpointSigningKey>>>,
+  keys: readonly CheckpointVerifyKey[],
+) {
+  if (sql.cas_inventory.status !== "complete")
+    throw new Error("DATABASE_CAS_INVENTORY_UNAVAILABLE");
+  if (sql.cas_inventory.hashes.length > DATABASE_CAS_BACKUP_LIMITS.objects)
+    throw new Error("DATABASE_CAS_OBJECT_LIMIT");
+  const key = databaseCasManifestKey(sql.sql_key);
+  const existing = await bucket.get(key);
+  if (existing) {
+    if (existing.size > DATABASE_CAS_BACKUP_LIMITS.manifestBytes)
+      throw new Error("DATABASE_CAS_MANIFEST_INVALID");
+    const metadata = await verifyCasManifest(await existing.json(), sql, keys);
+    for (const object of metadata.objects) {
+      const head = await bucket.head(casArchiveKey(sql.sql_key, object.sha256));
+      if (
+        !head ||
+        head.size !== object.bytes ||
+        (head.checksums.sha256 && hex(head.checksums.sha256) !== object.sha256)
+      )
+        throw new Error("DATABASE_CAS_ARCHIVE_INVALID");
+      if (!head.checksums.sha256)
+        await casBody(
+          bucket,
+          casArchiveKey(sql.sql_key, object.sha256),
+          object.sha256,
+          object.bytes,
+          object.bytes,
+        );
+    }
+    return metadata.objects.length;
+  }
+  const objects: { sha256: string; bytes: number }[] = [];
+  let remaining = DATABASE_CAS_BACKUP_LIMITS.bytes as number;
+  for (const hash of sql.cas_inventory.hashes) {
+    const archiveKey = casArchiveKey(sql.sql_key, hash);
+    const partial = await bucket.head(archiveKey);
+    const body = await casBody(bucket, partial ? archiveKey : privateCasKey(hash), hash, remaining);
+    if (!partial) {
+      await bucket.put(archiveKey, body, {
+        sha256: hash,
+        onlyIf: { etagDoesNotMatch: "*" },
+        httpMetadata: { contentType: "application/octet-stream", cacheControl: "no-store" },
+      });
+    }
+    await casBody(bucket, archiveKey, hash, remaining, body.byteLength);
+    remaining -= body.byteLength;
+    objects.push({ sha256: hash, bytes: body.byteLength });
+  }
+  const metadata = CasMetadataSchema.parse({
+    format: "asimposium.database-cas-backup.v1",
+    source: sql.source,
+    created_at: sql.created_at,
+    sql_key: sql.sql_key,
+    sql_sha256: sql.sql_sha256,
+    objects,
+    key_id: signing.kid,
+  });
+  const signature = hex(await crypto.subtle.sign("Ed25519", signing.privateKey, message(metadata)));
+  await bucket.put(key, JSON.stringify({ ...metadata, signature }), {
+    onlyIf: { etagDoesNotMatch: "*" },
+    httpMetadata: { contentType: "application/json", cacheControl: "no-store" },
+  });
+  const readback = await bucket.get(key);
+  if (!readback || readback.size > DATABASE_CAS_BACKUP_LIMITS.manifestBytes)
+    throw new Error("DATABASE_CAS_MANIFEST_INVALID");
+  await verifyCasManifest(await readback.json(), sql, keys);
+  return objects.length;
+}
+
+/** Recover only signed snapshot bodies into a separately marked private R2.
+ * No live source CAS is consulted. Keep the target quarantined: current rights,
+ * deletion replay and provider/service cutover remain separate requirements. */
+export async function restoreDatabaseCasBackup(options: {
+  readonly archive: R2Bucket;
+  readonly target: R2Bucket;
+  readonly publicBucket: R2Bucket;
+  readonly targetIdentifier: string;
+  readonly destinationSha256: string;
+  readonly expectedSourceOrigin: string;
+  readonly manifest: unknown;
+  readonly sql: string;
+  readonly casManifest: unknown;
+  readonly verifyKeys: readonly CheckpointVerifyKey[];
+}) {
+  validateScratchTarget(options.targetIdentifier);
+  const { metadata: sql } = await verifyDatabaseBackup(
+    options.manifest,
+    options.sql,
+    options.verifyKeys,
+  );
+  if (sql.source.origin !== options.expectedSourceOrigin)
+    throw new Error("DATABASE_RESTORE_SOURCE_MISMATCH");
+  const metadata = await verifyCasManifest(options.casManifest, sql, options.verifyKeys);
+  await privateDestination(
+    options.target,
+    options.publicBucket,
+    options.destinationSha256,
+    options.archive,
+  );
+  // Preflight all heads before copying. Actual bytes are verified again on read;
+  // a later race/error leaves only private, quarantined partial objects.
+  for (const object of metadata.objects) {
+    const source = await options.archive.head(casArchiveKey(sql.sql_key, object.sha256));
+    const target = await options.target.head(privateCasKey(object.sha256));
+    if (
+      !source ||
+      source.size !== object.bytes ||
+      (source.checksums.sha256 && hex(source.checksums.sha256) !== object.sha256)
+    )
+      throw new Error("DATABASE_CAS_ARCHIVE_INVALID");
+    if (!source.checksums.sha256)
+      await casBody(
+        options.archive,
+        casArchiveKey(sql.sql_key, object.sha256),
+        object.sha256,
+        object.bytes,
+        object.bytes,
+      );
+    if (
+      target &&
+      (target.size !== object.bytes ||
+        (target.checksums.sha256 && hex(target.checksums.sha256) !== object.sha256))
+    )
+      throw new Error("DATABASE_CAS_TARGET_CONFLICT");
+    if (target && !target.checksums.sha256)
+      await casBody(
+        options.target,
+        privateCasKey(object.sha256),
+        object.sha256,
+        object.bytes,
+        object.bytes,
+      );
+  }
+  let remaining = DATABASE_CAS_BACKUP_LIMITS.bytes as number;
+  let written = 0;
+  for (const object of metadata.objects) {
+    const body = await casBody(
+      options.archive,
+      casArchiveKey(sql.sql_key, object.sha256),
+      object.sha256,
+      remaining,
+      object.bytes,
+    );
+    const stored = await options.target.put(privateCasKey(object.sha256), body, {
+      sha256: object.sha256,
+      onlyIf: { etagDoesNotMatch: "*" },
+      httpMetadata: { contentType: "application/octet-stream", cacheControl: "no-store" },
+    });
+    if (stored) written++;
+    await casBody(
+      options.target,
+      privateCasKey(object.sha256),
+      object.sha256,
+      remaining,
+      object.bytes,
+    );
+    remaining -= body.byteLength;
+  }
+  return {
+    status: "cas-restored" as const,
+    serviceReady: false as const,
+    snapshotSha256: sql.sql_sha256,
+    objects: metadata.objects.length,
+    written,
+    bytes: DATABASE_CAS_BACKUP_LIMITS.bytes - remaining,
+  };
+}
 
 /** The existing five-minute cron creates at most one complete SQL snapshot
  * per UTC day. Incomplete objects never become completion witnesses. */
@@ -458,14 +796,7 @@ export async function runDatabaseBackup(env: BackupEnv, now = Date.now()) {
   // mistaken distinct public destination cannot bootstrap its own designation.
   // The operator must independently validate the private bucket before placing
   // the marker; this is a destination pin, not a claim about future DNS changes.
-  const destinationKey = `backups/control/database-destinations/${destination.data}.bin`;
-  const marker = await env.ARTIFACTS.get(destinationKey);
-  if (marker?.size !== 32) throw new Error("DATABASE_BACKUP_PRIVATE_DESTINATION_UNVERIFIED");
-  if (
-    hex(await crypto.subtle.digest("SHA-256", await marker.arrayBuffer())) !== destination.data ||
-    (await env.PUBLIC_ARTIFACTS.head(destinationKey))
-  )
-    throw new Error("DATABASE_BACKUP_PRIVATE_DESTINATION_UNVERIFIED");
+  await privateDestination(env.ARTIFACTS, env.PUBLIC_ARTIFACTS, destination.data);
   const origin = z.url().parse(env.STOA_ORIGIN);
   const date = new Date(now).toISOString().slice(0, 10);
   const manifestKey = `backups/sql/${date}/complete.json`;
@@ -492,6 +823,7 @@ export async function runDatabaseBackup(env: BackupEnv, now = Date.now()) {
       status: "complete" as const,
       bytes: manifest.bytes,
       tables: manifest.tables.length,
+      cas_objects: await archiveDatabaseCas(env.ARTIFACTS, manifest, signing, keys),
     };
   }
   const leaseObject = await env.ARTIFACTS.get(DATABASE_BACKUP_LEASE_KEY);
@@ -511,7 +843,7 @@ export async function runDatabaseBackup(env: BackupEnv, now = Date.now()) {
   const snapshot = await captureDatabaseSql(env.DB);
   const sqlKey = `backups/sql/${date}/${owner}.sql`;
   const metadata = MetadataSchema.parse({
-    format: "asimposium.database-backup.v1",
+    format: "asimposium.database-backup.v2",
     source: { binding: "DB", origin },
     created_at: new Date(now).toISOString(),
     sql_key: sqlKey,
@@ -521,6 +853,7 @@ export async function runDatabaseBackup(env: BackupEnv, now = Date.now()) {
     statement_bytes: snapshot.statementBytes,
     tables: snapshot.tables,
     rebuilt_fts: snapshot.rebuiltFts,
+    cas_inventory: snapshot.casInventory,
     key_id: signing.kid,
   });
   const signature = hex(await crypto.subtle.sign("Ed25519", signing.privateKey, message(metadata)));
@@ -552,5 +885,6 @@ export async function runDatabaseBackup(env: BackupEnv, now = Date.now()) {
     status: "written" as const,
     bytes: metadata.bytes,
     tables: metadata.tables.length,
+    cas_objects: await archiveDatabaseCas(env.ARTIFACTS, metadata, signing, keys),
   };
 }

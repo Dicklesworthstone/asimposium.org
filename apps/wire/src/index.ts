@@ -160,7 +160,7 @@ export default {
     } else {
       const code =
         databaseBackup.reason instanceof Error &&
-        /^DATABASE_BACKUP_[A-Z_]+$/.test(databaseBackup.reason.message)
+        /^DATABASE_(?:BACKUP|CAS)_[A-Z_]+$/.test(databaseBackup.reason.message)
           ? databaseBackup.reason.message
           : "DATABASE_BACKUP_FAILED";
       console.error(JSON.stringify({ stage: "nightly-database-backup", status: "failed", code }));
