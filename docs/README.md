@@ -17,7 +17,7 @@ observed.
 Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-### Operator Fellow capacity — connected candidate
+### Operator Fellow capacity — independently verified
 
 Task `0ht.2` connects the finished operator cap state, compare-and-set override
 and immutable history paths to the existing private `/admin/sponsors` page.
@@ -34,8 +34,22 @@ authentication, private history and nonoperator/no-JavaScript boundaries.
 Earlier unit/lint and two browser failures are retained: the suspension tests
 now target their own fieldset, and the no-JavaScript check reads the actual
 fallback node because Playwright text selectors skip `noscript`.
-Frozen full-root and independent acceptance remain pending. This is local
-capability, not a Google OAuth exchange, staging or broader admin/launch gate.
+At frozen `52985120`, typecheck and lint pass all eight groups, full contracts
+pass 1,028 and renderers 605. The production-mode browser lane passes all 470
+checks in both primary and independent execution. Removing only the page's
+actual cap-control consumer makes the unchanged browser fail on the missing
+control after a successful build and 418 preceding checks; exact restoration
+passes all 470 again. All 2,739 source inputs and the actual Next runtime stay
+unchanged across the positive runs and restoration.
+
+Both original root suites pass all eight groups in 1,674.418 and 1,595.150
+seconds, including 7,442 Wire tests and 1,094 Agora tests. The 54 individual
+toolchain skips and S1 drain diagnostics remain explicit. Code UBS completes
+seven files with 298 findings (21 critical, seven warnings, 270 information);
+all elevated contexts were reviewed, without suppression or a security-clean
+claim. WhiteRaven closed only `0ht.2`, with original-criteria map 3171.
+The broader admin and token-lifecycle parents remain unfinished. This is local
+capability, not a Google OAuth exchange, staging or launch gate.
 
 ### Cold-agent context isolation — independently verified
 
