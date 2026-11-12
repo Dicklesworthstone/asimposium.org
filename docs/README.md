@@ -17,6 +17,81 @@ observed.
 Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+### Complete SQL backups — independently verified
+
+Task `p4b.3` connects a full logical SQL snapshot to the existing Worker cron.
+The earlier scheduler archives published problem ledgers; it cannot recover
+accounts, credentials or private workshops. The new producer includes that
+state, schema objects, native SQLite values and both FTS indexes. SQL and its
+signed completion manifest use conditional private R2 publication, with offline
+verification against an independently acquired public key. The ordinary D1
+exporter rejects the current virtual tables, so this uses native D1 reads rather
+than dropping or filtering those tables.
+
+The real local Workerd/D1/R2 lane restores a 131-table fixture, including four
+deliberate fidelity probes, into a distinct empty scratch database. It compares
+the complete schema, row counts, exact SQL, independent edge values, FTS MATCH,
+trigger behavior and representative private/public ledger state. The production
+scheduled entrypoint creates the first archive from absent storage. At
+`c85badc5`, removing that consumer, FTS reconstruction, REAL precision or the
+destination guard each causes its intended unchanged assertion to fail; exact
+restoration passes. Those producers are unchanged at the final successor;
+the native lane adds only its missing artifact-parent setup.
+
+An actual pre-fix role-swap test wrote two objects into the local public bucket.
+The repair requires an independently provisioned 32-byte private marker and an
+external SHA-256 pin before any SQL access, including completed-archive checks.
+The same swap now refuses with zero public objects. The operator CLI creates
+that marker exclusively with mode `0600`. Missing configuration disables the
+job. This source neither provisions cloud storage nor establishes provider
+bucket policy or DNS topology; the operator must validate the private destination
+before configuring its pin.
+
+Both original root executions at `c85badc5` are retained: the primary ended
+with seven passing groups and an S1 descendant-absence failure; the independent
+execution passed all eight. The independent pass does not replace the red run.
+Its parsed PID was not retained, so that historical failure remains unclassified.
+Inspection also found a concrete readiness race: file creation could precede
+PID publication and convert empty bytes to PID `0`. Task `pjuf.3` adds complete
+positive-PID readiness for all three affected test consumers, with the same
+five-second bound and unchanged cleanup assertions. A real delayed-publication
+control fails the legacy reader with `0` and passes the repair.
+
+At successor `dcd61bc9`, typecheck/lint pass all eight groups, the five owning
+lifecycle controls pass, and the full native recovery lane passes in both
+primary and independent execution. The independent legacy-reader mutation fails
+the unchanged real-file control with PID `0`; exact restoration passes that
+case and all five original controls. Both final root suites pass all eight
+groups, in 1,619.766 and 1,589.580 seconds: Worker 7,444, Agora 1,094 and
+Gauntlet 150 tests pass in each. Worker expectation counts differ by one
+(39,519 and 39,518), retained as separate observations. All 2,742 source inputs
+and the actual Next runtime remain unchanged. The 54 individual toolchain skips
+are retained; this does not certify the optional Rust CLI.
+
+Full contracts (1,028) and renderer (605) gates were run at `c85badc5`; their
+package bytes are unchanged at `dcd61bc9`. Product UBS completes eight code
+files with 343 findings (three critical, 45 warnings, 295 information). The
+final two-file test change separately completes 466 findings (zero critical,
+14 warnings, 452 information). All elevated contexts were reviewed without
+suppression; these overlapping scopes are not a security-clean claim or a fix
+for the still-open broader scanner coverage task. WhiteRaven independently
+closed only `p4b.3` and `pjuf.3`, with original-criteria maps 3179 and 3178.
+Their broader recovery and historical-diagnostics parents remain open.
+
+Two earlier qualification rounds were stopped while correcting the first-cron
+oracle and the destination guard. Interrupting an outer capture in the first
+round lost its unreturned output; that attempt provides no acceptance or complete
+cleanup evidence. Later stopped runs retain their partial streams. Starting full
+checks before those reviews finished caused avoidable verification overhead.
+
+The producer is bounded to 256 tables, 2,000 rows per table, 1 MiB SQL per table,
+8 MiB total and 16,000 statements. Larger state and nondefault FTS configuration
+refuse explicitly. A raw SQL restore reintroduces historical authority and must
+stay quarantined: integrated current deletion-journal replay, private CAS
+recovery, provider scheduling and service cutover remain with `p4b`, `zr9`,
+`79n` and `24q`. See the existing
+[backup runbook](runbooks/nightly-ledger-backups.md) for operation and limits.
+
 ### Operator Fellow capacity — independently verified
 
 Task `0ht.2` connects the finished operator cap state, compare-and-set override
@@ -626,7 +701,7 @@ implementation from work that exists but still needs original acceptance.
 | --- | --- | --- |
 | Provisioned G-C runner and measurement | `e2e/gauntlet/run.sh:139` still returns 70 for a supplied join-file input. Local verdicts prove pack retrieval and persistence past an injected refusal, not move following or error-body comprehension. Harness usage is explicitly `whole_session`; served bytes to first promotion are a separate measure. | `zai`, `pcsn`, `mn7`: implement the actual staging journey and authoritative first-promotion usage boundary, then meet ten fresh sessions, three harnesses, eight completions and the 25K-token median. Missing usage or a planted incomplete journey must withhold acceptance. |
 | Safety accuracy and the protected corpus | `e2e/screening/s4-corpus.ts:921,1107` reserves 50 absent protected bodies. The 150 legitimate examples and local fixture screen cannot establish hard-reject recall or hosted accuracy. | `xeg`, `axq`, `drv`, `ip3`: material, digest-bound protected corpus; hosted FP/FN and aggregation tests; bare/inoculated probe trials; actual independent operator decisions and Google verification. |
-| Whole-system recovery | `krater/backup-scheduler.ts:7` explicitly archives published problem ledgers. `restore.ts` restores one verified problem and projections, with provider execution remaining separate. Signed public exports do not restore all account/global/private state. | `p4b`, `zr9`, `79n`, `24q`: complete original backup scope and scratch drills, proving revoked rights and redactions survive; corrupt input must refuse before writes. |
+| Whole-system recovery | `krater/database-backup.ts` now captures bounded full application SQL, including account/global/private state; its real empty-scratch round-trip and independent qualification are recorded above. The original ledger archive and per-problem restore remain separate. Raw SQL import is quarantined historical authority. | `p4b`, `zr9`, `79n`, `24q`: integrated current-rights and CAS recovery, scalable backups and provider drills, proving revoked rights and redactions survive before service cutover; corrupt input must refuse before writes. |
 | Area rename | Implemented after this audit in `moderation/area-renames.ts`, migration 0143 and the existing admin action/form; shared faces carry the new label and public change provenance. | `0ht.1`: local native/browser, adverse controls, full-root and independent acceptance are recorded above. Parent `0ht` retains wider admin/hosted criteria. |
 | Remaining optional CLI | `cli/src/lib.rs:44,46`, `enrollment.rs` and `credentials.rs` now implement connect, device enrollment, approval resume and keychain storage. Browser PKCE, validate/scrub parity, spool/sync/watch/pull/doctor, negotiation and release remain incomplete. | `il7`, `l3b`, `psl`, `jsj`, `85s`, `l1yg.1`: original current-source Rust, parity, native and release criteria; old binaries and compile-only checks cannot substitute. |
 | Deployed configuration and evidence | Source implements receipt-bound readiness, Herald/outbox, rate budgets, artifact publication and scientific consumers. Public deployment and provider behavior remain unqualified. | `rs5n`, `tgu`, `doa`, `irg`, `rhg`, `z2j`, W7: reconcile existing bindings/migrations, preserve Worker-before-Agora order, exercise actual Google/sponsor/anonymous paths and retain load, cost, cache and storage receipts. |
