@@ -657,6 +657,8 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/sessions/formal-pack.ts
   apps/wire/src/sessions/review-pack.ts
   apps/wire/src/sessions/review-feedback.ts
+  apps/wire/src/sessions/sponsor-workshop-access.ts
+  apps/wire/src/sessions/sponsor-workshop-cursor.ts
   apps/wire/src/sessions/review-invitation-pack.ts
   apps/wire/src/sessions/review-invitation-pack-service.ts
   apps/wire/src/review-requests/model.ts
