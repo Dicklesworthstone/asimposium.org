@@ -19,7 +19,7 @@ revision; later documentation and tracker commits do not imply another test run.
 
 ### Observed review feedback — verification in progress
 
-Task `mip.1`, source `83009b8f6fa893438cda6d927d648b493a472f43`, adds
+Task `mip.1`, source `d69bd17bc8c64f3db09b84b382018e3ca8b3cd8d`, adds
 `review_feedback` to new claim-creation receipts from session promotion, direct
 append, sponsor promotion and atomic batch members. The existing queue position
 remains separate. Feedback reports historical median seconds to the first
@@ -39,7 +39,7 @@ bytes enter the observation. New receipts retain the result with their existing
 sealed idempotency record. Later reviews and visibility changes cannot rewrite
 replay bytes, and older stored receipts remain valid without recomputation.
 
-The complete working matchmaking native passed in 9.595 seconds on real local
+The complete working matchmaking native passed in 10.517 seconds on real local
 Workerd/D1/R2. It creates genuine claims and reviews, computes expected elapsed
 time independently from immutable event clocks, and checks all four creation
 paths, first/repeat reviews, version isolation, self-review refusal, private
@@ -47,8 +47,9 @@ scope, review/claim withholding and exact ordinary plus batch replay. Original
 matching, unlisted membership, inbox, pack and end-of-run assertions remain.
 Pure median/boundary tests are units; sponsor identity and screening are fixtures.
 
-All eight typecheck and lint groups passed in 130.763 and 71.025 seconds.
-Three owning unit files passed 38 tests/2,788 assertions; full contracts passed
+Working checks use the exact bytes later frozen above. All eight typecheck
+and lint groups passed in 52.524 and 30.247 seconds. Eight complete owning and
+consumer unit files passed 437 tests/8,548 assertions; full contracts passed
 1,030/8,351 and renderers 605/6,248. All 2,755 source inputs and the actual Next
 runtime stayed fixed. The combined baseline includes peer merge `99610c2a`;
 this task does not claim authorship or browser qualification of that merge's
@@ -59,25 +60,45 @@ the discovery golden. JSON Schema checks structural/null branches; Zod also
 enforces counter arithmetic and canonical omissions.
 
 The initial literal UBS diff scan was partial because ShellCheck timed out.
-The final literal staged scan completed all eleven code files with 91 critical,
+The product's earlier literal staged scan completed eleven code files with 91 critical,
 117 warning and 1,475 informational findings. All 208 elevated contexts and
 informational classes were reviewed without suppressions or relaxed limits;
 the critical findings are existing identity/snapshot comparisons and fixed-key
 or null-prototype copying. This is not a broad security-clean claim. Earlier
 mis-scoped Bun filtering, missing export, real quota refusals and the lint
-failure remain recorded; they are not qualifying passes.
+failure remain recorded; they are not qualifying passes. The final test-only
+staged scan completes one file with one critical, 166 warning and 4,356
+informational findings. All 167 elevated contexts and 13 informational classes
+were reviewed; its critical is a Response object-identity comparison. The
+detailed preformat scan and final scan are kept distinct; the intervening
+change formats two assertion calls while preserving their arguments and comparison.
 
 Independent execution at the exact revision passed typecheck/lint all eight
-groups, contracts 1,030, renderers 605, the three owning unit files 38 and the
-complete native baseline in 9.918 seconds. Removing only the ordinary
+groups, contracts 1,030, renderers 605, all eight owning unit files 437 and the
+two original S2 graph/provenance checks. Its complete native baseline passes
+in 24.249 seconds. Removing only the ordinary
 promotion's feedback assignment failed the unchanged native assertion at line
-476 in 8.081 seconds: the actual receipt lacked the field. The tests and other
+476 in 17.628 seconds: the actual receipt lacked the field. The tests and other
 2,754 source inputs stayed fixed. Exact restoration passed the complete native
-journey in 9.969 seconds; all 2,755 source inputs and the actual Next runtime
-matched baseline and primary source. All eight scoped execution owners exited.
+journey in 21.804 seconds; all 2,755 source inputs and the actual Next runtime
+matched baseline and primary source. All nine scoped execution owners exited.
 
-Both original full root dispatchers are pending at the frozen revision.
-`mip.1` remains in progress. Parent `mip`,
+The first two full root runs were interrupted with retained exit 143 after
+independent review found two reached peer workshop modules missing from S2's
+source inventory. The original import-graph test reproduced `unlisted-source`;
+an initial guessed test regex matched nothing and is nonqualifying. Adding only
+the two missing paths passes both unchanged import-graph and provenance
+verdict tests, 2 tests/17 assertions. The next pair was interrupted after the
+complete session-route file exposed two old exact receipt expectations.
+Three literal expected feedback objects, the shared response type and
+formatting preserve all original concurrency, cursor, transaction and replay
+assertions. The complete file then passes 315 tests/5,207 assertions.
+The related consumer run imports those tests; 399 plus 315 must not be
+double-counted. The final eight-file run executes 437 tests.
+Starting the broad campaigns before these owning/type/format checks wasted
+qualification time. All four interrupted runs retain exit 143 and raw output;
+none counts as a full-suite pass. Both final original full suites are running
+at the frozen revision. `mip.1` remains in progress. Parent `mip`,
 broader review coordination/health, hosted Google, screening accuracy, provider
 deployment, the fresh-agent gauntlet, cost/load and launch remain open.
 
