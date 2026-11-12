@@ -7818,7 +7818,10 @@ run_s2_shell_regression_test() {
     done
     # No supervisor marker nor watchdog marker may outlive a supervisor that exited before
     # release. This exercises the bounded uncertain-inspection self-retirement branch.
-    assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" watchdog-self-retire || return 1
+    if ! assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" "${S2_LAST_SUPERVISOR_MARKER}"; then
+      emit "{\"tool\":\"bash+ps+lsof\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"S2_WATCHDOG_SELF_RETIRE_SURVIVOR_CHECK_FAILED\",\"check\":\"${S2_SURVIVOR_ASSERTION_FAILURE}\",\"reproduce\":\"S2_SHELL_REGRESSION_TEST=watchdog-self-retire scripts/e2e-s2-krater.sh\"}"
+      return 1
+    fi
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"supervisor-exit125-leaves-no-bounded-uncertainty-watchdog-survivor","reproduce":"S2_SHELL_REGRESSION_TEST=watchdog-self-retire scripts/e2e-s2-krater.sh"}'
     return 0
   fi

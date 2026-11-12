@@ -2212,6 +2212,67 @@ describe("S2 to S7 normalized cost receipt", () => {
   });
 });
 
+test(
+  "self-retirement ignores a live watchdog marker belonging to another run",
+  () => {
+    const fixture = mkdtempSync(join(tmpdir(), "asimposium-s2-foreign-watchdog-"));
+    const run = runCaptured(
+      "bash",
+      [
+        "-c",
+        `
+set -u
+mkfifo "$2/release" || exit 125
+exec 9<>"$2/release" || exit 125
+foreign=""
+finish() {
+  result=$?
+  trap - EXIT
+  if [[ -n "$foreign" ]]; then
+    printf 'release\\n' >&9
+    wait "$foreign" || exit 125
+  fi
+  exit "$result"
+}
+trap finish EXIT
+peer_marker="$3$4"
+bash -c 'read -r -t 85 ignored <&9' "$peer_marker" &
+foreign=$!
+bash "$1" 9>&-
+result=$?
+kill -0 "$foreign" 2>/dev/null || exit 125
+printf '%s\\n' '{"suite":"s2-foreign-watchdog-control","status":"pass","foreign_process_still_live":true}'
+exit "$result"
+`,
+        "s2-self-retire-collision",
+        SCRIPT,
+        fixture,
+        "s2-parent-watchdog-",
+        "watchdog-self-retire-unrelated",
+      ],
+      {
+        S2_RUN_ID: `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+        S2_SHELL_REGRESSION_TEST: "watchdog-self-retire",
+      },
+      S2_SHELL_REGRESSION_WATCHDOG_MS,
+    );
+    expect(run.exitCode, `${run.retainedLogs}\n${run.stdout}\n${run.stderr}`).toBe(0);
+    expect(ndjsonRecords(run)).toContainEqual({
+      suite: "s2-foreign-watchdog-control",
+      status: "pass",
+      foreign_process_still_live: true,
+    });
+    expect(ndjsonRecords(run)).toContainEqual(
+      expect.objectContaining({
+        suite: "s2-krater-shell",
+        status: "pass",
+        scenario: "supervisor-exit125-leaves-no-bounded-uncertainty-watchdog-survivor",
+      }),
+    );
+  },
+  S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+);
+
 const S2_SHELL_REGRESSION_MODES = [
   "pre-release-helper-classification",
   "pre-release-second-kill-authority",

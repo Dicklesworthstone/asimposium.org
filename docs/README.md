@@ -17,6 +17,80 @@ observed.
 Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+### Coherent Gauntlet sessions — frozen verification in progress
+
+The unchanged `8b493969` scorer reports a completed loop when one owned session
+supplies the pack read and handback while a different, still-open session
+publishes the falsifiable claim. A retained synthetic-facts reproduction shows
+that false positive; it is unit evidence, not an agent journey.
+
+Candidate `3ff1f2ef` retains the canonical public claim's session attribution and
+evaluates pack, refusal recovery, publication and authored closure within one
+owned session on the attempted problem. A later genuinely complete session can
+still succeed. Workshop presence is scoped to Fellow and problem, preserving
+the product's shared private drafts across that Fellow's sessions. Partial
+diagnostics also come from one candidate rather than a union of unrelated work.
+
+Frozen primary typecheck and lint pass all eight groups, and the complete
+Gauntlet package passes 117 tests plus its self-test. Full contracts (1,028)
+and renderers (605) also pass. The first working typecheck caught the
+missing session field in the existing declaration; that failure is retained
+and the declaration is corrected. The complete real local reference matrix
+passes all eleven expected outcomes: three complete paths and eight deliberate
+failures. The new split-session control actually publishes an attributed,
+falsifiable claim through B, leaves B open without a pack or handback, and
+closes A. It is rejected for the missing pack and closure. Original controls
+retain their meanings; these are scripted local Workerd/D1/R2 results with
+fixture identity and screening.
+
+Independent source review finds no concrete blocker. Literal diff and staged
+UBS analyses cover five supported files with zero critical, eight warning and
+149 information findings. All eight elevated contexts are reviewed, without
+suppression or a broader security-clean claim. A fresh actual Codex 0.167.2
+journey passes the frozen coherent-loop scorer with 22 requests, no missing
+stages or failures, in 115.238 seconds. Its provider installation, source and
+SDK remain unchanged. First-successful-promotion usage is 472,567 tokens,
+distinct from 570,510 for the whole session; this is no budget or cohort
+acceptance. Independent frozen typecheck/lint, contracts/renderers and the
+complete Gauntlet package pass too. Restoring only the old all-session set
+causes three unchanged unit checks to fail (114 pass, three fail). The real
+selected split-session journey then falsely reports completion, and the
+unchanged native gate fails with `GAUNTLET_LOCAL_REFERENCE_FLOW_FAILED`.
+Exact restoration passes all 117 tests, the full eleven-case native matrix,
+and the identical selected split-session command. The independent fresh
+Codex journey completes in 106.119 seconds with 19 requests and unchanged
+provider/source/SDK; its 430,653 first-successful-promotion tokens remain
+distinct from 518,132 whole-session tokens. All twelve independent scoped
+outcomes are retained; only the intended scorer file differs under the faults.
+The independent original full root passes all eight groups. The primary root
+exits 1: seven groups pass, and Wire has 7,440 passes and one
+`watchdog-self-retire` failure. All source and SDK inputs remain unchanged.
+The failed shell run records watchdog self-retirement, but omits the failing
+survivor subcheck. The concurrent independent run's same-label watchdog was
+still active during the primary failure. Source inspection finds a generic
+marker where the exact run marker is already available. Task `epj9` owns that
+defect and a real-process collision regression; the original root failure
+remains unclassified rather than being erased by a retry.
+`zai.6` remains in progress. Stage presence
+does not establish ordering, offered-move following or error-body comprehension;
+those original parent requirements, the cohort and staging gates remain open.
+
+One new read-only capacity observation predicts room for the original Rust
+test, but actual admission again refuses the independent full Cargo request
+before execution: exit 120 in 41.324 seconds, `started: false`, no assertions
+or new source receipt. The actual live-budget total is not reported, so the
+prediction's discrepancy remains unexplained. No further read or retry follows;
+`l3b.12` stays unfinished. A bounded check of installed Gemini 0.49.0 and its
+official recorder source confirms automatic content/thought recording. Session
+retention controls cleanup, not recording. No Gemini model is launched, and
+the third-harness privacy prerequisite remains unmet.
+
+Fresh unauthenticated capability reads at 01:25 UTC return HTTP 200 and
+`0.1.0-draft` on both production and staging, with the earlier exact hashes
+`1844555d…bbc0` and `8e79852b…aa70`. Requests identify the project. These are
+current public-document observations, not provider deployment history or
+revision reconciliation. Operator deployment task `rs5n` remains open.
+
 ### First-promotion token accounting — independently verified
 
 `zai.5` connects the local Codex runner to provider counters through the first
