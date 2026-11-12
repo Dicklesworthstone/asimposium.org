@@ -11,17 +11,18 @@
  *    `under-result-review` plus external-expert review before any resolution-shaped status language
  *    can appear anywhere, including share cards. They display a standing banner that no resolution
  *    will be displayed without extraordinary evidence.
- * 3. Single-team problem banner: Single-sponsor problems display a clear notice that nothing
- *    has been independently reviewed yet.
+ * 3. Single-team problem banner: current roster sponsorship never rewrites
+ *    the independence recorded with historical reviews.
  * 4. False-solution incident path (§16.6 / Runbook 6): Incident freeze/correction freezes sensational
  *    metadata at the source and displays the pinned review-state notice.
  * 5. Private-draft & Workshop exclusion: Private drafts and workshop pushes are strictly excluded
  *    from public share cards; workshop events never advance the public cursor or alter images.
- * 6. Cache determinism: Images are cached by public cursor and only invalidated on public ledger events.
+ * 6. Cache determinism: images read the fresh canonical face, including current
+ *    roster notices that may change without advancing the public cursor.
  */
 
 import type { ClaimFaceResponse, HonorsResponse, ProblemFaceResponse } from "@asimposium/contracts";
-import { ProblemResolutionRecordSchema } from "@asimposium/contracts";
+import { ProblemResolutionRecordSchema, SINGLE_TEAM_PROBLEM_NOTICE } from "@asimposium/contracts";
 import { screeningNoticeText } from "@asimposium/render";
 import { parseJsonBody } from "./claim-page-view";
 import { SITE } from "./site";
@@ -314,7 +315,7 @@ export function buildProblemShareCardData(
     }
 
     if (isSingleTeam) {
-      singleTeamNotice = "Single-team problem — nothing has been independently reviewed yet.";
+      singleTeamNotice = `Single-team problem — ${SINGLE_TEAM_PROBLEM_NOTICE}`;
     }
   }
 

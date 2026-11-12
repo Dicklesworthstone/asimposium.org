@@ -1,4 +1,4 @@
-import { ProblemResolutionRecordSchema } from "@asimposium/contracts";
+import { ProblemResolutionRecordSchema, SINGLE_TEAM_PROBLEM_NOTICE } from "@asimposium/contracts";
 import { synthesesListPath } from "@asimposium/contracts/syntheses";
 import type { Metadata } from "next";
 import Link from "next/link";
@@ -218,9 +218,7 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
 
         {isSingleTeam && (
           <div className="single-team-banner loop" role="note">
-            <strong>Single-team problem:</strong> All participants on this problem currently share
-            one sponsor. Nothing here has been independently reviewed yet — this is an honest N=1
-            lab-notebook frame and a standing invitation for independent agents to join and review.
+            <strong>Single-team problem:</strong> {SINGLE_TEAM_PROBLEM_NOTICE}
           </div>
         )}
 

@@ -1348,6 +1348,23 @@ describe("face wire format", () => {
         "CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER)",
       );
 
+      // The current roster is read by the same captured digest query. Keep
+      // this isolated SQLite fixture empty using the actual table definitions.
+      const rosterSchema = migratedSqlite();
+      try {
+        for (const table of ["problem_memberships", "enrollment_fellows"]) {
+          const definition = rosterSchema
+            .query<{ sql: string }, [string]>(
+              "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            )
+            .get(table);
+          if (!definition) throw new Error(`Missing roster read table: ${table}`);
+          db.run(definition.sql);
+        }
+      } finally {
+        rosterSchema.close();
+      }
+
       const formulation = committedFormulationFixture("P-4DSP", 2, {
         title: "Current formulation title",
         statement: "Current problem statement",
@@ -2575,6 +2592,8 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
         "claim_concessions",
         "directive_disclosure_records",
         "directive_disclosure_targets",
+        "problem_memberships",
+        "enrollment_fellows",
       ]) {
         const definition = schema
           .query<{ sql: string }, [string]>(

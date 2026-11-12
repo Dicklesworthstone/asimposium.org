@@ -5,6 +5,7 @@ import {
   ConflictsListResponseSchema,
   ProblemFaceResponseSchema,
   ScreeningPublicationProvenanceSchema,
+  SINGLE_TEAM_PROBLEM_NOTICE,
 } from "@asimposium/contracts";
 import { type Projection, screeningNoticeText } from "@asimposium/render";
 import type { Env } from "../../src/env.ts";
@@ -31,6 +32,7 @@ function formulationEnv(row: {
   public_seq: number;
   current_statement_version: number;
   formulation_json: string;
+  roster_sponsorship_json?: string | null;
 }): Env {
   return {
     DB: {
@@ -39,7 +41,7 @@ function formulationEnv(row: {
           bind: () => stmt,
           all: async () => {
             if (!query.includes("FROM problems p JOIN events e ON e.id = (")) {
-              return { results: [row] };
+              return { results: [{ roster_sponsorship_json: "[]", ...row }] };
             }
             const formulation = JSON.parse(row.formulation_json);
             const version = formulation.current_statement_version;
@@ -169,6 +171,63 @@ test("formulation fields share the untrusted renderer and whole-item byte budget
   expect(legacyFace.omitted).toContainEqual(
     expect.objectContaining({ reason: "formulation_unavailable" }),
   );
+});
+
+test("single-team notices require complete bounded current sponsorship, not scientific review inference (unit row double)", async () => {
+  const row = {
+    problem_id: "P-PATHS",
+    public_seq: 1,
+    status: "sharpening",
+    current_statement_version: 1,
+    formulation_json: JSON.stringify({
+      title: "Paths",
+      current_statement_version: 1,
+      statement: "A path has one more vertex than edges.",
+      falsifier: "A path with equal vertex and edge counts.",
+      motivation: "A finite convention.",
+    }),
+    claim_id: null,
+    statement: null,
+    source_seq: null,
+    roster_sponsorship_json: undefined as string | null | undefined,
+  };
+  const app = createLedgerFaceRoutes();
+  const env = formulationEnv(row);
+  const cases = [
+    { raw: JSON.stringify(["usr_canary_private"]), single: true, unknown: false },
+    { raw: JSON.stringify(Array(128).fill("usr_canary_private")), single: true, unknown: false },
+    { raw: "[]", single: false, unknown: false },
+    { raw: JSON.stringify(["usr_one", "usr_other"]), single: false, unknown: false },
+    { raw: JSON.stringify(Array(129).fill("usr_canary_private")), single: false, unknown: true },
+    { raw: JSON.stringify(["usr_one", null]), single: false, unknown: true },
+    { raw: JSON.stringify(["not_a_sponsor"]), single: false, unknown: true },
+    { raw: JSON.stringify(["usr_one\n"]), single: false, unknown: true },
+    { raw: JSON.stringify(["x".repeat(129)]), single: false, unknown: true },
+    { raw: "{}", single: false, unknown: true },
+    { raw: "[", single: false, unknown: true },
+    { raw: " ".repeat(32_769), single: false, unknown: true },
+    { raw: null, single: false, unknown: true },
+    { raw: undefined, single: false, unknown: true },
+  ];
+  for (const item of cases) {
+    row.roster_sponsorship_json = item.raw;
+    const response = await app.request("https://a.asimposium.org/p/P-PATHS.json", {}, env);
+    expect(response.status).toBe(200);
+    const face = ProblemFaceResponseSchema.parse(await response.json());
+    expect(face.omitted.some((entry) => entry.reason === "single_team")).toBe(item.single);
+    expect(
+      face.omitted.some((entry) => entry.detail?.startsWith("Current roster sponsorship")),
+    ).toBe(item.unknown);
+    const notice = face.omitted.find((entry) => entry.reason === "single_team");
+    if (notice) expect(notice.detail).toBe(`Single-team problem: ${SINGLE_TEAM_PROBLEM_NOTICE}`);
+    expect(JSON.stringify(face)).not.toContain("usr_canary_private");
+    expect(JSON.stringify(face.omitted)).not.toContain("nothing has been independently reviewed");
+    const markdown = await (
+      await app.request("https://a.asimposium.org/p/P-PATHS.md", {}, env)
+    ).text();
+    if (notice) expect(markdown).toContain(`Single-team problem: ${SINGLE_TEAM_PROBLEM_NOTICE}`);
+    expect(new TextEncoder().encode(markdown).length).toBeLessThanOrEqual(16_000);
+  }
 });
 
 test("statement review reader verifies event content, projection and attribution before disclosure (unit row double)", async () => {

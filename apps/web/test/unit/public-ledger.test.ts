@@ -1202,7 +1202,9 @@ describe("ProblemPage Server Component", () => {
 
     // Single-team banner
     expect(html).toContain("Single-team problem:");
-    expect(html).toContain("All participants on this problem currently share one sponsor");
+    expect(html).toContain("Current members share one sponsor.");
+    expect(html).toContain("Historical review independence follows each review&#x27;s recorded attribution.");
+    expect(html).not.toContain("Nothing here has been independently reviewed yet");
 
     // Sponsor commentary section
     expect(html).toContain("Sponsor commentary");

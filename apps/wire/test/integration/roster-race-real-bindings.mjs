@@ -47,6 +47,30 @@ await runLocalWorkerJourney(async (context) => {
   );
   const authorSession = (await call("/v1/sessions", { problem_id: problem }, author, 201))
     .session_id;
+  const rosterSponsors = await env.DB.prepare(`SELECT f.sponsor_id FROM problem_memberships m
+    JOIN enrollment_fellows f ON f.fellow_id=m.fellow_id WHERE m.problem_id=?`)
+    .bind(problem)
+    .all();
+  assert.deepEqual(rosterSponsors.results, [{ sponsor_id: OWNER }]);
+  const oneSponsorResponse = await worker.fetch(`${origin}/p/${problem}.json`, {
+    headers: { "user-agent": userAgent },
+  });
+  assert.equal(oneSponsorResponse.status, 200);
+  const oneSponsorFace = await oneSponsorResponse.json();
+  assert.ok(
+    oneSponsorFace.omitted.some((item) => item.reason === "single_team"),
+    "the canonical problem face must disclose its recorded one-sponsor roster",
+  );
+  const oneSponsorMarkdown = await worker.fetch(`${origin}/p/${problem}.md`, {
+    headers: { "user-agent": userAgent },
+  });
+  assert.equal(oneSponsorMarkdown.status, 200);
+  const singleTeamDetail = oneSponsorFace.omitted.find(
+    (item) => item.reason === "single_team",
+  ).detail;
+  assert.ok((await oneSponsorMarkdown.text()).includes(singleTeamDetail));
+  assert.ok(!singleTeamDetail.includes(OWNER), "no sponsor identity is exposed by the notice");
+  assert.match(singleTeamDetail, /Historical review independence/);
   const sharpeningNext = await call(`/v1/p/${problem}/next`, undefined, author);
   assert.equal(sharpeningNext.degraded, true);
   assert.equal(
@@ -57,6 +81,14 @@ await runLocalWorkerJourney(async (context) => {
   const reviewSession = (
     await call("/v1/sessions", { problem_id: problem, intent: "review" }, reviewer, 201)
   ).session_id;
+  const twoSponsorResponse = await worker.fetch(`${origin}/p/${problem}.json`, {
+    headers: { "user-agent": userAgent, "if-none-match": oneSponsorResponse.headers.get("etag") },
+  });
+  assert.equal(twoSponsorResponse.status, 200, "a roster join invalidates the old face ETag");
+  const twoSponsorFace = await twoSponsorResponse.json();
+  assert.equal(twoSponsorFace.cursor, oneSponsorFace.cursor, "a join need not advance the ledger");
+  assert.ok(!twoSponsorFace.omitted.some((item) => item.reason === "single_team"));
+  assert.notEqual(twoSponsorResponse.headers.get("etag"), oneSponsorResponse.headers.get("etag"));
   await call(
     `/v1/problems/${problem}/statement-review`,
     {
@@ -67,6 +99,42 @@ await runLocalWorkerJourney(async (context) => {
     },
     reviewer,
   );
+
+  const reviewedFace = await call(`/p/${problem}.json`);
+  const recordedReviews = reviewedFace.items.filter((item) => item.kind === "statement-review");
+  assert.equal(recordedReviews.length, 1, "a real cross-sponsor statement review is readable");
+  const reviewFellow = (await call("/v1/hello", undefined, reviewer)).fellow.fellow_id;
+  await sponsorCall(
+    OWNER,
+    "POST",
+    `/v1/sponsors/problems/${problem}/lifecycle`,
+    "problem-lifecycle",
+    { action: "manage-member", operation: "remove", target_fellow_id: reviewFellow },
+  );
+  const currentSingleTeam = await call(`/p/${problem}.json`);
+  assert.ok(currentSingleTeam.omitted.some((item) => item.reason === "single_team"));
+  assert.deepEqual(
+    currentSingleTeam.items.filter((item) => item.kind === "statement-review"),
+    recordedReviews,
+    "current membership cannot rewrite a committed review's attribution",
+  );
+  assert.ok(
+    !JSON.stringify(currentSingleTeam.omitted).includes("nothing has been independently reviewed"),
+  );
+  await sponsorCall(
+    OWNER,
+    "POST",
+    `/v1/sponsors/problems/${problem}/lifecycle`,
+    "problem-lifecycle",
+    {
+      action: "manage-member",
+      operation: "set-role",
+      target_fellow_id: reviewFellow,
+      role: "contributor",
+    },
+  );
+  const restoredTeams = await call(`/p/${problem}.json`);
+  assert.ok(!restoredTeams.omitted.some((item) => item.reason === "single_team"));
 
   const firstNext = await call(`/v1/p/${problem}/next`, undefined, author);
   assert.equal(

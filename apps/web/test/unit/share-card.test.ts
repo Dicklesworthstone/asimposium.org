@@ -367,17 +367,16 @@ describe("Problem Share Card View Model", () => {
     expect(data.suggestedShareText).toContain("Famous-problem guardrail");
   });
 
-  test("single-team problem banner displayed when unreviewed", () => {
+  test("single-team notice describes current membership without denying historical independent reviews", () => {
     const face = createMinimalProblemFace({
-      preamble: "Single-team problem — nothing here has been independently reviewed yet.",
       omitted: [{ reason: "single_team" }],
     });
     const data = buildProblemShareCardData(face);
 
     expect(data.isSingleTeam).toBe(true);
-    expect(data.singleTeamNotice).toContain(
-      "Single-team problem — nothing has been independently reviewed yet.",
-    );
+    expect(data.singleTeamNotice).toContain("Current members share one sponsor.");
+    expect(data.singleTeamNotice).toContain("Historical review independence follows each review's recorded attribution.");
+    expect(data.singleTeamNotice).not.toContain("nothing has been independently reviewed");
     expect(data.suggestedShareText).toContain("Single-team problem");
   });
 

@@ -46,7 +46,7 @@ import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
-import { ClaimFaceResponseSchema } from "../../packages/contracts/src/ledger.ts";
+import { ClaimFaceResponseSchema, ProblemFaceResponseSchema, SINGLE_TEAM_PROBLEM_NOTICE } from "../../packages/contracts/src/ledger.ts";
 import { parsePublicProblemExport, PUBLIC_EXPORT_FORMAT, verifyPublicProblemExportChain } from "../../apps/wire/src/krater/export.ts";
 import { PUBLIC_EXPORT_MAX_BYTES } from "../../apps/wire/src/ledger/event-export-snapshot.ts";
 import { SITE } from "../../apps/web/lib/site.ts";
@@ -1020,6 +1020,35 @@ async function main() {
     const claimsList = await seedClaimsList(target);
     const scientificCollections = await seedScientificCollections(target, claimsList);
     const citations = await seedCitations(target);
+    // A separate real board preserves all earlier scenarios. Its current
+    // roster becomes single-team while the earlier cross-sponsor statement
+    // review stays in the ledger; the warning cannot deny that history.
+    const singleTeamProblemId = await setUpProblem(target, 4);
+    const singleTeamOwner = (await target.env.DB.prepare(
+      "SELECT sponsor_id FROM problems WHERE id=?",
+    ).bind(singleTeamProblemId).first()).sponsor_id;
+    const noticeRoster = (await target.env.DB.prepare(`SELECT m.fellow_id,f.sponsor_id
+      FROM problem_memberships m JOIN enrollment_fellows f ON f.fellow_id=m.fellow_id
+      WHERE m.problem_id=?`).bind(singleTeamProblemId).all()).results;
+    assert.ok(noticeRoster.some((member) => member.sponsor_id !== singleTeamOwner));
+    const changeNoticeRoster = async (operation) => {
+      for (const member of noticeRoster.filter((member) => member.sponsor_id !== singleTeamOwner)) {
+        const changed = await target.sponsor(singleTeamOwner, "POST",
+          `/v1/sponsors/problems/${singleTeamProblemId}/lifecycle`, "problem-lifecycle", {
+            action: "manage-member", operation, target_fellow_id: member.fellow_id,
+            ...(operation === "set-role" ? { role: "contributor" } : {}),
+          });
+        assert.equal(changed.status, 200, "the current steward changes the actual membership");
+      }
+    };
+    await changeNoticeRoster("remove");
+    const rosterNoticeFace = ProblemFaceResponseSchema.parse(await (await fetch(
+      `${target.origin}/p/${singleTeamProblemId}.json`, { headers: { "user-agent": USER_AGENT } },
+    )).json());
+    record("single-team source: canonical current roster notice preserves a real earlier review",
+      rosterNoticeFace.omitted.some((item) => item.reason === "single_team" &&
+        item.detail === `Single-team problem: ${SINGLE_TEAM_PROBLEM_NOTICE}`) &&
+      rosterNoticeFace.items.some((item) => item.kind === "statement-review"));
     const claimProbe = await fetch(`${target.origin}/p/${problemId}/claims/${claimId}.json`, {
       headers: { "user-agent": USER_AGENT },
     });
@@ -1345,6 +1374,25 @@ async function main() {
           ? null
           : (problemText ?? "").replace(/\s+/g, " ").slice(0, 600),
       );
+      record(`${mode} a multiple-sponsor roster does not show a single-team problem notice`,
+        await page.locator(".single-team-banner").count() === 0);
+      await page.goto(`${agora.origin}/p/${singleTeamProblemId}`, { waitUntil: "load" });
+      const currentRosterNotice = await page.locator(".single-team-banner").innerText();
+      const shareRosterNotice = await page.locator(".single-team-alert-banner").innerText();
+      record(`${mode} actual problem page consumes the canonical current-roster notice`,
+        currentRosterNotice.includes(SINGLE_TEAM_PROBLEM_NOTICE));
+      record(`${mode} actual share panel consumes the same current-roster notice`,
+        shareRosterNotice.includes(SINGLE_TEAM_PROBLEM_NOTICE));
+      record(`${mode} a current single team cannot erase historical review independence`,
+        !`${currentRosterNotice} ${shareRosterNotice}`.includes("nothing has been independently reviewed") &&
+        (await page.textContent("body"))?.includes("statement-clear"));
+      await changeNoticeRoster("set-role");
+      await page.reload({ waitUntil: "load" });
+      record(`${mode} a warmed same-URL page refresh removes both notices after another sponsor rejoins`,
+        await page.locator(".single-team-banner").count() === 0 &&
+        await page.locator(".single-team-alert-banner").count() === 0 &&
+        (await page.textContent("body"))?.includes("statement-clear"));
+      await changeNoticeRoster("remove");
       await page.goto(`${agora.origin}/p/${problemId}/claims/${claimId}`, { waitUntil: "load" });
       const claimText = await page.textContent("body");
       record(
@@ -2239,7 +2287,7 @@ async function main() {
       };
       const context = await browser.newContext();
       const page = await context.newPage();
-      for (const path of [`/p/${problemId}`, `/p/${problemId}/claims/${claimId}`]) {
+      for (const path of [`/p/${problemId}`, `/p/${problemId}/claims/${claimId}`, `/p/${singleTeamProblemId}`]) {
         const imagePath = await ogImagePath(path);
         record(`og ${path} declares an og:image for Agora`, imagePath !== null, imagePath);
         if (imagePath === null) continue;
@@ -2267,6 +2315,16 @@ async function main() {
           decoded,
         );
       }
+      const rosterCard = await ogImagePath(`/p/${singleTeamProblemId}`);
+      assert.notEqual(rosterCard, null, "the single-team page has a real image route");
+      const rosterImageBefore = await card(rosterCard);
+      await changeNoticeRoster("set-role");
+      const rosterImageAfter = await card(rosterCard);
+      record("og a warmed same-URL image refreshes after the actual roster governance change",
+        rosterImageBefore.status === 200 && rosterImageAfter.status === 200 &&
+        rosterImageAfter.width === 1200 && rosterImageAfter.height === 630 &&
+        !rosterImageBefore.bytes.equals(rosterImageAfter.bytes));
+      await changeNoticeRoster("remove");
       // A card rendered from the live face changes when the ledger does; the
       // unavailable/not-found fallback depends only on the slug and cannot.
       const problemCard = await ogImagePath(`/p/${problemId}`);

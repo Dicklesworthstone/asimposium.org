@@ -468,6 +468,10 @@ const PublicFaceResponseSchema = z
   })
   .strict();
 
+/** Current membership is distinct from the attribution pinned to past reviews. */
+export const SINGLE_TEAM_PROBLEM_NOTICE =
+  "Current members share one sponsor. Historical review independence follows each review's recorded attribution.";
+
 export const ProblemFaceResponseSchema = PublicFaceResponseSchema.extend({
   // Administrative lifecycle at the digest cursor, never scientific standing.
   problem_status: ProblemStatusSchema.exclude(["private-draft"]),

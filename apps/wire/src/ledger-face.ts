@@ -21,6 +21,8 @@ import {
   PublicLedgerProblemIdSchema,
   RETRACTIONS_SCHEMA_ID,
   RetractionsListResponseSchema,
+  SINGLE_TEAM_PROBLEM_NOTICE,
+  SponsorIdSchema,
   SYNTHESES_SCHEMA_ID,
 } from "@asimposium/contracts";
 import {
@@ -172,6 +174,7 @@ function indexingHeaders(unlisted: boolean): Record<string, string> {
 }
 const PROBLEM_DIGEST_CANDIDATE_LIMIT = 200;
 const PROBLEM_DIGEST_TOKEN_BUDGET = 4_000;
+const PROBLEM_ROSTER_SOURCE_LIMIT = 128;
 const STATEMENT_REVIEW_LIMIT = 20;
 const PROBLEM_DIGEST_SELECT = `SELECT
   p.id AS problem_id,
@@ -179,6 +182,15 @@ const PROBLEM_DIGEST_SELECT = `SELECT
   p.unlisted AS unlisted,
   p.status AS status,
   p.current_statement_version AS current_statement_version,
+  CASE WHEN ROW_NUMBER() OVER (ORDER BY claims.source_seq ASC, claims.id ASC) = 1 THEN (
+    SELECT json_group_array(sponsor_id) FROM (
+      SELECT CASE WHEN typeof(f.sponsor_id) = 'text'
+        AND length(CAST(f.sponsor_id AS BLOB)) BETWEEN 1 AND 128
+        THEN f.sponsor_id END AS sponsor_id
+      FROM problem_memberships m LEFT JOIN enrollment_fellows f ON f.fellow_id = m.fellow_id
+      WHERE m.problem_id = p.id ORDER BY m.fellow_id LIMIT ${PROBLEM_ROSTER_SOURCE_LIMIT + 1}
+    )
+  ) END AS roster_sponsorship_json,
   (SELECT h.source_cursor FROM projection_health h
     WHERE h.problem_id = p.id AND h.status = 'drift') AS projection_drift_cursor,
   CASE WHEN ROW_NUMBER() OVER (ORDER BY claims.source_seq ASC, claims.id ASC) = 1 THEN (
@@ -260,6 +272,7 @@ interface ProblemDigestRow {
   /** W2.6: the cursor at which unrepaired projection drift was recorded, else null. */
   readonly projection_drift_cursor?: number | null;
   readonly current_statement_version: number;
+  readonly roster_sponsorship_json?: string | null;
   readonly statement_reviews_json: string | null;
   readonly result_review_json: string | null;
   readonly claim_id: string | null;
@@ -716,6 +729,34 @@ function projectionDriftNotice(cursor: number | null | undefined): string[] {
     : [];
 }
 
+/** Only a complete bounded roster can establish this current-membership fact.
+ * Missing identities are unknown, never a second team or independent review. */
+function currentRosterNotice(raw: string | null | undefined) {
+  const unavailable = [
+    {
+      reason: "source_omission",
+      detail:
+        "Current roster sponsorship is unavailable or exceeds this digest's 128-member source bound; no single-team claim is made.",
+    },
+  ];
+  if (typeof raw !== "string" || new TextEncoder().encode(raw).byteLength > 32_768)
+    return unavailable;
+  try {
+    const sponsors: unknown = JSON.parse(raw);
+    if (
+      !Array.isArray(sponsors) ||
+      sponsors.length > PROBLEM_ROSTER_SOURCE_LIMIT ||
+      !sponsors.every((id) => SponsorIdSchema.safeParse(id).success)
+    )
+      return unavailable;
+    return sponsors.length > 0 && new Set(sponsors).size === 1
+      ? [{ reason: "single_team", detail: `Single-team problem: ${SINGLE_TEAM_PROBLEM_NOTICE}` }]
+      : [];
+  } catch {
+    return unavailable;
+  }
+}
+
 async function loadProblemFace(
   db: Env["DB"],
   requestedProblemId: string,
@@ -865,6 +906,7 @@ async function loadProblemFace(
       },
     ],
     omitted: [
+      ...currentRosterNotice(first.roster_sponsorship_json),
       ...resolution.omitted,
       ...resultReview.omitted,
       ...reviews.omitted,
