@@ -17,7 +17,7 @@ observed.
 Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-### Observed review feedback — verification in progress
+### Observed review feedback — independently verified
 
 Task `mip.1`, source `d69bd17bc8c64f3db09b84b382018e3ca8b3cd8d`, adds
 `review_feedback` to new claim-creation receipts from session promotion, direct
@@ -120,8 +120,18 @@ Warnings concern existing test JSON parsing and an inert hostile-script fixture.
 The correction changes no runtime, unit, protocol, manifest or SDK bytes.
 The root Worker selector runs unit/split, excludes contract, and has no consumer
 of these two files. Full-root evidence therefore stays explicitly pinned to
-`d69bd17b`; independent affected-component verification of the catalog successor
-is pending. `mip.1` remains in progress. Parent `mip`,
+`d69bd17b`. Independent exact-successor execution passes HTTP 191/2,643,
+security 33/288, typecheck eight groups and lint eight groups. Removing only
+the actual protocol-conflict subrouter mount fails the unchanged census at
+lines 572 and 583 (189 pass/2 fail); exact restoration passes the full HTTP
+component again. All five positive runs preserve all 2,755 inputs and SDK;
+the fault changes only that mount's source file, with every test unchanged.
+All six execution owners exited. The final source comparison against `d69bd17b`
+differs in exactly the two contract files, with 2,753 other inputs and SDK fixed.
+Existing lint warnings and diagnostic elisions remain; green is not warning-free.
+WhiteRaven closed only `mip.1` at 2026-11-12 20:49:45 UTC, with the original
+acceptance criteria mapped to source lines and retained execution evidence in
+Beads comment 3194. Parent `mip`,
 broader review coordination/health, hosted Google, screening accuracy, provider
 deployment, the fresh-agent gauntlet, cost/load and launch remain open.
 
