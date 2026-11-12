@@ -17,7 +17,7 @@ observed.
 Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-### First-promotion token accounting — frozen validation in progress
+### First-promotion token accounting — independently verified
 
 `zai.5` connects the local Codex runner to provider counters through the first
 server-observed successful promotion. It collects only reduced counters,
@@ -66,8 +66,19 @@ whole-session tokens and 70,415 served bytes through promotion. Its actual
 different local attempts are not a cohort or a performance comparison. The
 five-component reconciliation is enforced by the running constructor; raw
 provider events are deliberately not retained for a separate replay.
-Both original complete root gates are still running. `zai.5` remains in
-progress until their outcomes and independent acceptance are complete.
+Both original complete root gates pass at `7c43d6dd`: the primary finishes
+at 00:40:01 UTC in 1,546.265 seconds; the independent run finishes at 00:39:42
+UTC in 1,499.698 seconds. Each executes all eight groups with zero failures,
+blocked groups, missing groups or whole-group skips: 7,441 Worker tests with
+39,508 assertions, 1,093 Agora tests and all 111 Gauntlet tests. The original
+54 individual toolchain skips and retained S-1 post-exit-drain diagnostic remain;
+these results do not establish G0. All 2,738 proof inputs and the actual Next SDK
+match before, after and current source. The later `dce2e063` commit contains
+only the pending assessment and tracker metadata, with identical runtime bytes.
+WhiteRaven independently accepts and closes only `zai.5` at 00:43:46 UTC, with
+the original criterion/source/evidence map in comment 3156. The tracker has
+623 issues: 479 closed and 144 unfinished. The parent and external requirements
+below remain open.
 The scoped code UBS diff and post-peer-commit staged analysis complete with
 219 findings: one critical, 19 warnings and 199 information items across six
 files. Both reviewers inspect every elevated context and establish no new
