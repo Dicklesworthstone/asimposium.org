@@ -17,6 +17,84 @@ observed.
 Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+### Roster role advice — independently verified
+
+Task `1ar.1`, source `67267ffc0546d6641ab7d8f2ccd69f6e2dabc3e9`, connects
+the existing roster suggestion helper to authenticated `/v1/p/:id/next` JSON
+and Markdown. `viewer.role_suggestion` names a worker, critic, investigator,
+synthesizer or observer with site-authored guidance and `advisory: true`.
+Recorded membership and effective permissions remain authoritative; the hint
+grants neither a slot nor publication permission. Public move faces acquire
+no Fellow-specific advice.
+
+One metadata-only read checks current membership and writer headcount at the
+canonical move selector's captured public cursor. Review guidance uses an
+already offered review/refutation move, never a second scientific evaluator or
+an invented count of unreviewed claims. The response exposes no headcounts or
+actor/model activity rankings. Existing writers keep writer guidance at a full
+cap; observers remain observers even after uncapping until membership actually
+changes. Missing, private, hidden, changed or unreadable inputs and degraded
+selection leave advice null. All reasons avoid claiming that no unreviewed work
+exists merely because this selection offers no review.
+
+The complete real local Workerd/D1/R2 roster journey passes in 8.240 seconds.
+It checks the unjoined and partial-discovery boundaries, worker guidance after
+statement approval, critic guidance for a real independent review opportunity,
+JSON/Markdown agreement and private-canary exclusion. Eight concurrent joins
+leave exactly five contributors and five observers at cap five; three racer
+promotions succeed and five receive `ROSTER_FULL`. Observer advice and denied
+promotion permission persist after uncapping. Original projection/search,
+credential-log and trigger checks remain. This is local binding evidence with
+fixture identities/screening, not hosted or multi-region acceptance. The generic
+trigger report still has 67 skipped transition rules and unknown exhaustive
+coverage.
+
+Working checks use the exact bytes frozen above: seven complete owning files
+122 tests/2,886 assertions, full contracts 1,031/8,364, render 605/6,248,
+Worker HTTP 191/2,643 and security 33/288. Typecheck and lint pass all eight
+groups. The targeted source-closure check passes one test with 151 filtered;
+this is not a separately executed full 152-case harness. All 2,757 qualified
+inputs and the actual Next runtime remain fixed. Zod generates the authenticated
+next definition in the existing moves schema; valid/invalid fixtures agree with
+Ajv, and only the intentional moves-schema byte count changes in discovery's
+golden registry. The literal UBS diff/details/staged scans complete nine files
+with zero critical, five warning and 440 informational findings. All five
+contexts and 12 informational classes were reviewed; no suppression or broad
+security-clean claim applies.
+
+Initial unit fixture failures omitted the Fellow and sponsor bootstrap. Native
+setup first assumed problem creation joined its author, then expected advice
+during explicitly partial sharpening discovery; both assumptions were corrected
+without relaxing the positive active-member assertion. A Node network request
+also failed before using the fixture's actual Worker transport, and lint caught
+native formatting. The failures remain retained.
+
+Independent exact-revision checks pass typecheck/lint eight groups, full
+contracts 1,031, render 605, Worker HTTP 191, security 33 and the targeted
+source-closure test. Its owning command runs seven Worker files, including
+22 Worker public-moves cases: 141 tests/3,027 assertions. The primary command
+instead includes three contract public-moves cases, yielding 122/2,886; the
+independent full contract suite covers those three too. These are distinct
+commands, not inconsistent totals for one execution. Its full native baseline
+passes in 8.537 seconds. Replacing only the actual advice assignment with null
+fails the unchanged active-writer assertion at native line 72 in 6.448 seconds;
+the early null cases pass first. Exact restoration passes the complete journey
+in 8.507 seconds. All ten positive source vectors and SDK match the frozen
+revision; the fault changes only the router, with every test fixed. All eleven
+scoped execution owners exited.
+
+Both original full root suites pass at the exact revision: primary
+1,601.811 seconds, independent 1,582.919 seconds, each with all eight groups
+executed and no failed, blocked, missing or skipped groups. Worker runs
+7,465 tests, Agora 1,113 and gauntlet units 150. The 54 original individual
+toolchain skips remain; gauntlet units are not fresh-harness evidence. Each
+S2 shell matrix has 64 records covering 32 paired unique starts/passes.
+All 2,757 inputs and the actual Next runtime match before/after/current across
+both runs. Both root execution owners and their groups have exited.
+WhiteRaven closed only `1ar.1` at 2026-11-12 21:48:52 UTC. Beads comment 3196
+maps the original criteria to exact source lines and retained execution evidence.
+Parent `1ar`, `codz`, deployment and launch acceptance remain open.
+
 ### Observed review feedback — independently verified
 
 Task `mip.1`, source `d69bd17bc8c64f3db09b84b382018e3ca8b3cd8d`, adds
