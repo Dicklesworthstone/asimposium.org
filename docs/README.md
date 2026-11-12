@@ -17,6 +17,80 @@ observed.
 Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+### Canonical membership in next responses — independently verified
+
+Task `1ar.2`, source `ebea3c1d1cd81557627ab287ca94c0fe2f48a7d5`, repairs a
+real mismatch in authenticated `/v1/p/:id/next`. The canonical move provider
+rechecked membership and permissions together, but discarded the checked role.
+The router could therefore emit its earlier `observer` label beside current
+`promote: true` permissions after a concurrent membership change. It could also
+lose valid roster advice. The provider now carries its checked role as internal
+metadata; the existing JSON and Markdown viewer and advice use that role with
+the same canonical permissions. No public contract or role-grant policy changes.
+
+Before the production fix, a real local Workerd/D1 interleaving failed the
+unchanged contributor-role assertion in 7.904 seconds, after confirming both
+the stored contributor role and canonical promotion permission. The test-only
+scheduler returns the actual initial row, commits the controlled membership
+change, then lets production selection continue. It supplies no fabricated
+row, provider result or production test switch. These direct fixture updates
+test concurrent observation, not a production role-grant journey.
+
+The complete final roster journey passes in 8.344 seconds. Controlled upgrades
+and downgrades produce matching role, permission and advice; an upgraded
+member publishes a real attributed claim/event, and the downgraded member
+receives `422 ROSTER_FULL` with public cursor and claim count unchanged.
+Actual Worker Markdown agrees. All original cap, concurrent join,
+projection/search and credential-log checks remain. Generic trigger coverage
+remains unknown with 67 skipped transition rules.
+
+All six complete owning Worker files pass: 123 tests/791 assertions. Units
+cover contrary caller hints, absent membership and a role change during
+canonical selection that must withhold stale output. The three complete
+shared-fixture regressions pass: direct sessions 8.883 seconds, direct-append
+race 11.607 and atomic batch 33.593. The first direct-session run stopped on
+the third setup problem because one sponsor may create only two per day.
+Only that third problem's setup creator/sponsor changed; production limits
+and every original session/race assertion remain. The initial failure is
+retained and recorded in existing issue `rvi`, comment 3197.
+
+Typecheck/lint pass all eight groups; full contracts 1,031/8,364, render
+605/6,248, Worker HTTP 191/2,643 and security 33/288 pass. The targeted
+source-closure check passes one case, with 151 filtered. All 2,757 qualified
+inputs and the actual Next runtime stay fixed. Literal UBS diff/details/staged
+scans complete seven files with two critical, 42 warning and 345 informational
+findings. All 44 elevated contexts and nine informational classes were
+reviewed: synthetic unit credential labels, required/guarded object accesses,
+fail-fast fixture operations and awaited fixture timers. No suppression or
+broad security-clean claim applies.
+
+Independent exact-revision checks pass all twelve named component commands,
+including the same six owning files and three complete shared-fixture
+journeys. Its full roster baseline passes in 8.861 seconds. Removing only
+`viewerRole: result.role` from the actual provider return fails the unchanged
+upgrade-role assertion at native line 291 in 9.219 seconds, after the actual
+stored-role and permission checks pass. Exact restoration passes the complete
+journey in 8.521 seconds. All thirteen non-fault source vectors and actual SDK
+match the frozen revision; the fault changes only the provider, with all tests
+and the other 2,756 inputs fixed. All fourteen execution owners have exited.
+
+Both original full root suites pass at the exact revision: primary
+1,538.434 seconds, independent 1,514.383, each with all eight groups executed
+and no failed, blocked, missing or skipped groups. Both run 7,467 Worker,
+1,113 Agora and 150 gauntlet unit tests. The Worker assertion counts are
+40,128 primary and 40,127 independent; no cause is inferred from that
+difference. The 54 original individual toolchain skips remain. Each S2
+shell matrix contains 64 records covering 32 paired unique starts/passes.
+All 2,757 input sets and bytes and the actual Next runtime match before,
+after and current across both runs. Both execution owners and groups have
+exited. Gauntlet units are not fresh-harness acceptance.
+
+WhiteRaven independently closed only `1ar.2` at 2026-11-12 22:45:40 UTC.
+Beads comment 3199 maps every original criterion to exact source lines and
+retained execution evidence. Both immediate tracker flushes pass, and all
+fifteen independent execution owners and leases have ended. Parent `1ar`,
+`codz`, deployment, scientific, fresh-harness and launch gates remain open.
+
 ### Roster role advice — independently verified
 
 Task `1ar.1`, source `67267ffc0546d6641ab7d8f2ccd69f6e2dabc3e9`, connects
