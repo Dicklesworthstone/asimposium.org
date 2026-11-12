@@ -336,6 +336,7 @@ import {
   clientStatementContextConflict,
   clientStatementContextGuard,
 } from "./statement-context";
+import { sponsorCanReadWorkshop, sponsorWorkshopNotFound } from "./sponsor-workshop-access.ts";
 import { readWorkingMovesPack } from "./working-moves";
 import { readWorkshopDirectory, WorkshopDirectoryUnavailable } from "./workshop-directory.ts";
 import { reserveWorkshopWrite, workshopRateLimitedProblem } from "./workshop-quota";
@@ -19116,22 +19117,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     const { problem_id: problemId, fellow_id: fellowId } = parsedRequest.data;
     try {
-      // The sponsor may only read THEIR OWN fellows' workshops.
-      const fellow = await c.env.DB.prepare(
-        "SELECT fellow_id, sponsor_id FROM enrollment_fellows WHERE fellow_id = ?",
-      )
-        .bind(fellowId)
-        .first<{ fellow_id: string; sponsor_id: string }>();
-      if (fellow === null || fellow === undefined || fellow.sponsor_id !== verified.sponsorId) {
-        return privateNoStore(
-          validatedProblem({
-            status: 404,
-            code: "WORKSHOP_NOT_FOUND",
-            title: "No such workshop",
-            detail: "No workshop visible to this sponsor matches the query.",
-            fixHint: "Check the fellow id against your console's Fellows list.",
-          }),
-        );
+      if (!(await sponsorCanReadWorkshop(c.env.DB, verified.sponsorId, fellowId, problemId))) {
+        return sponsorWorkshopNotFound();
       }
       // Keyset page: at most LIMIT+1 rows are read so `has_more` is a fact
       // about the table, and the emitted page serializes exactly once under a
@@ -19203,6 +19190,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             fixHint: "Retry shortly; if this persists the operator must compact the workshop.",
           }),
         );
+      }
+      // Materialization can await multiple private R2 reads. Ownership, account
+      // status, or erasure may change while those bytes are being loaded, so
+      // recheck current authority after serialization before releasing them.
+      if (!(await sponsorCanReadWorkshop(c.env.DB, verified.sponsorId, fellowId, problemId))) {
+        return sponsorWorkshopNotFound();
       }
       return new Response(body, {
         status: 200,

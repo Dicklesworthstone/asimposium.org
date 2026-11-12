@@ -100,6 +100,7 @@ let artifactClock: number | null = null;
 let screenCalls = 0;
 let screeningDelayMs = 0;
 let heldScreeningCall: number | null = null;
+let heldPrivateBodyRead: { readonly key: string; blocked: boolean } | null = null;
 let revokeDuringNextScreen = false;
 let redactDuringNextScreen: string | null = null;
 type ScreenMode =
@@ -457,7 +458,65 @@ function racingDb(db: D1Database): D1Database {
   });
 }
 
+/** Scheduling barrier after real R2 bytes have materialized. Each wait belongs
+ * to the reading request's I/O context; RPC callers only change the marker. */
+function heldPrivateBodyBucket(bucket: R2Bucket): R2Bucket {
+  return new Proxy(bucket, {
+    get(target, property) {
+      if (property === "get") {
+        return async (...args: Parameters<R2Bucket["get"]>) => {
+          const object = await target.get(...args);
+          const barrier = heldPrivateBodyRead;
+          if (
+            object === null ||
+            !("arrayBuffer" in object) ||
+            barrier === null ||
+            args[0] !== barrier.key
+          )
+            return object;
+          return new Proxy(object, {
+            get(body, key) {
+              if (key === "arrayBuffer") {
+                return async () => {
+                  const bytes = await body.arrayBuffer();
+                  if (heldPrivateBodyRead !== barrier || barrier.blocked) return bytes;
+                  barrier.blocked = true;
+                  const deadline = Date.now() + 30_000;
+                  while (heldPrivateBodyRead === barrier) {
+                    if (Date.now() >= deadline)
+                      throw new Error("Private body barrier was not released");
+                    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+                  }
+                  return bytes;
+                };
+              }
+              const value = Reflect.get(body, key);
+              return typeof value === "function" ? value.bind(body) : value;
+            },
+          });
+        };
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
+  holdPrivateBodyRead(key: string): void {
+    if (!/^cas\/sha256\/[a-f0-9]{64}$/.test(key) || heldPrivateBodyRead !== null)
+      throw new Error("Private body barrier requires one CAS object");
+    heldPrivateBodyRead = { key, blocked: false };
+  }
+
+  privateBodyReadBlocked(): boolean {
+    return heldPrivateBodyRead?.blocked === true;
+  }
+
+  releasePrivateBodyRead(): void {
+    heldPrivateBodyRead = null;
+  }
+
   beginDependencyGuardDiagnostics(): void {
     dependencyGuardErrors = [];
     captureDependencyGuardErrors = true;
@@ -644,6 +703,10 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
                 {
                   ...this.env,
                   AI: commentaryFixtureAI as unknown as Env["AI"],
+                  ARTIFACTS:
+                    heldPrivateBodyRead === null
+                      ? this.env.ARTIFACTS
+                      : heldPrivateBodyBucket(this.env.ARTIFACTS),
                   DB:
                     raceBeforeNextBatch === null &&
                     competingLedgerWriteBeforeNextBatch === null &&
