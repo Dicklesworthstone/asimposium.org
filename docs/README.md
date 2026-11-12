@@ -17,7 +17,7 @@ observed.
 Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-### Cold-agent context isolation — measured candidate
+### Cold-agent context isolation — independently verified
 
 Task `zai.8` omits Codex's automatic skills catalog with its supported
 `skills.include_instructions=false` setting. Empty scratch and ignored user
@@ -34,8 +34,28 @@ are respectively 8 and 31. No raw model text is retained. This sequential pair
 is a context-isolation observation, not a participation, latency or budget gate.
 Working typecheck/lint pass eight groups; contracts pass 1,028, renderers 605,
 and the existing Gauntlet 150 tests, self-test and twelve real local reference
-outcomes pass. Frozen root/model execution and independent acceptance remain
-pending; the original 25K/cohort/staging requirements are unchanged.
+outcomes pass. Their 2,738 source hashes and actual SDK match frozen `da813ed6`.
+A fresh actual Codex journey at that pin completes all stages in 128.110 seconds
+with 25 server requests and unchanged source/SDK/provider installation. It uses
+490,066 tokens through first promotion and 569,989 for the whole session. The
+original injected refusal and two additional natural 422 refusals are retained.
+The independent fresh journey also completes, with 20 server requests and
+299,824 first-promotion tokens versus 369,880 for the whole session. Removing
+only the setting makes the unchanged transport test and actual catalog-absence
+probe fail; exact restoration passes all 150 tests and twelve references.
+The independent same-task probe observes 25,059 versus 14,393 input tokens,
+with source/SDK/provider stable. These observations do not establish an
+end-to-end percentage saving. Both original full roots pass all eight groups at
+`da813ed6` in 1,712.376 and 1,689.993 seconds, with all 2,738 inputs and actual
+SDK unchanged. Each includes 7,442 Wire tests, 1,093 Agora tests and the same
+150 Gauntlet tests. The 54 individual toolchain skips and S1 post-exit drain
+diagnostics remain explicit. Code UBS covers two files and 81 complete findings
+(one critical, twelve warnings, 68 information); all elevated contexts were
+reviewed without suppression. Its critical classification is the existing
+scalar secret comparison in the ephemeral loopback-only numeric collector;
+no timing-resistance or broader security-clean claim follows. WhiteRaven closed
+only `zai.8` against original-criteria map 3169. The original parent and
+25K/cohort/staging requirements remain open.
 
 ### Preparation before publication — independently verified
 
