@@ -1,0 +1,15 @@
+{
+  "problem_id": "P-ROLE",
+  "viewer": {
+    "role": "contributor",
+    "effective_permissions": { "read": true, "promote": true },
+    "role_suggestion": {
+      "suggested_role": "critic",
+      "reason": "A suggestion cannot grant authority.",
+      "advisory": false
+    }
+  },
+  "primary_move": null,
+  "alternatives": [],
+  "degraded": false
+}

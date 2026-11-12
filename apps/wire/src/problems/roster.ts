@@ -11,7 +11,80 @@
  * - OPS.2a structured diagnostic logging with zero secret leakage.
  */
 
-export type SuggestedRole = "worker" | "critic" | "investigator" | "synthesizer" | "observer";
+import type { ProblemNextResponse, ProblemRole } from "@asimposium/contracts";
+import type { D1Database } from "@cloudflare/workers-types";
+import { hiddenByContentControlSql } from "../krater/public-content.ts";
+
+type Advice = NonNullable<ProblemNextResponse["viewer"]["role_suggestion"]>;
+export type SuggestedRole = Advice["suggested_role"];
+
+const ADVICE_REASON: Readonly<Record<SuggestedRole, string>> = {
+  worker:
+    "Develop a self-contained claim and falsifier in the workshop, following the offered move.",
+  critic:
+    "An offered review or refutation check needs scrutiny; inspect its exact target before deciding a verdict.",
+  investigator:
+    "Investigate alternative hypotheses and discriminating checks, following the offered move.",
+  synthesizer:
+    "Connect existing work when the offered move calls for synthesis; this hint does not authorize a publication.",
+  observer:
+    "Your recorded role is observer. Review or provide evidence where permitted; this hint does not open a writer slot.",
+};
+
+/** Advice uses the canonical offered check, not another scientific ranking or
+ * a purported count of unreviewed claims. No identities or counts leave this read. */
+export async function readRosterRoleSuggestion(input: {
+  db?: D1Database;
+  problemId: string;
+  fellowId: string;
+  role: ProblemRole | "none";
+  cursor?: number;
+  reviewOpportunity: boolean;
+}): Promise<Advice | null> {
+  if (
+    !input.db ||
+    input.role === "none" ||
+    input.cursor === undefined ||
+    !Number.isSafeInteger(input.cursor) ||
+    input.cursor < 0
+  )
+    return null;
+  try {
+    const row = await input.db
+      .prepare(`SELECT m.role,
+      (SELECT COUNT(*) FROM problem_memberships writers WHERE writers.problem_id = p.id
+        AND writers.role IN ('contributor', 'steward')) AS writers
+      FROM problems p JOIN problem_memberships m ON m.problem_id = p.id AND m.fellow_id = ?
+      WHERE p.id = ? AND p.public_seq = ? AND m.role = ?
+        AND p.status IN ('active', 'dormant', 'under-result-review', 'sharpening')
+        AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}`)
+      .bind(input.fellowId, input.problemId, input.cursor, input.role)
+      .first<{ role: ProblemRole; writers: number }>();
+    if (
+      !row ||
+      row.role !== input.role ||
+      !Number.isSafeInteger(row.writers) ||
+      row.writers < (row.role === "observer" ? 0 : 1)
+    )
+      return null;
+    // Admission already decided membership atomically. A full cap cannot turn
+    // a writer into an observer, nor can a vacant slot upgrade an observer.
+    const suggested =
+      row.role === "observer"
+        ? "observer"
+        : computeRoleSuggestion({
+            headcount: row.writers,
+            writerCap: null,
+            // Only the helper's >0 predicate is used: one offered canonical check,
+            // not the total number of unreviewed claims on this problem.
+            unreviewedClaimsCount: input.reviewOpportunity ? 1 : 0,
+          }).suggested_role;
+    return { suggested_role: suggested, reason: ADVICE_REASON[suggested], advisory: true };
+  } catch {
+    // Enrichment cannot conceal the canonical move or expose storage diagnostics.
+    return null;
+  }
+}
 
 export interface RoleSuggestionInput {
   headcount: number;

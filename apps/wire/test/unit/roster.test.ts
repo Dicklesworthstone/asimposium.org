@@ -12,6 +12,7 @@ import {
   computeRoleSuggestion,
   determineJoinRole,
   logRosterDiagnostic,
+  readRosterRoleSuggestion,
 } from "../../src/problems/roster.ts";
 import { createSessionRouter } from "../../src/sessions/router.ts";
 import { normHash } from "../../src/split/policy.ts";
@@ -109,6 +110,124 @@ function migratedDb(): Env["DB"] {
 }
 
 describe("W9.5 Writer slots + roster unit tests (asimposiumorg-1ar)", () => {
+  test("migrated SQLite unit executes current-cut, membership and private-scope advice predicates", async () => {
+    const db = migratedDb();
+    const now = new Date().toISOString();
+    await db
+      .prepare(
+        "INSERT INTO sponsors (sponsor_id,created_at,last_seen_at) VALUES ('usr_advice',1,1)",
+      )
+      .run();
+    await db
+      .prepare(`INSERT INTO problems
+      (id,sponsor_id,public_seq,created_at,updated_at,chain_digest,chain_version,status)
+      VALUES ('P-ADVICE','usr_advice',7,?,?,?,2,'active')`)
+      .bind(now, now, await genesisChainDigest("P-ADVICE"))
+      .run();
+    await db
+      .prepare(`INSERT INTO enrollment_fellows
+      (fellow_id,sponsor_id,name,model,harness,created_at)
+      VALUES ('F-ADVICE','usr_advice','advice-unit','unit-model','unit-harness',1)`)
+      .run();
+    await db
+      .prepare(`INSERT INTO problem_memberships (problem_id,fellow_id,role,joined_at)
+      VALUES ('P-ADVICE','F-ADVICE','contributor',?)`)
+      .bind(now)
+      .run();
+    const input = {
+      db,
+      problemId: "P-ADVICE",
+      fellowId: "F-ADVICE",
+      role: "contributor" as const,
+      cursor: 7,
+      reviewOpportunity: false,
+    };
+    expect((await readRosterRoleSuggestion(input))?.suggested_role).toBe("worker");
+    expect(await readRosterRoleSuggestion({ ...input, cursor: 6 })).toBeNull();
+    expect(await readRosterRoleSuggestion({ ...input, fellowId: "F-OTHER" })).toBeNull();
+    expect(await readRosterRoleSuggestion({ ...input, role: "observer" })).toBeNull();
+    await db.prepare("UPDATE problems SET status='private-draft' WHERE id='P-ADVICE'").run();
+    expect(await readRosterRoleSuggestion(input)).toBeNull();
+    await db.prepare("UPDATE problems SET status='active' WHERE id='P-ADVICE'").run();
+    await db
+      .prepare(`INSERT INTO content_controls
+      (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,actor,reason,version,created_at)
+      VALUES ('CC-advice','P-ADVICE','problem','problem','hidden','operator','other','operator','unit',1,?)`)
+      .bind(now)
+      .run();
+    expect(await readRosterRoleSuggestion(input)).toBeNull();
+  });
+
+  test("member advice uses an exact current membership snapshot without reapplying admission", async () => {
+    let row: { role: string; writers: number } | null = { role: "contributor", writers: 8 };
+    let query = "";
+    let bindings: unknown[] = [];
+    const db = {
+      prepare(sql: string) {
+        query = sql;
+        return {
+          bind(...values: unknown[]) {
+            bindings = values;
+            return {
+              async first() {
+                return row;
+              },
+            };
+          },
+        };
+      },
+    } as unknown as Env["DB"];
+    const input = {
+      db,
+      problemId: "P-ROLE",
+      fellowId: "F-ROLE",
+      role: "contributor" as const,
+      cursor: 7,
+      reviewOpportunity: true,
+    };
+    const full = await readRosterRoleSuggestion(input);
+    expect(full?.suggested_role).toBe("critic");
+    expect(full?.advisory).toBe(true);
+    expect(query).toContain("p.public_seq = ? AND m.role = ?");
+    expect(query).toContain("p.status IN");
+    expect(query).toContain("content_controls");
+    expect(bindings).toEqual(["F-ROLE", "P-ROLE", 7, "contributor"]);
+    for (const [writers, expected] of [
+      [1, "worker"],
+      [2, "worker"],
+      [3, "investigator"],
+      [4, "investigator"],
+      [5, "synthesizer"],
+    ] as const) {
+      row = { role: "contributor", writers };
+      const advice = await readRosterRoleSuggestion({ ...input, reviewOpportunity: false });
+      expect(advice?.suggested_role).toBe(expected);
+      expect(advice?.reason).not.toContain("no unreviewed");
+      expect(advice?.reason).not.toContain("Headcount");
+    }
+    row = { role: "observer", writers: 1 };
+    expect((await readRosterRoleSuggestion({ ...input, role: "observer" }))?.suggested_role).toBe(
+      "observer",
+    );
+    expect(await readRosterRoleSuggestion(input)).toBeNull();
+    row = null;
+    expect(await readRosterRoleSuggestion(input)).toBeNull();
+    for (const value of [-1, 0, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+      row = { role: "contributor", writers: value };
+      expect(await readRosterRoleSuggestion(input)).toBeNull();
+    }
+    expect(await readRosterRoleSuggestion({ ...input, cursor: undefined })).toBeNull();
+    expect(await readRosterRoleSuggestion({ ...input, cursor: -1 })).toBeNull();
+    expect(await readRosterRoleSuggestion({ ...input, role: "none" })).toBeNull();
+    expect(await readRosterRoleSuggestion({ ...input, db: undefined })).toBeNull();
+    const failing = {
+      prepare() {
+        throw new Error("private DB canary");
+      },
+    } as unknown as Env["DB"];
+    expect(await readRosterRoleSuggestion({ ...input, db: failing })).toBeNull();
+  });
+
   describe("Pure role suggestions matrix (computeRoleSuggestion)", () => {
     test("suggests 'worker' for headcount <= 1", () => {
       expect(

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import Ajv2020 from "ajv/dist/2020.js";
+import { ProblemNextResponseSchema } from "../../src/mega-commands.ts";
 import { generateMoveTemplatesDocument } from "../../src/moves.ts";
 import {
   PublicMoveDiscoverySchema,
@@ -10,6 +11,36 @@ import {
 
 const fixture = (kind: string, name: string) =>
   Bun.file(new URL(`../fixtures/${kind}/${name}.json`, import.meta.url)).json();
+
+test("authenticated next role advice is typed, advisory and compatible with absent advice", async () => {
+  const schema = await Bun.file(
+    new URL("../../generated/moves.schema.json", import.meta.url),
+  ).json();
+  const ajv = new Ajv2020({ strict: true, strictRequired: false, allErrors: true });
+  const validate = ajv.compile(schema.$defs.authenticated_next);
+  for (const [kind, expected] of [
+    ["valid", true],
+    ["invalid", false],
+  ] as const) {
+    const input = await fixture(kind, "next-role-suggestion");
+    expect(ProblemNextResponseSchema.safeParse(input).success).toBe(expected);
+    expect(validate(input), JSON.stringify(validate.errors)).toBe(expected);
+  }
+  const input = await fixture("valid", "next-role-suggestion");
+  for (const suggestion of [undefined, null]) {
+    const value = { ...input, viewer: { ...input.viewer, role_suggestion: suggestion } };
+    expect(ProblemNextResponseSchema.safeParse(value).success).toBe(true);
+    expect(validate(value)).toBe(true);
+  }
+  for (const suggestion of [
+    { ...input.viewer.role_suggestion, suggested_role: "steward" },
+    { ...input.viewer.role_suggestion, effective_permissions: { promote: true } },
+  ]) {
+    const value = { ...input, viewer: { ...input.viewer, role_suggestion: suggestion } };
+    expect(ProblemNextResponseSchema.safeParse(value).success).toBe(false);
+    expect(validate(value)).toBe(false);
+  }
+});
 
 test("public move golden contracts agree with the served JSON Schema", async () => {
   const schema = await Bun.file(

@@ -55,10 +55,20 @@ export const NextMoveCandidateSchema = z
   .strict();
 export type NextMoveCandidate = z.infer<typeof NextMoveCandidateSchema>;
 
+/** A division-of-work hint, never a membership or permission grant. */
+export const RosterRoleSuggestionSchema = z
+  .object({
+    suggested_role: z.enum(["worker", "critic", "investigator", "synthesizer", "observer"]),
+    reason: z.string().min(1).max(512),
+    advisory: z.literal(true),
+  })
+  .strict();
+
 export const ProblemNextViewerSchema = z
   .object({
     role: ProblemRoleSchema.or(z.literal("none")),
     effective_permissions: z.record(z.string(), z.boolean()),
+    role_suggestion: RosterRoleSuggestionSchema.nullable().optional(),
   })
   .strict();
 export type ProblemNextViewer = z.infer<typeof ProblemNextViewerSchema>;

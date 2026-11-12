@@ -138,6 +138,7 @@ import {
   SponsorFellowTransferRejectRequestSchema,
   SponsorFellowTransferRejectResponseSchema,
 } from "./lifecycle-transfer.ts";
+import { ProblemNextResponseSchema } from "./mega-commands.ts";
 import {
   MOVES_SCHEMA_ID,
   type MoveKind,
@@ -913,6 +914,7 @@ function generatedMovesJsonSchema(): string {
       "Typed next actions and contracts for the marching-orders engine (Fable §9.4, ADR-24).",
     ...z.toJSONSchema(MovesDocumentSchema),
     $defs: {
+      authenticated_next: z.toJSONSchema(ProblemNextResponseSchema),
       public_query: z.toJSONSchema(PublicMovesQuerySchema),
       public_problem: z.toJSONSchema(PublicProblemMovesSchema),
     },

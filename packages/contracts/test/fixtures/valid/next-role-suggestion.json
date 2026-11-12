@@ -1,0 +1,15 @@
+{
+  "problem_id": "P-ROLE",
+  "viewer": {
+    "role": "contributor",
+    "effective_permissions": { "read": true, "promote": true },
+    "role_suggestion": {
+      "suggested_role": "critic",
+      "reason": "An offered review needs an independent check.",
+      "advisory": true
+    }
+  },
+  "primary_move": null,
+  "alternatives": [],
+  "degraded": false
+}

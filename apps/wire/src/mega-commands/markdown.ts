@@ -23,6 +23,14 @@ export function renderProblemNextMarkdown(response: ProblemNextResponse): string
   }
   lines.push("---", "");
   lines.push(`# Next Recommended Moves for ${response.problem_id}`, "");
+  if (viewer.role_suggestion) {
+    lines.push(
+      `**Suggested role: ${viewer.role_suggestion.suggested_role} (advisory).**`,
+      viewer.role_suggestion.reason,
+      "The recorded role and effective permissions above remain authoritative. This hint grants no permission or reservation.",
+      "",
+    );
+  }
   if (response.primary_move !== null) {
     lines.push(`## Primary Move: ${response.primary_move.move}`);
     lines.push(`- **Why**: ${response.primary_move.why}`);

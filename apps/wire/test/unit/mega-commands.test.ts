@@ -1045,6 +1045,11 @@ test("next Markdown carries every JSON permission without allowing forged frontm
     problem_id: "P-PERMS",
     viewer: {
       role: "contributor",
+      role_suggestion: {
+        suggested_role: "critic",
+        reason: "Inspect the offered exact-version check.",
+        advisory: true,
+      },
       effective_permissions: {
         read: true,
         evidence: true,
@@ -1061,6 +1066,9 @@ test("next Markdown carries every JSON permission without allowing forged frontm
   expect(markdown).toContain("  evidence: true\n");
   expect(markdown).toContain("  dead_end: false\n");
   expect(markdown).toContain("  future_permission: true\n");
+  expect(markdown).toContain("Suggested role: critic (advisory)");
+  expect(markdown).toContain(response.viewer.role_suggestion!.reason);
+  expect(markdown).toContain("grants no permission or reservation");
   expect(markdown).toContain('  "other\\nrole: steward": false\n');
   expect(markdown).not.toContain("\nrole: steward\n");
   expect(markdown.match(/^---$/gm)).toHaveLength(2);

@@ -12,7 +12,8 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 const RACERS = 8;
 const OPEN_SLOTS = 3;
 
-await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
+await runLocalWorkerJourney(async (context) => {
+  const { call, enroll, sponsorCall, env, worker, origin, userAgent } = context;
   const OWNER = "usr_roster_owner";
   const author = await enroll("roster-author", OWNER);
   const reviewer = await enroll("roster-reviewer", "usr_roster_reviewer");
@@ -38,6 +39,21 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
       action: "publish",
     },
   );
+  const unjoined = await call(`/v1/p/${problem}/next`, undefined, author);
+  assert.equal(
+    unjoined.viewer.role_suggestion,
+    null,
+    "an unjoined Fellow receives no membership advice",
+  );
+  const authorSession = (await call("/v1/sessions", { problem_id: problem }, author, 201))
+    .session_id;
+  const sharpeningNext = await call(`/v1/p/${problem}/next`, undefined, author);
+  assert.equal(sharpeningNext.degraded, true);
+  assert.equal(
+    sharpeningNext.viewer.role_suggestion,
+    null,
+    "partial move discovery withholds roster advice",
+  );
   const reviewSession = (
     await call("/v1/sessions", { problem_id: problem, intent: "review" }, reviewer, 201)
   ).session_id;
@@ -51,6 +67,58 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
     },
     reviewer,
   );
+
+  const firstNext = await call(`/v1/p/${problem}/next`, undefined, author);
+  assert.equal(
+    firstNext.viewer.role_suggestion?.suggested_role,
+    "worker",
+    `first writer receives roster advice: ${JSON.stringify({ role: firstNext.viewer.role, degraded: firstNext.degraded, reason: firstNext.degraded_reason, move: firstNext.primary_move?.move })}`,
+  );
+  assert.equal(firstNext.viewer.role_suggestion.advisory, true);
+  const authorDraft = await call(
+    `/v1/sessions/${authorSession}/workshop`,
+    {
+      type: "claim-draft",
+      title: "Parity check",
+      body_md: "Private roster advice canary.",
+    },
+    author,
+    201,
+  );
+  await call(
+    `/v1/sessions/${authorSession}/promote`,
+    {
+      workshop_id: authorDraft.workshop_id,
+      kind: "conjecture",
+      statement: "The square of each integer from zero through sixty shares the integer's parity.",
+      falsifier: "An integer in the stated range whose square has different parity.",
+    },
+    author,
+    201,
+  );
+  const secondNext = await call(`/v1/p/${problem}/next`, undefined, reviewer);
+  assert.ok(
+    [secondNext.primary_move, ...secondNext.alternatives].some((move) => move?.move === "review"),
+    "a real exact-version review is offered",
+  );
+  assert.equal(
+    secondNext.viewer.role_suggestion?.suggested_role,
+    "critic",
+    "second writer sees the offered review role",
+  );
+  const markdown = await worker.fetch(`${origin}/v1/p/${problem}/next.md`, {
+    headers: { authorization: `Bearer ${reviewer}`, "user-agent": userAgent },
+  });
+  assert.equal(markdown.status, 200);
+  assert.equal(markdown.headers.get("cache-control"), "private, no-store");
+  const text = await markdown.text();
+  assert.ok(text.includes("Suggested role: critic (advisory)"));
+  assert.ok(
+    text.includes(secondNext.viewer.role_suggestion.reason),
+    "Markdown preserves the JSON advice",
+  );
+  assert.ok(text.includes("grants no permission or reservation"));
+  assert.ok(!text.includes("Private roster advice canary"));
 
   const contributors = async () =>
     Number(
@@ -107,6 +175,17 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
   for (const token of racers) {
     const next = await call(`/v1/p/${problem}/next`, undefined, token);
     nextRoles.push(next.viewer.role);
+    assert.equal(
+      next.viewer.role_suggestion?.suggested_role,
+      next.viewer.role === "observer" ? "observer" : "synthesizer",
+      "full cap does not demote an admitted writer's advice",
+    );
+    assert.equal(next.viewer.role_suggestion.advisory, true);
+    assert.equal(
+      next.viewer.effective_permissions.promote,
+      next.viewer.role !== "observer",
+      "advice does not grant publication",
+    );
   }
   assert.deepEqual(
     [...nextRoles].sort(),
@@ -153,6 +232,26 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
   }
   assert.equal(promoted, OPEN_SLOTS, "only slot holders may promote");
   assert.equal(refused, RACERS - OPEN_SLOTS, "every observer promote is ROSTER_FULL");
+
+  await sponsorCall(
+    OWNER,
+    "POST",
+    `/v1/sponsors/problems/${problem}/lifecycle`,
+    "problem-lifecycle",
+    {
+      action: "set-writer-cap",
+      writer_cap: null,
+    },
+  );
+  const observerIndex = nextRoles.indexOf("observer");
+  assert.ok(observerIndex >= 0);
+  const vacant = await call(`/v1/p/${problem}/next`, undefined, racers[observerIndex]);
+  assert.equal(
+    vacant.viewer.role_suggestion?.suggested_role,
+    "observer",
+    "uncapping alone does not change recorded membership",
+  );
+  assert.equal(vacant.viewer.effective_permissions.promote, false);
 
   console.log(
     JSON.stringify({

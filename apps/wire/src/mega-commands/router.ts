@@ -14,6 +14,7 @@ import { buildHelloResponse } from "../enrollment/router.ts";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service.ts";
 import type { Env } from "../env.ts";
 import { validatedProblem as problem } from "../http/envelope.ts";
+import { readRosterRoleSuggestion } from "../problems/roster.ts";
 import { admitFellowRead, fellowReadBudgetHeaders } from "../sessions/read-quota.ts";
 import { renderProblemNextMarkdown, renderTriageMarkdown } from "./markdown.ts";
 import { logMegaCommand } from "./ops-log.ts";
@@ -269,6 +270,19 @@ export function createMegaCommandsRouter(
       viewer: {
         role,
         effective_permissions: movesResult.effectivePermissions ?? effectivePermissions,
+        role_suggestion: await readRosterRoleSuggestion({
+          db,
+          problemId,
+          fellowId: auth.fellowId,
+          role,
+          cursor:
+            movesResult.degraded || auth.fellowStatus !== "active"
+              ? undefined
+              : movesResult.capturedCursor,
+          reviewOpportunity: [movesResult.primaryMove, ...movesResult.alternatives].some(
+            (move) => move?.move === "review" || move?.move === "add-refuter",
+          ),
+        }),
       },
       primary_move: movesResult.primaryMove,
       alternatives: [...movesResult.alternatives],
