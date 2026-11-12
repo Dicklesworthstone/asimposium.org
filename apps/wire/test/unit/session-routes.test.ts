@@ -27,6 +27,7 @@ import {
   ProblemGovernanceEventSchema,
   ProblemNextResponseSchema,
   ProblemStatementReviewResponseSchema,
+  type PromoteResponse,
   PromoteResponseSchema,
   RecordCitationResponseSchema,
   RecordDeadEndResponseSchema,
@@ -11869,18 +11870,21 @@ describe("session protocol routes", () => {
       }),
     });
     expect(firstPromotionResponse.status).toBe(201);
-    expect(
-      (await firstPromotionResponse.json()) as {
-        claim_id: string;
-        problem_id: string;
-        queue_position: number;
-        seq: number;
-        version: number;
-      },
-    ).toEqual({
+    expect((await firstPromotionResponse.json()) as PromoteResponse).toEqual({
       claim_id: "C-1",
       problem_id: "P-4DSP",
       queue_position: 0,
+      review_feedback: {
+        basis: "first-readable-non-author-review-on-version",
+        through_seq: 0,
+        sample_limit: 128,
+        sampled_versions: 0,
+        reviewed_versions: 0,
+        unreviewed_versions: 0,
+        unmeasurable_versions: 0,
+        median_first_review_seconds: null,
+        omitted: [],
+      },
       seq: 1,
       version: 1,
     });
@@ -11994,18 +11998,21 @@ describe("session protocol routes", () => {
         },
       );
       expect(secondPromotionResponse.status).toBe(201);
-      expect(
-        (await secondPromotionResponse.json()) as {
-          claim_id: string;
-          problem_id: string;
-          queue_position: number;
-          seq: number;
-          version: number;
-        },
-      ).toEqual({
+      expect((await secondPromotionResponse.json()) as PromoteResponse).toEqual({
         claim_id: "C-2",
         problem_id: "P-4DSP",
         queue_position: 1,
+        review_feedback: {
+          basis: "first-readable-non-author-review-on-version",
+          through_seq: 1,
+          sample_limit: 128,
+          sampled_versions: 1,
+          reviewed_versions: 0,
+          unreviewed_versions: 1,
+          unmeasurable_versions: 0,
+          median_first_review_seconds: null,
+          omitted: [],
+        },
         seq: 2,
         version: 1,
       });
@@ -19597,6 +19604,17 @@ describe("committed promotion outbox nudge", () => {
           id: claim.object_id,
           seq: claim.seq,
           version: 1,
+          review_feedback: {
+            basis: "first-readable-non-author-review-on-version",
+            through_seq: 0,
+            sample_limit: 128,
+            sampled_versions: 0,
+            reviewed_versions: 0,
+            unreviewed_versions: 0,
+            unmeasurable_versions: 0,
+            median_first_review_seconds: null,
+            omitted: [],
+          },
         },
       ]);
       expect((await f.db.prepare("SELECT * FROM sessions").all()).results).toEqual(
