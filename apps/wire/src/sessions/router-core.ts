@@ -19828,7 +19828,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       cleanupWorkshop = async () => {
         await db
           .prepare(
-            "UPDATE workshop_objects SET state = 'discarded' WHERE workshop_id = ? AND fellow_id = ?",
+            `UPDATE workshop_objects SET state = 'discarded',
+                   workshop_seq = (
+                     SELECT COALESCE(MAX(w.workshop_seq), 0) + 1 FROM workshop_objects w
+                     WHERE w.problem_id = workshop_objects.problem_id
+                       AND w.fellow_id = workshop_objects.fellow_id
+                   )
+                 WHERE workshop_id = ? AND fellow_id = ? AND state = 'open'`,
           )
           .bind(workshopId, auth.binding.fellowId)
           .run()
@@ -21748,7 +21754,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             cleanupBatchDraft = async () => {
               await db
                 .prepare(
-                  "UPDATE workshop_objects SET state = 'discarded' WHERE workshop_id = ? AND fellow_id = ?",
+                  `UPDATE workshop_objects SET state = 'discarded',
+                       workshop_seq = (
+                         SELECT COALESCE(MAX(w.workshop_seq), 0) + 1 FROM workshop_objects w
+                         WHERE w.problem_id = workshop_objects.problem_id
+                           AND w.fellow_id = workshop_objects.fellow_id
+                       )
+                     WHERE workshop_id = ? AND fellow_id = ? AND state = 'open'`,
                 )
                 .bind(workshopId, auth.binding.fellowId)
                 .run()

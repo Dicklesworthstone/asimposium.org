@@ -777,6 +777,25 @@ export const SponsorWorkshopRequestSchema = z
   .strict();
 export type SponsorWorkshopRequest = z.infer<typeof SponsorWorkshopRequestSchema>;
 
+/** A small private change signal. No workshop object, body, title, or CAS key
+ * belongs in this response; full pages are read only when the cursor changes. */
+export const SponsorWorkshopCursorRequestSchema = SponsorWorkshopRequestSchema.omit({
+  before_workshop_seq: true,
+});
+export type SponsorWorkshopCursorRequest = z.infer<typeof SponsorWorkshopCursorRequestSchema>;
+export const SPONSOR_WORKSHOP_CURSOR_MAX_RESPONSE_BYTES = 2048;
+
+export const SponsorWorkshopCursorResponseSchema = z
+  .object({
+    schema: z.literal("https://a.asimposium.org/schemas/sessions.v1.json"),
+    sponsor_id: SponsorIdSchema,
+    problem_id: ProblemIdSchema,
+    fellow_id: FellowIdSchema,
+    workshop_cursor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type SponsorWorkshopCursorResponse = z.infer<typeof SponsorWorkshopCursorResponseSchema>;
+
 /** The directory covers actual private work across every currently owned
  * Fellow, including Fellows without a problem-bound enrollment. It never
  * contains work-product text, CAS keys or public engagement counts. */
@@ -1745,6 +1764,8 @@ export const SessionsContractsSchema = z
     workshop_object_response: WorkshopObjectResponseSchema,
     sponsor_workshop_request: SponsorWorkshopRequestSchema,
     sponsor_workshop_view: SponsorWorkshopViewSchema,
+    sponsor_workshop_cursor_request: SponsorWorkshopCursorRequestSchema,
+    sponsor_workshop_cursor_response: SponsorWorkshopCursorResponseSchema,
     sponsor_workshop_index_request: SponsorWorkshopIndexRequestSchema,
     sponsor_workshop_index_response: SponsorWorkshopIndexResponseSchema,
     sponsor_workshop_mutation_request: SponsorWorkshopMutationRequestSchema,

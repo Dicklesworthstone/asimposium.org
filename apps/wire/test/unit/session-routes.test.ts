@@ -17774,7 +17774,15 @@ describe("committed promotion outbox nudge", () => {
     });
 
     test("direct claim rejects duplicate statement with 409 CLAIM_STATEMENT_EXISTS", async () => {
-      const f = await fixture();
+      let captureProvisional: (() => Promise<void>) | undefined;
+      const observed: { row?: { workshop_id: string; workshop_seq: number } | null } = {};
+      const f = await fixture({
+        afterRead: async (read) => {
+          if (read.kind === "run" && read.sql.includes("INSERT INTO workshop_objects")) {
+            await captureProvisional?.();
+          }
+        },
+      });
       const payload = {
         kind: "conjecture",
         statement: "The set of prime numbers is infinite.",
@@ -17788,6 +17796,15 @@ describe("committed promotion outbox nudge", () => {
       });
       expect(res1.status).toBe(201);
 
+      captureProvisional = async () => {
+        captureProvisional = undefined;
+        observed.row = await f.db
+          .prepare(
+            "SELECT workshop_id, workshop_seq FROM workshop_objects WHERE fellow_id = ? ORDER BY workshop_seq DESC LIMIT 1",
+          )
+          .bind(f.binding.fellowId)
+          .first<{ workshop_id: string; workshop_seq: number }>();
+      };
       const res2 = await f.call("/v1/p/P-4DSP/claims", {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": "direct-claim-dup-2" },
@@ -17796,6 +17813,26 @@ describe("committed promotion outbox nudge", () => {
       expect(res2.status).toBe(409);
       const body = (await res2.json()) as { code: string };
       expect(body.code).toBe("DUPLICATE_CLAIM");
+
+      // A live reader can observe the temporary open draft before duplicate
+      // detection. Cleanup must publish a newer private cursor for its discard.
+      expect(observed.row).toBeDefined();
+      if (!observed.row) throw new Error("duplicate request did not create its temporary draft");
+      const discarded = await f.db
+        .prepare("SELECT state, workshop_seq FROM workshop_objects WHERE workshop_id = ?")
+        .bind(observed.row.workshop_id)
+        .first<{ state: string; workshop_seq: number }>();
+      expect(discarded).toEqual({
+        state: "discarded",
+        workshop_seq: observed.row.workshop_seq + 1,
+      });
+      const cursor = await f.db
+        .prepare(
+          "SELECT MAX(workshop_seq) AS value FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?",
+        )
+        .bind("P-4DSP", f.binding.fellowId)
+        .first<{ value: number }>();
+      expect(cursor?.value).toBeGreaterThan(observed.row.workshop_seq);
 
       // Verify no open sessions leaked
       const openSessions = await f.db
