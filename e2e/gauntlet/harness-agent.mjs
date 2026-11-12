@@ -17,10 +17,15 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseClaudeCodeUsage } from "./token-accounting.ts";
-import { parseCodexExecUsage } from "./token-accounting-codex.ts";
+import {
+  codexUsageToFirstPromotion,
+  parseCodexExecUsage,
+  parseCodexUsageBatch,
+} from "./token-accounting-codex.ts";
 
 const ENV_ALLOWLIST = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SHELL", "USER"];
 
@@ -248,10 +253,98 @@ export function classifyUnavailable(text) {
   return null;
 }
 
+/** Run-local numeric accounting sink; no received OTLP body is retained. */
+export async function startCodexUsageCollector() {
+  const secret = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex");
+  const events = [];
+  let valid = true;
+  let receivedBytes = 0;
+  let active = 0;
+  let closed = false;
+  let closing;
+  const server = createServer(async (request, response) => {
+    if (request.headers["x-asimp-usage-token"] !== secret) {
+      response.writeHead(403);
+      response.end();
+      return;
+    }
+    active += 1;
+    try {
+      if (request.method !== "POST" || request.url !== "/v1/logs") throw new Error("route");
+      const chunks = [];
+      let bytes = 0;
+      for await (const chunk of request) {
+        bytes += chunk.length;
+        receivedBytes += chunk.length;
+        if (bytes > 1024 * 1024 || receivedBytes > 8 * 1024 * 1024) throw new Error("limit");
+        chunks.push(chunk);
+      }
+      const batch = parseCodexUsageBatch(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      if (batch === null || events.length + batch.length > 10_000) throw new Error("shape");
+      events.push(...batch);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    } catch {
+      valid = false;
+      response.writeHead(400);
+      response.end();
+      request.destroy();
+    } finally {
+      active -= 1;
+    }
+  });
+  server.requestTimeout = 10_000;
+  server.headersTimeout = 10_000;
+  server.keepAliveTimeout = 1000;
+  server.on("error", () => {
+    valid = false;
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  const endpoint = `http://127.0.0.1:${server.address().port}/v1/logs`;
+  return {
+    argv: [
+      "-c",
+      `otel.exporter={otlp-http={endpoint="${endpoint}",protocol="json",headers={"x-asimp-usage-token"="${secret}"}}}`,
+      "-c",
+      "otel.log_user_prompt=false",
+      "-c",
+      "otel.log_agent_responses=false",
+      "-c",
+      "otel.log_guardian_assessments=false",
+      "-c",
+      "otel.tool_result.max_bytes=0",
+      "-c",
+      'otel.trace_exporter="none"',
+      "-c",
+      'otel.metrics_exporter="none"',
+    ],
+    usage(whole, firstPromotionAt) {
+      return valid && closed ? codexUsageToFirstPromotion(events, whole, firstPromotionAt) : null;
+    },
+    async close() {
+      closing ??= new Promise((resolve) => {
+        if (active !== 0) valid = false;
+        server.close(() => {
+          closed = true;
+          resolve();
+        });
+        server.closeAllConnections();
+      });
+      await closing;
+    },
+  };
+}
+
 export async function runHarnessAgent(
   harness,
   joinUrl,
-  { timeoutMs = 900_000, spawnProcess = spawn } = {},
+  { timeoutMs = 900_000, spawnProcess = spawn, firstPromotionAt } = {},
 ) {
   const spec = HARNESSES[harness];
   if (!spec) throw new Error(`unknown harness ${harness}`);
@@ -278,6 +371,8 @@ export async function runHarnessAgent(
   for (const name of ENV_ALLOWLIST)
     if (process.env[name] !== undefined) env[name] = process.env[name];
   const started = Date.now();
+  const measure = harness === "codex" && typeof firstPromotionAt === "function";
+  const collector = measure ? await startCodexUsageCollector().catch(() => null) : null;
   return await new Promise((resolve) => {
     let stdout = "";
     let stderrTail = "";
@@ -291,7 +386,9 @@ export async function runHarnessAgent(
     let finished = false;
     let stdinWriteFailed = false;
     let binaryUnavailable = false;
-    const child = spawnProcess(spec.binary, spec.argv(sponsorPasteBlock(joinUrl)), {
+    const argv = spec.argv(sponsorPasteBlock(joinUrl));
+    if (collector) argv.splice(argv.length - 1, 0, ...collector.argv);
+    const child = spawnProcess(spec.binary, argv, {
       cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -320,7 +417,7 @@ export async function runHarnessAgent(
       child.kill("SIGTERM");
       setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
     }, timeoutMs);
-    const finish = (exitCode) => {
+    const finish = async (exitCode) => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
@@ -333,6 +430,18 @@ export async function runHarnessAgent(
         : exitCode === 0 && !spec.reportsStartFailureOnSuccess
           ? null
           : spec.unavailable(stdout, stderrTail);
+      await collector?.close();
+      let firstPromotionTokenUsage = null;
+      if (collector && !transcriptTruncated) {
+        try {
+          firstPromotionTokenUsage = collector.usage(
+            parseCodexExecUsage(stdout),
+            firstPromotionAt(),
+          );
+        } catch {
+          // A missing server boundary cannot turn partial telemetry into a budget.
+        }
+      }
       stdout = ""; // Rule A11: never retained beyond digest and token total.
       resolve({
         harness,
@@ -344,6 +453,7 @@ export async function runHarnessAgent(
         transcriptTruncated,
         tokens,
         tokenUsage,
+        ...(measure ? { firstPromotionTokenUsage } : {}),
         stdinWriteFailed,
         unavailable,
         stderrSha256: stderrHash.digest("hex"),
@@ -355,5 +465,7 @@ export async function runHarnessAgent(
       finish(null);
     });
     child.on("close", (code) => finish(code));
+  }).finally(async () => {
+    await collector?.close();
   });
 }

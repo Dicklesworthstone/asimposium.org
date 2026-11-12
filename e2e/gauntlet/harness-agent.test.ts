@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -11,7 +12,9 @@ import {
   retainedRouteTemplate,
   runHarnessAgent,
   sponsorPasteBlock,
+  startCodexUsageCollector,
 } from "./harness-agent.mjs";
+import { parseCodexExecUsage } from "./token-accounting-codex.ts";
 
 // A harness that never started is "blocked", not a measured cold-agent failure
 // (bead asimposiumorg-pcsn). The codex lines are the ones codex-cli 0.157.0
@@ -259,5 +262,157 @@ describe("the real runner uses the existing complete usage accounting", () => {
         }),
       ),
     ).toMatchObject({ total: 10, input: 1, output: 2, cache_write: 3, cache_read: 4 });
+  });
+});
+
+describe("run-local numeric usage receiver", () => {
+  const base = Date.parse("2026-11-11T00:00:00.000Z");
+  const terminal = [
+    '{"type":"thread.started","thread_id":"unit-root"}',
+    '{"type":"turn.completed","usage":{"input_tokens":300,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":30,"reasoning_output_tokens":0}}',
+  ].join("\n");
+  function payload() {
+    const logs = [
+      { name: "codex.user_prompt", at: 10, input: 0, output: 0 },
+      { name: "codex.websocket_request", at: 15, input: 0, output: 0 },
+      { name: "codex.sse_event", at: 20, input: 100, output: 10 },
+      { name: "codex.websocket_request", at: 35, input: 0, output: 0 },
+      { name: "codex.sse_event", at: 40, input: 200, output: 20 },
+    ].map((row) => ({
+      attributes: Object.entries({
+        "event.name": row.name,
+        "conversation.id": "unit-root",
+        "event.timestamp": new Date(base + row.at).toISOString(),
+        "event.kind": "response.completed",
+        success: "true",
+        input_token_count: String(row.input),
+        cached_token_count: "0",
+        cache_write_token_count: "0",
+        output_token_count: String(row.output),
+        reasoning_token_count: "0",
+        prompt: "synthetic-prompt-canary",
+        tool_arguments: "synthetic-tool-canary",
+        "user.email": "synthetic-account-canary",
+      }).map(([key, stringValue]) => ({ key, value: { stringValue } })),
+    }));
+    return { resourceLogs: [{ scopeLogs: [{ logRecords: logs }] }] };
+  }
+  function connection(argv: readonly string[]) {
+    const exporter = argv.find((arg) => arg.startsWith("otel.exporter="));
+    assert(exporter);
+    const url = /endpoint="([^"]+)"/.exec(exporter)?.[1];
+    const token = /"x-asimp-usage-token"="([^"]+)"/.exec(exporter)?.[1];
+    assert(url && token);
+    return { url, token };
+  }
+
+  test("authenticates, waits for closure, drops content, and closes idempotently", async () => {
+    const receiver = await startCodexUsageCollector();
+    const { url, token } = connection(receiver.argv);
+    try {
+      expect(new URL(url).hostname).toBe("127.0.0.1");
+      expect((await fetch(url, { method: "POST", body: "{}" })).status).toBe(403);
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "x-asimp-usage-token": token },
+        body: JSON.stringify(payload()),
+      });
+      expect(response.status).toBe(200);
+      expect(receiver.usage(parseCodexExecUsage(terminal), base + 30)).toBeNull();
+      await receiver.close();
+      const usage = receiver.usage(parseCodexExecUsage(terminal), base + 30);
+      expect(usage?.totalTokens).toBe(110);
+      expect(JSON.stringify(usage)).not.toContain("canary");
+      expect(JSON.stringify(usage)).not.toContain("unit-root");
+      await receiver.close();
+      let refused = false;
+      try {
+        await fetch(url);
+      } catch {
+        refused = true;
+      }
+      expect(refused).toBe(true);
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  test("an authenticated malformed or oversized batch poisons the measurement", async () => {
+    for (const bad of ["{broken", " ".repeat(1024 * 1024 + 1)]) {
+      const receiver = await startCodexUsageCollector();
+      const { url, token } = connection(receiver.argv);
+      try {
+        let rejected = false;
+        try {
+          const result = await fetch(url, {
+            method: "POST",
+            headers: { "x-asimp-usage-token": token },
+            body: bad,
+          });
+          rejected = result.status === 400;
+        } catch {
+          rejected = true;
+        }
+        expect(rejected).toBe(true);
+        const accepted = await fetch(url, {
+          method: "POST",
+          headers: { "x-asimp-usage-token": token },
+          body: JSON.stringify(payload()),
+        });
+        expect(accepted.status).toBe(200);
+        await receiver.close();
+        expect(receiver.usage(parseCodexExecUsage(terminal), base + 30)).toBeNull();
+      } finally {
+        await receiver.close();
+      }
+    }
+  });
+
+  test("the actual child transport wires privacy controls and reconciled counters", async () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "asimp-harness-usage-"));
+    const fixture = join(fixtureRoot, "numeric.cjs");
+    const observation = join(fixtureRoot, "flags.json");
+    writeFileSync(
+      fixture,
+      `const fs=require("node:fs");
+const args=process.argv.slice(2);
+const exporter=args.find(arg=>arg.startsWith("otel.exporter="));
+const url=/endpoint="([^"]+)"/.exec(exporter)?.[1];
+const token=/"x-asimp-usage-token"="([^"]+)"/.exec(exporter)?.[1];
+process.stdin.resume();
+process.stdin.on("end",async()=>{
+ fs.writeFileSync(${JSON.stringify(observation)},JSON.stringify({
+  promptsOff:args.includes("otel.log_user_prompt=false"),
+  responsesOff:args.includes("otel.log_agent_responses=false"),
+  rationalesOff:args.includes("otel.log_guardian_assessments=false"),
+  outputOff:args.includes("otel.tool_result.max_bytes=0"),
+  metricsOff:args.includes('otel.metrics_exporter="none"'),
+  tracesOff:args.includes('otel.trace_exporter="none"')
+ }));
+ const r=await fetch(url,{method:"POST",headers:{"x-asimp-usage-token":token},body:${JSON.stringify(JSON.stringify(payload()))}});
+ if(r.status!==200)process.exitCode=1;
+ process.stdout.write(${JSON.stringify(terminal)});
+});`,
+      { mode: 0o600 },
+    );
+    const run = await runHarnessAgent("codex", "https://unit.example/join/synthetic#v1.synthetic", {
+      timeoutMs: 5000,
+      firstPromotionAt: () => base + 30,
+      spawnProcess: (_binary, args, options) =>
+        spawn(process.execPath, [fixture, ...args], options),
+    });
+    expect(run.exitCode).toBe(0);
+    expect(run.firstPromotionTokenUsage?.totalTokens).toBe(110);
+    expect(run.tokenUsage?.totalTokens).toBe(330);
+    expect(JSON.parse(readFileSync(observation, "utf8"))).toEqual({
+      promptsOff: true,
+      responsesOff: true,
+      rationalesOff: true,
+      outputOff: true,
+      metricsOff: true,
+      tracesOff: true,
+    });
+    expect(JSON.stringify(run)).not.toContain("canary");
+    expect(JSON.stringify(run)).not.toContain("x-asimp-usage-token");
   });
 });

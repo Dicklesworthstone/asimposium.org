@@ -564,11 +564,23 @@ async function main() {
               approvalTrace,
             );
       const agentOutcome = isHarness
-        ? await runHarnessAgent(mode.slice(8), minted.join_url).then((run) => ({
+        ? await runHarnessAgent(mode.slice(8), minted.join_url, {
+            firstPromotionAt: () =>
+              target.observations
+                .slice(observationsFrom)
+                .find(
+                  (observation) =>
+                    observation.sponsor !== true &&
+                    observation.method === "POST" &&
+                    /^\/v1\/sessions\/[^/]+\/promote$/.test(observation.path) &&
+                    (observation.status === 200 || observation.status === 201),
+                )?.at,
+          }).then((run) => ({
             stage: run.timedOut ? "timeout" : `exit-${run.exitCode}`,
             ok: run.exitCode === 0,
             tokens: run.tokens,
             token_usage: run.tokenUsage,
+            first_promotion_token_usage: run.firstPromotionTokenUsage ?? null,
             stdin_write_failed: run.stdinWriteFailed,
             duration_ms: run.durationMs,
             transcript_sha256: run.transcriptSha256,
@@ -723,6 +735,7 @@ async function main() {
           ? {
               tokens: agentOutcome.tokens,
               token_usage: agentOutcome.token_usage,
+              first_promotion_token_usage: agentOutcome.first_promotion_token_usage,
               stdin_write_failed: agentOutcome.stdin_write_failed,
               duration_ms: agentOutcome.duration_ms,
               transcript_sha256: agentOutcome.transcript_sha256,
