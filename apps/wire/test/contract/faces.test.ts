@@ -646,6 +646,7 @@ describe("face wire format", () => {
         "/p/{problem}/evidence/{evidenceId}/artifacts.json",
         "/p/{problem}/evidence/{evidenceId}/artifacts.md",
         "/p/{problemId}/disclosures/{document}",
+        "/p/{problemId}/protocol-conflicts/{document}",
         "/p/{id}/formal.html",
         "/p/{id}/formal.json",
         "/p/{id}/formal.md",
@@ -733,6 +734,7 @@ describe("face wire format", () => {
         ...[
           "workshop",
           "promote",
+          "protocol-conflicts",
           "reanchor",
           "synthesize",
           "dead-ends",

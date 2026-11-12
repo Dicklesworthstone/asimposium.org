@@ -157,6 +157,46 @@ async function artifactUploadGatewayHasMount(key: string): Promise<boolean> {
   return response.status === 401 && problem.success && problem.data.code === "UNAUTHORIZED";
 }
 
+/** Dispatch/refusal proof for the one method-guarded ALL endpoint. The exact
+ * mounted row and actual POST/GET behavior must agree; this proves no publication. */
+async function protocolConflictMethodHasMount(key: string): Promise<boolean> {
+  if (key !== "POST /v1/sessions/<id>/protocol-conflicts") return false;
+  if (
+    !sessionRouter.routes.some(
+      (route) => route.method === "ALL" && route.path === "/v1/sessions/:id/protocol-conflicts",
+    )
+  )
+    return false;
+  const url = `https://a.asimposium.org/v1/sessions/S-${"0".repeat(26)}/protocol-conflicts`;
+  const env = {
+    DB: {
+      prepare() {
+        throw new Error("Unauthenticated protocol conflict discovery must not query D1");
+      },
+    },
+  } as unknown as Env;
+  const headers = {
+    "user-agent": "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
+    "content-type": "application/json",
+  };
+  const post = await sessionRouter.fetch(
+    new Request(url, { method: "POST", headers, body: "{}" }),
+    env,
+  );
+  const refusal = ProblemDocumentSchema.safeParse(await post.json());
+  const get = await sessionRouter.fetch(new Request(url, { headers }), env);
+  const wrongMethod = ProblemDocumentSchema.safeParse(await get.json());
+  return (
+    post.status === 401 &&
+    refusal.success &&
+    refusal.data.code === "UNAUTHORIZED" &&
+    get.status === 405 &&
+    get.headers.get("allow") === "POST" &&
+    wrongMethod.success &&
+    wrongMethod.data.code === "SCHEMA_INVALID"
+  );
+}
+
 const STUB_SERVICE = {} as never;
 
 const rootApp = createApp({ createEnrollmentStore: (() => ({})) as never });
@@ -243,6 +283,8 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "signed body-only private export read; summarized by sponsor_surface",
     "POST /v1/sponsors/workshops":
       "signed body-only private workshop read; summarized by sponsor_surface",
+    "POST /v1/sponsors/workshop/cursor":
+      "signed body-only private workshop cursor read; summarized by sponsor_surface",
     "POST /v1/p/<id>/discrimination":
       "publication remains withheld by DISCOVERY_UNDISCLOSED_ROUTES; the disclosed discriminate move drafts privately through workshop",
     "GET /v1/sponsors/follows": "signed sponsor subscription read; summarized by sponsor_surface",
@@ -254,6 +296,8 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "signed exact-lineage sponsor disclosure decision; summarized by sponsor_surface",
     "GET /v1/sponsors/problems/<id>/publication-preview":
       "signed private formulation preview; summarized by sponsor_surface",
+    "POST /v1/sponsors/problems/<id>/hide":
+      "signed sponsor problem visibility command; summarized by sponsor_surface",
     "GET /v1/sponsors/problems/<id>/statement-proposals":
       "signed current-steward private proposal queue; summarized by sponsor_surface",
     "GET /v1/sponsors/problems/<id>/statement-proposals/<proposalId>":
@@ -522,7 +566,8 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       expect(
         advertisementHasMount(key, all) ||
           (await artifactPublicationGatewayHasMount(key)) ||
-          (await artifactUploadGatewayHasMount(key)),
+          (await artifactUploadGatewayHasMount(key)) ||
+          (await protocolConflictMethodHasMount(key)),
         key,
       ).toBe(true);
     }
@@ -532,6 +577,19 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       expect(advertised.has(key), key).toBe(false);
       expect(reason.trim().length, key).toBeGreaterThan(0);
     }
+  });
+
+  test("the method-guarded protocol conflict write cannot bless other methods, paths or templates", async () => {
+    expect(await protocolConflictMethodHasMount("POST /v1/sessions/<id>/protocol-conflicts")).toBe(
+      true,
+    );
+    for (const key of [
+      "GET /v1/sessions/<id>/protocol-conflicts",
+      "DELETE /v1/sessions/<id>/protocol-conflicts",
+      "POST /v1/sessions/<id>/protocol-conflicts/extra",
+      "POST /v1/sessions/<different>/protocol-conflicts",
+    ])
+      expect(await protocolConflictMethodHasMount(key), key).toBe(false);
   });
 
   test("the five advertised artifact gateway operations cannot bless fallback paths or unsupported methods", async () => {
