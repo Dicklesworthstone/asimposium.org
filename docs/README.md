@@ -17,6 +17,64 @@ observed.
 Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+### Full SQL recovery with current published controls — independently verified
+
+Task `p4b.4` connects the verified full SQL archive to the existing signed
+deletion-journal replayer. `restoreDatabaseBackup` checks independently trusted
+keys, the expected source origin, current published authority, supported action
+semantics and the credential-replay capability before importing historical
+state. The empty-target check is the first statement of the same D1 transaction
+as the import. It then verifies the complete logical SQL, schema and table counts,
+replays controls through existing lifecycle operations and rechecks current
+authority. The result explicitly remains `serviceReady: false`.
+
+The latest working real Workerd/D1/R2 lane passes in 27.596 seconds with a
+131-table fixture and 988 captured statements. It proves that the raw snapshot
+contains private statement/workshop content and a live credential, then proves
+the later erasure removes the actual content and private search entry, and
+the scratch Worker's real enrollment policy rejects the revoked credential.
+The captured public ledger head remains intact. All 15 pre-import refusals
+leave the actual target empty, including authentic but inconsistent control
+histories and a suspension record missing its required event ID.
+
+A newly published control during recovery withholds completion. The later
+credential is still live in the quarantined target before explicit journal
+resume and is rejected afterward. A separate unrelated table created during
+preflight survives; the atomic empty-target fence imports no historical tables.
+The existing real journal and per-problem export/restore lanes pass in 10.062
+and 11.909 seconds. The journal lane explicitly models historical rows by
+reversing fixture state; it is not a Time Travel exercise.
+
+Working typecheck/lint pass eight groups and the three focused retention files
+pass 94 tests. The exact five-file UBS scan completes 395 findings (four
+critical, 27 warnings, 364 information). All 31 elevated contexts were reviewed:
+public verification metadata comparisons and a literal credential-type mapping
+account for the critical heuristics. No suppression or security-clean claim
+is made. Earlier Node/RPC setup failures, import-order lint errors and an
+incorrect expected error code are retained separately.
+
+At frozen `19ad079f`, both original root suites pass all eight groups, in
+1,530.866 and 1,514.943 seconds. Each passes Worker 7,444, Agora 1,094 and
+Gauntlet 150 tests; both Worker expectation counts are 39,518. All 2,742 source
+inputs and the actual Next runtime are unchanged. The 54 individual toolchain
+skips remain explicit; these gates do not certify the optional Rust CLI.
+Full contracts pass 1,028 and renderers 605 in separate frozen executions.
+
+Independent semantic faults use unchanged native assertions. Omitting initial
+journal preflight imports 740 schema objects before the missing-journal refusal,
+failing the required empty-target check. Omitting replay fails the direct
+private-content erasure predicate before later count/authentication assertions.
+Removing only the atomic fence imports into the concurrently occupied target
+and reaches a snapshot mismatch where import refusal was required; later
+row-preservation assertions are not reached under that fault. Exact restoration
+passes the complete native lane after each omission. WhiteRaven independently
+closed only `p4b.4`, with original-criteria map 3182 at that exact revision. The
+[existing runbook](runbooks/nightly-ledger-backups.md) gives the real binding
+invocation, native command and explicit replay-resume procedure. Publication
+can lag newer D1 controls, so complete current rights, CAS bodies/unbinds,
+provider identity, scalable backups and service cutover remain original open
+recovery requirements.
+
 ### Complete SQL backups — independently verified
 
 Task `p4b.3` connects a full logical SQL snapshot to the existing Worker cron.
@@ -87,9 +145,9 @@ checks before those reviews finished caused avoidable verification overhead.
 The producer is bounded to 256 tables, 2,000 rows per table, 1 MiB SQL per table,
 8 MiB total and 16,000 statements. Larger state and nondefault FTS configuration
 refuse explicitly. A raw SQL restore reintroduces historical authority and must
-stay quarantined: integrated current deletion-journal replay, private CAS
-recovery, provider scheduling and service cutover remain with `p4b`, `zr9`,
-`79n` and `24q`. See the existing
+stay quarantined. The successor above connects current published controls;
+complete current rights, private CAS recovery, provider scheduling and service
+cutover remain with `p4b`, `zr9`, `79n` and `24q`. See the existing
 [backup runbook](runbooks/nightly-ledger-backups.md) for operation and limits.
 
 ### Operator Fellow capacity — independently verified
@@ -701,7 +759,7 @@ implementation from work that exists but still needs original acceptance.
 | --- | --- | --- |
 | Provisioned G-C runner and measurement | `e2e/gauntlet/run.sh:139` still returns 70 for a supplied join-file input. Local verdicts prove pack retrieval and persistence past an injected refusal, not move following or error-body comprehension. Harness usage is explicitly `whole_session`; served bytes to first promotion are a separate measure. | `zai`, `pcsn`, `mn7`: implement the actual staging journey and authoritative first-promotion usage boundary, then meet ten fresh sessions, three harnesses, eight completions and the 25K-token median. Missing usage or a planted incomplete journey must withhold acceptance. |
 | Safety accuracy and the protected corpus | `e2e/screening/s4-corpus.ts:921,1107` reserves 50 absent protected bodies. The 150 legitimate examples and local fixture screen cannot establish hard-reject recall or hosted accuracy. | `xeg`, `axq`, `drv`, `ip3`: material, digest-bound protected corpus; hosted FP/FN and aggregation tests; bare/inoculated probe trials; actual independent operator decisions and Google verification. |
-| Whole-system recovery | `krater/database-backup.ts` now captures bounded full application SQL, including account/global/private state; its real empty-scratch round-trip and independent qualification are recorded above. The original ledger archive and per-problem restore remain separate. Raw SQL import is quarantined historical authority. | `p4b`, `zr9`, `79n`, `24q`: integrated current-rights and CAS recovery, scalable backups and provider drills, proving revoked rights and redactions survive before service cutover; corrupt input must refuse before writes. |
+| Whole-system recovery | `krater/database-backup.ts` captures bounded full application SQL and now connects independently current published journal controls to an atomic empty-scratch import and lifecycle replay. Real private erasure, credential revocation and quarantined resume are verified above. The original ledger archive and per-problem restore remain separate; `serviceReady` remains false. | `p4b`, `zr9`, `79n`, `24q`: complete current rights, including controls newer than published authority, CAS bodies/unbind, scalable backups and provider drills before service cutover. |
 | Area rename | Implemented after this audit in `moderation/area-renames.ts`, migration 0143 and the existing admin action/form; shared faces carry the new label and public change provenance. | `0ht.1`: local native/browser, adverse controls, full-root and independent acceptance are recorded above. Parent `0ht` retains wider admin/hosted criteria. |
 | Remaining optional CLI | `cli/src/lib.rs:44,46`, `enrollment.rs` and `credentials.rs` now implement connect, device enrollment, approval resume and keychain storage. Browser PKCE, validate/scrub parity, spool/sync/watch/pull/doctor, negotiation and release remain incomplete. | `il7`, `l3b`, `psl`, `jsj`, `85s`, `l1yg.1`: original current-source Rust, parity, native and release criteria; old binaries and compile-only checks cannot substitute. |
 | Deployed configuration and evidence | Source implements receipt-bound readiness, Herald/outbox, rate budgets, artifact publication and scientific consumers. Public deployment and provider behavior remain unqualified. | `rs5n`, `tgu`, `doa`, `irg`, `rhg`, `z2j`, W7: reconcile existing bindings/migrations, preserve Worker-before-Agora order, exercise actual Google/sponsor/anonymous paths and retain load, cost, cache and storage receipts. |
