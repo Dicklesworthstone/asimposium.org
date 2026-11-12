@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ReviewFeedbackSchema } from "./review-feedback.ts";
 
 /**
  * W2.2 / W1.2 Batch write schemas (Fable §7: `POST /v1/p/:id/events:batch`).
@@ -153,6 +154,7 @@ export const BatchMemberResultSchema = z
     id: z.string(),
     seq: z.number().int().positive(),
     version: z.number().int().min(1).optional(),
+    review_feedback: ReviewFeedbackSchema.nullable().optional(),
   })
   .strict();
 

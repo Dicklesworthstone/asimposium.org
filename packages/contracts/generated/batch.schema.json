@@ -241,6 +241,149 @@
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 9007199254740991
+              },
+              "review_feedback": {
+                "anyOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "basis": {
+                            "type": "string",
+                            "const": "first-readable-non-author-review-on-version"
+                          },
+                          "through_seq": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "sample_limit": {
+                            "type": "number",
+                            "const": 128
+                          },
+                          "sampled_versions": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 128
+                          },
+                          "unreviewed_versions": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 128
+                          },
+                          "unmeasurable_versions": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 128
+                          },
+                          "omitted": {
+                            "maxItems": 3,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "sample_limit",
+                                "content_unavailable",
+                                "invalid_timestamp"
+                              ]
+                            }
+                          },
+                          "reviewed_versions": {
+                            "type": "number",
+                            "const": 0
+                          },
+                          "median_first_review_seconds": {
+                            "type": "null"
+                          }
+                        },
+                        "required": [
+                          "basis",
+                          "through_seq",
+                          "sample_limit",
+                          "sampled_versions",
+                          "unreviewed_versions",
+                          "unmeasurable_versions",
+                          "omitted",
+                          "reviewed_versions",
+                          "median_first_review_seconds"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "basis": {
+                            "type": "string",
+                            "const": "first-readable-non-author-review-on-version"
+                          },
+                          "through_seq": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "sample_limit": {
+                            "type": "number",
+                            "const": 128
+                          },
+                          "sampled_versions": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 128
+                          },
+                          "unreviewed_versions": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 128
+                          },
+                          "unmeasurable_versions": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 128
+                          },
+                          "omitted": {
+                            "maxItems": 3,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "sample_limit",
+                                "content_unavailable",
+                                "invalid_timestamp"
+                              ]
+                            }
+                          },
+                          "reviewed_versions": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 128
+                          },
+                          "median_first_review_seconds": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "basis",
+                          "through_seq",
+                          "sample_limit",
+                          "sampled_versions",
+                          "unreviewed_versions",
+                          "unmeasurable_versions",
+                          "omitted",
+                          "reviewed_versions",
+                          "median_first_review_seconds"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ],
+                    "description": "Historical observation, not a forecast. sampled_versions equals reviewed_versions + unreviewed_versions + unmeasurable_versions; counter arithmetic and canonical omissions are enforced by the Zod consumer."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readProblemReviewFeedback } from "../../src/sessions/review-feedback.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // W9.6 review matchmaking (beads asimposiumorg-mip / asimposiumorg-codz) on
@@ -380,6 +381,344 @@ await runLocalWorkerJourney(
         assert.equal(declinedAfterRemoval.status, "declined");
         assert.ok(!JSON.stringify(await call("/reviews.json")).includes(problem));
       }
+    }
+
+    // Feedback is a bounded historical observation in an actual NEW receipt,
+    // not a forecast or a standing/tier signal. All original journeys above run.
+    {
+      // Fresh Fellows respect the ordinary global open-session cap; the original
+      // unlisted membership-removal story keeps its historical sessions intact.
+      const author = await enroll("feedback-author", OWNER);
+      const eligible = await enroll("feedback-reviewer", "usr_match_eligible");
+      const sameSponsor = await enroll("feedback-same-sponsor", OWNER);
+      const feedbackProblem = (
+        await call(
+          "/v1/problems",
+          {
+            title: "Observed review timing",
+            statement: "For every natural n, n + 0 = n.",
+            falsifier: "A natural n with a different sum.",
+            motivation: "Observe version-pinned feedback without predicting a wait.",
+            areas: ["number-theory"],
+          },
+          sameFamily,
+          201,
+        )
+      ).problem.id;
+      assert.equal(
+        await readProblemReviewFeedback(env.DB, feedbackProblem),
+        null,
+        "private draft has no public observation",
+      );
+      await sponsorCall(
+        "usr_match_same_family",
+        "POST",
+        `/v1/sponsors/problems/${feedbackProblem}/lifecycle`,
+        "problem-lifecycle",
+        { action: "publish" },
+      );
+      const feedbackReviewSession = (
+        await call("/v1/sessions", { problem_id: feedbackProblem, intent: "review" }, eligible, 201)
+      ).session_id;
+      await call(
+        `/v1/problems/${feedbackProblem}/statement-review`,
+        {
+          session_id: feedbackReviewSession,
+          statement_version: 1,
+          verdict: "statement-clear",
+          basis: "Exact natural-number identity.",
+        },
+        eligible,
+      );
+      const feedbackSession = (
+        await call("/v1/sessions", { problem_id: feedbackProblem, intent: "prove" }, author, 201)
+      ).session_id;
+      const post = async (path, data, key, token = author, status = 201) => {
+        const response = await worker.fetch(`${origin}${path}`, {
+          method: "POST",
+          headers: {
+            "User-Agent": userAgent,
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+            "idempotency-key": key,
+          },
+          body: JSON.stringify(data),
+        });
+        const text = await response.text();
+        const value = JSON.parse(text);
+        assert.equal(response.status, status, `${path}: ${value.code ?? "receipt"}`);
+        assert.equal(response.headers.get("cache-control"), "private, no-store");
+        return { text, value };
+      };
+      let nextDraft = 0;
+      const draft = () =>
+        call(
+          `/v1/sessions/${feedbackSession}/workshop`,
+          {
+            type: "claim-draft",
+            title: `Observed work ${++nextDraft}`,
+            body_md: "Private workshop timing canary, excluded from feedback.",
+          },
+          author,
+          201,
+        );
+      const claim = (statement) => ({
+        kind: "conjecture",
+        statement,
+        falsifier: "A natural number outside the stated equality.",
+      });
+      const firstData = {
+        ...claim("For every natural n, n + 0 = n exactly."),
+        workshop_id: (await draft()).workshop_id,
+      };
+      const firstPath = `/v1/sessions/${feedbackSession}/promote`;
+      const first = await post(firstPath, firstData, "feedback-first");
+      assert.ok(
+        first.value.review_feedback,
+        "ordinary promotion carries an observed review-feedback receipt",
+      );
+      assert.equal(first.value.review_feedback.sampled_versions, 0);
+      assert.equal(first.value.review_feedback.median_first_review_seconds, null);
+      assert.ok(
+        first.value.review_feedback.through_seq < first.value.seq,
+        "history cut is persisted D1, not predicted new publication",
+      );
+      const reviewData = {
+        target_claim_id: first.value.claim_id,
+        target_version: 1,
+        verdict: "cannot-verify",
+        basis: "The exact argument remains incomplete.",
+        capable_of_failure: "A natural number for which the sum differs.",
+        body_md: "The statement is precise; this review does not establish a proof.",
+      };
+      const selfReview = await call(
+        `/v1/sessions/${feedbackSession}/review`,
+        reviewData,
+        author,
+        422,
+      );
+      assert.equal(selfReview.code, "REVIEWER_IS_AUTHOR");
+      const firstReview = await call(
+        `/v1/sessions/${feedbackReviewSession}/review`,
+        reviewData,
+        eligible,
+        201,
+      );
+      const clocks =
+        await env.DB.prepare(`SELECT p.created_at AS published_at, r.created_at AS reviewed_at
+      FROM events p JOIN events r ON r.problem_id=p.problem_id
+      WHERE p.problem_id=? AND p.object_id=? AND p.type='claim.created'
+        AND r.object_id=? AND r.type='review.created'`)
+          .bind(feedbackProblem, first.value.claim_id, firstReview.review_id)
+          .first();
+      const expectedSeconds =
+        (Date.parse(clocks.reviewed_at) - Date.parse(clocks.published_at)) / 1000;
+      assert.ok(Number.isFinite(expectedSeconds) && expectedSeconds >= 0);
+      const direct = await post(
+        `/v1/p/${feedbackProblem}/claims`,
+        claim("For every natural n, 0 + n = n."),
+        "feedback-direct",
+      );
+      assert.ok(
+        direct.value.review_feedback,
+        "implicit direct claim uses the same feedback consumer",
+      );
+      assert.equal(direct.value.review_feedback.sampled_versions, 1);
+      assert.equal(direct.value.review_feedback.reviewed_versions, 1);
+      assert.equal(direct.value.review_feedback.median_first_review_seconds, expectedSeconds);
+      assert.equal(
+        (await post(firstPath, firstData, "feedback-first", author, 200)).text,
+        first.text,
+        "later review never recomputes stored replay bytes",
+      );
+
+      const sameSponsorSession = (
+        await call(
+          "/v1/sessions",
+          { problem_id: feedbackProblem, intent: "review" },
+          sameSponsor,
+          201,
+        )
+      ).session_id;
+      const laterReview = await call(
+        `/v1/sessions/${sameSponsorSession}/review`,
+        {
+          ...reviewData,
+          body_md: "A later non-author check with no added sponsorship independence.",
+        },
+        sameSponsor,
+        201,
+      );
+      assert.equal(laterReview.tier, "T0");
+      await call(
+        `/v1/sessions/${feedbackSession}/revise`,
+        {
+          ...claim("For every natural n, n + 0 equals n exactly."),
+          claim_id: first.value.claim_id,
+          base_version: 1,
+        },
+        author,
+        201,
+      );
+      const members = [
+        {
+          tempId: "tmp:feedback-a",
+          action: "claim",
+          data: claim("For every natural n, n times 1 equals n."),
+        },
+        {
+          tempId: "tmp:feedback-b",
+          action: "claim",
+          data: claim("For every natural n, 1 times n equals n."),
+        },
+      ];
+      const batch = await post(
+        `/v1/p/${feedbackProblem}/events:batch`,
+        { members },
+        "feedback-batch",
+      );
+      assert.equal(batch.value.results.length, 2);
+      for (const member of batch.value.results) {
+        assert.ok(
+          member.review_feedback,
+          "atomic claim member carries its exact ordinary feedback receipt",
+        );
+        assert.equal(member.review_feedback.median_first_review_seconds, expectedSeconds);
+        assert.equal(member.review_feedback.sampled_versions, 3);
+      }
+      const afterRevision = await post(
+        firstPath,
+        {
+          ...claim("For every natural n, n plus zero equals n."),
+          workshop_id: (await draft()).workshop_id,
+        },
+        "feedback-version-probe",
+      );
+      assert.equal(afterRevision.value.review_feedback.sampled_versions, 5);
+      assert.equal(
+        afterRevision.value.review_feedback.reviewed_versions,
+        1,
+        "v1 review does not credit revised v2",
+      );
+      assert.equal(afterRevision.value.review_feedback.unreviewed_versions, 4);
+      assert.equal(
+        afterRevision.value.review_feedback.median_first_review_seconds,
+        expectedSeconds,
+        "later review does not replace first review by sequence",
+      );
+
+      const controlReview = (id, action) =>
+        operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+          target_id: `${feedbackProblem}/${id}`,
+          target_kind: "review",
+          action,
+          reason: "Verify current review visibility before observing feedback.",
+        });
+      await controlReview(firstReview.review_id, "hide");
+      await controlReview(laterReview.review_id, "hide");
+      const noReadableReview = await post(
+        firstPath,
+        {
+          ...claim("For every natural n, zero plus n equals n."),
+          workshop_id: (await draft()).workshop_id,
+        },
+        "feedback-hidden-reviews",
+      );
+      assert.equal(noReadableReview.value.review_feedback.reviewed_versions, 0);
+      assert.equal(
+        noReadableReview.value.review_feedback.median_first_review_seconds,
+        null,
+        "hidden reviews do not become public timing evidence",
+      );
+      assert.ok(noReadableReview.value.review_feedback.omitted.includes("content_unavailable"));
+      assert.equal(
+        (
+          await post(
+            `/v1/p/${feedbackProblem}/events:batch`,
+            { members },
+            "feedback-batch",
+            author,
+            200,
+          )
+        ).text,
+        batch.text,
+      );
+      assert.equal(
+        (await post(firstPath, firstData, "feedback-first", author, 200)).text,
+        first.text,
+      );
+      await controlReview(firstReview.review_id, "restore");
+      await operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+        target_id: `${feedbackProblem}/${first.value.claim_id}`,
+        target_kind: "claim",
+        action: "hide",
+        reason: "Verify hidden claim versions do not contribute review timing.",
+      });
+      const hiddenClaim = await post(
+        firstPath,
+        {
+          ...claim("For every natural n, the sum of n and zero equals n."),
+          workshop_id: (await draft()).workshop_id,
+        },
+        "feedback-hidden-claim",
+      );
+      assert.equal(hiddenClaim.value.review_feedback.reviewed_versions, 0);
+      assert.equal(hiddenClaim.value.review_feedback.median_first_review_seconds, null);
+      assert.ok(hiddenClaim.value.review_feedback.omitted.includes("content_unavailable"));
+      await operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+        target_id: `${feedbackProblem}/${first.value.claim_id}`,
+        target_kind: "claim",
+        action: "restore",
+        reason: "Restore the observed claim after the timing visibility control.",
+      });
+
+      const typedDraft = await call(
+        `/v1/sessions/${feedbackSession}/workshop`,
+        {
+          type: "claim-draft",
+          title: "Sponsor promotes stored work",
+          ledger_intent: { kind: "create", target_kind: "claim" },
+          body_md: "Private sponsor promotion body.",
+          publication: {
+            kind: "conjecture",
+            statement: "For every natural n, n multiplied by one equals n.",
+            falsifier: "A natural number with a different product.",
+            relates_to: [],
+            depends_on: [],
+          },
+        },
+        author,
+        201,
+      );
+      const sponsorReceipt = await sponsorCall(
+        OWNER,
+        "POST",
+        "/v1/sponsors/workshop/action",
+        "workshop.action",
+        {
+          problem_id: feedbackProblem,
+          fellow_id: await hello(author),
+          workshop_id: typedDraft.workshop_id,
+          expected_workshop_version: typedDraft.version,
+          action: "promote",
+        },
+        201,
+      );
+      assert.ok(
+        sponsorReceipt.promotion.review_feedback,
+        "sponsor promotion preserves the Fellow receipt observation",
+      );
+      assert.equal(
+        sponsorReceipt.promotion.review_feedback.median_first_review_seconds,
+        expectedSeconds,
+      );
+      console.log(
+        JSON.stringify({
+          stage: "observed-review-feedback-passed",
+          boundary:
+            "real local receipts and immutable event clocks; descriptive bounded history, not a forecast or standing change",
+        }),
+      );
     }
 
     console.log(

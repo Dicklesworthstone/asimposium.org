@@ -272,8 +272,7 @@ test("missing, foreign, tombstoned and erased authority have one private 404 fac
       f.add("fellow-a", "P-AAA", 77);
       if (mode === "tombstoned")
         f.sql.exec("UPDATE sponsors SET tombstoned_at='2026-11-12' WHERE sponsor_id='usr_own'");
-      if (mode === "erased")
-        f.sql.exec("INSERT INTO private_draft_erasures VALUES('P-AAA')");
+      if (mode === "erased") f.sql.exec("INSERT INTO private_draft_erasures VALUES('P-AAA')");
       const response = await f.request(
         mode === "missing" ? { ...SCOPE, fellow_id: "fellow-missing" } : SCOPE,
         mode === "foreign" ? "usr_other" : "usr_own",

@@ -428,6 +428,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/screening.ts
   packages/contracts/src/scientific-provenance.ts
   packages/contracts/src/sessions.ts
+  packages/contracts/src/review-feedback.ts
   packages/contracts/src/statements.ts
   packages/contracts/src/health.ts
   packages/contracts/src/readiness.ts
@@ -655,6 +656,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/sessions/ledger-pack.ts
   apps/wire/src/sessions/formal-pack.ts
   apps/wire/src/sessions/review-pack.ts
+  apps/wire/src/sessions/review-feedback.ts
   apps/wire/src/sessions/review-invitation-pack.ts
   apps/wire/src/sessions/review-invitation-pack-service.ts
   apps/wire/src/review-requests/model.ts

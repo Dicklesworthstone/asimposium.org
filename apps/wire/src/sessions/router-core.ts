@@ -316,6 +316,7 @@ import {
   narrowSessionRefusalSchema,
   SESSIONS_SCHEMA_URL as SESSIONS_SCHEMA_URI,
 } from "./refusal-schema";
+import { readProblemReviewFeedback } from "./review-feedback.ts";
 import {
   assertSessionClosePublicationPins,
   parseSessionCloseReplayState,
@@ -331,12 +332,12 @@ import {
   type SessionCloseWorkshopPromotion,
   workshopRevisionSessionMatchesSql,
 } from "./session-close-workshop";
+import { sponsorCanReadWorkshop, sponsorWorkshopNotFound } from "./sponsor-workshop-access.ts";
 import {
   type ClientStatementContext,
   clientStatementContextConflict,
   clientStatementContextGuard,
 } from "./statement-context";
-import { sponsorCanReadWorkshop, sponsorWorkshopNotFound } from "./sponsor-workshop-access.ts";
 import { readWorkingMovesPack } from "./working-moves";
 import { readWorkshopDirectory, WorkshopDirectoryUnavailable } from "./workshop-directory.ts";
 import { reserveWorkshopWrite, workshopRateLimitedProblem } from "./workshop-quota";
@@ -6557,6 +6558,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               seq: settlement.sequence,
               version: versionMint.version,
               queue_position: queuePosition,
+              review_feedback: await readProblemReviewFeedback(db, session.problem_id),
             });
             const value = sponsorActing
               ? SponsorWorkshopMutationResponseSchema.parse({
@@ -10564,6 +10566,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     screening: ScreenedPublication,
     reservation: QuotaReservation,
     workshopPlan?: SessionCloseWorkshopPlan,
+    onResponse?: (sequence: number, value: unknown) => void,
   ): KraterLedgerCommand & Pick<KraterLedgerBatchMember, "resolveForAttempt"> {
     if (isSponsorWorkshopCreate(input.auth)) {
       if (
@@ -10649,7 +10652,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         session: input.session,
         reservationId: reservation.reservationId,
         statementsAfterReplay: workshopPlan?.statementsAt(createdAt),
-        responseFor: prepared.responseFor,
+        responseFor: onResponse
+          ? async (settlement, context) => {
+              const value = await prepared.responseFor(settlement, context);
+              onResponse(settlement.sequence, value);
+              return value;
+            }
+          : prepared.responseFor,
       }),
     };
   }
@@ -11206,6 +11215,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           problem_id: session.problem_id,
           seq: sequence,
           version: 1,
+          review_feedback: await readProblemReviewFeedback(db, session.problem_id),
           queue_position: await computeProblemReviewQueuePosition(
             db,
             session.problem_id,
@@ -21056,6 +21066,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       return screeningContextUnavailableProblem(error);
     }
     const commands: KraterLedgerBatchMember[] = [];
+    // The compact aggregate retains the exact ordinary member observation,
+    // rather than sampling again. Each CAS retry replaces its own entries.
+    const memberReceipts = new Map<number, unknown>();
     const eventIds = new Map(
       preparedMembers.map(({ member, prepared }) => [
         member.tempId,
@@ -21100,7 +21113,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         return id;
       });
       commands.push({
-        ...screenedSimpleCommand(item.input, item.prepared, screened, reservation),
+        ...screenedSimpleCommand(
+          item.input,
+          item.prepared,
+          screened,
+          reservation,
+          undefined,
+          (sequence, value) => memberReceipts.set(sequence, value),
+        ),
         causedByEventIds,
       });
     }
@@ -21124,6 +21144,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 action: preparedMembers[index]?.member.action,
                 id: settlement.claimId,
                 seq: settlement.sequence,
+                ...(["claim", "promote"].includes(preparedMembers[index]?.member.action ?? "")
+                  ? {
+                      review_feedback: PromoteResponseSchema.parse(
+                        memberReceipts.get(settlement.sequence),
+                      ).review_feedback,
+                    }
+                  : {}),
                 ...(["claim", "promote", "revise"].includes(
                   preparedMembers[index]?.member.action ?? "",
                 )
@@ -21336,6 +21363,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       id,
       seq: Number(seq),
       ...(typeof receipt.version === "number" ? { version: receipt.version } : {}),
+      ...("review_feedback" in receipt
+        ? { review_feedback: PromoteResponseSchema.parse(receipt).review_feedback }
+        : {}),
     };
   }
 

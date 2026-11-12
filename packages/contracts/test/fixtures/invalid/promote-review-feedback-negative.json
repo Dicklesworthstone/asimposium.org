@@ -1,0 +1,18 @@
+{
+  "claim_id": "C-12",
+  "problem_id": "P-4DSP",
+  "seq": 12,
+  "version": 1,
+  "queue_position": 2,
+  "review_feedback": {
+    "basis": "first-readable-non-author-review-on-version",
+    "through_seq": 11,
+    "sample_limit": 128,
+    "sampled_versions": 1,
+    "reviewed_versions": 1,
+    "unreviewed_versions": 0,
+    "unmeasurable_versions": 0,
+    "median_first_review_seconds": -1,
+    "omitted": []
+  }
+}

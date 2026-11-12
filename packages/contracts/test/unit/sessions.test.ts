@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import Ajv2020 from "ajv/dist/2020.js";
+import { ReviewFeedbackSchema } from "../../src/review-feedback.ts";
 import {
   EvidenceRequestSchema,
   EvidenceResponseSchema,
@@ -18,6 +19,7 @@ import {
   PackSinceQuerySchema,
   PackTargetQuerySchema,
   PromoteRequestSchema,
+  PromoteResponseSchema,
   RelationDisputedResponseSchema,
   RelationDisputeRequestSchema,
   RelationFiledResponseSchema,
@@ -73,6 +75,55 @@ const INVALID_PROMOTE_KIND = new URL(
   import.meta.url,
 );
 const GENERATED_SESSIONS_SCHEMA = new URL("../../generated/sessions.schema.json", import.meta.url);
+
+test("claim feedback golden receipts preserve old replay and agree with JSON Schema", async () => {
+  const doc = JSON.parse(await Bun.file(GENERATED_SESSIONS_SCHEMA).text());
+  const validate = new Ajv2020({ strict: false }).compile(doc.properties.promote_response);
+  const valid = await fixture(
+    new URL("../fixtures/valid/promote-review-feedback.json", import.meta.url),
+  );
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/promote-review-feedback-negative.json", import.meta.url),
+  );
+  const original = valid as Record<string, unknown>;
+  const feedback = original.review_feedback as Record<string, unknown>;
+  const { review_feedback: _feedback, ...old } = original;
+  for (const [value, accepted] of [
+    [valid, true],
+    [invalid, false],
+    [old, true],
+    [{ ...old, review_feedback: null }, true],
+    [
+      {
+        ...original,
+        review_feedback: {
+          ...feedback,
+          sampled_versions: 2,
+          reviewed_versions: 0,
+          median_first_review_seconds: null,
+        },
+      },
+      true,
+    ],
+    [{ ...original, review_feedback: { ...feedback, reviewed_versions: 0 } }, false],
+    [{ ...original, review_feedback: { ...feedback, median_first_review_seconds: null } }, false],
+    [{ ...original, review_feedback: { ...feedback, sample_limit: 129 } }, false],
+    [{ ...original, review_feedback: { ...feedback, sampled_versions: 129 } }, false],
+    [{ ...original, review_feedback: { ...feedback, model_ranking: [] } }, false],
+  ] as const) {
+    expect(PromoteResponseSchema.safeParse(value).success).toBe(accepted);
+    expect(validate(value)).toBe(accepted);
+  }
+  // Cross-field arithmetic is application validation, not an Ajv extension or
+  // a second hand-written JSON Schema. The Worker consumes the Zod contract.
+  for (const value of [
+    { ...feedback, sampled_versions: 3 },
+    { ...feedback, omitted: [] },
+    { ...feedback, omitted: ["invalid_timestamp", "invalid_timestamp"] },
+    { ...feedback, omitted: ["invalid_timestamp", "sample_limit"] },
+  ])
+    expect(ReviewFeedbackSchema.safeParse(value).success).toBe(false);
+});
 
 test("sponsor workshop actions select a pinned Fellow-authored revision in both schemas", async () => {
   const valid = (await fixture(

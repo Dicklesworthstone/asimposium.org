@@ -1012,6 +1012,12 @@ export {
   RetractResponseSchema,
 } from "./retractions.ts";
 export {
+  REVIEW_FEEDBACK_OMISSION_REASONS,
+  REVIEW_FEEDBACK_SAMPLE_LIMIT,
+  type ReviewFeedback,
+  ReviewFeedbackSchema,
+} from "./review-feedback.ts";
+export {
   type DomainRubric,
   DomainRubricSchema,
   generateReviewRubricsDocument,

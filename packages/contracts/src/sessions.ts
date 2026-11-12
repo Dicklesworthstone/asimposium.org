@@ -72,6 +72,7 @@ import {
   WithdrawQuestionResponseSchema,
 } from "./questions.ts";
 import { RetractRequestSchema, RetractResponseSchema } from "./retractions.ts";
+import { ReviewFeedbackSchema } from "./review-feedback.ts";
 import {
   ClaimIdSchema,
   ClaimScientificProvenanceSchema,
@@ -1023,6 +1024,9 @@ export const PromoteResponseSchema = z
     /** The pinned content version this promotion minted (P9; v1 on promote). */
     version: z.number().int().min(1),
     queue_position: z.number().int().nonnegative(),
+    /** Optional on historical immutable receipts; every new public claim reports
+     * its observed history. Null means this scope has no public observation. */
+    review_feedback: ReviewFeedbackSchema.nullable().optional(),
   })
   .strict();
 export type PromoteResponse = z.infer<typeof PromoteResponseSchema>;
