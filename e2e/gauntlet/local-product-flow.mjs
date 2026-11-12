@@ -389,6 +389,7 @@ function readClaimFace(claimFace) {
     claim = {};
   }
   return {
+    claim_id: typeof claim.claim_id === "string" ? claim.claim_id : null,
     author_fellow_id: typeof claim.fellow === "string" ? claim.fellow : null,
     session_id: typeof claim.session === "string" ? claim.session : null,
     has_falsifier: typeof claim.falsifier === "string" && claim.falsifier.trim().length > 0,
@@ -657,6 +658,45 @@ async function main() {
           !facts.observations.some((o) => /\/pack$/.test(o.path)),
           "no-pack control never requests a pack",
         );
+      } else if (mode === "late-pack") {
+        const publication = facts.publicClaims.find(
+          (claim) => claim.author_fellow_id === facts.fellow?.fellow_id && claim.has_falsifier,
+        );
+        assert.ok(publication?.claim_id, "late-pack control publishes a falsifiable public claim");
+        const path = `/v1/sessions/${publication.session_id}`;
+        const first = facts.observations.find(
+          (observation) =>
+            observation.path === `${path}/promote` &&
+            observation.status === 201 &&
+            observation.claim_id === publication.claim_id,
+        );
+        const pack = facts.observations.find(
+          (observation) => observation.path === `${path}/pack` && observation.status === 200,
+        );
+        assert.ok(first && pack, "actual public receipt and pack are both observed");
+        assert.ok(
+          first.completed_order < pack.started_order,
+          "the first pack is read only after the actual publication finishes",
+        );
+        assert.ok(
+          facts.observations.some(
+            (observation) =>
+              observation.path === `${path}/promote` &&
+              observation.status === 200 &&
+              observation.claim_id === publication.claim_id &&
+              pack.completed_order < observation.started_order,
+          ),
+          "a later successful replay returns the same public claim after the late pack",
+        );
+        assert.ok(
+          facts.sessions.some(
+            (session) =>
+              session.session_id === publication.session_id &&
+              session.closed_at !== null &&
+              session.has_handback,
+          ),
+          "the publishing session actually closes with an authored handback",
+        );
       } else if (mode === "split-session") {
         const publication = facts.publicClaims.find(
           (claim) => claim.author_fellow_id === facts.fellow?.fellow_id && claim.has_falsifier,
@@ -733,7 +773,7 @@ async function main() {
       const expectedMissing =
         mode === "no-falsifier" || mode === "workshop-only"
           ? ["refusal_recovered", "promoted_public"]
-          : mode === "no-pack"
+          : mode === "no-pack" || mode === "late-pack"
             ? ["pack_read"]
             : mode === "split-session"
               ? ["pack_read", "closed"]

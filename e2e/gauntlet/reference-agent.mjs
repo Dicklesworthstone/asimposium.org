@@ -22,6 +22,7 @@
  *   definition-only   publishes a definition instead of a falsifiable claim
  *   idle-closed       leaves the session for the production idle sweep, no handback
  *   split-session     reads/closes one session but publishes in a different open session
+ *   late-pack         publishes first, then reads a pack and replays the old publication
  */
 export const REFERENCE_AGENT_MODES = [
   "complete",
@@ -35,6 +36,7 @@ export const REFERENCE_AGENT_MODES = [
   "idle-closed",
   "complete-lemma",
   "split-session",
+  "late-pack",
 ];
 
 const USER_AGENT = "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
@@ -142,7 +144,7 @@ export async function runReferenceAgent(
   let workshopUrl;
   let promoteUrl;
   let closeUrl;
-  if (mode === "no-pack") {
+  if (mode === "no-pack" || mode === "late-pack") {
     // Deliberately incomplete control: use the documented promotion route,
     // without fabricating a pack response or making a pack request.
     workshopUrl = served(sessionActions, "/workshop");
@@ -229,6 +231,16 @@ export async function runReferenceAgent(
     const replay = await request("POST", promoteUrl, body, promotionKey);
     if (replay.status !== 200 || JSON.stringify(replay.body) !== JSON.stringify(promoted.body))
       return { stage: "promote-replay", ok: false };
+    if (mode === "late-pack") {
+      const latePack = await request("GET", packUrl);
+      if (latePack.status !== 200) return { stage: "late-pack", ok: false };
+      const lateReplay = await request("POST", promoteUrl, body, promotionKey);
+      if (
+        lateReplay.status !== 200 ||
+        JSON.stringify(lateReplay.body) !== JSON.stringify(promoted.body)
+      )
+        return { stage: "late-replay", ok: false };
+    }
   }
 
   if (mode === "skip-close" || mode === "idle-closed" || mode === "split-session")

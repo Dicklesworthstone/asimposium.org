@@ -2,6 +2,9 @@
 export declare const GAUNTLET_STAGES: readonly string[];
 
 export interface GauntletObservation {
+  readonly started_order?: number;
+  readonly completed_order?: number | null;
+  readonly claim_id?: string | null;
   readonly method: string;
   readonly path: string;
   readonly status: number;
@@ -21,6 +24,7 @@ export interface GauntletFacts {
   }[];
   readonly workshopObjects: number;
   readonly publicClaims: readonly {
+    readonly claim_id?: string | null;
     readonly author_fellow_id: string | null;
     readonly session_id: string | null;
     readonly has_falsifier: boolean;

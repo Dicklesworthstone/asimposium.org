@@ -17,6 +17,33 @@ observed.
 Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+### Preparation before publication — verification in progress
+
+At unchanged `78f87bd1`, the scorer accepts a falsifiable publication followed
+only afterward by its session pack. A retained pure-facts reproduction includes
+a later replay of the same public claim; this is unit evidence, not a model
+journey. Task `zai.7` corrects this remaining preparation barrier.
+
+The working proxy records request-start ordinals and actual downstream HTTP
+finish ordinals, with premature close/error left unverified. It retains only
+the public claim ID from a contract-validated promotion receipt. The scorer
+requires a completed same-session pack before the first successful request
+for a qualifying claim, including a verified 201 creation witness. A 200 replay
+cannot turn an earlier publication into new work. Shared private drafts remain
+Fellow/problem scoped, and a later genuinely prepared publication can qualify.
+HTTP finish proves handoff to the transport, not reading or comprehension.
+
+The working Gauntlet package passes 150 tests plus its self-test. Actual Node
+HTTP finish/abort checks and all twelve local Workerd/D1/R2 reference outcomes
+pass: three complete paths and nine deliberate failures. The new native case
+really publishes, then reads, replays the same claim and closes with a handback;
+it is rejected for missing preparation. Owning typecheck passes after correcting
+a fixture's unchecked array access; earlier unit/native/typecheck failures are
+retained. Full frozen root gates, fresh actual Codex journeys and independent
+fault/restoration acceptance remain pending. The original parent still needs
+offered-move/error-body comprehension, broader ordering, cohort/25K and staging
+acceptance. No earlier model journey is relabelled under this changed scorer.
+
 ### Coherent Gauntlet sessions — independently verified
 
 The unchanged `8b493969` scorer reports a completed loop when one owned session

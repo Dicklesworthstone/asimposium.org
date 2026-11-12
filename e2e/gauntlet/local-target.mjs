@@ -4,7 +4,8 @@
  * Boots the real Worker routes on local Workerd with real D1/R2 through
  * Wrangler's test harness, and puts a recording HTTP proxy in front of it. The
  * proxy is the only origin an agent is given. It records, per request, the
- * method, path (no query), status and problem `code`; it never records headers
+ * method, path (no query), status, problem `code`, response lifecycle ordinals
+ * and the contract-validated public claim ID; it never records headers
  * or bodies, because the enrollment secret travels in a POST body and bearer
  * tokens travel in headers.
  *
@@ -26,7 +27,10 @@ import {
   serviceEnvelopeHeaders,
 } from "../../apps/web/lib/service-envelope.ts";
 import { retainWranglerBuilder } from "../../apps/wire/test/integration/wrangler-builder-lifecycle.mjs";
-import { PromoteRequestSchema } from "../../packages/contracts/src/sessions.ts";
+import {
+  PromoteRequestSchema,
+  PromoteResponseSchema,
+} from "../../packages/contracts/src/sessions.ts";
 
 export const USER_AGENT =
   "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
@@ -41,6 +45,20 @@ async function freePort() {
   const { port } = probe.address();
   await new Promise((resolve) => probe.close(resolve));
   return port;
+}
+
+/** Record the downstream HTTP boundary once. Finish means handed to the
+ * transport, not proof that the agent read or understood the content. */
+export function observeGauntletResponse(response, nextOrder, record) {
+  let recorded = false;
+  function terminal(finished) {
+    if (recorded) return;
+    recorded = true;
+    record(finished ? nextOrder() : null);
+  }
+  response.once("finish", () => terminal(true));
+  response.once("close", () => terminal(false));
+  response.once("error", () => terminal(false));
 }
 
 /** Start Workerd + proxy. Returns the agent-facing origin and sponsor/observation handles. */
@@ -123,6 +141,7 @@ export async function startLocalTarget({
 
     /** Server-side observations: what the Worker answered, never what was sent. */
     const observations = [];
+    let observationOrder = 0;
     /**
      * Fable §16.1 "recover from an injected 422": the first promotion of each
      * session removes workshop_id from a contract-valid promotion, so the Worker
@@ -147,6 +166,24 @@ export async function startLocalTarget({
       return Buffer.from(JSON.stringify(parsed));
     }
     proxy = createServer(async (req, res) => {
+      const startedOrder = ++observationOrder;
+      let completionOrder;
+      let observation;
+      observeGauntletResponse(
+        res,
+        () => ++observationOrder,
+        (order) => {
+          completionOrder = order;
+          if (observation !== undefined)
+            observations.push({ ...observation, completed_order: completionOrder });
+        },
+      );
+      function publishObservation(value) {
+        observation = value;
+        // A client can close while the Worker is still producing its response.
+        if (completionOrder !== undefined)
+          observations.push({ ...observation, completed_order: completionOrder });
+      }
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       const url0 = new URL(req.url ?? "/", origin);
@@ -174,13 +211,23 @@ export async function startLocalTarget({
           ...(body && req.method !== "GET" && req.method !== "HEAD" ? { body } : {}),
         });
       } catch {
-        res.writeHead(502, { "content-type": "text/plain" });
-        res.end("local target transport failure");
-        observations.push({ method: req.method, path: url.pathname, status: 502, code: null });
+        publishObservation({
+          started_order: startedOrder,
+          method: req.method,
+          path: url.pathname,
+          status: 502,
+          code: null,
+          claim_id: null,
+        });
+        if (!res.destroyed) {
+          res.writeHead(502, { "content-type": "text/plain" });
+          res.end("local target transport failure");
+        }
         return;
       }
       const bytes = Buffer.from(await response.arrayBuffer());
       let code = null;
+      let claimId = null;
       if ((response.headers.get("content-type") ?? "").includes("json") && response.status >= 400) {
         try {
           code = JSON.parse(bytes.toString("utf8")).code ?? null;
@@ -188,7 +235,21 @@ export async function startLocalTarget({
           code = null;
         }
       }
-      observations.push({
+      if (
+        req.method === "POST" &&
+        /^\/v1\/sessions\/[^/]+\/promote$/.test(url.pathname) &&
+        (response.status === 200 || response.status === 201)
+      ) {
+        try {
+          const receipt = PromoteResponseSchema.safeParse(JSON.parse(bytes.toString("utf8")));
+          if (receipt.success) claimId = receipt.data.claim_id;
+        } catch {
+          // An unverified receipt cannot establish a preparation/publication link.
+        }
+      }
+      publishObservation({
+        started_order: startedOrder,
+        claim_id: claimId,
         at: Date.now(),
         method: req.method,
         path: url.pathname,
@@ -206,8 +267,10 @@ export async function startLocalTarget({
       response.headers.forEach((value, name) => {
         if (name !== "content-length" && name !== "transfer-encoding") outHeaders[name] = value;
       });
-      res.writeHead(response.status, outHeaders);
-      res.end(bytes);
+      if (!res.destroyed) {
+        res.writeHead(response.status, outHeaders);
+        res.end(bytes);
+      }
     });
     const listening = once(proxy, "listening");
     proxy.listen(port, "127.0.0.1");

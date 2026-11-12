@@ -28,8 +28,8 @@ const PACK_PATH = /^\/v1\/sessions\/([^/]+)\/pack$/;
  *   problemId: string,
  *   sessions: { session_id: string, problem_id: string, closed_at: string | null, has_handback: boolean }[],
  *   workshopObjects: number,
- *   publicClaims: { author_fellow_id: string | null, session_id: string | null, has_falsifier: boolean, conjecture_class: boolean }[],
- *   observations: { method: string, path: string, status: number, code: string | null, injected?: boolean }[],
+ *   publicClaims: { claim_id?: string | null, author_fellow_id: string | null, session_id: string | null, has_falsifier: boolean, conjecture_class: boolean }[],
+ *   observations: { started_order?: number, completed_order?: number | null, claim_id?: string | null, method: string, path: string, status: number, code: string | null, injected?: boolean }[],
  *   injected: boolean,
  *   secretSeenInPaths: boolean,
  * }} facts
@@ -129,6 +129,49 @@ function sessionVerdict(facts, session) {
   // (for example, a lemma) also qualify when they carry that field.
   const withFalsifier = own.filter((c) => c.has_falsifier === true);
   if (withFalsifier.length > 0) reached.push("promoted_public");
+  if (withFalsifier.length > 0 && reached.includes("pack_read")) {
+    // These ordinals come from the proxy, not the agent or its transcript.
+    // Completion of a read must precede the publication request's START;
+    // overlapping responses do not prove preparation. Missing or conflicting
+    // observations withhold the evidence instead of guessing a chronology.
+    const endpoints = facts.observations.flatMap((observation) => [
+      observation.started_order,
+      ...(observation.completed_order === null ? [] : [observation.completed_order]),
+    ]);
+    const timelineValid =
+      facts.observations.every(
+        (observation) =>
+          Number.isSafeInteger(observation.started_order) &&
+          observation.started_order >= 1 &&
+          (observation.completed_order === null ||
+            (Number.isSafeInteger(observation.completed_order) &&
+              observation.completed_order > observation.started_order)),
+      ) && new Set(endpoints).size === endpoints.length;
+    const receipts = promotes.filter((o) => o.status === 200 || o.status === 201);
+    const prepared =
+      timelineValid &&
+      withFalsifier.some((claim) => {
+        if (typeof claim.claim_id !== "string" || claim.claim_id.length === 0) return false;
+        // The first successful request for this ID is its publication witness.
+        // A later idempotent replay cannot turn an old publication into new work.
+        const first = receipts
+          .filter((receipt) => receipt.claim_id === claim.claim_id)
+          .sort((left, right) => left.started_order - right.started_order)[0];
+        return (
+          first !== undefined &&
+          first.status === 201 &&
+          facts.observations.some(
+            (observation) =>
+              observation.method === "GET" &&
+              observation.path === `/v1/sessions/${session.session_id}/pack` &&
+              observation.status === 200 &&
+              Number.isSafeInteger(observation.completed_order) &&
+              observation.completed_order < first.started_order,
+          )
+        );
+      });
+    if (!prepared) reached.splice(reached.indexOf("pack_read"), 1);
+  }
   if (sessions.some((s) => s.closed_at !== null && s.has_handback === true)) reached.push("closed");
   if (facts.secretSeenInPaths) failures.push("the enrollment secret appeared in a request path");
 

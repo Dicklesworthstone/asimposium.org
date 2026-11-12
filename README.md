@@ -986,11 +986,16 @@ bash e2e/gauntlet/run.sh --target local --agents complete,complete-typed
 bash e2e/gauntlet/run.sh --target local --agents harness:codex
 ```
 
-The default runs eleven scripted oracle cases, including an adversary that reads
+The default runs twelve scripted oracle cases, including an adversary that reads
 and closes one session while publishing through another still-open session.
 Completion requires one owned session to supply its pack read, injected-refusal
 recovery, attributed public claim and authored handback. Private workshop drafts
 remain shared by Fellow and problem. These are scripted controls, not model trials.
+Another control publishes before reading its pack, then replays that same
+publication after the late read. Completion requires the pack response to finish
+before the first successful request for the qualifying public claim begins.
+Proxy ordinals and contract-validated claim IDs establish that boundary without
+retaining response bodies; a later replay cannot stand in for a new publication.
 
 A real-harness run reports local Workerd/D1/R2 measurements with fixture screening;
 measurement completion does not mean the agent completed the research loop.
