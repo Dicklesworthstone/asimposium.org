@@ -3,16 +3,17 @@
  *
  * Proves:
  * 1. Live WIP Column & 3s Polling Cadence:
- *    - Renders ConsoleAutoRefresh with exact intervalMs=3000 (3s polling cadence).
+ *    - Wires the private cursor watcher with the rendered head and a 3s check cadence.
+ *    - Older pages announce changes without automatic replacement.
  *    - Displays private work newest-first.
  * 2. Workshop Object Cards & Revision Pinning:
  *    - Card exposes workshop_id, type, state, version (vN), title, timestamp, relates_to, and body_md.
  *    - Form actions provide explicit Promote / Keep / Discard controls.
- *    - Pinned version is attached to form inputs to prevent optimistic CAS race conditions.
+ *    - Exact revision is passed to the action component; action tests cover its server binding.
  * 3. Immutable Scientific Authorship (Rules A2 & A3):
- *    - Promotion copy affirms Fellow/session/model/harness remain immutable scientific author.
- *    - Sponsor is recorded only as acting promoter; cannot affect review independence, calibration, or honors.
- *    - Discard is soft-hide; never deletes negative knowledge.
+ *    - Promotion confirmation retains Fellow/session/model/harness as scientific author.
+ *    - Sponsor is recorded as acting promoter.
+ *    - Discard preserves private drafts and their history.
  * 4. Keyset Pagination & Bounded Page Navigation:
  *    - Cursor-based pagination via before_workshop_seq.
  *    - Navigation generates exact olderHref and newestHref links.
@@ -26,6 +27,10 @@
 
 import { mock } from "bun:test";
 import { SponsorWorkshopViewSchema } from "@asimposium/contracts";
+
+const { WORKSHOP_WATCH_INTERVAL_MS } = (await import(
+  [new URL("../../apps/web/lib/workshop-watch.ts", import.meta.url).pathname].join("")
+)) as { readonly WORKSHOP_WATCH_INTERVAL_MS: number };
 
 type WorkshopReader = (
   principal: string,
@@ -75,6 +80,7 @@ mock.module("@/auth", () => ({
 }));
 
 mock.module("@/lib/stoa", () => ({
+  configuredStoaOrigin: () => "https://a.asimposium.org",
   stoaSponsorWorkshop: async (
     _sponsorId: string,
     problemId: string,
@@ -106,15 +112,23 @@ mock.module("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
 }));
 
-mock.module("@/app/console/console-auto-refresh", () => ({
-  ConsoleAutoRefresh: ({ intervalMs }: { intervalMs: number }) => {
+type WorkshopWatchConfiguration = {
+  readonly sponsorId: string;
+  readonly fellowId: string;
+  readonly problemId: string;
+  readonly renderedCursor?: number;
+};
+let capturedWorkshopWatch: WorkshopWatchConfiguration | undefined;
+mock.module("@/app/console/workshop-live", () => ({
+  WorkshopLive: (configuration: WorkshopWatchConfiguration) => {
+    capturedWorkshopWatch = configuration;
     return React.createElement(
-      "div",
+      "aside",
       {
-        className: "console-auto-refresh",
-        "data-refresh-interval": intervalMs,
+        className: "workshop-live",
+        "aria-label": "Private workshop updates",
       },
-      `Auto-refresh active (${intervalMs}ms)`,
+      "Private workshop change checks",
     );
   },
 }));
@@ -181,14 +195,26 @@ function createMockWorkshopView(fellow: string, problem: string, seqs: number[],
   });
 }
 
+function workshopActionPins(node: unknown): readonly { workshopId: string; version: unknown }[] {
+  if (Array.isArray(node)) return node.flatMap((child) => workshopActionPins(child));
+  if (node === null || typeof node !== "object" || !("props" in node)) return [];
+  const props = node.props;
+  if (props === null || typeof props !== "object") return [];
+  const pin =
+    "workshopId" in props && typeof props.workshopId === "string"
+      ? [{ workshopId: props.workshopId, version: "version" in props ? props.version : undefined }]
+      : [];
+  return [...pin, ...workshopActionPins("children" in props ? props.children : undefined)];
+}
+
 export async function runWorkshopLiveE2e() {
   const overallStart = performance.now();
   console.log("=== Running W8.6 Workshop Live View E2E Suite ===\n");
 
   // ---------------------------------------------------------------------------
-  // Stage 1: Auto-refresh Cadence & Live Polling Hook
+  // Stage 1: Cursor Check Cadence & Live Watcher Wiring
   // ---------------------------------------------------------------------------
-  console.log("1. Verifying 3s Live Refresh Cadence & ConsoleAutoRefresh...");
+  console.log("1. Verifying private cursor checks and rendered-head wiring...");
   const t1 = performance.now();
 
   const mockReader: WorkshopReader = async (_principal, request) => {
@@ -227,16 +253,25 @@ export async function runWorkshopLiveE2e() {
   });
   const html = renderToStaticMarkup(pageElement);
 
-  // Assert 3s auto-refresh is active and present in the UI
-  if (!html.includes("3s live refresh active")) {
-    throw new Error("Workshop UI missing 3s live refresh active indicator");
+  // The full page only refreshes after a changed cursor. Controller behavior,
+  // cancellation, and backoff are exercised in the focused watcher unit suite.
+  if (WORKSHOP_WATCH_INTERVAL_MS !== 3_000) {
+    throw new Error("Workshop cursor check cadence must be three seconds");
   }
-  if (!html.includes('data-refresh-interval="3000"') && !html.includes("3000")) {
-    throw new Error("ConsoleAutoRefresh 3000ms interval missing from rendered workshop markup");
+  if (!html.includes('aria-label="Private workshop updates"')) {
+    throw new Error("Workshop UI missing its private update watcher");
+  }
+  if (
+    capturedWorkshopWatch?.sponsorId !== testSponsor ||
+    capturedWorkshopWatch.fellowId !== testFellow ||
+    capturedWorkshopWatch.problemId !== testProblem ||
+    capturedWorkshopWatch.renderedCursor !== 3
+  ) {
+    throw new Error("Workshop watcher must be bound to the rendered sponsor, pair, and head");
   }
 
   logOps2a({
-    stage: "auto-refresh-cadence",
+    stage: "cursor-check-cadence",
     status: "pass",
     cited_authority: "Fable §8.3 & Rule A7",
     duration_ms: performance.now() - t1,
@@ -264,8 +299,15 @@ export async function runWorkshopLiveE2e() {
   if (!html.includes("Discard (Soft-hide)")) {
     throw new Error("Missing 'Discard (Soft-hide)' action button on workshop card");
   }
-  if (!html.includes('name="pinned_version"')) {
-    throw new Error("Missing pinned_version input in workshop card actions (CAS guard)");
+  if (!html.includes('name="confirm_promotion"')) {
+    throw new Error("Stored-revision promotion must require sponsor confirmation");
+  }
+  const expectedPins = [3, 2, 1].map((seq) => ({
+    workshopId: `W-${String(seq).padStart(26, "0")}`,
+    version: 1,
+  }));
+  if (JSON.stringify(workshopActionPins(pageElement)) !== JSON.stringify(expectedPins)) {
+    throw new Error("Workshop actions must receive each rendered object's exact revision");
   }
 
   logOps2a({
@@ -284,10 +326,9 @@ export async function runWorkshopLiveE2e() {
 
   // Affirm Rule A2 and Rule A3 copy
   const requiredCopy = [
-    "Promoting unblocks a stalled Fellow through the same validator",
-    "Scientific authorship remains immutable (Fellow/session/model/harness)",
-    "sponsor is acting promoter only (Rule A2/A3)",
-    "Discard soft-hides in workshop, never deletes negative knowledge",
+    "The Fellow, session, model and harness remain the scientific",
+    "author; I am recorded as acting promoter.",
+    "Discard preserves the draft and its history privately.",
   ];
 
   for (const phrase of requiredCopy) {
@@ -345,6 +386,22 @@ export async function runWorkshopLiveE2e() {
     throw new Error(`Unexpected newestHref: ${page2.newestHref}`);
   }
 
+  capturedWorkshopWatch = undefined;
+  const olderPageElement = await WorkshopPage({
+    params: Promise.resolve({ fellow: testFellow, problem: testProblem }),
+    searchParams: Promise.resolve({ before_workshop_seq: "5" }),
+  });
+  const olderHtml = renderToStaticMarkup(olderPageElement);
+  const olderWatch = capturedWorkshopWatch as WorkshopWatchConfiguration | undefined;
+  if (
+    olderWatch?.fellowId !== testFellow ||
+    olderWatch.problemId !== testProblem ||
+    olderWatch.renderedCursor !== undefined ||
+    !olderHtml.includes("announce changes without moving this page")
+  ) {
+    throw new Error("Earlier workshop pages must watch without replacing the selected page");
+  }
+
   logOps2a({
     stage: "keyset-pagination",
     status: "pass",
@@ -381,7 +438,11 @@ export async function runWorkshopLiveE2e() {
   if (!anonHtml.includes("Sign in required")) {
     throw new Error("Anonymous workshop render did not produce 'Sign in required' card");
   }
-  if (anonHtml.includes("workshop-card") || anonHtml.includes("Grounded private derivation")) {
+  if (
+    anonHtml.includes("workshop-card") ||
+    anonHtml.includes("workshop-live") ||
+    anonHtml.includes("Grounded private derivation")
+  ) {
     throw new Error("Private workshop bytes leaked in anonymous render");
   }
 

@@ -1,11 +1,13 @@
 import { expect, test } from "bun:test";
 import {
   SponsorWorkshopPromotionReceiptSchema,
+  SponsorWorkshopCursorResponseSchema,
   SponsorWorkshopViewSchema,
 } from "@asimposium/contracts";
 
 import {
   loadWorkshopPage,
+  loadWorkshopCursorResponse,
   workshopPageHref,
   workshopPromotionDestination,
 } from "../../lib/workshop-page";
@@ -192,4 +194,74 @@ test("an empty older page preserves its meaning and a route cannot inject a quer
   expect(workshopPageHref("fellow/a?b=c", "P-X#fragment")).toBe(
     "/console/workshop/fellow%2Fa%3Fb%3Dc/P-X%23fragment",
   );
+});
+
+test("workshop cursor facade authenticates before reading and returns private metadata only", async () => {
+  const calls: unknown[] = [];
+  const data = SponsorWorkshopCursorResponseSchema.parse({
+    schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+    sponsor_id: sponsor,
+    fellow_id: fellow,
+    problem_id: problem,
+    workshop_cursor: 17,
+  });
+  const read: Parameters<typeof loadWorkshopCursorResponse>[3] = async (principal, request) => {
+    calls.push({ principal, request });
+    return { ok: true, data };
+  };
+  for (const principal of [undefined, "", "owner@example.com"])
+    expect((await loadWorkshopCursorResponse(principal, fellow, problem, read)).status).toBe(401);
+  for (const [fellowId, problemId] of [
+    ["", problem],
+    [fellow, "P-A?upstream=evil"],
+  ] as const)
+    expect((await loadWorkshopCursorResponse(sponsor, fellowId, problemId, read)).status).toBe(400);
+  expect(calls).toHaveLength(0);
+  const response = await loadWorkshopCursorResponse(sponsor, fellow, problem, read);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("cache-control")).toBe("private, no-store");
+  expect(response.headers.get("vary")).toBe("Cookie");
+  expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+  expect(await response.json()).toEqual(data);
+  expect(calls).toEqual([{ principal: sponsor, request: { fellow_id: fellow, problem_id: problem } }]);
+});
+
+test("cursor facade refuses crossed identities, malformed bodies and private upstream diagnostics", async () => {
+  const data = SponsorWorkshopCursorResponseSchema.parse({
+    schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+    sponsor_id: sponsor,
+    fellow_id: fellow,
+    problem_id: problem,
+    workshop_cursor: 0,
+  });
+  for (const body of [
+    { ...data, sponsor_id: "usr_other" },
+    { ...data, fellow_id: "fellow-other" },
+    { ...data, problem_id: "P-OTHER" },
+    { ...data, workshop_cursor: -1 },
+    { ...data, body_md: "private-canary" },
+  ]) {
+    const response = await loadWorkshopCursorResponse(sponsor, fellow, problem, async () => ({
+      ok: true,
+      data: body,
+    }));
+    expect(response.status).toBe(503);
+    expect(await response.text()).not.toContain("private-canary");
+  }
+  for (const status of [401, 403, 404, 503]) {
+    const response = await loadWorkshopCursorResponse(sponsor, fellow, problem, async () => ({
+      ok: false,
+      reason: "refused",
+      status,
+      detail: "private-canary",
+    }));
+    expect(response.status).toBe(status === 503 ? 503 : 404);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(await response.text()).not.toContain("private-canary");
+  }
+  const failed = await loadWorkshopCursorResponse(sponsor, fellow, problem, async () => {
+    throw new Error("private-canary");
+  });
+  expect(failed.status).toBe(503);
+  expect(await failed.text()).not.toContain("private-canary");
 });
