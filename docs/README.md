@@ -97,8 +97,31 @@ The related consumer run imports those tests; 399 plus 315 must not be
 double-counted. The final eight-file run executes 437 tests.
 Starting the broad campaigns before these owning/type/format checks wasted
 qualification time. All four interrupted runs retain exit 143 and raw output;
-none counts as a full-suite pass. Both final original full suites are running
-at the frozen revision. `mip.1` remains in progress. Parent `mip`,
+none counts as a full-suite pass. Both final original full suites passed at
+`d69bd17b`: primary 1,657.993 seconds and independent 1,649.377 seconds, each
+with all eight groups executed and zero failed or blocked groups. Worker ran
+7,463 tests, Agora 1,113 and the gauntlet units 150; these gauntlet units are
+not fresh-agent participation evidence. The 54 original individual toolchain
+skips remain. Each S2 shell matrix contains 32 paired starts/passes. All 2,755
+source inputs and the actual Next runtime match before/after in both runs.
+
+An additional full Worker HTTP contract run exposed two pre-existing catalog
+failures (188 pass/2 fail), independently reproduced. Correction
+`3c597a9327968088a28100a0a4e56406f8d1e29b` changes only two contract test files:
+exact private cursor/hide reasons, public protocol-conflict read/write entries
+and method-aware dispatch checks for its existing `ALL` handler. The checks
+observe typed POST 401 and GET 405 refusals and reject other methods/templates;
+this is in-process routing evidence, not successful publication evidence.
+The final working HTTP component passes 191 tests/2,643 assertions, security
+33/288, and typecheck/lint all eight groups. Literal UBS diff/details/staged
+complete the two files with zero critical, ten warning and 326 informational
+findings; all elevated contexts and nine informational classes were reviewed.
+Warnings concern existing test JSON parsing and an inert hostile-script fixture.
+The correction changes no runtime, unit, protocol, manifest or SDK bytes.
+The root Worker selector runs unit/split, excludes contract, and has no consumer
+of these two files. Full-root evidence therefore stays explicitly pinned to
+`d69bd17b`; independent affected-component verification of the catalog successor
+is pending. `mip.1` remains in progress. Parent `mip`,
 broader review coordination/health, hosted Google, screening accuracy, provider
 deployment, the fresh-agent gauntlet, cost/load and launch remain open.
 
