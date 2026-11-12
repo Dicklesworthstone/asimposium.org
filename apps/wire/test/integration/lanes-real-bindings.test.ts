@@ -33,6 +33,7 @@ const LANES = [
   "event-tails",
   "face-census",
   "fellow-rebind",
+  "full-database-backup",
   "hypotheses-evidence",
   "hypothesis-lifecycle",
   "journey-cleanup",

@@ -44,6 +44,7 @@ import {
   signPendingCheckpoints,
 } from "../../src/krater/checkpoint-signing.ts";
 import { claimContentDigest } from "../../src/krater/claim-version.ts";
+import { runDatabaseBackup } from "../../src/krater/database-backup.ts";
 import {
   genesisChainDigest,
   redactEventContent,
@@ -1276,6 +1277,13 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
    * writes. A supplied clock makes lease expiry and daily rollover observable. */
   async backupSchedulerTick(now: number) {
     return runScheduledBackup(this.env, now);
+  }
+
+  async databaseBackupTick(now: number, aliasBuckets = false) {
+    return runDatabaseBackup(
+      aliasBuckets ? { ...this.env, PUBLIC_ARTIFACTS: this.env.ARTIFACTS } : this.env,
+      now,
+    );
   }
 
   /** Bulk history fixture for archive bounds, through the production chained

@@ -16,6 +16,7 @@ import { artifactFetch } from "./krater/artifact-runtime";
 import { reconcileArtifactStaging } from "./krater/artifact-staging-retention";
 import { runScheduledBackup } from "./krater/backup-scheduler";
 import { signPendingCheckpoints } from "./krater/checkpoint-signing.ts";
+import { runDatabaseBackup } from "./krater/database-backup.ts";
 import { KraterOutboxDrainer, requestKraterOutbox } from "./krater/outbox-do";
 import { expireSecurityRecords, publishDeletionJournal } from "./krater/retention.ts";
 import { markDormantProblems } from "./problems/dormancy";
@@ -84,6 +85,7 @@ export default {
       backups,
       dormancy,
       artifactStaging,
+      databaseBackup,
     ] = await Promise.allSettled([
       Promise.resolve().then(() => expireIdleSessions(env.DB)),
       Promise.resolve().then(() => requestKraterOutbox(env, "/nudge")),
@@ -116,6 +118,7 @@ export default {
           _ctx.waitUntil(task),
         ),
       ),
+      Promise.resolve().then(() => runDatabaseBackup(env)),
     ]);
     if (inbox.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "inbox-event-delivery", ...inbox.value }));
@@ -152,6 +155,16 @@ export default {
           : "BACKUP_SCHEDULED_FAILED";
       console.error(JSON.stringify({ stage: "nightly-ledger-backup", status: "failed", code }));
     }
+    if (databaseBackup.status === "fulfilled") {
+      console.info(JSON.stringify({ stage: "nightly-database-backup", ...databaseBackup.value }));
+    } else {
+      const code =
+        databaseBackup.reason instanceof Error &&
+        /^DATABASE_BACKUP_[A-Z_]+$/.test(databaseBackup.reason.message)
+          ? databaseBackup.reason.message
+          : "DATABASE_BACKUP_FAILED";
+      console.error(JSON.stringify({ stage: "nightly-database-backup", status: "failed", code }));
+    }
     if (sessions.status === "rejected") throw new Error("SESSION_IDLE_SWEEP_FAILED");
     if (leases.status === "rejected") throw new Error("LEASE_EXPIRY_WARNING_FAILED");
     if (dormancy.status === "rejected" || dormancy.value.failed > 0) {
@@ -170,6 +183,7 @@ export default {
       throw new Error("INBOX_EVENT_DELIVERY_FAILED");
     }
     if (checkpoints.status === "rejected") throw new Error("CHECKPOINT_SIGNING_FAILED");
+    if (databaseBackup.status === "rejected") throw new Error("DATABASE_BACKUP_FAILED");
     if (journal.status === "rejected") throw new Error("DELETION_JOURNAL_PUBLICATION_FAILED");
     if (security.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "security-record-expiry", ...security.value }));

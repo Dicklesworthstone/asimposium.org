@@ -1,15 +1,92 @@
-# Nightly ledger archives
+# Nightly database snapshots and ledger archives
 
-The existing five-minute Worker cron advances a daily archive of published
-problem ledgers. It writes only to the private `ARTIFACTS` R2 binding; the
+The existing five-minute Worker cron creates a bounded daily SQL database
+snapshot and advances a separate archive of published problem ledgers.
+Both write only to the private `ARTIFACTS` R2 binding; the
 public artifact bucket never receives backup files. Deployment and the
 provider's actual cron delivery remain operator responsibilities.
 
-This is a **published-problem ledger archive**, not a full SQL database backup.
-It excludes never-published drafts, workshops, credentials, private account
-state and the global event scope. D1 Time Travel, full SQL backups, the
-deletion journal, and restore drills remain separate requirements of W2.8 and
-OPS.6. Do not describe this run as complete database recovery.
+The SQL snapshot includes application accounts, credentials, private drafts,
+workshops and operational tables. The separate **published-problem ledger
+archive** excludes that private state. Neither replaces D1 Time Travel,
+current deletion-control replay, CAS body retention/inventory, guarded recovery
+or provider restore drills. Those remain requirements of W2.8 and OPS.6.
+
+## Complete SQL snapshot
+
+Cloudflare's ordinary SQL exporter rejects databases containing virtual tables.
+ASImposium has both public and private FTS5 indexes. The Worker therefore reads
+the complete application schema and SQLite-formatted rows through D1 instead.
+It captures all rows in one D1 batch transaction and checks that schema and
+table definitions still match the prepared queries. Concurrent ordinary writes
+cannot splice together different table snapshots. Schema changes or growth
+beyond the measured read budgets refuse the attempt.
+
+Integer values are formatted inside SQLite, preserving int64 values. Text and
+BLOB literals preserve NULs and original bytes; finite REAL values use round-trip
+formatting. Rowids, WITHOUT ROWID keys, generated columns and AUTOINCREMENT
+sequence state survive. Schema definitions include indexes, triggers and views.
+Import data before installing triggers, then restore sequence values after all
+table inserts. Standalone FTS contents are copied logically; external-content
+FTS is rebuilt from its restored source rows. Engine shadow pages and Cloudflare
+internal tables are excluded. Nondefault persisted FTS configuration or an
+unsupported virtual table refuses the snapshot rather than silently changing
+search behavior.
+
+The launch implementation is bounded: at most 256 application tables, 2,000
+rows per table, 1 MiB of SQL per table, 8 MiB total and 16,000 statements.
+Measurement transfers counts only. Actual table reads share a fixed aggregate
+budget; excess state is an explicit failed backup, never a truncated success.
+These limits require a later scalable recovery path before a larger database
+can rely on this producer.
+
+The current checkpoint signing key must have an independently configured public
+pin. The private SQL object is created conditionally, read back and verified
+before the signed completion manifest is created. A ten-minute conditional lease
+coordinates concurrent cron deliveries. Interrupted uploads have no completion
+manifest; after lease expiry a new attempt preserves those objects and creates
+a fresh archive. Existing completion objects are never overwritten. Later ticks
+verify the signed manifest and the SQL object's R2 checksum with a HEAD request.
+
+Storage keys:
+
+- `backups/control/database-v1.json`: the bounded lease, outside dated retention.
+- `backups/sql/YYYY-MM-DD/<uuid>.sql`: confidential SQL, including private data.
+- `backups/sql/YYYY-MM-DD/complete.json`: signed digest, source binding/origin,
+  statement byte boundaries and table counts. It is private too.
+
+The configured physical bucket roles remain an operator/deployment trust
+boundary. The code uses only `ARTIFACTS` and rejects identical bucket handles;
+that identity check cannot establish that two distinct deployed buckets have
+the right roles. Validate the generated environment and actual provider bindings
+before enabling keys. Local binding tests do not certify a public hostname's
+deployment topology. No public resource serves these archives.
+
+Download SQL and its completion manifest through the private operator channel,
+using exclusive local destinations and restricted filesystem permissions. Verify
+with a public key acquired independently of the archive:
+
+```sh
+bun scripts/verify-database-backup.ts \
+  --manifest ./complete.json --sql ./snapshot.sql \
+  --key '<key-id>=<trusted-ed25519-public-key-hex>'
+```
+
+This offline command prints only bounded metadata and never executes SQL.
+The complete SQL must import into an empty, unmigrated, separately identified
+scratch database, with foreign keys deferred until the import transaction ends.
+Existing or migrated application schemas are not valid import targets.
+Raw import restores historical authority: keep it quarantined. Authenticate
+the independently current deletion journal before any recovery write, replay
+its controls through the existing lifecycle paths afterward, and recheck current
+authority before considering cutover. The original whole-system recovery item
+remains open for that integrated procedure and its provider drill. A successful
+raw SQL round-trip does not establish deletion-safe service recovery.
+
+Apply the disclosed 90-day lifecycle to dated `backups/sql/` objects, including
+interrupted uploads. Do not expire the lease or deletion journal with a broad
+bucket rule. Cron emits `nightly-database-backup` with counts/status or a coarse
+failure code; it never logs SQL, rows, signing material or credentials.
 
 ## Operation and limits
 
