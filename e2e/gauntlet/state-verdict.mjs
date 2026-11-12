@@ -28,13 +28,36 @@ const PACK_PATH = /^\/v1\/sessions\/([^/]+)\/pack$/;
  *   problemId: string,
  *   sessions: { session_id: string, problem_id: string, closed_at: string | null, has_handback: boolean }[],
  *   workshopObjects: number,
- *   publicClaims: { author_fellow_id: string | null, has_falsifier: boolean, conjecture_class: boolean }[],
+ *   publicClaims: { author_fellow_id: string | null, session_id: string | null, has_falsifier: boolean, conjecture_class: boolean }[],
  *   observations: { method: string, path: string, status: number, code: string | null, injected?: boolean }[],
  *   injected: boolean,
  *   secretSeenInPaths: boolean,
  * }} facts
  */
 export function gauntletVerdict(facts) {
+  const sessions = facts.sessions
+    .filter((session) => session.problem_id === facts.problemId)
+    .sort((left, right) =>
+      left.session_id < right.session_id ? -1 : left.session_id > right.session_id ? 1 : 0,
+    );
+  const verdicts =
+    sessions.length > 0
+      ? sessions.map((session) => sessionVerdict(facts, session))
+      : [sessionVerdict(facts, null)];
+  // Keep partial diagnostics from one candidate too. A closed abandoned session
+  // cannot supply a handback or pack to a different session's publication.
+  // A later, genuinely complete loop still wins over every incomplete attempt.
+  return verdicts.reduce((best, candidate) =>
+    candidate.reached.length > best.reached.length ||
+    (candidate.reached.length === best.reached.length &&
+      candidate.reached.includes("promoted_public") &&
+      !best.reached.includes("promoted_public"))
+      ? candidate
+      : best,
+  );
+}
+
+function sessionVerdict(facts, session) {
   const reached = [];
   const failures = [];
   const approved = facts.fellow !== null && facts.fellow.sponsor_id === facts.sponsorId;
@@ -49,7 +72,7 @@ export function gauntletVerdict(facts) {
     (o) => o.method === "GET" && o.path === "/v1/hello" && o.status === 200,
   );
   if (approved && helloOk) reached.push("hello");
-  const sessions = facts.sessions.filter((s) => s.problem_id === facts.problemId);
+  const sessions = session === null ? [] : [session];
   const sessionIds = new Set(sessions.map((session) => session.session_id));
   if (sessions.length > 0) reached.push("session_opened");
   // Record a successful owned pack response for this problem. This does not
@@ -95,7 +118,12 @@ export function gauntletVerdict(facts) {
   if (!facts.injected) failures.push("no refusal was injected, so recovery was not tested");
 
   const own = facts.fellow
-    ? facts.publicClaims.filter((c) => c.author_fellow_id === facts.fellow.fellow_id)
+    ? facts.publicClaims.filter(
+        (claim) =>
+          claim.author_fellow_id === facts.fellow.fellow_id &&
+          session !== null &&
+          claim.session_id === session.session_id,
+      )
     : [];
   // Fable §16.1 requires a valid claim with a falsifier. Other admitted kinds
   // (for example, a lemma) also qualify when they carry that field.

@@ -21,6 +21,7 @@
  *   no-pack           deliberately skips the pack using documented session routes
  *   definition-only   publishes a definition instead of a falsifiable claim
  *   idle-closed       leaves the session for the production idle sweep, no handback
+ *   split-session     reads/closes one session but publishes in a different open session
  */
 export const REFERENCE_AGENT_MODES = [
   "complete",
@@ -33,6 +34,7 @@ export const REFERENCE_AGENT_MODES = [
   "definition-only",
   "idle-closed",
   "complete-lemma",
+  "split-session",
 ];
 
 const USER_AGENT = "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
@@ -185,6 +187,21 @@ export async function runReferenceAgent(
   if (draft.status !== 201 && draft.status !== 200) return { stage: "workshop", ok: false };
   const workshopId = draft.body.workshop_id;
 
+  if (mode === "split-session") {
+    // Deliberately stitch two legal sessions: keep the first pack/close URLs,
+    // but close it before publishing through the second session without reading
+    // its pack or closing it. Workshop is shared by Fellow/problem across sessions.
+    const closed = await request("POST", closeUrl, {
+      handback: "Draft saved; continuing in a different session.",
+    });
+    if (closed.status !== 200 && closed.status !== 201) return { stage: "close", ok: false };
+    const other = await request("POST", open.url, { problem_id: problemId });
+    if (other.status !== 200 && other.status !== 201) return { stage: "session", ok: false };
+    if (other.body.session_id === session.body.session_id)
+      return { stage: "split-session", ok: false };
+    promoteUrl = `/v1/sessions/${other.body.session_id}/promote`;
+  }
+
   if (mode !== "workshop-only") {
     // 7. Promote; recover from a teaching refusal by reading fix_hint/example.
     const body = {
@@ -214,7 +231,8 @@ export async function runReferenceAgent(
       return { stage: "promote-replay", ok: false };
   }
 
-  if (mode === "skip-close" || mode === "idle-closed") return { stage: "promote", ok: true };
+  if (mode === "skip-close" || mode === "idle-closed" || mode === "split-session")
+    return { stage: "promote", ok: true };
   const closed = await request("POST", closeUrl, {
     handback: "Promoted a bounded parity conjecture; an independent check of the range is next.",
   });

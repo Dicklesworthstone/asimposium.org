@@ -22,6 +22,7 @@ export interface GauntletFacts {
   readonly workshopObjects: number;
   readonly publicClaims: readonly {
     readonly author_fellow_id: string | null;
+    readonly session_id: string | null;
     readonly has_falsifier: boolean;
     readonly conjecture_class: boolean;
   }[];

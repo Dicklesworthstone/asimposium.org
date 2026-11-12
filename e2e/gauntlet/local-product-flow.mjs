@@ -390,6 +390,7 @@ function readClaimFace(claimFace) {
   }
   return {
     author_fellow_id: typeof claim.fellow === "string" ? claim.fellow : null,
+    session_id: typeof claim.session === "string" ? claim.session : null,
     has_falsifier: typeof claim.falsifier === "string" && claim.falsifier.trim().length > 0,
     conjecture_class: CONJECTURE_CLASS.has(claim.kind),
   };
@@ -471,8 +472,10 @@ async function gatherFacts(
   }));
   const workshop = fellow
     ? await db
-        .prepare("SELECT COUNT(*) AS n FROM workshop_objects WHERE fellow_id = ?")
-        .bind(fellow.fellow_id)
+        .prepare(
+          "SELECT COUNT(*) AS n FROM workshop_objects WHERE fellow_id = ? AND problem_id = ?",
+        )
+        .bind(fellow.fellow_id, problemId)
         .first()
     : { n: 0 };
   // The anonymous public face is the authority for what was published.
@@ -535,7 +538,10 @@ async function main() {
       // a populated working pack can properly steer later arrivals to review.
       // Preserve the original six reference modes' shared-board expectations.
       const isolated =
-        isHarness || ["no-pack", "definition-only", "idle-closed", "complete-lemma"].includes(mode);
+        isHarness ||
+        ["no-pack", "definition-only", "idle-closed", "complete-lemma", "split-session"].includes(
+          mode,
+        );
       const attemptProblem =
         isolated && index > 0 ? await setUpProblem(target, nextIsolatedProblem++) : problemId;
       // Each attempt has its own sponsor. Sharing setup and reference Fellows
@@ -651,6 +657,34 @@ async function main() {
           !facts.observations.some((o) => /\/pack$/.test(o.path)),
           "no-pack control never requests a pack",
         );
+      } else if (mode === "split-session") {
+        const publication = facts.publicClaims.find(
+          (claim) => claim.author_fellow_id === facts.fellow?.fellow_id && claim.has_falsifier,
+        );
+        assert.ok(publication?.session_id, "split control actually publishes an attributed claim");
+        const publishingSession = facts.sessions.find(
+          (session) => session.session_id === publication.session_id,
+        );
+        assert.ok(publishingSession, "split control publication belongs to an owned session");
+        assert.equal(publishingSession.closed_at, null, "publishing session remains open");
+        assert.equal(publishingSession.has_handback, false, "publishing session has no handback");
+        assert.ok(
+          facts.sessions.some(
+            (session) =>
+              session.session_id !== publishingSession.session_id &&
+              session.closed_at !== null &&
+              session.has_handback,
+          ),
+          "a different owned session supplies the misleading closure",
+        );
+        assert.ok(
+          !facts.observations.some(
+            (observation) =>
+              observation.method === "GET" &&
+              observation.path === `/v1/sessions/${publishingSession.session_id}/pack`,
+          ),
+          "publishing session never reads its pack",
+        );
       } else if (mode === "definition-only") {
         assert.ok(
           facts.publicClaims.some(
@@ -701,11 +735,13 @@ async function main() {
           ? ["refusal_recovered", "promoted_public"]
           : mode === "no-pack"
             ? ["pack_read"]
-            : mode === "definition-only"
-              ? ["promoted_public"]
-              : mode === "skip-close" || mode === "idle-closed"
-                ? ["closed"]
-                : GAUNTLET_STAGES.filter((stage) => stage !== "registered");
+            : mode === "split-session"
+              ? ["pack_read", "closed"]
+              : mode === "definition-only"
+                ? ["promoted_public"]
+                : mode === "skip-close" || mode === "idle-closed"
+                  ? ["closed"]
+                  : GAUNTLET_STAGES.filter((stage) => stage !== "registered");
       const expectedNoInjection = mode === "workshop-only" || mode === "abandon";
       const negativeAsExpected =
         !verdict.completed &&

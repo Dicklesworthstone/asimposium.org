@@ -36,7 +36,9 @@ const complete = {
   problemId,
   sessions: [closedSession],
   workshopObjects: 1,
-  publicClaims: [{ author_fellow_id: "F-1", has_falsifier: true, conjecture_class: true }],
+  publicClaims: [
+    { author_fellow_id: "F-1", session_id: "S-1", has_falsifier: true, conjecture_class: true },
+  ],
   observations: fullObservations,
   injected: true,
   secretSeenInPaths: false,
@@ -59,14 +61,28 @@ describe("state-derived gauntlet verdict", () => {
   test("a conjecture without a falsifier does not count as promoted", () => {
     const verdict = gauntletVerdict({
       ...complete,
-      publicClaims: [{ author_fellow_id: "F-1", has_falsifier: false, conjecture_class: true }],
+      publicClaims: [
+        {
+          author_fellow_id: "F-1",
+          session_id: "S-1",
+          has_falsifier: false,
+          conjecture_class: true,
+        },
+      ],
     });
     expect(verdict.missing).toContain("promoted_public");
   });
   test("another Fellow's public claim does not count", () => {
     const verdict = gauntletVerdict({
       ...complete,
-      publicClaims: [{ author_fellow_id: "F-OTHER", has_falsifier: true, conjecture_class: true }],
+      publicClaims: [
+        {
+          author_fellow_id: "F-OTHER",
+          session_id: "S-1",
+          has_falsifier: true,
+          conjecture_class: true,
+        },
+      ],
     });
     expect(verdict.completed).toBe(false);
   });
@@ -110,8 +126,10 @@ describe("state-derived gauntlet verdict", () => {
     const verdict = gauntletVerdict({
       ...complete,
       sessions: [...complete.sessions, { ...closedSession, session_id: "S-2" }],
+      publicClaims: complete.publicClaims.map((claim) => ({ ...claim, session_id: "S-2" })),
       observations: [
         ...fullObservations.slice(0, 4),
+        obs("GET", "/v1/sessions/S-2/pack", 200),
         obs("POST", "/v1/sessions/S-2/promote", 422, "PROMOTE_BODY_INVALID", true),
         obs("POST", "/v1/sessions/S-2/promote", 201),
       ],
@@ -174,7 +192,9 @@ describe("state-derived gauntlet verdict", () => {
     (has_falsifier) => {
       const verdict = gauntletVerdict({
         ...complete,
-        publicClaims: [{ author_fellow_id: "F-1", has_falsifier, conjecture_class: false }],
+        publicClaims: [
+          { author_fellow_id: "F-1", session_id: "S-1", has_falsifier, conjecture_class: false },
+        ],
       });
       expect(verdict.completed).toBe(has_falsifier);
       if (has_falsifier) expect(verdict.missing).not.toContain("promoted_public");
@@ -203,5 +223,65 @@ describe("state-derived gauntlet verdict", () => {
     });
     expect(verdict.completed).toBe(false);
     expect(verdict.missing).toContain("closed");
+  });
+
+  test("a different closed session cannot supply the publishing session's handback", () => {
+    const verdict = gauntletVerdict({
+      ...complete,
+      sessions: [
+        { ...closedSession, closed_at: null, has_handback: false },
+        { ...closedSession, session_id: "S-2" },
+      ],
+    });
+    expect(verdict.completed).toBe(false);
+    expect(verdict.missing).toEqual(["closed"]);
+  });
+
+  test("pack and closure on one session cannot be stitched to another's public contribution", () => {
+    const facts = {
+      ...complete,
+      sessions: [
+        closedSession,
+        { ...closedSession, session_id: "S-2", closed_at: null, has_handback: false },
+      ],
+      publicClaims: complete.publicClaims.map((claim) => ({ ...claim, session_id: "S-2" })),
+      observations: [
+        ...fullObservations.slice(0, 3),
+        obs("POST", "/v1/sessions/S-2/promote", 422, "PROMOTE_BODY_INVALID", true),
+        obs("POST", "/v1/sessions/S-2/promote", 201),
+      ],
+    };
+    const verdict = gauntletVerdict(facts);
+    expect(verdict.completed).toBe(false);
+    expect(verdict.missing).toEqual(["pack_read", "closed"]);
+    expect(gauntletVerdict({ ...facts, sessions: [...facts.sessions].reverse() })).toEqual(verdict);
+  });
+
+  test.each([null, "", "S-FOREIGN"])(
+    "missing or foreign public session attribution cannot count as a publication: %s",
+    (session_id) => {
+      const verdict = gauntletVerdict({
+        ...complete,
+        publicClaims: complete.publicClaims.map((claim) => ({ ...claim, session_id })),
+      });
+      expect(verdict.completed).toBe(false);
+      expect(verdict.missing).toContain("promoted_public");
+    },
+  );
+
+  test("a different session's recovery cannot stand in for the public claim's session", () => {
+    const verdict = gauntletVerdict({
+      ...complete,
+      sessions: [...complete.sessions, { ...closedSession, session_id: "S-2" }],
+      observations: [
+        ...fullObservations.slice(0, 3),
+        obs("POST", "/v1/sessions/S-1/promote", 201),
+        obs("GET", "/v1/sessions/S-2/pack", 200),
+        obs("POST", "/v1/sessions/S-2/promote", 422, "PROMOTE_BODY_INVALID", true),
+        obs("POST", "/v1/sessions/S-2/promote", 201),
+      ],
+    });
+    expect(verdict.completed).toBe(false);
+    expect(verdict.missing).toEqual(["refusal_recovered"]);
   });
 });

@@ -986,11 +986,19 @@ bash e2e/gauntlet/run.sh --target local --agents complete,complete-typed
 bash e2e/gauntlet/run.sh --target local --agents harness:codex
 ```
 
-The default runs ten scripted oracle cases, not ten model trials. A real-harness
-run reports measurements from local Workerd/D1/R2 with fixture screening;
+The default runs eleven scripted oracle cases, including an adversary that reads
+and closes one session while publishing through another still-open session.
+Completion requires one owned session to supply its pack read, injected-refusal
+recovery, attributed public claim and authored handback. Private workshop drafts
+remain shared by Fellow and problem. These are scripted controls, not model trials.
+
+A real-harness run reports local Workerd/D1/R2 measurements with fixture screening;
 measurement completion does not mean the agent completed the research loop.
-Missing harness prerequisites exit 78 as blocked. Neither local mode satisfies
-the staging G-C gate or measures tokens to first promotion.
+Codex separately reports provider-counter tokens through first successful promotion
+when complete, reconciled telemetry is available. Whole-session tokens and served
+bytes remain separate. Missing harness prerequisites exit 78 as blocked. These
+local results do not establish the staging G-C cohort, offered-move comprehension
+or the median 25K budget.
 
 Also: golden contract corpus (CLI and Worker byte-agree), Diptych face snapshots, pack-determinism byte-compare, `smoke-agent.sh` / `smoke-gallery.sh` (workshop visible to sponsor, absent from the public page), Playwright against staging, and a pre-launch red team for injection (including forged system items), moderation evasion, write-cap evasion, and auth replay.
 
