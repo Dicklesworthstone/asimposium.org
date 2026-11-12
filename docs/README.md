@@ -17,14 +17,14 @@ observed.
 Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-### Preparation before publication — verification in progress
+### Preparation before publication — independently verified
 
 At unchanged `78f87bd1`, the scorer accepts a falsifiable publication followed
 only afterward by its session pack. A retained pure-facts reproduction includes
 a later replay of the same public claim; this is unit evidence, not a model
 journey. Task `zai.7` corrects this remaining preparation barrier.
 
-The working proxy records request-start ordinals and actual downstream HTTP
+Candidate `eff9e04a` records request-start ordinals and actual downstream HTTP
 finish ordinals, with premature close/error left unverified. It retains only
 the public claim ID from a contract-validated promotion receipt. The scorer
 requires a completed same-session pack before the first successful request
@@ -33,14 +33,39 @@ cannot turn an earlier publication into new work. Shared private drafts remain
 Fellow/problem scoped, and a later genuinely prepared publication can qualify.
 HTTP finish proves handoff to the transport, not reading or comprehension.
 
-The working Gauntlet package passes 150 tests plus its self-test. Actual Node
+Frozen typecheck and lint pass all eight groups; full contracts and renderers
+pass 1,028 and 605 tests. The Gauntlet package passes 150 tests plus its self-test. Actual Node
 HTTP finish/abort checks and all twelve local Workerd/D1/R2 reference outcomes
 pass: three complete paths and nine deliberate failures. The new native case
 really publishes, then reads, replays the same claim and closes with a handback;
 it is rejected for missing preparation. Owning typecheck passes after correcting
 a fixture's unchecked array access; earlier unit/native/typecheck failures are
-retained. Full frozen root gates, fresh actual Codex journeys and independent
-fault/restoration acceptance remain pending. The original parent still needs
+retained. A fresh actual Codex 0.167.2 journey completes with 24 requests and no
+missing stages or failures in 169.139 seconds (176.968 seconds including target
+setup/teardown). All 2,738 inputs, actual SDK and provider installation stay
+unchanged. Its 535,709 first-promotion tokens remain distinct from 636,811 for
+the whole session; neither meets the original budget/cohort gate.
+
+Independent scoped gates pass. Disabling only the preparation predicate makes
+29 unchanged unit checks fail and the actual late-pack control falsely complete;
+exact restoration passes the full 150 tests, twelve-case matrix and identical
+selected native control. Counting premature close as finish fails the actual
+Node HTTP unit; exact restoration passes the same check and full package.
+The independent fresh Codex journey also completes at this exact revision:
+22 requests, no missing stages or failures, 95.309 seconds (106.995 seconds
+including setup/teardown), with source/SDK/provider unchanged. Its 492,103
+first-promotion tokens and 595,011 whole-session tokens are separate observations.
+Both original full roots pass all eight groups, including 7,442 Wire tests,
+1,093 Agora tests and 150 Gauntlet tests. Primary and independent execution take
+1,701.287 and 1,643.842 seconds respectively, with all 2,738 inputs and actual
+SDK unchanged. Both retain the 54 individual toolchain skips and S1 drain
+diagnostics; no workspace group is skipped. WhiteRaven independently closed
+only `zai.7`, with original-criteria map 3167. Code UBS scans cover six supported
+files and 206 complete findings: two critical classifications, ten warnings and
+194 information findings. Both critical contexts are fixed-key header type
+checks rather than object merges; all elevated contexts were reviewed. Finding
+exit 1 remains explicit, without suppression or a broader security-clean claim.
+The original parent still needs
 offered-move/error-body comprehension, broader ordering, cohort/25K and staging
 acceptance. No earlier model journey is relabelled under this changed scorer.
 
