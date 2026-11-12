@@ -178,12 +178,20 @@ try {
         "UPDATE sqlite_sequence SET seq = 7 WHERE name = 'z_database_backup_sequence'",
       ),
     ]);
-    const now = Date.now() + 1000;
-    const date = new Date(now).toISOString().slice(0, 10);
-    const manifestKey = `backups/sql/${date}/complete.json`;
-    const result = await fixtures.databaseBackupTick(now);
-    assert.equal(result.status, "written");
+    assert.deepEqual((await env.ARTIFACTS.list({ prefix: "backups/sql/" })).objects, []);
+    assert.equal(
+      (await worker.scheduled({ cron: "*/5 * * * *" })).outcome,
+      "ok",
+      "production scheduled entrypoint creates the first SQL backup",
+    );
+    const completed = (await env.ARTIFACTS.list({ prefix: "backups/sql/" })).objects.filter(
+      (object) => object.key.endsWith("/complete.json"),
+    );
+    assert.equal(completed.length, 1, "cron must publish exactly one completion from absent state");
+    const manifestKey = completed[0].key;
     const manifest = await (await env.ARTIFACTS.get(manifestKey)).json();
+    const now = Date.parse(manifest.created_at);
+    assert.equal((await fixtures.databaseBackupTick(now + 1)).status, "complete");
     const sql = await (await env.ARTIFACTS.get(manifest.sql_key)).text();
     const keys = [{ kid: CHECKPOINT_KEY_ID, publicKeyHex: CHECKPOINT_PUBLIC_KEY_HEX }];
     const verified = await verifyDatabaseBackup(manifest, sql, keys);
