@@ -17,7 +17,7 @@ observed.
 Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-### Coherent Gauntlet sessions — frozen verification in progress
+### Coherent Gauntlet sessions — independently verified
 
 The unchanged `8b493969` scorer reports a completed loop when one owned session
 supplies the pack read and handback while a different, still-open session
@@ -71,7 +71,22 @@ still active during the primary failure. Source inspection finds a generic
 marker where the exact run marker is already available. Task `epj9` owns that
 defect and a real-process collision regression; the original root failure
 remains unclassified rather than being erased by a retry.
-`zai.6` remains in progress. Stage presence
+The exact-marker repair is committed as `9a7e294f`. Its live-process control
+fails on the original generic marker and passes with the exact marker while
+the unrelated process remains alive. Existing owned-marker and PGID refusals
+still pass. Frozen typecheck/lint, contracts, renderers, Gauntlet and the full
+eleven-case local reference matrix pass. Both original full roots now pass all
+eight groups, including 7,442 Wire tests and all 32 named S2 lifecycle scenarios
+(32 start records and 32 pass records). The independent one-line old-marker
+fault fails the unchanged live-process control with `check: process-match`;
+exact restoration passes that control and the existing owned-survivor checks.
+All 2,738 source inputs and the actual Next SDK stay unchanged through both
+roots. The 54 individual toolchain skips and retained S1 drain diagnostics
+remain visible; no workspace group is skipped. WhiteRaven independently closed
+`epj9` and then `zai.6`, with original-criteria maps 3163 and 3164. No new model
+journey is attributed to this revision: the unchanged Gauntlet's genuine Codex
+observations above remain pinned to `3ff1f2ef`.
+Stage presence
 does not establish ordering, offered-move following or error-body comprehension;
 those original parent requirements, the cohort and staging gates remain open.
 
