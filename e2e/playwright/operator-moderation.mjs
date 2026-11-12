@@ -33,6 +33,8 @@ export async function operatorModerationJourney({
     `${target.origin}/p/${problemId}/claims/${claim}.json`, { headers: { "user-agent": USER_AGENT } },
   )).status;
 
+  await fellowCapacityJourney({ browser, agora, target, record, privateToCaches, signedInAs });
+
   for (const javaScriptEnabled of [true, false]) {
     const mode = javaScriptEnabled ? "js" : "no-js";
     const author = await enrollSetupFellow(target, `usr_moderation_browser_${mode.replaceAll("-", "_")}`, `moderation-browser-${mode}`, ["promote"]);
@@ -214,4 +216,137 @@ export async function operatorModerationJourney({
         !(await page.content()).includes(held.body.case_id) && await page.locator("#admin-content-target").count() === 0);
     } finally { await context.close(); }
   }
+}
+
+/** Real capacity writes, including a lost browser reply after the D1 commit. */
+async function fellowCapacityJourney({ browser, agora, target, record, privateToCaches, signedInAs }) {
+  const sponsor = "usr_operator_capacity_browser";
+  await enrollSetupFellow(target, sponsor, "operator-capacity-browser", ["promote"]);
+  const path = `/admin/sponsors?sponsor=${encodeURIComponent(sponsor)}`;
+  const state = () => target.env.DB.prepare(
+    "SELECT active_fellow_limit, fellow_cap_seq FROM sponsors WHERE sponsor_id = ?",
+  ).bind(sponsor).first();
+  const audit = async () => (await target.env.DB.prepare(
+    "SELECT audit_event_id, sponsor_seq, reason, step_up_authenticated_at FROM sponsor_fellow_cap_audit_events WHERE sponsor_id = ? ORDER BY sponsor_seq DESC",
+  ).bind(sponsor).all()).results;
+  const firstReason = 'Capacity reviewed <img id="cap-history-injection" src=x> for the research group.';
+  const secondReason = "A second reviewed capacity decision by the other operator.";
+  const fill = async (page, limit, reason) => {
+    await page.locator("#operator-cap-limit").fill(String(limit));
+    await page.locator("#operator-cap-reason").fill(reason);
+    await page.locator("#operator-cap-confirm").check();
+  };
+  const a = await browser.newContext();
+  const b = await browser.newContext();
+  try {
+    const firstAuthTime = Math.floor(Date.now() / 1000);
+    await signedInAs(a, ADMIN_OPERATORS[0], firstAuthTime);
+    await signedInAs(b, ADMIN_OPERATORS[1]);
+    const first = await a.newPage();
+    const second = await b.newPage();
+    const response = await first.goto(`${agora.origin}${path}`, { waitUntil: "load" });
+    await second.goto(`${agora.origin}${path}`, { waitUntil: "load" });
+    record("capacity: the operator reads an authoritative private initial cap and sequence",
+      response?.status() === 200 && privateToCaches(response.headers()) &&
+      await first.locator("#operator-cap-current").innerText() === "5" &&
+      await first.locator("#operator-cap-sequence").innerText() === "0" && (await audit()).length === 0);
+    await fill(first, 6, firstReason);
+    await fill(second, 7, secondReason);
+
+    // Forward the actual encrypted action to Next and let its real signed
+    // Worker request commit, then drop only the browser's response. No fake
+    // response or replacement service is supplied.
+    let dropped = false;
+    let forwardedStatus = null;
+    const matches = url => url.origin === agora.origin && url.pathname === "/admin/sponsors";
+    const loseReply = async route => {
+      if (!dropped && route.request().method() === "POST" && route.request().headers()["next-action"]) {
+        dropped = true;
+        const reply = await route.fetch();
+        forwardedStatus = reply.status();
+        await reply.dispose();
+        await route.abort("failed");
+      } else await route.continue();
+    };
+    await first.route(matches, loseReply);
+    await first.locator("#operator-cap-save").click();
+    await first.getByText("The capacity decision could not be confirmed.", { exact: false }).waitFor();
+    await first.unroute(matches, loseReply);
+    const afterFirst = await state();
+    const firstAudit = await audit();
+    record("capacity: a lost reply retains the pending intent after one actual audited 5-to-6 commit",
+      dropped && forwardedStatus === 200 && afterFirst.active_fellow_limit === 6 && afterFirst.fellow_cap_seq === 1 &&
+      firstAudit.length === 1 && firstAudit[0].reason === firstReason &&
+      await first.locator("#operator-cap-limit").isDisabled() && await first.locator("#operator-cap-receipt").count() === 0);
+
+    await second.locator("#operator-cap-save").click();
+    await second.getByRole("alert").first().waitFor();
+    record("capacity: another operator's stale cap-plus-sequence cannot overwrite the committed decision",
+      (await state()).active_fellow_limit === 6 && (await audit()).length === 1 &&
+      await second.locator("#operator-cap-receipt").count() === 0 && await second.locator("#operator-cap-reason").inputValue() === secondReason);
+    await second.reload({ waitUntil: "load" });
+    await fill(second, 7, secondReason);
+    await second.locator("#operator-cap-save").click();
+    await second.locator("#operator-cap-receipt").waitFor();
+    record("capacity: fresh inspection authorizes the next real decision and its immutable receipt",
+      (await state()).active_fellow_limit === 7 && (await state()).fellow_cap_seq === 2 && (await audit()).length === 2);
+
+    const freshAuthTime = Math.floor(Date.now() / 1000);
+    await signedInAs(a, ADMIN_OPERATORS[0], freshAuthTime);
+    await first.getByRole("button", { name: "Retry the exact capacity decision", exact: true }).click();
+    await first.locator("#operator-cap-receipt").waitFor();
+    record("capacity: unchanged retry recovers the original receipt while showing the later current state",
+      await first.locator("#operator-cap-receipt").innerText() === firstAudit[0].audit_event_id &&
+      await first.locator("#operator-cap-current").innerText() === "7" &&
+      await first.locator("#operator-cap-sequence").innerText() === "2" && (await audit()).length === 2 &&
+      freshAuthTime > firstAuthTime && firstAudit[0].step_up_authenticated_at === firstAuthTime);
+    await first.reload({ waitUntil: "load" });
+    const history = first.locator('section[aria-labelledby="operator-cap-history-heading"]');
+    const rows = await audit();
+    const sequences = await history.locator("tbody tr td:first-child").allTextContents();
+    record("capacity: private history renders both exact audited decisions without interpreting reason HTML",
+      (await history.innerText()).includes(rows[0].audit_event_id) && (await history.innerText()).includes(firstAudit[0].audit_event_id) &&
+      (await history.innerText()).includes(firstReason) && await first.locator("#cap-history-injection").count() === 0 &&
+      sequences.length === 2 && sequences[0] === "2" && sequences[1] === "1");
+
+    await fill(first, 8, "A reviewed decision that must not survive an authentication change.");
+    await signedInAs(a, ADMIN_OPERATORS[0], Math.floor(Date.now() / 1000) - 3600);
+    await first.locator("#operator-cap-save").click();
+    await first.getByText("need a Google authentication time", { exact: false }).waitFor();
+    record("capacity: server-side recent-auth checks refuse an expired reviewed page", (await audit()).length === 2);
+    await signedInAs(a, ADMIN_OPERATORS[1]);
+    await first.getByRole("button", { name: "Retry the exact capacity decision", exact: true }).click();
+    await first.getByText("Re-authenticate as the same operator", { exact: false }).waitFor();
+    record("capacity: an account switch cannot reuse another operator's reviewed decision", (await audit()).length === 2);
+  } finally { await a.close(); await b.close(); }
+
+  for (const principal of [null, sponsor]) {
+    const context = await browser.newContext();
+    try {
+      if (principal !== null) await signedInAs(context, principal);
+      const page = await context.newPage();
+      const response = await page.goto(`${agora.origin}${path}`, { waitUntil: "load" });
+      const html = await page.content();
+      record(`capacity: ${principal === null ? "anonymous" : "nonoperator"} cannot inspect private capacity controls or history`,
+        privateToCaches(response.headers()) && !html.includes("operator-fellow-cap-heading") &&
+        !html.includes("operator-cap-history-heading") && !html.includes("Capacity reviewed") && await page.locator("#operator-cap-save").count() === 0);
+    } finally { await context.close(); }
+  }
+  const readOnly = await browser.newContext({ javaScriptEnabled: false });
+  try {
+    await signedInAs(readOnly, ADMIN_OPERATORS[0]);
+    const page = await readOnly.newPage();
+    await page.goto(`${agora.origin}${path}`, { waitUntil: "load" });
+    // Playwright's text selector deliberately skips NOSCRIPT even when JS is
+    // disabled. Inspect the actual fallback node and its visible rendered text.
+    const notice = page.locator('section[aria-labelledby="operator-fellow-cap-heading"] noscript p');
+    const observed = {
+      stateMatches: await page.locator("#operator-cap-current").innerText() === "7",
+      saveDisabled: await page.locator("#operator-cap-save").isDisabled(),
+      explanationVisible: await notice.isVisible() && (await notice.textContent()).includes("Capacity changes require JavaScript."),
+      historyMatches: (await page.locator('section[aria-labelledby="operator-cap-history-heading"]').innerText()).includes((await audit())[0].audit_event_id),
+    };
+    record("capacity: no-JS operator inspection shows real state/history with writes explicitly disabled",
+      Object.values(observed).every(Boolean), observed);
+  } finally { await readOnly.close(); }
 }

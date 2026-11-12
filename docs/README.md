@@ -17,6 +17,26 @@ observed.
 Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+### Operator Fellow capacity — connected candidate
+
+Task `0ht.2` connects the finished operator cap state, compare-and-set override
+and immutable history paths to the existing private `/admin/sponsors` page.
+An allowlisted operator can inspect a sponsor, confirm a reasoned capacity
+change and recover an uncertain response with its original intent and key.
+Receipts remain separate from fresh state, including a later operator's change;
+no-JavaScript inspection is read-only. Existing contracts, URLs, suspension
+controls, recent-auth policy and Worker write paths are retained.
+
+The working production Next/Chromium/local Workerd/D1/R2 lane passes all 470
+checks, including an actual 5→6 write, a lost reply after commit, stale-CAS
+refusal, a later 6→7 decision, original-receipt recovery after fresh
+authentication, private history and nonoperator/no-JavaScript boundaries.
+Earlier unit/lint and two browser failures are retained: the suspension tests
+now target their own fieldset, and the no-JavaScript check reads the actual
+fallback node because Playwright text selectors skip `noscript`.
+Frozen full-root and independent acceptance remain pending. This is local
+capability, not a Google OAuth exchange, staging or broader admin/launch gate.
+
 ### Cold-agent context isolation — independently verified
 
 Task `zai.8` omits Codex's automatic skills catalog with its supported

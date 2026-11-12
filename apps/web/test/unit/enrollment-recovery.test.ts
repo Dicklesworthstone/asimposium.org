@@ -410,6 +410,7 @@ test("operator Fellow-cap action rejects browser auth-time and signs only curren
     confirm: "override-fellow-cap" as const,
   };
   let dispatched: unknown;
+  let returnedReceipt = receipt;
   let revalidations = 0;
 
   mock.module("server-only", () => ({}));
@@ -433,7 +434,7 @@ test("operator Fellow-cap action rejects browser auth-time and signs only curren
       idempotencyKey: string,
     ) => {
       dispatched = { candidateOperatorId, command, idempotencyKey };
-      return { ok: true as const, data: receipt };
+      return { ok: true as const, data: returnedReceipt };
     },
   }));
 
@@ -448,12 +449,23 @@ test("operator Fellow-cap action rejects browser auth-time and signs only curren
     const forged = await overrideOperatorFellowCap(
       { ...cleanIntent, step_up_authenticated_at: 1 },
       "console-operator-cap-forged",
+      operatorId,
     );
     expect(forged).toEqual({ ok: false, message: "The operator Fellow-cap command is invalid." });
     expect(dispatched).toBeUndefined();
 
-    const accepted = await overrideOperatorFellowCap(cleanIntent, "console-operator-cap-clean");
+    const switched = await overrideOperatorFellowCap(cleanIntent, "console-operator-cap-switch", "usr_other_operator");
+    expect(switched.ok).toBe(false);
+    expect(dispatched).toBeUndefined();
+    const accepted = await overrideOperatorFellowCap(cleanIntent, "console-operator-cap-clean", operatorId);
     expect(accepted).toEqual({ ok: true, receipt });
+    for (const wrong of [
+      { sponsor_id: "usr_wrong_target" }, { previous_active_fellow_limit: 6 },
+      { active_fellow_limit: 7 }, { sponsor_seq: 2 },
+    ]) {
+      returnedReceipt = { ...receipt, ...wrong };
+      expect((await overrideOperatorFellowCap(cleanIntent, "console-operator-cap-clean", operatorId)).ok).toBe(false);
+    }
   } finally {
     mock.module("@/lib/stoa", () => realStoa);
     mock.module("next/cache", () => realCache);

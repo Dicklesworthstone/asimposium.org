@@ -253,9 +253,12 @@ async function requireOperatorId(): Promise<
 /** Read the exact cap/sequence precondition before an operator compare-and-set. */
 export async function operatorFellowCapState(
   sponsorId: unknown,
+  expectedOperatorId: unknown,
 ): Promise<OperatorFellowCapStateResult> {
   const operator = await requireOperatorId();
   if (!operator.ok) return operator;
+  if (expectedOperatorId !== operator.operatorId)
+    return { ok: false, message: "Re-authenticate as the same operator before inspecting this capacity decision." };
   if (!isCanonicalSponsorId(sponsorId)) {
     return { ok: false, message: "The target sponsor identity is invalid." };
   }
@@ -271,6 +274,8 @@ export async function operatorFellowCapState(
             : (result.detail ?? "The operator state was not available."),
     };
   }
+  if (result.data.sponsor_id !== sponsorId)
+    return { ok: false, message: "The capacity state did not match the requested sponsor. Reload this inspection." };
   return { ok: true, state: result.data };
 }
 
@@ -281,9 +286,12 @@ export async function operatorFellowCapState(
 export async function overrideOperatorFellowCap(
   request: unknown,
   idempotencyKey: unknown,
+  expectedOperatorId: unknown,
 ): Promise<OperatorFellowCapResult> {
   const operator = await requireOperatorId();
   if (!operator.ok) return operator;
+  if (expectedOperatorId !== operator.operatorId)
+    return { ok: false, message: "Re-authenticate as the same operator before recording this capacity decision." };
   if (
     typeof idempotencyKey !== "string" ||
     !/^console-[A-Za-z0-9._-]{1,152}$/.test(idempotencyKey)
@@ -320,6 +328,14 @@ export async function overrideOperatorFellowCap(
             : (result.detail ?? "The operator Fellow-cap command was not accepted."),
     };
   }
+  // A replay can carry the original authentication time. Bind the immutable
+  // receipt to the intent, rather than treating it as a fresh current-state read.
+  if (
+    result.data.sponsor_id !== command.sponsor_id ||
+    result.data.previous_active_fellow_limit !== command.expected_active_fellow_limit ||
+    result.data.active_fellow_limit !== command.active_fellow_limit ||
+    result.data.sponsor_seq !== command.expected_sponsor_seq + 1
+  ) return { ok: false, message: "The capacity receipt did not match this decision. Retry the exact pending decision or reload the inspection." };
   bestEffortEnrollmentCacheInvalidation(() => revalidatePath("/console"));
   return { ok: true, receipt: result.data };
 }

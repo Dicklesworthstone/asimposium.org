@@ -182,14 +182,14 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
 
       <section className="card" aria-labelledby="admin-sponsor-suspension-heading">
         <h2 id="admin-sponsor-suspension-heading" className="card-title">
-          Reviewed sponsor suspension
+          Sponsor capacity and standing
         </h2>
         <p>
-          Inspect sponsor standing and a rejected screening case, review the effect on Fellows and
-          credentials, and record an egregious-case decision.
+          Inspect capacity and its recorded decisions, or review a rejected screening case and the
+          effect of suspension on Fellows and credentials.
         </p>
         <Link href="/admin/sponsors" prefetch={false}>
-          Inspect a sponsor for suspension
+          Inspect sponsor capacity and standing
         </Link>
       </section>
 

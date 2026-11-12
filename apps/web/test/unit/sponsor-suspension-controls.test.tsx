@@ -59,6 +59,8 @@ let writeResult: StoaCall<AdminSponsorSuspensionReceipt>;
 let caseResult: StoaCall<AdminQuarantineCaseDetail>;
 let failWrite: boolean;
 let failRead: boolean;
+let capTarget: string;
+const capReads: unknown[][] = [];
 const reads: unknown[][] = [];
 const writes: unknown[][] = [];
 const caseReads: unknown[][] = [];
@@ -68,6 +70,12 @@ let actions: typeof import("../../app/admin/sponsors/actions");
 let admin: typeof import("../../lib/admin");
 let page: typeof import("../../app/admin/sponsors/page");
 const originalOperators = process.env.OPERATOR_PRINCIPAL_IDS;
+
+function suspensionMarkup(html: string): string {
+  const start = html.indexOf('<section class="card" aria-labelledby="sponsor-standing-heading">');
+  if (start < 0) throw new Error("The suspension control is absent from the inspection.");
+  return html.slice(start);
+}
 
 beforeAll(async () => {
   realStoa = { ...(await import("../../lib/stoa")) };
@@ -90,6 +98,11 @@ beforeAll(async () => {
       return writeResult;
     },
     stoaAdminQuarantineCase: async (...args: unknown[]) => { caseReads.push(args); return caseResult; },
+    stoaOperatorFellowCapState: async (...args: unknown[]) => {
+      capReads.push(args);
+      return { ok: true, data: { sponsor_id: capTarget, active_fellow_limit: 5, sponsor_seq: 0 } };
+    },
+    stoaOperatorFellowCapAudit: async () => ({ ok: true, data: { audit_events: [], next_cursor: null } }),
   }));
   actions = await import("../../app/admin/sponsors/actions");
   admin = await import("../../lib/admin");
@@ -104,6 +117,8 @@ beforeEach(() => {
   caseResult = { ok: true, data: reviewedCase };
   failWrite = false;
   failRead = false;
+  capTarget = sponsorId;
+  capReads.length = 0;
   reads.length = 0;
   writes.length = 0;
   caseReads.length = 0;
@@ -113,6 +128,26 @@ afterAll(() => {
   mock.module("@/auth", () => realAuth);
   if (originalOperators === undefined) delete process.env.OPERATOR_PRINCIPAL_IDS;
   else process.env.OPERATOR_PRINCIPAL_IDS = originalOperators;
+});
+
+test("capacity inspection withholds a foreign target and preserves later independent decisions", async () => {
+  capTarget = "usr_foreign_target";
+  const html = renderToStaticMarkup(await page.default({ searchParams: Promise.resolve({ sponsor: sponsorId }) }));
+  expect(html).toContain("Fellow capacity unavailable");
+  expect(html).not.toContain('id="operator-cap-save"');
+  expect(capReads).toEqual([[operatorId, sponsorId]]);
+  const { capacityStateFollowsReceipt } = await import("../../components/operator-fellow-cap-control");
+  const acknowledged = {
+    acknowledged: true as const, audit_event_id: `OFC-${"0".repeat(26)}`, sponsor_id: sponsorId,
+    sponsor_seq: 1, previous_active_fellow_limit: 5, active_fellow_limit: 6,
+    step_up_authenticated_at: 1, signer_kid: "fixture", effective_at: 1,
+  };
+  const state = { sponsor_id: sponsorId, active_fellow_limit: 6, sponsor_seq: 1 };
+  expect(capacityStateFollowsReceipt(state, acknowledged)).toBe(true);
+  expect(capacityStateFollowsReceipt({ ...state, sponsor_seq: 2, active_fellow_limit: 7 }, acknowledged)).toBe(true);
+  expect(capacityStateFollowsReceipt({ ...state, sponsor_seq: 0 }, acknowledged)).toBe(false);
+  expect(capacityStateFollowsReceipt({ ...state, active_fellow_limit: 7 }, acknowledged)).toBe(false);
+  expect(capacityStateFollowsReceipt({ ...state, sponsor_id: "usr_other_target" }, acknowledged)).toBe(false);
 });
 
 test("a confirmed decision uses the server identity and time, binds its target and recovers its receipt", async () => {
@@ -208,7 +243,7 @@ test("inspection shows actual account impact, case ownership and separate review
     "&lt;img src=x onerror=alert(1)&gt; rejected after review"]) expect(html).toContain(text);
   expect(html).not.toContain("UNNEEDED_PRIVATE_CANDIDATE");
   expect(html).not.toContain("<img src=x");
-  expect(html).not.toContain("<fieldset disabled");
+  expect(suspensionMarkup(html)).not.toContain("<fieldset disabled");
   expect(page.metadata.robots).toEqual({ index: false, follow: false });
 });
 
@@ -220,7 +255,7 @@ test("wrong-sponsor, pending and missing cases leave suspension disabled", async
   ]) {
     caseResult = { ok: true, data: detail };
     const html = renderToStaticMarkup(await page.default({ searchParams: Promise.resolve({ sponsor: sponsorId, case: caseId }) }));
-    expect(html).toContain("<fieldset disabled");
+    expect(suspensionMarkup(html)).toContain("<fieldset disabled");
     expect(html).not.toContain("I reviewed case <code>QC-");
   }
   expect(writes).toHaveLength(0);
@@ -231,7 +266,7 @@ test("stale sessions can diagnose standing, but cannot submit another suspension
   issuedAt = Math.floor(Date.now() / 1000) - 1800;
   const html = renderToStaticMarkup(await page.default({ searchParams: Promise.resolve({ sponsor: sponsorId, case: caseId }) }));
   expect(html).toContain("Active Fellows");
-  expect(html).toContain("<fieldset disabled");
+  expect(suspensionMarkup(html)).toContain("<fieldset disabled");
   expect(html).toContain("Re-authenticate with Google");
   expect(reads).toHaveLength(1);
   expect(writes).toHaveLength(0);
@@ -251,6 +286,7 @@ test("invalid selectors and unauthorized viewers cause no private reads", async 
   }
   expect(reads).toHaveLength(0);
   expect(caseReads).toHaveLength(0);
+  expect(capReads).toHaveLength(0);
 });
 
 test("unavailable standing never becomes an active account, and suspension reasons remain inert text", async () => {
