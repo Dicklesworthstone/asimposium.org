@@ -17,6 +17,76 @@ observed.
 Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+### Private snapshot bodies — independently verified
+
+Task `p4b.5`, source `0537720a091b42f4dd63321bed1822a5f89bd129`, closes a
+specific recovery gap: SQL retained only extracts for R2-spilled private work.
+The existing cron now captures a signed CAS inventory in the same D1 transaction
+as SQL and produces a separate signed body companion. SQL completion remains
+valid when bodies fail. Inventory overflow or malformed references are explicit
+unavailable states, never truncated success. Body copies are bounded to eight
+objects, 20 MiB each and 32 MiB combined; the inventory bound is 1,024 references.
+
+The operator primitive recovers only those signed bodies from an archive-only
+bucket into independently pinned private scratch R2. It checks source, SQL key
+and digest, exact ordered hashes/sizes, actual bytes, namespace markers and
+conditional writes. Correct partial bytes survive retries, including ordinary
+CAS objects without optional R2 checksum metadata. Conflicts refuse overwrite.
+The result remains `serviceReady: false`. No public URL, D1 table, provider
+resource, body deletion or public re-publication was added.
+
+The reviewed local native lane passed in 55.837 seconds: the production cron
+created both completions before any fixture tick; owning current and historical
+workshop reads failed without bodies, then returned exact full bodies after
+archive-only recovery. A verified artifact's full bytes recovered too. Foreign
+and anonymous private reads remained refused, and a public face excluded private
+bytes. All original 131-table/1,005-statement SQL fidelity and 15 current-journal
+preflight refusals remained. Eight synthetic failure cases retained verified
+SQL and withheld body completion at failure; a missing-body retry later completed
+from signed historical references despite changed D1. Unverified staging was
+excluded. Staging/classifier/capacity inputs are fixtures on real local bindings;
+this is not provider presigned-upload or hosted recovery acceptance.
+
+Working typecheck and lint passed all eight original groups in 114.224 and
+40.587 seconds. The default lifecycle native passed in 18.538 seconds, retention
+units 94/260 assertions, contracts 1,028/8,275 and render 605/6,248. All 2,742
+qualified source inputs and the actual Next runtime stayed fixed during those
+runs. Literal UBS diff/staged scans completed with 232 findings across four
+code files: six critical, 20 warning and 206 informational. All 26 elevated
+contexts and 12 informational classes were reviewed without suppression; this
+is not a broad security-clean claim. Initial fixture-origin, D1 compound-query,
+synchronous-RPC assertion and row-type failures were retained and corrected.
+Independent review also caught and corrected an oracle that could let a later
+fixture tick hide a missing first-cron CAS companion.
+
+Different-agent source gates passed at the exact revision: typecheck/lint eight
+groups, contracts 1,028, render 605, retention units 94 and the default lifecycle
+native. Its complete recovery baseline passed in 37.025 seconds. Removing only
+the new SQL branch's CAS call produced the intended missing-companion assertion
+at native line 375 in 8.919 seconds, before fixture rescue. The unchanged oracle
+and other 2,741 source inputs stayed fixed. Exact restoration then passed the
+complete native lane in 32.404 seconds; all 2,742 inputs and the actual Next
+runtime matched the frozen source again. All nine scoped process owners exited.
+
+Both original full root dispatchers passed all eight groups: primary
+1,644.208 seconds, finished 17:43:19.042 UTC; independent 1,643.937 seconds,
+finished 17:44:38.603 UTC. Each ran 7,444 Worker tests/39,518 assertions,
+1,094 Agora tests and 150 Gauntlet tests. Each retained 54 original individual
+toolchain skips; no whole group was skipped or blocked. The named S-2 shell
+matrix produced all 32 unique start/pass pairs in each run. All 2,742 inputs
+and the actual Next runtime matched before, after and the current source.
+Both known root process owners exited. WhiteRaven independently closed only
+`p4b.5` at 17:49:09.675 UTC, citing original-criteria acceptance map 3188 at
+the exact source revision. Its ten execution owners and all scoped primary
+commands exited; no further executions are queued. The generic native trigger
+report retains `coverage_known: false` and 67 skipped transition rules; this
+does not establish exhaustive trigger coverage.
+Whole-system recovery still needs current unpublished
+rights, CAS unbinds, public delivery reconciliation, provider binding identity,
+whole-bucket-loss recovery, scaling beyond these bounds and guarded cutover.
+The original `p4b` and operational/launch requirements remain open. Browser and
+optional Rust execution are not claimed by this backend work.
+
 ### Public ledger download — independently verified
 
 Task `fjp.1` connects the existing Worker archive to the Agora problem page's
