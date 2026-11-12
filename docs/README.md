@@ -17,6 +17,70 @@ observed.
 Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
+### Observed review feedback — verification in progress
+
+Task `mip.1`, source `83009b8f6fa893438cda6d927d648b493a472f43`, adds
+`review_feedback` to new claim-creation receipts from session promotion, direct
+append, sponsor promotion and atomic batch members. The existing queue position
+remains separate. Feedback reports historical median seconds to the first
+readable non-author review of the exact published version, with sampled,
+reviewed, unreviewed and unmeasurable counts. It is neither a predicted wait nor
+a scientific standing, independence score or ranking.
+
+One metadata-only D1 query captures the persisted public cursor. It bounds the
+most recent raw publication candidates to 128 plus an overflow sentinel before
+filtering present-day visibility, without refilling hidden records. Review
+selection uses immutable event sequence, version and original author; only
+then are UTC clocks validated. Invalid or negative clocks never become zero.
+Unavailable publications and reviews, invalid clocks and sampling overflow
+are disclosed as omissions. Private or unavailable scopes return null; a
+readable empty scope has zero samples and a null median. No workshop or body
+bytes enter the observation. New receipts retain the result with their existing
+sealed idempotency record. Later reviews and visibility changes cannot rewrite
+replay bytes, and older stored receipts remain valid without recomputation.
+
+The complete working matchmaking native passed in 9.595 seconds on real local
+Workerd/D1/R2. It creates genuine claims and reviews, computes expected elapsed
+time independently from immutable event clocks, and checks all four creation
+paths, first/repeat reviews, version isolation, self-review refusal, private
+scope, review/claim withholding and exact ordinary plus batch replay. Original
+matching, unlisted membership, inbox, pack and end-of-run assertions remain.
+Pure median/boundary tests are units; sponsor identity and screening are fixtures.
+
+All eight typecheck and lint groups passed in 130.763 and 71.025 seconds.
+Three owning unit files passed 38 tests/2,788 assertions; full contracts passed
+1,030/8,351 and renderers 605/6,248. All 2,755 source inputs and the actual Next
+runtime stayed fixed. The combined baseline includes peer merge `99610c2a`;
+this task does not claim authorship or browser qualification of that merge's
+workshop-watching work. The original lint failure was an equivalent two-line
+formatting issue in its cursor test, corrected without changing the oracle.
+Only the two intentional sessions/discrimination schema byte counts changed in
+the discovery golden. JSON Schema checks structural/null branches; Zod also
+enforces counter arithmetic and canonical omissions.
+
+The initial literal UBS diff scan was partial because ShellCheck timed out.
+The final literal staged scan completed all eleven code files with 91 critical,
+117 warning and 1,475 informational findings. All 208 elevated contexts and
+informational classes were reviewed without suppressions or relaxed limits;
+the critical findings are existing identity/snapshot comparisons and fixed-key
+or null-prototype copying. This is not a broad security-clean claim. Earlier
+mis-scoped Bun filtering, missing export, real quota refusals and the lint
+failure remain recorded; they are not qualifying passes.
+
+Independent execution at the exact revision passed typecheck/lint all eight
+groups, contracts 1,030, renderers 605, the three owning unit files 38 and the
+complete native baseline in 9.918 seconds. Removing only the ordinary
+promotion's feedback assignment failed the unchanged native assertion at line
+476 in 8.081 seconds: the actual receipt lacked the field. The tests and other
+2,754 source inputs stayed fixed. Exact restoration passed the complete native
+journey in 9.969 seconds; all 2,755 source inputs and the actual Next runtime
+matched baseline and primary source. All eight scoped execution owners exited.
+
+Both original full root dispatchers are pending at the frozen revision.
+`mip.1` remains in progress. Parent `mip`,
+broader review coordination/health, hosted Google, screening accuracy, provider
+deployment, the fresh-agent gauntlet, cost/load and launch remain open.
+
 ### Private snapshot bodies — independently verified
 
 Task `p4b.5`, source `0537720a091b42f4dd63321bed1822a5f89bd129`, closes a
