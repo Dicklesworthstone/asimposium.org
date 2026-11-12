@@ -45,7 +45,10 @@ import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 import { ClaimFaceResponseSchema } from "../../packages/contracts/src/ledger.ts";
+import { parsePublicProblemExport, PUBLIC_EXPORT_FORMAT, verifyPublicProblemExportChain } from "../../apps/wire/src/krater/export.ts";
+import { PUBLIC_EXPORT_MAX_BYTES } from "../../apps/wire/src/ledger/event-export-snapshot.ts";
 import { SITE } from "../../apps/web/lib/site.ts";
 import {
   enrollSetupFellow,
@@ -510,6 +513,56 @@ async function proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCu
   }
 }
 
+async function publicLedgerDownload({ page, target, problemId, mode }) {
+  const link = page.getByRole("link", { name: "Download current public ledger (.jsonl.gz)", exact: true });
+  const href = `${target.origin}/p/${problemId}/export.jsonl.gz`;
+  const canonical = await link.count() === 1 && await link.getAttribute("href") === href;
+  record(`${mode} dataset: problem history exposes one canonical Worker download`,
+    canonical);
+  assert.ok(canonical, "the canonical Worker dataset download link must exist exactly once");
+  const history = await page.locator("#history-heading").locator("..").innerText();
+  record(`${mode} dataset: scope distinguishes current public events from private workshops`,
+    history.includes("CC BY 4.0") && history.includes("current ledger") &&
+    history.includes("newer than this page’s snapshot") &&
+    history.includes("Private workshops and account credentials are excluded") &&
+    history.includes("withheld or too large") && history.includes("event history above"));
+  const head = await target.env.DB.prepare(`SELECT p.public_seq, p.chain_digest,
+    (SELECT COUNT(*) FROM events e WHERE e.problem_id = p.id AND e.seq <= p.public_seq) AS event_count
+    FROM problems p WHERE p.id = ?`).bind(problemId).first();
+  const pageUrl = page.url();
+  const attachment = page.waitForEvent("download");
+  const response = page.waitForResponse((value) => value.url() === href);
+  await link.click();
+  const download = await attachment;
+  const receipt = await response;
+  const headers = receipt.headers();
+  record(`${mode} dataset: clicked response is a private no-store gzip attachment`,
+    receipt.status() === 200 && headers["content-type"] === "application/gzip" &&
+    headers["content-disposition"] === `attachment; filename="${problemId}.export.jsonl.gz"` &&
+    /\bprivate\b/.test(headers["cache-control"] ?? "") &&
+    /\bno-store\b/.test(headers["cache-control"] ?? "") && privateToCaches(headers));
+  record(`${mode} dataset: native click receives the named attachment without navigating the page`,
+    download.url() === href && download.suggestedFilename() === `${problemId}.export.jsonl.gz` &&
+    page.url() === pageUrl && await download.failure() === null);
+  const chunks = [];
+  const stream = await download.createReadStream();
+  assert.ok(stream, "the actual browser download must be readable");
+  for await (const chunk of stream) chunks.push(chunk);
+  const bytes = gunzipSync(Buffer.concat(chunks), { maxOutputLength: PUBLIC_EXPORT_MAX_BYTES });
+  const ndjson = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  const header = JSON.parse(ndjson.slice(0, ndjson.indexOf("\n")));
+  const parsed = parsePublicProblemExport(ndjson);
+  record(`${mode} dataset: downloaded gzip has strict v5 framing, public license and exact problem`,
+    parsed.ok && parsed.format === PUBLIC_EXPORT_FORMAT && header.license === "CC BY 4.0" &&
+    parsed.header.problem === problemId && parsed.trailer.finalCursor === head.public_seq &&
+    parsed.trailer.eventCount === head.event_count && head.event_count > 0);
+  const verified = await verifyPublicProblemExportChain(ndjson);
+  record(`${mode} dataset: complete downloaded event chain agrees with the independent live D1 head`,
+    verified.intact && verified.eventCount === head.event_count && verified.finalChainDigest === head.chain_digest);
+  record(`${mode} dataset: the actual archive omits private workshop and scratch canaries`,
+    !ndjson.includes(WORKSHOP_CANARY) && !ndjson.includes(SCRATCH_CANARY));
+}
+
 async function proofGapWithdrawal({
   target,
   browser,
@@ -565,6 +618,15 @@ async function proofGapWithdrawal({
         !(await page.content()).includes(GAP_OBLIGATION) &&
         (await page.textContent("body")).includes("currently withheld or unavailable"),
     );
+    const archive = await fetch(`${target.origin}/p/${problemId}/export.jsonl.gz`, {
+      headers: { "user-agent": USER_AGENT },
+    });
+    const refusal = await archive.json();
+    record("dataset: current withholding refuses the complete archive rather than returning partial gzip",
+      archive.status === 409 && refusal.code === "PUBLIC_EXPORT_CONTENT_WITHHELD" &&
+      archive.headers.get("content-type")?.includes("application/problem+json") &&
+      archive.headers.get("content-disposition") === null && privateToCaches(Object.fromEntries(archive.headers)) &&
+      !JSON.stringify(refusal).includes(GAP_OBLIGATION));
   } finally {
     await context.close();
   }
@@ -803,6 +865,15 @@ async function commentaryJourney({
       !(await sponsorPage.content()).includes(draftProblem.statement) &&
       (await sponsorPage.locator("[data-gap-status]").count()) === 0,
   );
+  await sponsorPage.goto(`${agora.origin}/p/${privateId}`, { waitUntil: "load" });
+  const privateArchive = await fetch(`${target.origin}/p/${privateId}/export.jsonl.gz`, {
+    headers: { "user-agent": USER_AGENT },
+  });
+  record("dataset: the private problem owner has no public download control or archive access",
+    await sponsorPage.getByRole("link", { name: "Download current public ledger (.jsonl.gz)", exact: true }).count() === 0 &&
+    !(await sponsorPage.content()).includes(draftProblem.statement) && privateArchive.status === 404 &&
+    privateArchive.headers.get("content-disposition") === null &&
+    !(await privateArchive.text()).includes(draftProblem.statement));
   await setAccount(SPONSOR);
 }
 
@@ -1123,6 +1194,9 @@ async function main() {
           `${mode} ${path} emits no live injected element`,
           (await page.locator("img[onerror], a[href^='javascript:']").count()) === 0,
         );
+        if (path === `/p/${problemId}`) {
+          await publicLedgerDownload({ page, target, problemId, mode });
+        }
         if (path === "/a/agora-lane-reviewer") {
           const exactHref = `/r/p/${problemId}/reviews/${reviewId}`;
           const source = page.getByRole("link", { name: `Read review ${reviewId}`, exact: true });

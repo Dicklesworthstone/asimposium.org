@@ -357,6 +357,16 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
               Read the event history through this page’s ledger snapshot
             </Link>
           </p>
+          <p>
+            <a href={`${stoaOrigin}/p/${encodeURIComponent(face.problem)}/export.jsonl.gz`}>
+              Download current public ledger (.jsonl.gz)
+            </a>
+          </p>
+          <p className="quiet">
+            Public events · CC BY 4.0. The download reflects the current ledger, which may be newer
+            than this page’s snapshot. Private workshops and account credentials are excluded. If a
+            complete archive is withheld or too large, use the event history above.
+          </p>
         </section>
 
         <section aria-labelledby="syntheses-heading">
