@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createTestHarness } from "wrangler";
@@ -22,6 +22,7 @@ import {
 // or overwritten. Raw SQL round-trip is not a current-rights/cutover claim.
 const root = fileURLToPath(new URL("../../../../", import.meta.url));
 const target = "scratch-full-database-backup";
+await mkdir(join(root, "e2e/artifacts"), { recursive: true, mode: 0o700 });
 const destinationDirectory = await mkdtemp(join(root, "e2e/artifacts/full-db-destination-"));
 const destinationFile = join(destinationDirectory, "private-marker.bin");
 const prepare = () =>

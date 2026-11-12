@@ -2833,13 +2833,23 @@ async function waitForPortFree(port: number): Promise<boolean> {
   return false;
 }
 
-async function waitForFile(path: string): Promise<boolean> {
+async function waitForPublishedPid(path: string): Promise<number> {
   const deadline = performance.now() + PROCESS_PROOF_TIMEOUT_MS;
-  while (performance.now() < deadline) {
-    if (existsSync(path)) return true;
+  do {
+    try {
+      const raw = readFileSync(path, "utf8");
+      const pid = Number(raw);
+      // Redirection creates the file before printf publishes the PID. Its
+      // trailing newline is the completion boundary; an empty file is not PID 0.
+      if (Number.isSafeInteger(pid) && pid > 0 && raw === `${pid}\n`) return pid;
+      if (raw.includes("\n")) throw new Error("DESCENDANT_PID_PUBLICATION_INVALID");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (performance.now() >= deadline) break;
     await Bun.sleep(50);
-  }
-  return existsSync(path);
+  } while (performance.now() < deadline);
+  throw new Error("DESCENDANT_PID_NOT_PUBLISHED");
 }
 
 interface SpawnedHarness {
@@ -3462,7 +3472,7 @@ describe("lifecycle: containment failures stay fail-closed", () => {
         const stateDir = phaseValue(stderr, "state-retained", "dir") as string;
         expect(Number.isInteger(leader), phase).toBe(true);
         expect(stateDir, phase).toBeDefined();
-        expect(await waitForFile(`${stateDir}/descendant.pid`), phase).toBe(true);
+        const descendant = await waitForPublishedPid(`${stateDir}/descendant.pid`);
         child.kill("SIGTERM");
         const exitCode = await waitForExitBefore(child.exited, HARNESS_CLEANUP_TIMEOUT_MS);
         expect(exitCode, phase).toBe(1);
@@ -3477,7 +3487,6 @@ describe("lifecycle: containment failures stay fail-closed", () => {
         ).toBe("INTERRUPTED_TERM");
         expect(stderr, phase).toContain(`cleanup-begin signal=TERM`);
         expect(stderr, phase).toContain(`${phase}-`);
-        const descendant = Number(readFileSync(`${stateDir}/descendant.pid`, "utf8").trim());
         expect(Number.isInteger(descendant), phase).toBe(true);
         expect(await waitForExit(descendant), phase).toBe(true);
         expect(await waitForGroupExit(leader), phase).toBe(true);
@@ -3499,6 +3508,47 @@ describe("lifecycle: containment failures stay fail-closed", () => {
 });
 
 describe("lifecycle: parallel runs and signal handling", () => {
+  test("descendant readiness waits for complete positive PID publication", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "s1-pid-publication-"));
+    const path = join(directory, "descendant.pid");
+    writeFileSync(path, "");
+    let published: number | undefined;
+    const pending = waitForPublishedPid(path).then((pid) => {
+      published = pid;
+      return pid;
+    });
+    try {
+      await Bun.sleep(75);
+      expect(published).toBeUndefined();
+      writeFileSync(path, "12");
+      await Bun.sleep(75);
+      expect(published).toBeUndefined();
+      writeFileSync(path, `${process.pid}\n`);
+      expect(await pending).toBe(process.pid);
+    } finally {
+      writeFileSync(path, `${process.pid}\n`);
+      await pending;
+    }
+  });
+
+  test("descendant readiness refuses completed invalid PID publications", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "s1-invalid-pid-publication-"));
+    const path = join(directory, "descendant.pid");
+    for (const raw of [
+      "0\n",
+      "-1\n",
+      "1.5\n",
+      "1e3\n",
+      "01\n",
+      "bad\n",
+      "12\n\n",
+      "9007199254740992\n",
+    ]) {
+      writeFileSync(path, raw);
+      await expect(waitForPublishedPid(path)).rejects.toThrow("DESCENDANT_PID_PUBLICATION_INVALID");
+    }
+  });
+
   test("PLANTED: every launch, CONT, return, and CLIENT/SERVER adoption window defers interruption atomically", async () => {
     const windows = [
       ["before-background-spawn", "client"],
@@ -3762,8 +3812,7 @@ describe("lifecycle: parallel runs and signal handling", () => {
       expect(stderr).toContain("client-started");
       const stateDir = phaseValue(stderr, "state-retained", "dir") as string;
       const supervisor = Number(phaseValue(stderr, "client-started", "pid"));
-      expect(await waitForFile(`${stateDir}/descendant.pid`)).toBe(true);
-      const descendant = Number(readFileSync(`${stateDir}/descendant.pid`, "utf8").trim());
+      const descendant = await waitForPublishedPid(`${stateDir}/descendant.pid`);
 
       child.kill("SIGTERM");
       const exitCode = await waitForExitBefore(child.exited, HARNESS_CLEANUP_TIMEOUT_MS);
@@ -3803,8 +3852,7 @@ describe("lifecycle: parallel runs and signal handling", () => {
       let stderr = await waitForStderrMarker(child, reader, decoder, "client-started", 30_000);
       const stateDir = phaseValue(stderr, "state-retained", "dir") as string;
       const supervisor = Number(phaseValue(stderr, "client-started", "pid"));
-      expect(await waitForFile(`${stateDir}/descendant.pid`)).toBe(true);
-      const descendant = Number(readFileSync(`${stateDir}/descendant.pid`, "utf8").trim());
+      const descendant = await waitForPublishedPid(`${stateDir}/descendant.pid`);
 
       child.kill("SIGTERM");
       stderr = await waitForStderrMarker(child, reader, decoder, "cleanup-begin", 10_000, stderr);
