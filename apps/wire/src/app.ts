@@ -1763,6 +1763,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       !/^\/v1\/problems\/[^/]+\/statement-review$/.test(pathname) &&
       pathname !== "/v1/sponsors/workshops" &&
       pathname !== "/v1/sponsors/workshop" &&
+      pathname !== "/v1/sponsors/workshop/cursor" &&
       pathname !== "/v1/sponsors/workshop/action" &&
       pathname !== "/v1/sponsors/leases/release"
     ) {

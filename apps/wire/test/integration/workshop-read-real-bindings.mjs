@@ -857,4 +857,261 @@ if (!cliMode) {
       );
     },
   );
+
+  // Only scheduling is controlled: real R2 bytes are read before a second,
+  // signed HTTP request transfers ownership or deletes the private authority.
+  await runLocalWorkerJourney(
+    async ({ call, enroll, fixtures, env, sponsorCall, worker, origin, userAgent }) => {
+      const owner = "usr_workshop_read_owner";
+      const recipient = "usr_workshop_read_recipient";
+      const token = await enroll("workshop-read-owner", owner);
+      await enroll("workshop-read-recipient", recipient);
+      const problem = "P-WORKSHOP-READ-AUTHORITY";
+      await fixtures.seedProblem(problem, owner);
+      const session = await call("/v1/sessions", { problem_id: problem }, token, 201);
+      const { fellow_id: fellow } = await env.DB.prepare(
+        "SELECT fellow_id FROM sessions WHERE session_id = ?",
+      )
+        .bind(session.session_id)
+        .first();
+      const scope = { problem_id: problem, fellow_id: fellow };
+      const path = "/v1/sponsors/workshop";
+      const inlineBody = "PRIVATE_AUTHORITY_INLINE: owner-only boundary calculation.";
+      const spilledBody =
+        "PRIVATE_AUTHORITY_R2: exact work product must remain private across ownership changes.\n".repeat(
+          100,
+        );
+      const push = (authorSession, credential, title, body) =>
+        call(
+          `/v1/sessions/${authorSession.session_id}/workshop`,
+          { type: "scratch", title, body_md: body },
+          credential,
+          201,
+        );
+      const inline = await push(session, token, "Private inline authority canary", inlineBody);
+      const spilled = await push(session, token, "Private R2 authority canary", spilledBody);
+      const row = await env.DB.prepare(
+        "SELECT cas_hash FROM workshop_objects WHERE workshop_id = ?",
+      )
+        .bind(spilled.workshop_id)
+        .first();
+      assert.match(row.cas_hash, /^sha256:[a-f0-9]{64}$/);
+      const read = (actor, selected = scope, expected = 200) =>
+        sponsorCall(actor, "POST", path, "workshop.read", selected, expected);
+      const assertRefusal = (data, extraCanaries = []) => {
+        assert.equal(data.code, "WORKSHOP_NOT_FOUND");
+        const serialized = JSON.stringify(data);
+        for (const privateValue of [
+          inlineBody,
+          spilledBody,
+          inline.workshop_id,
+          spilled.workshop_id,
+          row.cas_hash,
+          "cas/sha256/",
+          "Private inline authority canary",
+          "Private R2 authority canary",
+          ...extraCanaries,
+        ])
+          assert.ok(!serialized.includes(privateValue), "a refusal contains no private work");
+        assert.equal(data.objects, undefined);
+        assert.equal(data.workshop_cursor, undefined);
+      };
+      const first = await read(owner);
+      assert.equal(
+        first.objects.find((item) => item.workshop_id === inline.workshop_id).body_md,
+        inlineBody,
+      );
+      assert.equal(
+        first.objects.find((item) => item.workshop_id === spilled.workshop_id).body_md,
+        spilledBody,
+      );
+      assertRefusal(await read(recipient, scope, 404));
+      for (const headers of [
+        {},
+        { authorization: `Bearer ${token}` },
+        // A browser cookie is never service-envelope authority at the Worker.
+        { cookie: "authjs.session-token=fixture-browser-session" },
+      ]) {
+        const response = await worker.fetch(`${origin}${path}`, {
+          method: "POST",
+          headers: { "User-Agent": userAgent, "Content-Type": "application/json", ...headers },
+          body: JSON.stringify(scope),
+        });
+        assert.equal(response.status, 403);
+        assert.equal(response.headers.get("cache-control"), "private, no-store");
+        const refused = await response.json();
+        assert.equal(refused.code, "WRONG_PRINCIPAL");
+        assert.ok(!JSON.stringify(refused).includes(inlineBody));
+        assert.ok(!JSON.stringify(refused).includes(spilledBody));
+      }
+      const publicBefore = await call("/cursor");
+      const publicObjectsBefore = (await env.PUBLIC_ARTIFACTS.list()).objects;
+      const whileBodyHeld = async (actor, selected, digest, mutate, canaries = []) => {
+        await fixtures.holdPrivateBodyRead(`cas/sha256/${digest.slice("sha256:".length)}`);
+        let responded = false;
+        const pending = read(actor, selected, 404).then(
+          (data) => {
+            responded = true;
+            return { data };
+          },
+          (error) => {
+            responded = true;
+            return { error };
+          },
+        );
+        try {
+          for (
+            let attempt = 0;
+            attempt < 200 && !(await fixtures.privateBodyReadBlocked());
+            attempt++
+          )
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          assert.equal(await fixtures.privateBodyReadBlocked(), true, "real R2 bytes materialized");
+          assert.equal(responded, false, "the private response remains held");
+          await mutate();
+          assert.equal(responded, false, "authority changed before the private response completed");
+        } finally {
+          await fixtures.releasePrivateBodyRead();
+        }
+        const result = await pending;
+        if (result.error) throw result.error;
+        assertRefusal(result.data, canaries);
+      };
+      const now = () => Math.floor(Date.now() / 1000);
+      await whileBodyHeld(owner, scope, row.cas_hash, async () => {
+        const offered = await sponsorCall(
+          owner,
+          "POST",
+          "/v1/sponsors/transfers",
+          "sponsor.transfer.initiate",
+          {
+            fellow_id: fellow,
+            target_sponsor_id: recipient,
+            confirm: "initiate-fellow-transfer",
+            step_up_authenticated_at: now(),
+            directive_attestation: "no_directives",
+          },
+          201,
+        );
+        await sponsorCall(
+          recipient,
+          "POST",
+          `/v1/sponsors/transfers/${offered.transfer_id}/accept`,
+          "sponsor.transfer.accept",
+          {
+            transfer_id: offered.transfer_id,
+            confirm: "accept-fellow-transfer",
+            step_up_authenticated_at: now(),
+          },
+        );
+      });
+      assertRefusal(await read(owner, scope, 404));
+      const received = await read(recipient);
+      assert.deepEqual(
+        received.objects,
+        first.objects,
+        "the current sponsor can recover unchanged work",
+      );
+      await whileBodyHeld(recipient, scope, row.cas_hash, async () => {
+        const preview = await sponsorCall(
+          recipient,
+          "GET",
+          "/v1/sponsors/account/delete-preview",
+          "sponsor.account.delete-preview",
+        );
+        const deleted = await sponsorCall(
+          recipient,
+          "POST",
+          "/v1/sponsors/account/delete",
+          "sponsor.account.delete",
+          {
+            confirm: "delete-sponsor-account-and-revoke-all-fellows",
+            expected_preview: preview.review,
+            step_up_authenticated_at: now(),
+          },
+        );
+        assert.equal(deleted.acknowledged, true);
+      });
+      assertRefusal(await read(recipient, scope, 404));
+      assertRefusal(await read(owner, scope, 404));
+
+      const privateToken = await enroll("workshop-read-erasure", owner);
+      const privateProblem = await call(
+        "/v1/problems",
+        {
+          title: "Private endpoint erasure control",
+          statement: "Every finite simple path with n edges has n plus one vertices.",
+          falsifier: "A finite simple path whose vertex count differs from n plus one.",
+          motivation: "Check private work erasure during an in-flight sponsor read.",
+          areas: ["combinatorics"],
+        },
+        privateToken,
+        201,
+      );
+      const privateSession = await call(
+        "/v1/sessions",
+        { problem_id: privateProblem.problem.id },
+        privateToken,
+        201,
+      );
+      const privateFellow = await env.DB.prepare(
+        "SELECT fellow_id FROM sessions WHERE session_id = ?",
+      )
+        .bind(privateSession.session_id)
+        .first();
+      const privateScope = {
+        problem_id: privateProblem.problem.id,
+        fellow_id: privateFellow.fellow_id,
+      };
+      const privateDraft = await push(
+        privateSession,
+        privateToken,
+        "Private erasure canary",
+        spilledBody,
+      );
+      assert.equal((await read(owner, privateScope)).objects[0].body_md, spilledBody);
+      await whileBodyHeld(
+        owner,
+        privateScope,
+        row.cas_hash,
+        async () => {
+          const deleted = await sponsorCall(
+            owner,
+            "DELETE",
+            `/v1/sponsors/problems/${privateProblem.problem.id}`,
+            "delete-problem-draft",
+          );
+          assert.equal(deleted.deleted, true);
+        },
+        [privateDraft.workshop_id, "Private erasure canary"],
+      );
+      assertRefusal(await read(owner, privateScope, 404), [privateDraft.workshop_id]);
+      assert.deepEqual(await call("/cursor"), publicBefore);
+      assert.deepEqual((await env.PUBLIC_ARTIFACTS.list()).objects, publicObjectsBefore);
+      assert.equal(
+        (
+          await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id = ?")
+            .bind(problem)
+            .first()
+        ).n,
+        0,
+      );
+      console.log(
+        JSON.stringify({
+          kind: "sponsor-workshop-read-authority-real-bindings",
+          status: "pass",
+          complete_inline_and_r2_bodies: true,
+          current_owner_after_bilateral_transfer: true,
+          denied_after_r2_materialization: [
+            "sponsor-transfer",
+            "account-deletion",
+            "private-draft-erasure",
+          ],
+          public_cursor_and_artifacts_unchanged: true,
+          proof_scope:
+            "local Workerd, real D1/R2 and signed lifecycle routes; fixture enrollment approval and request scheduling; no Google or deployment claim",
+        }),
+      );
+    },
+  );
 }

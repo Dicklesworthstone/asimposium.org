@@ -67,6 +67,7 @@ const {
   stoaPostCommentary,
   stoaSetProblemWriterCap,
   stoaSponsorWorkshop,
+  stoaSponsorWorkshopCursor,
   stoaSponsorWorkshopIndex,
   stoaSponsorWorkshopMutation,
   stoaTombstoneCommentary,
@@ -1967,6 +1968,78 @@ describe("public Agora Stoa origin binding", () => {
       } finally {
         fetchSpy.mockRestore();
       }
+    }
+  });
+
+  test("workshop cursor signs an exact private scope and rejects crossed or oversized responses", async () => {
+    const data = {
+      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      sponsor_id: "usr_origin-runtime-test",
+      problem_id: "P-4DSP",
+      fellow_id: "fellow-01JXYZ",
+      workshop_cursor: 13,
+    };
+    for (const [body, expected] of [
+      [data, true],
+      [{ ...data, sponsor_id: "usr_another" }, false],
+      [{ ...data, fellow_id: "fellow-another" }, false],
+      [{ ...data, problem_id: "P-OTHER" }, false],
+      [{ ...data, body_md: "private cursor must not carry work products" }, false],
+    ] as const) {
+      const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(Response.json(body));
+      try {
+        await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+          const result = await stoaSponsorWorkshopCursor(data.sponsor_id, {
+            problem_id: data.problem_id,
+            fellow_id: data.fellow_id,
+          });
+          expect(result.ok).toBe(expected);
+          const [url, init] = fetchSpy.mock.calls[0]!;
+          expect(String(url)).toBe(`${staging}/v1/sponsors/workshop/cursor`);
+          expect(init?.method).toBe("POST");
+          expect(JSON.parse(String(init?.body))).toEqual({
+            problem_id: data.problem_id,
+            fellow_id: data.fellow_id,
+          });
+          const headers = new Headers(init?.headers);
+          expect(JSON.parse(headers.get(SERVICE_ENVELOPE_HEADER) ?? "{}").claims).toMatchObject({
+            principal_id: data.sponsor_id,
+            action: "workshop.read",
+            route: "/v1/sponsors/workshop/cursor",
+          });
+          expect(headers.has("cookie")).toBe(false);
+          expect(headers.has("authorization")).toBe(false);
+        });
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    }
+    let cancelled = false;
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array(2049));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        expect(
+          await stoaSponsorWorkshopCursor(data.sponsor_id, {
+            fellow_id: data.fellow_id,
+            problem_id: data.problem_id,
+          }),
+        ).toEqual({ ok: false, reason: "unreachable" });
+      });
+      expect(cancelled).toBe(true);
+    } finally {
+      fetchSpy.mockRestore();
     }
   });
 

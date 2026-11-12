@@ -110,6 +110,7 @@ import {
   ScreeningPromotionHoldResponseSchema,
   type ScreeningPromotionPolicyResponse,
   SPONSOR_WORKSHOP_INDEX_MAX_RESPONSE_BYTES,
+  SPONSOR_WORKSHOP_CURSOR_MAX_RESPONSE_BYTES,
   SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
   type SponsorBootstrapResponse,
   SponsorBootstrapResponseSchema,
@@ -172,6 +173,10 @@ import {
   SponsorWorkshopIndexRequestSchema,
   type SponsorWorkshopIndexResponse,
   SponsorWorkshopIndexResponseSchema,
+  type SponsorWorkshopCursorRequest,
+  SponsorWorkshopCursorRequestSchema,
+  type SponsorWorkshopCursorResponse,
+  SponsorWorkshopCursorResponseSchema,
   type SponsorWorkshopMutationRequest,
   SponsorWorkshopMutationRequestSchema,
   type SponsorWorkshopMutationResponse,
@@ -223,6 +228,7 @@ const ROUTE_FELLOW_LIFECYCLE = "/v1/fellows/lifecycle";
 const ROUTE_SPONSOR_PANIC = "/v1/sponsors/panic";
 const ROUTE_SPONSOR_TRANSFERS = "/v1/sponsors/transfers";
 const ROUTE_SPONSOR_WORKSHOP = "/v1/sponsors/workshop";
+const ROUTE_SPONSOR_WORKSHOP_CURSOR = "/v1/sponsors/workshop/cursor";
 const ROUTE_SPONSOR_WORKSHOP_INDEX = "/v1/sponsors/workshops";
 const ROUTE_SPONSOR_WORKSHOP_ACTION = "/v1/sponsors/workshop/action";
 const ROUTE_BOOTSTRAP = "/v1/sponsors/bootstrap";
@@ -829,6 +835,35 @@ export function stoaSponsorWorkshop(
       const response = SponsorWorkshopViewSchema.parse(value);
       if (response.problem_id !== problemId || response.fellow_id !== fellowId) {
         throw new TypeError("sponsor workshop response identity does not match the signed request");
+      }
+      return response;
+    },
+  });
+}
+
+/** Only an ownership-checked integer crosses this private liveness read.
+ * Workshop bodies and Fellow credentials are never requested by the watcher. */
+export function stoaSponsorWorkshopCursor(
+  principalId: string,
+  request: SponsorWorkshopCursorRequest,
+): Promise<StoaCall<SponsorWorkshopCursorResponse>> {
+  const command = SponsorWorkshopCursorRequestSchema.parse(request);
+  return callStoa({
+    method: "POST",
+    route: ROUTE_SPONSOR_WORKSHOP_CURSOR,
+    path: ROUTE_SPONSOR_WORKSHOP_CURSOR,
+    action: ACTION_WORKSHOP_READ,
+    principalId,
+    body: JSON.stringify(command),
+    responseMaxBytes: SPONSOR_WORKSHOP_CURSOR_MAX_RESPONSE_BYTES,
+    parse: (value) => {
+      const response = SponsorWorkshopCursorResponseSchema.parse(value);
+      if (
+        response.sponsor_id !== principalId ||
+        response.problem_id !== command.problem_id ||
+        response.fellow_id !== command.fellow_id
+      ) {
+        throw new TypeError("workshop cursor does not match the signed request");
       }
       return response;
     },

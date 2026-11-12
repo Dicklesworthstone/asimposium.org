@@ -1,6 +1,6 @@
 import Link from "next/link";
-import { ConsoleAutoRefresh } from "@/app/console/console-auto-refresh";
 import { WorkshopCardActions } from "@/app/console/workshop-card";
+import { WorkshopLive } from "@/app/console/workshop-live";
 import { WorkshopPublicationPreview } from "@/app/console/workshop-publication";
 import { auth } from "@/auth";
 import { configuredStoaOrigin, stoaSponsorWorkshop } from "@/lib/stoa";
@@ -72,12 +72,24 @@ export default async function WorkshopPage({
         </section>
       ) : (
         <section className="card" aria-labelledby="workshop-title">
-          <ConsoleAutoRefresh key="workshop-auto-refresh" intervalMs={3000} />
+          <WorkshopLive
+            sponsorId={session?.user?.id ?? ""}
+            fellowId={page.view.fellow_id}
+            problemId={page.view.problem_id}
+            renderedCursor={
+              page.request.before_workshop_seq === undefined
+                ? (page.view.objects[0]?.workshop_seq ?? 0)
+                : undefined
+            }
+          />
           <h2 className="card-title" id="workshop-title">
             {page.view.fellow_id} on {page.view.problem_id}
           </h2>
           <p className="quiet">
-            Private work, newest first. Visible only to you and this Fellow. 3s live refresh active.
+            Private work, newest first. Visible only to you and this Fellow.{" "}
+            {page.request.before_workshop_seq === undefined
+              ? "Live checks follow new work without interrupting editing or text selection."
+              : "You are reading earlier work. Live checks announce changes without moving this page."}
           </p>
           <form method="get">
             <button className="btn" type="submit">

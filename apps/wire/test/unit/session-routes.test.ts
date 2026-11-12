@@ -12650,6 +12650,73 @@ describe("session protocol routes", () => {
     expect(await verifierRefusal.text()).toBe(verifierBytes);
   });
 
+  test("the sponsor workshop read does not release loaded bodies after account deletion", async () => {
+    let afterWorkshopRead: (() => Promise<void>) | undefined;
+    const f = await fixture({
+      afterRead: async (read) => {
+        if (read.kind !== "all" || !read.sql.includes("FROM workshop_objects")) return;
+        const action = afterWorkshopRead;
+        afterWorkshopRead = undefined;
+        await action?.();
+      },
+    });
+    const opened = await f.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "read-fence-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    expect(opened.status).toBe(201);
+    const session = (await opened.json()) as { session_id: string };
+    const title = "PRIVATE-READ-FENCE-TITLE";
+    const privateBody = "PRIVATE-READ-FENCE-BODY";
+    const pushed = await f.call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "read-fence-push" },
+      body: JSON.stringify({ type: "note", title, body_md: privateBody, relates_to: [] }),
+    });
+    expect(pushed.status).toBe(201);
+    const object = WorkshopPushResponseSchema.parse(await pushed.json());
+    const sponsorRouter = createSessionRouter({
+      service: f.service,
+      replayProtector: f.replayProtector,
+      verifiedSponsor: async (request) => ({
+        principal: { type: "sponsor", sponsorId: f.binding.sponsorId },
+        rawBody: new Uint8Array(await request.arrayBuffer()),
+      }),
+    });
+    const read = () =>
+      sponsorRouter.fetch(
+        new Request("https://a-staging.asimposium.org/v1/sponsors/workshop", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ problem_id: "P-4DSP", fellow_id: f.binding.fellowId }),
+        }),
+        f.env,
+      );
+    const visible = await read();
+    expect(visible.status).toBe(200);
+    expect(await visible.text()).toContain(privateBody);
+
+    // The query captures private rows before this competing account deletion.
+    afterWorkshopRead = async () => {
+      await f.db
+        .prepare("UPDATE sponsors SET tombstoned_at = ? WHERE sponsor_id = ?")
+        .bind(new Date().toISOString(), f.binding.sponsorId)
+        .run();
+    };
+    const lostAuthority = await read();
+    expect(lostAuthority.status).toBe(404);
+    expect(lostAuthority.headers.get("cache-control")).toBe("private, no-store");
+    const refusal = await lostAuthority.text();
+    expect(JSON.parse(refusal)).toMatchObject({ code: "WORKSHOP_NOT_FOUND" });
+    expect(refusal).not.toContain(title);
+    expect(refusal).not.toContain(privateBody);
+    expect(refusal).not.toContain(object.workshop_id);
+    const again = await read();
+    expect(again.status).toBe(404);
+    expect(await again.text()).toBe(refusal);
+  });
+
   test("the sponsor workshop page is a byte-bounded keyset with exact cursor continuity (asimposiumorg-e7j.2)", async () => {
     const { call, db, binding, service, replayProtector } = await fixture();
     const opened = await call("/v1/sessions", {
@@ -17707,7 +17774,15 @@ describe("committed promotion outbox nudge", () => {
     });
 
     test("direct claim rejects duplicate statement with 409 CLAIM_STATEMENT_EXISTS", async () => {
-      const f = await fixture();
+      let captureProvisional: (() => Promise<void>) | undefined;
+      const observed: { row?: { workshop_id: string; workshop_seq: number } | null } = {};
+      const f = await fixture({
+        afterRead: async (read) => {
+          if (read.kind === "run" && read.sql.includes("INSERT INTO workshop_objects")) {
+            await captureProvisional?.();
+          }
+        },
+      });
       const payload = {
         kind: "conjecture",
         statement: "The set of prime numbers is infinite.",
@@ -17721,6 +17796,15 @@ describe("committed promotion outbox nudge", () => {
       });
       expect(res1.status).toBe(201);
 
+      captureProvisional = async () => {
+        captureProvisional = undefined;
+        observed.row = await f.db
+          .prepare(
+            "SELECT workshop_id, workshop_seq FROM workshop_objects WHERE fellow_id = ? ORDER BY workshop_seq DESC LIMIT 1",
+          )
+          .bind(f.binding.fellowId)
+          .first<{ workshop_id: string; workshop_seq: number }>();
+      };
       const res2 = await f.call("/v1/p/P-4DSP/claims", {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": "direct-claim-dup-2" },
@@ -17729,6 +17813,26 @@ describe("committed promotion outbox nudge", () => {
       expect(res2.status).toBe(409);
       const body = (await res2.json()) as { code: string };
       expect(body.code).toBe("DUPLICATE_CLAIM");
+
+      // A live reader can observe the temporary open draft before duplicate
+      // detection. Cleanup must publish a newer private cursor for its discard.
+      expect(observed.row).toBeDefined();
+      if (!observed.row) throw new Error("duplicate request did not create its temporary draft");
+      const discarded = await f.db
+        .prepare("SELECT state, workshop_seq FROM workshop_objects WHERE workshop_id = ?")
+        .bind(observed.row.workshop_id)
+        .first<{ state: string; workshop_seq: number }>();
+      expect(discarded).toEqual({
+        state: "discarded",
+        workshop_seq: observed.row.workshop_seq + 1,
+      });
+      const cursor = await f.db
+        .prepare(
+          "SELECT MAX(workshop_seq) AS value FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?",
+        )
+        .bind("P-4DSP", f.binding.fellowId)
+        .first<{ value: number }>();
+      expect(cursor?.value).toBeGreaterThan(observed.row.workshop_seq);
 
       // Verify no open sessions leaked
       const openSessions = await f.db

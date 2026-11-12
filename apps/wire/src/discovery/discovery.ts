@@ -160,6 +160,7 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/fellows": true,
   "GET /v1/fellows/after/:cursor": true,
   "POST /v1/sponsors/workshop": true,
+  "POST /v1/sponsors/workshop/cursor": true,
   "POST /v1/sponsors/workshops": true,
   "POST /v1/sponsors/workshop/action": true,
   // Signed sponsor-console reads/preferences are not Fellow capabilities.
