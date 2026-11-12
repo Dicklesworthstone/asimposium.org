@@ -14,8 +14,80 @@ observed.
 
 ## Current reality check
 
-Updated 2026-11-11. Runtime qualification below is pinned to its named source
+Updated 2026-11-12. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
+
+### First-promotion token accounting — frozen validation in progress
+
+`zai.5` connects the local Codex runner to provider counters through the first
+server-observed successful promotion. It collects only reduced counters,
+timestamps and a temporary root identifier in memory; prompts, responses, tool
+output and account fields are not retained. The runner explicitly disables
+their export. Authenticated loopback ingestion is bounded and must close before
+the measurement can be consumed.
+
+The parser requires safe integer counters, one root prompt and complete,
+successful, nonoverlapping WebSocket request/completion intervals. It reconciles
+every component against the CLI's whole-session totals before selecting the
+promotion boundary. Missing telemetry, conflicting fields, duplicate roots,
+timestamp ties or a request straddling promotion withhold the metric. Cached
+input and reasoning output remain subsets, never additional tokens. Official
+Codex `rust-v0.167.1` send/stream telemetry source supports that ordering; other
+transports remain unsupported for this metric.
+
+The strict-interval working source passes all eight typecheck and lint groups
+and all 111 Gauntlet tests, plus the existing harness self-test. One fresh actual
+Codex 0.167.1 run completes the real local Workerd/D1/R2 participation loop,
+including injected 422 recovery and handback, in 92.745 seconds. Its first
+successful promotion uses **415,986 tokens** across 12 provider requests:
+413,202 input plus 2,784 output. The 375,168 cached input and 44 reasoning output
+tokens are included in those totals. Whole-session usage is 518,780 tokens;
+84,181 served bytes through promotion are a separate measurement. This single
+local observation is substantially above the original 25K target. It is neither
+a cohort median nor a staging/G-C pass or improvement statistic.
+
+Another session commits these exact six source files as `7c43d6dd`; all 2,738
+proof inputs and the actual Next SDK match the working-source receipts. The
+commit description omits the new collection and boundary calculation. Its
+timestamp is not verification evidence. Frozen primary and independent
+typecheck/lint, complete contracts (1,028), renderers (605) and Gauntlet package
+(111 plus self-test) pass. A fresh primary Codex 0.167.2 run at this frozen source
+completes the local journey in 108.560 seconds, reporting **568,420 tokens**
+through first promotion across 15 requests (565,196 input plus 3,224 output),
+versus 674,395 for the whole session and 75,676 served bytes through promotion.
+The actual CLI version, wrapper, launcher, native binary, source and Next SDK
+remain stable during the run. Independently omitting only the cutoff-straddle
+guard causes the unchanged accounting test to fail (110 pass, one fail);
+exact restoration passes all 111 tests and the self-test. This is unit causal
+proof. The independent fresh Codex run also completes the local journey in
+97.548 seconds: 439,983 first-promotion tokens across 13 requests, 542,424
+whole-session tokens and 70,415 served bytes through promotion. Its actual
+0.167.2 installation, all source inputs and Next SDK stay unchanged. These
+different local attempts are not a cohort or a performance comparison. The
+five-component reconciliation is enforced by the running constructor; raw
+provider events are deliberately not retained for a separate replay.
+Both original complete root gates are still running. `zai.5` remains in
+progress until their outcomes and independent acceptance are complete.
+The scoped code UBS diff and post-peer-commit staged analysis complete with
+219 findings: one critical, 19 warnings and 199 information items across six
+files. Both reviewers inspect every elevated context and establish no new
+changed-code defect. The critical finding is the run-local loopback nonce's
+string comparison; this is not a claim of constant-time comparison or a
+security-clean result. The staged analysis cannot establish what ran before
+the other session's commit. Broader scanner task `g4b4` remains open.
+
+The installed CLI changes to 0.167.2 before frozen native validation. Its
+official WebSocket/session-telemetry source files are byte-identical to 0.167.1,
+and the relevant exporter/privacy schema definitions are unchanged. Fresh
+native execution records the actual CLI version and binary before and after;
+the earlier 0.167.1 observation has no retroactive binary-hash attribution.
+
+The provisioned staging runner still refuses its unimplemented journey. The
+original ten-session, three-harness, eight-completion, median-token, sponsor and
+move-following requirements remain open, as do deployment reconciliation and
+the watch leaf's independent Rust gate. Gemini and Grok are not launched without
+verified no-recording controls. No further remote Cargo attempt follows the
+latest insufficient-capacity observation.
 
 ### Merged HEAD repair — independently verified
 
