@@ -17,7 +17,13 @@ observed.
 Updated 2026-11-13. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-### Canonical single-team notice — qualification in progress
+Current combined source `4476c5b8` passes all eight typecheck, lint and root
+unit groups. The root executes 7,485 Worker and 1,113 Agora tests. The
+single-team notice is independently accepted; the merged inbox authority
+change has independent native regression proof. Deployment and broader
+hosted acceptance remain open; the exact scopes follow.
+
+### Canonical single-team notice — independently verified
 
 Task `vv5.1`, source `4142b2d0ccb34d2c29683ff0d13321894dc89efd`, connects
 an existing but unreachable Agora/share-card warning to the canonical problem
@@ -70,9 +76,69 @@ the complete roster journey in 10.353 seconds. The actual notice-output
 omission again fails the unchanged positive in 6.941 seconds; exact restoration
 passes the complete journey in 9.541 seconds. All five positive/restored source
 vectors match `58bd8927`; only the producer differs under the fault.
-Both successor full-root runs and original-criteria closure remain pending.
+Both original successor full suites pass at `58bd8927`: primary 1,733.992
+seconds, independent 1,677.879, each with eight executed groups and none failed,
+blocked, missing or skipped. Each runs 7,468 Worker, 1,113 Agora and 150 gauntlet
+unit tests; the 54 original individual toolchain skips remain. Worker assertion
+counts are 40,216 primary and 40,215 independent; no cause is inferred. Both S2
+matrices contain 32 paired unique starts/passes. All 2,757 inputs and the actual
+Next runtime match before/after both runs, and both execution owners have exited.
+WhiteRaven independently closed only `vv5.1` at 2026-11-13 01:15:09 UTC.
+Beads comment 3205 maps the unchanged original criteria to source lines and
+retained evidence. Both immediate certified flushes pass; the 637-record
+comparison changes only this leaf's status. All 21 verifier execution owners
+have exited, and all its reservations were released.
+
+Later merge `86db9c45` preserves the separate inbox-security change `fbd37a0d`.
+Its five code paths differ from the qualified source; the single-team paths
+remain unchanged. The results above do not certify that combined HEAD. Merged
+source checks are being recorded separately under the existing inbox work.
 Parent `vv5`, hosted Google/screening, scientific, deployment,
 gauntlet, cost/recovery and launch gates remain open.
+
+### Merged inbox authority — native fixture repaired and qualified
+
+The separate inbox change rechecks current credential and notice visibility
+before releasing private pages. Its native race initially stopped in 7.970
+seconds: a direct token UPDATE lacks the required lifecycle event and is
+correctly refused by the database. The existing test scheduler now invokes
+the canonical revocation service on the reading request's real D1 binding.
+It commits the existing lease, event, revocation and retention controls;
+neither the production guard nor the native assertions are relaxed.
+
+The complete final Stoa lane passes in 13.180 seconds, including two actual
+revocations, four private-visibility races and all original journey checks.
+The existing SQL scheduling callers still work: the full roster lane passes
+in 8.807 seconds. Typecheck and lint each pass all eight groups. This is
+controlled fixture scheduling with real local
+Workerd/D1/R2, not sponsor HTTP/Google authorization or complete `1e7` acceptance.
+The two-file fixture repair is committed as `4476c5b8`; production inbox code
+remains the peer's implementation. Literal UBS diff/staged scans cover both
+fixtures with 29 warnings and 435 informational findings. A complete scan of
+all five merged code paths has one critical, 38 warning and 644 informational
+findings; all 39 elevated contexts and ten informational classes were reviewed,
+with no suppression or broad security-clean claim. The critical comparison
+pins two already authenticated stored credential hashes, not a supplied secret.
+Independent typecheck/lint, the complete 34-test inbox file and both native
+journeys pass at `4476c5b8`. Removing only the scheduled fixture commit fails
+the unchanged database-revocation assertion; exact restoration passes the full
+Stoa journey. Separately removing the actual production authority argument
+returns 200 after confirmed revocation and fails the unchanged 401 assertion.
+That failure occurs before the raced body is read. Exact restoration again
+passes the complete journey. All seven positive/restored source sets and the
+Next runtime match; each fault changes only its named file. All nine execution
+owners and the verifier's four reservations have ended.
+The original combined full suite passes at `4476c5b8` in 1,529.148 seconds:
+eight groups execute with none failed, blocked, missing or skipped. Worker
+runs 7,485 tests/40,431 assertions; Agora 1,113/8,211; gauntlet units 150/448.
+The 54 original individual toolchain skips remain. All 32 S2 matrix modes
+have paired starts/passes. All 2,757 source inputs and the actual Next runtime
+match before, after and current; the recorded process and group have exited.
+This is one primary combined-root run, alongside independent bounded native
+verification. It is not a second independent combined root or a fresh browser
+run. The original `1e7` taxonomy, DO/outbox, OPS and hosted criteria remain
+unearned, with its status and ownership unchanged.
+The original native failure and initial formatter failure remain retained.
 
 ### Canonical membership in next responses — independently verified
 
