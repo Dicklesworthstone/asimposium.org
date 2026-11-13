@@ -2,6 +2,7 @@ import {
   ClaimFaceQuerySchema,
   ClaimFaceResponseSchema,
   DEAD_ENDS_SCHEMA_ID,
+  DeadEndsListQuerySchema,
   DeadEndsListResponseSchema,
   EnrollmentDeclaredRuntimeSchema,
   FullPackPageSchema,
@@ -994,6 +995,87 @@ function formalRecordsRefusal(
   return method === "HEAD"
     ? new Response(null, { status: response.status, headers: response.headers })
     : response;
+}
+
+async function handleDeadEndsList(
+  c: Context<{ Bindings: Env }>,
+  format: "json" | "md" | "html",
+): Promise<Response> {
+  const problemId = c.req.param("id");
+  if (problemId === undefined) return problemNotFound(c.req.method);
+  const problem = await c.env.DB.prepare(
+    "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+  )
+    .bind(problemId)
+    .first<{ id: string; unlisted: number }>();
+  if (!problem) return problemNotFound(c.req.method);
+
+  const parameters = new URL(c.req.url).searchParams;
+  const query = DeadEndsListQuerySchema.safeParse(Object.fromEntries(parameters));
+  const repeated = [...parameters.keys()].some((key) => parameters.getAll(key).length !== 1);
+  const refuse = (missing: boolean) => {
+    const response = problemDocument({
+      status: missing ? 404 : 400,
+      code: missing ? "DEAD_END_NOT_FOUND" : "DEAD_ENDS_QUERY_INVALID",
+      title: missing ? "No such public dead end" : "Invalid dead-ends query",
+      detail: missing
+        ? "No readable public dead end with this id is available in this problem."
+        : "Use an optional exact DE- target and include_superseded=true or false. Unknown or repeated parameters are not accepted.",
+      fixHint: "Read the list, then use a returned dead_end_id as ?target=DE-EXAMPLE.",
+      rule: "A5",
+      extensions: {
+        schema: missing ? DEAD_ENDS_SCHEMA_ID : `${DEAD_ENDS_SCHEMA_ID}#/$defs/query`,
+        example: { path: "/p/P-EXAMPLE/dead-ends.json?target=DE-EXAMPLE" },
+      },
+    });
+    return c.req.method === "HEAD"
+      ? new Response(null, { status: response.status, headers: response.headers })
+      : response;
+  };
+  if (!query.success || repeated) return refuse(false);
+  const { target, include_superseded } = query.data;
+  const includeSuperseded =
+    target !== undefined || include_superseded === "true" || include_superseded === "1";
+  const { items, truncated, contentUnavailable } = await loadProblemDeadEnds(c.env.DB, problemId, {
+    includeSuperseded,
+    target,
+  });
+  if (target !== undefined && items.length !== 1) return refuse(true);
+  const omitted = [
+    ...(target === undefined ? [] : ["Other dead ends are omitted from this exact-target view."]),
+    ...(contentUnavailable
+      ? ["Recorded dead-end content is unavailable or could not be verified."]
+      : []),
+    ...(includeSuperseded
+      ? []
+      : ["superseded dead ends are excluded (use ?include_superseded=true to include history)"]),
+    ...(truncated
+      ? [
+          `dead ends beyond the first ${MAX_DEAD_ENDS_PER_PAGE} in ledger sequence order are omitted`,
+        ]
+      : []),
+  ];
+  const face = DeadEndsListResponseSchema.parse({
+    schema: DEAD_ENDS_SCHEMA_ID,
+    problem_id: problemId,
+    dead_ends: items,
+    omitted,
+  });
+  const body =
+    format === "json"
+      ? JSON.stringify(face, null, 2)
+      : format === "md"
+        ? renderDeadEndsMarkdown(problemId, face.dead_ends, face.omitted)
+        : renderDeadEndsHtmlFragment(problemId, face.dead_ends, face.omitted);
+  const etag = await strongEtag(format === "md" ? "markdown" : format, body);
+  const headers = {
+    "content-type": `${format === "json" ? "application/json" : format === "md" ? "text/markdown" : "text/html"}; charset=utf-8`,
+    "cache-control": "public, max-age=0, must-revalidate",
+    ...indexingHeaders(Boolean(problem.unlisted)),
+    etag,
+  };
+  if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+  return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
 }
 
 function problemNotFound(method: string): Response {
@@ -2177,143 +2259,11 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     });
   }
 
-  app.on(["GET", "HEAD"], "/p/:id/dead-ends.json", async (c) => {
-    const problemId = c.req.param("id");
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
-    if (!problem) return problemNotFound(c.req.method);
+  app.on(["GET", "HEAD"], "/p/:id/dead-ends.json", (c) => handleDeadEndsList(c, "json"));
 
-    const includeSupersededParam = c.req.query("include_superseded");
-    const includeSuperseded = includeSupersededParam === "true" || includeSupersededParam === "1";
-    const {
-      items: deadEnds,
-      truncated,
-      contentUnavailable,
-    } = await loadProblemDeadEnds(c.env.DB, problemId, {
-      includeSuperseded,
-    });
-    const omitted = [
-      ...(contentUnavailable
-        ? ["Recorded dead-end content is unavailable or could not be verified."]
-        : []),
-      ...(includeSuperseded
-        ? []
-        : ["superseded dead ends are excluded (use ?include_superseded=true to include history)"]),
-      ...(truncated
-        ? [
-            `dead ends beyond the first ${MAX_DEAD_ENDS_PER_PAGE} in ledger sequence order are omitted`,
-          ]
-        : []),
-    ];
-    const body = JSON.stringify(
-      DeadEndsListResponseSchema.parse({
-        schema: DEAD_ENDS_SCHEMA_ID,
-        problem_id: problemId,
-        dead_ends: deadEnds,
-        omitted,
-      }),
-      null,
-      2,
-    );
-    const etag = await strongEtag("json", body);
-    const headers = {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
+  app.on(["GET", "HEAD"], "/p/:id/dead-ends.md", (c) => handleDeadEndsList(c, "md"));
 
-  app.on(["GET", "HEAD"], "/p/:id/dead-ends.md", async (c) => {
-    const problemId = c.req.param("id");
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
-    if (!problem) return problemNotFound(c.req.method);
-
-    const includeSupersededParam = c.req.query("include_superseded");
-    const includeSuperseded = includeSupersededParam === "true" || includeSupersededParam === "1";
-    const {
-      items: deadEnds,
-      truncated,
-      contentUnavailable,
-    } = await loadProblemDeadEnds(c.env.DB, problemId, {
-      includeSuperseded,
-    });
-    const omitted = [
-      ...(contentUnavailable
-        ? ["Recorded dead-end content is unavailable or could not be verified."]
-        : []),
-      ...(includeSuperseded
-        ? []
-        : ["superseded dead ends are excluded (use ?include_superseded=true to include history)"]),
-      ...(truncated
-        ? [
-            `dead ends beyond the first ${MAX_DEAD_ENDS_PER_PAGE} in ledger sequence order are omitted`,
-          ]
-        : []),
-    ];
-    const body = renderDeadEndsMarkdown(problemId, deadEnds, omitted);
-    const etag = await strongEtag("markdown", body);
-    const headers = {
-      "content-type": "text/markdown; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
-
-  app.on(["GET", "HEAD"], "/p/:id/dead-ends.html", async (c) => {
-    const problemId = c.req.param("id");
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
-    if (!problem) return problemNotFound(c.req.method);
-
-    const includeSupersededParam = c.req.query("include_superseded");
-    const includeSuperseded = includeSupersededParam === "true" || includeSupersededParam === "1";
-    const {
-      items: deadEnds,
-      truncated,
-      contentUnavailable,
-    } = await loadProblemDeadEnds(c.env.DB, problemId, {
-      includeSuperseded,
-    });
-    const omitted = [
-      ...(contentUnavailable
-        ? ["Recorded dead-end content is unavailable or could not be verified."]
-        : []),
-      ...(includeSuperseded
-        ? []
-        : ["superseded dead ends are excluded (use ?include_superseded=true to include history)"]),
-      ...(truncated
-        ? [
-            `dead ends beyond the first ${MAX_DEAD_ENDS_PER_PAGE} in ledger sequence order are omitted`,
-          ]
-        : []),
-    ];
-    const body = renderDeadEndsHtmlFragment(problemId, deadEnds, omitted);
-    const etag = await strongEtag("html", body);
-    const headers = {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
+  app.on(["GET", "HEAD"], "/p/:id/dead-ends.html", (c) => handleDeadEndsList(c, "html"));
 
   // --- W5.8d Questions Diptych faces ---
   for (const format of ["json", "md", "html"] as const)

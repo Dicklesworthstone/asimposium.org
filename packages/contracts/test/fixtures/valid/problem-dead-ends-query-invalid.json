@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/DEAD_ENDS_QUERY_INVALID",
+  "title": "Invalid dead-ends query",
+  "status": 400,
+  "code": "DEAD_ENDS_QUERY_INVALID",
+  "detail": "Use an optional exact DE- target and include_superseded=true or false. Unknown or repeated parameters are not accepted.",
+  "fix_hint": "Read the list, then use a returned dead_end_id as ?target=DE-EXAMPLE.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/dead-ends.v1.json#/$defs/query",
+  "example": { "path": "/p/P-EXAMPLE/dead-ends.json?target=DE-EXAMPLE" }
+}

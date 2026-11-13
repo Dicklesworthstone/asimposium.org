@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/DEAD_ENDS_QUERY_INVALID",
+  "title": "Invalid dead-ends query",
+  "status": 400,
+  "code": "DEAD_ENDS_QUERY_INVALID",
+  "detail": "The dead-end selection is malformed.",
+  "fix_hint": "Read the query schema and use a returned dead-end id."
+}

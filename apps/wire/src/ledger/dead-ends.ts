@@ -419,6 +419,8 @@ export async function readPublicDeadEnd(row: PublicDeadEndRow): Promise<DeadEndI
 export interface LoadProblemDeadEndsOptions {
   limit?: number;
   includeSuperseded?: boolean;
+  /** An explicit ledger reference may read a superseded record, but never hidden content. */
+  target?: string;
   /** Captured problem-local public cursor; withdrawal still applies today. */
   through?: number;
 }
@@ -432,6 +434,7 @@ export async function loadProblemDeadEnds(
   const includeSuperseded =
     typeof options === "object" ? options?.includeSuperseded === true : false;
   const through = typeof options === "object" ? (options?.through ?? null) : null;
+  const target = typeof options === "object" ? (options?.target ?? null) : null;
   if (through !== null && (!Number.isSafeInteger(through) || through < 0)) {
     throw new RangeError("Dead-end cursor must be a nonnegative safe integer");
   }
@@ -474,12 +477,21 @@ export async function loadProblemDeadEnds(
                     AND replacement.seq <= MIN(p.public_seq, COALESCE(?, p.public_seq))
        WHERE d.problem_id = ?
          AND p.status != 'private-draft'
+         AND (? IS NULL OR d.dead_end_id = ?)
          AND (? = 1 OR replacement.id IS NULL)
          AND e.seq <= MIN(p.public_seq, COALESCE(?, p.public_seq))
        ORDER BY e.seq DESC, d.dead_end_id DESC
        LIMIT ?`,
     )
-    .bind(through, problemId, includeSuperseded ? 1 : 0, through, queryLimit)
+    .bind(
+      through,
+      problemId,
+      target,
+      target,
+      includeSuperseded || target !== null ? 1 : 0,
+      through,
+      queryLimit,
+    )
     .all<PublicDeadEndRow>();
 
   const rawResults = rows.results ?? [];

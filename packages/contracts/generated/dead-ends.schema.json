@@ -282,5 +282,22 @@
     "dead_ends",
     "omitted"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "query": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string",
+          "pattern": "^(?!.*--)DE-[A-Z0-9][A-Z0-9-]{0,40}$"
+        },
+        "include_superseded": {
+          "type": "string",
+          "pattern": "^(?:true|false|1|0)$"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
 }

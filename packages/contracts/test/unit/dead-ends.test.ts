@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test";
+import Ajv from "ajv/dist/2020.js";
 import {
   DEAD_ENDS_SCHEMA_ID,
   DeadEndItemSchema,
   DeadEndRetryWhenSchema,
+  DeadEndsListQuerySchema,
   DeadEndsListResponseSchema,
   RecordDeadEndRequestSchema,
   RecordDeadEndResponseSchema,
 } from "../../src/dead-ends.ts";
+import { ContractProblemSchema } from "../../src/problem.ts";
 import {
   RecordDeadEndSubmissionSchema,
   SponsorWorkshopPromotionReceiptSchema,
@@ -24,6 +27,35 @@ async function fixture(url: URL): Promise<unknown> {
 }
 
 describe("W5.8a dead-ends contracts", () => {
+  test("exact-target golden queries agree with the generated canonical schema", async () => {
+    const document = (await fixture(
+      new URL("../../generated/dead-ends.schema.json", import.meta.url),
+    )) as { $defs: { query: object } };
+    const validate = new Ajv({ strict: true }).compile(document.$defs.query);
+    const valid = await fixture(
+      new URL("../fixtures/valid/dead-ends-target-query.json", import.meta.url),
+    );
+    const invalid = await fixture(
+      new URL("../fixtures/invalid/dead-ends-target-query.json", import.meta.url),
+    );
+    for (const [value, accepted] of [
+      [valid, true],
+      [{}, true],
+      [{ target: "DE-EXAMPLE", include_superseded: "true" }, true],
+      [invalid, false],
+      [{ target: "DE-lowercase" }, false],
+      [{ target: "DE-EXAMPLE\n" }, false],
+      [{ target: "DE-EXAMPLE", extra: "x" }, false],
+      [{ include_superseded: "yes" }, false],
+    ] as const) {
+      expect(DeadEndsListQuerySchema.safeParse(value).success).toBe(accepted);
+      expect(validate(value)).toBe(accepted);
+    }
+    const refusal = await fixture(
+      new URL("../fixtures/valid/problem-dead-ends-query-invalid.json", import.meta.url),
+    );
+    expect(ContractProblemSchema.parse(refusal).code).toBe("DEAD_ENDS_QUERY_INVALID");
+  });
   test("DEAD_ENDS_SCHEMA_ID is canonical", () => {
     expect(DEAD_ENDS_SCHEMA_ID).toBe("https://a.asimposium.org/schemas/dead-ends.v1.json");
   });

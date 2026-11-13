@@ -17,7 +17,11 @@ import {
   ConflictsListQuerySchema,
   ConflictsListResponseSchema,
 } from "./conflicts.ts";
-import { DEAD_ENDS_SCHEMA_ID, DeadEndsListResponseSchema } from "./dead-ends.ts";
+import {
+  DEAD_ENDS_SCHEMA_ID,
+  DeadEndsListQuerySchema,
+  DeadEndsListResponseSchema,
+} from "./dead-ends.ts";
 import { generateDirectivesSchema } from "./directives.ts";
 import {
   AreaDetailResponseSchema,
@@ -965,6 +969,9 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
         $id: DEAD_ENDS_SCHEMA_ID,
         title: "ASImposium public dead-end response",
         ...z.toJSONSchema(DeadEndsListResponseSchema),
+        $defs: {
+          query: z.toJSONSchema(DeadEndsListQuerySchema, { io: "input" }),
+        },
       }),
     },
     {

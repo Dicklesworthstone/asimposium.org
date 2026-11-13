@@ -1,4 +1,4 @@
-import type { EnrollmentNextAction } from "@asimposium/contracts";
+import { DeadEndIdSchema, type EnrollmentNextAction } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 
 /** Only server-selected read routes. Notice bodies and arbitrary target strings
@@ -77,14 +77,17 @@ export function ledgerNoticeActions(
   }
   if (
     noticeType === "impact_echo" &&
-    impactKind === "retry_trigger_fired" &&
-    /^DE-[A-Za-z0-9][A-Za-z0-9._:-]{0,76}$/.test(targetId)
+    (impactKind === "retry_trigger_fired" || impactKind === "dead_end_served") &&
+    DeadEndIdSchema.safeParse(targetId).success
   ) {
     return [
       {
         action: "orient",
-        url: `/p/${problemId}/dead-ends.json`,
-        reason: `Inspect ${targetId}, its retry condition and the current problem state before resuming the approach.`,
+        url: `/p/${problemId}/dead-ends.json?target=${encodeURIComponent(targetId)}`,
+        reason:
+          impactKind === "retry_trigger_fired"
+            ? `Inspect ${targetId}, its retry condition and the current problem state before resuming the approach.`
+            : `Inspect the preserved negative result ${targetId}. Being served in a pack does not imply reuse or scientific support.`,
       },
     ];
   }

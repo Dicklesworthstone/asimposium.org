@@ -64,7 +64,7 @@ import {
   publishDeletionJournal,
   readDeletionJournalRecords,
 } from "../../src/krater/retention.ts";
-import { loadFiredDeadEndTriggers } from "../../src/ledger/dead-ends.ts";
+import { computeDeadEndNormHash, loadFiredDeadEndTriggers } from "../../src/ledger/dead-ends.ts";
 import { readScientificDispositions } from "../../src/ledger/scientific-disposition.ts";
 import { markDormantProblems } from "../../src/problems/dormancy.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
@@ -720,6 +720,73 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
   }
   async retryTriggersAt(problemId: string, cursor: number) {
     return JSON.stringify(await loadFiredDeadEndTriggers(this.env.DB, problemId, 3, cursor));
+  }
+
+  /** Busy-history arrangement only: real chained events and atomic projections,
+   * not HTTP publication/screening proof. The recipient notice comes from the
+   * ordinary pack producer before this fixture is called. */
+  async seedLaterDeadEnds(problemId: string, authorToken: string, sessionId: string) {
+    const author = await this.service().credentialBinding(authorToken);
+    if (!author) throw new Error("Dead-end history fixture identity unavailable");
+    const db = this.env.DB;
+    for (let index = 0; index < 200; index += 1) {
+      const id = `DE-HISTORY-${index}`;
+      const content = {
+        approach: `Busy-history fixture examines the finite modular interval numbered ${index}.`,
+        why_it_fails:
+          "The bounded interval leaves every larger modulus outside the examined domain.",
+        retry_predicate:
+          "Retry when an induction covers the remaining unbounded modular intervals.",
+      };
+      const digest = await computeDeadEndNormHash(content.approach);
+      const payload = canonicalJson({ ...content, dead_end_id: id, norm_hash: digest });
+      await writeLedgerEvent(
+        db,
+        {
+          problemId,
+          eventId: `E-HISTORY-${index}`,
+          idempotencyKey: `history-${index}`,
+          requestDigest: await sha256Hex(payload),
+          eventType: "dead_end.recorded",
+          objectKind: "dead_end",
+          objectId: id,
+          objectVersion: 1,
+          payloadJson: payload,
+          createdAt: new Date().toISOString(),
+          attribution: {
+            fellowId: author.fellowId,
+            sponsorId: author.sponsorId,
+            sessionId,
+            modelSelfDeclared: author.model,
+            harness: author.harness,
+          },
+        },
+        {
+          statementsAfterEvent: ({ eventId, sequence, createdAt }) => [
+            db
+              .prepare(`
+          INSERT INTO dead_ends (dead_end_id,problem_id,seq,approach,why_it_fails,retry_predicate,
+            norm_hash,author_fellow_id,declared_model,created_at)
+          SELECT ?,?,?,?,?,?,?,?,?,? FROM events WHERE id = ? AND seq = ?
+        `)
+              .bind(
+                id,
+                problemId,
+                sequence,
+                content.approach,
+                content.why_it_fails,
+                content.retry_predicate,
+                digest,
+                author.fellowId,
+                author.model,
+                createdAt,
+                eventId,
+                sequence,
+              ),
+          ],
+        },
+      );
+    }
   }
 
   async deadEndPackAt(problemId: string, cursor: number) {

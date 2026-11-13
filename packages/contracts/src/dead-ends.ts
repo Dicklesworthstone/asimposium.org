@@ -111,6 +111,7 @@ export type DeadEndItem = z.infer<typeof DeadEndItemSchema>;
 /** Query parameters for public dead ends list face: GET /p/:id/dead-ends.* */
 export const DeadEndsListQuerySchema = z
   .object({
+    target: DeadEndIdSchema.optional(),
     include_superseded: z
       .string()
       .regex(/^(?:true|false|1|0)$/)

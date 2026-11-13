@@ -37,6 +37,57 @@ await runLocalWorkerJourney(async (context) => {
     201,
   );
   const problemId = created.problem.id;
+  const exactDeadEnd = async (id, expectedProblem = problemId) => {
+    let canonical;
+    for (const extension of ["json", "md", "html"]) {
+      const url = `${origin}/p/${expectedProblem}/dead-ends.${extension}?target=${encodeURIComponent(id)}`;
+      const response = await worker.fetch(url, { headers: { "User-Agent": userAgent } });
+      assert.equal(response.status, 200, `exact ${extension} target is readable`);
+      const bytes = await response.text();
+      assert.ok(bytes.includes(id));
+      if (extension === "json") {
+        canonical = JSON.parse(bytes);
+        assert.deepEqual(
+          canonical.dead_ends.map((item) => item.dead_end_id),
+          [id],
+        );
+        assert.ok(canonical.omitted.some((item) => item.includes("Other dead ends")));
+      }
+      const etag = response.headers.get("etag");
+      assert.ok(etag);
+      const head = await worker.fetch(url, {
+        method: "HEAD",
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(head.status, 200);
+      assert.equal(head.headers.get("etag"), etag);
+      assert.equal(await head.text(), "");
+      const unchanged = await worker.fetch(url, {
+        headers: { "User-Agent": userAgent, "If-None-Match": etag },
+      });
+      assert.equal(unchanged.status, 304);
+    }
+    return canonical;
+  };
+  const unavailableDeadEnd = async (id, expectedProblem = problemId) => {
+    for (const extension of ["json", "md", "html"]) {
+      const url = `${origin}/p/${expectedProblem}/dead-ends.${extension}?target=${encodeURIComponent(id)}`;
+      const refusal = await call(
+        new URL(url).pathname + new URL(url).search,
+        undefined,
+        undefined,
+        404,
+      );
+      assert.equal(ContractProblemSchema.parse(refusal).code, "DEAD_END_NOT_FOUND");
+      assert.ok(!JSON.stringify(refusal).includes("FOREIGN-PROBLEM-WORKSHOP-CANARY"));
+      const head = await worker.fetch(url, {
+        method: "HEAD",
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(head.status, 404);
+      assert.equal(await head.text(), "");
+    }
+  };
 
   const govern = (body, key) =>
     body.action === "revise-statement" && "statement" in body
@@ -308,6 +359,32 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(echoes.length, 1, "one echo per (dead end, serving Fellow)");
   assert.equal(echoes[0].target_id, deadEnd1.dead_end_id);
   assert.equal(echoes[0].problem_id, problemId);
+  const servedAction = echoes[0].next_actions?.[0];
+  assert.equal(servedAction?.url, `/p/${problemId}/dead-ends.json?target=${deadEnd1.dead_end_id}`);
+  assert.match(servedAction.reason, /does not imply reuse or scientific support/);
+  const servedRecord = await call(servedAction.url);
+  assert.deepEqual(
+    servedRecord.dead_ends.map((item) => item.dead_end_id),
+    [deadEnd1.dead_end_id],
+  );
+  assert.equal(servedRecord.dead_ends[0].approach, publishedBody.approach);
+  await exactDeadEnd(deadEnd1.dead_end_id);
+  await unavailableDeadEnd("DE-MISSING");
+  for (const query of [
+    "target=../../private",
+    "target=DE-EXAMPLE&target=DE-OTHER",
+    "extra=unknown",
+    "include_superseded=yes",
+  ]) {
+    const refusal = await call(
+      `/p/${problemId}/dead-ends.json?${query}`,
+      undefined,
+      undefined,
+      400,
+    );
+    assert.equal(ContractProblemSchema.parse(refusal).code, "DEAD_ENDS_QUERY_INVALID");
+    assert.equal(refusal.schema, "https://a.asimposium.org/schemas/dead-ends.v1.json#/$defs/query");
+  }
   assert.deepEqual(await servedEchoes(reviewerB), [], "the served Fellow is not echoed");
   const packUrl = `${origin}/v1/sessions/${sessionB.session_id}/pack?profile=graveyard&max_tokens=8000`;
   const readHeaders = { "User-Agent": userAgent, authorization: `Bearer ${reviewerB}` };
@@ -334,6 +411,7 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(!JSON.stringify(await readPack("graveyard")).includes("PRIVATE-GRAVEYARD-A-CANARY"));
   const otherProblem = "P-DEAD-END-OTHER";
   await fixtures.seedProblem(otherProblem);
+  await unavailableDeadEnd(deadEnd1.dead_end_id, otherProblem);
   const otherSession = await call("/v1/sessions", { problem_id: otherProblem }, reviewerB, 201);
   await call(
     `/v1/sessions/${otherSession.session_id}/workshop`,
@@ -523,6 +601,7 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(supersededItem.superseded_by, supersedeRes.dead_end_id);
   assert.equal(supersededItem.sponsor_id, sponsorA);
   assert.equal(supersededItem.session_id, sessionIdA);
+  assert.deepEqual((await exactDeadEnd(deadEnd1.dead_end_id)).dead_ends, [supersededItem]);
   assert.ok(!historyJson.omitted.some((o) => o.includes("superseded dead ends are excluded")));
 
   const historyMdRes = await worker.fetch(
@@ -1002,7 +1081,11 @@ await runLocalWorkerJourney(async (context) => {
     assert.equal(echoes.length, 1, `one retry echo for ${id}`);
     assert.deepEqual(
       echoes[0].next_actions?.map((action) => action.url),
-      [`/p/${problemId}/dead-ends.json`],
+      [`/p/${problemId}/dead-ends.json?target=${id}`],
+    );
+    assert.deepEqual(
+      (await call(echoes[0].next_actions[0].url)).dead_ends.map((item) => item.dead_end_id),
+      [id],
     );
   }
   assert.ok(settledRetryIds.length > 0, "at least one retry condition fired");
@@ -1023,6 +1106,7 @@ await runLocalWorkerJourney(async (context) => {
     .bind(problemId, withdrawnSourceRetry.dead_end_id)
     .first();
   await fixtures.redactPublicContent(withdrawnSourceEvent.id);
+  await unavailableDeadEnd(withdrawnSourceRetry.dead_end_id);
   const retracted = await call(
     `/v1/sessions/${sessionIdA}/retract`,
     {
@@ -1402,6 +1486,7 @@ await runLocalWorkerJourney(async (context) => {
     .first();
   assert.ok(retrySource);
   await fixtures.redactPublicContent(retrySource.id);
+  await unavailableDeadEnd(stmtRevDeadEnd.dead_end_id);
   for (const profile of ["working", "orient"]) {
     const withdrawnPack = await call(
       `/v1/sessions/${triggerSessionId}/pack?profile=${profile}&max_tokens=8000`,
@@ -1674,6 +1759,7 @@ await runLocalWorkerJourney(async (context) => {
     "platform context is outside the author's body",
   );
   await controlChoiceSource(`${warningResult.dead_end_id}@1`, "hidden", 1);
+  await unavailableDeadEnd(warningResult.dead_end_id, choiceProblemId);
   for (const face of warningFaces) {
     const response = await worker.fetch(face.url, {
       headers: { "User-Agent": userAgent, "If-None-Match": face.etag },
@@ -1690,6 +1776,7 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(!hiddenOldPack.candidates.some((item) => item.id === warningResult.dead_end_id));
   assert.ok(hiddenOldPack.omitted.some((item) => item.reason === "content_unavailable"));
   await controlChoiceSource(`${warningResult.dead_end_id}@1`, "visible", 2);
+  await exactDeadEnd(warningResult.dead_end_id, choiceProblemId);
   for (const face of warningFaces) {
     const response = await worker.fetch(face.url, {
       headers: { "User-Agent": userAgent, "If-None-Match": face.etag },
@@ -1733,6 +1820,42 @@ await runLocalWorkerJourney(async (context) => {
       current_controls_and_restoration_verified: true,
     }),
   );
+
+  // Keep a genuine served notice useful after its record falls beyond the
+  // unchanged 200-entry list cap. These later entries are explicit fixture
+  // events, not 200 claimed HTTP publications or independent research results.
+  await fixtures.seedLaterDeadEnds(problemId, authorA, sessionIdA);
+  const busyList = await call(`/p/${problemId}/dead-ends.json?include_superseded=true`);
+  assert.equal(busyList.dead_ends.length, 200);
+  assert.ok(busyList.omitted.some((item) => item.includes("beyond the first 200")));
+  assert.ok(!busyList.dead_ends.some((item) => item.dead_end_id === deadEnd1.dead_end_id));
+  const oldNoticeTarget = await call(servedAction.url);
+  assert.deepEqual(
+    oldNoticeTarget.dead_ends.map((item) => item.dead_end_id),
+    [deadEnd1.dead_end_id],
+  );
+  assert.equal(oldNoticeTarget.dead_ends[0].approach, publishedBody.approach);
+  await exactDeadEnd(deadEnd1.dead_end_id);
+  const visibleProblem = await env.DB.prepare("SELECT status FROM problems WHERE id = ?")
+    .bind(problemId)
+    .first();
+  await env.DB.prepare("UPDATE problems SET status = 'private-draft' WHERE id = ?")
+    .bind(problemId)
+    .run();
+  for (const extension of ["json", "md", "html"]) {
+    const refusal = await call(
+      `/p/${problemId}/dead-ends.${extension}?target=${deadEnd1.dead_end_id}`,
+      undefined,
+      undefined,
+      404,
+    );
+    assert.equal(ContractProblemSchema.parse(refusal).code, "PROBLEM_NOT_FOUND");
+    assert.ok(!JSON.stringify(refusal).includes(publishedBody.approach));
+  }
+  await env.DB.prepare("UPDATE problems SET status = ? WHERE id = ?")
+    .bind(visibleProblem.status, problemId)
+    .run();
+  await exactDeadEnd(deadEnd1.dead_end_id);
 
   // x78n: a superseded_by link to a redacted retry is excused only on the dead
   // end that retry actually supersedes. The same link invented on an unrelated
