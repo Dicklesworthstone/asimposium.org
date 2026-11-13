@@ -17,7 +17,15 @@ observed.
 Updated 2026-11-13. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-Qualified source `fecd48d5` connects private dead-end impact notices to exact
+Qualified source `b2179c07` connects claim timelines and cards to the exact
+published evidence and reviews. Typecheck, lint and the full root suite pass
+all eight groups; primary and independent rebuilt local browsers pass all
+542 checks. A one-line timeline regression fails the new exact-source check;
+exact restoration passes. The broader claim-page task remains open. Public
+Worker observations at 22:32 UTC retain the older draft capability bodies and
+missing protocol route; deployment reconciliation remains operator task `rs5n`.
+
+Earlier qualified source `fecd48d5` connects private dead-end impact notices to exact
 verified public records. Typecheck, lint and the full root suite pass all eight
 groups; independent owning, contract, renderer and real Workerd/D1/R2 checks pass.
 The original inbox task remains incomplete. Public Worker observations at
@@ -63,6 +71,64 @@ The parent screening task retains its full scope and ownership. Closing
 syntheses with warnings stay held until resolution, honors and share-card
 derivatives can retain the notice. Deployment and broader hosted acceptance
 remain open. The earlier qualifications below retain their own source pins.
+
+### Exact claim publication navigation — `b2179c07`
+
+Claim evidence and review cards now offer the existing complete-publication
+readers; timeline entries use the same exact links. URLs come from the canonical
+problem, record kind and publication identifier, with each path component
+encoded. Authored body URLs cannot replace them. Other timeline kinds retain
+their local anchors. The existing readers retain current-visibility checks;
+the page explicitly allows newer surrounding context rather than promising
+a frozen review window. No route, table, contract, access rule or scientific
+standing rule changed.
+
+The full production-mode local browser journey retains its original 526 checks
+and adds 16 for evidence/review navigation in both JavaScript modes. Both entry
+points open the exact source heading and one identified record body containing
+the work, claim version, Fellow and sponsor; workshop and executable-markup
+checks remain. Existing genuine local publications are reused. The initial
+whole-page attribution oracle was strengthened before qualification so it
+cannot borrow attribution from another record.
+
+Primary and independent rebuilt browsers pass all 542 checks; independent exact
+restoration passes again. Reverting only the timeline href to its former local
+anchor leaves the producer, cards and tests fixed. After 107 successful checks,
+the new exact-review-link check fails; its unchanged 30-second click then times
+out on that missing link. This is a successful build reaching the intended
+navigation failure, rather than a setup or compiler error.
+
+Independent final-pin typecheck and lint pass eight groups, the four whole
+owning files pass 98 tests, full contracts pass 1,033, and renderers pass 605.
+The original full root passes all eight groups in 1,536.951 seconds, including
+7,507 Worker and 1,119 Agora tests. The 54 original individual toolchain skips
+remain. All 2,764 qualified inputs, the actual Next runtime and the retained
+browser binaries are stable. Later README changes are documentation deltas,
+not a fresh execution at a metadata commit.
+
+Literal source UBS completes five files with two inherited heuristic critical
+flags, 68 reviewed warnings and 414 informational findings, without suppression
+or failed modules. The criticals compare public pathnames and numeric status;
+this is not a security-clean or full-project scanner result. An attempted
+parallel detail scan failed on Git's index lock and analyzed nothing; its
+sequential successor completed. Avoidable Biome reflow enlarged the five-file
+textual diff; independent semantic review found no original assertion removal,
+and formatting earns no capability credit. An older private checkout's Beads
+read triggered a metadata migration; that dirty state is preserved unused,
+while verification ran in a separate clean installed checkout.
+
+These are local Chromium/Next/Workerd/D1/R2 results with fixture identity and
+screening. They establish software navigation, not independent scientific
+evidence, Google approval, deployed behavior or launch readiness. Fresh public
+GETs at 22:32 UTC retain the earlier production/staging capability bytes and
+`0.1.0-draft`; both `/protocol.json` requests return 404. Provider revision and
+deployment history remain unestablished. Parent `n9n` retains its original
+broader criteria and remains open.
+
+WhiteRaven independently closed only `n9n.4` at 22:45:28 UTC. Beads map 3236,
+with precision clarification 3237, maps every original criterion to exact
+source lines and retained executions. There is one original full root;
+the independent reexecutions are the browser and component gates above.
 
 ### Exact negative-evidence reads — `fecd48d5`
 

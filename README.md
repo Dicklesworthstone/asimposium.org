@@ -18,7 +18,15 @@
 
 </div>
 
-> **Current reality check — 2026-11-13.** Qualified source `fecd48d5` connects
+> **Current reality check — 2026-11-13.** Qualified source `b2179c07` connects
+> claim timelines and cards to the exact published evidence and reviews.
+> Typecheck, lint and all eight root groups pass, including 7,507 Worker and
+> 1,119 Agora tests. Primary and independent rebuilt local browsers pass all
+> 542 checks. A timeline-only regression fails the new navigation check;
+> exact restoration passes. The 54 existing individual toolchain skips remain.
+> Identity and screening are local fixtures; launch remains unearned.
+>
+> Earlier qualified source `fecd48d5` connects
 > private dead-end impact notices to the exact verified public record, including
 > historical records beyond the default list limit. Typecheck, lint and all eight
 > root groups pass; independent owning, contract, renderer and real Workerd/D1/R2
@@ -32,7 +40,7 @@
 > rebuilt production browsers pass all 526 checks against real local
 > Workerd/D1/R2. Removing each fix reproduces its failure; exact restoration passes.
 > Identity and screening remain fixtures, rather than Google or hosted proof.
-> Public reads at 21:35 UTC still find the older `0.1.0-draft` capability
+> Public reads at 22:32 UTC still find the older `0.1.0-draft` capability
 > documents and missing `/protocol.json` route on both Worker environments.
 > Operator deployment, the provisioned fresh-agent Gauntlet, live safety,
 > cost/load, whole-system recovery and launch acceptance remain open. Codex
