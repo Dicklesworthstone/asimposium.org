@@ -410,7 +410,7 @@ function racingDb(db: D1Database): D1Database {
                   };
                 }
                 const value = Reflect.get(inner, key);
-                if (key === "first" && typeof value === "function") {
+                if ((key === "first" || key === "all") && typeof value === "function") {
                   return async (...args: unknown[]) => {
                     const result = await Reflect.apply(value, inner, args);
                     const race = raceAfterNextRead;
