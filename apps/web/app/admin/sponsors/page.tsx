@@ -84,7 +84,9 @@ export default async function SponsorSuspensionPage({
               <p role="alert">The selected sponsor’s capacity could not be verified. Reload before making a capacity decision.</p>
             </section>
           ) : (
-            <OperatorFellowCapControl key={`${operatorId}:${sponsorId}:${authIssuedAt}`}
+            // Keep the reviewed attempt and receipt through same-operator reauthentication.
+            // Server actions recheck current identity/time; changing operator or target resets it.
+            <OperatorFellowCapControl key={`${operatorId}:${sponsorId}`}
               operatorId={session.operatorId} initial={capState} canChange={canChange} returnPath={returnPath} />
           )}
           {sponsorId === undefined ? null : (

@@ -278,6 +278,8 @@ async function fellowCapacityJourney({ browser, agora, target, record, privateTo
       dropped && forwardedStatus === 200 && afterFirst.active_fellow_limit === 6 && afterFirst.fellow_cap_seq === 1 &&
       firstAudit.length === 1 && firstAudit[0].reason === firstReason &&
       await first.locator("#operator-cap-limit").isDisabled() && await first.locator("#operator-cap-receipt").count() === 0);
+    const pendingControl = await first.locator('section[aria-labelledby="operator-fellow-cap-heading"]').elementHandle();
+    assert.ok(pendingControl, "the reviewed capacity control is mounted before reauthentication");
 
     await second.locator("#operator-cap-save").click();
     await second.getByRole("alert").first().waitFor();
@@ -300,6 +302,8 @@ async function fellowCapacityJourney({ browser, agora, target, record, privateTo
       await first.locator("#operator-cap-current").innerText() === "7" &&
       await first.locator("#operator-cap-sequence").innerText() === "2" && (await audit()).length === 2 &&
       freshAuthTime > firstAuthTime && firstAudit[0].step_up_authenticated_at === firstAuthTime);
+    record("capacity: same-operator reauthentication preserves the reviewed control",
+      await pendingControl.evaluate(element => element.isConnected));
     await first.reload({ waitUntil: "load" });
     const history = first.locator('section[aria-labelledby="operator-cap-history-heading"]');
     const rows = await audit();
