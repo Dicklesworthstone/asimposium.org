@@ -363,15 +363,18 @@ describe("published screening warnings", () => {
         ...candidate(f, "synthesis"),
         statement: JSON.stringify(publication),
       });
-      for (const category of ["dual-use-boundary", "off-topic"] as const) {
-        const receipt = published(
-          await screen(f, input(ordinary), { coarse_category: category }, "synthesize"),
-        );
-        expect(receipt.provenance.public_action).toEqual({
-          category,
+      for (const notice of [
+        {
+          category: "dual-use-boundary",
           action: "published-with-warning",
-          notice: category === "off-topic" ? "off-scope" : "screening-warning",
-        });
+          notice: "screening-warning",
+        },
+        { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
+      ] as const) {
+        const receipt = published(
+          await screen(f, input(ordinary), { coarse_category: notice.category }, "synthesize"),
+        );
+        expect(receipt.provenance.public_action).toEqual(notice);
         expect(ScreeningPublicationProvenanceSchema.safeParse(receipt.provenance).success).toBe(
           true,
         );
