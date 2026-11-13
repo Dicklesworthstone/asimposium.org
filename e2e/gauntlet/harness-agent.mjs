@@ -20,7 +20,11 @@ import { mkdtempSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseClaudeCodeUsage } from "./token-accounting.ts";
+import {
+  claudeUsageToFirstPromotion,
+  parseClaudeCodeUsage,
+  parseClaudeUsageBatch,
+} from "./token-accounting.ts";
 import {
   codexUsageToFirstPromotion,
   parseCodexExecUsage,
@@ -257,8 +261,8 @@ export function classifyUnavailable(text) {
   return null;
 }
 
-/** Run-local numeric accounting sink; no received OTLP body is retained. */
-export async function startCodexUsageCollector() {
+/** Shared bounded transport; only the parser's numeric evidence survives. */
+async function startUsageCollector(path, parseBatch, reconcile) {
   const secret = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex");
   const events = [];
   let valid = true;
@@ -274,7 +278,7 @@ export async function startCodexUsageCollector() {
     }
     active += 1;
     try {
-      if (request.method !== "POST" || request.url !== "/v1/logs") throw new Error("route");
+      if (request.method !== "POST" || request.url !== path) throw new Error("route");
       const chunks = [];
       let bytes = 0;
       for await (const chunk of request) {
@@ -283,7 +287,7 @@ export async function startCodexUsageCollector() {
         if (bytes > 1024 * 1024 || receivedBytes > 8 * 1024 * 1024) throw new Error("limit");
         chunks.push(chunk);
       }
-      const batch = parseCodexUsageBatch(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      const batch = parseBatch(JSON.parse(Buffer.concat(chunks).toString("utf8")));
       if (batch === null || events.length + batch.length > 10_000) throw new Error("shape");
       events.push(...batch);
       response.writeHead(200, { "content-type": "application/json" });
@@ -310,7 +314,34 @@ export async function startCodexUsageCollector() {
       resolve();
     });
   });
-  const endpoint = `http://127.0.0.1:${server.address().port}/v1/logs`;
+  return {
+    endpoint: `http://127.0.0.1:${server.address().port}${path}`,
+    secret,
+    usage(whole, firstPromotionAt) {
+      return valid && closed ? reconcile(events, whole, firstPromotionAt) : null;
+    },
+    async close() {
+      closing ??= new Promise((resolve) => {
+        if (active !== 0) valid = false;
+        server.close(() => {
+          closed = true;
+          resolve();
+        });
+        server.closeAllConnections();
+      });
+      await closing;
+    },
+  };
+}
+
+/** Run-local numeric accounting sink; no received OTLP body is retained. */
+export async function startCodexUsageCollector() {
+  const receiver = await startUsageCollector(
+    "/v1/logs",
+    parseCodexUsageBatch,
+    codexUsageToFirstPromotion,
+  );
+  const { endpoint, secret } = receiver;
   return {
     argv: [
       "-c",
@@ -329,18 +360,48 @@ export async function startCodexUsageCollector() {
       'otel.metrics_exporter="none"',
     ],
     usage(whole, firstPromotionAt) {
-      return valid && closed ? codexUsageToFirstPromotion(events, whole, firstPromotionAt) : null;
+      return receiver.usage(whole, firstPromotionAt);
     },
-    async close() {
-      closing ??= new Promise((resolve) => {
-        if (active !== 0) valid = false;
-        server.close(() => {
-          closed = true;
-          resolve();
-        });
-        server.closeAllConnections();
-      });
-      await closing;
+    close() {
+      return receiver.close();
+    },
+  };
+}
+
+/** Request intervals only. Content, logs and metrics exporters stay disabled. */
+export async function startClaudeUsageCollector() {
+  const receiver = await startUsageCollector(
+    "/v1/traces",
+    parseClaudeUsageBatch,
+    claudeUsageToFirstPromotion,
+  );
+  return {
+    env: {
+      CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+      CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: "1",
+      OTEL_TRACES_EXPORTER: "otlp",
+      OTEL_LOGS_EXPORTER: "none",
+      OTEL_METRICS_EXPORTER: "none",
+      OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: "http/json",
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: receiver.endpoint,
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: `x-asimp-usage-token=${receiver.secret}`,
+      OTEL_TRACES_EXPORT_INTERVAL: "1000",
+      OTEL_LOG_USER_PROMPTS: "0",
+      OTEL_LOG_ASSISTANT_RESPONSES: "0",
+      OTEL_LOG_TOOL_DETAILS: "0",
+      OTEL_LOG_TOOL_CONTENT: "0",
+      OTEL_LOG_RAW_API_BODIES: "0",
+      OTEL_LOG_MANAGED_SETTINGS: "0",
+      OTEL_METRICS_INCLUDE_ACCOUNT_UUID: "false",
+      OTEL_METRICS_INCLUDE_RESOURCE_ATTRIBUTES: "false",
+      OTEL_METRICS_INCLUDE_REPOSITORY: "false",
+      OTEL_METRICS_INCLUDE_SESSION_ID: "true",
+    },
+    usage(whole, firstPromotionAt) {
+      return receiver.usage(whole, firstPromotionAt);
+    },
+    close() {
+      return receiver.close();
     },
   };
 }
@@ -375,8 +436,11 @@ export async function runHarnessAgent(
   for (const name of ENV_ALLOWLIST)
     if (process.env[name] !== undefined) env[name] = process.env[name];
   const started = Date.now();
-  const measure = harness === "codex" && typeof firstPromotionAt === "function";
-  const collector = measure ? await startCodexUsageCollector().catch(() => null) : null;
+  const measure =
+    (harness === "codex" || harness === "claude-code") && typeof firstPromotionAt === "function";
+  const startCollector = harness === "codex" ? startCodexUsageCollector : startClaudeUsageCollector;
+  const collector = measure ? await startCollector().catch(() => null) : null;
+  if (collector?.env) Object.assign(env, collector.env);
   return await new Promise((resolve) => {
     let stdout = "";
     let stderrTail = "";
@@ -391,7 +455,7 @@ export async function runHarnessAgent(
     let stdinWriteFailed = false;
     let binaryUnavailable = false;
     const argv = spec.argv(sponsorPasteBlock(joinUrl));
-    if (collector) argv.splice(argv.length - 1, 0, ...collector.argv);
+    if (collector?.argv) argv.splice(argv.length - 1, 0, ...collector.argv);
     const child = spawnProcess(spec.binary, argv, {
       cwd,
       env,
@@ -439,7 +503,7 @@ export async function runHarnessAgent(
       if (collector && !transcriptTruncated) {
         try {
           firstPromotionTokenUsage = collector.usage(
-            parseCodexExecUsage(stdout),
+            harness === "codex" ? parseCodexExecUsage(stdout) : parseClaudeCodeUsage(stdout),
             firstPromotionAt(),
           );
         } catch {

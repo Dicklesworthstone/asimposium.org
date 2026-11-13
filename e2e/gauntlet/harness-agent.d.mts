@@ -1,5 +1,6 @@
 /** Types for harness-agent.mjs (the runner is plain Node ESM; tests are TypeScript). */
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
+import type { ClaudeCodeTokenUsage, ClaudePromotionTokenUsage } from "./token-accounting.ts";
 import type { CodexExecTokenUsage, CodexPromotionTokenUsage } from "./token-accounting-codex.ts";
 
 export type HarnessSpawnProcess = (
@@ -42,6 +43,15 @@ export declare function startCodexUsageCollector(): Promise<{
   close(): Promise<void>;
 }>;
 
+export declare function startClaudeUsageCollector(): Promise<{
+  readonly env: Readonly<Record<string, string>>;
+  usage(
+    whole: ClaudeCodeTokenUsage | null,
+    firstPromotionAt: number | undefined,
+  ): ClaudePromotionTokenUsage | null;
+  close(): Promise<void>;
+}>;
+
 export declare function runHarnessAgent(
   harness: string,
   joinUrl: string,
@@ -60,7 +70,7 @@ export declare function runHarnessAgent(
   readonly transcriptTruncated: boolean;
   readonly tokens: unknown;
   readonly tokenUsage: Record<string, number | boolean | string> | null;
-  readonly firstPromotionTokenUsage?: CodexPromotionTokenUsage | null;
+  readonly firstPromotionTokenUsage?: CodexPromotionTokenUsage | ClaudePromotionTokenUsage | null;
   readonly stdinWriteFailed: boolean;
   readonly unavailable:
     | "usage-limit"

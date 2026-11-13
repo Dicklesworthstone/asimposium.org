@@ -12,8 +12,10 @@ import {
   retainedRouteTemplate,
   runHarnessAgent,
   sponsorPasteBlock,
+  startClaudeUsageCollector,
   startCodexUsageCollector,
 } from "./harness-agent.mjs";
+import { parseClaudeCodeUsage } from "./token-accounting.ts";
 import { parseCodexExecUsage } from "./token-accounting-codex.ts";
 
 // A harness that never started is "blocked", not a measured cold-agent failure
@@ -255,6 +257,7 @@ describe("the real runner uses the existing complete usage accounting", () => {
     expect(
       HARNESSES["claude-code"].tokens(
         JSON.stringify({
+          is_error: false,
           usage: {
             input_tokens: 1,
             output_tokens: 2,
@@ -413,6 +416,170 @@ process.stdin.on("end",async()=>{
       outputOff: true,
       metricsOff: true,
       tracesOff: true,
+    });
+    expect(JSON.stringify(run)).not.toContain("canary");
+    expect(JSON.stringify(run)).not.toContain("x-asimp-usage-token");
+  });
+});
+
+describe("Claude content-free request receiver", () => {
+  const base = Date.parse("2026-11-13T00:00:00.000Z");
+  const terminal = JSON.stringify({
+    session_id: "unit-claude-root",
+    is_error: false,
+    num_turns: 3,
+    usage: {
+      input_tokens: 300,
+      output_tokens: 30,
+      cache_creation_input_tokens: 30,
+      cache_read_input_tokens: 3000,
+      output_tokens_details: { thinking_tokens: 3 },
+    },
+  });
+  function payload() {
+    const spans = [
+      { id: "span-a", start: 10, end: 20, n: 1 },
+      { id: "span-b", start: 40, end: 50, n: 2 },
+    ].map((row) => ({
+      name: "claude_code.llm_request",
+      spanId: row.id,
+      status: { code: 0 },
+      startTimeUnixNano: (BigInt(base + row.start) * 1_000_000n).toString(),
+      endTimeUnixNano: (BigInt(base + row.end) * 1_000_000n).toString(),
+      attributes: Object.entries({
+        "session.id": "unit-claude-root",
+        input_tokens: row.n * 100,
+        output_tokens: row.n * 10,
+        cache_creation_tokens: row.n * 10,
+        cache_read_tokens: row.n * 1000,
+        prompt: "synthetic-prompt-canary",
+        tool_output: "synthetic-tool-canary",
+        "user.email": "synthetic-identity-canary",
+      }).map(([key, value]) => ({
+        key,
+        value: typeof value === "number" ? { doubleValue: value } : { stringValue: value },
+      })),
+    }));
+    return { resourceSpans: [{ scopeSpans: [{ spans }] }] };
+  }
+  function connection(env: Readonly<Record<string, string>>) {
+    const url = env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
+    const token = env.OTEL_EXPORTER_OTLP_TRACES_HEADERS?.split("=")[1];
+    assert(url && token);
+    return { url, token };
+  }
+
+  test("the actual loopback receiver authenticates and emits only reconciled counts after close", async () => {
+    const receiver = await startClaudeUsageCollector();
+    const { url, token } = connection(receiver.env);
+    try {
+      expect(new URL(url).hostname).toBe("127.0.0.1");
+      expect((await fetch(url, { method: "POST", body: "{}" })).status).toBe(403);
+      expect(
+        (
+          await fetch(url, {
+            method: "POST",
+            headers: { "x-asimp-usage-token": token },
+            body: JSON.stringify(payload()),
+          })
+        ).status,
+      ).toBe(200);
+      expect(receiver.usage(parseClaudeCodeUsage(terminal), base + 30)).toBeNull();
+      await receiver.close();
+      const usage = receiver.usage(parseClaudeCodeUsage(terminal), base + 30);
+      expect(usage?.totalTokens).toBe(1120);
+      expect(JSON.stringify(usage)).not.toContain("canary");
+      expect(JSON.stringify(usage)).not.toContain("unit-claude-root");
+      expect(usage).not.toHaveProperty("thinkingTokens");
+      await receiver.close();
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  test("a malformed authenticated trace poisons the result even after a valid batch", async () => {
+    const receiver = await startClaudeUsageCollector();
+    const { url, token } = connection(receiver.env);
+    try {
+      expect(
+        (
+          await fetch(url, {
+            method: "POST",
+            headers: { "x-asimp-usage-token": token },
+            body: "{}",
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await fetch(url, {
+            method: "POST",
+            headers: { "x-asimp-usage-token": token },
+            body: JSON.stringify(payload()),
+          })
+        ).status,
+      ).toBe(200);
+      await receiver.close();
+      expect(receiver.usage(parseClaudeCodeUsage(terminal), base + 30)).toBeNull();
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  test("the actual Claude child receives content-off settings and its first boundary receipt", async () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "asimp-claude-usage-"));
+    const fixture = join(fixtureRoot, "numeric.cjs");
+    const observation = join(fixtureRoot, "flags.json");
+    // UNIT process fixture: synthetic provider counts, never a model/cohort result.
+    writeFileSync(
+      fixture,
+      `const fs=require("node:fs");
+const args=process.argv.slice(2),e=process.env;
+process.stdin.resume();
+process.stdin.on("end",async()=>{
+ const url=e.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
+ const token=e.OTEL_EXPORTER_OTLP_TRACES_HEADERS?.split("=")[1];
+ fs.writeFileSync(${JSON.stringify(observation)},JSON.stringify({
+  ephemeral:args.includes("--no-session-persistence"),safeMode:args.includes("--safe-mode"),
+  enabled:e.CLAUDE_CODE_ENABLE_TELEMETRY==="1"&&e.CLAUDE_CODE_ENHANCED_TELEMETRY_BETA==="1",
+  contentOff:["OTEL_LOG_USER_PROMPTS","OTEL_LOG_ASSISTANT_RESPONSES","OTEL_LOG_TOOL_DETAILS","OTEL_LOG_TOOL_CONTENT","OTEL_LOG_RAW_API_BODIES","OTEL_LOG_MANAGED_SETTINGS"].every(k=>e[k]==="0"),
+  logsAndMetricsOff:e.OTEL_LOGS_EXPORTER==="none"&&e.OTEL_METRICS_EXPORTER==="none",
+  scopedLocalEndpoint:!!url&&new URL(url).hostname==="127.0.0.1"&&new URL(url).pathname==="/v1/traces",
+  genericEndpointAbsent:e.OTEL_EXPORTER_OTLP_ENDPOINT===undefined,
+  identitiesOff:e.OTEL_METRICS_INCLUDE_ACCOUNT_UUID==="false"&&e.OTEL_METRICS_INCLUDE_RESOURCE_ATTRIBUTES==="false"&&e.OTEL_METRICS_INCLUDE_REPOSITORY==="false",
+  secretInArgv:args.some(a=>a.includes("v1.")||a.includes("x-asimp-usage-token"))
+ }));
+ if(url&&token){const r=await fetch(url,{method:"POST",headers:{"x-asimp-usage-token":token},body:${JSON.stringify(JSON.stringify(payload()))}});if(r.status!==200)process.exitCode=1;}
+ process.stdout.write(${JSON.stringify(terminal)});
+});`,
+      { mode: 0o600 },
+    );
+    const run = await runHarnessAgent(
+      "claude-code",
+      "https://unit.example/join/synthetic#v1.synthetic",
+      {
+        timeoutMs: 5000,
+        firstPromotionAt: () => base + 30,
+        spawnProcess: (_binary, args, options) =>
+          spawn(process.execPath, [fixture, ...args], options),
+      },
+    );
+    expect(run.exitCode).toBe(0);
+    expect(run.firstPromotionTokenUsage).toMatchObject({
+      source: "claude_request_spans",
+      totalTokens: 1120,
+    });
+    expect(run.tokenUsage?.totalTokens).toBe(3360);
+    expect(JSON.parse(readFileSync(observation, "utf8"))).toEqual({
+      ephemeral: true,
+      safeMode: true,
+      enabled: true,
+      contentOff: true,
+      logsAndMetricsOff: true,
+      scopedLocalEndpoint: true,
+      genericEndpointAbsent: true,
+      identitiesOff: true,
+      secretInArgv: false,
     });
     expect(JSON.stringify(run)).not.toContain("canary");
     expect(JSON.stringify(run)).not.toContain("x-asimp-usage-token");
