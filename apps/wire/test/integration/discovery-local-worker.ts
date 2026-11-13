@@ -278,9 +278,8 @@ let raceBeforeNextBatch: {
  * The caller receives that original row while later production reads see the
  * committed change. This controls scheduling, never supplies a fabricated row. */
 let raceAfterNextRead: {
-  readonly sql: string;
-  readonly bindings: unknown[];
   readonly matchSql: string;
+  readonly commit: (db: D1Database) => Promise<void>;
 } | null = null;
 
 /**
@@ -416,10 +415,7 @@ function racingDb(db: D1Database): D1Database {
                     const race = raceAfterNextRead;
                     if (race !== null && query.includes(race.matchSql)) {
                       raceAfterNextRead = null;
-                      await target
-                        .prepare(race.sql)
-                        .bind(...race.bindings)
-                        .run();
+                      await race.commit(target);
                     }
                     return result;
                   };
@@ -564,7 +560,38 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
 
   armRaceAfterNextRead(sql: string, bindings: unknown[], matchSql: string): void {
     if (matchSql.length === 0) throw new Error("Read scheduling requires an exact SQL marker");
-    raceAfterNextRead = { sql, bindings, matchSql };
+    raceAfterNextRead = {
+      matchSql,
+      commit: async (db) => {
+        await db
+          .prepare(sql)
+          .bind(...bindings)
+          .run();
+      },
+    };
+  }
+
+  /** Controlled revocation through the real lifecycle service, not a direct
+   * token UPDATE that the event/lease guards correctly refuse. This is not
+   * proof of sponsor HTTP or Google authorization. */
+  async armCredentialRevocationAfterNextInboxPage(token: string): Promise<void> {
+    const binding = await this.service().credentialBinding(token);
+    if (!binding) throw new Error("Inbox race credential unavailable");
+    raceAfterNextRead = {
+      matchSql: "FROM fellow_inbox_notices",
+      commit: async (db) => {
+        await this.service(db).revokeCredential(
+          { type: "sponsor", sponsorId: binding.sponsorId },
+          {
+            fellow_id: binding.fellowId,
+            credential_id: binding.credentialId,
+            confirm: "revoke-credential",
+            step_up_authenticated_at: Math.floor(Date.now() / 1000),
+          },
+          { idempotencyKey: `inbox-read-race-${binding.credentialId}` },
+        );
+      },
+    };
   }
 
   raceStillArmed(): boolean {
@@ -758,11 +785,11 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     return response as unknown as WorkerResponse;
   }
 
-  service(): EnrollmentService {
+  service(db: D1Database = this.env.DB): EnrollmentService {
     return new EnrollmentService({
       stoaOrigin: this.env.STOA_ORIGIN as string,
       agoraOrigin: this.env.AGORA_ORIGIN as string,
-      store: new D1EnrollmentStore(this.env.DB),
+      store: new D1EnrollmentStore(db),
       replayProtector: enrollmentReplayProtectorFromBase64Url(this.env.ENROLLMENT_REPLAY_KEY),
     });
   }

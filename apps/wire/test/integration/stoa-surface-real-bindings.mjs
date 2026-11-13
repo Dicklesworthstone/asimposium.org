@@ -198,11 +198,7 @@ await runLocalWorkerJourney(
       const control = await read();
       assert.equal(control.status, 200);
       assert.ok((await control.text()).includes(notice.title));
-      await fixtures.armRaceAfterNextRead(
-        "UPDATE fellow_tokens SET revoked_at = ? WHERE fellow_id = ? AND revoked_at IS NULL",
-        [Date.now(), fellowId],
-        "FROM fellow_inbox_notices",
-      );
+      await fixtures.armCredentialRevocationAfterNextInboxPage(reader);
       const raced = await read();
       assert.equal(await fixtures.raceStillArmed(), false, "real credential revocation fired");
       assert.ok(
