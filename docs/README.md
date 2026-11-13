@@ -17,7 +17,12 @@ observed.
 Updated 2026-11-13. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-Current source `03e4a8c2` repairs a typecheck regression introduced by the
+Qualified source `0f0e1b67` repairs capacity-receipt loss during same-operator
+reauthentication. Typecheck, lint and the full root suite pass all eight groups;
+the independent browser, old-key fault and exact-restoration checks pass as
+described below. WhiteRaven closed only `0ht.3`; deployment remains `rs5n`.
+
+Previous source `03e4a8c2` repairs a typecheck regression introduced by the
 ordinary-synthesis warning merge `8fae4073`. Both warning categories retain
 their exact provenance and schema assertions; the expected category/notice
 pairs are now explicit literals. WhiteRaven independently closed only this
@@ -38,13 +43,51 @@ for original capacity-receipt recovery after a lost reply and fresh
 authentication (`0ht.3`). The preceding two audited capacity writes succeeded.
 One isolated diagnostic run passes 501 checks without reaching its failure-only
 observation. Exact restoration then passes the original 501-check journey in
-140.736 seconds using the same production build. This does not explain or erase
-the first failure: `0ht.3` remains open without a speculative product patch.
+140.736 seconds using the same production build. That rerun did not explain
+or erase the first failure; the later diagnosis and repair follow below.
 
 The parent screening task retains its full scope and ownership. Closing
 syntheses with warnings stay held until resolution, honors and share-card
 derivatives can retain the notice. Deployment and broader hosted acceptance
 remain open. The earlier qualifications below retain their own source pins.
+
+### Capacity receipt retention — `0f0e1b67`
+
+Task `0ht.3` traced the intermittent recovery failure to a control identity
+that included the Google authentication timestamp. A refreshed session could
+replace the same operator's control and discard its pending result. The
+capacity control now keeps its identity for the same operator and sponsor;
+switching either still resets it. Server-side authentication, recent-auth,
+compare-and-set and replay checks are unchanged.
+
+The original 453-check timeout was reproduced with safe diagnostics: two
+action responses returned 200, the replay response contained the original
+receipt marker, and D1 retained exactly two audit rows and current limit 7,
+while the browser showed neither receipt nor error. These are response-marker
+observations, not a typed RSC-parser result. The temporary probes were removed.
+The existing browser journey adds one check that the reviewed control remains
+mounted through same-operator reauthentication; all original 501 checks remain.
+
+Primary, independent and exact-restored production-browser runs pass all 502
+checks. Rebuilding with only the old timestamp key restored makes the new
+continuity check fail while the other 501 checks pass. That counterexample
+demonstrates the remount, rather than a recurrence of the original timeout.
+Exact restoration and another rebuild pass all 502. Typecheck and lint pass
+eight groups, owning/transport units pass 127 tests, full contracts 1,032 and
+renderers 605. The original full root passes all eight groups in 1,518.166
+seconds, including 7,507 Worker and 1,116 Agora tests. The 54 original
+individual toolchain skips remain. All 2,759 source inputs and the actual Next
+runtime match the frozen revision. WhiteRaven independently closed only
+`0ht.3` at 03:57:17 UTC; original-criteria map 3220 records the precise fault
+and evidence boundaries. This is real local Next/Chromium/Workerd/D1/R2 with
+fixture identity; it does not certify the Google exchange or hosted deployment.
+
+Fresh public reads at 03:30 UTC still show the production and staging
+capability documents byte-identical to November 11, with `/protocol.json`
+returning 404 on both origins. The designated provider variables are absent
+from this process; this is not a credential-store inventory. Deployment
+reconciliation remains operator task `rs5n`, with its original authority,
+lineage, binding and revision-receipt requirements.
 
 ### Canonical single-team notice — independently verified
 
