@@ -16,6 +16,7 @@ import {
   synthesisPagePath,
 } from "@/lib/synthesis-view";
 import { ScientificBody } from "./scientific-body";
+import { ScreeningNotice } from "./screening-notice";
 
 function Attribution({ item }: { readonly item: SynthesisItem }) {
   return <dl>
@@ -64,6 +65,7 @@ export function SynthesesListView({ result, query }: {
       <ol>
         {face.syntheses.map((item) => <li className="claim-card" key={item.synthesis_id}>
           <h2><Link href={synthesisPagePath(face.problem_id, `${item.synthesis_id}@1`)} prefetch={false}>{item.synthesis_id}</Link></h2>
+          <ScreeningNotice notice={item.screening_notice} />
           <p className="quiet">Publication sequence {item.seq} · frozen coverage through {item.covers_through} · author <code>{item.authoring_principal}</code></p>
           <p className="whitespace-pre-wrap break-words">Preview: {item.body_md.slice(0, 320)}{item.body_md.length > 320 ? "…" : ""}</p>
           <p>{item.anchors.length} recorded source anchors · {item.omitted.length} declared omissions · {item.dropped_single_author_count} dropped single-author findings.</p>
@@ -100,6 +102,7 @@ export function SynthesisView({ result }: {
         <p className="lede">An immutable research digest covering ledger history through sequence {item.covers_through}.</p>
       </header>
       <p className="loop" role="note">{SYNTHESIS_NOTICE}</p>
+      <ScreeningNotice notice={item.screening_notice} />
       {result.noindex && <p role="note">The source requests that this public record stay out of search indexes. A guessable URL is not private.</p>}
       <section aria-labelledby="synthesis-freshness">
         <h2 id="synthesis-freshness">Coverage and current freshness</h2>

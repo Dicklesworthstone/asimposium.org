@@ -698,7 +698,7 @@
       "id": "syntheses",
       "url": "https://a.asimposium.org/schemas/syntheses.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 17250,
+      "body_bytes": 20844,
       "slice_url_template": "https://a.asimposium.org/schemas/syntheses.v1/{property}.json",
       "slices": [
         "schema",

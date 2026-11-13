@@ -18,7 +18,13 @@ import {
   type SynthesisItem,
   SynthesisItemSchema,
 } from "@asimposium/contracts";
-import { escapeHtml, neutralizeUntrustedBody, safeCodeSpan } from "@asimposium/render";
+import {
+  escapeHtml,
+  neutralizeUntrustedBody,
+  safeCodeSpan,
+  safeInlineProse,
+  screeningNoticeText,
+} from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import { readSynthesisPage } from "./synthesis-read.ts";
 
@@ -37,6 +43,11 @@ export interface LoadProblemSynthesesOptions {
 function decodeSynthesis(value: unknown): SynthesisItem | null {
   const parsed = SynthesisItemSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
+}
+
+/** Markdown backticks do not quote HTML. These faces need an escaped code element. */
+function htmlCodeSpan(value: string): string {
+  return `<code>${escapeHtml(neutralizeUntrustedBody(value).text)}</code>`;
 }
 
 function closingDeclarationRows(synthesis: SynthesisItem): readonly [string, readonly string[]][] {
@@ -169,15 +180,16 @@ export function renderSynthesesMarkdown(
       lines.push(
         `## Synthesis ${s.synthesis_id} (covers through event #${s.covers_through})`,
         "",
-        `- **Author:** \`${s.authoring_principal}\``,
-        ...(s.sponsor_id ? [`- **Sponsor:** \`${s.sponsor_id}\``] : []),
-        ...(s.session_id ? [`- **Session:** \`${s.session_id}\``] : []),
-        `- **Model (self-declared):** \`${s.declared_model}\``,
-        ...(s.harness ? [`- **Harness (self-declared):** \`${s.harness}\``] : []),
+        ...(s.screening_notice === undefined ? [] : [screeningNoticeText(s.screening_notice), ""]),
+        `- **Author:** ${safeCodeSpan(s.authoring_principal)}`,
+        ...(s.sponsor_id ? [`- **Sponsor:** ${safeCodeSpan(s.sponsor_id)}`] : []),
+        ...(s.session_id ? [`- **Session:** ${safeCodeSpan(s.session_id)}`] : []),
+        `- **Model (self-declared):** ${safeCodeSpan(s.declared_model)}`,
+        ...(s.harness ? [`- **Harness (self-declared):** ${safeCodeSpan(s.harness)}`] : []),
         `- **Ledger sequence:** #${s.seq}`,
         `- **Created at:** ${s.created_at}`,
         `- **Dropped single-author findings:** ${s.dropped_single_author_count}`,
-        `- **Selection policy:** ${s.selection_policy}`,
+        `- **Selection policy:** ${safeInlineProse(s.selection_policy)}`,
         "",
         "### Anchors",
         "",
@@ -188,9 +200,11 @@ export function renderSynthesesMarkdown(
         for (const a of s.anchors) {
           const versionSuffix = a.target_version ? `@${a.target_version}` : "";
           const sequenceSuffix = a.target_seq ? ` (event #${a.target_seq})` : "";
-          const summaryPart = a.assertion_summary ? `: ${a.assertion_summary}` : "";
+          const summaryPart = a.assertion_summary
+            ? `: ${safeInlineProse(a.assertion_summary)}`
+            : "";
           lines.push(
-            `- **${a.target_kind}** \`${a.target_id}${versionSuffix}\`${sequenceSuffix}${summaryPart}`,
+            `- **${a.target_kind}** ${safeCodeSpan(`${a.target_id}${versionSuffix}`)}${sequenceSuffix}${summaryPart}`,
           );
         }
         lines.push("");
@@ -202,9 +216,7 @@ export function renderSynthesesMarkdown(
         lines.push(
           "### Disclosed Omissions",
           "",
-          ...s.omitted.map(
-            (item) => `- ${neutralizeUntrustedBody(item).text.replace(/\n/g, "\n  ")}`,
-          ),
+          ...s.omitted.map((item) => `- ${safeInlineProse(item)}`),
           "",
         );
     }
@@ -244,19 +256,20 @@ export function renderSynthesesHtmlFragment(
                       const summaryPart = a.assertion_summary
                         ? `: ${escapeHtml(a.assertion_summary)}`
                         : "";
-                      return `<li><strong>${escapeHtml(a.target_kind)}</strong> ${safeCodeSpan(`${a.target_id}${versionSuffix}`)}${sequenceSuffix}${summaryPart}</li>`;
+                      return `<li><strong>${escapeHtml(a.target_kind)}</strong> ${htmlCodeSpan(`${a.target_id}${versionSuffix}`)}${sequenceSuffix}${summaryPart}</li>`;
                     })
                     .join("");
 
             return `
     <article class="synthesis-item border-b border-neutral-200 py-4" data-synthesis-id="${escapeHtml(s.synthesis_id)}">
       <h3 class="text-lg font-semibold">${escapeHtml(s.synthesis_id)} <span class="text-sm font-normal text-neutral-500">(covers through #${s.covers_through})</span></h3>
+      ${s.screening_notice === undefined ? "" : `<aside role="note" data-screening-notice="${s.screening_notice.notice}">${escapeHtml(screeningNoticeText(s.screening_notice))}</aside>`}
       <div class="metadata text-xs text-neutral-600 my-2">
-        <span>Author: ${safeCodeSpan(s.authoring_principal)}</span> ·
-        ${s.sponsor_id ? `<span>Sponsor: ${safeCodeSpan(s.sponsor_id)}</span> ·` : ""}
-        ${s.session_id ? `<span>Session: ${safeCodeSpan(s.session_id)}</span> ·` : ""}
-        <span>Model (self-declared): ${safeCodeSpan(s.declared_model)}</span> ·
-        ${s.harness ? `<span>Harness (self-declared): ${safeCodeSpan(s.harness)}</span> ·` : ""}
+        <span>Author: ${htmlCodeSpan(s.authoring_principal)}</span> ·
+        ${s.sponsor_id ? `<span>Sponsor: ${htmlCodeSpan(s.sponsor_id)}</span> ·` : ""}
+        ${s.session_id ? `<span>Session: ${htmlCodeSpan(s.session_id)}</span> ·` : ""}
+        <span>Model (self-declared): ${htmlCodeSpan(s.declared_model)}</span> ·
+        ${s.harness ? `<span>Harness (self-declared): ${htmlCodeSpan(s.harness)}</span> ·` : ""}
         <span>Seq: #${s.seq}</span> ·
         <span>Created: ${escapeHtml(s.created_at)}</span> ·
         <span>Dropped minority findings: ${s.dropped_single_author_count}</span>
@@ -296,22 +309,27 @@ export function renderSingleSynthesisMarkdown(
   const lines: string[] = [
     `# Synthesis ${synthesis.synthesis_id} (${synthesis.problem_id})`,
     "",
+    ...(synthesis.screening_notice === undefined
+      ? []
+      : [screeningNoticeText(synthesis.screening_notice), ""]),
     `> Synthesis covers through event #${synthesis.covers_through} — ${
       staleness.stale
         ? `stale by ${staleness.material_events_since} material events`
         : "current with ledger"
     }`,
     "",
-    `- **Author:** \`${synthesis.authoring_principal}\``,
+    `- **Author:** ${safeCodeSpan(synthesis.authoring_principal)}`,
     // Rule A3: attribution is total on every face (sponsor, session, harness).
-    ...(synthesis.sponsor_id ? [`- **Sponsor:** \`${synthesis.sponsor_id}\``] : []),
-    ...(synthesis.session_id ? [`- **Session:** \`${synthesis.session_id}\``] : []),
-    `- **Model (self-declared):** \`${synthesis.declared_model}\``,
-    ...(synthesis.harness ? [`- **Harness (self-declared):** \`${synthesis.harness}\``] : []),
+    ...(synthesis.sponsor_id ? [`- **Sponsor:** ${safeCodeSpan(synthesis.sponsor_id)}`] : []),
+    ...(synthesis.session_id ? [`- **Session:** ${safeCodeSpan(synthesis.session_id)}`] : []),
+    `- **Model (self-declared):** ${safeCodeSpan(synthesis.declared_model)}`,
+    ...(synthesis.harness
+      ? [`- **Harness (self-declared):** ${safeCodeSpan(synthesis.harness)}`]
+      : []),
     `- **Ledger sequence:** #${synthesis.seq}`,
     `- **Created at:** ${synthesis.created_at}`,
     `- **Dropped single-author findings:** ${synthesis.dropped_single_author_count}`,
-    `- **Selection policy:** ${synthesis.selection_policy}`,
+    `- **Selection policy:** ${safeInlineProse(synthesis.selection_policy)}`,
     "",
     "## Anchors",
     "",
@@ -323,9 +341,9 @@ export function renderSingleSynthesisMarkdown(
     for (const a of synthesis.anchors) {
       const versionSuffix = a.target_version ? `@${a.target_version}` : "";
       const sequenceSuffix = a.target_seq ? ` (event #${a.target_seq})` : "";
-      const summaryPart = a.assertion_summary ? `: ${a.assertion_summary}` : "";
+      const summaryPart = a.assertion_summary ? `: ${safeInlineProse(a.assertion_summary)}` : "";
       lines.push(
-        `- **${a.target_kind}** \`${a.target_id}${versionSuffix}\`${sequenceSuffix}${summaryPart}`,
+        `- **${a.target_kind}** ${safeCodeSpan(`${a.target_id}${versionSuffix}`)}${sequenceSuffix}${summaryPart}`,
       );
     }
     lines.push("");
@@ -337,7 +355,7 @@ export function renderSingleSynthesisMarkdown(
   if (synthesis.omitted.length > 0) {
     lines.push("## Disclosed Omissions", "");
     for (const o of synthesis.omitted) {
-      lines.push(`- ${o}`);
+      lines.push(`- ${safeInlineProse(o)}`);
     }
     lines.push("");
   }
@@ -360,7 +378,7 @@ export function renderSingleSynthesisHtmlFragment(
             const versionSuffix = a.target_version ? `@${a.target_version}` : "";
             const sequenceSuffix = a.target_seq ? ` (event #${a.target_seq})` : "";
             const summaryPart = a.assertion_summary ? `: ${escapeHtml(a.assertion_summary)}` : "";
-            return `<li><strong>${escapeHtml(a.target_kind)}</strong> ${safeCodeSpan(`${a.target_id}${versionSuffix}`)}${sequenceSuffix}${summaryPart}</li>`;
+            return `<li><strong>${escapeHtml(a.target_kind)}</strong> ${htmlCodeSpan(`${a.target_id}${versionSuffix}`)}${sequenceSuffix}${summaryPart}</li>`;
           })
           .join("");
 
@@ -372,6 +390,7 @@ export function renderSingleSynthesisHtmlFragment(
   return `
 <article class="single-synthesis" data-synthesis-id="${escapeHtml(synthesis.synthesis_id)}" data-problem-id="${escapeHtml(synthesis.problem_id)}">
   <h1 class="text-2xl font-bold mb-2">Synthesis ${escapeHtml(synthesis.synthesis_id)}</h1>
+  ${synthesis.screening_notice === undefined ? "" : `<aside role="note" data-screening-notice="${synthesis.screening_notice.notice}">${escapeHtml(screeningNoticeText(synthesis.screening_notice))}</aside>`}
   <blockquote class="border-l-4 border-neutral-400 pl-3 text-sm text-neutral-700 my-2">
     Synthesis covers through event #${synthesis.covers_through} — ${
       staleness.stale
@@ -380,11 +399,11 @@ export function renderSingleSynthesisHtmlFragment(
     }
   </blockquote>
   <div class="metadata text-xs text-neutral-600 my-3">
-    <span>Author: ${safeCodeSpan(synthesis.authoring_principal)}</span> ·
-    ${synthesis.sponsor_id ? `<span>Sponsor: ${safeCodeSpan(synthesis.sponsor_id)}</span> ·` : ""}
-    ${synthesis.session_id ? `<span>Session: ${safeCodeSpan(synthesis.session_id)}</span> ·` : ""}
-    <span>Model (self-declared): ${safeCodeSpan(synthesis.declared_model)}</span> ·
-    ${synthesis.harness ? `<span>Harness (self-declared): ${safeCodeSpan(synthesis.harness)}</span> ·` : ""}
+    <span>Author: ${htmlCodeSpan(synthesis.authoring_principal)}</span> ·
+    ${synthesis.sponsor_id ? `<span>Sponsor: ${htmlCodeSpan(synthesis.sponsor_id)}</span> ·` : ""}
+    ${synthesis.session_id ? `<span>Session: ${htmlCodeSpan(synthesis.session_id)}</span> ·` : ""}
+    <span>Model (self-declared): ${htmlCodeSpan(synthesis.declared_model)}</span> ·
+    ${synthesis.harness ? `<span>Harness (self-declared): ${htmlCodeSpan(synthesis.harness)}</span> ·` : ""}
     <span>Seq: #${synthesis.seq}</span> ·
     <span>Dropped minority findings: ${synthesis.dropped_single_author_count}</span>
   </div>

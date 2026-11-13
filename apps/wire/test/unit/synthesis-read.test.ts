@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   OpaqueProblemSchema,
   SynthesesListResponseSchema,
@@ -33,6 +34,7 @@ function fixture() {
       UNIQUE(problem_id,seq));
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
     CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,version INTEGER,visibility TEXT);
+    CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY, provenance_json TEXT);
     INSERT INTO problems VALUES ('P-SYNTH',0,'active',0),('P-OTHER',0,'active',0);`);
   const queries: string[] = [];
   const db = {
@@ -170,6 +172,127 @@ test("reconstructs complete published work without a syntheses projection", () =
     assert.deepEqual(page.omitted, []);
     assert.equal(f.queries.length, 1);
   }));
+
+const warningReceipt = JSON.parse(
+  readFileSync(
+    new URL(
+      "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
+
+test("synthesis notices come only from the exact immutable publication receipt in the same read", () =>
+  using(async (f) => {
+    const warned = f.publish(2, "SYNTH-WARNED");
+    f.publish(3, "SYNTH-CLEAN", { screening_notice: warningReceipt.public_action });
+    f.sql
+      .query("INSERT INTO screening_publications VALUES(?,?)")
+      .run(warned.eventId, JSON.stringify(warningReceipt));
+    const page = await f.read();
+    assert.deepEqual(
+      page.items.map(({ synthesis }) => [synthesis.synthesis_id, synthesis.screening_notice]),
+      [
+        ["SYNTH-CLEAN", undefined],
+        ["SYNTH-WARNED", warningReceipt.public_action],
+      ],
+    );
+    assert.equal(f.queries.length, 1, "content and notice share one D1 snapshot");
+    const exact = await f.read({ synthesisId: "SYNTH-WARNED" });
+    assert.deepEqual(exact.items[0]?.synthesis.screening_notice, warningReceipt.public_action);
+    for (const format of ["json", "md", "html"]) {
+      const response = await f.http(`/p/P-SYNTH/syntheses.${format}`);
+      assert.equal(response.status, 200);
+      const body = await response.text();
+      assert.ok(
+        body.includes(
+          format === "json"
+            ? '"screening_notice"'
+            : "Published with a screening context notice: dual-use-boundary.",
+        ),
+      );
+      for (const privateField of ["input_digest", "configuration_digest", "model_version"])
+        assert.ok(!body.includes(privateField));
+    }
+  }));
+
+test("ordinary pass receipts retain legacy no-notice behavior", () =>
+  using(async (f) => {
+    const { eventId } = f.publish();
+    const pass = {
+      ...warningReceipt,
+      outcome: "pass",
+      public_action: {
+        category: "benign-context",
+        action: "published",
+        notice: "none",
+      },
+    };
+    f.sql
+      .query("INSERT INTO screening_publications VALUES(?,?)")
+      .run(eventId, JSON.stringify(pass));
+    const page = await f.read();
+    assert.equal(page.items.length, 1);
+    const item = page.items[0];
+    assert.ok(item);
+    assert.ok(!("screening_notice" in item.synthesis));
+    assert.deepEqual(page.omitted, []);
+  }));
+
+for (const [label, receipt] of [
+  ["malformed JSON", "{"],
+  [
+    "incoherent action",
+    JSON.stringify({
+      ...warningReceipt,
+      public_action: { category: "off-topic", action: "published-with-warning", notice: "none" },
+    }),
+  ],
+  ["oversized receipt", JSON.stringify(warningReceipt) + " ".repeat(4096)],
+  [
+    "private fields",
+    JSON.stringify({ ...warningReceipt, provider_reason: "PRIVATE-CLASSIFIER-CANARY" }),
+  ],
+] as const) {
+  test(`${label} withholds synthesis rather than stripping its context notice`, () =>
+    using(async (f) => {
+      const { eventId } = f.publish();
+      f.sql.query("INSERT INTO screening_publications VALUES(?,?)").run(eventId, receipt);
+      const page = await f.read();
+      assert.deepEqual(page.items, []);
+      assert.deepEqual(page.omitted, ["content_unavailable"]);
+      for (const format of ["json", "md", "html"]) {
+        const body = await (await f.http(`/p/P-SYNTH/syntheses.${format}`)).text();
+        assert.ok(!body.includes("Published scientific work."));
+        assert.ok(!body.includes("PRIVATE-CLASSIFIER-CANARY"));
+        assert.ok(!body.includes("screening_notice"));
+      }
+    }));
+}
+
+for (const mode of ["hidden", "redacted", "private"] as const) {
+  test(`${mode} synthesis suppresses both its content and its publication notice`, () =>
+    using(async (f) => {
+      const { eventId } = f.publish();
+      f.sql
+        .query("INSERT INTO screening_publications VALUES(?,?)")
+        .run(eventId, JSON.stringify(warningReceipt));
+      if (mode === "hidden") f.hide("SYNTH-A");
+      if (mode === "redacted")
+        f.sql
+          .query(
+            "UPDATE event_content SET payload_json=NULL,redacted_at='2026-11-12T00:00:00.000Z' WHERE event_id=?",
+          )
+          .run(eventId);
+      if (mode === "private")
+        f.sql.exec("UPDATE problems SET status='private-draft' WHERE id='P-SYNTH'");
+      const page = await f.read();
+      assert.deepEqual(page.items, []);
+      assert.ok(!JSON.stringify(page).includes("Published scientific work."));
+      assert.ok(!JSON.stringify(page).includes("screening_notice"));
+    }));
+}
 
 test("corrupt projection text and attribution cannot replace a publication", () =>
   using(async (f) => {

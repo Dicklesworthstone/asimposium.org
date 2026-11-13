@@ -1,0 +1,25 @@
+{
+  "schema": "https://a.asimposium.org/schemas/syntheses.v1.json",
+  "synthesis": {
+    "synthesis_id": "SYNTH-WARNING",
+    "problem_id": "P-SYNTHESIS",
+    "seq": 3,
+    "covers_through": 2,
+    "body_md": "The finite parity result remains limited to the recorded cases.",
+    "anchors": [
+      { "target_kind": "claim", "target_id": "C-1", "target_version": 1, "target_seq": 2 }
+    ],
+    "omitted": [],
+    "selection_policy": "Include the exact bounded result and disclose its limits.",
+    "dropped_single_author_count": 0,
+    "authoring_principal": "F-RESEARCH",
+    "declared_model": "self-declared/model",
+    "created_at": "2026-11-12T00:00:00.000Z",
+    "screening_notice": {
+      "category": "dual-use-boundary",
+      "action": "published-with-warning",
+      "notice": "screening-warning"
+    }
+  },
+  "staleness": { "material_events_since": 0, "stale": false }
+}

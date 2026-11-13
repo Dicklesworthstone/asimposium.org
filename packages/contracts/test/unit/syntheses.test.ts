@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
 import {
   SingleSynthesisResponseSchema,
   SYNTHESES_SCHEMA_ID,
@@ -6,11 +9,47 @@ import {
   SynthesesListResponseSchema,
   SynthesisIdSchema,
   SynthesisItemSchema,
+  SynthesizeRequestSchema,
   synthesesListMatchesQuery,
   synthesesListPath,
 } from "../../src/index.ts";
 
 describe("W5.8b Synthesis contracts", () => {
+  test("warning goldens preserve public-only notices in Zod and generated JSON Schema", () => {
+    const read = (path: string) => JSON.parse(readFileSync(new URL(path, import.meta.url), "utf8"));
+    const schema = read("../../generated/syntheses.schema.json");
+    const ajv = new Ajv2020({ strict: true, allErrors: true });
+    addFormats(ajv);
+    const validate = ajv.compile(schema.$defs.single);
+    const valid = read("../fixtures/valid/synthesis-screening-notice.json");
+    const invalid = read("../fixtures/invalid/synthesis-screening-notice.json");
+    expect(SingleSynthesisResponseSchema.parse(valid)).toEqual(valid);
+    expect(validate(valid), JSON.stringify(validate.errors)).toBe(true);
+    expect(SingleSynthesisResponseSchema.safeParse(invalid).success).toBe(false);
+    expect(validate(invalid)).toBe(false);
+    const { synthesis: item } = valid;
+    const request = {
+      covers_through: item.covers_through,
+      body_md: item.body_md,
+      anchors: item.anchors,
+      omitted: item.omitted,
+      selection_policy: item.selection_policy,
+    };
+    expect(SynthesizeRequestSchema.safeParse(request).success).toBe(true);
+    expect(
+      SynthesizeRequestSchema.safeParse({ ...request, screening_notice: item.screening_notice })
+        .success,
+    ).toBe(false);
+    for (const notice of [
+      { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
+      { category: "injection", action: "published-with-warning", notice: "screening-warning" },
+    ]) {
+      const face = { ...valid, synthesis: { ...item, screening_notice: notice } };
+      expect(SingleSynthesisResponseSchema.safeParse(face).success).toBe(true);
+      expect(validate(face), JSON.stringify(validate.errors)).toBe(true);
+    }
+  });
+
   describe("SynthesisIdSchema", () => {
     test("validates canonical IDs and rejects malformed ones", () => {
       expect(SynthesisIdSchema.safeParse("SYNTH-1").success).toBe(true);

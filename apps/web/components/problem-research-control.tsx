@@ -34,6 +34,7 @@ import {
   synthesisPagePath,
   type SynthesisSelectionPage,
 } from "@/lib/synthesis-view";
+import { ScreeningNotice } from "./screening-notice";
 
 export type ProblemResearchWorkspace = Pick<
   SponsorProblemGovernanceResponse,
@@ -76,6 +77,7 @@ export function ClosingSynthesisReview({
   return (
     <section aria-labelledby="closing-synthesis-review">
       <h3 id="closing-synthesis-review">Exact published closing synthesis</h3>
+      <ScreeningNotice notice={source.screening_notice} />
       <p>
         <code>{source.synthesis_id}</code> · publication sequence {source.seq} · covers through{" "}
         {source.covers_through}
@@ -167,6 +169,7 @@ export function PublishedSynthesisChoices({
       <ul>{page.choices.map((item) => <li className="claim-card" key={item.synthesis_id}>
         <p><Link href={synthesisPagePath(problemId, `${item.synthesis_id}@1`)} prefetch={false}>{item.synthesis_id}</Link>{" · "}
           publication sequence {item.seq} · coverage through {item.covers_through}</p>
+        <ScreeningNotice notice={item.screening_notice} />
         <p>Author <code>{item.authoring_principal}</code> · <time dateTime={item.created_at}>{item.created_at}</time></p>
         {item.closing === undefined ? <p>No structured closing declaration was recorded.</p> : <p>
           Closing declaration for <code>{item.closing.result_claim.claim_id}@{item.closing.result_claim.version}</code>, direction {item.closing.direction}.

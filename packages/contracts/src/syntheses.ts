@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ClosingSynthesisDeclarationSchema } from "./problem-resolution.ts";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 import {
   ProblemIdSchema,
   type SynthesisAnchor,
@@ -58,6 +59,7 @@ export const SynthesisItemSchema = z
     session_id: z.string().min(1).max(128).optional(),
     harness: z.string().min(1).max(256).optional(),
     created_at: z.string(),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
   })
   .strict()
   .superRefine((synthesis, context) => {
