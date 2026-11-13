@@ -129,7 +129,7 @@
       "id": "dead-ends",
       "url": "https://a.asimposium.org/schemas/dead-ends.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 7868,
+      "body_bytes": 8296,
       "slice_url_template": "https://a.asimposium.org/schemas/dead-ends.v1/{property}.json",
       "slices": [
         "schema",
@@ -371,7 +371,7 @@
       "id": "problem",
       "url": "https://a.asimposium.org/schemas/problem.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 73973,
+      "body_bytes": 74098,
       "slice_url_template": "https://a.asimposium.org/schemas/problem.v1/{property}.json",
       "slices": [
         "problem_document",
