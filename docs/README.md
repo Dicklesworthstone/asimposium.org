@@ -17,7 +17,14 @@ observed.
 Updated 2026-11-13. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-Qualified source `45089000` repairs exact synthesis navigation and mobile
+Qualified source `fecd48d5` connects private dead-end impact notices to exact
+verified public records. Typecheck, lint and the full root suite pass all eight
+groups; independent owning, contract, renderer and real Workerd/D1/R2 checks pass.
+The original inbox task remains incomplete. Public Worker observations at
+21:35 UTC retain the older draft capability bodies and missing protocol route;
+deployment reconciliation remains operator task `rs5n`.
+
+Earlier qualified source `45089000` repairs exact synthesis navigation and mobile
 reading. Typecheck, lint and the full root suite pass all eight groups;
 primary and independent rebuilt production browsers pass all 526 checks.
 WhiteRaven independently closed only `fjp.2`, with source faults and restoration
@@ -56,6 +63,52 @@ The parent screening task retains its full scope and ownership. Closing
 syntheses with warnings stay held until resolution, honors and share-card
 derivatives can retain the notice. Deployment and broader hosted acceptance
 remain open. The earlier qualifications below retain their own source pins.
+
+### Exact negative-evidence reads — `fecd48d5`
+
+Served-dead-end notices previously had no next action, retry notices pointed to
+the default list, and the advertised `target` query was ignored. Both notices
+now reach the exact public record through the canonical query contract. The
+existing verified-event loader selects that record before the unchanged
+200-entry limit; JSON, Markdown and HTML share selection, current visibility,
+body-integrity checks, HEAD and ETag handling. Explicit references preserve
+readable superseded history. Missing, hidden, redacted and foreign-problem
+targets stay unavailable; malformed queries teach the actual request schema.
+
+The original real-bindings journey follows genuine served and retry notices.
+After 200 later chained fixture events, the old notice still reaches its exact
+earlier body while the default list omits it. Those events arrange busy history;
+they are not 200 validator/screening HTTP publications or scientific results.
+The original projection-rebuild, privacy, retry, warning and log checks remain.
+Independent final-pin execution passes 110 owning tests, the whole native
+journey, eight-group typecheck/lint, 1,033 contracts and 605 renderer tests.
+The earlier selector-only fault at `6134ddef` returns another record for an
+unknown target, failing the unchanged 404 assertion; exact restoration passes.
+Only the discovery golden differs between these source pins, so the fault is
+reported at its actual revision, rather than presented as a new execution.
+
+The first full root fails one strict discovery-golden assertion: the new schemas
+changed two advertised UTF-8 lengths. `fecd48d5` updates only those derived values
+after matching the complete normal generator; no assertion or threshold changes.
+The final original root passes all eight groups in 1,551.556 seconds, including
+7,507 Worker tests and 1,117 Agora tests. The 54 original individual toolchain
+skips remain. All 2,764 inputs and the actual Next runtime are stable at this
+qualification. Later README edits are an explicit documentation delta, not a
+fresh execution at the metadata commit.
+
+Source UBS completes ten supported files with three inherited heuristic critical
+flags and 76 reviewed warnings; it is not a security-clean result. The JSON-only
+successor scans report nothing checked, exit 3, and are not passes. The larger
+inbox taxonomy, DO/outbox, operational and hosted criteria remain open under
+`1e7`; this increment supplies only the exact-reader and notice connection.
+WhiteRaven independently closed only `1e7.1` at 21:40:48 UTC; Beads comment
+3232 maps each original criterion to its source lines and actual gate receipts.
+
+Fresh no-auth public observations at 21:35 UTC use the configured staging origin
+and the project User-Agent. Both capability documents retain the earlier bytes
+and `0.1.0-draft`; both `/protocol.json` requests return 404. These observations
+do not establish provider revision, deployment history, Google approval or
+launch readiness. The current source qualification is local.
 
 ### Exact synthesis reading — `45089000`
 
