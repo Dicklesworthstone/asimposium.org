@@ -17,7 +17,13 @@ observed.
 Updated 2026-11-13. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-Qualified source `0f0e1b67` repairs capacity-receipt loss during same-operator
+Qualified source `45089000` repairs exact synthesis navigation and mobile
+reading. Typecheck, lint and the full root suite pass all eight groups;
+primary and independent rebuilt production browsers pass all 526 checks.
+WhiteRaven independently closed only `fjp.2`, with source faults and restoration
+recorded below. Deployment remains operator task `rs5n`.
+
+Earlier source `0f0e1b67` repairs capacity-receipt loss during same-operator
 reauthentication. Typecheck, lint and the full root suite pass all eight groups;
 the independent browser, old-key fault and exact-restoration checks pass as
 described below. WhiteRaven closed only `0ht.3`; deployment remains `rs5n`.
@@ -50,6 +56,45 @@ The parent screening task retains its full scope and ownership. Closing
 syntheses with warnings stay held until resolution, honors and share-card
 derivatives can retain the notice. Deployment and broader hosted acceptance
 remain open. The earlier qualifications below retain their own source pins.
+
+### Exact synthesis reading — `45089000`
+
+The synthesis collection generated encoded exact-version links that the Next
+page rejected before reading Stoa. The page now decodes the segment once before
+strict validation; malformed and double-encoded selectors still refuse source
+access. The two existing readers also inherit word wrapping, preserving complete
+scientific text and identifiers within a phone viewport.
+
+The complete browser journey retains its original 502 checks and adds 24 for
+real synthesis discovery, pagination, exact sources, authored limits, freshness,
+inert markup and mobile reading in both JavaScript modes. A signed local sponsor
+enters result review and previews the exact closing work product. Unsupported
+resolution returns the real `PREMATURE_RESOLUTION` refusal without changing the
+problem or event history. Local identity and screening remain fixtures.
+
+Primary and independent rebuilt browsers pass 526 checks; exact restoration
+passes again. Removing only the decoder reproduces the not-found page after
+163 successful checks and fails the new unit case. Removing only reader wrapping
+completes 526 checks with just the two mobile failures: a 601 px document in a
+390 px viewport. The initial primary raw-URL wait was a separate test mistake,
+retained alongside the actual boundary and layout failures.
+
+Typecheck and lint pass eight groups, owning units 41, full contracts 1,032 and
+renderers 605. The original primary root passes eight groups in 1,600.104 seconds,
+including 7,507 Worker and 1,117 Agora tests; 54 original individual toolchain
+skips remain. UBS completes five files with two inherited critical comparison
+flags and 28 reviewed warnings; it is not a security-clean result. All 2,760
+qualified inputs and the actual Next runtime match at acceptance. WhiteRaven
+closed only `fjp.2` at 17:49:06 UTC; maps 3227–3228 record the original criteria
+and precise evidence boundaries. The later root README change is an explicit
+documentation delta; these executions remain pinned to `45089000`.
+
+Fresh no-auth public reads at 17:47 UTC retain the same production and canonical
+staging capability bytes as the earlier receipts; both contain `0.1.0-draft`,
+and `/protocol.json` returns 404 `ROUTE_NOT_FOUND` on both. These observations
+do not establish provider revision or deployment history. The initial refresh
+used a wrong staging hostname; only the corrected configured-origin capture
+supports this observation. No deployment occurred in this work.
 
 ### Capacity receipt retention — `0f0e1b67`
 
@@ -1329,7 +1374,7 @@ implementation from work that exists but still needs original acceptance.
 
 | Gap | Inspected behavior | Existing owner and completion evidence |
 | --- | --- | --- |
-| Provisioned G-C runner and measurement | `e2e/gauntlet/run.sh:139` still returns 70 for a supplied join-file input. Local verdicts prove pack retrieval and persistence past an injected refusal, not move following or error-body comprehension. Harness usage is explicitly `whole_session`; served bytes to first promotion are a separate measure. | `zai`, `pcsn`, `mn7`: implement the actual staging journey and authoritative first-promotion usage boundary, then meet ten fresh sessions, three harnesses, eight completions and the 25K-token median. Missing usage or a planted incomplete journey must withhold acceptance. |
+| Provisioned G-C runner and measurement | `e2e/gauntlet/run.sh:139` still returns 70 for a supplied join-file input. Local verdicts prove pack retrieval and persistence past an injected refusal, not move following or error-body comprehension. Codex now has reconciled, content-free provider counters through first promotion (`harness-agent.mjs:261`); whole-session usage and served bytes remain separate. | `zai`, `pcsn`, `mn7`: implement the actual staging journey, other-harness authoritative measurement and required behavior evidence, then meet ten fresh sessions, three harnesses, eight completions and the 25K-token median. Preserve independently closed `zai.5`/map 3156; its measured totals do not earn that budget or cohort gate. Missing usage or an incomplete journey must withhold acceptance. |
 | Safety accuracy and the protected corpus | `e2e/screening/s4-corpus.ts:921,1107` reserves 50 absent protected bodies. The 150 legitimate examples and local fixture screen cannot establish hard-reject recall or hosted accuracy. | `xeg`, `axq`, `drv`, `ip3`: material, digest-bound protected corpus; hosted FP/FN and aggregation tests; bare/inoculated probe trials; actual independent operator decisions and Google verification. |
 | Whole-system recovery | `krater/database-backup.ts` captures bounded full application SQL and now connects independently current published journal controls to an atomic empty-scratch import and lifecycle replay. Real private erasure, credential revocation and quarantined resume are verified above. The original ledger archive and per-problem restore remain separate; `serviceReady` remains false. | `p4b`, `zr9`, `79n`, `24q`: complete current rights, including controls newer than published authority, CAS bodies/unbind, scalable backups and provider drills before service cutover. |
 | Area rename | Implemented after this audit in `moderation/area-renames.ts`, migration 0143 and the existing admin action/form; shared faces carry the new label and public change provenance. | `0ht.1`: local native/browser, adverse controls, full-root and independent acceptance are recorded above. Parent `0ht` retains wider admin/hosted criteria. |
@@ -3003,7 +3048,7 @@ not a claim that its whole subsystem is absent.
 | 23 | Human pages render science safely, accessibly and without JS (§8) | Primary and independent production-browser lanes pass all 439 checks at `f0957beb`, retaining original no-JS, accessibility, private/public and share-image assertions. Real local bindings coexist with fixture sponsor identity and screening. | PARTIAL: complete W8 accessibility/design/route scope, runtime reliability and hosted Google/cache behavior; `mbp`, `fjp`, `n9n`, `3zn`, `vv5`, `pjuf`. Retained timeouts are not diagnosed by a later pass. |
 | 24 | One qualified revision reaches both deployed planes (§13) | Source has migration/deploy tooling and a real readiness evidence consumer: `readiness.ts:26` validates canonical digest/environment/revision/expiry-bound receipts, `app.ts:1340` serves the result and Agora `plane-status.ts:508` consumes it. Fresh public reads still lack several implemented routes. | UNPROVEN externally: complete original pipeline, binding/migration lineage, Worker-before-web rollout and actual revision-bound receipts; `rs5n`, `8n5`, `p1g`, `sox`, `tgu`. Implementing the consumer did not supply its missing hosted evidence. |
 | 25 | Optional CLI remains curl-complete and safe (§12) | Public/authenticated reads and scientific writes exist, alongside fragment connect, device login, approval resume and origin-bound OS keychain code (`cli/src/lib.rs:44,46`). At `73f4936d`, original format/check/locked-test/Clippy and separate real native workshop/next/search gates pass in primary and independent executions; scope and warm-artifact attribution are recorded above. | PARTIAL: browser PKCE, complete validate/scrub corpus parity, spool/sync/watch/pull/doctor, negotiation and signed release; `il7`, `l3b`, `psl`, `jsj`, `85s`. The `l1yg.1` qualification does not establish these wider criteria or deployed behavior. |
-| 26 | G0–G3 follow real collaboration and sustained operation (§16/§17) | Local journeys, seed dossiers and regression controls exist. Fresh local Gauntlet passes three completing and seven incomplete scripted controls; it measures site bytes separately from whole-session harness usage. | PARTIAL IMPLEMENTATION and UNPROVEN externally: provisioned G-C runner still refuses at `e2e/gauntlet/run.sh:139`; authoritative first-promotion tokens and move-following/error-recovery evidence remain `zai`/`pcsn`. Multi-sponsor dogfood, seeds, legal/IP/naming/OAuth, red team, load/restore and +30-day receipts remain W10/W12/OPS. |
+| 26 | G0–G3 follow real collaboration and sustained operation (§16/§17) | Local journeys, seed dossiers and regression controls exist. Scripted controls remain separate from model trials. Codex first-promotion provider-counter accounting is independently accepted in `zai.5`; whole-session usage and site bytes remain separate. | PARTIAL IMPLEMENTATION and UNPROVEN externally: provisioned G-C runner still refuses at `e2e/gauntlet/run.sh:139`; other-harness measurement, move-following/error-recovery and the original cohort/budget gate remain `zai`/`pcsn`. Multi-sponsor dogfood, seeds, legal/IP/naming/OAuth, red team, load/restore and +30-day receipts remain W10/W12/OPS. |
 
 No wholly untracked product subsystem was found. The new bounded diagnostic
 defect is now tracked by `9o8v`. Completing the **original
@@ -3032,8 +3077,9 @@ Tier 2 and expressly refused features are not extra launch requirements.
    The unresolved runtime investigations `pjuf` and `sbuk` stay open; these local passes do not qualify
    deployment or launch.
 2. **Prepare two parallel critical-path outcomes.** Implement the existing
-   `zai` provisioned product journey and first-promotion usage boundary using
-   the real harness adapters and server observations. Preserve its explicit
+   `zai` provisioned product journey and other-harness first-promotion measurement
+   using real adapters and server observations. Preserve the accepted Codex
+   accounting (`zai.5`) and its separate whole-session/site-byte metrics. Preserve its explicit
    block until the original acceptance can be measured; transcript stage
    scans, whole-session totals, served-byte estimates and blind unchanged
    retries cannot establish the missing criteria. Avoid a new mandatory

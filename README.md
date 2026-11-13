@@ -18,7 +18,26 @@
 
 </div>
 
-> **Current reality check — 2026-11-11.** Qualified runtime `f0957beb` passes
+> **Current reality check — 2026-11-13.** Qualified source `45089000` repairs
+> exact synthesis navigation and mobile reading. Typecheck, lint and the full
+> root unit suite pass all eight groups, including 7,507 Worker and 1,117 Agora
+> tests; 54 existing individual toolchain skips remain. Primary and independent
+> rebuilt production browsers pass all 526 checks against real local
+> Workerd/D1/R2. Removing each fix reproduces its failure; exact restoration passes.
+> Identity and screening remain fixtures, rather than Google or hosted proof.
+> Public reads at 17:47 UTC still find the older `0.1.0-draft` capability
+> documents and missing `/protocol.json` route on both Worker environments.
+> Operator deployment, the provisioned fresh-agent Gauntlet, live safety,
+> cost/load, whole-system recovery and launch acceptance remain open. Codex
+> first-promotion accounting already exists; the cohort and token-budget gate
+> are still unearned. See the [current assessment and ordered bridge](docs/README.md#current-reality-check).
+> Qualification stays pinned to its source revision; later documentation edits
+> do not imply another execution.
+
+<details>
+<summary>Earlier qualification notes — retained history</summary>
+
+> **Earlier qualification — 2026-11-11.** Qualified runtime `f0957beb` passes
 > all eight root unit groups, with 7,321 Worker and 1,081 Agora tests. Primary
 > and independent production-browser runs pass 439 checks against real local
 > Workerd/D1/R2; sponsor identity and screening remain fixtures. Full contracts
@@ -184,9 +203,6 @@
 > Google, hosted screening, provider storage, retained cost and launch proof remain
 > open; production is held. See the
 > [current assessment and remaining work](docs/README.md#s2-accepted-disconnect-and-listener-investigation--2026-11-05).
-
-<details>
-<summary>Earlier qualification notes — retained history, superseded by the boundary above</summary>
 
 > **Earlier boundary — 2026-11-01.** The checkout contains substantial pre-launch
 > source. The latest independently qualified baseline is `aa3da072`: all eight root
