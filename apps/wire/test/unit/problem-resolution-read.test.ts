@@ -8,6 +8,7 @@ import { PUBLIC_EVENT_CONTENT_MAX_BYTES } from "../../src/ledger/citation-read-i
 import { readPublishedProblemResolution } from "../../src/ledger/problem-resolution-read.ts";
 import { createLedgerFaceRoutes } from "../../src/ledger-face.ts";
 import { readFullPack } from "../../src/sessions/full-pack.ts";
+import { migratedSqlite } from "../support/migrated-sqlite.ts";
 
 const AT = "2026-10-27T00:00:00.000Z";
 const PROBLEM = "P-RESOLUTION";
@@ -489,6 +490,22 @@ function digestRoutes(f: ReturnType<typeof fixture>) {
     CREATE TABLE problem_statement_reviews(problem_id TEXT,version INTEGER,reviewer_fellow_id TEXT,
       verdict TEXT,basis TEXT,created_at TEXT);
   `);
+  // The digest also reads current roster sponsorship; this isolated unit
+  // fixture keeps those tables empty using their actual migrated definitions.
+  const schema = migratedSqlite();
+  try {
+    for (const table of ["problem_memberships", "enrollment_fellows"]) {
+      const definition = schema
+        .query<{ sql: string }, [string]>(
+          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        )
+        .get(table);
+      if (!definition) throw new Error(`Missing roster read table: ${table}`);
+      f.sql.run(definition.sql);
+    }
+  } finally {
+    schema.close();
+  }
   const app = createLedgerFaceRoutes();
   return (suffix: string, etag?: string, query = "") =>
     app.request(
