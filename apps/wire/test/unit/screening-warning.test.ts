@@ -7,6 +7,7 @@ import {
   ProblemDetailSchema,
   ScreeningPublicationNoticeSchema,
   ScreeningPublicationProvenanceSchema,
+  SynthesizeRequestSchema,
 } from "@asimposium/contracts";
 import { createApp } from "../../src/app";
 import type { Env } from "../../src/env";
@@ -333,6 +334,109 @@ describe("published screening warnings", () => {
         const held = await screen(f, candidate(f, "hypotheses"), patch, "hypotheses");
         expect(held instanceof Response && held.status).toBe(202);
       }
+      expect(f.state().events).toEqual([]);
+    }));
+
+  test("ordinary synthesis warnings publish only through the exact writer; closing declarations stay held", () =>
+    withFixture(async (f) => {
+      const ordinary = SynthesizeRequestSchema.parse({
+        covers_through: 2,
+        body_md: "The finite parity result remains limited to the recorded cases.",
+        anchors: [{ target_kind: "claim", target_id: "C-1", target_version: 1, target_seq: 2 }],
+        omitted: [],
+        selection_policy: "Include the exact bounded result and disclose its limits.",
+      });
+      const closing = SynthesizeRequestSchema.parse({
+        ...ordinary,
+        closing_resolution: {
+          result_claim: { claim_id: "C-1", version: 1 },
+          direction: "affirmed",
+          no_claim_boundary: {
+            verified: ["Exact finite case."],
+            mechanisms: ["Independent check."],
+            independence_tiers: ["T2"],
+            remaining_external_validation: ["External review remains."],
+          },
+        },
+      });
+      const input = (publication: unknown): WorkersAIPromotionInput => ({
+        ...candidate(f, "synthesis"),
+        statement: JSON.stringify(publication),
+      });
+      for (const category of ["dual-use-boundary", "off-topic"] as const) {
+        const receipt = published(
+          await screen(f, input(ordinary), { coarse_category: category }, "synthesize"),
+        );
+        expect(receipt.provenance.public_action).toEqual({
+          category,
+          action: "published-with-warning",
+          notice: category === "off-topic" ? "off-scope" : "screening-warning",
+        });
+        expect(ScreeningPublicationProvenanceSchema.safeParse(receipt.provenance).success).toBe(
+          true,
+        );
+      }
+      expect(count(f, "screening_cases")).toBe(0);
+      expect(count(f, "screening_refusals")).toBe(0);
+      for (const publication of [ordinary, closing]) {
+        const receipt = published(
+          await screen(
+            f,
+            input(publication),
+            {
+              decision: "pass",
+              coarse_category: "benign-context",
+            },
+            "synthesize",
+          ),
+        );
+        expect(receipt.provenance.public_action).toEqual({
+          category: "benign-context",
+          action: "published",
+          notice: "none",
+        });
+      }
+      // A closing declaration also feeds problem-resolution and honors derivatives.
+      // Those surfaces do not yet carry its notice, so only ordinary warnings open.
+      for (const category of ["dual-use-boundary", "off-topic"] as const) {
+        const held = await screen(f, input(closing), { coarse_category: category }, "synthesize");
+        expect(held instanceof Response && held.status).toBe(202);
+        if (!(held instanceof Response))
+          throw new Error("Expected a private closing-synthesis hold");
+        expect(held.headers.get("cache-control")).toContain("no-store");
+        expect(await held.json()).toMatchObject({ code: "SCREENING_HOLD" });
+      }
+      for (const route of ["promote", "review", "unrecognized-synthesis-writer"]) {
+        const held = await screen(f, input(ordinary), {}, route);
+        expect(held instanceof Response && held.status).toBe(202);
+      }
+      for (const publication of [
+        null,
+        [],
+        {},
+        { ...ordinary, closing_resolution: null },
+        { ...ordinary, screening_notice: { notice: "screening-warning" } },
+      ]) {
+        const held = await screen(f, input(publication), {}, "synthesize");
+        expect(held instanceof Response && held.status).toBe(202);
+      }
+      const malformed = await screen(
+        f,
+        { ...input(ordinary), statement: "{not-json" },
+        {},
+        "synthesize",
+      );
+      expect(malformed instanceof Response && malformed.status).toBe(202);
+      for (const patch of [
+        { evaluated_body_digest: `sha256:${"f".repeat(64)}` },
+        { evaluated_context_digest: `sha256:${"f".repeat(64)}` },
+        { provider_status: "timeout" },
+        { coarse_category: "provider-unavailable" },
+      ] as const) {
+        const held = await screen(f, input(ordinary), patch, "synthesize");
+        expect(held instanceof Response && held.status).toBe(202);
+      }
+      expect(count(f, "screening_refusals")).toBe(0);
       expect(f.state().events).toEqual([]);
     }));
 

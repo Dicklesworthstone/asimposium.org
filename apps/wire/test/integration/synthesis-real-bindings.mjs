@@ -8,6 +8,10 @@ import {
   SynthesesListResponseSchema,
   SynthesizeRequestSchema,
 } from "@asimposium/contracts";
+import {
+  parsePublicProblemExport,
+  verifyPublicProblemExportChain,
+} from "../../src/krater/export.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
@@ -946,6 +950,204 @@ await runLocalWorkerJourney(
         (anchor) => anchor.target_seq <= retainedCut && anchor.target_version > 0,
       ),
     );
+
+    // An ordinary summary can carry a policy warning without becoming a
+    // scientific verdict. The exact immutable receipt follows every reader.
+    const warningNotice = {
+      category: "dual-use-boundary",
+      action: "published-with-warning",
+      notice: "screening-warning",
+    };
+    const warningText = "Published with a screening context notice: dual-use-boundary.";
+    const warningBody = {
+      ...retainedBody,
+      body_md: "NATIVE-SYNTHESIS-WARNING: retain the reviewed claim and failed sieve together.",
+    };
+    await fixtures.setScreenMode("allow-with-warning");
+    const beforeWarning = await footprint();
+    const warned = await call(
+      `/v1/sessions/${retainedSession.session_id}/synthesize`,
+      warningBody,
+      retainedWriter,
+      201,
+      "synthesis-published-warning",
+    );
+    const afterWarning = await footprint();
+    assert.equal(afterWarning.events, beforeWarning.events + 1);
+    assert.equal(afterWarning.syntheses, beforeWarning.syntheses + 1);
+    assert.equal(afterWarning.screening_publications, beforeWarning.screening_publications + 1);
+    assert.equal(afterWarning.public_seq, beforeWarning.public_seq + 1);
+    const warningScreens = await fixtures.screeningCalls();
+    assert.deepEqual(
+      await call(
+        `/v1/sessions/${retainedSession.session_id}/synthesize`,
+        warningBody,
+        retainedWriter,
+        200,
+        "synthesis-published-warning",
+      ),
+      warned,
+    );
+    assert.deepEqual(await footprint(), afterWarning);
+    assert.equal(await fixtures.screeningCalls(), warningScreens, "replay is not screened again");
+
+    // Closing-resolution derivatives do not yet carry warning context. A
+    // structurally valid closing declaration must still be held, with no
+    // scientific publication or successful replay receipt escaping the hold.
+    const heldClosing = await call(
+      `/v1/sessions/${retainedSession.session_id}/synthesize`,
+      {
+        ...warningBody,
+        closing_resolution: {
+          ...closing,
+          result_claim: { claim_id: claim1Id, version: 2 },
+        },
+      },
+      retainedWriter,
+      202,
+      "synthesis-closing-warning-hold",
+    );
+    assert.equal(heldClosing.code, "SCREENING_HOLD");
+    assert.deepEqual(await footprint(), afterWarning);
+    await fixtures.setScreenMode("pass");
+
+    const warningReceipt = await env.DB.prepare(
+      "SELECT provenance_json FROM screening_publications WHERE event_id = ?",
+    )
+      .bind(warned.event_id)
+      .first();
+    assert.ok(warningReceipt);
+    assert.deepEqual(
+      ScreeningPublicationProvenanceSchema.parse(JSON.parse(warningReceipt.provenance_json))
+        .public_action,
+      warningNotice,
+    );
+    const warningFaces = [];
+    for (const suffix of ["json", "md", "html"]) {
+      for (const exact of [false, true]) {
+        const url = `${origin}/p/${problemId}/syntheses${exact ? `/${warned.synthesis_id}` : ""}.${suffix}`;
+        const response = await worker.fetch(url, { headers: { "User-Agent": userAgent } });
+        assert.equal(response.status, 200);
+        const bytes = await response.text();
+        assert.ok(bytes.includes(warningBody.body_md));
+        if (suffix === "json") {
+          const face = JSON.parse(bytes);
+          const item = exact
+            ? SingleSynthesisResponseSchema.parse(face).synthesis
+            : SynthesesListResponseSchema.parse(face).syntheses.find(
+                (synthesis) => synthesis.synthesis_id === warned.synthesis_id,
+              );
+          assert.deepEqual(item.screening_notice, warningNotice);
+          if (!exact) {
+            assert.equal(
+              face.syntheses.find((synthesis) => synthesis.synthesis_id === retained.synthesis_id)
+                .screening_notice,
+              undefined,
+              "a neighboring passing publication does not inherit the warning",
+            );
+          }
+        } else assert.ok(bytes.includes(warningText));
+        for (const privateKey of ["candidate_digest", "input_digest", "evaluated_context_digest"]) {
+          assert.ok(!bytes.includes(privateKey), `${suffix} does not expose ${privateKey}`);
+        }
+        const etag = response.headers.get("etag");
+        assert.ok(etag);
+        assert.equal(
+          (
+            await worker.fetch(url, {
+              headers: { "User-Agent": userAgent, "If-None-Match": etag },
+            })
+          ).status,
+          304,
+        );
+        warningFaces.push({ url, etag });
+      }
+    }
+    for (const profile of ["orient", "working"]) {
+      const pack = PackResponseSchema.parse(
+        await call(
+          `/v1/sessions/${retainedSession.session_id}/pack?profile=${profile}&max_tokens=8000`,
+          undefined,
+          retainedWriter,
+        ),
+      );
+      const latest = pack.items.find((item) => item.id === "SYS-synthesis-staleness");
+      assert.ok(latest?.body.includes(warned.synthesis_id));
+      assert.ok(latest.body.includes(warningText));
+    }
+    const fullWarningPack = PackResponseSchema.parse(
+      await call(
+        `/v1/sessions/${retainedSession.session_id}/pack?profile=full&max_tokens=8000&after=${warned.sequence - 1}&through=${warned.sequence}`,
+        undefined,
+        retainedWriter,
+      ),
+    );
+    const fullWarningItem = fullWarningPack.items.find(
+      (item) => item.kind === "full-event" && item.id === `FULL-${warned.sequence}`,
+    );
+    assert.ok(fullWarningItem);
+    assert.deepEqual(fullWarningItem.screening_notice, warningNotice);
+    const fullWarningRecord = JSON.parse(fullWarningItem.body);
+    assert.deepEqual(fullWarningRecord.publication.screening_notice, warningNotice);
+    assert.equal(fullWarningRecord.publication.id, warned.event_id);
+    assert.equal(fullWarningRecord.content.body_md, warningBody.body_md);
+    assert.equal(fullWarningRecord.content.screening_notice, undefined);
+
+    const warningExport = await worker.fetch(`${origin}/p/${problemId}/export.jsonl.gz`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(warningExport.status, 200);
+    const warningArchive = await new Response(
+      warningExport.body.pipeThrough(new DecompressionStream("gzip")),
+    ).text();
+    assert.equal((await verifyPublicProblemExportChain(warningArchive)).intact, true);
+    const parsedWarningExport = parsePublicProblemExport(warningArchive);
+    assert.equal(parsedWarningExport.ok, true);
+    assert.deepEqual(
+      parsedWarningExport.publicationContext.notices.find(
+        (notice) => notice.event_id === warned.event_id,
+      )?.screening_notice,
+      warningNotice,
+    );
+
+    async function controlWarnedSynthesis(visibility, version) {
+      await env.DB.prepare(
+        `INSERT INTO content_controls(control_id, problem_id, target_kind, target_ref,
+          visibility, source, reason_category, actor, reason, version, created_at)
+         VALUES (?, ?, 'ledger-object', ?, ?, 'operator', 'privacy',
+          'native-negative-test', 'Local synthesis warning visibility proof.', ?, ?)`,
+      )
+        .bind(
+          `CC-SYNTHESIS-WARNING-${version}`,
+          problemId,
+          warned.synthesis_id,
+          visibility,
+          version,
+          new Date().toISOString(),
+        )
+        .run();
+    }
+    await controlWarnedSynthesis("hidden", 1);
+    for (const face of warningFaces) {
+      const response = await worker.fetch(face.url, {
+        headers: { "User-Agent": userAgent, "If-None-Match": face.etag },
+      });
+      assert.notEqual(response.status, 304, "hidden content invalidates every previous ETag");
+      const bytes = await response.text();
+      assert.ok(!bytes.includes(warningBody.body_md));
+      assert.ok(!bytes.includes("screening-warning"));
+      assert.ok(!bytes.includes(warningText));
+    }
+    await controlWarnedSynthesis("visible", 2);
+    const restoredWarning = SingleSynthesisResponseSchema.parse(
+      await (
+        await worker.fetch(`${origin}/p/${problemId}/syntheses/${warned.synthesis_id}.json`, {
+          headers: { "User-Agent": userAgent },
+        })
+      ).json(),
+    );
+    assert.deepEqual(restoredWarning.synthesis.screening_notice, warningNotice);
+    console.log(JSON.stringify({ stage: "synthesis-warning-readers", status: "pass" }));
 
     // W2.6 (79n, z3or): claims (anchored across a statement revision), their
     // versions and the syntheses rebuild from the log.

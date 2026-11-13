@@ -110,3 +110,24 @@ test("withheld candidate pages retain progress and unsupported closing records c
   expect(html).toContain("complete summary exceeds the closing-control limit");
   expect(html).not.toContain("x".repeat(100));
 });
+
+test("ordinary warned synthesis choices retain their public notice without becoming closing candidates", () => {
+  const notice = { category: "dual-use-boundary", action: "published-with-warning",
+    notice: "screening-warning" } as const;
+  const synthesis = { ...researchSynthesis, synthesis_id: "SYNTH-ORDINARY",
+    closing_resolution: undefined, screening_notice: notice };
+  const page = synthesisSelectionPage({
+    schema: SYNTHESES_SCHEMA_ID, problem_id: "P-RESEARCH", cursor: 40,
+    before: null, next_before: null, omitted: [], syntheses: [synthesis],
+  });
+  expect(page.choices[0]?.screening_notice).toEqual(notice);
+  expect(JSON.stringify(page)).not.toContain(researchSynthesis.body_md);
+  const content = PublishedSynthesisChoices({ problemId: "P-RESEARCH", page,
+    query: {}, selected: "", disabled: false, onSelect: () => {} });
+  const html = renderToStaticMarkup(content);
+  expect(html).toContain('data-screening-notice="screening-warning"');
+  expect(html).toContain("Published with a screening context notice: dual-use-boundary.");
+  expect(html).toContain("No structured closing declaration was recorded");
+  expect(html).not.toContain(researchSynthesis.body_md);
+  expect(callbacks(content)).toHaveLength(0);
+});

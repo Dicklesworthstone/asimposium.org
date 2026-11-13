@@ -1,6 +1,7 @@
 import type { SynthesisItem } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 import { synthesisMaterialEventSql } from "./synthesis-events.ts";
 import type { SynthesisAnchorSource } from "./synthesis-references.ts";
 
@@ -80,6 +81,10 @@ SELECT p.id AS problem_id, p.public_seq, p.cursor, p.unlisted,
   e.actor_fellow_id AS fellow_id, e.actor_sponsor_id AS sponsor_id,
   e.actor_session_id AS session_id, e.model_string_self_declared AS declared_model,
   e.harness, e.available, e.body_bytes,
+  (SELECT CASE WHEN typeof(s.provenance_json) = 'text'
+      AND length(CAST(s.provenance_json AS BLOB)) <= 4096
+    THEN s.provenance_json ELSE 'invalid' END
+    FROM screening_publications s WHERE s.event_id = e.id) AS screening_provenance,
   CASE WHEN e.available = 1 AND e.page_bytes > ? THEN 1 ELSE 0 END AS byte_limit,
   CASE WHEN e.ordinal <= ? AND e.available = 1 AND e.page_bytes <= ?
     THEN e.payload_json END AS payload_json,
@@ -279,6 +284,18 @@ export async function readSynthesisPage(
       omitted.add("content_unavailable");
       continue;
     }
+    let screeningNotice: ReturnType<typeof publicationScreeningNotice>;
+    try {
+      const receipt = row.screening_provenance;
+      if (receipt !== undefined && receipt !== null && typeof receipt !== "string")
+        throw new Error("SYNTHESIS_SCREENING_RECEIPT_INVALID");
+      screeningNotice = publicationScreeningNotice(receipt);
+    } catch {
+      // A malformed recorded notice must not turn into apparently unqualified
+      // science. Hidden/redacted publications never reach receipt decoding.
+      omitted.add("content_unavailable");
+      continue;
+    }
     const synthesis = decode({
       synthesis_id: row.synthesis_id,
       problem_id: problemId,
@@ -296,6 +313,7 @@ export async function readSynthesisPage(
       session_id: row.session_id,
       harness: row.harness,
       created_at: row.created_at,
+      ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
     });
     if (synthesis === null) {
       omitted.add("content_unavailable");

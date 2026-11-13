@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
@@ -24,6 +24,12 @@ import type { Env } from "../../src/env.ts";
 import { createInboxNotice } from "../../src/inbox/store.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
+const fixtureDatabases = new Set<Database>();
+
+afterEach(() => {
+  for (const sqlite of fixtureDatabases) sqlite.close();
+  fixtureDatabases.clear();
+});
 
 class FixedRandom {
   #next = 23;
@@ -63,6 +69,7 @@ function afterInboxRead(phase: InboxRacePhase, invalidate: () => Promise<void>) 
 
 function migratedDb(afterRead?: (read: InboxRead) => Promise<void>): Env["DB"] {
   const sqlite = new Database(":memory:", { strict: true });
+  fixtureDatabases.add(sqlite);
   const files = readdirSync(MIGRATIONS)
     .filter((n) => n.endsWith(".sql"))
     .sort();

@@ -89,6 +89,56 @@ test("a wholly withheld page still advances and never claims the synthesis histo
   expect(html).not.toContain("No published syntheses were returned");
 });
 
+test("ordinary synthesis notices precede previews and exact bodies on the public human faces", async () => {
+  for (const [notice, text] of [
+    [{ category: "dual-use-boundary", action: "published-with-warning", notice: "screening-warning" },
+      "Published with a screening context notice: dual-use-boundary."],
+    [{ category: "off-topic", action: "published-with-warning", notice: "off-scope" },
+      "Off-scope science: this work remains public and available for direct collaboration"],
+  ] as const) {
+    const synthesis = { ...researchSynthesis, synthesis_id: "SYNTH-ORDINARY",
+      closing_resolution: undefined, screening_notice: notice };
+    globalThis.fetch = mock(async () => Response.json(list({ syntheses: [synthesis] }))) as unknown as typeof fetch;
+    const collection = renderToStaticMarkup(await SynthesesPage(listProps()));
+    expect(collection).toContain(`data-screening-notice="${notice.notice}"`);
+    expect(collection).toContain(text);
+    expect(collection.indexOf(text)).toBeLessThan(collection.indexOf("Preview:"));
+    globalThis.fetch = mock(async () => Response.json(exact({ synthesis }))) as unknown as typeof fetch;
+    const single = renderToStaticMarkup(await SynthesisPage(exactProps("SYNTH-ORDINARY@1")));
+    expect(single).toContain(`data-screening-notice="${notice.notice}"`);
+    expect(single).toContain(text);
+    expect(single.indexOf(text)).toBeLessThan(single.indexOf("The exact parity result"));
+    for (const html of [collection, single]) {
+      expect(html).not.toContain("evaluated_context_digest");
+      expect(html).not.toContain("provider_reason");
+    }
+  }
+  globalThis.fetch = mock(async () => Response.json(list())) as unknown as typeof fetch;
+  expect(renderToStaticMarkup(await SynthesesPage(listProps()))).not.toContain("data-screening-notice");
+  globalThis.fetch = mock(async () => Response.json(exact())) as unknown as typeof fetch;
+  expect(renderToStaticMarkup(await SynthesisPage(exactProps()))).not.toContain("data-screening-notice");
+});
+
+test("public synthesis readers reject notices containing private provider details", async () => {
+  const synthesis = { ...researchSynthesis, screening_notice: {
+    category: "dual-use-boundary", action: "published-with-warning", notice: "screening-warning",
+    provider_reason: "PRIVATE-PROVIDER-CANARY",
+  } as const };
+  globalThis.fetch = mock(async () => Response.json(list({ syntheses: [synthesis] }))) as unknown as typeof fetch;
+  expect(await stoaFetchSyntheses("P-RESEARCH"))
+    .toEqual({ state: "unavailable", reason: "invalid_response" });
+  const collection = renderToStaticMarkup(await SynthesesPage(listProps()));
+  globalThis.fetch = mock(async () => Response.json(exact({ synthesis }))) as unknown as typeof fetch;
+  expect(await stoaFetchSynthesis("P-RESEARCH", "SYNTH-CLOSING"))
+    .toEqual({ state: "unavailable", reason: "invalid_response" });
+  const single = renderToStaticMarkup(await SynthesisPage(exactProps()));
+  for (const html of [collection, single]) {
+    expect(html).toContain("Public ledger data is temporarily unavailable");
+    expect(html).not.toContain("The exact parity result");
+    expect(html).not.toContain("PRIVATE-PROVIDER-CANARY");
+  }
+});
+
 test("empty public history is distinct from unavailable content and an unavailable deployment", async () => {
   globalThis.fetch = mock(async () => Response.json(list({
     syntheses: [], next_before: null, omitted: [],

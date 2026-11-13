@@ -135,6 +135,7 @@ export interface SynthesisSelectionPage {
     readonly covers_through: number;
     readonly authoring_principal: string;
     readonly created_at: string;
+    readonly screening_notice?: SynthesisItem["screening_notice"];
     readonly closing?: Pick<NonNullable<SynthesisItem["closing_resolution"]>, "direction" | "result_claim">;
     readonly can_preview: boolean;
   }[];
@@ -147,6 +148,7 @@ export function synthesisSelectionPage(face: SynthesesListResponse): SynthesisSe
     choices: face.syntheses.map((item) => ({
       synthesis_id: item.synthesis_id, seq: item.seq, covers_through: item.covers_through,
       authoring_principal: item.authoring_principal, created_at: item.created_at,
+      ...(item.screening_notice === undefined ? {} : { screening_notice: item.screening_notice }),
       ...(item.closing_resolution === undefined ? {} : { closing: {
         direction: item.closing_resolution.direction,
         result_claim: item.closing_resolution.result_claim,

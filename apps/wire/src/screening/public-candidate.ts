@@ -23,6 +23,7 @@ import {
   ScreeningPromotionHoldResponseSchema,
   ScreeningProviderStatusSchema,
   ScreeningPublicActionSchema,
+  SynthesizeRequestSchema,
 } from "@asimposium/contracts";
 import type { Env } from "../env";
 import { postureOf, recordRefusal } from "../moderation/posture";
@@ -97,7 +98,20 @@ const HEX64 = /^[a-f0-9]{64}$/;
 function supportsPublishedWarning(
   kind: string,
   holdContext: ScreeningHoldContext | undefined,
+  statement: string,
 ): boolean {
+  if (kind === "synthesis") {
+    if (holdContext?.route !== "synthesize") return false;
+    try {
+      const publication = SynthesizeRequestSchema.safeParse(JSON.parse(statement));
+      // Ordinary digests carry the exact notice through canonical faces and
+      // packs. Closing declarations also feed resolution summaries and honors;
+      // keep those warnings held until every derived consumer carries it.
+      return publication.success && publication.data.closing_resolution === undefined;
+    } catch {
+      return false;
+    }
+  }
   return (
     ClaimKindSchema.safeParse(kind).success ||
     kind === "revise" ||
@@ -424,7 +438,7 @@ export async function screenPublicCandidate(
   if (
     screening.decision === "quarantine" ||
     (screening.decision === "allow-with-warning" &&
-      !supportsPublishedWarning(input.kind, holdContext))
+      !supportsPublishedWarning(input.kind, holdContext, input.statement))
   ) {
     if (screening.decision === "quarantine") {
       await noteRefusal(env, input, holdContext, "quarantine", screening.coarse_category);

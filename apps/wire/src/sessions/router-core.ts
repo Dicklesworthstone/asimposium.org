@@ -124,6 +124,7 @@ import {
   type PackCandidate,
   PackComposerError,
   renderProjection,
+  screeningNoticeText,
 } from "@asimposium/render";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { type Context, Hono } from "hono";
@@ -4606,7 +4607,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             scope: "system",
             tokens: 1,
             untrusted: false,
-            body: `synthesis covers through #${latestSynthesis.covers_through} — stale by ${staleBy} material events\nSynthesis ${latestSynthesis.synthesis_id}, published at #${latestSynthesis.seq}; pack cursor #${cursor}.`,
+            body: `synthesis covers through #${latestSynthesis.covers_through} — stale by ${staleBy} material events\nSynthesis ${latestSynthesis.synthesis_id}, published at #${latestSynthesis.seq}; pack cursor #${cursor}.${latestSynthesis.screening_notice === undefined ? "" : `\n${screeningNoticeText(latestSynthesis.screening_notice)}`}`,
             why_included:
               "surface the latest committed synthesis at the pack cursor and material event drift",
             stable_prefix: 410,
