@@ -20,23 +20,31 @@ revision; later documentation and tracker commits do not imply another test run.
 Current source `03e4a8c2` repairs a typecheck regression introduced by the
 ordinary-synthesis warning merge `8fae4073`. Both warning categories retain
 their exact provenance and schema assertions; the expected category/notice
-pairs are now explicit literals. All eight typecheck and lint groups pass,
-as do the full owning Worker files (108 tests), Agora files (19), contracts
-(1,032), renderer (605), and native synthesis journey on local Workerd/D1/R2.
-The full root suite is still running. The production-browser lane fails after
-453 successful checks, timing out on original capacity-receipt recovery after
-a lost reply and fresh authentication (`0ht.3`). Its cause remains unclassified;
-the preceding two audited capacity writes succeeded. One isolated diagnostic
-run passes 501 checks without reaching its failure-only observation. Exact
-restoration then passes the original 501-check journey in 140.736 seconds,
-using the same production build. This does not explain or erase the initial
-failure; `0ht.3` remains open without a speculative product patch. These results do not
-inherit the preceding `4476c5b8` qualification below. Independent verification
-reproduces the original compiler failure, then passes after exact restoration;
-closure of the narrow regression `b9y9.1` still awaits the full root result.
-The parent screening task remains open. Closing syntheses with warnings stay
-held until resolution, honors and share-card derivatives can retain the notice.
-Deployment and broader hosted acceptance remain open.
+pairs are now explicit literals. WhiteRaven independently closed only this
+regression (`b9y9.1`) at 02:57:42 UTC; Beads comment 3214 maps its original
+criteria to exact source lines and reexecuted gates. Restoring the original
+expression reproduces TS2769; exact restoration passes the unchanged compiler.
+
+Typecheck, lint and the root suite each pass all eight groups. The root runs
+7,507 Worker and 1,116 Agora tests in 1,562.779 seconds; the 54 existing
+individual toolchain skips remain. Full contracts (1,032), renderer (605),
+owning Worker/Agora files (108/19), and the native synthesis journey also pass.
+All 2,759 qualified inputs and the actual Next runtime remain unchanged.
+The native journey uses real local Workerd/D1/R2 with fixture screening;
+it does not establish hosted screening accuracy.
+
+The initial production-browser run fails after 453 successful checks, waiting
+for original capacity-receipt recovery after a lost reply and fresh
+authentication (`0ht.3`). The preceding two audited capacity writes succeeded.
+One isolated diagnostic run passes 501 checks without reaching its failure-only
+observation. Exact restoration then passes the original 501-check journey in
+140.736 seconds using the same production build. This does not explain or erase
+the first failure: `0ht.3` remains open without a speculative product patch.
+
+The parent screening task retains its full scope and ownership. Closing
+syntheses with warnings stay held until resolution, honors and share-card
+derivatives can retain the notice. Deployment and broader hosted acceptance
+remain open. The earlier qualifications below retain their own source pins.
 
 ### Canonical single-team notice — independently verified
 
