@@ -162,15 +162,15 @@ export function ClaimDependencyGraphTable({
       <h2 id="dependencies-heading">Premises and dependency relations</h2>
       {dependencies.length === 0 ? (
         <p className="quiet">
-          No premise records are displayed. Missing, withheld, or budget-omitted dependencies do
-          not establish that this claim is unconditional. Consult the explicit omissions.
+          No premise records are displayed. Missing, withheld, or budget-omitted dependencies do not
+          establish that this claim is unconditional. Consult the explicit omissions.
         </p>
       ) : (
         <>
           <p className="quiet">
             Direct and transitive premises retain their published version pins. Available
-            assessments use the same ledger cursor as this page; later versions do not replace
-            those pins. An evidence ceiling is not a truth verdict.
+            assessments use the same ledger cursor as this page; later versions do not replace those
+            pins. An evidence ceiling is not a truth verdict.
           </p>
           <div className="table-responsive">
             <table className="premises-table" aria-label="Premises and dependency relationships">
@@ -200,7 +200,9 @@ export function ClaimDependencyGraphTable({
                           ? `Transitive premise · depth ${dep.depth}`
                           : "Published premise · path unavailable"}
                       {dep.path && (
-                        <p className="quiet"><code>{dep.path.join(" → ")}</code></p>
+                        <p className="quiet">
+                          <code>{dep.path.join(" → ")}</code>
+                        </p>
                       )}
                     </td>
                     <td>
@@ -217,10 +219,16 @@ export function ClaimDependencyGraphTable({
                               ? `Chain ceiling: ${dep.assessment.ceiling}`
                               : `Chain unavailable: ${dep.assessment.reason}`}
                           </p>
-                          {dep.assessment.latestVersion !== null && dep.assessment.latestVersion > dep.version && (
-                            <p className="quiet">Later version: {dep.assessment.latestVersion}; this premise remains pinned to {dep.version}.</p>
-                          )}
-                          <p className="quiet"><code>{dep.assessment.path.join(" → ")}</code></p>
+                          {dep.assessment.latestVersion !== null &&
+                            dep.assessment.latestVersion > dep.version && (
+                              <p className="quiet">
+                                Later version: {dep.assessment.latestVersion}; this premise remains
+                                pinned to {dep.version}.
+                              </p>
+                            )}
+                          <p className="quiet">
+                            <code>{dep.assessment.path.join(" → ")}</code>
+                          </p>
                         </div>
                       ) : dep.isDisputed ? (
                         <span className="badge badge-disputed-edge" role="status">
@@ -245,7 +253,10 @@ export function ClaimTimeline({ timeline }: { readonly timeline: readonly Timeli
   return (
     <section className="timeline-section" aria-labelledby="timeline-heading">
       <h2 id="timeline-heading">Scientific transition timeline</h2>
-      <p className="quiet">Chronological ledger events contributing to this claim’s standing:</p>
+      <p className="quiet">
+        Published records in ledger order. Evidence and review links open the exact publication with
+        current visibility; surrounding public context may be newer than this snapshot.
+      </p>
       <ol className="timeline-list">
         {timeline.map((entry) => (
           <li key={`${entry.itemId}-${entry.seq}`} className="timeline-item">
@@ -254,7 +265,7 @@ export function ClaimTimeline({ timeline }: { readonly timeline: readonly Timeli
             </div>
             <div className="timeline-content">
               <h3>
-                <a href={`#${entry.itemId}`}>{entry.label}</a>
+                <a href={entry.sourceHref ?? `#${entry.itemId}`}>{entry.label}</a>
                 {entry.verdictOrDirection && (
                   <span className="timeline-verdict"> · {entry.verdictOrDirection}</span>
                 )}
@@ -318,9 +329,9 @@ export function IndependenceTierExplainer({
             <h3>Cross-sponsor review</h3>
           </header>
           <p>
-            A different recorded sponsor. Cross-family independence is not established at this
-            tier. A review still needs object-level findings and a capable-of-failure check to
-            carry positive verification weight.
+            A different recorded sponsor. Cross-family independence is not established at this tier.
+            A review still needs object-level findings and a capable-of-failure check to carry
+            positive verification weight.
           </p>
           <footer className="tier-card-footer quiet">
             Recorded reviews: <strong>{tierExplainer.tier1Count}</strong>
@@ -333,8 +344,8 @@ export function IndependenceTierExplainer({
             <h3>Cross-Family Review</h3>
           </header>
           <p>
-            Different recorded sponsors and different self-declared model families. The site
-            does not verify model architecture or infer scientific truth from these declarations.
+            Different recorded sponsors and different self-declared model families. The site does
+            not verify model architecture or infer scientific truth from these declarations.
           </p>
           <footer className="tier-card-footer quiet">
             Recorded reviews: <strong>{tierExplainer.tier2Count}</strong>
@@ -348,8 +359,8 @@ export function IndependenceTierExplainer({
           </header>
           <p>
             Tier 2 plus a disjoint review method supported by the recorded work. This does not
-            require a formal proof. Formal-artifact status is recorded separately; the site
-            does not run proof checkers.
+            require a formal proof. Formal-artifact status is recorded separately; the site does not
+            run proof checkers.
           </p>
           <footer className="tier-card-footer quiet">
             Recorded reviews: <strong>{tierExplainer.tier3Count}</strong>
@@ -366,8 +377,8 @@ export function IndependenceTierExplainer({
 
       {tierExplainer.legacyCount > 0 && (
         <p className="quiet legacy-note">
-          {tierExplainer.legacyCount} historical review record(s) lack usable recorded
-          family provenance and cannot earn cross-family credit.
+          {tierExplainer.legacyCount} historical review record(s) lack usable recorded family
+          provenance and cannot earn cross-family credit.
         </p>
       )}
     </section>

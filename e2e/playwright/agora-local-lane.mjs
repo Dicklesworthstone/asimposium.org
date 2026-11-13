@@ -46,8 +46,16 @@ import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
-import { ClaimFaceResponseSchema, ProblemFaceResponseSchema, SINGLE_TEAM_PROBLEM_NOTICE } from "../../packages/contracts/src/ledger.ts";
-import { parsePublicProblemExport, PUBLIC_EXPORT_FORMAT, verifyPublicProblemExportChain } from "../../apps/wire/src/krater/export.ts";
+import {
+  ClaimFaceResponseSchema,
+  ProblemFaceResponseSchema,
+  SINGLE_TEAM_PROBLEM_NOTICE,
+} from "../../packages/contracts/src/ledger.ts";
+import {
+  parsePublicProblemExport,
+  PUBLIC_EXPORT_FORMAT,
+  verifyPublicProblemExportChain,
+} from "../../apps/wire/src/krater/export.ts";
 import { PUBLIC_EXPORT_MAX_BYTES } from "../../apps/wire/src/ledger/event-export-snapshot.ts";
 import { SITE } from "../../apps/web/lib/site.ts";
 import {
@@ -57,9 +65,21 @@ import {
   setUpProblem,
 } from "../gauntlet/local-product-flow.mjs";
 import { startLocalTarget, USER_AGENT } from "../gauntlet/local-target.mjs";
-import { claimsListBrowsing, claimsListWithdrawal, seedClaimsList } from "./claims-list-browsing.mjs";
-import { hypothesisLifecycleBrowsing, hypothesisPublicationWithdrawal, seedHypothesisLifecycle } from "./hypotheses-lifecycle.mjs";
-import { scientificCollectionsBrowsing, scientificCollectionsWithdrawal, seedScientificCollections } from "./scientific-collections-browsing.mjs";
+import {
+  claimsListBrowsing,
+  claimsListWithdrawal,
+  seedClaimsList,
+} from "./claims-list-browsing.mjs";
+import {
+  hypothesisLifecycleBrowsing,
+  hypothesisPublicationWithdrawal,
+  seedHypothesisLifecycle,
+} from "./hypotheses-lifecycle.mjs";
+import {
+  scientificCollectionsBrowsing,
+  scientificCollectionsWithdrawal,
+  seedScientificCollections,
+} from "./scientific-collections-browsing.mjs";
 import { citationsBrowsing, citationsWithdrawal, seedCitations } from "./citations-browsing.mjs";
 import { seedSyntheses, synthesisBrowsing, synthesisClosingReview } from "./synthesis-browsing.mjs";
 import { ADMIN_OPERATORS, operatorModerationJourney } from "./operator-moderation.mjs";
@@ -151,23 +171,41 @@ async function nativeClickFailureState(page, selector) {
           now_ms: performance.now(),
           scroll_y: window.scrollY,
           viewport_height: window.innerHeight,
-          navigation: performance.getEntriesByType("navigation").slice(0, 8).map((entry) => ({
-            type: entry.type, response_end_ms: entry.responseEnd,
-            load_end_ms: entry.loadEventEnd, duration_ms: entry.duration,
-          })),
+          navigation: performance
+            .getEntriesByType("navigation")
+            .slice(0, 8)
+            .map((entry) => ({
+              type: entry.type,
+              response_end_ms: entry.responseEnd,
+              load_end_ms: entry.loadEventEnd,
+              duration_ms: entry.duration,
+            })),
           animation_count: document.getAnimations().length,
           source_count: sources.length,
-          body_child_tags: [...document.body.children].slice(0, 32).map((element) => element.tagName),
+          body_child_tags: [...document.body.children]
+            .slice(0, 32)
+            .map((element) => element.tagName),
           next_error_document: document.documentElement.id === "__next_error__",
-          not_found_templates: document.querySelectorAll('template[data-dgst="NEXT_HTTP_ERROR_FALLBACK;404"]').length,
+          not_found_templates: document.querySelectorAll(
+            'template[data-dgst="NEXT_HTTP_ERROR_FALLBACK;404"]',
+          ).length,
           sources: sources.slice(0, 8).map((element) => {
             const box = element.getBoundingClientRect();
-            return { x: box.x, y: box.y, width: box.width, height: box.height, connected: element.isConnected };
+            return {
+              x: box.x,
+              y: box.y,
+              width: box.width,
+              height: box.height,
+              connected: element.isConnected,
+            };
           }),
         };
       }, selector),
       new Promise((resolve) => {
-        timer = setTimeout(() => resolve({ unavailable: true, reason: "diagnostic-timeout" }), 1000);
+        timer = setTimeout(
+          () => resolve({ unavailable: true, reason: "diagnostic-timeout" }),
+          1000,
+        );
       }),
     ]);
   } catch {
@@ -230,12 +268,18 @@ async function seed(target) {
     author.token,
   );
   assert.equal(promoted.status, 201, `promote ${promoted.body.code ?? ""}`);
-  const negative = await fellowPost(target, `/v1/sessions/${sessionId}/dead-ends`, {
-    approach: `Enumerate a finite parity interval as an attempted proof over all integers. ${XSS_CANARY}`,
-    why_it_fails: "The finite parity interval does not establish an unbounded assertion without a reduction theorem.",
-    retry_predicate: "Retry after an exact finite reduction is proved for the complete domain.",
-    retry_when: { kind: "statement-revised" },
-  }, author.token);
+  const negative = await fellowPost(
+    target,
+    `/v1/sessions/${sessionId}/dead-ends`,
+    {
+      approach: `Enumerate a finite parity interval as an attempted proof over all integers. ${XSS_CANARY}`,
+      why_it_fails:
+        "The finite parity interval does not establish an unbounded assertion without a reduction theorem.",
+      retry_predicate: "Retry after an exact finite reduction is proved for the complete domain.",
+      retry_when: { kind: "statement-revised" },
+    },
+    author.token,
+  );
   assert.equal(negative.status, 201, `negative history publication ${negative.body.code ?? ""}`);
 
   // A novelty-claim with one independent novelty review (another sponsor).
@@ -296,67 +340,137 @@ async function seed(target) {
   );
   assert.equal(noveltyReview.status, 201, `novelty review ${noveltyReview.body.code ?? ""}`);
   const spare = await enrollSetupFellow(target, SPONSOR, "agora-lane-spare", ["review"]);
-  const sameSponsorSession = await fellowPost(target, "/v1/sessions", {
-    problem_id: problemId, intent: "review",
-  }, spare.token);
+  const sameSponsorSession = await fellowPost(
+    target,
+    "/v1/sessions",
+    {
+      problem_id: problemId,
+      intent: "review",
+    },
+    spare.token,
+  );
   assert.equal(sameSponsorSession.status, 201, "same-sponsor review session");
-  const sameSponsorReview = await fellowPost(target,
-    `/v1/sessions/${sameSponsorSession.body.session_id}/review`, {
-      target_claim_id: promoted.body.claim_id, target_version: 1, verdict: "inform",
+  const sameSponsorReview = await fellowPost(
+    target,
+    `/v1/sessions/${sameSponsorSession.body.session_id}/review`,
+    {
+      target_claim_id: promoted.body.claim_id,
+      target_version: 1,
+      verdict: "inform",
       basis: "Checked the parity statement against its bounded falsifier.",
       capable_of_failure: "An opposite-parity square in the declared range would refute it.",
-      body_md: "This review is by another Fellow of the author’s sponsor, not independent sponsorship.",
-    }, spare.token);
+      body_md:
+        "This review is by another Fellow of the author’s sponsor, not independent sponsorship.",
+    },
+    spare.token,
+  );
   assert.equal(sameSponsorReview.status, 201, "same-sponsor review publication");
   // A deliberate false claim is conceded through the real typed path, without
   // an independent review. All pins come from public faces/event envelopes.
   // Its own ordinary Fellow preserves the original author's publication quota.
-  const concessionAuthor = await enrollSetupFellow(target, "usr_agora_lane_concession",
-    "agora-lane-concession-author", ["promote"]);
-  const concessionSession = await fellowPost(target, "/v1/sessions", {
-    problem_id: problemId, intent: "prove",
-  }, concessionAuthor.token);
+  const concessionAuthor = await enrollSetupFellow(
+    target,
+    "usr_agora_lane_concession",
+    "agora-lane-concession-author",
+    ["promote"],
+  );
+  const concessionSession = await fellowPost(
+    target,
+    "/v1/sessions",
+    {
+      problem_id: problemId,
+      intent: "prove",
+    },
+    concessionAuthor.token,
+  );
   assert.equal(concessionSession.status, 201, "concession author session");
   const concessionSessionId = concessionSession.body.session_id;
-  const falseDraft = await fellowPost(target, `/v1/sessions/${concessionSessionId}/workshop`, {
-    type: "claim-draft", title: "A false parity assertion", body_md: "Every integer square is odd.",
-  }, concessionAuthor.token);
+  const falseDraft = await fellowPost(
+    target,
+    `/v1/sessions/${concessionSessionId}/workshop`,
+    {
+      type: "claim-draft",
+      title: "A false parity assertion",
+      body_md: "Every integer square is odd.",
+    },
+    concessionAuthor.token,
+  );
   assert.equal(falseDraft.status, 201);
-  const falseClaim = await fellowPost(target, `/v1/sessions/${concessionSessionId}/promote`, {
-    workshop_id: falseDraft.body.workshop_id, kind: "conjecture",
-    statement: "For every integer n, the square n times n is odd.",
-    falsifier: "An integer with an even square, such as n = 2.",
-  }, concessionAuthor.token);
+  const falseClaim = await fellowPost(
+    target,
+    `/v1/sessions/${concessionSessionId}/promote`,
+    {
+      workshop_id: falseDraft.body.workshop_id,
+      kind: "conjecture",
+      statement: "For every integer n, the square n times n is odd.",
+      falsifier: "An integer with an even square, such as n = 2.",
+    },
+    concessionAuthor.token,
+  );
   assert.equal(falseClaim.status, 201, "false claim publication");
-  const counterexample = await fellowPost(target, `/v1/sessions/${concessionSessionId}/evidence`, {
-    bears_on_kind: "claim", bears_on_id: falseClaim.body.claim_id, bears_on_version: 1,
-    direction: "refutes", kind: "argument", mode: "confirmatory",
-    source: { kind: "locator", locator: "https://example.invalid/parity/two-squared",
-      excerpt: "The square of 2 is 4, which is even." },
-    body_md: "At n = 2 the square is 4, an even integer. The universal oddness assertion fails.",
-  }, concessionAuthor.token);
+  const counterexample = await fellowPost(
+    target,
+    `/v1/sessions/${concessionSessionId}/evidence`,
+    {
+      bears_on_kind: "claim",
+      bears_on_id: falseClaim.body.claim_id,
+      bears_on_version: 1,
+      direction: "refutes",
+      kind: "argument",
+      mode: "confirmatory",
+      source: {
+        kind: "locator",
+        locator: "https://example.invalid/parity/two-squared",
+        excerpt: "The square of 2 is 4, which is even.",
+      },
+      body_md: "At n = 2 the square is 4, an even integer. The universal oddness assertion fails.",
+    },
+    concessionAuthor.token,
+  );
   assert.equal(counterexample.status, 201, "counterexample publication");
-  const publicClaim = async (id) => ClaimFaceResponseSchema.parse(await (
-    await fetch(`${target.origin}/p/${problemId}/claims/${id}.json`, {
-      headers: { "user-agent": USER_AGENT },
-    })).json());
+  const publicClaim = async (id) =>
+    ClaimFaceResponseSchema.parse(
+      await (
+        await fetch(`${target.origin}/p/${problemId}/claims/${id}.json`, {
+          headers: { "user-agent": USER_AGENT },
+        })
+      ).json(),
+    );
   const disputed = await publicClaim(falseClaim.body.claim_id);
   assert.equal(disputed.claim_state.disposition, "disputed");
   const adverseBasis = disputed.claim_state.status_basis;
   assert.equal(adverseBasis?.kind, "transition");
   assert.equal(adverseBasis.cause, "refuting-evidence");
-  const eventWindow = await (await fetch(`${target.origin}/p/${problemId}/events.json?since=${adverseBasis.seq - 1}&through=${adverseBasis.seq}&limit=1`, {
-    headers: { "user-agent": USER_AGENT },
-  })).json();
-  const sourceEvent = eventWindow.events.find((entry) => entry.event?.id === adverseBasis.event_id)?.event;
+  const eventWindow = await (
+    await fetch(
+      `${target.origin}/p/${problemId}/events.json?since=${adverseBasis.seq - 1}&through=${adverseBasis.seq}&limit=1`,
+      {
+        headers: { "user-agent": USER_AGENT },
+      },
+    )
+  ).json();
+  const sourceEvent = eventWindow.events.find(
+    (entry) => entry.event?.id === adverseBasis.event_id,
+  )?.event;
   assert.equal(sourceEvent?.object_id, counterexample.body.evidence_id);
   const statement = JSON.parse(disputed.items.find((item) => item.kind === "claim-detail").body);
-  const concession = await fellowPost(target, `/v1/sessions/${concessionSessionId}/retract`, {
-    target_object: falseClaim.body.claim_id,
-    reason: "I concede the oddness assertion because the square of 2 is even.",
-    concession: { target_version: 1, target_digest: statement.content_digest,
-      evidence: { evidence_id: counterexample.body.evidence_id, digest: `sha256:${sourceEvent.payload_sha256}` } },
-  }, concessionAuthor.token);
+  const concession = await fellowPost(
+    target,
+    `/v1/sessions/${concessionSessionId}/retract`,
+    {
+      target_object: falseClaim.body.claim_id,
+      reason: "I concede the oddness assertion because the square of 2 is even.",
+      concession: {
+        target_version: 1,
+        target_digest: statement.content_digest,
+        evidence: {
+          evidence_id: counterexample.body.evidence_id,
+          digest: `sha256:${sourceEvent.payload_sha256}`,
+        },
+      },
+    },
+    concessionAuthor.token,
+  );
   assert.equal(concession.status, 201, `author concession ${concession.body.code ?? ""}`);
   const conceded = await publicClaim(falseClaim.body.claim_id);
   assert.equal(conceded.claim_state.disposition, "refuted");
@@ -404,6 +518,10 @@ async function seed(target) {
     gapCursor,
     deadEndId: negative.body.dead_end_id,
     concessionClaimId: falseClaim.body.claim_id,
+    claimReviewId: sameSponsorReview.body.review_id,
+    claimReviewFellowId: spare.fellowId,
+    concessionEvidenceId: counterexample.body.evidence_id,
+    concessionEvidenceFellowId: concessionAuthor.fellowId,
     concessionBasis: conceded.claim_state.status_basis,
     hypothesisLifecycle,
   };
@@ -470,8 +588,10 @@ async function proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCu
   const navigations = [];
   const onNavigation = (frame) => {
     if (frame === page.mainFrame() && navigations.length < 8) {
-      navigations.push({ elapsed_ms: performance.now() - clickStarted,
-        path: new URL(frame.url()).pathname });
+      navigations.push({
+        elapsed_ms: performance.now() - clickStarted,
+        path: new URL(frame.url()).pathname,
+      });
     }
   };
   page.on("framenavigated", onNavigation);
@@ -479,8 +599,16 @@ async function proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCu
     await exact.click();
   } catch (error) {
     const state = await nativeClickFailureState(page, ".claim-card > p > a");
-    console.error(JSON.stringify({ stage: "proof-gap-exact-claim-click-failed", mode,
-      path: listPath, elapsed_ms: performance.now() - clickStarted, navigations, state }));
+    console.error(
+      JSON.stringify({
+        stage: "proof-gap-exact-claim-click-failed",
+        mode,
+        path: listPath,
+        elapsed_ms: performance.now() - clickStarted,
+        navigations,
+        state,
+      }),
+    );
     throw error;
   } finally {
     page.off("framenavigated", onNavigation);
@@ -515,21 +643,29 @@ async function proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCu
 }
 
 async function publicLedgerDownload({ page, target, problemId, mode }) {
-  const link = page.getByRole("link", { name: "Download current public ledger (.jsonl.gz)", exact: true });
+  const link = page.getByRole("link", {
+    name: "Download current public ledger (.jsonl.gz)",
+    exact: true,
+  });
   const href = `${target.origin}/p/${problemId}/export.jsonl.gz`;
-  const canonical = await link.count() === 1 && await link.getAttribute("href") === href;
-  record(`${mode} dataset: problem history exposes one canonical Worker download`,
-    canonical);
+  const canonical = (await link.count()) === 1 && (await link.getAttribute("href")) === href;
+  record(`${mode} dataset: problem history exposes one canonical Worker download`, canonical);
   assert.ok(canonical, "the canonical Worker dataset download link must exist exactly once");
   const history = await page.locator("#history-heading").locator("..").innerText();
-  record(`${mode} dataset: scope distinguishes current public events from private workshops`,
-    history.includes("CC BY 4.0") && history.includes("current ledger") &&
-    history.includes("newer than this page’s snapshot") &&
-    history.includes("Private workshops and account credentials are excluded") &&
-    history.includes("withheld or too large") && history.includes("event history above"));
+  record(
+    `${mode} dataset: scope distinguishes current public events from private workshops`,
+    history.includes("CC BY 4.0") &&
+      history.includes("current ledger") &&
+      history.includes("newer than this page’s snapshot") &&
+      history.includes("Private workshops and account credentials are excluded") &&
+      history.includes("withheld or too large") &&
+      history.includes("event history above"),
+  );
   const head = await target.env.DB.prepare(`SELECT p.public_seq, p.chain_digest,
     (SELECT COUNT(*) FROM events e WHERE e.problem_id = p.id AND e.seq <= p.public_seq) AS event_count
-    FROM problems p WHERE p.id = ?`).bind(problemId).first();
+    FROM problems p WHERE p.id = ?`)
+    .bind(problemId)
+    .first();
   const pageUrl = page.url();
   const attachment = page.waitForEvent("download");
   const response = page.waitForResponse((value) => value.url() === href);
@@ -537,14 +673,22 @@ async function publicLedgerDownload({ page, target, problemId, mode }) {
   const download = await attachment;
   const receipt = await response;
   const headers = receipt.headers();
-  record(`${mode} dataset: clicked response is a private no-store gzip attachment`,
-    receipt.status() === 200 && headers["content-type"] === "application/gzip" &&
-    headers["content-disposition"] === `attachment; filename="${problemId}.export.jsonl.gz"` &&
-    /\bprivate\b/.test(headers["cache-control"] ?? "") &&
-    /\bno-store\b/.test(headers["cache-control"] ?? "") && privateToCaches(headers));
-  record(`${mode} dataset: native click receives the named attachment without navigating the page`,
-    download.url() === href && download.suggestedFilename() === `${problemId}.export.jsonl.gz` &&
-    page.url() === pageUrl && await download.failure() === null);
+  record(
+    `${mode} dataset: clicked response is a private no-store gzip attachment`,
+    receipt.status() === 200 &&
+      headers["content-type"] === "application/gzip" &&
+      headers["content-disposition"] === `attachment; filename="${problemId}.export.jsonl.gz"` &&
+      /\bprivate\b/.test(headers["cache-control"] ?? "") &&
+      /\bno-store\b/.test(headers["cache-control"] ?? "") &&
+      privateToCaches(headers),
+  );
+  record(
+    `${mode} dataset: native click receives the named attachment without navigating the page`,
+    download.url() === href &&
+      download.suggestedFilename() === `${problemId}.export.jsonl.gz` &&
+      page.url() === pageUrl &&
+      (await download.failure()) === null,
+  );
   const chunks = [];
   const stream = await download.createReadStream();
   assert.ok(stream, "the actual browser download must be readable");
@@ -553,15 +697,27 @@ async function publicLedgerDownload({ page, target, problemId, mode }) {
   const ndjson = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   const header = JSON.parse(ndjson.slice(0, ndjson.indexOf("\n")));
   const parsed = parsePublicProblemExport(ndjson);
-  record(`${mode} dataset: downloaded gzip has strict v5 framing, public license and exact problem`,
-    parsed.ok && parsed.format === PUBLIC_EXPORT_FORMAT && header.license === "CC BY 4.0" &&
-    parsed.header.problem === problemId && parsed.trailer.finalCursor === head.public_seq &&
-    parsed.trailer.eventCount === head.event_count && head.event_count > 0);
+  record(
+    `${mode} dataset: downloaded gzip has strict v5 framing, public license and exact problem`,
+    parsed.ok &&
+      parsed.format === PUBLIC_EXPORT_FORMAT &&
+      header.license === "CC BY 4.0" &&
+      parsed.header.problem === problemId &&
+      parsed.trailer.finalCursor === head.public_seq &&
+      parsed.trailer.eventCount === head.event_count &&
+      head.event_count > 0,
+  );
   const verified = await verifyPublicProblemExportChain(ndjson);
-  record(`${mode} dataset: complete downloaded event chain agrees with the independent live D1 head`,
-    verified.intact && verified.eventCount === head.event_count && verified.finalChainDigest === head.chain_digest);
-  record(`${mode} dataset: the actual archive omits private workshop and scratch canaries`,
-    !ndjson.includes(WORKSHOP_CANARY) && !ndjson.includes(SCRATCH_CANARY));
+  record(
+    `${mode} dataset: complete downloaded event chain agrees with the independent live D1 head`,
+    verified.intact &&
+      verified.eventCount === head.event_count &&
+      verified.finalChainDigest === head.chain_digest,
+  );
+  record(
+    `${mode} dataset: the actual archive omits private workshop and scratch canaries`,
+    !ndjson.includes(WORKSHOP_CANARY) && !ndjson.includes(SCRATCH_CANARY),
+  );
 }
 
 async function proofGapWithdrawal({
@@ -623,11 +779,15 @@ async function proofGapWithdrawal({
       headers: { "user-agent": USER_AGENT },
     });
     const refusal = await archive.json();
-    record("dataset: current withholding refuses the complete archive rather than returning partial gzip",
-      archive.status === 409 && refusal.code === "PUBLIC_EXPORT_CONTENT_WITHHELD" &&
-      archive.headers.get("content-type")?.includes("application/problem+json") &&
-      archive.headers.get("content-disposition") === null && privateToCaches(Object.fromEntries(archive.headers)) &&
-      !JSON.stringify(refusal).includes(GAP_OBLIGATION));
+    record(
+      "dataset: current withholding refuses the complete archive rather than returning partial gzip",
+      archive.status === 409 &&
+        refusal.code === "PUBLIC_EXPORT_CONTENT_WITHHELD" &&
+        archive.headers.get("content-type")?.includes("application/problem+json") &&
+        archive.headers.get("content-disposition") === null &&
+        privateToCaches(Object.fromEntries(archive.headers)) &&
+        !JSON.stringify(refusal).includes(GAP_OBLIGATION),
+    );
   } finally {
     await context.close();
   }
@@ -870,11 +1030,16 @@ async function commentaryJourney({
   const privateArchive = await fetch(`${target.origin}/p/${privateId}/export.jsonl.gz`, {
     headers: { "user-agent": USER_AGENT },
   });
-  record("dataset: the private problem owner has no public download control or archive access",
-    await sponsorPage.getByRole("link", { name: "Download current public ledger (.jsonl.gz)", exact: true }).count() === 0 &&
-    !(await sponsorPage.content()).includes(draftProblem.statement) && privateArchive.status === 404 &&
-    privateArchive.headers.get("content-disposition") === null &&
-    !(await privateArchive.text()).includes(draftProblem.statement));
+  record(
+    "dataset: the private problem owner has no public download control or archive access",
+    (await sponsorPage
+      .getByRole("link", { name: "Download current public ledger (.jsonl.gz)", exact: true })
+      .count()) === 0 &&
+      !(await sponsorPage.content()).includes(draftProblem.statement) &&
+      privateArchive.status === 404 &&
+      privateArchive.headers.get("content-disposition") === null &&
+      !(await privateArchive.text()).includes(draftProblem.statement),
+  );
   await setAccount(SPONSOR);
 }
 
@@ -962,11 +1127,17 @@ async function main() {
   // Blocked, not failed, when there is no browser to drive; probed with a real
   // launch first so a missing binary costs seconds, not a Next build.
   try {
-    console.log(JSON.stringify({ kind: "agora-local-lane-stage", stage: "browser-preflight-launch" }));
+    console.log(
+      JSON.stringify({ kind: "agora-local-lane-stage", stage: "browser-preflight-launch" }),
+    );
     const preflightBrowser = await chromium.launch(browserOptions);
-    console.log(JSON.stringify({ kind: "agora-local-lane-stage", stage: "browser-preflight-launched" }));
+    console.log(
+      JSON.stringify({ kind: "agora-local-lane-stage", stage: "browser-preflight-launched" }),
+    );
     await preflightBrowser.close();
-    console.log(JSON.stringify({ kind: "agora-local-lane-stage", stage: "browser-preflight-closed" }));
+    console.log(
+      JSON.stringify({ kind: "agora-local-lane-stage", stage: "browser-preflight-closed" }),
+    );
   } catch (error) {
     if (!/Executable doesn't exist|browserType\.launch/i.test(String(error?.message ?? error))) {
       throw error;
@@ -996,7 +1167,10 @@ async function main() {
       process.exit(1);
     }
   }
-  const target = await startLocalTarget({ injectPromoteRefusal: false, operatorPrincipalIds: ADMIN_OPERATORS });
+  const target = await startLocalTarget({
+    injectPromoteRefusal: false,
+    operatorPrincipalIds: ADMIN_OPERATORS,
+  });
   let agora;
   let browser;
   try {
@@ -1015,6 +1189,10 @@ async function main() {
       gapCursor,
       deadEndId,
       concessionClaimId,
+      claimReviewId,
+      claimReviewFellowId,
+      concessionEvidenceId,
+      concessionEvidenceFellowId,
       concessionBasis,
       hypothesisLifecycle,
     } = await seed(target);
@@ -1026,31 +1204,52 @@ async function main() {
     // roster becomes single-team while the earlier cross-sponsor statement
     // review stays in the ledger; the warning cannot deny that history.
     const singleTeamProblemId = await setUpProblem(target, 4);
-    const singleTeamOwner = (await target.env.DB.prepare(
-      "SELECT sponsor_id FROM problems WHERE id=?",
-    ).bind(singleTeamProblemId).first()).sponsor_id;
-    const noticeRoster = (await target.env.DB.prepare(`SELECT m.fellow_id,f.sponsor_id
+    const singleTeamOwner = (
+      await target.env.DB.prepare("SELECT sponsor_id FROM problems WHERE id=?")
+        .bind(singleTeamProblemId)
+        .first()
+    ).sponsor_id;
+    const noticeRoster = (
+      await target.env.DB.prepare(`SELECT m.fellow_id,f.sponsor_id
       FROM problem_memberships m JOIN enrollment_fellows f ON f.fellow_id=m.fellow_id
-      WHERE m.problem_id=?`).bind(singleTeamProblemId).all()).results;
+      WHERE m.problem_id=?`)
+        .bind(singleTeamProblemId)
+        .all()
+    ).results;
     assert.ok(noticeRoster.some((member) => member.sponsor_id !== singleTeamOwner));
     const changeNoticeRoster = async (operation) => {
       for (const member of noticeRoster.filter((member) => member.sponsor_id !== singleTeamOwner)) {
-        const changed = await target.sponsor(singleTeamOwner, "POST",
-          `/v1/sponsors/problems/${singleTeamProblemId}/lifecycle`, "problem-lifecycle", {
-            action: "manage-member", operation, target_fellow_id: member.fellow_id,
+        const changed = await target.sponsor(
+          singleTeamOwner,
+          "POST",
+          `/v1/sponsors/problems/${singleTeamProblemId}/lifecycle`,
+          "problem-lifecycle",
+          {
+            action: "manage-member",
+            operation,
+            target_fellow_id: member.fellow_id,
             ...(operation === "set-role" ? { role: "contributor" } : {}),
-          });
+          },
+        );
         assert.equal(changed.status, 200, "the current steward changes the actual membership");
       }
     };
     await changeNoticeRoster("remove");
-    const rosterNoticeFace = ProblemFaceResponseSchema.parse(await (await fetch(
-      `${target.origin}/p/${singleTeamProblemId}.json`, { headers: { "user-agent": USER_AGENT } },
-    )).json());
-    record("single-team source: canonical current roster notice preserves a real earlier review",
-      rosterNoticeFace.omitted.some((item) => item.reason === "single_team" &&
-        item.detail === `Single-team problem: ${SINGLE_TEAM_PROBLEM_NOTICE}`) &&
-      rosterNoticeFace.items.some((item) => item.kind === "statement-review"));
+    const rosterNoticeFace = ProblemFaceResponseSchema.parse(
+      await (
+        await fetch(`${target.origin}/p/${singleTeamProblemId}.json`, {
+          headers: { "user-agent": USER_AGENT },
+        })
+      ).json(),
+    );
+    record(
+      "single-team source: canonical current roster notice preserves a real earlier review",
+      rosterNoticeFace.omitted.some(
+        (item) =>
+          item.reason === "single_team" &&
+          item.detail === `Single-team problem: ${SINGLE_TEAM_PROBLEM_NOTICE}`,
+      ) && rosterNoticeFace.items.some((item) => item.kind === "statement-review"),
+    );
     const claimProbe = await fetch(`${target.origin}/p/${problemId}/claims/${claimId}.json`, {
       headers: { "user-agent": USER_AGENT },
     });
@@ -1071,30 +1270,42 @@ async function main() {
     browser = await chromium.launch(browserOptions);
 
     {
-      const { encode } = await import(require.resolve("next-auth/jwt", {
-        paths: [`${root}apps/web`],
-      }));
+      const { encode } = await import(
+        require.resolve("next-auth/jwt", {
+          paths: [`${root}apps/web`],
+        })
+      );
       const contexts = [];
       try {
         const pages = [];
         for (const sponsorId of ["usr_gallery_owner", "usr_gallery_other"]) {
           const bootstrap = await target.sponsor(
-            sponsorId, "POST", "/v1/sponsors/bootstrap", "sponsor.bootstrap", {},
+            sponsorId,
+            "POST",
+            "/v1/sponsors/bootstrap",
+            "sponsor.bootstrap",
+            {},
           );
           assert.ok(bootstrap.status === 200 || bootstrap.status === 201);
           const context = await browser.newContext();
           contexts.push(context);
-          await context.addCookies([{
-            name: SESSION_COOKIE,
-            value: await encode({
-              token: { sub: sponsorId, name: "Local Gallery sponsor", authTime: Math.floor(Date.now() / 1000) },
-              secret: AUTH_SECRET,
-              salt: SESSION_COOKIE,
-            }),
-            url: agora.origin,
-            httpOnly: true,
-            sameSite: "Lax",
-          }]);
+          await context.addCookies([
+            {
+              name: SESSION_COOKIE,
+              value: await encode({
+                token: {
+                  sub: sponsorId,
+                  name: "Local Gallery sponsor",
+                  authTime: Math.floor(Date.now() / 1000),
+                },
+                secret: AUTH_SECRET,
+                salt: SESSION_COOKIE,
+              }),
+              url: agora.origin,
+              httpOnly: true,
+              sameSite: "Lax",
+            },
+          ]);
           const page = await context.newPage();
           page.setDefaultTimeout(20_000);
           pages.push(page);
@@ -1110,7 +1321,10 @@ async function main() {
           problemId,
           runId: "gallery-local-product",
         });
-        record("Gallery shared journey completes with two local sponsor sessions", completed.length === 10);
+        record(
+          "Gallery shared journey completes with two local sponsor sessions",
+          completed.length === 10,
+        );
       } finally {
         await Promise.all(contexts.map((context) => context.close()));
       }
@@ -1204,6 +1418,68 @@ async function main() {
         if (/Content Security Policy/i.test(message.text())) cspViolations.push(message.text());
       });
       const mode = javaScriptEnabled ? "js" : "no-js";
+      const followClaimPublication = async (kind, id, claimPin, work, fellow, sponsor) => {
+        const previous = page.url();
+        const segment = kind === "evidence" ? "evidence" : "reviews";
+        const href = `/r/p/${problemId}/${segment}/${id}`;
+        const itemKind = kind === "evidence" ? "claim-evidence" : "claim-review";
+        const publicationBody = page.locator(
+          `.asimp-item[data-id="${id}"][data-kind="${itemKind}"] .asimp-item__body`,
+        );
+        const timeline = page.locator(`.timeline-list a[href="${href}"]`);
+        const card = page.getByRole("link", {
+          name: `Read complete published ${kind} ${id} →`,
+          exact: true,
+        });
+        record(
+          `${mode} claim ${kind}: timeline and card expose the exact registered publication`,
+          (await timeline.count()) === 1 &&
+            (await card.count()) === 1 &&
+            (await card.getAttribute("href")) === href,
+        );
+        await timeline.click();
+        await page.waitForURL(`${agora.origin}${href}`, { waitUntil: "load" });
+        await page
+          .getByRole("heading", { name: id, level: 1, exact: true })
+          .waitFor({ state: "visible" });
+        const timelineBody = await page.locator("main").innerText();
+        const timelineCount = await publicationBody.count();
+        const timelineRecord = timelineCount === 1 ? await publicationBody.innerText() : "";
+        record(
+          `${mode} claim ${kind}: timeline opens the complete work, claim pin and publication attribution`,
+          timelineCount === 1 &&
+            timelineRecord.includes(work) &&
+            timelineRecord.includes(claimPin) &&
+            timelineRecord.includes(fellow) &&
+            timelineRecord.includes(sponsor),
+        );
+        const timelineInert =
+          !timelineBody.includes(WORKSHOP_CANARY) &&
+          !timelineBody.includes(SCRATCH_CANARY) &&
+          (await page.locator("img[onerror], a[href^='javascript:']").count()) === 0;
+        await page.goto(previous, { waitUntil: "load" });
+        await card.click();
+        await page.waitForURL(`${agora.origin}${href}`, { waitUntil: "load" });
+        await page
+          .getByRole("heading", { name: id, level: 1, exact: true })
+          .waitFor({ state: "visible" });
+        const cardBody = await page.locator("main").innerText();
+        const cardCount = await publicationBody.count();
+        const cardRecord = cardCount === 1 ? await publicationBody.innerText() : "";
+        record(
+          `${mode} claim ${kind}: record card opens the same complete published work`,
+          cardCount === 1 && cardRecord.includes(work) && cardRecord.includes(claimPin) &&
+            cardRecord.includes(fellow) && cardRecord.includes(sponsor),
+        );
+        record(
+          `${mode} claim ${kind}: both source entry points preserve private-workshop and markup boundaries`,
+          timelineInert &&
+            !cardBody.includes(WORKSHOP_CANARY) &&
+            !cardBody.includes(SCRATCH_CANARY) &&
+            (await page.locator("img[onerror], a[href^='javascript:']").count()) === 0,
+        );
+        await page.goto(previous, { waitUntil: "load" });
+      };
       for (const path of pages) {
         const response = await page.goto(`${agora.origin}${path}`, { waitUntil: "load" });
         const status = response?.status() ?? 0;
@@ -1231,43 +1507,72 @@ async function main() {
         if (path === "/a/agora-lane-reviewer") {
           const exactHref = `/r/p/${problemId}/reviews/${reviewId}`;
           const source = page.getByRole("link", { name: `Read review ${reviewId}`, exact: true });
-          record(`${mode} Fellow review links the exact published human record`,
-            (await source.count()) === 1 && (await source.getAttribute("href")) === exactHref);
+          record(
+            `${mode} Fellow review links the exact published human record`,
+            (await source.count()) === 1 && (await source.getAttribute("href")) === exactHref,
+          );
           await source.click();
           await page.waitForURL(`${agora.origin}${exactHref}`, { waitUntil: "load" });
           const reviewBody = await page.locator("main").innerText();
-          record(`${mode} review click-through displays the full work product and publication pin`,
-            reviewBody.includes("Search log.") && reviewBody.includes(`${noveltyId}@1`) &&
-            reviewBody.includes("usr_agora_lane_reviewer"));
-          record(`${mode} exact review click-through contains no private draft or executable injection`,
-            !reviewBody.includes(WORKSHOP_CANARY) && !reviewBody.includes(SCRATCH_CANARY) &&
-            (await page.locator("img[onerror], a[href^='javascript:']").count()) === 0);
+          record(
+            `${mode} review click-through displays the full work product and publication pin`,
+            reviewBody.includes("Search log.") &&
+              reviewBody.includes(`${noveltyId}@1`) &&
+              reviewBody.includes("usr_agora_lane_reviewer"),
+          );
+          record(
+            `${mode} exact review click-through contains no private draft or executable injection`,
+            !reviewBody.includes(WORKSHOP_CANARY) &&
+              !reviewBody.includes(SCRATCH_CANARY) &&
+              (await page.locator("img[onerror], a[href^='javascript:']").count()) === 0,
+          );
         }
         if (path === "/a/agora-lane-author") {
           const history = page.locator(".asimp-negative-history");
-          record(`${mode} Fellow card shows the published negative work with its retry condition`,
-            (await history.getByRole("heading", { name: "Negative Work History", exact: true }).count()) === 1 &&
-            (await history.textContent()).includes("The finite parity interval does not establish") &&
-            (await history.textContent()).includes("Retry after an exact finite reduction"));
-          record(`${mode} negative work links its public problem history`,
-            (await history.locator(`a[href='/p/${problemId}/dead-ends']`).filter({ hasText: deadEndId }).count()) === 1);
-          record(`${mode} negative work retains publication attribution without a volume score`,
+          record(
+            `${mode} Fellow card shows the published negative work with its retry condition`,
+            (await history
+              .getByRole("heading", { name: "Negative Work History", exact: true })
+              .count()) === 1 &&
+              (await history.textContent()).includes(
+                "The finite parity interval does not establish",
+              ) &&
+              (await history.textContent()).includes("Retry after an exact finite reduction"),
+          );
+          record(
+            `${mode} negative work links its public problem history`,
+            (await history
+              .locator(`a[href='/p/${problemId}/dead-ends']`)
+              .filter({ hasText: deadEndId })
+              .count()) === 1,
+          );
+          record(
+            `${mode} negative work retains publication attribution without a volume score`,
             (await history.textContent()).includes(SPONSOR) &&
-            (await history.textContent()).includes(sessionId) &&
-            (await history.textContent()).toLowerCase().includes("self-declared") &&
-            !html.includes("dead_ends_recorded") && !html.includes("Checked Dead Ends"));
+              (await history.textContent()).includes(sessionId) &&
+              (await history.textContent()).toLowerCase().includes("self-declared") &&
+              !html.includes("dead_ends_recorded") &&
+              !html.includes("Checked Dead Ends"),
+          );
           const previousViewport = page.viewportSize();
           await page.setViewportSize({ width: 390, height: 844 });
           const dimensions = await page.evaluate(() => ({
             viewport: window.innerWidth,
             document: document.documentElement.scrollWidth,
-            history: [...document.querySelectorAll(".asimp-negative-history pre")].map((element) => ({
-              client: element.clientWidth, scroll: element.scrollWidth,
-            })),
+            history: [...document.querySelectorAll(".asimp-negative-history pre")].map(
+              (element) => ({
+                client: element.clientWidth,
+                scroll: element.scrollWidth,
+              }),
+            ),
           }));
-          record(`${mode} negative work stays readable inside a 390px viewport`,
-            dimensions.document <= dimensions.viewport && dimensions.history.length > 0 &&
-            dimensions.history.every((element) => element.scroll <= element.client), dimensions);
+          record(
+            `${mode} negative work stays readable inside a 390px viewport`,
+            dimensions.document <= dimensions.viewport &&
+              dimensions.history.length > 0 &&
+              dimensions.history.every((element) => element.scroll <= element.client),
+            dimensions,
+          );
           await page.setViewportSize(previousViewport);
         }
         if (path === "/explore" || path === "/area/number-theory") {
@@ -1311,8 +1616,10 @@ async function main() {
           const navigations = [];
           const onNavigation = (frame) => {
             if (frame === page.mainFrame() && navigations.length < 8) {
-              navigations.push({ elapsed_ms: performance.now() - clickStarted,
-                path: new URL(frame.url()).pathname });
+              navigations.push({
+                elapsed_ms: performance.now() - clickStarted,
+                path: new URL(frame.url()).pathname,
+              });
             }
           };
           page.on("framenavigated", onNavigation);
@@ -1321,9 +1628,20 @@ async function main() {
           } catch (error) {
             // Retain geometry and load state when native disclosure controls
             // fail actionability. Never include authored text or credentials.
-            const state = await nativeClickFailureState(page, ".scientific-markdown .asimp-source summary");
-            console.error(JSON.stringify({ stage: "math-source-click-failed", mode, path,
-              elapsed_ms: performance.now() - clickStarted, navigations, state }));
+            const state = await nativeClickFailureState(
+              page,
+              ".scientific-markdown .asimp-source summary",
+            );
+            console.error(
+              JSON.stringify({
+                stage: "math-source-click-failed",
+                mode,
+                path,
+                elapsed_ms: performance.now() - clickStarted,
+                navigations,
+                state,
+              }),
+            );
             throw error;
           } finally {
             page.off("framenavigated", onNavigation);
@@ -1376,24 +1694,35 @@ async function main() {
           ? null
           : (problemText ?? "").replace(/\s+/g, " ").slice(0, 600),
       );
-      record(`${mode} a multiple-sponsor roster does not show a single-team problem notice`,
-        await page.locator(".single-team-banner").count() === 0);
+      record(
+        `${mode} a multiple-sponsor roster does not show a single-team problem notice`,
+        (await page.locator(".single-team-banner").count()) === 0,
+      );
       await page.goto(`${agora.origin}/p/${singleTeamProblemId}`, { waitUntil: "load" });
       const currentRosterNotice = await page.locator(".single-team-banner").innerText();
       const shareRosterNotice = await page.locator(".single-team-alert-banner").innerText();
-      record(`${mode} actual problem page consumes the canonical current-roster notice`,
-        currentRosterNotice.includes(SINGLE_TEAM_PROBLEM_NOTICE));
-      record(`${mode} actual share panel consumes the same current-roster notice`,
-        shareRosterNotice.includes(SINGLE_TEAM_PROBLEM_NOTICE));
-      record(`${mode} a current single team cannot erase historical review independence`,
-        !`${currentRosterNotice} ${shareRosterNotice}`.includes("nothing has been independently reviewed") &&
-        (await page.textContent("body"))?.includes("statement-clear"));
+      record(
+        `${mode} actual problem page consumes the canonical current-roster notice`,
+        currentRosterNotice.includes(SINGLE_TEAM_PROBLEM_NOTICE),
+      );
+      record(
+        `${mode} actual share panel consumes the same current-roster notice`,
+        shareRosterNotice.includes(SINGLE_TEAM_PROBLEM_NOTICE),
+      );
+      record(
+        `${mode} a current single team cannot erase historical review independence`,
+        !`${currentRosterNotice} ${shareRosterNotice}`.includes(
+          "nothing has been independently reviewed",
+        ) && (await page.textContent("body"))?.includes("statement-clear"),
+      );
       await changeNoticeRoster("set-role");
       await page.reload({ waitUntil: "load" });
-      record(`${mode} a warmed same-URL page refresh removes both notices after another sponsor rejoins`,
-        await page.locator(".single-team-banner").count() === 0 &&
-        await page.locator(".single-team-alert-banner").count() === 0 &&
-        (await page.textContent("body"))?.includes("statement-clear"));
+      record(
+        `${mode} a warmed same-URL page refresh removes both notices after another sponsor rejoins`,
+        (await page.locator(".single-team-banner").count()) === 0 &&
+          (await page.locator(".single-team-alert-banner").count()) === 0 &&
+          (await page.textContent("body"))?.includes("statement-clear"),
+      );
       await changeNoticeRoster("remove");
       await page.goto(`${agora.origin}/p/${problemId}/claims/${claimId}`, { waitUntil: "load" });
       const claimText = await page.textContent("body");
@@ -1404,62 +1733,148 @@ async function main() {
           ? null
           : (claimText ?? "").replace(/\s+/g, " ").slice(0, 600),
       );
-      const tierCounts = await page.locator(".tier-card .tier-card-footer strong").allTextContents();
-      record(`${mode} review tiers match the Worker's pinned T0 rather than upgrading it to T1`,
-        claimProbeBody.items.some((item) => item.kind === "claim-review" &&
-          JSON.parse(item.body).tier === "T0") &&
-        JSON.stringify(tierCounts) === JSON.stringify(["1", "0", "0", "0"]));
+      const tierCounts = await page
+        .locator(".tier-card .tier-card-footer strong")
+        .allTextContents();
+      record(
+        `${mode} review tiers match the Worker's pinned T0 rather than upgrading it to T1`,
+        claimProbeBody.items.some(
+          (item) => item.kind === "claim-review" && JSON.parse(item.body).tier === "T0",
+        ) && JSON.stringify(tierCounts) === JSON.stringify(["1", "0", "0", "0"]),
+      );
       const tiersText = await page.locator(".tier-explainer-section").innerText();
-      record(`${mode} independence copy distinguishes sponsorship, self-declaration and disjoint method`,
-        tiersText.includes("Same-sponsor review") && tiersText.includes("Cross-sponsor review") &&
-        tiersText.includes("self-declared model families") &&
-        tiersText.includes("Disjoint-method review") && tiersText.includes("does not run proof checkers") &&
-        tiersText.includes("Later transfers do not upgrade earlier reviews") &&
-        !tiersText.includes("Formal Machine Proof") && !tiersText.includes("cryptographically verified"));
-      record(`${mode} different Fellows with one recorded sponsor retain single-team caution`,
+      record(
+        `${mode} independence copy distinguishes sponsorship, self-declaration and disjoint method`,
+        tiersText.includes("Same-sponsor review") &&
+          tiersText.includes("Cross-sponsor review") &&
+          tiersText.includes("self-declared model families") &&
+          tiersText.includes("Disjoint-method review") &&
+          tiersText.includes("does not run proof checkers") &&
+          tiersText.includes("Later transfers do not upgrade earlier reviews") &&
+          !tiersText.includes("Formal Machine Proof") &&
+          !tiersText.includes("cryptographically verified"),
+      );
+      record(
+        `${mode} different Fellows with one recorded sponsor retain single-team caution`,
         tiersText.includes("All displayed contributions have the same recorded sponsor") &&
-        await page.locator(`[data-disposition="${claimProbeBody.claim_state.disposition}"]`).count() > 0,
-        { singleTeam: tiersText.includes("All displayed contributions have the same recorded sponsor"),
+          (await page
+            .locator(`[data-disposition="${claimProbeBody.claim_state.disposition}"]`)
+            .count()) > 0,
+        {
+          singleTeam: tiersText.includes(
+            "All displayed contributions have the same recorded sponsor",
+          ),
           disposition: claimProbeBody.claim_state.disposition,
-          unchallenged: claimProbeBody.claim_state.unchallenged });
+          unchallenged: claimProbeBody.claim_state.unchallenged,
+        },
+      );
       const publicationBasis = claimProbeBody.claim_state.status_basis;
       const unverifiedText = await page.locator("#what-remains-unverified").innerText();
-      record(`${mode} unverified gaps describe bounded coverage and qualifying support without invented global absence`,
+      record(
+        `${mode} unverified gaps describe bounded coverage and qualifying support without invented global absence`,
         unverifiedText.includes("No displayed cross-family (T2/T3) review") &&
-        unverifiedText.includes("bounded face") && unverifiedText.includes("qualifying refutation attempts") &&
-        unverifiedText.includes("does not execute proof checkers") &&
-        !unverifiedText.includes("All reviews stem") && !unverifiedText.includes("cryptographically validated") &&
-        !unverifiedText.includes("No independently compiled"));
-      const publicationLink = await page.locator("#why-this-status").getByRole("link", { name: /Recorded status step/ }).getAttribute("href");
-      record(`${mode} ordinary claim links its canonical publication cause rather than its T0 review`,
-        publicationBasis?.kind === "transition" && publicationBasis.cause === "claim-created" &&
-        publicationLink === `/p/${problemId}/events?since=${publicationBasis.seq - 1}&through=${publicationBasis.seq}&limit=1`);
-      await page.goto(`${agora.origin}/p/${problemId}/claims/${concessionClaimId}`, { waitUntil: "load" });
+          unverifiedText.includes("bounded face") &&
+          unverifiedText.includes("qualifying refutation attempts") &&
+          unverifiedText.includes("does not execute proof checkers") &&
+          !unverifiedText.includes("All reviews stem") &&
+          !unverifiedText.includes("cryptographically validated") &&
+          !unverifiedText.includes("No independently compiled"),
+      );
+      const publicationLink = await page
+        .locator("#why-this-status")
+        .getByRole("link", { name: /Recorded status step/ })
+        .getAttribute("href");
+      record(
+        `${mode} ordinary claim links its canonical publication cause rather than its T0 review`,
+        publicationBasis?.kind === "transition" &&
+          publicationBasis.cause === "claim-created" &&
+          publicationLink ===
+            `/p/${problemId}/events?since=${publicationBasis.seq - 1}&through=${publicationBasis.seq}&limit=1`,
+      );
+      await followClaimPublication(
+        "review",
+        claimReviewId,
+        `${claimId}@1`,
+        "This review is by another Fellow of the author’s sponsor, not independent sponsorship.",
+        claimReviewFellowId,
+        SPONSOR,
+      );
+      await page.goto(`${agora.origin}/p/${problemId}/claims/${concessionClaimId}`, {
+        waitUntil: "load",
+      });
+      await followClaimPublication(
+        "evidence",
+        concessionEvidenceId,
+        `${concessionClaimId}@1`,
+        "At n = 2 the square is 4, an even integer. The universal oddness assertion fails.",
+        concessionEvidenceFellowId,
+        "usr_agora_lane_concession",
+      );
       const why = page.locator("#why-this-status");
       const whyText = await why.innerText();
-      record(`${mode} conceded false claim explains author concession without inventing independent verification`,
-        whyText.includes("author conceded") && whyText.includes("Canonical standing: refuted") &&
-        !whyText.includes("survived adversarial review") && !whyText.includes("verified on the public ledger"));
+      record(
+        `${mode} conceded false claim explains author concession without inventing independent verification`,
+        whyText.includes("author conceded") &&
+          whyText.includes("Canonical standing: refuted") &&
+          !whyText.includes("survived adversarial review") &&
+          !whyText.includes("verified on the public ledger"),
+      );
       const step = why.getByRole("link", { name: /Recorded status step/ });
-      record(`${mode} concession link names the exact canonical event window`,
-        await step.getAttribute("href") === `/p/${problemId}/events?since=${concessionBasis.seq - 1}&through=${concessionBasis.seq}&limit=1`);
+      record(
+        `${mode} concession link names the exact canonical event window`,
+        (await step.getAttribute("href")) ===
+          `/p/${problemId}/events?since=${concessionBasis.seq - 1}&through=${concessionBasis.seq}&limit=1`,
+      );
       await step.click();
-      await page.waitForURL(`${agora.origin}/p/${problemId}/events?since=${concessionBasis.seq - 1}&through=${concessionBasis.seq}&limit=1`);
+      await page.waitForURL(
+        `${agora.origin}/p/${problemId}/events?since=${concessionBasis.seq - 1}&through=${concessionBasis.seq}&limit=1`,
+      );
       await page.getByText(concessionBasis.event_id, { exact: true }).waitFor();
-      record(`${mode} concession click-through resolves the real public event and retraction`,
-        (await page.locator("main").innerText()).includes(concessionBasis.event_id));
+      record(
+        `${mode} concession click-through resolves the real public event and retraction`,
+        (await page.locator("main").innerText()).includes(concessionBasis.event_id),
+      );
       await proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCursor, mode });
-      await hypothesisLifecycleBrowsing({ page, agora, target, problemId, fixture: hypothesisLifecycle, mode, record });
+      await hypothesisLifecycleBrowsing({
+        page,
+        agora,
+        target,
+        problemId,
+        fixture: hypothesisLifecycle,
+        mode,
+        record,
+      });
       await claimsListBrowsing({ page, agora, target, fixture: claimsList, mode, record });
-      await scientificCollectionsBrowsing({ page, agora, target, fixture: scientificCollections, mode, record });
+      await scientificCollectionsBrowsing({
+        page,
+        agora,
+        target,
+        fixture: scientificCollections,
+        mode,
+        record,
+      });
       await synthesisBrowsing({ page, agora, target, fixture: syntheses, mode, record });
       await citationsBrowsing({ page, agora, target, fixture: citations, mode, record });
       await context.close();
     }
-    await scientificCollectionsWithdrawal({ target, browser, agora, fixture: scientificCollections, record, diagnose: nativeClickFailureState });
+    await scientificCollectionsWithdrawal({
+      target,
+      browser,
+      agora,
+      fixture: scientificCollections,
+      record,
+      diagnose: nativeClickFailureState,
+    });
     await citationsWithdrawal({ target, browser, agora, fixture: citations, record });
     await claimsListWithdrawal({ target, browser, agora, fixture: claimsList, record });
-    await hypothesisPublicationWithdrawal({ target, browser, agora, problemId, fixture: hypothesisLifecycle, record });
+    await hypothesisPublicationWithdrawal({
+      target,
+      browser,
+      agora,
+      problemId,
+      fixture: hypothesisLifecycle,
+      record,
+    });
     await proofGapWithdrawal({
       target,
       browser,
@@ -2269,8 +2684,10 @@ async function main() {
         const image = new URL(match[1], agora.origin);
         if (
           (image.origin !== agora.origin && image.origin !== SITE.agora) ||
-          image.username !== "" || image.password !== ""
-        ) return null;
+          image.username !== "" ||
+          image.password !== ""
+        )
+          return null;
         return `${image.pathname}${image.search}`;
       };
       const card = async (imagePath) => {
@@ -2290,7 +2707,11 @@ async function main() {
       };
       const context = await browser.newContext();
       const page = await context.newPage();
-      for (const path of [`/p/${problemId}`, `/p/${problemId}/claims/${claimId}`, `/p/${singleTeamProblemId}`]) {
+      for (const path of [
+        `/p/${problemId}`,
+        `/p/${problemId}/claims/${claimId}`,
+        `/p/${singleTeamProblemId}`,
+      ]) {
         const imagePath = await ogImagePath(path);
         record(`og ${path} declares an og:image for Agora`, imagePath !== null, imagePath);
         if (imagePath === null) continue;
@@ -2323,10 +2744,14 @@ async function main() {
       const rosterImageBefore = await card(rosterCard);
       await changeNoticeRoster("set-role");
       const rosterImageAfter = await card(rosterCard);
-      record("og a warmed same-URL image refreshes after the actual roster governance change",
-        rosterImageBefore.status === 200 && rosterImageAfter.status === 200 &&
-        rosterImageAfter.width === 1200 && rosterImageAfter.height === 630 &&
-        !rosterImageBefore.bytes.equals(rosterImageAfter.bytes));
+      record(
+        "og a warmed same-URL image refreshes after the actual roster governance change",
+        rosterImageBefore.status === 200 &&
+          rosterImageAfter.status === 200 &&
+          rosterImageAfter.width === 1200 &&
+          rosterImageAfter.height === 630 &&
+          !rosterImageBefore.bytes.equals(rosterImageAfter.bytes),
+      );
       await changeNoticeRoster("remove");
       // A card rendered from the live face changes when the ledger does; the
       // unavailable/not-found fallback depends only on the slug and cannot.
@@ -2651,14 +3076,27 @@ async function main() {
     // all the earlier, independent research and lifecycle scenarios.
     const moderationProblemId = await setUpProblem(target, 2);
     await synthesisClosingReview({
-      browser, agora, target, fixture: syntheses, record,
-      authSecret: AUTH_SECRET, sessionCookie: SESSION_COOKIE,
-      encode: (await import(createRequire(`${root}apps/web/package.json`).resolve("next-auth/jwt"))).encode,
+      browser,
+      agora,
+      target,
+      fixture: syntheses,
+      record,
+      authSecret: AUTH_SECRET,
+      sessionCookie: SESSION_COOKIE,
+      encode: (await import(createRequire(`${root}apps/web/package.json`).resolve("next-auth/jwt")))
+        .encode,
     });
     await operatorModerationJourney({
-      browser, agora, target, problemId: moderationProblemId, record, privateToCaches,
-      authSecret: AUTH_SECRET, sessionCookie: SESSION_COOKIE,
-      encode: (await import(createRequire(`${root}apps/web/package.json`).resolve("next-auth/jwt"))).encode,
+      browser,
+      agora,
+      target,
+      problemId: moderationProblemId,
+      record,
+      privateToCaches,
+      authSecret: AUTH_SECRET,
+      sessionCookie: SESSION_COOKIE,
+      encode: (await import(createRequire(`${root}apps/web/package.json`).resolve("next-auth/jwt")))
+        .encode,
     });
 
     const context = await browser.newContext({ reducedMotion: "reduce" });

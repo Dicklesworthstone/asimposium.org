@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ClaimFaceResponse } from "@asimposium/contracts";
-import { buildClaimPageViewModel } from "../../lib/claim-page-view";
+import { buildClaimPageViewModel, claimRecordSourceHref } from "../../lib/claim-page-view";
 
 const ORIGIN = "https://a.asimposium.org";
 
@@ -27,8 +27,14 @@ function makeClaimFace(overrides: Partial<ClaimFaceResponse> = {}): ClaimFaceRes
       recorded_refutation_attempts: 0,
       certified_artifact: false,
       legacy_reviews: 0,
-      status_basis: { kind: "transition", event_id: "EVT-PUBLICATION", seq: 1,
-        from: "draft", to: "open", cause: "claim-created" },
+      status_basis: {
+        kind: "transition",
+        event_id: "EVT-PUBLICATION",
+        seq: 1,
+        from: "draft",
+        to: "open",
+        cause: "claim-created",
+      },
     },
     items: [
       {
@@ -74,84 +80,256 @@ function makeClaimFace(overrides: Partial<ClaimFaceResponse> = {}): ClaimFaceRes
 }
 
 describe("Claim Page View-Model & Diptych Honesty Panels", () => {
+  test("timeline sources use canonical envelope identities rather than authored URLs", () => {
+    const face = makeClaimFace();
+    const vm = buildClaimPageViewModel(
+      {
+        ...face,
+        items: [
+          ...face.items,
+          {
+            kind: "claim-evidence",
+            id: "E-1",
+            scope: "ledger",
+            untrusted: true,
+            why_included: "published evidence",
+            neutralized: [],
+            body: JSON.stringify({
+              problem: "P-OTHER",
+              evidence_id: "E-FORGED",
+              href: "javascript:alert(1)",
+              sourceHref: "https://evil.invalid/private",
+              direction: "informs",
+              body_md: "A published check.",
+            }),
+          },
+          {
+            kind: "claim-review",
+            id: "R-2",
+            scope: "ledger",
+            untrusted: true,
+            why_included: "published review",
+            neutralized: [],
+            body: JSON.stringify({
+              review_id: "R-FORGED",
+              href: "/console/private",
+              tier: "T0",
+              verdict: "inform",
+              basis: "Read the declared check.",
+            }),
+          },
+        ],
+      },
+      ORIGIN,
+    );
+    expect(vm.timeline.find((entry) => entry.itemId === "E-1")?.sourceHref).toBe(
+      "/r/p/P-MATH-1/evidence/E-1",
+    );
+    expect(vm.timeline.find((entry) => entry.itemId === "R-2")?.sourceHref).toBe(
+      "/r/p/P-MATH-1/reviews/R-2",
+    );
+    expect(vm.timeline.find((entry) => entry.kind === "claim-detail")?.sourceHref).toBeUndefined();
+    expect(vm.badges.disposition).toBe("open");
+    expect(vm.badges.machineChecked.earned).toBe(false);
+  });
+
+  test("publication links encode each path component and leave other record kinds alone", () => {
+    for (const kind of ["claim-detail", "claim-dependency", "claim-proof-gap"] as const) {
+      expect(claimRecordSourceHref("P-MATH-1", { kind, id: "C-1@1" })).toBeUndefined();
+    }
+    const href = claimRecordSourceHref("P-MATH/../console", {
+      kind: "claim-review",
+      id: "R-1/../../private?url=https://evil.invalid#fragment",
+    });
+    expect(href).toBe(
+      "/r/p/P-MATH%2F..%2Fconsole/reviews/R-1%2F..%2F..%2Fprivate%3Furl%3Dhttps%3A%2F%2Fevil.invalid%23fragment",
+    );
+    const parsed = new URL(href as string, ORIGIN);
+    expect(parsed.origin).toBe(ORIGIN);
+    expect(parsed.search).toBe("");
+    expect(parsed.hash).toBe("");
+  });
   test("a displayed T3 review supplies cross-family coverage without certifying the statement", () => {
     const face = makeClaimFace();
-    const vm = buildClaimPageViewModel({ ...face, items: [...face.items, {
-      kind: "claim-review", id: "R-T3", scope: "ledger", untrusted: true,
-      why_included: "recorded review", neutralized: [],
-      body: JSON.stringify({ tier: "T3", verdict: "inform", seq: 2 }),
-    }] }, ORIGIN);
+    const vm = buildClaimPageViewModel(
+      {
+        ...face,
+        items: [
+          ...face.items,
+          {
+            kind: "claim-review",
+            id: "R-T3",
+            scope: "ledger",
+            untrusted: true,
+            why_included: "recorded review",
+            neutralized: [],
+            body: JSON.stringify({ tier: "T3", verdict: "inform", seq: 2 }),
+          },
+        ],
+      },
+      ORIGIN,
+    );
     expect(vm.tierExplainer.tier3Count).toBe(1);
-    expect(vm.whatRemainsUnverified.gaps.some(g => g.code === "NO_TIER2_REVIEWS")).toBe(false);
+    expect(vm.whatRemainsUnverified.gaps.some((g) => g.code === "NO_TIER2_REVIEWS")).toBe(false);
     expect(vm.badges.disposition).toBe("open");
     expect(vm.badges.machineChecked.earned).toBe(false);
   });
 
   test("bounded empty review coverage and zero qualifying counts do not establish globally absent work", () => {
-    const face = makeClaimFace({ omitted: [{ reason: "item_budget", detail: "Additional reviews omitted." }] });
+    const face = makeClaimFace({
+      omitted: [{ reason: "item_budget", detail: "Additional reviews omitted." }],
+    });
     const gaps = buildClaimPageViewModel(face, ORIGIN).whatRemainsUnverified.gaps;
-    expect(gaps.find(g => g.code === "NO_TIER2_REVIEWS")?.title).toContain("displayed");
-    expect(gaps.find(g => g.code === "NO_TIER2_REVIEWS")?.detail).toContain("bounded face");
-    expect(gaps.find(g => g.code === "NO_REFUTATIONS")?.detail).toContain("qualifying");
-    expect(gaps.find(g => g.code === "NO_REFUTATIONS")?.detail).not.toContain("No adversarial tests");
-    expect(gaps.find(g => g.code === "NO_FORMAL_ARTIFACT")?.detail).toContain("does not execute proof checkers");
-    expect(gaps.map(g=>g.detail).join(" ")).not.toContain("All reviews stem");
-    const positive = buildClaimPageViewModel({ ...face, claim_state: {
-      ...face.claim_state, recorded_refutation_attempts: 3, unchallenged: false, certified_artifact: true,
-    } }, ORIGIN);
-    expect(positive.whatRemainsUnverified.gaps.some(g=>g.code === "NO_REFUTATIONS")).toBe(false);
-    expect(positive.whatRemainsUnverified.gaps.some(g=>g.code === "NO_FORMAL_ARTIFACT")).toBe(false);
+    expect(gaps.find((g) => g.code === "NO_TIER2_REVIEWS")?.title).toContain("displayed");
+    expect(gaps.find((g) => g.code === "NO_TIER2_REVIEWS")?.detail).toContain("bounded face");
+    expect(gaps.find((g) => g.code === "NO_REFUTATIONS")?.detail).toContain("qualifying");
+    expect(gaps.find((g) => g.code === "NO_REFUTATIONS")?.detail).not.toContain(
+      "No adversarial tests",
+    );
+    expect(gaps.find((g) => g.code === "NO_FORMAL_ARTIFACT")?.detail).toContain(
+      "does not execute proof checkers",
+    );
+    expect(gaps.map((g) => g.detail).join(" ")).not.toContain("All reviews stem");
+    const positive = buildClaimPageViewModel(
+      {
+        ...face,
+        claim_state: {
+          ...face.claim_state,
+          recorded_refutation_attempts: 3,
+          unchallenged: false,
+          certified_artifact: true,
+        },
+      },
+      ORIGIN,
+    );
+    expect(positive.whatRemainsUnverified.gaps.some((g) => g.code === "NO_REFUTATIONS")).toBe(
+      false,
+    );
+    expect(positive.whatRemainsUnverified.gaps.some((g) => g.code === "NO_FORMAL_ARTIFACT")).toBe(
+      false,
+    );
   });
 
   test("legacy and stale gaps cannot invent cryptographic provenance or a cache diagnosis", () => {
     const face = makeClaimFace();
-    const gaps = buildClaimPageViewModel({ ...face, claim_state: {
-      ...face.claim_state, legacy_reviews: 2, stale: true, status_basis: { kind: "unavailable" },
-    } }, ORIGIN).whatRemainsUnverified.gaps;
-    expect(gaps.find(g=>g.code === "LEGACY_UNVERIFIED_REVIEWS")?.detail).toContain("review-time");
-    expect(gaps.find(g=>g.code === "LEGACY_UNVERIFIED_REVIEWS")?.detail).not.toContain("cryptographically");
-    expect(gaps.find(g=>g.code === "STALE_RECORD")?.detail).toContain("unavailable");
-    expect(gaps.find(g=>g.code === "STALE_RECORD")?.detail).not.toContain("cached projections have shifted");
+    const gaps = buildClaimPageViewModel(
+      {
+        ...face,
+        claim_state: {
+          ...face.claim_state,
+          legacy_reviews: 2,
+          stale: true,
+          status_basis: { kind: "unavailable" },
+        },
+      },
+      ORIGIN,
+    ).whatRemainsUnverified.gaps;
+    expect(gaps.find((g) => g.code === "LEGACY_UNVERIFIED_REVIEWS")?.detail).toContain(
+      "review-time",
+    );
+    expect(gaps.find((g) => g.code === "LEGACY_UNVERIFIED_REVIEWS")?.detail).not.toContain(
+      "cryptographically",
+    );
+    expect(gaps.find((g) => g.code === "STALE_RECORD")?.detail).toContain("unavailable");
+    expect(gaps.find((g) => g.code === "STALE_RECORD")?.detail).not.toContain(
+      "cached projections have shifted",
+    );
   });
 
   test("author concession readback uses the canonical event, not displayed confirmation prose", () => {
     const face = makeClaimFace();
-    face.claim_state = { ...face.claim_state, disposition: "refuted", unchallenged: false,
-      status_basis: { kind: "transition", event_id: "EVT-CONCESSION", seq: 5,
-        from: "disputed", to: "refuted", cause: "author-concession" } };
+    face.claim_state = {
+      ...face.claim_state,
+      disposition: "refuted",
+      unchallenged: false,
+      status_basis: {
+        kind: "transition",
+        event_id: "EVT-CONCESSION",
+        seq: 5,
+        from: "disputed",
+        to: "refuted",
+        cause: "author-concession",
+      },
+    };
     const vm = buildClaimPageViewModel(face, ORIGIN);
     expect(vm.whyThisStatus.reasons.join(" ")).toContain("author conceded");
     expect(vm.whyThisStatus.reasons.join(" ")).not.toContain("survived adversarial review");
-    expect(vm.whyThisStatus.triggeringItems).toEqual([{
-      id: "EVT-CONCESSION", kind: "author-concession", seq: 5,
-      label: "Recorded status step", verdictOrDirection: "disputed → refuted",
-      href: "/p/P-MATH-1/events?since=4&through=5&limit=1",
-    }]);
+    expect(vm.whyThisStatus.triggeringItems).toEqual([
+      {
+        id: "EVT-CONCESSION",
+        kind: "author-concession",
+        seq: 5,
+        label: "Recorded status step",
+        verdictOrDirection: "disputed → refuted",
+        href: "/p/P-MATH-1/events?since=4&through=5&limit=1",
+      },
+    ]);
   });
 
   test("absent, stale or inconsistent causal metadata never becomes a verified-refutation story", () => {
     const face = makeClaimFace();
-    for (const status_basis of [undefined, { kind: "unavailable" },
-      { kind: "transition", event_id: "EVT-FUTURE", seq: 11, from: "open", to: "refuted", cause: "review-created" },
-      { kind: "transition", event_id: "EVT-WRONG", seq: 5, from: "draft", to: "open", cause: "claim-created" },
-      { kind: "transition", event_id: "EVT-FORGED", seq: 1, from: "open", to: "refuted", cause: "claim-created" },
+    for (const status_basis of [
+      undefined,
+      { kind: "unavailable" },
+      {
+        kind: "transition",
+        event_id: "EVT-FUTURE",
+        seq: 11,
+        from: "open",
+        to: "refuted",
+        cause: "review-created",
+      },
+      {
+        kind: "transition",
+        event_id: "EVT-WRONG",
+        seq: 5,
+        from: "draft",
+        to: "open",
+        cause: "claim-created",
+      },
+      {
+        kind: "transition",
+        event_id: "EVT-FORGED",
+        seq: 1,
+        from: "open",
+        to: "refuted",
+        cause: "claim-created",
+      },
     ] as const) {
-      face.claim_state = { ...face.claim_state, disposition: "refuted", unchallenged: false, status_basis };
+      face.claim_state = {
+        ...face.claim_state,
+        disposition: "refuted",
+        unchallenged: false,
+        status_basis,
+      };
       const vm = buildClaimPageViewModel(face, ORIGIN);
       expect(vm.whyThisStatus.triggeringItems).toHaveLength(0);
       expect(vm.whyThisStatus.reasons.join(" ")).toContain("cause is unavailable");
       expect(vm.whyThisStatus.summary).not.toContain("verified");
     }
-    face.claim_state = { ...face.claim_state, stale: true,
-      status_basis: { kind: "transition", event_id: "EVT-OLD", seq: 5,
-        from: "open", to: "refuted", cause: "review-created" } };
+    face.claim_state = {
+      ...face.claim_state,
+      stale: true,
+      status_basis: {
+        kind: "transition",
+        event_id: "EVT-OLD",
+        seq: 5,
+        from: "open",
+        to: "refuted",
+        cause: "review-created",
+      },
+    };
     expect(buildClaimPageViewModel(face, ORIGIN).whyThisStatus.triggeringItems).toHaveLength(0);
   });
 
   test("a canonical disclosure cap is explained without inferring a missing scientific review", () => {
     const face = makeClaimFace();
-    face.claim_state = { ...face.claim_state, disposition: "corroborated", unchallenged: false,
-      status_basis: { kind: "directive-disclosure", status: "missing" } };
+    face.claim_state = {
+      ...face.claim_state,
+      disposition: "corroborated",
+      unchallenged: false,
+      status_basis: { kind: "directive-disclosure", status: "missing" },
+    };
     const why = buildClaimPageViewModel(face, ORIGIN).whyThisStatus;
     expect(why.reasons.join(" ")).toContain("incomplete coverage limits");
     expect(why.triggeringItems).toHaveLength(0);
@@ -198,8 +376,10 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         ...face.items[0]!,
         body: JSON.stringify({ fellow: "F-GOLDBACH", claim_id: "C-1", version: 1, seq: 1 }),
       };
-      expect(buildClaimPageViewModel({ ...face, items: [unknownAuthor, review] }, ORIGIN)
-        .tierExplainer.isSingleTeam).toBe(false);
+      expect(
+        buildClaimPageViewModel({ ...face, items: [unknownAuthor, review] }, ORIGIN).tierExplainer
+          .isSingleTeam,
+      ).toBe(false);
     }
   });
 
@@ -208,13 +388,18 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
       const face = makeClaimFace();
       face.claim_state = { ...face.claim_state, directive_disclosure: status };
       const vm = buildClaimPageViewModel(face, ORIGIN);
-      expect(vm.whatRemainsUnverified.gaps.some((gap) => gap.code === `DIRECTIVE_DISCLOSURE_${status.toUpperCase()}`))
-        .toBe(true);
+      expect(
+        vm.whatRemainsUnverified.gaps.some(
+          (gap) => gap.code === `DIRECTIVE_DISCLOSURE_${status.toUpperCase()}`,
+        ),
+      ).toBe(true);
     }
     const face = makeClaimFace();
     face.claim_state = { ...face.claim_state, directive_disclosure: "satisfied" };
     const vm = buildClaimPageViewModel(face, ORIGIN);
-    expect(vm.whatRemainsUnverified.gaps.some((gap) => gap.code.startsWith("DIRECTIVE_DISCLOSURE_"))).toBe(false);
+    expect(
+      vm.whatRemainsUnverified.gaps.some((gap) => gap.code.startsWith("DIRECTIVE_DISCLOSURE_")),
+    ).toBe(false);
     expect(vm.badges.disposition).toBe("open");
     expect(vm.whatRemainsUnverified.gaps.some((gap) => gap.code === "NO_REFUTATIONS")).toBe(true);
   });
@@ -232,7 +417,13 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
 
     // Why this status
     expect(vm.whyThisStatus.summary).toContain("unchallenged");
-    expect(vm.whyThisStatus.reasons.some((r) => r.includes("0 recorded refutation attempts") || r.includes("0 recorded refutation attempt(s)"))).toBe(true);
+    expect(
+      vm.whyThisStatus.reasons.some(
+        (r) =>
+          r.includes("0 recorded refutation attempts") ||
+          r.includes("0 recorded refutation attempt(s)"),
+      ),
+    ).toBe(true);
 
     // What remains unverified
     expect(vm.whatRemainsUnverified.gaps.some((g) => g.code === "NO_REFUTATIONS")).toBe(true);
@@ -286,8 +477,14 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         recorded_refutation_attempts: 4,
         certified_artifact: true,
         legacy_reviews: 0,
-        status_basis: { kind: "transition", event_id: "EVT-REVIEW-2", seq: 4,
-          from: "corroborated", to: "strongly-supported", cause: "review-created" },
+        status_basis: {
+          kind: "transition",
+          event_id: "EVT-REVIEW-2",
+          seq: 4,
+          from: "corroborated",
+          to: "strongly-supported",
+          cause: "review-created",
+        },
       },
       items: [
         makeClaimFace().items[0]!,
@@ -365,7 +562,8 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
 
     // Why this status has triggering links to R-1, R-2, E-1
     expect(vm.whyThisStatus.triggeringItems.map((item) => item.id)).toEqual(["EVT-REVIEW-2"]);
-    for (const id of ["R-1", "R-2", "E-1"]) expect(vm.timeline.some((item) => item.itemId === id)).toBe(true);
+    for (const id of ["R-1", "R-2", "E-1"])
+      expect(vm.timeline.some((item) => item.itemId === id)).toBe(true);
 
     // Verified: no NO_REFUTATIONS gap and no NO_TIER2 gap
     expect(vm.whatRemainsUnverified.gaps.some((g) => g.code === "NO_REFUTATIONS")).toBe(false);
@@ -386,8 +584,14 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         recorded_refutation_attempts: 1,
         certified_artifact: false,
         legacy_reviews: 0,
-        status_basis: { kind: "transition", event_id: "EVT-DISPUTE", seq: 2,
-          from: "open", to: "disputed", cause: "refuting-evidence" },
+        status_basis: {
+          kind: "transition",
+          event_id: "EVT-DISPUTE",
+          seq: 2,
+          from: "open",
+          to: "disputed",
+          cause: "refuting-evidence",
+        },
       },
       items: [
         makeClaimFace().items[0]!,
@@ -437,8 +641,14 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         recorded_refutation_attempts: 1,
         certified_artifact: false,
         legacy_reviews: 0,
-        status_basis: { kind: "transition", event_id: "EVT-REFUTATION-REVIEW", seq: 3,
-          from: "disputed", to: "refuted", cause: "review-created" },
+        status_basis: {
+          kind: "transition",
+          event_id: "EVT-REFUTATION-REVIEW",
+          seq: 3,
+          from: "disputed",
+          to: "refuted",
+          cause: "review-created",
+        },
       },
       items: [
         makeClaimFace().items[0]!,
@@ -466,7 +676,9 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
 
     expect(vm.badges.disposition).toBe("refuted");
     expect(vm.whyThisStatus.summary).toContain("refuted");
-    expect(vm.whyThisStatus.triggeringItems.some((i) => i.id === "EVT-REFUTATION-REVIEW")).toBe(true);
+    expect(vm.whyThisStatus.triggeringItems.some((i) => i.id === "EVT-REFUTATION-REVIEW")).toBe(
+      true,
+    );
     expect(vm.timeline.some((item) => item.itemId === "E-KILL-1")).toBe(true);
   });
 
@@ -484,8 +696,14 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         recorded_refutation_attempts: 0,
         certified_artifact: false,
         legacy_reviews: 0,
-        status_basis: { kind: "transition", event_id: "EVT-WITHDRAWN", seq: 2,
-          from: "open", to: "withdrawn", cause: "claim-retracted" },
+        status_basis: {
+          kind: "transition",
+          event_id: "EVT-WITHDRAWN",
+          seq: 2,
+          from: "open",
+          to: "withdrawn",
+          cause: "claim-retracted",
+        },
       },
     });
 
@@ -510,8 +728,14 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         recorded_refutation_attempts: 0,
         certified_artifact: false,
         legacy_reviews: 0,
-        status_basis: { kind: "transition", event_id: "EVT-STATEMENT-REVIEW", seq: 2,
-          from: "open", to: "malformed", cause: "review-created" },
+        status_basis: {
+          kind: "transition",
+          event_id: "EVT-STATEMENT-REVIEW",
+          seq: 2,
+          from: "open",
+          to: "malformed",
+          cause: "review-created",
+        },
       },
     });
 
@@ -737,7 +961,10 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
       untrusted: true as const,
       why_included: "public review",
       body: JSON.stringify({
-        tier: "T2", verdict: "inform", basis: `Review basis ${id}`, seq,
+        tier: "T2",
+        verdict: "inform",
+        basis: `Review basis ${id}`,
+        seq,
         screening_notice: notice,
         novelty: {
           verdict: "new",
@@ -746,19 +973,24 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
       }),
       neutralized: [],
     });
-    const vm = buildClaimPageViewModel({
-      ...face,
-      claim_state: { ...face.claim_state, novelty: "new" },
-      items: [
-        ...face.items,
-        { ...review("R-1", 2), screening_notice: notice },
-        review("R-2", 3),
-      ],
-    }, ORIGIN);
-    expect(vm.novelty?.searches.find((item) => item.reviewId === "R-1")?.screeningNotice).toEqual(notice);
+    const vm = buildClaimPageViewModel(
+      {
+        ...face,
+        claim_state: { ...face.claim_state, novelty: "new" },
+        items: [...face.items, { ...review("R-1", 2), screening_notice: notice }, review("R-2", 3)],
+      },
+      ORIGIN,
+    );
+    expect(vm.novelty?.searches.find((item) => item.reviewId === "R-1")?.screeningNotice).toEqual(
+      notice,
+    );
     expect(vm.timeline.find((item) => item.itemId === "R-1")?.screeningNotice).toEqual(notice);
-    expect(vm.timeline.find((item) => item.itemId === "R-1")?.summary).toBe("Basis: Review basis R-1");
-    expect(vm.novelty?.searches.find((item) => item.reviewId === "R-2")).not.toHaveProperty("screeningNotice");
+    expect(vm.timeline.find((item) => item.itemId === "R-1")?.summary).toBe(
+      "Basis: Review basis R-1",
+    );
+    expect(vm.novelty?.searches.find((item) => item.reviewId === "R-2")).not.toHaveProperty(
+      "screeningNotice",
+    );
     expect(vm.timeline.find((item) => item.itemId === "R-2")).not.toHaveProperty("screeningNotice");
   });
 

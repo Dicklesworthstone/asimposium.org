@@ -1,7 +1,28 @@
-import type { ClaimFaceResponse, PublicClaimState, ScreeningPublicationNotice } from "@asimposium/contracts";
+import type {
+  ClaimFaceResponse,
+  PublicClaimState,
+  ScreeningPublicationNotice,
+} from "@asimposium/contracts";
 import { ClaimStatusBasisSchema } from "@asimposium/contracts";
 
 type FaceItem = ClaimFaceResponse["items"][number];
+
+/** Read a publication by its envelope identity, never a URL from authored prose.
+ * These readers apply current visibility; the publication ID is immutable but
+ * this link does not freeze the claim's later review window. */
+export function claimRecordSourceHref(
+  problemId: string,
+  item: Pick<FaceItem, "kind" | "id">,
+): string | undefined {
+  const segment =
+    item.kind === "claim-evidence"
+      ? "evidence"
+      : item.kind === "claim-review"
+        ? "reviews"
+        : undefined;
+  if (segment === undefined) return undefined;
+  return `/r/p/${encodeURIComponent(problemId)}/${segment}/${encodeURIComponent(item.id)}`;
+}
 
 export interface ParsedClaimDetail {
   readonly problem?: string;
@@ -174,6 +195,7 @@ export interface TimelineEntry {
   readonly itemId: string;
   readonly kind: "claim-detail" | "claim-dependency" | "claim-evidence" | "claim-review" | string;
   readonly label: string;
+  readonly sourceHref?: string;
   readonly actor: {
     readonly fellow?: string;
     readonly sponsor?: string;
@@ -274,14 +296,24 @@ function dependencyPath(
   const depth = data.dependency_depth;
   const path = data.dependency_path;
   if (
-    typeof depth !== "number" || !Number.isInteger(depth) || depth < 1 || depth > 63 ||
-    !Array.isArray(path) || path.length !== depth + 1 || path[0] !== root ||
+    typeof depth !== "number" ||
+    !Number.isInteger(depth) ||
+    depth < 1 ||
+    depth > 63 ||
+    !Array.isArray(path) ||
+    path.length !== depth + 1 ||
+    path[0] !== root ||
     path.at(-1) !== target ||
-    !path.every((step): step is string => typeof step === "string" && step.length <= 64 &&
-      /^C-[0-9]+@[1-9][0-9]*$/.exec(step)?.[0] === step &&
-      Number.isSafeInteger(Number(step.split("@")[1]))) ||
+    !path.every(
+      (step): step is string =>
+        typeof step === "string" &&
+        step.length <= 64 &&
+        /^C-[0-9]+@[1-9][0-9]*$/.exec(step)?.[0] === step &&
+        Number.isSafeInteger(Number(step.split("@")[1])),
+    ) ||
     new Set(path.map((step) => step.split("@")[0])).size !== path.length
-  ) return undefined;
+  )
+    return undefined;
   return { depth, path: [...path] };
 }
 
@@ -294,72 +326,155 @@ function dependencyScanCount(
 ): number | undefined {
   const value = detail?.dependency_closure;
   if (
-    detail?.problem !== face.problem || detail?.claim_id !== face.claim_state.claim_id ||
+    detail?.problem !== face.problem ||
+    detail?.claim_id !== face.claim_state.claim_id ||
     detail?.version !== face.claim_state.version ||
-    !value || typeof value !== "object" || Array.isArray(value) ||
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
     !Array.isArray(detail.dependency_pins)
-  ) return undefined;
+  )
+    return undefined;
   const summary = value as Record<string, unknown>;
   const count = summary.verified_dependencies;
   if (
-    summary.scope !== "publication-pins" || summary.through !== face.cursor ||
-    summary.scan_complete !== true || summary.unavailable_dependencies !== 0 ||
-    typeof count !== "number" || !Number.isInteger(count) || count < 0 || count > 63 ||
+    summary.scope !== "publication-pins" ||
+    summary.through !== face.cursor ||
+    summary.scan_complete !== true ||
+    summary.unavailable_dependencies !== 0 ||
+    typeof count !== "number" ||
+    !Number.isInteger(count) ||
+    count < 0 ||
+    count > 63 ||
     count < dependencies.length ||
     (count === 0 ? detail.dependency_pins.length !== 0 : detail.dependency_pins.length === 0) ||
     dependencies.some((dependency) => dependency.path === undefined) ||
     new Set(dependencies.map((dependency) => dependency.target)).size !== dependencies.length ||
     face.omitted.some((entry) => entry.reason === "dependency_history_unavailable")
-  ) return undefined;
+  )
+    return undefined;
   return count;
 }
 
 const EVIDENCE_CLASSES = ["assertion", "heuristic", "citation", "computation", "certified"];
-const ASSESSMENT_REASONS = ["weakest-evidence", "source-unavailable", "dependency-history-unavailable",
-  "dependency-cycle", "premise-not-current", "premise-contested", "premise-inactive"];
-const PREMISE_DISPOSITIONS = ["draft", "open", "malformed", "disputed", "corroborated",
-  "strongly-supported", "refuted", "reduced-to", "withdrawn", "superseded"];
-const REVIEW_STATES = ["unreviewed", "review-requested", "under-review", "contested", "independently-checked"];
+const ASSESSMENT_REASONS = [
+  "weakest-evidence",
+  "source-unavailable",
+  "dependency-history-unavailable",
+  "dependency-cycle",
+  "premise-not-current",
+  "premise-contested",
+  "premise-inactive",
+];
+const PREMISE_DISPOSITIONS = [
+  "draft",
+  "open",
+  "malformed",
+  "disputed",
+  "corroborated",
+  "strongly-supported",
+  "refuted",
+  "reduced-to",
+  "withdrawn",
+  "superseded",
+];
+const REVIEW_STATES = [
+  "unreviewed",
+  "review-requested",
+  "under-review",
+  "contested",
+  "independently-checked",
+];
 
 /** Interpret a server assessment only at its exact identity and ledger cut.
  * This validates display metadata; it never recomputes scientific standing or
  * derives support from the author's prose. Older faces keep the unknown view.
  */
 function dependencyAssessment(
-  value: unknown, problem: string, target: string, cursor: number,
+  value: unknown,
+  problem: string,
+  target: string,
+  cursor: number,
 ): DependencyAssessmentView | undefined {
   const record = (v: unknown): Record<string, unknown> | undefined =>
-    v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : undefined;
-  const data = record(value), standing = record(data?.standing), chain = record(data?.chain);
-  const exact = (v: unknown): v is string => typeof v === "string" && v.length <= 64 &&
-    /^C-[0-9]+@[1-9][0-9]*$/.exec(v)?.[0] === v && Number.isSafeInteger(Number(v.split("@")[1]));
-  const nullableEnum = (v: unknown, choices: string[]) => v === null || (typeof v === "string" && choices.includes(v));
-  if (!data || !standing || !chain || data.scope !== "publication-pins" || data.problem !== problem ||
-      data.target !== target || data.through !== cursor || !exact(target) ||
-      typeof standing.complete !== "boolean" || typeof standing.stale !== "boolean" ||
-      typeof chain.complete !== "boolean" || typeof chain.reason !== "string" || !ASSESSMENT_REASONS.includes(chain.reason) ||
-      !nullableEnum(standing.disposition, PREMISE_DISPOSITIONS) || !nullableEnum(standing.review_state, REVIEW_STATES) ||
-      !nullableEnum(standing.own_ceiling, EVIDENCE_CLASSES) || !nullableEnum(chain.ceiling, EVIDENCE_CLASSES) ||
-      (standing.latest_version !== null && (typeof standing.latest_version !== "number" ||
-        !Number.isSafeInteger(standing.latest_version) || standing.latest_version < Number(target.split("@")[1]))) ||
-      !Array.isArray(chain.weakest_path) || chain.weakest_path.length < 1 || chain.weakest_path.length > 65 ||
-      chain.weakest_path[0] !== target || !chain.weakest_path.every(exact)) return undefined;
-  if (standing.complete && (standing.stale || standing.disposition === null || standing.review_state === null ||
-      standing.own_ceiling === null || standing.latest_version === null)) return undefined;
+    v !== null && typeof v === "object" && !Array.isArray(v)
+      ? (v as Record<string, unknown>)
+      : undefined;
+  const data = record(value),
+    standing = record(data?.standing),
+    chain = record(data?.chain);
+  const exact = (v: unknown): v is string =>
+    typeof v === "string" &&
+    v.length <= 64 &&
+    /^C-[0-9]+@[1-9][0-9]*$/.exec(v)?.[0] === v &&
+    Number.isSafeInteger(Number(v.split("@")[1]));
+  const nullableEnum = (v: unknown, choices: string[]) =>
+    v === null || (typeof v === "string" && choices.includes(v));
+  if (
+    !data ||
+    !standing ||
+    !chain ||
+    data.scope !== "publication-pins" ||
+    data.problem !== problem ||
+    data.target !== target ||
+    data.through !== cursor ||
+    !exact(target) ||
+    typeof standing.complete !== "boolean" ||
+    typeof standing.stale !== "boolean" ||
+    typeof chain.complete !== "boolean" ||
+    typeof chain.reason !== "string" ||
+    !ASSESSMENT_REASONS.includes(chain.reason) ||
+    !nullableEnum(standing.disposition, PREMISE_DISPOSITIONS) ||
+    !nullableEnum(standing.review_state, REVIEW_STATES) ||
+    !nullableEnum(standing.own_ceiling, EVIDENCE_CLASSES) ||
+    !nullableEnum(chain.ceiling, EVIDENCE_CLASSES) ||
+    (standing.latest_version !== null &&
+      (typeof standing.latest_version !== "number" ||
+        !Number.isSafeInteger(standing.latest_version) ||
+        standing.latest_version < Number(target.split("@")[1]))) ||
+    !Array.isArray(chain.weakest_path) ||
+    chain.weakest_path.length < 1 ||
+    chain.weakest_path.length > 65 ||
+    chain.weakest_path[0] !== target ||
+    !chain.weakest_path.every(exact)
+  )
+    return undefined;
+  if (
+    standing.complete &&
+    (standing.stale ||
+      standing.disposition === null ||
+      standing.review_state === null ||
+      standing.own_ceiling === null ||
+      standing.latest_version === null)
+  )
+    return undefined;
   if (!standing.complete && (standing.own_ceiling !== null || chain.complete)) return undefined;
   if (chain.complete) {
-    if (!standing.complete || chain.reason !== "weakest-evidence" || chain.ceiling === null ||
-        standing.latest_version !== Number(target.split("@")[1]) || standing.review_state === "contested" ||
-        !["open", "corroborated", "strongly-supported", "reduced-to"].includes(String(standing.disposition)) ||
-        EVIDENCE_CLASSES.indexOf(String(chain.ceiling)) > EVIDENCE_CLASSES.indexOf(String(standing.own_ceiling)) ||
-        new Set(chain.weakest_path.map((step: string) => step.split("@")[0])).size !== chain.weakest_path.length)
+    if (
+      !standing.complete ||
+      chain.reason !== "weakest-evidence" ||
+      chain.ceiling === null ||
+      standing.latest_version !== Number(target.split("@")[1]) ||
+      standing.review_state === "contested" ||
+      !["open", "corroborated", "strongly-supported", "reduced-to"].includes(
+        String(standing.disposition),
+      ) ||
+      EVIDENCE_CLASSES.indexOf(String(chain.ceiling)) >
+        EVIDENCE_CLASSES.indexOf(String(standing.own_ceiling)) ||
+      new Set(chain.weakest_path.map((step: string) => step.split("@")[0])).size !==
+        chain.weakest_path.length
+    )
       return undefined;
   } else if (chain.ceiling !== null || chain.reason === "weakest-evidence") return undefined;
   return {
-    complete: chain.complete, ceiling: chain.ceiling as string | null,
-    ownCeiling: standing.own_ceiling as string | null, disposition: standing.disposition as string | null,
-    reviewState: standing.review_state as string | null, latestVersion: standing.latest_version as number | null,
-    path: [...chain.weakest_path], reason: chain.reason,
+    complete: chain.complete,
+    ceiling: chain.ceiling as string | null,
+    ownCeiling: standing.own_ceiling as string | null,
+    disposition: standing.disposition as string | null,
+    reviewState: standing.review_state as string | null,
+    latestVersion: standing.latest_version as number | null,
+    path: [...chain.weakest_path],
+    reason: chain.reason,
   };
 }
 
@@ -409,12 +524,15 @@ export function buildClaimPageViewModel(
     const [targetClaimId, versionStr] = target.split("@");
     const targetVersion = versionStr ? Number.parseInt(versionStr, 10) : 1;
     const route = dependencyPath(data, exactTarget, target);
-    const assessment = route && data.problem === face.problem && `${data.claim_id}@${data.version}` === target
-      ? dependencyAssessment(data.dependency_assessment, face.problem, target, face.cursor) : undefined;
-    const isDisputed = assessment?.disposition === "disputed" || assessment?.disposition === "refuted" ||
-      assessment?.reviewState === "contested" || parsedEvidence.some(
-      (e) => e.data.target === target && e.data.direction === "refutes",
-    );
+    const assessment =
+      route && data.problem === face.problem && `${data.claim_id}@${data.version}` === target
+        ? dependencyAssessment(data.dependency_assessment, face.problem, target, face.cursor)
+        : undefined;
+    const isDisputed =
+      assessment?.disposition === "disputed" ||
+      assessment?.disposition === "refuted" ||
+      assessment?.reviewState === "contested" ||
+      parsedEvidence.some((e) => e.data.target === target && e.data.direction === "refutes");
     const statementPreview = data.statement ?? item.body.slice(0, 140);
     return {
       target,
@@ -432,19 +550,33 @@ export function buildClaimPageViewModel(
 
   // 3. Badges
   const scannedDependencies = dependencyScanCount(authorDetail, face, dependencies);
-  const assessed = authorDetail?.problem === face.problem && authorDetail.claim_id === state.claim_id &&
+  const assessed =
+    authorDetail?.problem === face.problem &&
+    authorDetail.claim_id === state.claim_id &&
     authorDetail.version === state.version
-    ? dependencyAssessment(authorDetail.dependency_assessment, face.problem, exactTarget, face.cursor) : undefined;
-  const rootAssessment = assessed?.complete && (scannedDependencies === undefined ||
-    assessed.path.length > scannedDependencies + 1 ||
-    face.omitted.some((o) => o.reason === "premise_assessment_unavailable")) ? undefined : assessed;
-  const structuralCeiling = scannedDependencies === undefined
-    ? `${dependencies.length} premise(s) shown · dependency history incomplete`
-    : scannedDependencies === 0
-      ? "No declared premises"
-      : `${dependencies.length} of ${scannedDependencies} declared premise(s) shown · evidence ceiling uncomputed`;
+      ? dependencyAssessment(
+          authorDetail.dependency_assessment,
+          face.problem,
+          exactTarget,
+          face.cursor,
+        )
+      : undefined;
+  const rootAssessment =
+    assessed?.complete &&
+    (scannedDependencies === undefined ||
+      assessed.path.length > scannedDependencies + 1 ||
+      face.omitted.some((o) => o.reason === "premise_assessment_unavailable"))
+      ? undefined
+      : assessed;
+  const structuralCeiling =
+    scannedDependencies === undefined
+      ? `${dependencies.length} premise(s) shown · dependency history incomplete`
+      : scannedDependencies === 0
+        ? "No declared premises"
+        : `${dependencies.length} of ${scannedDependencies} declared premise(s) shown · evidence ceiling uncomputed`;
   const ceiling = rootAssessment
-    ? rootAssessment.complete ? `Evidence ceiling: ${rootAssessment.ceiling}`
+    ? rootAssessment.complete
+      ? `Evidence ceiling: ${rootAssessment.ceiling}`
       : `Evidence ceiling unavailable · ${rootAssessment.reason}`
     : structuralCeiling;
 
@@ -509,6 +641,7 @@ export function buildClaimPageViewModel(
       eventId: data.event ?? item.id,
       itemId: item.id,
       kind: "claim-evidence",
+      sourceHref: claimRecordSourceHref(face.problem, item),
       label: `Evidence ${item.id} (${data.kind ?? "evidence"})`,
       actor: {
         fellow: data.fellow,
@@ -531,6 +664,7 @@ export function buildClaimPageViewModel(
       eventId: data.event ?? item.id,
       itemId: item.id,
       kind: "claim-review",
+      sourceHref: claimRecordSourceHref(face.problem, item),
       label: `Review ${item.id} (${data.tier ?? "tier unknown"})`,
       actor: {
         fellow: data.fellow,
@@ -570,7 +704,8 @@ export function buildClaimPageViewModel(
   const allActors = timelineEntries.map((e) => e.actor);
   const isSingleTeam =
     allActors.length > 1 &&
-    typeof authorSponsor === "string" && authorSponsor.length > 0 &&
+    typeof authorSponsor === "string" &&
+    authorSponsor.length > 0 &&
     allActors.every((actor) => actor.sponsor === authorSponsor);
 
   const tierExplainer: TierExplainerViewModel = {
@@ -596,29 +731,54 @@ export function buildClaimPageViewModel(
   ];
   const parsedBasis = ClaimStatusBasisSchema.safeParse(state.status_basis);
   const basis = parsedBasis.success ? parsedBasis.data : undefined;
-  if (basis?.kind === "transition" && !state.stale && basis.to === state.disposition &&
-    basis.seq <= face.cursor) {
+  if (
+    basis?.kind === "transition" &&
+    !state.stale &&
+    basis.to === state.disposition &&
+    basis.seq <= face.cursor
+  ) {
     const causeText: Record<typeof basis.cause, string> = {
       "claim-created": "The claim publication established this standing.",
-      "claim-revised": "A new statement version reestablished its standing; earlier reviews do not certify it.",
+      "claim-revised":
+        "A new statement version reestablished its standing; earlier reviews do not certify it.",
       "claim-retracted": "The author withdrew this statement through a recorded retraction.",
-      "claim-reduced": "A recorded reduction changed the bookkeeping status; this is not proof of the reduction.",
-      "author-concession": "The author conceded this exact statement against recorded counterevidence; an independent verification is not inferred.",
-      "review-created": "A recorded review changed the computed standing under the existing ledger rules.",
-      "refuting-evidence": "Recorded counterevidence triggered this status step; evidence submission alone does not certify a refutation.",
-      "falsification-attempt": "A grounded surviving check triggered reevaluation of the recorded support.",
+      "claim-reduced":
+        "A recorded reduction changed the bookkeeping status; this is not proof of the reduction.",
+      "author-concession":
+        "The author conceded this exact statement against recorded counterevidence; an independent verification is not inferred.",
+      "review-created":
+        "A recorded review changed the computed standing under the existing ledger rules.",
+      "refuting-evidence":
+        "Recorded counterevidence triggered this status step; evidence submission alone does not certify a refutation.",
+      "falsification-attempt":
+        "A grounded surviving check triggered reevaluation of the recorded support.",
     };
     reasons.unshift(causeText[basis.cause]);
-    triggeringItems.push({ id: basis.event_id, kind: basis.cause, seq: basis.seq,
-      label: "Recorded status step", verdictOrDirection: `${basis.from} → ${basis.to}`,
-      href: `/p/${encodeURIComponent(face.problem)}/events?since=${basis.seq - 1}&through=${basis.seq}&limit=1` });
-  } else if (basis?.kind === "directive-disclosure" && !state.stale &&
-    state.disposition === "corroborated" && basis.status === state.directive_disclosure) {
-    reasons.unshift(`Current sponsor directive disclosure is ${basis.status}; incomplete coverage limits the strongest public standing.`);
+    triggeringItems.push({
+      id: basis.event_id,
+      kind: basis.cause,
+      seq: basis.seq,
+      label: "Recorded status step",
+      verdictOrDirection: `${basis.from} → ${basis.to}`,
+      href: `/p/${encodeURIComponent(face.problem)}/events?since=${basis.seq - 1}&through=${basis.seq}&limit=1`,
+    });
+  } else if (
+    basis?.kind === "directive-disclosure" &&
+    !state.stale &&
+    state.disposition === "corroborated" &&
+    basis.status === state.directive_disclosure
+  ) {
+    reasons.unshift(
+      `Current sponsor directive disclosure is ${basis.status}; incomplete coverage limits the strongest public standing.`,
+    );
   } else {
-    reasons.unshift("The exact disposition cause is unavailable at this snapshot; no cause is inferred from displayed prose or review counts.");
+    reasons.unshift(
+      "The exact disposition cause is unavailable at this snapshot; no cause is inferred from displayed prose or review counts.",
+    );
   }
-  reasons.push("The evidence and review timeline below contains bounded related records, not an inferred list of causal transitions.");
+  reasons.push(
+    "The evidence and review timeline below contains bounded related records, not an inferred list of causal transitions.",
+  );
 
   const whyThisStatus: WhyThisStatusViewModel = {
     summary: whySummary,
@@ -633,26 +793,38 @@ export function buildClaimPageViewModel(
     const status = state.directive_disclosure ?? "unavailable";
     gaps.push({
       code: `DIRECTIVE_DISCLOSURE_${status.toUpperCase()}`,
-      title: status === "unresolved" ? "Sponsor disclosure coverage remains unresolved"
-        : status === "missing" ? "Sponsor directive declaration is missing"
-          : "Sponsor directive disclosure could not be verified",
-      detail: status === "unresolved"
-        ? "A sponsor interval in this exact result lineage is unresolved. A new sponsor cannot attest for a previous sponsor; the accountable sponsor must resolve their own disclosure before strongly-supported standing or result review is available."
-        : status === "missing"
-          ? "The public record lacks complete sponsor declarations for the exact claim lineage. Each accountable sponsor must attest that no undisclosed private directive materially shaped the result, or publish a scoped disclosure."
-          : "The canonical projection could not verify complete disclosure coverage. Missing or unavailable coverage cannot establish that private steering was disclosed, even when other scientific evidence is present.",
+      title:
+        status === "unresolved"
+          ? "Sponsor disclosure coverage remains unresolved"
+          : status === "missing"
+            ? "Sponsor directive declaration is missing"
+            : "Sponsor directive disclosure could not be verified",
+      detail:
+        status === "unresolved"
+          ? "A sponsor interval in this exact result lineage is unresolved. A new sponsor cannot attest for a previous sponsor; the accountable sponsor must resolve their own disclosure before strongly-supported standing or result review is available."
+          : status === "missing"
+            ? "The public record lacks complete sponsor declarations for the exact claim lineage. Each accountable sponsor must attest that no undisclosed private directive materially shaped the result, or publish a scoped disclosure."
+            : "The canonical projection could not verify complete disclosure coverage. Missing or unavailable coverage cannot establish that private steering was disclosed, even when other scientific evidence is present.",
       severity: "warning",
     });
   }
 
   if (rootAssessment) {
     gaps.push({
-      code: rootAssessment.complete ? "DEPENDENCY_EVIDENCE_CEILING" : "DEPENDENCY_ASSESSMENT_UNAVAILABLE",
-      title: rootAssessment.complete ? `Weakest-link evidence ceiling: ${rootAssessment.ceiling}`
+      code: rootAssessment.complete
+        ? "DEPENDENCY_EVIDENCE_CEILING"
+        : "DEPENDENCY_ASSESSMENT_UNAVAILABLE",
+      title: rootAssessment.complete
+        ? `Weakest-link evidence ceiling: ${rootAssessment.ceiling}`
         : `No complete chain assessment: ${rootAssessment.reason}`,
       detail: `Limiting publication path: ${rootAssessment.path.join(" → ")}. The assessment uses pinned versions at ledger cursor ${face.cursor}, not later replacements. An evidence ceiling is not a truth verdict or an established implication.`,
-      severity: rootAssessment.complete ? "info"
-        : ["premise-contested", "premise-inactive", "premise-not-current"].includes(rootAssessment.reason) ? "critical" : "warning",
+      severity: rootAssessment.complete
+        ? "info"
+        : ["premise-contested", "premise-inactive", "premise-not-current"].includes(
+              rootAssessment.reason,
+            )
+          ? "critical"
+          : "warning",
     });
   }
 
@@ -660,14 +832,16 @@ export function buildClaimPageViewModel(
     gaps.push({
       code: "DEPENDENCY_HISTORY_UNAVAILABLE",
       title: "Dependency history is incomplete or unavailable",
-      detail: "Only displayed, readable publication pins can be inspected here. Missing, withheld, legacy or bounded-out dependencies cannot establish that this claim has no premises.",
+      detail:
+        "Only displayed, readable publication pins can be inspected here. Missing, withheld, legacy or bounded-out dependencies cannot establish that this claim has no premises.",
       severity: "warning",
     });
   } else if (scannedDependencies > dependencies.length) {
     gaps.push({
       code: "DEPENDENCIES_NOT_SHOWN",
       title: `${scannedDependencies - dependencies.length} declared premise(s) not displayed`,
-      detail: "The structural scan found more dependencies than this budgeted face displays. Follow the pinned premise links and explicit omissions to inspect the remaining records.",
+      detail:
+        "The structural scan found more dependencies than this budgeted face displays. Follow the pinned premise links and explicit omissions to inspect the remaining records.",
       severity: "info",
     });
   }

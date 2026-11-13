@@ -18,7 +18,7 @@ import { ReportLink } from "@/components/report-panel";
 import { ScientificBody } from "@/components/scientific-body";
 import { ScreeningNotice } from "@/components/screening-notice";
 import { ShareCardPanel } from "@/components/share-card-panel";
-import { buildClaimPageViewModel } from "@/lib/claim-page-view";
+import { buildClaimPageViewModel, claimRecordSourceHref } from "@/lib/claim-page-view";
 import { directiveDisclosureHref } from "@/lib/directive-disclosure-target";
 import { stoaFetchClaimFace } from "@/lib/public-ledger";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
@@ -297,38 +297,49 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
             <p>Published content is unavailable; see the omissions below.</p>
           )}
           <ol className="claims-list">
-            {face.items.map((item) => (
-              <li className="claim-card" key={item.id} id={item.id}>
-                <header className="claim-card-header">
-                  <h3>
-                    <code>{item.id}</code> · {item.kind}
-                  </h3>
-                  <span className="quiet"> · {item.scope} · untrusted data</span>
-                </header>
-                {item.kind === "claim-dependency" && (
-                  <p>
-                    <Link
-                      href={`/p/${encodeURIComponent(face.problem)}/claims/${item.id}${cut}`}
-                      prefetch={false}
-                    >
-                      Read this premise version
-                    </Link>
-                  </p>
-                )}
-                <ScientificBody body={item.body} namespace={`claim-record-${item.id}`} />
-                <ScreeningNotice notice={item.screening_notice} />
-                <EvidenceArtifactLink problem={face.problem} item={item} />
-                <p className="quiet">{item.why_included}</p>
-                {item.neutralized.length > 0 && (
-                  <p className="quiet">
-                    Neutralized markers:{" "}
-                    {item.neutralized
-                      .map((finding) => `${finding.marker}×${finding.count}`)
-                      .join(", ")}
-                  </p>
-                )}
-              </li>
-            ))}
+            {face.items.map((item) => {
+              const sourceHref = claimRecordSourceHref(face.problem, item);
+              return (
+                <li className="claim-card" key={item.id} id={item.id}>
+                  <header className="claim-card-header">
+                    <h3>
+                      <code>{item.id}</code> · {item.kind}
+                    </h3>
+                    <span className="quiet"> · {item.scope} · untrusted data</span>
+                  </header>
+                  {sourceHref !== undefined && (
+                    <p>
+                      <Link href={sourceHref} prefetch={false}>
+                        Read complete published{" "}
+                        {item.kind === "claim-evidence" ? "evidence" : "review"} {item.id} →
+                      </Link>
+                    </p>
+                  )}
+                  {item.kind === "claim-dependency" && (
+                    <p>
+                      <Link
+                        href={`/p/${encodeURIComponent(face.problem)}/claims/${item.id}${cut}`}
+                        prefetch={false}
+                      >
+                        Read this premise version
+                      </Link>
+                    </p>
+                  )}
+                  <ScientificBody body={item.body} namespace={`claim-record-${item.id}`} />
+                  <ScreeningNotice notice={item.screening_notice} />
+                  <EvidenceArtifactLink problem={face.problem} item={item} />
+                  <p className="quiet">{item.why_included}</p>
+                  {item.neutralized.length > 0 && (
+                    <p className="quiet">
+                      Neutralized markers:{" "}
+                      {item.neutralized
+                        .map((finding) => `${finding.marker}×${finding.count}`)
+                        .join(", ")}
+                    </p>
+                  )}
+                </li>
+              );
+            })}
           </ol>
         </section>
 
