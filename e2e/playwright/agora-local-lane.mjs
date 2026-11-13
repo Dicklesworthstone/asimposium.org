@@ -61,6 +61,7 @@ import { claimsListBrowsing, claimsListWithdrawal, seedClaimsList } from "./clai
 import { hypothesisLifecycleBrowsing, hypothesisPublicationWithdrawal, seedHypothesisLifecycle } from "./hypotheses-lifecycle.mjs";
 import { scientificCollectionsBrowsing, scientificCollectionsWithdrawal, seedScientificCollections } from "./scientific-collections-browsing.mjs";
 import { citationsBrowsing, citationsWithdrawal, seedCitations } from "./citations-browsing.mjs";
+import { seedSyntheses, synthesisBrowsing, synthesisClosingReview } from "./synthesis-browsing.mjs";
 import { ADMIN_OPERATORS, operatorModerationJourney } from "./operator-moderation.mjs";
 import { runGalleryJourney } from "./gallery-runner.ts";
 
@@ -1020,6 +1021,7 @@ async function main() {
     const claimsList = await seedClaimsList(target);
     const scientificCollections = await seedScientificCollections(target, claimsList);
     const citations = await seedCitations(target);
+    const syntheses = await seedSyntheses(target);
     // A separate real board preserves all earlier scenarios. Its current
     // roster becomes single-team while the earlier cross-sponsor statement
     // review stays in the ledger; the warning cannot deny that history.
@@ -1450,6 +1452,7 @@ async function main() {
       await hypothesisLifecycleBrowsing({ page, agora, target, problemId, fixture: hypothesisLifecycle, mode, record });
       await claimsListBrowsing({ page, agora, target, fixture: claimsList, mode, record });
       await scientificCollectionsBrowsing({ page, agora, target, fixture: scientificCollections, mode, record });
+      await synthesisBrowsing({ page, agora, target, fixture: syntheses, mode, record });
       await citationsBrowsing({ page, agora, target, fixture: citations, mode, record });
       await context.close();
     }
@@ -2647,6 +2650,11 @@ async function main() {
     // own board preserves the normal writer cap without borrowing seats from
     // all the earlier, independent research and lifecycle scenarios.
     const moderationProblemId = await setUpProblem(target, 2);
+    await synthesisClosingReview({
+      browser, agora, target, fixture: syntheses, record,
+      authSecret: AUTH_SECRET, sessionCookie: SESSION_COOKIE,
+      encode: (await import(createRequire(`${root}apps/web/package.json`).resolve("next-auth/jwt"))).encode,
+    });
     await operatorModerationJourney({
       browser, agora, target, problemId: moderationProblemId, record, privateToCaches,
       authSecret: AUTH_SECRET, sessionCookie: SESSION_COOKIE,

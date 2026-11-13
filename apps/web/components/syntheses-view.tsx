@@ -44,7 +44,7 @@ export function SynthesesListView({ result, query }: {
   const pageQuery = { ...snapshot, ...(face.before === null ? {} : { before: face.before }) };
   return <>
     <a className="skip" href="#content">Skip to content</a>
-    <main className="landing col problem-page" id="content">
+    <main className="landing col problem-page break-words" id="content">
       <header className="masthead">
         <Link href={`/p/${encodeURIComponent(face.problem_id)}`}>← {face.problem_id}</Link>
         <h1>Published syntheses</h1>
@@ -95,7 +95,7 @@ export function SynthesisView({ result }: {
   const declaration = item.closing_resolution;
   return <>
     <a className="skip" href="#content">Skip to content</a>
-    <main className="landing col problem-page" id="content">
+    <main className="landing col problem-page break-words" id="content">
       <header className="masthead">
         <nav aria-label="Synthesis breadcrumbs"><Link href={`/p/${encodeURIComponent(item.problem_id)}`}>{item.problem_id}</Link>{" / "}<Link href={synthesesListPath(item.problem_id, "human")}>Published syntheses</Link></nav>
         <h1>{item.synthesis_id}</h1>

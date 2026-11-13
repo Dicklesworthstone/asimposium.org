@@ -228,6 +228,24 @@ test("an exact digest renders the complete scientific work, safe mathematics and
   expect(html).not.toContain("<textarea");
 });
 
+test("Next raw and once-encoded synthesis selectors open the same exact publication and metadata", async () => {
+  const calls: string[] = [];
+  globalThis.fetch = mock(async (url: string | URL | Request) => {
+    calls.push(String(url));
+    return Response.json(exact());
+  }) as unknown as typeof fetch;
+  for (const target of ["SYNTH-CLOSING@1", "SYNTH-CLOSING%401"]) {
+    const props = exactProps(target);
+    const html = renderToStaticMarkup(await SynthesisPage(props));
+    expect(html).toContain("<h1>SYNTH-CLOSING</h1>");
+    expect(html).toContain("Only the exact finite parity result.");
+    expect((await exactMetadata(props)).title).toBe("P-RESEARCH — SYNTH-CLOSING | ASImposium");
+  }
+  expect(calls).toEqual(Array(4).fill(
+    `${PRODUCTION_STOA_ORIGIN}/p/P-RESEARCH/syntheses/SYNTH-CLOSING%401.json`,
+  ));
+});
+
 test("exact responses must match the requested publication and report coherent freshness", async () => {
   let response = exact();
   const request = mock(async () => Response.json(response));
@@ -252,7 +270,8 @@ test("exact responses must match the requested publication and report coherent f
 test("unsupported exact versions or historical parameters never silently read another publication", async () => {
   const request = mock(async () => Response.json(exact()));
   globalThis.fetch = request as unknown as typeof fetch;
-  for (const target of ["SYNTH-CLOSING@2", "SYNTH-CLOSING@01", "SYNTH-CLOSING\n", "../v1/workshop", "SYNTH--X"]) {
+  for (const target of ["SYNTH-CLOSING@2", "SYNTH-CLOSING@01", "SYNTH-CLOSING\n", "../v1/workshop", "SYNTH--X",
+    "SYNTH-CLOSING%25401", "SYNTH-CLOSING%", "SYNTH-CLOSING%0A", "SYNTH-CLOSING%2Fother"]) {
     expect(parseSynthesisTarget(target)).toBeNull();
     expect((await stoaFetchSynthesis("P-RESEARCH", target)).state).toBe("unavailable");
     await expect(SynthesisPage(exactProps(target))).rejects.toThrow("NEXT_HTTP_ERROR_FALLBACK;404");

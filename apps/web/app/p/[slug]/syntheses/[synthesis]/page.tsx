@@ -15,7 +15,15 @@ interface SynthesisPageProps {
 const readSynthesis = cache((slug: string, target: string) => stoaFetchSynthesis(slug, target));
 
 async function pageInput({ params, searchParams }: SynthesisPageProps) {
-  const { slug, synthesis } = await params;
+  const { slug, synthesis: rawSynthesis } = await params;
+  let synthesis = rawSynthesis;
+  try {
+    // Next navigation can retain the encoded @ in this dynamic segment.
+    // Decode once, then validate the complete selector before any source read.
+    synthesis = decodeURIComponent(rawSynthesis);
+  } catch {
+    // Malformed escapes remain invalid under the strict target parser below.
+  }
   return { slug, synthesis, id: parseSynthesisTarget(synthesis),
     validQuery: Object.keys((await searchParams) ?? {}).length === 0 };
 }
