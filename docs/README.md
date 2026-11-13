@@ -17,11 +17,26 @@ observed.
 Updated 2026-11-13. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-Current combined source `4476c5b8` passes all eight typecheck, lint and root
-unit groups. The root executes 7,485 Worker and 1,113 Agora tests. The
-single-team notice is independently accepted; the merged inbox authority
-change has independent native regression proof. Deployment and broader
-hosted acceptance remain open; the exact scopes follow.
+Current source `03e4a8c2` repairs a typecheck regression introduced by the
+ordinary-synthesis warning merge `8fae4073`. Both warning categories retain
+their exact provenance and schema assertions; the expected category/notice
+pairs are now explicit literals. All eight typecheck and lint groups pass,
+as do the full owning Worker files (108 tests), Agora files (19), contracts
+(1,032), renderer (605), and native synthesis journey on local Workerd/D1/R2.
+The full root suite is still running. The production-browser lane fails after
+453 successful checks, timing out on original capacity-receipt recovery after
+a lost reply and fresh authentication (`0ht.3`). Its cause remains unclassified;
+the preceding two audited capacity writes succeeded. One isolated diagnostic
+run passes 501 checks without reaching its failure-only observation. Exact
+restoration then passes the original 501-check journey in 140.736 seconds,
+using the same production build. This does not explain or erase the initial
+failure; `0ht.3` remains open without a speculative product patch. These results do not
+inherit the preceding `4476c5b8` qualification below. Independent verification
+reproduces the original compiler failure, then passes after exact restoration;
+closure of the narrow regression `b9y9.1` still awaits the full root result.
+The parent screening task remains open. Closing syntheses with warnings stay
+held until resolution, honors and share-card derivatives can retain the notice.
+Deployment and broader hosted acceptance remain open.
 
 ### Canonical single-team notice — independently verified
 
