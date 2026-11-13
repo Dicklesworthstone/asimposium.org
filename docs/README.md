@@ -14,8 +14,65 @@ observed.
 
 ## Current reality check
 
-Updated 2026-11-12. Runtime qualification below is pinned to its named source
+Updated 2026-11-13. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
+
+### Canonical single-team notice — qualification in progress
+
+Task `vv5.1`, source `4142b2d0ccb34d2c29683ff0d13321894dc89efd`, connects
+an existing but unreachable Agora/share-card warning to the canonical problem
+face. The Worker now examines at most 129 raw current membership records,
+preserving missing sponsorship rather than dropping it. Only a complete,
+nonempty roster of at most 128 records with one validated sponsor emits the
+existing `single_team` marker. Unknown or oversized sources disclose an
+omission; no sponsor identifiers or roster counts enter the notice.
+
+The shared wording describes current membership and explicitly preserves
+historical review independence. It removes the unsupported inference that
+a present one-sponsor roster means no independent review ever occurred.
+The real local roster journey passes in 8.198 seconds: an operational join
+changes the notice and ETag at the same public cursor; actual governance
+removal/restoration changes the notice without rewriting prior review items.
+The original cap, race, projection/search and credential assertions remain.
+
+All 11 scoped commands pass at the frozen bytes: the complete owning Wire
+and Agora files (9/325 and 105/795 tests/assertions), all eight typecheck/lint
+groups, full contracts 1,031/8,364, render 605/6,248, HTTP 191/2,643 and security
+33/288. Source closure is one passing case with 151 filtered, not the full file.
+The production-browser lane passes 501 checks with real Chromium, Next
+production mode and local Workerd/D1/R2; identity and screening are fixtures.
+It checks JavaScript/no-JavaScript notices, warmed pages and real share PNGs.
+Changed PNG bytes establish freshness, not isolated notice-pixel correctness.
+The initial missing-browser block and three missing-table SQLite fixture
+failures remain retained. The browser used an existing supported cache; the
+fixture repair adds the exact existing table definitions without relaxing tests.
+
+All 2,757 qualified inputs and the actual Next runtime remain stable. Literal
+UBS scans complete 11 files with six critical, 119 warning and 1,499 informational
+findings; all 125 elevated contexts and 21 informational classes were reviewed,
+with no suppression or broad security-clean claim. Independent reexecution
+passes the same 11 commands, including all 501 browser checks. Removing only
+the actual notice spread from the Worker fails the unchanged native positive
+in 7.394 seconds, after confirming the real roster and HTTP 200. Exact
+restoration passes the complete journey in 9.964 seconds. Every other input,
+all tests and the SDK stay fixed under the fault. Both original `4142b2d0`
+full root runs finish red: seven groups pass, while two resolution-reader cases
+fail because their separate SQLite fixture also lacks the roster tables.
+Primary duration is 1,609.784 seconds; independent 1,642.728. Neither run is
+acceptance. Adding the actual migrated definitions only to that fixture
+restores its complete 39-test/126-assertion file; all original resolution,
+withdrawal, budget and conditional-response predicates remain. Fixture-only
+successor `58bd8927` changes no application or browser/native test bytes;
+fresh typecheck and lint pass all eight groups. Its one-file UBS diff/details/
+staged scans complete with no elevated findings and 32 informational items.
+Independent successor checks pass the same fixture, typecheck and lint, plus
+the complete roster journey in 10.353 seconds. The actual notice-output
+omission again fails the unchanged positive in 6.941 seconds; exact restoration
+passes the complete journey in 9.541 seconds. All five positive/restored source
+vectors match `58bd8927`; only the producer differs under the fault.
+Both successor full-root runs and original-criteria closure remain pending.
+Parent `vv5`, hosted Google/screening, scientific, deployment,
+gauntlet, cost/recovery and launch gates remain open.
 
 ### Canonical membership in next responses — independently verified
 
