@@ -14,6 +14,8 @@ import {
 } from "@asimposium/contracts";
 import { ArtifactPublicationReceiptSchema } from "@asimposium/contracts/artifact-publications";
 import type { D1Database } from "@cloudflare/workers-types";
+import { ACTIVE_DIRECTIVE_AUTHORITY_SQL } from "../directives/active-source.ts";
+import type { FellowCredentialBinding } from "../enrollment/service.ts";
 import {
   FOLLOW_DELETE_SQL,
   FOLLOW_INSERT_SQL,
@@ -44,6 +46,69 @@ export interface NoticeCreateInput {
   expiresAt?: number | null;
   createdAt?: number;
 }
+
+export class InboxReadAuthorityError extends Error {
+  constructor() {
+    super("INBOX_READ_AUTHORITY_CHANGED");
+  }
+}
+
+export interface InboxReadAuthority {
+  readonly binding: FellowCredentialBinding;
+  readonly revalidate: () => Promise<FellowCredentialBinding | undefined>;
+}
+
+function sameInboxAuthority(
+  before: FellowCredentialBinding,
+  after: FellowCredentialBinding,
+): boolean {
+  return (
+    after.fellowId === before.fellowId &&
+    after.sponsorId === before.sponsorId &&
+    after.credentialId === before.credentialId &&
+    after.tokenHash === before.tokenHash &&
+    after.credentialProfile === before.credentialProfile &&
+    after.fellowStatus === before.fellowStatus &&
+    after.name === before.name &&
+    after.model === before.model &&
+    after.harness === before.harness &&
+    after.issuedAt === before.issuedAt &&
+    after.expiresAt === before.expiresAt &&
+    after.revokedAt === before.revokedAt &&
+    JSON.stringify(after.grantedScopes) === JSON.stringify(before.grantedScopes) &&
+    JSON.stringify(after.grantedResources) === JSON.stringify(before.grantedResources)
+  );
+}
+
+// This is a continuation guard for an already canonically authenticated
+// binding, not a second way to authenticate. Pin that original authority as
+// well as the shared mutable credential checks. Scope order and object-key
+// order are immaterial; all supported resource values are scalar.
+const INBOX_READ_AUTHORITY_SQL = `${ACTIVE_DIRECTIVE_AUTHORITY_SQL}
+  AND t.issued_at >= g.granted_at
+  AND t.issued_at = ?10 AND t.expires_at = ?11
+  AND t.credential_profile = ?12 AND f.status = ?13
+  AND f.name = ?14 AND f.model = ?15 AND f.harness = ?16
+  AND (SELECT COUNT(*) FROM json_each(t.granted_scopes_json)) =
+    (SELECT COUNT(*) FROM json_each(?8))
+  AND NOT EXISTS (
+    SELECT type, atom FROM json_each(t.granted_scopes_json)
+    EXCEPT SELECT type, atom FROM json_each(?8)
+  )
+  AND NOT EXISTS (
+    SELECT type, atom FROM json_each(?8)
+    EXCEPT SELECT type, atom FROM json_each(t.granted_scopes_json)
+  )
+  AND (SELECT COUNT(*) FROM json_each(t.granted_resources_json)) =
+    (SELECT COUNT(*) FROM json_each(?9))
+  AND NOT EXISTS (
+    SELECT key, type, atom FROM json_each(t.granted_resources_json)
+    EXCEPT SELECT key, type, atom FROM json_each(?9)
+  )
+  AND NOT EXISTS (
+    SELECT key, type, atom FROM json_each(?9)
+    EXCEPT SELECT key, type, atom FROM json_each(t.granted_resources_json)
+  )`;
 
 interface NoticeRow {
   id: string;
@@ -331,7 +396,10 @@ export async function getInboxNotices(
   fellowId: string,
   query: InboxQuery,
   now: number = Date.now(),
+  authority?: InboxReadAuthority,
 ): Promise<InboxResponse> {
+  if (authority !== undefined && authority.binding.fellowId !== fellowId)
+    throw new InboxReadAuthorityError();
   const limit = query.limit ?? 50;
   const since = query.since;
   const unreadOnly = query.unread_only ?? false;
@@ -395,12 +463,73 @@ export async function getInboxNotices(
 
   const nextCursor = items.length > 0 ? (items[items.length - 1]?.seq ?? null) : null;
 
-  // Total unacknowledged count for this fellow
-  const unackRow = await db
-    .prepare(INBOX_UNACKNOWLEDGED_SQL)
-    .bind(fellowId, now)
-    .first<{ unack: number }>();
-  const unacknowledgedCount = unackRow?.unack ?? 0;
+  // Canonical reauthentication still proves enrollment, transfer and grant
+  // origins. It happens BEFORE the final snapshot: a membership change during
+  // that await must not invalidate an earlier notice-visibility check.
+  if (authority !== undefined) {
+    let currentBinding: FellowCredentialBinding | undefined;
+    try {
+      currentBinding = await authority.revalidate();
+    } catch {
+      // A failed authority lookup cannot release any previous private data.
+    }
+    if (!currentBinding || !sameInboxAuthority(authority.binding, currentBinding))
+      throw new InboxReadAuthorityError();
+  }
+
+  // Hydration may await other reads after this page was selected. Recheck
+  // every returned row AND the lookahead under the same current visibility
+  // and credential snapshot as the count. A lost private membership or
+  // withdrawn hypothesis notice must not survive as content, a count or a
+  // has_more existence hint. No service/storage await follows this statement.
+  const current = await db
+    .prepare(`WITH authority AS (
+      ${authority === undefined ? "SELECT 1 AS permitted" : INBOX_READ_AUTHORITY_SQL}
+    ), eligible AS (
+      SELECT * FROM fellow_inbox_notices WHERE fellow_id = ?1
+        AND ${VISIBLE_INBOX_NOTICE_SQL}
+        AND ${UNEXPIRED_INBOX_NOTICE_SQL.replace("?", "?6")}
+    ) SELECT
+      (SELECT COUNT(*) FROM eligible WHERE acknowledged_at IS NULL) AS unack,
+      (SELECT COUNT(*) FROM eligible n JOIN json_each(?7) pin
+        ON n.id = json_extract(pin.value, '$.id')
+        AND n.seq = json_extract(pin.value, '$.seq')
+        AND n.acknowledged_at IS json_extract(pin.value, '$.acknowledged_at')) AS matched
+    FROM authority`)
+    .bind(
+      fellowId,
+      authority?.binding.sponsorId ?? null,
+      // Inbox discovery remains global to this Fellow; a problem-specific
+      // read scope is not silently introduced by the shared authority guard.
+      null,
+      authority?.binding.credentialId ?? null,
+      authority?.binding.tokenHash ?? null,
+      authority === undefined ? now : Date.now(),
+      JSON.stringify(rows.map(({ id, seq, acknowledged_at }) => ({ id, seq, acknowledged_at }))),
+      ...(authority === undefined
+        ? []
+        : [
+            JSON.stringify(authority.binding.grantedScopes),
+            JSON.stringify(authority.binding.grantedResources),
+            authority.binding.issuedAt,
+            authority.binding.expiresAt,
+            authority.binding.credentialProfile,
+            authority.binding.fellowStatus,
+            authority.binding.name,
+            authority.binding.model,
+            authority.binding.harness,
+          ]),
+    )
+    .first<{ unack: number; matched: number }>();
+  if (!current && authority !== undefined) throw new InboxReadAuthorityError();
+  if (
+    !current ||
+    !Number.isSafeInteger(current.unack) ||
+    current.unack < 0 ||
+    current.matched !== rows.length
+  )
+    throw new Error("INBOX_PAGE_CHANGED");
+  const unacknowledgedCount = current.unack;
 
   const omitted: string[] = [];
   if (hasMore) {

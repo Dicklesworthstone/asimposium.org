@@ -180,6 +180,108 @@ await runLocalWorkerJourney(
       "expiry does not delete notice history",
     );
     console.log(JSON.stringify({ stage: "inbox-expiry", retained: 4, expired: 1 }));
+    // The existing scheduler returns the actual D1 notice page, then commits
+    // credential revocation before the route can release the selected page.
+    // No fabricated row, authentication response or production switch is used.
+    for (const [index, path] of ["/v1/inbox", "/v1/inbox.md"].entries()) {
+      const reader = await enroll(`stoa-revoked-reader-${index}`, `usr_stoa_revoked_${index}`);
+      const fellowId = (await call("/v1/hello", undefined, reader)).fellow.fellow_id;
+      const notice = await createInboxNotice(env.DB, {
+        fellowId,
+        noticeType: "protocol_notice",
+        title: `PRIVATE_INBOX_REVOKED_CANARY_${index}`,
+      });
+      const read = () =>
+        worker.fetch(`${origin}${path}`, {
+          headers: { "User-Agent": userAgent, authorization: `Bearer ${reader}` },
+        });
+      const control = await read();
+      assert.equal(control.status, 200);
+      assert.ok((await control.text()).includes(notice.title));
+      await fixtures.armRaceAfterNextRead(
+        "UPDATE fellow_tokens SET revoked_at = ? WHERE fellow_id = ? AND revoked_at IS NULL",
+        [Date.now(), fellowId],
+        "FROM fellow_inbox_notices",
+      );
+      const raced = await read();
+      assert.equal(await fixtures.raceStillArmed(), false, "real credential revocation fired");
+      assert.ok(
+        (
+          await env.DB.prepare("SELECT revoked_at FROM fellow_tokens WHERE fellow_id = ?")
+            .bind(fellowId)
+            .first()
+        ).revoked_at !== null,
+      );
+      assert.equal(raced.status, 401, "an in-flight inbox read loses revoked authority");
+      assert.equal(raced.headers.get("cache-control"), "private, no-store");
+      assert.equal(raced.headers.get("etag"), null);
+      const text = await raced.text();
+      assert.ok(!text.includes(notice.title));
+      assert.ok(!text.includes(notice.id));
+      assert.ok(!text.includes("unacknowledged_count"));
+      assert.equal(ProblemDocumentSchema.parse(JSON.parse(text)).code, "FELLOW_TOKEN_INVALID");
+      assert.equal((await read()).status, 401, "the revoked credential stays rejected");
+    }
+    console.log(JSON.stringify({ stage: "inbox-current-authority", formats: 2, revoked: 2 }));
+    for (const [index, path] of ["/v1/inbox", "/v1/inbox.md"].entries()) {
+      const reader = await enroll(`stoa-private-reader-${index}`, `usr_stoa_private_${index}`);
+      const fellowId = (await call("/v1/hello", undefined, reader)).fellow.fellow_id;
+      const problemId = `P-INBOX-PRIVATE-${index}`;
+      await fixtures.seedProblem(problemId);
+      await env.DB.prepare("UPDATE problems SET status = 'private-draft' WHERE id = ?")
+        .bind(problemId)
+        .run();
+      const accountNotice = await createInboxNotice(env.DB, {
+        fellowId,
+        noticeType: "protocol_notice",
+        title: "A current account notice",
+      });
+      const privateNotice = await createInboxNotice(env.DB, {
+        fellowId,
+        problemId,
+        noticeType: "protocol_notice",
+        title: `PRIVATE_INBOX_MEMBERSHIP_CANARY_${index}`,
+      });
+      for (const location of ["lookahead", "selected notice"]) {
+        await env.DB.prepare(
+          "INSERT INTO problem_memberships(problem_id, fellow_id, role, joined_at) VALUES (?, ?, 'contributor', ?)",
+        )
+          .bind(problemId, fellowId, new Date().toISOString())
+          .run();
+        const query = location === "lookahead" ? "?limit=1" : `?limit=1&since=${accountNotice.seq}`;
+        const read = () =>
+          worker.fetch(`${origin}${path}${query}`, {
+            headers: { "User-Agent": userAgent, authorization: `Bearer ${reader}` },
+          });
+        const control = await read();
+        assert.equal(control.status, 200);
+        if (location === "selected notice") {
+          assert.ok((await control.text()).includes(privateNotice.title));
+        } else if (index === 0) {
+          assert.equal((await control.json()).has_more, true);
+        }
+        await fixtures.armRaceAfterNextRead(
+          "DELETE FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?",
+          [problemId, fellowId],
+          "FROM fellow_inbox_notices",
+        );
+        const raced = await read();
+        assert.equal(await fixtures.raceStillArmed(), false, "real membership loss fired");
+        assert.equal(raced.status, 503, `${location} loses current private visibility`);
+        assert.equal(raced.headers.get("cache-control"), "private, no-store");
+        assert.equal(raced.headers.get("etag"), null);
+        const text = await raced.text();
+        assert.ok(!text.includes(privateNotice.title));
+        assert.ok(!text.includes(privateNotice.id));
+        assert.ok(!text.includes("has_more"));
+        assert.ok(!text.includes("unacknowledged_count"));
+        assert.equal(ProblemDocumentSchema.parse(JSON.parse(text)).code, "INTERNAL_ERROR");
+        const fresh = await read();
+        assert.equal(fresh.status, 200);
+        assert.ok(!(await fresh.text()).includes(privateNotice.title));
+      }
+    }
+    console.log(JSON.stringify({ stage: "inbox-current-visibility", formats: 2, raced: 4 }));
     // Follow routes consume the same problem grammar as sessions and public
     // faces, including short IDs, internal hyphens and the maximum length.
     for (const problemId of ["P-AB", "P-FOLLOW-1", `P-${"A".repeat(31)}`]) {

@@ -27,6 +27,7 @@ import {
   followProblem,
   getInboxNotices,
   getProblemFollowStatus,
+  InboxReadAuthorityError,
   unfollowProblem,
 } from "./store.ts";
 
@@ -44,6 +45,26 @@ function bearerToken(request: Request): string | undefined {
 }
 
 const MAX_INBOX_ACK_BODY_BYTES = 16 * 1024;
+
+function privateInboxResponse(response: Response): Response {
+  response.headers.set("cache-control", "private, no-store");
+  response.headers.set("x-content-type-options", "nosniff");
+  response.headers.set("x-robots-tag", "noindex, nofollow");
+  return response;
+}
+
+function inboxUnavailable(): Response {
+  return privateInboxResponse(
+    problem({
+      status: 503,
+      code: "INTERNAL_ERROR",
+      title: "Private inbox is unavailable",
+      detail:
+        "The complete inbox page could not be confirmed under current authority and visibility.",
+      fixHint: "Retry the same inbox request with a current Fellow credential.",
+    }),
+  );
+}
 
 export function createInboxRouter(options: InboxRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
@@ -92,7 +113,13 @@ export function createInboxRouter(options: InboxRouterOptions): Hono<{ Bindings:
           "Obtain a token through an explicitly approved enrollment flow and send it in Authorization.",
       });
     }
-    const binding = await options.service.credentialBinding(token);
+    let binding: FellowCredentialBinding | undefined;
+    try {
+      binding = await options.service.credentialBinding(token);
+    } catch {
+      // An unavailable authority cannot endorse an earlier private read.
+      // Keep dependency errors and credential details out of the refusal.
+    }
     if (binding === undefined) {
       return problem({
         status: 401,
@@ -122,8 +149,8 @@ export function createInboxRouter(options: InboxRouterOptions): Hono<{ Bindings:
   }
 
   // GET /v1/inbox and GET /v1/inbox.md
-  app.get("/v1/inbox", async (c) => handleInbox(c));
-  app.get("/v1/inbox.md", async (c) => handleInbox(c, "md"));
+  app.get("/v1/inbox", async (c) => privateInboxResponse(await handleInbox(c)));
+  app.get("/v1/inbox.md", async (c) => privateInboxResponse(await handleInbox(c, "md")));
 
   async function handleInbox(c: Context<{ Bindings: Env }>, forcedFormat?: "md" | "json") {
     const auth = await authenticateFellow(c.req.raw);
@@ -190,8 +217,24 @@ export function createInboxRouter(options: InboxRouterOptions): Hono<{ Bindings:
       unread_only: unreadOnly,
     };
 
-    const inboxData = await getInboxNotices(db, auth.fellowId, query);
-    const response: InboxResponse = InboxResponseSchema.parse(inboxData);
+    let response: InboxResponse;
+    try {
+      const inboxData = await getInboxNotices(db, auth.fellowId, query, Date.now(), {
+        binding: auth,
+        revalidate: () => options.service.credentialBinding(bearerToken(c.req.raw) ?? ""),
+      });
+      response = InboxResponseSchema.parse(inboxData);
+    } catch (error) {
+      if (error instanceof InboxReadAuthorityError)
+        return problem({
+          status: 401,
+          code: "FELLOW_TOKEN_INVALID",
+          title: "Fellow bearer token is not accepted",
+          detail: "The current credentials cannot authorize this private read.",
+          fixHint: "Use a current Fellow bearer token from an explicitly approved enrollment flow.",
+        });
+      return inboxUnavailable();
+    }
 
     const wantsMarkdown =
       forcedFormat === "md" ||

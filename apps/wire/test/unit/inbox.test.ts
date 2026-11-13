@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
@@ -37,7 +37,31 @@ class FixedRandom {
   }
 }
 
-function migratedDb(): Env["DB"] {
+interface InboxRead {
+  readonly kind: "first" | "all";
+  readonly sql: string;
+}
+
+type InboxRacePhase = "page selection" | "final credential refresh";
+
+function afterInboxRead(phase: InboxRacePhase, invalidate: () => Promise<void>) {
+  let pageSelected = false;
+  return async ({ kind, sql }: InboxRead) => {
+    if (kind === "all" && sql.includes("FROM fellow_inbox_notices")) {
+      pageSelected = true;
+      if (phase === "page selection") await invalidate();
+    } else if (
+      pageSelected &&
+      kind === "first" &&
+      sql.trimStart().startsWith("UPDATE fellow_tokens")
+    ) {
+      pageSelected = false;
+      if (phase === "final credential refresh") await invalidate();
+    }
+  };
+}
+
+function migratedDb(afterRead?: (read: InboxRead) => Promise<void>): Env["DB"] {
   const sqlite = new Database(":memory:", { strict: true });
   const files = readdirSync(MIGRATIONS)
     .filter((n) => n.endsWith(".sql"))
@@ -63,10 +87,12 @@ function migratedDb(): Env["DB"] {
       },
       async first<T>(): Promise<T | null> {
         const row = (sqlite.prepare(query) as any).get(...(values as any[]));
+        await afterRead?.({ kind: "first", sql: query });
         return (row ?? null) as T | null;
       },
       async all<T>(): Promise<{ results: T[]; meta: { rows_read: number; rows_written: number } }> {
         const rows = (sqlite.prepare(query) as any).all(...(values as any[])) as T[];
+        await afterRead?.({ kind: "all", sql: query });
         return { results: rows, meta: { rows_read: rows.length, rows_written: 0 } };
       },
     });
@@ -109,8 +135,8 @@ interface FixtureFellow {
   readonly sponsorId: string;
 }
 
-async function createTestHarness() {
-  const db = migratedDb();
+async function createTestHarness(afterRead?: (read: InboxRead) => Promise<void>) {
+  const db = migratedDb(afterRead);
   const random = new FixedRandom();
   const replayProtector = new AesGcmEnrollmentReplayProtector(
     Uint8Array.from({ length: 32 }, (_v, i) => i),
@@ -201,10 +227,206 @@ async function createTestHarness() {
       .run();
   }
 
-  return { app, env, db, service, enrollFellow, seedProblem };
+  return { app, env, db, service, enrollmentStore, enrollFellow, seedProblem };
 }
 
 describe("W6.3 Inbox, follows, notices, and impact echoes", () => {
+  for (const phase of ["page selection", "final credential refresh"] as const) {
+    for (const path of ["/v1/inbox", "/v1/inbox.md"]) {
+      for (const change of ["credential revocation", "sponsor transfer"] as const) {
+        test(`${path} withholds private notices after ${change} during ${phase}`, async () => {
+          let invalidate: (() => Promise<void>) | undefined;
+          let invalidated = false;
+          const f = await createTestHarness(
+            afterInboxRead(phase, async () => {
+              if (invalidate) {
+                const run = invalidate;
+                invalidate = undefined;
+                await run();
+                invalidated = true;
+              }
+            }),
+          );
+          const fellow = await f.enrollFellow();
+          const binding = await f.service.credentialBinding(fellow.token);
+          if (!binding) throw new Error("Expected the enrolled credential");
+          const notice = await createInboxNotice(f.db, {
+            fellowId: fellow.fellowId,
+            noticeType: "sponsor_directive",
+            title: "PRIVATE-INBOX-CURRENT-AUTHORITY-CANARY",
+            detail: "Only the current Fellow credential may read this private instruction.",
+          });
+          const request = () =>
+            f.app.fetch(
+              new Request(`https://a.asimposium.org${path}`, {
+                headers: { authorization: `Bearer ${fellow.token}` },
+              }),
+              f.env,
+            );
+          const control = await request();
+          expect(control.status).toBe(200);
+          expect(await control.text()).toContain(notice.title);
+
+          invalidate = async () => {
+            if (change === "credential revocation") {
+              const revoked = await f.service.revokeCredential(
+                { type: "sponsor", sponsorId: fellow.sponsorId },
+                {
+                  fellow_id: fellow.fellowId,
+                  credential_id: binding.credentialId,
+                  confirm: "revoke-credential",
+                  step_up_authenticated_at: Math.floor(Date.now() / 1000),
+                },
+                { idempotencyKey: "inbox-authority-revoke" },
+              );
+              expect(revoked.acknowledged).toBe(true);
+            } else {
+              const now = Date.now();
+              const recipient = "usr_inbox_new_sponsor";
+              await f.enrollmentStore.bootstrapSponsor(recipient, now);
+              const transfer = await f.enrollmentStore.initiateTransfer({
+                transferId: `TRF-${"8".repeat(26)}`,
+                fellowId: fellow.fellowId,
+                sourceSponsorId: fellow.sponsorId,
+                targetSponsorId: recipient,
+                now,
+                expiresAt: now + 60_000,
+              });
+              const accepted = await f.enrollmentStore.acceptTransfer({
+                transferId: transfer.transfer_id,
+                targetSponsorId: recipient,
+                now: Date.now(),
+              });
+              expect(accepted.fellow_status).toBe("paused");
+              expect(accepted.revoked_credentials_count).toBe(1);
+            }
+          };
+          const raced = await request();
+          expect(invalidated).toBe(true);
+          expect(await f.service.credentialBinding(fellow.token)).toBeUndefined();
+          expect(raced.status).toBe(401);
+          expect(raced.headers.get("cache-control")).toBe("private, no-store");
+          expect(raced.headers.get("etag")).toBeNull();
+          const body = await raced.text();
+          expect(body).not.toContain(notice.title);
+          expect(body).not.toContain(notice.id);
+          expect(JSON.parse(body).code).toBe("FELLOW_TOKEN_INVALID");
+        });
+      }
+      for (const location of ["selected notice", "lookahead"] as const) {
+        test(`${path} withholds a private ${location} after membership loss during ${phase}`, async () => {
+          let invalidate: (() => Promise<void>) | undefined;
+          let invalidated = false;
+          const f = await createTestHarness(
+            afterInboxRead(phase, async () => {
+              if (invalidate) {
+                const run = invalidate;
+                invalidate = undefined;
+                await run();
+                invalidated = true;
+              }
+            }),
+          );
+          const fellow = await f.enrollFellow();
+          const problemId = "P-INBOX-PRIVATE";
+          await f.seedProblem(problemId);
+          await f.db
+            .prepare("UPDATE problems SET status = 'private-draft' WHERE id = ?")
+            .bind(problemId)
+            .run();
+          await f.db
+            .prepare(
+              "INSERT INTO problem_memberships(problem_id, fellow_id, role, joined_at) VALUES (?, ?, 'contributor', ?)",
+            )
+            .bind(problemId, fellow.fellowId, new Date().toISOString())
+            .run();
+          if (location === "lookahead") {
+            await createInboxNotice(f.db, {
+              fellowId: fellow.fellowId,
+              noticeType: "protocol_notice",
+              title: "An account notice that remains visible",
+            });
+          }
+          const notice = await createInboxNotice(f.db, {
+            fellowId: fellow.fellowId,
+            problemId,
+            noticeType: "protocol_notice",
+            title: "PRIVATE-INBOX-VISIBILITY-CANARY",
+          });
+          const request = () =>
+            f.app.fetch(
+              new Request(`https://a.asimposium.org${path}?limit=1`, {
+                headers: { authorization: `Bearer ${fellow.token}` },
+              }),
+              f.env,
+            );
+          const control = await request();
+          expect(control.status).toBe(200);
+          if (location === "selected notice") expect(await control.text()).toContain(notice.title);
+          invalidate = async () => {
+            await f.db
+              .prepare("DELETE FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?")
+              .bind(problemId, fellow.fellowId)
+              .run();
+          };
+          const raced = await request();
+          expect(invalidated).toBe(true);
+          expect(raced.status).toBe(503);
+          expect(raced.headers.get("cache-control")).toBe("private, no-store");
+          const body = await raced.text();
+          expect(body).not.toContain(notice.title);
+          expect(body).not.toContain(notice.id);
+          expect(body).not.toContain("has_more");
+          expect(JSON.parse(body).code).toBe("INTERNAL_ERROR");
+          const fresh = await request();
+          expect(fresh.status).toBe(200);
+          expect(await fresh.text()).not.toContain(notice.title);
+        });
+      }
+    }
+  }
+
+  test("withholds a notice that expires during the final credential refresh", async () => {
+    let expire: (() => void) | undefined;
+    let expired = false;
+    const f = await createTestHarness(
+      afterInboxRead("final credential refresh", async () => {
+        if (expire) {
+          expire();
+          expire = undefined;
+          expired = true;
+        }
+      }),
+    );
+    const fellow = await f.enrollFellow();
+    const expiresAt = Date.now() + 60_000;
+    const notice = await createInboxNotice(f.db, {
+      fellowId: fellow.fellowId,
+      noticeType: "protocol_notice",
+      title: "PRIVATE-INBOX-EXPIRED-DURING-READ-CANARY",
+      expiresAt,
+    });
+    const clock = spyOn(Date, "now");
+    expire = () => clock.mockReturnValue(expiresAt);
+    try {
+      const raced = await f.app.fetch(
+        new Request("https://a.asimposium.org/v1/inbox", {
+          headers: { authorization: `Bearer ${fellow.token}` },
+        }),
+        f.env,
+      );
+      expect(expired).toBe(true);
+      expect(raced.status).toBe(503);
+      expect(raced.headers.get("cache-control")).toBe("private, no-store");
+      const body = await raced.text();
+      expect(body).not.toContain(notice.title);
+      expect(body).not.toContain(notice.id);
+      expect(JSON.parse(body).code).toBe("INTERNAL_ERROR");
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   test("authentication guards reject unauthenticated and invalid tokens", async () => {
     const { app, env } = await createTestHarness();
 
