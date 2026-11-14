@@ -104,10 +104,10 @@ function supportsPublishedWarning(
     if (holdContext?.route !== "synthesize") return false;
     try {
       const publication = SynthesizeRequestSchema.safeParse(JSON.parse(statement));
-      // Ordinary digests carry the exact notice through canonical faces and
-      // packs. Closing declarations also feed resolution summaries and honors;
-      // keep those warnings held until every derived consumer carries it.
-      return publication.success && publication.data.closing_resolution === undefined;
+      // Canonical faces and packs retain the exact publication notice.
+      // Closing declarations also carry it into resolution summaries, honors
+      // and share cards without replacing their separate claim/formulation notices.
+      return publication.success;
     } catch {
       return false;
     }

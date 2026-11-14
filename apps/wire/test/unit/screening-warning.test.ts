@@ -337,7 +337,7 @@ describe("published screening warnings", () => {
       expect(f.state().events).toEqual([]);
     }));
 
-  test("ordinary synthesis warnings publish only through the exact writer; closing declarations stay held", () =>
+  test("ordinary and closing synthesis warnings publish only through the exact writer", () =>
     withFixture(async (f) => {
       const ordinary = SynthesizeRequestSchema.parse({
         covers_through: 2,
@@ -371,13 +371,15 @@ describe("published screening warnings", () => {
         },
         { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
       ] as const) {
-        const receipt = published(
-          await screen(f, input(ordinary), { coarse_category: notice.category }, "synthesize"),
-        );
-        expect(receipt.provenance.public_action).toEqual(notice);
-        expect(ScreeningPublicationProvenanceSchema.safeParse(receipt.provenance).success).toBe(
-          true,
-        );
+        for (const publication of [ordinary, closing]) {
+          const receipt = published(
+            await screen(f, input(publication), { coarse_category: notice.category }, "synthesize"),
+          );
+          expect(receipt.provenance.public_action).toEqual(notice);
+          expect(ScreeningPublicationProvenanceSchema.safeParse(receipt.provenance).success).toBe(
+            true,
+          );
+        }
       }
       expect(count(f, "screening_cases")).toBe(0);
       expect(count(f, "screening_refusals")).toBe(0);
@@ -399,19 +401,11 @@ describe("published screening warnings", () => {
           notice: "none",
         });
       }
-      // A closing declaration also feeds problem-resolution and honors derivatives.
-      // Those surfaces do not yet carry its notice, so only ordinary warnings open.
-      for (const category of ["dual-use-boundary", "off-topic"] as const) {
-        const held = await screen(f, input(closing), { coarse_category: category }, "synthesize");
-        expect(held instanceof Response && held.status).toBe(202);
-        if (!(held instanceof Response))
-          throw new Error("Expected a private closing-synthesis hold");
-        expect(held.headers.get("cache-control")).toContain("no-store");
-        expect(await held.json()).toMatchObject({ code: "SCREENING_HOLD" });
-      }
       for (const route of ["promote", "review", "unrecognized-synthesis-writer"]) {
-        const held = await screen(f, input(ordinary), {}, route);
-        expect(held instanceof Response && held.status).toBe(202);
+        for (const publication of [ordinary, closing]) {
+          const held = await screen(f, input(publication), {}, route);
+          expect(held instanceof Response && held.status).toBe(202);
+        }
       }
       for (const publication of [
         null,
@@ -436,8 +430,10 @@ describe("published screening warnings", () => {
         { provider_status: "timeout" },
         { coarse_category: "provider-unavailable" },
       ] as const) {
-        const held = await screen(f, input(ordinary), patch, "synthesize");
-        expect(held instanceof Response && held.status).toBe(202);
+        for (const publication of [ordinary, closing]) {
+          const held = await screen(f, input(publication), patch, "synthesize");
+          expect(held instanceof Response && held.status).toBe(202);
+        }
       }
       expect(count(f, "screening_refusals")).toBe(0);
       expect(f.state().events).toEqual([]);

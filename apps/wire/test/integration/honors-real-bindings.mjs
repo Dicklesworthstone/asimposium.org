@@ -466,28 +466,50 @@ await runLocalWorkerJourney(
         "No formal-kernel execution or external expert review is claimed.",
       ],
     };
+    const closingNotice = {
+      category: "dual-use-boundary",
+      action: "published-with-warning",
+      notice: "screening-warning",
+    };
+    const closingNoticeText = "Published with a screening context notice: dual-use-boundary.";
+    const closingBody = {
+      covers_through: through,
+      body_md: summary,
+      anchors: [
+        { target_kind: "claim", target_id: claimA, target_version: 1 },
+        { target_kind: "evidence", target_id: proofA },
+        { target_kind: "review", target_id: qualifiedB.review_id },
+        { target_kind: "review", target_id: qualifiedC.review_id },
+      ],
+      omitted: ["The other claims do not enlarge this result."],
+      selection_policy: "Retain the exact result and the verifications that earned its standing.",
+      closing_resolution: {
+        result_claim: { claim_id: claimA, version: 1 },
+        direction: "affirmed",
+        no_claim_boundary: boundary,
+      },
+    };
+    await fixtures.setScreenMode("allow-with-warning");
     const closing = await call(
       `/v1/sessions/${authorSession}/synthesize`,
-      {
-        covers_through: through,
-        body_md: summary,
-        anchors: [
-          { target_kind: "claim", target_id: claimA, target_version: 1 },
-          { target_kind: "evidence", target_id: proofA },
-          { target_kind: "review", target_id: qualifiedB.review_id },
-          { target_kind: "review", target_id: qualifiedC.review_id },
-        ],
-        omitted: ["The other claims do not enlarge this result."],
-        selection_policy: "Retain the exact result and the verifications that earned its standing.",
-        closing_resolution: {
-          result_claim: { claim_id: claimA, version: 1 },
-          direction: "affirmed",
-          no_claim_boundary: boundary,
-        },
-      },
+      closingBody,
       author,
       201,
+      "honors-closing-warning",
     );
+    const closingScreens = await fixtures.screeningCalls();
+    assert.deepEqual(
+      await call(
+        `/v1/sessions/${authorSession}/synthesize`,
+        closingBody,
+        author,
+        200,
+        "honors-closing-warning",
+      ),
+      closing,
+    );
+    assert.equal(await fixtures.screeningCalls(), closingScreens);
+    await fixtures.setScreenMode("pass");
     await sponsorCall(
       OWNER,
       "POST",
@@ -521,6 +543,62 @@ await runLocalWorkerJourney(
     assert.ok(resolved.evidence_trail.includes(closing.synthesis_id));
     assert.ok(resolved.evidence_trail.includes(proofA));
 
+    assert.deepEqual(resolved.closing_synthesis_screening_notice, closingNotice);
+    assert.deepEqual(
+      resolved.screening_notice,
+      item.screening_notice,
+      "the clean result claim never borrows the closing synthesis warning",
+    );
+    const digest = await call(`/p/${problem}.json`, undefined, undefined, 200);
+    const resolutionItem = digest.items.find((entry) => entry.kind === "problem-resolution");
+    assert.ok(resolutionItem);
+    assert.deepEqual(resolutionItem.screening_notice, closingNotice);
+    const resolutionRecord = JSON.parse(resolutionItem.body);
+    assert.deepEqual(resolutionRecord.screening_notice, closingNotice);
+    assert.equal(resolutionRecord.summary, summary);
+    assert.deepEqual(resolutionRecord.no_claim_boundary, boundary);
+    assert.equal(resolutionRecord.closing_synthesis.synthesis_id, closing.synthesis_id);
+    const fullResolution = await call(
+      `/v1/sessions/${authorSession}/pack?profile=full&max_tokens=8000&after=${resolutionEvent.seq - 1}&through=${resolutionEvent.seq}`,
+      undefined,
+      author,
+      200,
+    );
+    const fullResolutionItem = fullResolution.items.find(
+      (entry) => entry.kind === "full-event" && entry.id === `FULL-${resolutionEvent.seq}`,
+    );
+    assert.ok(fullResolutionItem, "the warned resolution remains available in full packs");
+    assert.deepEqual(fullResolutionItem.screening_notice, closingNotice);
+    const fullResolutionRecord = JSON.parse(fullResolutionItem.body);
+    assert.deepEqual(fullResolutionRecord.content.screening_notice, closingNotice);
+    assert.equal(
+      fullResolutionRecord.publication.screening_notice,
+      undefined,
+      "the clean sponsor event does not acquire the Fellow publication's screening decision",
+    );
+    assert.equal(fullResolutionRecord.content.summary, summary);
+    for (const path of [`/p/${problem}.md`, "/results.md", "/results.html"]) {
+      const response = await worker.fetch(`${origin}${path}`, {
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(response.status, 200);
+      const rendered = await response.text();
+      assert.ok(rendered.includes(closingNoticeText), path);
+      if (path === `/p/${problem}.md`) {
+        const resolutionMarkdown = rendered
+          .split(`### ${resolutionItem.id} · problem-resolution ·`)[1]
+          ?.split("<!-- asimp:item")[0];
+        assert.ok(resolutionMarkdown, "the resolved account has its own Markdown item");
+        assert.ok(resolutionMarkdown.includes(`**Screening notice:** ${closingNoticeText}`));
+        assert.ok(resolutionMarkdown.indexOf(closingNoticeText) < resolutionMarkdown.indexOf(summary));
+      }
+      if (path === "/results.md")
+        assert.ok(rendered.includes(`**Closing synthesis:** ${closingNoticeText}`), path);
+      if (path === "/results.html") {
+        assert.ok(rendered.includes(`<strong>Closing synthesis:</strong> ${closingNoticeText}`), path);
+      }
+    }
+
     // A genuine sponsor commentary event advances the head after settlement.
     // It must never masquerade as a newer problem resolution.
     await sponsorCall(
@@ -538,6 +616,7 @@ await runLocalWorkerJourney(
     const afterCommentary = (await resultItems()).find((result) => result.kind === "problem");
     assert.equal(afterCommentary.sequence, resolved.sequence);
     assert.equal(afterCommentary.settled_at, resolved.settled_at);
+    assert.deepEqual(afterCommentary.closing_synthesis_screening_notice, closingNotice);
 
     // Current visibility is authoritative even if no science event changes the
     // captured head. Append restoring controls instead of deleting test history.
@@ -574,6 +653,30 @@ await runLocalWorkerJourney(
           "a pinned historical read never republishes hidden evidence bytes",
         );
       }
+
+      if (kind === "synthesis") {
+        const hiddenDigest = await call(`/p/${problem}.json`, undefined, undefined, 200);
+        assert.ok(
+          !hiddenDigest.items.some((entry) => entry.kind === "problem-resolution"),
+          "hiding the closing publication removes its derived resolution account",
+        );
+        const hiddenFull = await call(
+          `/v1/sessions/${authorSession}/pack?profile=full&max_tokens=8000&after=${resolutionEvent.seq - 1}&through=${resolutionEvent.seq}`,
+          undefined,
+          author,
+          200,
+        );
+        const hiddenResolutionItem = hiddenFull.items.find(
+          (entry) => entry.id === `FULL-${resolutionEvent.seq}`,
+        );
+        assert.ok(hiddenResolutionItem, "the immutable resolution envelope remains in history");
+        assert.equal(hiddenResolutionItem.screening_notice, undefined);
+        const hiddenResolutionRecord = JSON.parse(hiddenResolutionItem.body);
+        assert.equal(hiddenResolutionRecord.content, null);
+        assert.equal(hiddenResolutionRecord.content_omitted, "content_unavailable");
+        assert.ok(!JSON.stringify(hiddenFull).includes(summary));
+      }
+
       const withheld = await resultItems();
       assert.ok(
         !withheld.some((result) => result.kind === "problem"),
@@ -592,6 +695,12 @@ await runLocalWorkerJourney(
       assert.ok(
         (await resultItems()).some((result) => result.kind === "problem"),
         "available exact sources restore earned recognition",
+      );
+      assert.deepEqual(
+        (await resultItems()).find((result) => result.kind === "problem")
+          ?.closing_synthesis_screening_notice,
+        closingNotice,
+        "restoring the exact sources restores the original closing notice",
       );
     }
 
