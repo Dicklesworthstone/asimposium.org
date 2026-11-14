@@ -11230,66 +11230,179 @@ describe("session protocol routes", () => {
     }
   });
 
-  test("the §7.6 intent classifier refuses a claim-shaped note, and force_note is the recorded escape", async () => {
-    const { call } = await fixture();
+  test("claim-shaped note recovery saves a complete private draft and keeps the force_note escape", async () => {
+    const { call, db } = await fixture();
     const opened = await call("/v1/sessions", {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "intent-open" },
       body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
     });
-    const session = (await opened.json()) as { session_id: string };
-    const claimShapedNote = "\r  \rTherefore the invariant holds.\rA later derivation follows.";
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const path = `/v1/sessions/${session.session_id}/workshop`;
+    const note = {
+      type: "note",
+      title: "A developing claim",
+      body_md: "\r  \rTherefore the invariant holds.\rPRIVATE_INTENT_DRAFT: retain the derivation. ∀𝑥",
+      relates_to: ["C-context"],
+      ledger_intent: { kind: "revise", target_id: "C-context", base_version: 3 },
+    };
+    const publicCursorBefore = await db
+      .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+      .first();
+    const post = (body: unknown, key: string) =>
+      call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(body),
+      });
 
-    // A claim-shaped note (proposition markers) without force_note is refused.
-    // Bare CR is a legal Markdown line ending; the suggested statement must
-    // stop at its first nonblank line rather than absorb later author text.
-    const refused = await call(`/v1/sessions/${session.session_id}/workshop`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "intent-note" },
-      body: JSON.stringify({
-        type: "note",
-        title: "A disguised claim",
-        body_md: claimShapedNote,
-        relates_to: [],
-      }),
-    });
+    // Refusal changes no private state; the complete request preserves later
+    // prose, Unicode, links and the author's intended ledger revision.
+    const refused = await post(note, "intent-note");
     expect(refused.status).toBe(422);
-    // The refusal must parse as a canonical ProblemDocument (asimposiumorg-but.1):
-    // the suggested claim rides the contract's `example` field, not a free extension.
-    const refusedDocument = ProblemDocumentSchema.parse(await refused.json());
-    expect(refusedDocument.code).toBe("LOOKS_LIKE_CLAIM");
-    if (refusedDocument.code !== "LOOKS_LIKE_CLAIM") return;
-    expect(refusedDocument.example).toEqual({
-      statement: "Therefore the invariant holds.",
+    expect(refused.headers.get("cache-control")).toBe("private, no-store");
+    const refusal = ProblemDocumentSchema.parse(await refused.json());
+    if (refusal.code !== "LOOKS_LIKE_CLAIM") throw new Error("Expected intent recovery");
+    const recovery = WorkshopPushRequestSchema.parse(refusal.example);
+    expect(recovery).toEqual({ ...note, type: "claim-draft" });
+    expect(refusal.fix_hint).toContain("new Idempotency-Key");
+    expect(refusal.fix_hint).toContain("force_note: true");
+    const recoverySchema = getPublicSchemaSlice(new URL(refusal.schema).pathname);
+    expect(recoverySchema).toBeDefined();
+    expect(recoverySchema?.body.length).toBeLessThan(32_768);
+    expect(JSON.parse(recoverySchema!.body).$id).toBe(refusal.schema);
+    expect(await db.prepare("SELECT COUNT(*) AS n FROM workshop_objects").first()).toEqual({ n: 0 });
+
+    const saved = await post(recovery, "intent-draft");
+    expect(saved.status).toBe(201);
+    const draft = WorkshopPushResponseSchema.parse(await saved.json());
+    const replay = await post(recovery, "intent-draft");
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(draft);
+    const read = await call(`${path}/${draft.workshop_id}`);
+    expect(read.status).toBe(200);
+    expect(read.headers.get("cache-control")).toBe("private, no-store");
+    expect(WorkshopObjectResponseSchema.parse(await read.json()).object).toMatchObject({
+      ...note,
+      type: "claim-draft",
+      version: 1,
     });
 
-    // The recorded escape hatch: force_note admits the same body as a note.
-    const forced = await call(`/v1/sessions/${session.session_id}/workshop`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "intent-forced" },
-      body: JSON.stringify({
-        type: "note",
-        title: "A disguised claim",
-        body_md: claimShapedNote,
-        relates_to: [],
-        force_note: true,
-      }),
-    });
+    // The alternative is an explicit, recorded choice to keep this as a note.
+    const forced = await post({ ...note, force_note: true }, "intent-forced");
     expect(forced.status).toBe(201);
-
-    // A plain note (no markers) is accepted without force_note.
-    const plain = await call(`/v1/sessions/${session.session_id}/workshop`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "intent-plain" },
-      body: JSON.stringify({
-        type: "note",
-        title: "A working note",
-        body_md: "Tried the obvious approach; it stalled.",
-        relates_to: [],
-      }),
-    });
+    const forcedDraft = WorkshopPushResponseSchema.parse(await forced.json());
+    const forcedRead = await call(`${path}/${forcedDraft.workshop_id}`);
+    expect(WorkshopObjectResponseSchema.parse(await forcedRead.json()).object.type).toBe("note");
+    const plain = await post(
+      { type: "note", title: "A working note", body_md: "The obvious approach stalled." },
+      "intent-plain",
+    );
     expect(plain.status).toBe(201);
+    expect(await db.prepare("SELECT cursor FROM public_cursor WHERE singleton = 1").first()).toEqual(
+      publicCursorBefore,
+    );
+    expect(await db.prepare("SELECT COUNT(*) AS n FROM claims").first()).toEqual({ n: 0 });
   });
+
+  test.each([false, true])(
+    "claim-shaped revision recovery preserves its base and inherited context (typed hypothesis: %s)",
+    async (typedHypothesis) => {
+      const { call, db } = await fixture();
+      let key = 0;
+      const post = (path: string, body: unknown) =>
+        call(path, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": `intent-revise-${++key}`,
+          },
+          body: JSON.stringify(body),
+        });
+      const opened = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" });
+      const session = SessionOpenResponseSchema.parse(await opened.json());
+      const path = `/v1/sessions/${session.session_id}/workshop`;
+      const publication = {
+        object_kind: "hypothesis",
+        payload: {
+          route: "Bound the residue count",
+          mechanism: "Enumerate the finite residues",
+          falsifier: "A missing residue",
+          origin: "proposed",
+          body_md: "Investigate whether the residue enumeration is complete.",
+        },
+      };
+      const note = WorkshopPushRequestSchema.parse({
+        type: "note",
+        title: "An interrupted line of work",
+        body_md: "The residue cases are still incomplete.",
+        relates_to: ["C-context"],
+        ledger_intent: typedHypothesis
+          ? { kind: "create", target_kind: "hypothesis" }
+          : { kind: "revise", target_id: "C-context", base_version: 7 },
+        ...(typedHypothesis ? { publication } : {}),
+      });
+      const created = await post(path, note);
+      expect(created.status).toBe(201);
+      const draft = WorkshopPushResponseSchema.parse(await created.json());
+      const forceNoteMarker = () =>
+        db
+          .prepare("SELECT force_note FROM workshop_objects WHERE workshop_id = ?")
+          .bind(draft.workshop_id)
+          .first<{ force_note: number }>();
+      expect(await forceNoteMarker()).toEqual({ force_note: 0 });
+      const revision = {
+        workshop_id: draft.workshop_id,
+        base_version: draft.version,
+        body_md: "Therefore all residue cases agree.\nPRIVATE_REVISED_INTENT: retain the argument.",
+      };
+      const refused = await post(path, revision);
+      expect(refused.status).toBe(422);
+      const refusal = ProblemDocumentSchema.parse(await refused.json());
+      if (refusal.code !== "LOOKS_LIKE_CLAIM") throw new Error("Expected revision recovery");
+      const recovery = WorkshopPushRequestSchema.parse(refusal.example);
+      expect(recovery).toEqual({
+        ...revision,
+        ...(typedHypothesis ? { force_note: true } : { type: "claim-draft" }),
+      });
+      const before = await call(`${path}/${draft.workshop_id}`);
+      expect(WorkshopObjectResponseSchema.parse(await before.json()).object).toMatchObject({
+        ...note,
+        version: 1,
+      });
+      const saved = await post(path, recovery);
+      expect(saved.status).toBe(201);
+      expect(WorkshopPushResponseSchema.parse(await saved.json())).toMatchObject({
+        workshop_id: draft.workshop_id,
+        version: 2,
+      });
+      const read = await call(`${path}/${draft.workshop_id}`);
+      expect(WorkshopObjectResponseSchema.parse(await read.json()).object).toMatchObject({
+        ...note,
+        type: typedHypothesis ? "note" : "claim-draft",
+        body_md: revision.body_md,
+        version: 2,
+      });
+      expect(await forceNoteMarker()).toEqual({ force_note: typedHypothesis ? 1 : 0 });
+      // The override remains auditable when a later edit omits force_note.
+      const continued = await post(path, {
+        workshop_id: draft.workshop_id,
+        base_version: 2,
+        title: "Resume without another override",
+      });
+      expect(continued.status).toBe(201);
+      expect(WorkshopPushResponseSchema.parse(await continued.json()).version).toBe(3);
+      expect(await forceNoteMarker()).toEqual({ force_note: typedHypothesis ? 1 : 0 });
+      const stale = await post(path, recovery);
+      expect(stale.status).toBe(409);
+      const staleProblem = ProblemDocumentSchema.parse(await stale.json());
+      if (staleProblem.code !== "WORKSHOP_VERSION_CONFLICT") throw new Error("Expected stale base");
+      expect(staleProblem.refetch_url).toBe(`${path}/${draft.workshop_id}`);
+      expect(staleProblem.schema).toBe(refusal.schema);
+      expect(await db.prepare("SELECT COUNT(*) AS n FROM claims").first()).toEqual({ n: 0 });
+      expect(await db.prepare("SELECT COUNT(*) AS n FROM hypotheses").first()).toEqual({ n: 0 });
+    },
+  );
 
   test("two working packs at the same cursor byte-compare identical (prompt-cache money)", async () => {
     const { call, db } = await fixture();

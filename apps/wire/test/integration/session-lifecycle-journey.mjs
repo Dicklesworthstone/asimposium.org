@@ -5,6 +5,8 @@ import {
   SessionCloseResponseSchema,
   SessionOpenResponseSchema,
   SessionStatusResponseSchema,
+  WorkshopObjectResponseSchema,
+  WorkshopPushRequestSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
 
@@ -315,6 +317,94 @@ export async function sessionLifecycleJourney({ call, enroll, sponsorCall }) {
     404,
   );
   assert.equal(crossWorkshop.code, "SESSION_NOT_FOUND");
+
+  // 7f. A claim-shaped note teaches a lossless private save, never publication.
+  const workshopPath = `/v1/sessions/${sessionId1}/workshop`;
+  const claimShapedNote = {
+    type: "note",
+    title: "An unfinished private argument",
+    body_md: "\rTherefore the modular bound holds.\rPRIVATE_INTENT_CANARY: retain the full derivation. ∀𝑥",
+    relates_to: [problemId1],
+    ledger_intent: { kind: "create", target_kind: "claim" },
+  };
+  const refusedNote = await call(workshopPath, claimShapedNote, fellowAToken, 422);
+  ProblemDocumentSchema.parse(refusedNote);
+  assert.equal(refusedNote.code, "LOOKS_LIKE_CLAIM");
+  const draftRequest = WorkshopPushRequestSchema.parse(refusedNote.example);
+  assert.deepEqual(draftRequest, { ...claimShapedNote, type: "claim-draft" });
+  assert.ok(refusedNote.fix_hint.includes("new Idempotency-Key"));
+  assert.ok(refusedNote.fix_hint.includes("force_note: true"));
+  const draftSchema = await call(new URL(refusedNote.schema).pathname);
+  assert.equal(draftSchema.$id, refusedNote.schema);
+  assert.ok(JSON.stringify(draftSchema).length < 32_768);
+  const statusAfterRefusal = await call(`/v1/sessions/${sessionId1}`, undefined, fellowAToken, 200);
+  assert.equal(statusAfterRefusal.workshop_cursor, statusAfterPush.workshop_cursor);
+  const recoveredDraft = await call(
+    workshopPath,
+    draftRequest,
+    fellowAToken,
+    201,
+    "idemp-intent-recovery",
+  );
+  WorkshopPushResponseSchema.parse(recoveredDraft);
+  const recoveredReplay = await call(
+    workshopPath,
+    draftRequest,
+    fellowAToken,
+    200,
+    "idemp-intent-recovery",
+  );
+  assert.deepEqual(recoveredReplay, recoveredDraft);
+  const draftReadPath = `${workshopPath}/${recoveredDraft.workshop_id}`;
+  const privateDraft = WorkshopObjectResponseSchema.parse(
+    await call(draftReadPath, undefined, fellowAToken, 200),
+  );
+  assert.equal(privateDraft.object.type, "claim-draft");
+  assert.equal(privateDraft.object.body_md, claimShapedNote.body_md);
+  assert.deepEqual(privateDraft.object.relates_to, claimShapedNote.relates_to);
+  assert.deepEqual(privateDraft.object.ledger_intent, claimShapedNote.ledger_intent);
+  await call(draftReadPath, undefined, fellowBToken, 404);
+  await call(
+    "/v1/sessions/S-01ARZ3NDEKTSV4RRFFQ69G5FAV/workshop",
+    draftRequest,
+    fellowAToken,
+    404,
+  );
+
+  // 7g. Interrupted note edits recover the same object and optimistic base.
+  const plainNote = {
+    type: "note",
+    title: "Cases left to check",
+    body_md: "The boundary cases remain incomplete.",
+    relates_to: [problemId1],
+    ledger_intent: { kind: "create", target_kind: "claim" },
+  };
+  const noteDraft = WorkshopPushResponseSchema.parse(
+    await call(workshopPath, plainNote, fellowAToken, 201),
+  );
+  const revisionRequest = {
+    workshop_id: noteDraft.workshop_id,
+    base_version: noteDraft.version,
+    body_md: "Therefore the boundary cases agree.\nPRIVATE_REVISION_CANARY: retain the argument.",
+  };
+  const refusedRevision = await call(workshopPath, revisionRequest, fellowAToken, 422);
+  ProblemDocumentSchema.parse(refusedRevision);
+  assert.equal(refusedRevision.code, "LOOKS_LIKE_CLAIM");
+  const revisionRecovery = WorkshopPushRequestSchema.parse(refusedRevision.example);
+  assert.deepEqual(revisionRecovery, { ...revisionRequest, type: "claim-draft" });
+  const revisedDraft = WorkshopPushResponseSchema.parse(
+    await call(workshopPath, revisionRecovery, fellowAToken, 201),
+  );
+  assert.equal(revisedDraft.workshop_id, noteDraft.workshop_id);
+  assert.equal(revisedDraft.version, 2);
+  const revisedPrivate = WorkshopObjectResponseSchema.parse(
+    await call(`${workshopPath}/${noteDraft.workshop_id}`, undefined, fellowAToken, 200),
+  );
+  assert.equal(revisedPrivate.object.title, plainNote.title);
+  assert.equal(revisedPrivate.object.body_md, revisionRequest.body_md);
+  assert.deepEqual(revisedPrivate.object.relates_to, plainNote.relates_to);
+  assert.deepEqual(revisedPrivate.object.ledger_intent, plainNote.ledger_intent);
+  assert.equal((await call("/cursor")).cursor, publicCursorBefore);
 
   // --- Step 8: Session Close (POST /v1/sessions/:id/close) ---
   // 8a. Close session 1 with handback
