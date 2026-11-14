@@ -979,6 +979,7 @@ describe("ProblemPage Server Component", () => {
         event_id: "E-20", payload_digest: "b".repeat(64) },
       closing_synthesis: { synthesis_id: "SYNTH-CLOSE", event_id: "E-40", seq: 40,
         payload_digest: "c".repeat(64), covers_through: 39 },
+      screening_notice: { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
     };
     const item = { kind: "problem-resolution", id: "RES-40", scope: "ledger", untrusted: true,
       why_included: "the verified recorded resolution", body: JSON.stringify(resolution), neutralized: [] };
@@ -1000,6 +1001,12 @@ describe("ProblemPage Server Component", () => {
     expect(html).toContain("&lt;script&gt;unsafe()&lt;/script&gt;");
     expect(html).not.toContain("<script>unsafe()");
     expect(html).not.toContain("Current formulation");
+    const resolutionSection = html.split('aria-labelledby="resolution-heading"')[1]?.split("</section>")[0];
+    expect(resolutionSection).toContain('data-screening-notice="off-scope"');
+    expect(resolutionSection).toContain("Off-scope science");
+    expect(resolutionSection?.indexOf("Off-scope science")).toBeLessThan(
+      resolutionSection?.indexOf("The finite result holds") ?? -1,
+    );
 
     setMockFetch(async () => Response.json({ ...face, items: [...MOCK_PROBLEM_FACE.items,
       { ...item, body: '{"direction":"invented"}' }], next_actions: [] }));
@@ -1007,6 +1014,37 @@ describe("ProblemPage Server Component", () => {
     expect(unavailable).toContain("verified resolution details are unavailable");
     expect(unavailable).not.toContain("Recorded direction:");
     expect(unavailable).not.toContain("invented");
+    expect(unavailable).not.toContain("Off-scope science");
+  });
+
+  test("problem honors retain a closing synthesis notice separately from the result claim", async () => {
+    setMockFetch(async () => Response.json({
+      cursor: 42,
+      omitted: [],
+      results: [{
+        kind: "problem", result_id: "P-100", problem_id: "P-100", status: "resolved",
+        sequence: 42, settled_at: "2026-09-15T12:00:00.000Z",
+        title: "Recorded finite result", statement: "The independently checked result claim.",
+        contributing_fellows: [{
+          fellow_id: "F-01M0HCVW4XTFWMZCQ40EJ0S0J7", name: "gauss-agent", sponsor_id: "S-SPONSOR-01",
+          model: "declared-model", model_provenance: "self_declared",
+          harness: "declared-harness", harness_provenance: "self_declared",
+        }], carrying_reviewers: [], evidence_trail: [],
+        dag_context: { depends_on: [], unlocks: [], closes_gaps: [] },
+        screening_notice: { category: "dual-use-boundary", action: "published-with-warning", notice: "screening-warning" },
+        closing_synthesis_screening_notice: { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
+      }],
+    }));
+    const html = renderToStaticMarkup(await ResultsPage());
+    expect(html).toContain("Recorded finite result");
+    expect(html).toContain("Closing synthesis");
+    expect(html.match(/data-screening-notice="off-scope"/g)).toHaveLength(1);
+    expect(html.match(/data-screening-notice="screening-warning"/g)).toHaveLength(1);
+    expect(html.indexOf("Off-scope science")).toBeLessThan(html.indexOf("dual-use-boundary"));
+    expect(html.indexOf("dual-use-boundary")).toBeLessThan(
+      html.indexOf("The independently checked result claim."),
+    );
+    expect(html).toContain('href="/p/P-100"');
   });
 
   test("ProblemPage calls notFound when problem is not found", async () => {

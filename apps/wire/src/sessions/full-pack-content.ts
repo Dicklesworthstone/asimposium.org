@@ -29,6 +29,7 @@ import {
   RetractionKindSchema,
   RetractRequestSchema,
   ReviewRequestSchema,
+  type ScreeningPublicationNotice,
   SynthesisIdSchema,
   SynthesizeRequestSchema,
   SynthesizeResponseSchema,
@@ -91,6 +92,8 @@ export interface FullPackRecord {
   readonly envelope: PublicEventEnvelope;
   readonly content: Readonly<Record<string, unknown>> | null;
   readonly content_omitted: FullPackContentOmission | null;
+  /** A copied resolution is qualified by its exact closing publication. */
+  readonly screening_notice?: ScreeningPublicationNotice;
 }
 
 /** Public write schemas are the field allowlist, including nested objects.
@@ -546,8 +549,20 @@ export async function readFullPackContent(
       const content = decodeContent(envelope.event, payload, { problem, seq: envelope.seq });
       if (content !== null && envelope.event.type === "problem.resolved") {
         const available = await readPublishedProblemResolution(db, problem, envelope.seq, capture);
-        if (available === undefined || JSON.stringify(available) !== JSON.stringify(content))
+        if (available === undefined) return absent("content_unavailable");
+        const { screening_notice: notice, ...committed } = available;
+        // Publication notices are derived from the immutable screening receipt,
+        // never authored fields of the governance event. Compare the committed
+        // declaration first, then retain its exact qualification in both the
+        // typed content and the platform-owned pack item metadata.
+        if (JSON.stringify(committed) !== JSON.stringify(content))
           return absent("content_unavailable");
+        return {
+          envelope,
+          content: available,
+          content_omitted: null,
+          ...(notice === undefined ? {} : { screening_notice: notice }),
+        };
       }
       return content === null
         ? absent("content_unavailable")

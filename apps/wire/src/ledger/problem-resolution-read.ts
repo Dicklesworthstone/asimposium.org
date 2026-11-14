@@ -6,6 +6,7 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql } from "../krater/public-content.ts";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 import {
   type CitationContentRow,
   PUBLIC_EVENT_CONTENT_MAX_BYTES,
@@ -141,7 +142,12 @@ export async function readPublishedProblemResolution(
   // The two source reads above are separate D1 snapshots. Recheck both exact
   // witnesses together so a hide, redaction or changed retained body between
   // reads cannot publish a copied conclusion from an unavailable source.
-  const resolutionWitnessSql = `SELECT 1 AS available FROM problems p
+  const resolutionWitnessSql = `SELECT 1 AS available,
+    (SELECT CASE WHEN typeof(s.provenance_json)='text'
+      AND length(CAST(s.provenance_json AS BLOB))<=4096
+      THEN s.provenance_json ELSE 'invalid' END
+      FROM screening_publications s WHERE s.event_id=synthesis.id) AS screening_provenance
+    FROM problems p
     JOIN events resolution ON resolution.problem_id=p.id AND resolution.id=?
       AND resolution.seq=? AND resolution.payload_sha256=?
       AND resolution.type='problem.resolved' AND resolution.object_kind='problem'
@@ -183,17 +189,31 @@ export async function readPublishedProblemResolution(
   const current = await db
     .prepare(resolutionWitnessSql)
     .bind(...resolutionWitnessBindings)
-    .all<{ available: number }>();
+    .all<{ available: number; screening_provenance: string | null }>();
   // A composed public page may perform further awaited reads. Retain this
   // exact two-source guard so its final transaction can recheck the closing
   // synthesis even when that publication is outside the page's event window.
   capture?.(resolutionWitnessSql, resolutionWitnessBindings, current.results);
   if (current.results.length !== 1 || current.results[0]?.available !== 1) return undefined;
+  try {
+    // The copied conclusion retains the notice belonging to its exact closing
+    // work, not the result claim, formulation or resolution event. Recheck it
+    // with both source witnesses so a changed or malformed receipt cannot
+    // strip the qualification while the conclusion is being hydrated.
+    const currentNotice = publicationScreeningNotice(current.results[0].screening_provenance);
+    if (JSON.stringify(currentNotice) !== JSON.stringify(item.synthesis.screening_notice))
+      return undefined;
+  } catch {
+    return undefined;
+  }
   return ProblemDetailSchema.shape.resolution.safeParse({
     direction: resolved.resolution_direction,
     summary: resolved.resolution_summary,
     no_claim_boundary: resolved.resolution_no_claim_boundary,
     result_claim: resolved.result_claim,
     closing_synthesis: closing,
+    ...(item.synthesis.screening_notice === undefined
+      ? {}
+      : { screening_notice: item.synthesis.screening_notice }),
   }).data;
 }

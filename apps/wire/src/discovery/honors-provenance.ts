@@ -25,7 +25,10 @@ import {
   foldScientificRows,
   type ScientificDisposition,
 } from "../ledger/scientific-disposition.ts";
-import { readPublicationNotices } from "../screening/publication-notice.ts";
+import {
+  publicationScreeningNotice,
+  readPublicationNotices,
+} from "../screening/publication-notice.ts";
 import { claimHonorsStatus } from "./honors-eligibility.ts";
 
 export interface HonorsSourceWitness {
@@ -51,6 +54,10 @@ export interface HonorsResultRecord {
   readonly scope: { problem: string; through: number; claim: string; version: number };
   readonly witnesses: readonly HonorsSourceWitness[];
   readonly contextWitnesses: HonorsSourceWitness[];
+  readonly closingScreeningReceipt?: {
+    readonly event: string;
+    readonly provenance: string | null;
+  };
 }
 
 export interface HonorsClaimRecord extends HonorsResultRecord {
@@ -87,6 +94,14 @@ export function prepareHonorsSourceCheck(
     new TextEncoder().encode(encoded).byteLength > 1024 * 1024
   )
     throw new Error("Honors final source check exceeds its read budget");
+  const closingReceipt = record.closingScreeningReceipt;
+  if (
+    closingReceipt !== undefined &&
+    (!unique.has(closingReceipt.event) ||
+      (closingReceipt.provenance !== null &&
+        new TextEncoder().encode(closingReceipt.provenance).byteLength > 4096))
+  )
+    throw new Error("Honors closing notice lacks its exact source witness");
   return db
     .prepare(`WITH expected(j) AS (VALUES (?)),
     head AS MATERIALIZED (
@@ -105,13 +120,16 @@ export function prepareHonorsSourceCheck(
         AND c.payload_json=json_extract(pin.value,'$.body') AND c.redacted_at IS NULL
       WHERE NOT ${eventContentHiddenSql("e")}
     ) SELECT COALESCE((SELECT complete FROM coverage)=1 AND
-      (SELECT matched FROM sources)=(SELECT json_array_length(j) FROM expected),0) AS available`)
+      (SELECT matched FROM sources)=(SELECT json_array_length(j) FROM expected)
+      ${closingReceipt === undefined ? "" : "AND (SELECT provenance_json FROM screening_publications WHERE event_id=?) IS ?"},
+      0) AS available`)
     .bind(
       encoded,
       record.scope.problem,
       record.scope.through,
       record.scope.claim,
       record.scope.version,
+      ...(closingReceipt === undefined ? [] : [closingReceipt.event, closingReceipt.provenance]),
     );
 }
 
@@ -580,14 +598,18 @@ export async function readHonorsProblem(
   const closing = resolution.closing_synthesis;
   const synthesis = await db
     .prepare(`SELECT e.actor_fellow_id AS fellow, e.actor_sponsor_id AS sponsor,
-      e.model_string_self_declared AS model, e.harness, f.name, c.payload_json AS body
+      e.model_string_self_declared AS model, e.harness, f.name, c.payload_json AS body,
+      (SELECT CASE WHEN typeof(s.provenance_json)='text'
+        AND length(CAST(s.provenance_json AS BLOB))<=4096
+        THEN s.provenance_json ELSE 'invalid' END
+        FROM screening_publications s WHERE s.event_id=e.id) AS screening_provenance
     FROM events e JOIN event_content c ON c.event_id=e.id AND c.payload_sha256=e.payload_sha256
       AND c.redacted_at IS NULL LEFT JOIN enrollment_fellows f ON f.fellow_id=e.actor_fellow_id
     WHERE e.id=? AND e.problem_id=? AND e.seq=? AND e.payload_sha256=?
       AND e.object_kind='synthesis' AND e.type='synthesis.created' AND e.object_id=?
       AND NOT ${eventContentHiddenSql("e")} AND length(CAST(c.payload_json AS BLOB))<=65536`)
     .bind(closing.event_id, problem, closing.seq, closing.payload_digest, closing.synthesis_id)
-    .first<ActorRow & { body: string }>();
+    .first<ActorRow & { body: string; screening_provenance: string | null }>();
   if (
     !synthesis?.fellow ||
     !synthesis.sponsor ||
@@ -598,6 +620,12 @@ export async function readHonorsProblem(
     payload_json: synthesis.body,
     payload_sha256: closing.payload_digest,
   });
+  try {
+    const notice = publicationScreeningNotice(synthesis.screening_provenance);
+    if (JSON.stringify(notice) !== JSON.stringify(resolution.screening_notice)) return null;
+  } catch {
+    return null;
+  }
   const witnesses = [
     ...claim.witnesses,
     {
@@ -644,12 +672,19 @@ export async function readHonorsProblem(
     scope: claim.scope,
     witnesses,
     contextWitnesses: claim.contextWitnesses,
+    closingScreeningReceipt: {
+      event: closing.event_id,
+      provenance: synthesis.screening_provenance,
+    },
     item: {
       ...resultItem,
       kind: "problem",
       result_id: problem,
       status: "resolved",
       title: payload.data.problem.title,
+      ...(resolution.screening_notice === undefined
+        ? {}
+        : { closing_synthesis_screening_notice: resolution.screening_notice }),
       settled_at: result.created_at,
       sequence: result.seq,
       contributing_fellows: contributors,

@@ -50,6 +50,13 @@ export function renderHonorsMarkdown(data: HonorsResponse, _query: HonorsQuery =
     for (const item of data.results) {
       const href = honorsResultPath(item, "md");
       lines.push(`## [${safeInlineProse(item.title)}](${href})`);
+      if (item.kind === "problem" && item.closing_synthesis_screening_notice !== undefined) {
+        lines.push(
+          "",
+          `**Closing synthesis:** ${screeningNoticeText(item.closing_synthesis_screening_notice)}`,
+          "",
+        );
+      }
       lines.push(
         `- **Result:** ${safeCodeSpan(item.result_id)} (${safeCodeSpan(item.kind)}) on [${safeInlineProse(item.problem_id)}](/p/${encodeURIComponent(item.problem_id)}.md)`,
       );
@@ -153,6 +160,11 @@ export function renderHonorsHtmlFragment(data: HonorsResponse, _query: HonorsQue
       lines.push(
         `      <h3><a href="${escapeHtml(href)}">${escapeHtml(item.title)}</a> <span class="asimp-badge asimp-status-${escapeHtml(item.status)}">${escapeHtml(item.status)}</span></h3>`,
       );
+      if (item.kind === "problem" && item.closing_synthesis_screening_notice !== undefined) {
+        lines.push(
+          `      <aside role="note" data-screening-notice="${escapeHtml(item.closing_synthesis_screening_notice.notice)}"><strong>Closing synthesis:</strong> ${escapeHtml(screeningNoticeText(item.closing_synthesis_screening_notice))}</aside>`,
+        );
+      }
       lines.push(
         `      <p class="asimp-meta">result: <code>${escapeHtml(item.result_id)}</code> (${escapeHtml(item.kind)}) on <a href="/p/${encodeURIComponent(item.problem_id)}.html">${escapeHtml(item.problem_id)}</a> · settled: ${escapeHtml(item.settled_at)} (seq ${item.sequence})</p>`,
       );

@@ -280,6 +280,7 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
                   </code>
                   . The closing work declares the scope and limits below.
                 </p>
+                <ScreeningNotice notice={resolution.screening_notice} />
                 <ScientificBody body={resolution.summary} namespace="resolution-summary" />
                 <h3>Limits of this resolution</h3>
                 <dl>

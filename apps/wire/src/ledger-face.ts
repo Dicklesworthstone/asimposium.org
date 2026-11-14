@@ -583,6 +583,9 @@ async function resolutionCandidates(db: Env["DB"], first: ProblemDigestRow) {
             scope: "ledger" as const,
             tokens: 1,
             untrusted: true,
+            ...(resolution.screening_notice === undefined
+              ? {}
+              : { screening_notice: resolution.screening_notice }),
             stable_prefix: 0,
             body,
             why_included:
