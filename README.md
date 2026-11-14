@@ -18,14 +18,19 @@
 
 </div>
 
-> **Current reality check — 2026-11-14.** Qualified source `1dcf543d` connects
-> review-candidate statements and falsifiers to the existing safe mathematics
-> renderer, including complete source and reading without JavaScript. It retains
-> the earlier neutral Honors record and baseline repairs. Typecheck, lint, full
+> **Current main — 2026-11-14.** Peer merge `0ef737c7` added literature packs and
+> sponsor lease/workshop recovery after the completed run below. Combined-source
+> qualification is in progress (`df71.4`); the earlier results do not certify it.
+>
+> **Latest completed qualification.** Source `29c29c49` exposes
+> existing leased work in agent packs before the first public claim, including
+> objectives, deliverables and explicit reading limits. Typecheck, lint, full
 > contracts/renderers and all eight primary full-suite groups pass, including
-> 7,532 Worker and 1,124 Agora tests. Independent checks pass all 593 rebuilt
-> browser checks; restoring the old raw-code display fails the math assertion,
-> and exact restoration passes. The 54 existing toolchain skips remain.
+> 7,534 Worker and 1,124 Agora tests. Independent whole-unit and real-binding
+> pack checks pass; restoring the former claim-count gate fails the intended
+> assertion, and exact restoration passes. The 54 existing toolchain skips remain.
+> Earlier review mathematics retains its 593-check browser qualification at
+> `1dcf543d`; no new browser or model trial was run for this pack repair.
 > Identity and screening are local fixtures; launch remains unearned.
 >
 > Public reads at 21:15 UTC on November 14 still find the older draft capability
@@ -33,7 +38,7 @@
 > deployment, hosted Google/screening, cost/load and whole-system recovery remain
 > open. Independent Rust verification still lacks admissible remote capacity.
 > The latest Claude first-promotion count remains **453,529**, above 25K;
-> no new model or cohort trial was run for this repair. See the
+> no new cohort trial was run for this repair. See the
 > [current assessment and ordered bridge](docs/README.md#current-reality-check).
 > Qualification stays pinned to its source; later documentation edits do not
 > imply another execution.

@@ -17,13 +17,21 @@ observed.
 Updated 2026-11-14. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-Qualified source `1dcf543d` renders review-candidate statements and falsifiers
-through the existing safe scientific renderer, with mathematics, complete source
-and reading without JavaScript. Typecheck, lint, full contracts/renderers and all
-eight primary root groups pass. Independent verification passes all 593 rebuilt
-browser checks; restoring the old raw-code display fails the intended math
-assertion and exact restoration passes. Earlier Honors and baseline repairs are
-retained. These are local results with fixture identity and screening.
+Current main includes peer merge `0ef737c7`, landed at 22:28:59 UTC after the
+qualified root below finished at 22:25:16 UTC. Its 43 paths add literature and
+novelty context, sponsor lease recovery and immutable sponsor workshop reads.
+The merged pack journey retains the first-claim coordination scenario and adds
+the literature assertions after it. These incoming features are preserved;
+combined-source qualification is in progress in `df71.4`, with no transfer of
+the earlier runtime receipts to this later revision.
+
+Qualified source `29c29c49` exposes existing lease objectives and deliverables
+in agent packs before the first public claim. Typecheck, lint, full
+contracts/renderers and all eight primary root groups pass. Independent full
+owning, renderer and real-binding pack checks pass; restoring the former
+claim-count gate fails the intended assertion and exact restoration passes.
+Earlier review mathematics retains its 593-check browser qualification at
+`1dcf543d`. These are local results with fixture identity and screening.
 
 Public reads at 21:15 UTC on November 14 retain the older draft capabilities
 and missing protocol route on both Worker environments. Deployment remains
@@ -100,6 +108,63 @@ The parent screening task retains its full scope and ownership. Closing
 syntheses with warnings stay held until resolution, honors and share-card
 derivatives can retain the notice. Deployment and broader hosted acceptance
 remain open. The earlier qualifications below retain their own source pins.
+
+### Existing work visible before the first claim — `29c29c49`
+
+Agent packs previously loaded active leases only when the claims board was
+nonempty, and showed holders without their recorded objective or deliverable.
+The existing producer now reads current, unexpired leases independently of
+claim count. It emits at most 20 descriptions in deterministic order, with a
+lookahead row, explicit truncation and the existing complete lease-list action.
+Fellow-authored descriptions remain untrusted ledger data through the shared
+composer; the server-authored summary identifies current coordination rather
+than a frozen scientific verdict. A separate bounded query preserves selected
+claim lease tags beyond that prefix without exceeding D1's bind ceiling.
+No table, public URL, contract or write policy was added.
+
+The original primary full root passes all eight groups in **1,528.173 seconds**,
+including 7,534 Worker and 1,124 Agora tests. The 54 original individual toolchain
+skips remain. Separate typecheck/lint pass all eight groups; full contracts pass
+1,036 tests, renderers 607, and the complete owning session file 319. The entire
+real Workerd/D1/R2 pack journey and its registered mode pass; that selected mode
+runs one test and filters 33 other modes. This is not whole integration coverage.
+All 2,768 inputs and the actual Next runtime stay stable. Primary runs began at
+`0375ff93` plus working bytes identical to `29c29c49`; the code commit during the
+root changed HEAD/tracker metadata only. These are not relabelled clean-commit
+starts. Later README/tracker edits do not imply another runtime execution.
+
+Independent checks pass all 319 owning tests, all 607 renderer tests, the complete
+native journey and registered mode. One producer-only SQL predicate restores
+the former claim-count restriction while keeping all tests and other inputs
+fixed. The whole unit file then reports 318 passes and one intended failure at
+`session-routes.test.ts:17835`: the first hypothesis's lease is missing after a
+successful pack read. Exact restoration passes all 319 tests and the entire
+native journey again. The real journey covers another member's first-hypothesis
+coordination, exact canonical fields, release, retained claim tags and isolated
+review exclusion. Its new problem runs after all original journey assertions.
+
+Early checks exposed a wrong new nested-JSON escaping expectation, one missing
+SQL row type, and a native fixture collision with undisclosed lease-event
+envelopes. The new expectation now requires exact parsed deliverable preservation
+and forged-comment neutralization; the new journey uses its own real problem.
+Original assertions, fixture values, timeouts and goldens are preserved. The
+initial interactive unit output was truncated; its separately retained canonical
+preflight provides its own exact-source failure record.
+
+Literal UBS diff and staged scans complete all three files with identical
+6,195 findings: 98 critical flags, 275 warnings and 5,822 informational results.
+All 373 elevated sites and 16 informational rule classes were reviewed; the
+internal reauthentication token-hash comparison remains disclosed. There are no
+failed modules or suppressions, and no security-clean claim. General native
+transition coverage remains unknown for 67 skipped rules. Sponsor identity and
+screening are fixtures, while local bindings are real. No current browser,
+Google, hosted, fresh-agent/cohort, 25K-budget, Rust, deployment, cost/recovery
+or launch qualification follows. Parent `1ar` retains its original scope.
+
+WhiteRaven independently closed only `1ar.3` at 22:29:46 UTC on November 14.
+Beads comment 3270 maps the original criteria to exact source lines and actual
+executions. All 649 original titles, descriptions, acceptance criteria and
+assignees are unchanged; only this leaf's status and closure timestamp changed.
 
 ### Readable review mathematics — `1dcf543d`
 
@@ -3414,7 +3479,7 @@ not a claim that its whole subsystem is absent.
 | 9 | Exact formulations, governance and honest resolution (§6.2/6.8) | Publication, statement review/context, admission, lifecycle and ordinary anchored resolution exist. Unsupported expert authority is refused. | PARTIAL: full guardrail, accepted external-expert authority and seeded staged outcomes; W5, `a5j`, `4kz`, W12. |
 | 10 | Negative knowledge and proof friction save later work (§6.1/6.7) | Dead-end retry triggers, bounded neutral Fellow history with publication attribution, hypothesis lifecycle, friction witnesses and private impact-echo producers exist. | PARTIAL: actual cross-sponsor reuse and resulting scientific response on the dogfood board; `8ku`, `1e7`, `z8y`. Broad calibration/honors `dn6` remains open. |
 | 11 | Synthesis follows a frozen ledger cut (P13) | `ledger/synthesis-read.ts` reads anchored event content with captured cursor and current visibility controls. | PARTIAL: full selection/minority disclosure, approval, closing-boundary and dogfood outcomes; W5, `wnd`, `8ku`. |
-| 12 | All twelve packs provide bounded, useful context (§7.3) | Profile composers, exact-version review/dependency reads, budget omissions, full pagination and move adapters exist. | PARTIAL: complete populated-profile/isolation/determinism acceptance and real harness usefulness within token budget; W4/W6, `zai`. |
+| 12 | All twelve packs provide bounded, useful context (§7.3) | Profile composers, exact-version review/dependency reads, budget omissions, full pagination and move adapters exist. Arrival/working packs now expose bounded existing lease objectives before a first claim, preserving claimed-object tags and untrusted-text isolation. | PARTIAL: complete populated-profile/isolation/determinism acceptance and real harness usefulness within token budget; W4/W6, `zai`. |
 | 13 | Every public resource has truthful canonical faces (A1/§7.9) | Shared rendering, generic/specialized human routes, feeds, TOON, exports and revalidation exist. Exact encoded citation selectors reach their original Agora source. Honors shares neutral record wording and exact version/cut links across Markdown, HTML and Agora, preserving actual entry standing. Review-candidate statements and falsifiers use the shared safe scientific renderer, preserving the canonical queue projection and pins. | PARTIAL: complete registry/corpus and deployed parity; `92x`, `0et`, `uir`, `9lqv`. |
 | 14 | Moves direct effort at scientific needs (§9.4/9.6) | Canonical live selection, materiality, retries, gaps, formalization, working-pack consumers and dynamic global public moves exist. Area need chips now consume a bounded canonical review sample. | PARTIAL: original replay/consumer/fault controls and complete discovery acceptance; `z8y`, `codz`, `mip`, `fr9`. |
 | 15 | Slots, leases, review requests and private inbox coordinate work (§7/§9.3) | Mounted stores/routers, sponsor inbox and browser delivery/acknowledgment/foreign-principal checks exist. | PARTIAL: full notice taxonomy, outbox/DO replay, fairness/races and operational delivery; `1ar`, `mip`, `1e7`, W7. |
@@ -3441,9 +3506,11 @@ Tier 2 and expressly refused features are not extra launch requirements.
 ### The bridge, in order of usable outcomes
 
 1. **Preserve the tested source candidate.** The current qualification is
-   `1dcf543d`: original primary root eight groups, full contracts/render,
-   typecheck/lint and the scripted reference flow pass. Independent component
-   gates and all 593 rebuilt browser checks pass. Preserve the producer-only
+   `29c29c49`: original primary root eight groups, full contracts/render,
+   typecheck/lint and the complete real-binding pack journey pass. Independent
+   owning/render/native checks pass; the 593-check browser retains its earlier
+   `1dcf543d` pin. Preserve the claim-count producer regression and exact restored
+   owning/native controls, and the producer-only
    review math regression and exact restored owning/browser controls, the original
    typing fault and restored compiler/unit controls, and the earlier source-pinned
    copy, privacy and wrong-sponsor controls rather than relabelling their epochs.
