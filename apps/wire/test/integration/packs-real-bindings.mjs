@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { PackResponseSchema, TriageResponseSchema } from "@asimposium/contracts";
+import {
+  LeaseAcquireResponseSchema,
+  LeaseListResponseSchema,
+  PackResponseSchema,
+  TriageResponseSchema,
+} from "@asimposium/contracts";
 import { FormalRecordsResponseSchema } from "@asimposium/contracts/formal-records";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
@@ -64,6 +69,207 @@ await runLocalWorkerJourney(
       outsider,
     );
     const authorSession = await sessionOf(author, "prove");
+    // Run this added scenario after the existing journey, on its own genuine
+    // problem. Private lease-event gaps must not change the old tail oracle.
+    async function checkFirstLeaseCoordination() {
+      const coordination = await call(
+        "/v1/problems",
+        {
+          title: "Coordination before a first claim",
+          statement: "For every natural number n, n + 0 = n.",
+          falsifier: "A natural number changed by adding zero.",
+          motivation: "Make recorded work visible before the first claim.",
+          areas: ["number-theory"],
+        },
+        author,
+        201,
+      );
+      const problem = coordination.problem.id;
+      await sponsorCall(
+        OWNER,
+        "POST",
+        `/v1/sponsors/problems/${problem}/lifecycle`,
+        "problem-lifecycle",
+        { action: "publish" },
+      );
+      const sessionOf = async (token, intent) =>
+        (await call("/v1/sessions", { problem_id: problem, intent }, token, 201)).session_id;
+      const outsiderSession = await sessionOf(outsider, "review");
+      await call(
+        `/v1/problems/${problem}/statement-review`,
+        {
+          session_id: outsiderSession,
+          statement_version: 1,
+          verdict: "statement-clear",
+          basis: "Exact defining equation.",
+        },
+        outsider,
+      );
+      const authorSession = await sessionOf(author, "prove");
+      const firstHypothesis = await call(
+        `/v1/sessions/${authorSession}/hypotheses`,
+        {
+          route: "Check the additive identity in the zero case.",
+          mechanism: "The definition of zero preserves the input.",
+          falsifier: "A natural number changed by adding zero.",
+          expected_evidence: "A checked defining equation.",
+          discriminating_predictions: [],
+          origin: "proposed",
+          body_md: "Examine the defining equation.",
+        },
+        author,
+        201,
+      );
+      const acquired = LeaseAcquireResponseSchema.parse(
+        await call(
+          `/v1/sessions/${authorSession}/leases`,
+          {
+            object: firstHypothesis.hypothesis_id,
+            objective: "Check the additive identity in the zero case.",
+            deliverable: "A checked defining equation, or a counterexample.",
+            parallel_safe: true,
+          },
+          author,
+          201,
+        ),
+      ).lease;
+      const listedLeases = LeaseListResponseSchema.parse(
+        await call(`/v1/sessions/${authorSession}/leases`, undefined, author),
+      );
+      assert.deepEqual(listedLeases.leases, [acquired]);
+      for (const [token, session] of [
+        [author, authorSession],
+        [outsider, outsiderSession],
+      ]) {
+        for (const profile of ["orient", "working"]) {
+          const pack = PackResponseSchema.parse(
+            await call(
+              `/v1/sessions/${session}/pack?profile=${profile}&max_tokens=8000`,
+              undefined,
+              token,
+            ),
+          );
+          assert.equal(
+            pack.items.some((item) => item.kind === "claim"),
+            false,
+            "coordination precedes any public claim",
+          );
+          const work = pack.items.find((item) => item.id === acquired.lease_id);
+          assert.ok(work, "a first-hypothesis lease is visible to another current member");
+          assert.equal(work.kind, "lease");
+          assert.equal(work.scope, "ledger");
+          assert.equal(work.untrusted, true);
+          assert.deepEqual(json(work.body), {
+            object: acquired.object,
+            fellow_id: acquired.fellow_id,
+            objective: acquired.objective,
+            deliverable: acquired.deliverable,
+            leased_until: acquired.leased_until,
+            parallel_safe: acquired.parallel_safe,
+          });
+          assert.ok(
+            pack.next_actions.some((action) => action.url === `/v1/sessions/${session}/leases`),
+          );
+          assert.ok(!JSON.stringify(pack).includes("PRIVATE-PACK-SOURCE"));
+        }
+      }
+      const isolatedQueue = PackResponseSchema.parse(
+        await call(
+          `/v1/sessions/${outsiderSession}/pack?profile=review-queue&max_tokens=8000`,
+          undefined,
+          outsider,
+        ),
+      );
+      assert.equal(
+        isolatedQueue.items.some((item) => item.kind === "lease"),
+        false,
+      );
+      await call(
+        `/v1/sessions/${authorSession}/leases/${firstHypothesis.hypothesis_id}/release`,
+        {},
+        author,
+        200,
+      );
+      const released = PackResponseSchema.parse(
+        await call(
+          `/v1/sessions/${authorSession}/pack?profile=working&max_tokens=8000`,
+          undefined,
+          author,
+        ),
+      );
+      assert.equal(
+        released.items.some((item) => item.id === acquired.lease_id),
+        false,
+      );
+      assert.equal(
+        released.items.some((item) => item.id === "SYS-active-leases"),
+        false,
+      );
+      const draft = await call(
+        `/v1/sessions/${authorSession}/workshop`,
+        {
+          type: "claim-draft",
+          title: "Additive identity",
+          body_md: "Apply the defining equation.",
+        },
+        author,
+        201,
+      );
+      const published = await call(
+        `/v1/sessions/${authorSession}/promote`,
+        {
+          workshop_id: draft.workshop_id,
+          kind: "conjecture",
+          statement: "For every natural number n, n + 0 = n.",
+          falsifier: "A natural number changed by adding zero.",
+          relates_to: [],
+        },
+        author,
+        201,
+      );
+      const claimLease = LeaseAcquireResponseSchema.parse(
+        await call(
+          `/v1/sessions/${authorSession}/leases`,
+          {
+            object: published.claim_id,
+            objective: "Check the defining equation on this exact claim.",
+            deliverable: "A checked identity or a counterexample.",
+          },
+          author,
+          201,
+        ),
+      ).lease;
+      const leasedClaim = PackResponseSchema.parse(
+        await call(
+          `/v1/sessions/${authorSession}/pack?profile=working&max_tokens=8000`,
+          undefined,
+          author,
+        ),
+      );
+      assert.ok(
+        leasedClaim.items
+          .find((item) => item.kind === "claim" && item.id === published.claim_id)
+          ?.body.includes(`leased by ${claimLease.fellow_id}`),
+      );
+      const isolatedReview = PackResponseSchema.parse(
+        await call(
+          `/v1/sessions/${outsiderSession}/pack?profile=review&target=${published.claim_id}@1&max_tokens=8000`,
+          undefined,
+          outsider,
+        ),
+      );
+      assert.equal(
+        isolatedReview.items.some((item) => item.kind === "lease"),
+        false,
+      );
+      assert.ok(!JSON.stringify(isolatedReview).includes(claimLease.objective));
+      await call(
+        `/v1/sessions/${authorSession}/leases/${published.claim_id}/release`,
+        {},
+        author,
+        200,
+      );
+    }
     const initialOrientation = PackResponseSchema.parse(
       await call(
         `/v1/sessions/${authorSession}/pack?profile=working&max_tokens=8000`,
@@ -614,6 +820,7 @@ await runLocalWorkerJourney(
       "restoring visibility retains the same immutable captured publication",
     );
 
+    await checkFirstLeaseCoordination();
     console.log(
       JSON.stringify({
         stage: "packs-journey-passed",

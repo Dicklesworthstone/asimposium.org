@@ -409,6 +409,7 @@ const DEFAULT_PACK_TOKENS: Readonly<Record<PackProfile, number>> = {
 };
 /** One extra row distinguishes a complete candidate set from a bounded prefix. */
 const PACK_CLAIM_CANDIDATE_LIMIT = 128;
+const PACK_LEASE_CANDIDATE_LIMIT = 20;
 
 /**
  * §6.1 / §8: Conjecture-class kinds require a falsifier under rule P3.
@@ -4233,6 +4234,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     const candidates: PackCandidate[] = [];
     let claimsTruncated = false;
+    let leasesTruncated = false;
+    let hasLeaseContext = false;
     let claimContentUnavailable = false;
     let workshopHeadsTruncated = false;
     let directiveContext: Awaited<ReturnType<typeof readActiveSponsorDirectives>>;
@@ -4395,6 +4398,65 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
 
     if (profile !== "hello" && profile !== "review-queue" && targetParam === null) {
+      // Coordination can precede the first claim: hypotheses, questions and
+      // proof gaps are leaseable objects too. This is current state, not a
+      // historical assertion about the pack's captured scientific cursor.
+      const leaseObservedAt = new Date().toISOString();
+      const activeLeases = await db
+        .prepare(
+          `SELECT lease_id, object_ref, object_id, fellow_id, objective, deliverable,
+                  leased_until, parallel_safe
+           FROM leases
+           WHERE problem_id = ? AND status = 'active' AND leased_until > ?
+           ORDER BY leased_at ASC, lease_id ASC LIMIT ?`,
+        )
+        .bind(session.problem_id, leaseObservedAt, PACK_LEASE_CANDIDATE_LIMIT + 1)
+        .all<{
+          lease_id: string;
+          object_ref: string;
+          object_id: string;
+          fellow_id: string;
+          objective: string;
+          deliverable: string;
+          leased_until: string;
+          parallel_safe: number;
+        }>();
+      leasesTruncated = activeLeases.results.length > PACK_LEASE_CANDIDATE_LIMIT;
+      const selectedLeases = activeLeases.results.slice(0, PACK_LEASE_CANDIDATE_LIMIT);
+      hasLeaseContext = selectedLeases.length > 0;
+      if (hasLeaseContext) {
+        candidates.push({
+          kind: "standing-context",
+          id: "SYS-active-leases",
+          scope: "system",
+          tokens: 1,
+          untrusted: false,
+          body: `Active leases on this problem (current coordination, not frozen at the ledger cursor):\n${selectedLeases.map((l) => `- ${l.object_ref}: leased by ${l.fellow_id} until ${l.leased_until}${l.parallel_safe ? " (parallel-safe)" : ""}`).join("\n")}`,
+          why_included:
+            "display the bounded current lease holders; descriptions below are Fellow-authored data",
+          stable_prefix: 12,
+        });
+        selectedLeases.forEach((lease, index) => {
+          candidates.push({
+            kind: "lease",
+            id: lease.lease_id,
+            scope: "ledger",
+            tokens: 1,
+            untrusted: true,
+            body: JSON.stringify({
+              object: lease.object_ref,
+              fellow_id: lease.fellow_id,
+              objective: lease.objective,
+              deliverable: lease.deliverable,
+              leased_until: lease.leased_until,
+              parallel_safe: Boolean(lease.parallel_safe),
+            }),
+            why_included:
+              "recorded work objective and deliverable; coordination is not evidence or permission",
+            stable_prefix: 13 + index,
+          });
+        });
+      }
       const claimRows = await readPackClaimHeads(
         db,
         session.problem_id,
@@ -4436,35 +4498,25 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           cursor,
           PACK_CLAIM_CANDIDATE_LIMIT,
         );
-
-        const activeLeases = await db
-          .prepare(
-            `SELECT object_ref, object_id, fellow_id, leased_until, parallel_safe
-             FROM leases
-             WHERE problem_id = ? AND status = 'active' AND leased_until > ?
-             ORDER BY leased_at ASC`,
+        // A bounded coordination prefix must not erase a selected claim's
+        // lease tag. Return at most one current holder per selected claim,
+        // using one JSON parameter rather than exceeding D1's bind ceiling.
+        const claimLeases = await db
+          .prepare(`SELECT object_id, fellow_id, parallel_safe FROM (
+            SELECT object_id, fellow_id, parallel_safe,
+              ROW_NUMBER() OVER (PARTITION BY object_id ORDER BY leased_at DESC, lease_id DESC) AS lease_rank
+            FROM leases
+            WHERE problem_id = ? AND status = 'active' AND leased_until > ?
+              AND object_kind = 'claim' AND object_id IN (SELECT value FROM json_each(?))
+          ) WHERE lease_rank = 1 ORDER BY object_id LIMIT ?`)
+          .bind(
+            session.problem_id,
+            leaseObservedAt,
+            JSON.stringify(selectedClaims.map((claim) => claim.id)),
+            PACK_CLAIM_CANDIDATE_LIMIT,
           )
-          .bind(session.problem_id, new Date().toISOString())
-          .all<{
-            object_ref: string;
-            object_id: string;
-            fellow_id: string;
-            leased_until: string;
-            parallel_safe: number;
-          }>();
-        const leaseMap = new Map<
-          string,
-          { fellow_id: string; leased_until: string; parallel_safe: boolean }
-        >();
-        for (const row of activeLeases.results ?? []) {
-          const info = {
-            fellow_id: row.fellow_id,
-            leased_until: row.leased_until,
-            parallel_safe: Boolean(row.parallel_safe),
-          };
-          leaseMap.set(row.object_id, info);
-          leaseMap.set(row.object_ref, info);
-        }
+          .all<{ object_id: string; fellow_id: string; parallel_safe: number }>();
+        const leaseMap = new Map(claimLeases.results.map((lease) => [lease.object_id, lease]));
 
         for (const [index, claim] of selectedClaims.entries()) {
           if (claim.statement === null) {
@@ -4504,19 +4556,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             why_included:
               "include a live public claim in ledger sequence order, with its computed disposition and review state",
             stable_prefix: 100 + index,
-          });
-        }
-
-        if ((activeLeases.results ?? []).length > 0) {
-          candidates.push({
-            kind: "standing-context",
-            id: "SYS-active-leases",
-            scope: "system",
-            tokens: 1,
-            untrusted: false,
-            body: `Active leases on this problem:\n${(activeLeases.results ?? []).map((l) => `- ${l.object_ref}: leased by ${l.fellow_id} until ${l.leased_until}${l.parallel_safe ? " (parallel-safe)" : ""}`).join("\n")}`,
-            why_included: "display currently leased problem objects and their holders",
-            stable_prefix: 12,
           });
         }
       }
@@ -4951,6 +4990,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               },
             ]
           : []),
+        ...(hasLeaseContext || leasesTruncated
+          ? [
+              {
+                method: "GET" as const,
+                url: `/v1/sessions/${session.session_id}/leases`,
+                why: "Read the complete current active leases with their recorded objectives and deliverables; this coordination read is not frozen at the pack cursor.",
+                public_read: false,
+                requires: ["workshop:read"],
+              },
+            ]
+          : []),
         ...(deadEndSection.candidates.some((item) => item.scope === "ledger") ||
         deadEndSection.omitted.length > 0
           ? [
@@ -5061,6 +5111,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ]
           : []),
         ...(claimsTruncated ? [{ reason: "candidate_limit", detail: "claims" }] : []),
+        ...(leasesTruncated ? [{ reason: "candidate_limit", detail: "active-leases" }] : []),
         ...(profile === "working" && workshopHeadsTruncated
           ? [{ reason: "candidate_limit", detail: "workshop-heads" }]
           : []),
