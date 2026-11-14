@@ -17,8 +17,15 @@ observed.
 Updated 2026-11-14. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-Source `e62b1e40` adds Claude first-promotion accounting to the existing cold-agent
-runner. Both frozen native loops complete, with first counts 563,360 and 827,339
+Source `c9f8c922` explicitly selects Bash for the existing Claude HTTP rehearsal,
+retaining all six command permissions. One fresh native journey completes with
+453,529 tokens through first promotion, still above 25K. Typecheck, lint,
+contracts/renderers and the original primary full root pass. Independent
+Gauntlet/reference controls pass; a planted catalog regression fails and exact
+restoration passes. Full cohort, budget and staging requirements remain unearned.
+
+Earlier source `e62b1e40` adds Claude first-promotion accounting to the existing
+cold-agent runner. Both frozen native loops complete, with first counts 563,360 and 827,339
 tokens; both exceed 25K. Typecheck, lint, contracts, renderers, real-binding
 reference checks and both original full roots pass. The full cohort and budget
 gate remain unearned. Latest public reads at 23:57 UTC on November 13 retain the
@@ -78,6 +85,42 @@ The parent screening task retains its full scope and ownership. Closing
 syntheses with warnings stay held until resolution, honors and share-card
 derivatives can retain the notice. Deployment and broader hosted acceptance
 remain open. The earlier qualifications below retain their own source pins.
+
+### Explicit Claude tool selection — `c9f8c922`
+
+The Claude adapter now requests `--tools Bash` alongside its six unchanged
+shell permission rules. [Available tools and automatic permission](https://code.claude.com/docs/en/cli-reference)
+are separate controls; the previous permission list left the default builtin
+selection in place. The CLI may retain its reserved `EndConversation` tool,
+and `--tools` does not configure MCP. Existing safe-mode/MCP, ephemeral/stdin,
+telemetry, sponsor instructions, scorer, deadlines and token formula remain.
+
+The single predeclared frozen native run completes the original local journey,
+including the injected and one additional contract-error recovery, public claim
+and close/handback. First usage is **453,529** across 23 model requests; whole
+usage is 633,509, with 2,848 thinking tokens a subset of output. Cached input
+accounts for 403,461 of the first count. The first total still exceeds 25K;
+this is neither a paired optimization trial nor cohort/budget acceptance.
+Claude 2.1.325 executable version/SHA and all 2,764 inputs plus the actual Next
+runtime are stable before/after. Approval and screening remain local fixtures.
+
+Typecheck/lint, full contracts/renderers and default real Workerd/D1/R2 controls
+pass. The unchanged primary full root passes all eight groups in 1,557.320
+seconds, including 7,507 Worker and 1,119 Agora tests; 54 original individual
+toolchain skips remain. Independent verification reexecutes all 161 Gauntlet
+tests/self-test and all 12 default reference cases. A sole `Bash` → `default`
+producer fault fails the original subprocess assertion after child exit zero;
+exact restoration passes again. This leaf's original criteria require review
+of the primary full root and native result, not another full root/model trial.
+
+Literal source UBS completes two files with two critical flags, 20 warnings and
+88 informational findings, all reviewed without suppression. The inherited
+nonconstant-time local nonce check remains; no security-clean claim follows.
+Later README/tracker edits are documentation deltas, not runtime reexecution.
+WhiteRaven independently closed only `zai.10` at 01:23:04 UTC on November 14;
+Beads comment 3248 maps its original criteria to source and actual evidence.
+Original ZAI/PCSN, three-harness/cohort, budget and staging requirements remain
+unfinished. No deployment was performed for this change.
 
 ### Claude first-promotion accounting — `e62b1e40`
 

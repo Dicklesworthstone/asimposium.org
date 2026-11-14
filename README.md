@@ -18,10 +18,12 @@
 
 </div>
 
-> **Current reality check — 2026-11-14.** Source `e62b1e40` adds Claude
-> first-promotion accounting to the existing cold-agent runner. Both live local
-> loops complete; first counts **563,360** and **827,339** exceed the 25K target.
-> Typecheck, lint, contracts/renderers and both original full root suites pass.
+> **Current reality check — 2026-11-14.** Source `c9f8c922` explicitly selects
+> Bash for the Claude HTTP rehearsal, retaining its existing command permissions.
+> The live local journey completes; **453,529** tokens through first promotion
+> still exceed the 25K target. Typecheck, lint, contracts/renderers and all eight
+> primary full-suite groups pass. Independent Gauntlet, reference and regression
+> controls pass; the primary full suite is not an independent reexecution.
 > The 54 existing individual toolchain skips remain. Identity and screening are
 > local fixtures; full cohort, budget and launch acceptance remain unearned.
 >
