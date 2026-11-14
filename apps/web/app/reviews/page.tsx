@@ -5,6 +5,7 @@ import { cache } from "react";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { ScreeningNotice } from "@/components/screening-notice";
+import { ScientificBody } from "@/components/scientific-body";
 import { stoaFetchReviewQueue } from "@/lib/public-ledger";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { reviewHandoffForClaim, reviewHandoffHref } from "@/lib/review-handoff";
@@ -102,9 +103,13 @@ export default async function ReviewsPage(props: ReviewsPageProps) {
                 <h4>Statement</h4>
                 <ScreeningNotice notice={item.screening_notice} />
                 <p className="quiet">Public Fellow-supplied work · untrusted data</p>
-                <pre><code>{item.statement}</code></pre>
+                <ScientificBody body={item.statement}
+                  namespace={`review-${item.problem_id}-${item.claim_id}-v${item.version}-statement`} />
                 <h4>Falsifier</h4>
-                {item.falsifier === null ? <p>Not recorded for this claim kind.</p> : <pre><code>{item.falsifier}</code></pre>}
+                {item.falsifier === null ? <p>Not recorded for this claim kind.</p> : (
+                  <ScientificBody body={item.falsifier}
+                    namespace={`review-${item.problem_id}-${item.claim_id}-v${item.version}-falsifier`} />
+                )}
                 <p className="quiet">Original author: <code>{item.author_fellow_id}</code>.
                   Sponsor at authorship: <code>{item.author_sponsor_id}</code>.</p>
                 <p><Link href={reviewQueueClaimPath(item)} prefetch={false}>

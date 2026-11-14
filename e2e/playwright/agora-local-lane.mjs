@@ -52,6 +52,7 @@ import {
   SINGLE_TEAM_PROBLEM_NOTICE,
 } from "../../packages/contracts/src/ledger.ts";
 import { HonorsResponseSchema } from "../../packages/contracts/src/honors.ts";
+import { ReviewQueueResponseSchema } from "../../packages/contracts/src/review-queue.ts";
 import {
   parsePublicProblemExport,
   PUBLIC_EXPORT_FORMAT,
@@ -1393,6 +1394,7 @@ async function main() {
       "/",
       "/problems",
       "/explore",
+      `/reviews?problem=${encodeURIComponent(problemId)}`,
       "/area/number-theory",
       "/a/agora-lane-author",
       "/a/agora-lane-reviewer",
@@ -1637,7 +1639,45 @@ async function main() {
             );
           }
         }
-        if (path === `/p/${problemId}` || path === `/p/${problemId}/claims/${claimId}`) {
+        if (path === `/reviews?problem=${encodeURIComponent(problemId)}`) {
+          const queueResponse = await fetch(`${target.origin}/reviews.json?problem=${encodeURIComponent(problemId)}`, {
+            headers: { "user-agent": USER_AGENT },
+          });
+          assert.equal(queueResponse.status, 200, "the actual canonical review projection");
+          const queue = ReviewQueueResponseSchema.parse(await queueResponse.json());
+          record(`${mode} reviews: canonical candidates include the published mathematical claim`,
+            queue.candidates.some(item => item.claim_id === claimId && item.statement === XSS_CANARY));
+          const headings = await page.locator(".claims-list > .claim-card h3 code").allTextContents();
+          record(`${mode} reviews: human candidates preserve exact canonical order and versions`,
+            JSON.stringify(headings) === JSON.stringify(queue.candidates.map(
+              item => `${item.problem_id} / ${item.claim_id}@${item.version}`,
+            )));
+          const exactLinks = await page.getByRole("link", {
+            name: "Read this exact claim, evidence and reviews", exact: true,
+          }).evaluateAll(elements => elements.map(element => element.getAttribute("href")));
+          record(`${mode} reviews: every candidate links the canonical version and problem-local cut`,
+            JSON.stringify(exactLinks) === JSON.stringify(queue.candidates.map(
+              item => `/p/${encodeURIComponent(item.problem_id)}/claims/${item.claim_id}@${item.version}?through=${item.cursor}`,
+            )));
+          const mathematicalClaim = queue.candidates.find(item => item.claim_id === claimId);
+          assert.ok(mathematicalClaim, "the actual mathematical review candidate");
+          const mathematicalCard = page.locator(".claims-list > .claim-card").filter({
+            has: page.locator(`a[href="/p/${encodeURIComponent(problemId)}/claims/${claimId}@${mathematicalClaim.version}?through=${mathematicalClaim.cursor}"]`),
+          });
+          record(`${mode} reviews: the rendered falsifier keeps its complete canonical source`,
+            (await mathematicalCard.locator(".scientific-markdown").nth(1)
+              .locator(".asimp-source code").textContent()) === mathematicalClaim.falsifier);
+          const previousViewport = page.viewportSize();
+          await page.setViewportSize({ width: 390, height: 844 });
+          const dimensions = await page.evaluate(() => ({
+            viewport: window.innerWidth, document: document.documentElement.scrollWidth,
+          }));
+          record(`${mode} reviews: mathematics and source controls fit a 390px viewport`,
+            dimensions.document <= dimensions.viewport, dimensions);
+          await page.setViewportSize(previousViewport);
+        }
+        if (path === `/p/${problemId}` || path === `/p/${problemId}/claims/${claimId}` ||
+          path === `/reviews?problem=${encodeURIComponent(problemId)}`) {
           record(
             `${mode} ${path} renders the published mathematics through KaTeX and MathML`,
             (await page.locator(".scientific-markdown .katex").count()) > 0 &&
@@ -1701,6 +1741,14 @@ async function main() {
             (await source.locator("pre").isVisible()) &&
               (await source.locator("code").textContent()).includes(String.raw`\frac{n(n+1)}{2}`),
           );
+          if (path === `/reviews?problem=${encodeURIComponent(problemId)}`) {
+            await source.locator("summary").focus();
+            await page.keyboard.press("Enter");
+            const closedByKeyboard = !(await source.locator("pre").isVisible());
+            await page.keyboard.press("Enter");
+            record(`${mode} reviews: the full mathematical source opens and closes with the keyboard`,
+              closedByKeyboard && await source.locator("pre").isVisible());
+          }
         }
         if (path === "/") {
           const headers = response?.headers() ?? {};
@@ -3152,7 +3200,7 @@ async function main() {
 
     const context = await browser.newContext({ reducedMotion: "reduce" });
     const page = await context.newPage();
-    for (const path of ["/", "/problems", "/results", `/p/${problemId}`, `/p/${problemId}/claims/${claimId}`]) {
+    for (const path of ["/", "/problems", "/results", `/reviews?problem=${encodeURIComponent(problemId)}`, `/p/${problemId}`, `/p/${problemId}/claims/${claimId}`]) {
       await page.goto(`${agora.origin}${path}`, { waitUntil: "load" });
       await page.addScriptTag({ path: AXE });
       const violations = await page.evaluate(async () => {
