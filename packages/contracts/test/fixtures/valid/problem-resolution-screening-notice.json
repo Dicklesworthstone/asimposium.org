@@ -1,0 +1,29 @@
+{
+  "direction": "affirmed",
+  "summary": "The bounded result remains subject to the published closing synthesis context.",
+  "no_claim_boundary": {
+    "verified": ["The finite claim as stated."],
+    "mechanisms": ["Independent full-write-up review."],
+    "independence_tiers": ["T2"],
+    "remaining_external_validation": ["Generalization outside the finite scope."]
+  },
+  "result_claim": {
+    "claim_id": "C-1",
+    "version": 1,
+    "event_id": "E-claim-1",
+    "content_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "payload_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "closing_synthesis": {
+    "synthesis_id": "SYNTH-1",
+    "event_id": "E-synthesis-1",
+    "seq": 10,
+    "payload_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "covers_through": 9
+  },
+  "screening_notice": {
+    "category": "off-topic",
+    "action": "published-with-warning",
+    "notice": "off-scope"
+  }
+}
