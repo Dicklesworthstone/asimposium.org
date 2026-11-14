@@ -241,6 +241,17 @@ test("claim pages reject a changed cursor, wrong scope, loop and duplicate inste
   }
 });
 
+test("corrupt publication screening provenance refuses the whole literature profile", async () => {
+  for (const source of ["citations", "claims"] as const) {
+    const dependencies = deps({
+      [source]: async () => {
+        throw new Error("PUBLIC_SCREENING_RECEIPT_UNAVAILABLE");
+      },
+    });
+    await assert.rejects(read(dependencies), /PUBLIC_SCREENING_RECEIPT_UNAVAILABLE/);
+  }
+});
+
 test("citation scope and missing public scope cannot become an empty bibliography", async () => {
   for (const problem of [null, { id: "P-FOREIGN", unlisted: 0 }]) {
     const result = await read(deps({ citations: async () => ({ ...citationPage(), problem }) }));

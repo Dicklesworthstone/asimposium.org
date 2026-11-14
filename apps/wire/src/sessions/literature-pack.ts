@@ -113,7 +113,9 @@ async function citationSection(
         dependencies.neutralize,
       );
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message === "PUBLIC_SCREENING_RECEIPT_UNAVAILABLE")
+      throw error;
     return {
       candidates: [],
       omitted: [
@@ -191,7 +193,9 @@ async function claimSection(
         reason: "profile_summary",
         detail: `literature: other claim kinds excluded; complete collection ${claimsListPath(problem, "md", { through: cursor })}`,
       });
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message === "PUBLIC_SCREENING_RECEIPT_UNAVAILABLE")
+      throw error;
     return {
       candidates: [],
       omitted: [

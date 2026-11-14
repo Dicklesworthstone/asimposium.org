@@ -27,6 +27,17 @@ import {
 import { createLedgerFaceRoutes } from "../../src/ledger-face";
 import { readLedgerPackSection } from "../../src/sessions/ledger-pack";
 
+function literatureCitations(section: Awaited<ReturnType<typeof readLedgerPackSection>>) {
+  expect(section.candidates.filter((item) => item.scope === "system")).toEqual([
+    expect.objectContaining({
+      id: "SYS-literature-context",
+      kind: "standing-context",
+      untrusted: false,
+    }),
+  ]);
+  return section.candidates.filter((item) => item.scope === "ledger" && item.kind === "citation");
+}
+
 function sampleCitation(overrides: Partial<CitationItem> = {}): CitationItem {
   return {
     citation_id: "L-1",
@@ -1061,12 +1072,13 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
     test("readLedgerPackSection populates exact-version literature candidates", async () => {
       await withPublicCitation(async (fixture) => {
         const section = await readLedgerPackSection(fixture.db, "P-CITATIONS", 10, "literature");
-        expect(section.candidates).toHaveLength(1);
-        expect(section.candidates[0]?.kind).toBe("citation");
-        expect(section.candidates[0]?.id).toBe("L-1@1");
-        expect(section.candidates[0]?.why_included).toContain("committed public citation version");
-        expect(section.candidates[0]?.untrusted).toBe(true);
-        expect(section.candidates[0]?.body).toContain("/citations/L-1@1.md?through=10");
+        const citations = literatureCitations(section);
+        expect(citations).toHaveLength(1);
+        expect(citations[0]?.kind).toBe("citation");
+        expect(citations[0]?.id).toBe("L-1@1");
+        expect(citations[0]?.why_included).toContain("committed public citation version");
+        expect(citations[0]?.untrusted).toBe(true);
+        expect(citations[0]?.body).toContain("/citations/L-1@1.md?through=10");
         expect(section.omitted).toHaveLength(0);
       });
     });
@@ -1082,8 +1094,10 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
           .query("INSERT INTO screening_publications VALUES (?, ?)")
           .run("P-CITATIONS-2", JSON.stringify(receipt));
         const warned = await readLedgerPackSection(fixture.db, "P-CITATIONS", 10, "literature");
-        expect(warned.candidates[0]?.screening_notice).toEqual(receipt.public_action);
-        expect(JSON.parse(warned.candidates[0]?.body ?? "{}").screening_notice).toBeUndefined();
+        const warnedCitations = literatureCitations(warned);
+        expect(warnedCitations).toHaveLength(1);
+        expect(warnedCitations[0]?.screening_notice).toEqual(receipt.public_action);
+        expect(JSON.parse(warnedCitations[0]?.body ?? "{}").screening_notice).toBeUndefined();
         expect(JSON.stringify(warned)).not.toContain("configuration_digest");
         expect(JSON.stringify(warned)).not.toContain("input_digest");
         await fixture.seed(
@@ -1096,10 +1110,14 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
         );
         const older = await readLedgerPackSection(fixture.db, "P-CITATIONS", 10, "literature");
         const current = await readLedgerPackSection(fixture.db, "P-CITATIONS", 11, "literature");
-        expect(older.candidates[0]?.id).toBe("L-1@1");
-        expect(older.candidates[0]?.screening_notice).toEqual(receipt.public_action);
-        expect(current.candidates[0]?.id).toBe("L-1@2");
-        expect(current.candidates[0]?.screening_notice).toBeUndefined();
+        const olderCitations = literatureCitations(older);
+        const currentCitations = literatureCitations(current);
+        expect(olderCitations).toHaveLength(1);
+        expect(currentCitations).toHaveLength(1);
+        expect(olderCitations[0]?.id).toBe("L-1@1");
+        expect(olderCitations[0]?.screening_notice).toEqual(receipt.public_action);
+        expect(currentCitations[0]?.id).toBe("L-1@2");
+        expect(currentCitations[0]?.screening_notice).toBeUndefined();
         fixture.sqlite
           .query("UPDATE screening_publications SET provenance_json = ? WHERE event_id = ?")
           .run(JSON.stringify({ private_detail: "PRIVATE_SCREENING_CANARY" }), "P-CITATIONS-2");
@@ -1107,8 +1125,9 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
           readLedgerPackSection(fixture.db, "P-CITATIONS", 10, "literature"),
         ).rejects.toThrow("PUBLIC_SCREENING_RECEIPT_UNAVAILABLE");
         expect(
-          (await readLedgerPackSection(fixture.db, "P-CITATIONS", 11, "literature")).candidates[0]
-            ?.screening_notice,
+          literatureCitations(
+            await readLedgerPackSection(fixture.db, "P-CITATIONS", 11, "literature"),
+          )[0]?.screening_notice,
         ).toBeUndefined();
       });
     });
@@ -1124,10 +1143,14 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
         );
         const older = await readLedgerPackSection(fixture.db, "P-CITATIONS", 10, "literature");
         const current = await readLedgerPackSection(fixture.db, "P-CITATIONS", 11, "literature");
-        expect(older.candidates[0]?.id).toBe("L-1@1");
-        expect(older.candidates[0]?.body).toContain("Bounded gaps between primes");
-        expect(current.candidates[0]?.id).toBe("L-1@2");
-        expect(current.candidates[0]?.body).toContain("Corrected metadata");
+        const olderCitations = literatureCitations(older);
+        const currentCitations = literatureCitations(current);
+        expect(olderCitations).toHaveLength(1);
+        expect(currentCitations).toHaveLength(1);
+        expect(olderCitations[0]?.id).toBe("L-1@1");
+        expect(olderCitations[0]?.body).toContain("Bounded gaps between primes");
+        expect(currentCitations[0]?.id).toBe("L-1@2");
+        expect(currentCitations[0]?.body).toContain("Corrected metadata");
         const response = await app.request(`${publicUrl}/citations/L-1.json?through=10`, {}, env);
         expect(response.status).toBe(200);
         const face = SingleCitationResponseSchema.parse(await response.json());
@@ -1160,7 +1183,10 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
           expect(text).not.toContain("PRIVATE_PROJECTION_CANARY");
         }
         const pack = await readLedgerPackSection(fixture.db, "P-CITATIONS", 10, "literature");
-        expect(pack.candidates).toHaveLength(0);
+        expect(literatureCitations(pack)).toHaveLength(0);
+        expect(pack.candidates.every((item) => item.scope === "system")).toBe(true);
+        expect(JSON.stringify(pack)).not.toContain("Bounded gaps between primes");
+        expect(JSON.stringify(pack)).not.toContain("PRIVATE_PROJECTION_CANARY");
         expect(pack.omitted.map((item) => item.detail).join(" ")).toContain("unavailable");
       });
     });
@@ -1249,11 +1275,29 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
           .query("INSERT INTO screening_publications VALUES (?, ?)")
           .run(eventId, JSON.stringify(receipt));
         const pack = await readLedgerPackSection(fixture.db, "P-CITATIONS", 11, "literature");
-        expect(pack.candidates).toHaveLength(0);
+        const citations = literatureCitations(pack);
+        expect(citations).toHaveLength(1);
+        expect(pack.candidates.filter((item) => item.scope !== "system")).toHaveLength(1);
+        expect(citations[0]).toMatchObject({
+          id: "L-1@2",
+          untrusted: true,
+          screening_notice: receipt.public_action,
+        });
+        const pointer = JSON.parse(citations[0]?.body ?? "{}");
+        expect(pointer).toEqual({
+          citation_id: "L-1",
+          version: 2,
+          source: "/p/P-CITATIONS/citations/L-1@2.md?through=11",
+          content_omitted: "whole-record-size-limit",
+        });
+        expect(citations.filter((item) => !JSON.parse(item.body).content_omitted)).toHaveLength(0);
+        for (const field of ["title", "authors", "locator", "excerpt"])
+          expect(pointer[field]).toBeUndefined();
         expect(pack.omitted.some((item) => item.reason === "item_too_large")).toBe(true);
         expect(pack.omitted).toContainEqual({
           reason: "item_too_large",
-          detail: "literature:L-1@2",
+          detail:
+            "literature:L-1@2; complete public record: /p/P-CITATIONS/citations/L-1@2.md?through=11",
         });
         expect(JSON.stringify(pack)).not.toContain("configuration_digest");
       });
