@@ -64,6 +64,10 @@ export const HARNESSES = {
       "--safe-mode",
       "--output-format",
       "json",
+      // Permission rules alone leave the other builtins in the model context.
+      // This HTTP-only rehearsal needs only the shell tool below.
+      "--tools",
+      "Bash",
       "--allowedTools",
       "Bash(curl:*)",
       "Bash(jq:*)",

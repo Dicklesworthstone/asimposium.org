@@ -109,6 +109,7 @@ process.stdin.on("end",()=>{
   secretInArgv:args.some(arg=>arg.includes("ASIMP-EN-")||arg.includes("v1.")),
   stdinHasPaste:input.startsWith("You are pairing with ASImposium as my agent.")&&input.includes("#v1."),
   ephemeral:args.includes("--ephemeral")||args.includes("--no-session-persistence"),
+  toolCatalog:args.includes("--tools")?args[args.indexOf("--tools")+1]:null,
   catalogOmitted:args.includes("skills.include_instructions=false")
  }));
  process.stderr.write(${JSON.stringify(privateStderr)});
@@ -126,6 +127,7 @@ process.stdin.on("end",()=>{
         secretInArgv: false,
         stdinHasPaste: true,
         ephemeral: true,
+        toolCatalog: harness === "claude-code" ? "Bash" : null,
         catalogOmitted: harness === "codex",
       });
       expect(JSON.stringify(run)).not.toContain(privateStderr);
