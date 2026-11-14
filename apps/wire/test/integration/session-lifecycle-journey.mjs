@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   PackResponseSchema,
+  ProblemDocumentSchema,
   SessionCloseResponseSchema,
   SessionOpenResponseSchema,
   SessionStatusResponseSchema,
@@ -195,8 +196,23 @@ export async function sessionLifecycleJourney({ call, enroll, sponsorCall }) {
     fellowAToken,
     409,
   );
+  ProblemDocumentSchema.parse(duplicateSession);
   assert.equal(duplicateSession.code, "SESSION_EXISTS");
   assert.equal(duplicateSession.existing_session_id, sessionId1);
+  assert.equal(
+    duplicateSession.schema,
+    "https://a.asimposium.org/schemas/sessions.v1/pack_since_query.json",
+  );
+  assert.deepEqual(duplicateSession.example, {
+    method: "GET",
+    path: `/v1/sessions/${sessionId1}/pack?profile=working&since=0`,
+  });
+  assert.equal(duplicateSession.refetch_url, duplicateSession.example.path);
+  const resumeSchema = await call(new URL(duplicateSession.schema).pathname);
+  assert.equal(resumeSchema.$id, duplicateSession.schema);
+  assert.ok(JSON.stringify(resumeSchema).length < 2_048);
+  const resumed = await call(duplicateSession.example.path, undefined, fellowAToken, 200);
+  assert.equal(PackResponseSchema.parse(resumed).session, sessionId1);
 
   // --- Step 5: Session Status (GET /v1/sessions/:id) ---
   // 5a. Owning Fellow reads status

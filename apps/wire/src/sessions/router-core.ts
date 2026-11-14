@@ -1622,6 +1622,25 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       fixHint: "Check the console for the credential state or contact your sponsor.",
     });
 
+  const sessionExistsProblem = (sessionId: string): Response => {
+    const packPath = `/v1/sessions/${sessionId}/pack?profile=working&since=0`;
+    return validatedProblem({
+      status: 409,
+      code: "SESSION_EXISTS",
+      title: "An open session already exists for this problem",
+      detail: "Each Fellow keeps at most one open session per problem.",
+      fixHint: `GET ${packPath} to resume. GET /v1/sessions/${sessionId} for status and next actions.`,
+      rule: "A5",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/sessions.v1/pack_since_query.json",
+        existing_session_id: sessionId,
+        suggested_action: "resume_existing_session",
+        refetch_url: packPath,
+        example: { method: "GET", path: packPath },
+      },
+    });
+  };
+
   // Fable §5.5: the global two-open-session cap (asimposiumorg-zdz.6). A
   // teaching refusal: it names the open sessions to close so the caller can
   // free a slot without a second round trip.
@@ -1634,7 +1653,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       fixHint: "Close one of the open sessions with POST /v1/sessions/:id/close, then reopen.",
       rule: "A5",
       extensions: {
-        schema: SESSIONS_SCHEMA_URI,
+        schema: "https://a.asimposium.org/schemas/sessions.v1/session_close_request.json",
         open_session_ids: [...openSessionIds].slice(0, 2),
         example: {
           method: "POST",
@@ -3584,19 +3603,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
       }
       if (error instanceof SessionExistsError) {
-        return validatedProblem({
-          status: 409,
-          code: "SESSION_EXISTS",
-          title: "An open session already exists for this problem",
-          detail: "Each Fellow keeps at most one open session per problem.",
-          fixHint: `Resume or close session ${error.sessionId} first.`,
-          rule: "A5",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            existing_session_id: error.sessionId,
-            example: { path: "/v1/sessions/<existing_session_id>/pack?profile=working" },
-          },
-        });
+        return sessionExistsProblem(error.sessionId);
       }
       if (error instanceof ReplayClaimNotCommittedError) {
         const problemRow = await db
@@ -3624,19 +3631,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           .bind(auth.binding.fellowId, parsed.data.problem_id)
           .first<{ session_id: string }>();
         if (existing !== null && existing !== undefined) {
-          return validatedProblem({
-            status: 409,
-            code: "SESSION_EXISTS",
-            title: "An open session already exists for this problem",
-            detail: "Each Fellow keeps at most one open session per problem.",
-            fixHint: `Resume or close session ${existing.session_id} first.`,
-            rule: "A5",
-            extensions: {
-              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-              existing_session_id: existing.session_id,
-              example: { path: "/v1/sessions/<existing_session_id>/pack?profile=working" },
-            },
-          });
+          return sessionExistsProblem(existing.session_id);
         }
         // The cap trigger can abort the batch at commit time when a concurrent
         // same-Fellow open won the last free slot: re-read the live count and

@@ -55,6 +55,7 @@ import {
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
+import { getPublicSchemaSlice } from "@asimposium/contracts/public-schemas";
 import {
   WorkshopDirectoryResponseSchema,
   workshopDirectoryPath,
@@ -8517,7 +8518,25 @@ describe("session protocol routes", () => {
       body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
     });
     expect(duplicate.status).toBe(409);
-    expect(await duplicate.json()).toMatchObject({ code: "SESSION_EXISTS" });
+    expect(duplicate.headers.get("cache-control")).toBe("private, no-store");
+    const duplicateProblem = ProblemDocumentSchema.parse(await duplicate.json());
+    if (duplicateProblem.code !== "SESSION_EXISTS") throw new Error("Expected session recovery");
+    expect(duplicateProblem.existing_session_id).toBe(session.session_id);
+    expect(duplicateProblem.schema).toBe(
+      "https://a.asimposium.org/schemas/sessions.v1/pack_since_query.json",
+    );
+    expect(duplicateProblem.example).toEqual({
+      method: "GET",
+      path: `/v1/sessions/${session.session_id}/pack?profile=working&since=0`,
+    });
+    expect(duplicateProblem.refetch_url).toBe(duplicateProblem.example.path);
+    expect(duplicateProblem.fix_hint).toContain(`GET /v1/sessions/${session.session_id} for status`);
+    const recoverySchema = getPublicSchemaSlice(new URL(duplicateProblem.schema).pathname);
+    expect(recoverySchema).toBeDefined();
+    expect(recoverySchema?.body.length).toBeLessThan(2_048);
+    const resumed = await call(String(duplicateProblem.example.path));
+    expect(resumed.status).toBe(200);
+    expect(PackResponseSchema.parse(await resumed.json()).session).toBe(session.session_id);
 
     // Idempotent replay of the first open returns the same session.
     const replay = await call("/v1/sessions", {

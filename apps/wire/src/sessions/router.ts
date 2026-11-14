@@ -75,7 +75,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           "Fetch current hypothesis and evidence records. Cite available evidence that refutes this exact hypothesis, or stop if the route is already eliminated. Retry unchanged input with the same Idempotency-Key; use a new key only for a deliberately revised request.",
         rule: "P6",
         extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          schema: "https://a.asimposium.org/schemas/sessions.v1/hypothesis_kill_request.json",
           example: {
             hypothesis_id: "H-1",
             killed_by_evidence_id: "E-1",
@@ -146,7 +146,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ? {
                 rule: "A5" as const,
                 extensions: {
-                  schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                  schema: "https://a.asimposium.org/schemas/sessions.v1/pack_target_query.json",
                   example: { profile: "review", target: "C-1@1" },
                 },
               }
