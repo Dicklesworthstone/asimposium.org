@@ -2,23 +2,6 @@ import "server-only";
 
 import {
   ADMIN_REPORT_DETAIL_MAX_RESPONSE_BYTES,
-  type AdminReportDetail,
-  AdminReportDetailSchema,
-  AdminReportIdSchema,
-  SPONSOR_INBOX_MAX_RESPONSE_BYTES,
-  type SponsorInboxRequest,
-  SponsorInboxRequestSchema,
-  type SponsorInboxResponse,
-  SponsorInboxResponseSchema,
-  sponsorInboxPageIsValid,
-  type SponsorFollowListResponse,
-  SponsorFollowListResponseSchema,
-  type SponsorFollowQuery,
-  SponsorFollowQuerySchema,
-  type SponsorFollowReceipt,
-  SponsorFollowReceiptSchema,
-  type SponsorFollowRequest,
-  SponsorFollowRequestSchema,
   type AdminAreaRenameRequest,
   AdminAreaRenameRequestSchema,
   type AdminAreaRenameResponse,
@@ -37,20 +20,21 @@ import {
   AdminQuarantineDecisionResponseSchema,
   type AdminQuarantineQueueResponse,
   AdminQuarantineQueueResponseSchema,
+  type AdminReportDetail,
+  AdminReportDetailSchema,
+  AdminReportIdSchema,
   type AdminReportResolutionRequest,
   AdminReportResolutionRequestSchema,
   type AdminReportResolutionResponse,
   AdminReportResolutionResponseSchema,
   type AdminReportsQueueResponse,
   AdminReportsQueueResponseSchema,
+  type AdminSponsorSuspensionReceipt,
+  AdminSponsorSuspensionReceiptSchema,
   type AdminSponsorSuspensionRequest,
   AdminSponsorSuspensionRequestSchema,
   type AdminSponsorSuspensionState,
   AdminSponsorSuspensionStateSchema,
-  type AdminSponsorSuspensionReceipt,
-  AdminSponsorSuspensionReceiptSchema,
-  type SponsorSuspensionStatus,
-  SponsorSuspensionStatusSchema,
   assertNoScientificDispositionOverride,
   type CommentaryItem,
   CommentaryItemSchema,
@@ -71,29 +55,25 @@ import {
   OperatorFellowCapOverrideResponseSchema,
   type OperatorFellowCapStateResponse,
   OperatorFellowCapStateResponseSchema,
-  type SponsorProblemHideRequest,
-  SponsorProblemHideRequestSchema,
-  type SponsorProblemHideReceipt,
-  SponsorProblemHideReceiptSchema,
   type ProblemCode,
   ProblemCodeSchema,
-  ProblemDocumentSchema,
   type ProblemDetail,
   ProblemDetailSchema,
+  ProblemDocumentSchema,
+  ProblemIdSchema,
   type ProblemLifecycleActionRequest,
   ProblemLifecycleActionRequestSchema,
   type ProblemPublicationPreview,
   ProblemPublicationPreviewSchema,
   type ProblemPublicationResponse,
   ProblemPublicationResponseSchema,
-  PublicLedgerProblemIdSchema,
-  ProblemIdSchema,
+  type ProblemSlowModeReceipt,
+  ProblemSlowModeReceiptSchema,
   type ProblemSlowModeRequest,
   ProblemSlowModeRequestSchema,
   type ProblemSlowModeState,
   ProblemSlowModeStateSchema,
-  type ProblemSlowModeReceipt,
-  ProblemSlowModeReceiptSchema,
+  PublicLedgerProblemIdSchema,
   parseStoaJoinUrl,
   type ReportRequest,
   ReportRequestSchema,
@@ -102,15 +82,12 @@ import {
   type SaveProblemBriefRequest,
   SaveProblemBriefRequestSchema,
   SaveProblemBriefResponseSchema,
-  type WithdrawProblemBriefRequest,
-  WithdrawProblemBriefRequestSchema,
-  type WithdrawProblemBriefResponse,
-  WithdrawProblemBriefResponseSchema,
   ScreeningPromotionDeniedResponseSchema,
   ScreeningPromotionHoldResponseSchema,
   type ScreeningPromotionPolicyResponse,
-  SPONSOR_WORKSHOP_INDEX_MAX_RESPONSE_BYTES,
+  SPONSOR_INBOX_MAX_RESPONSE_BYTES,
   SPONSOR_WORKSHOP_CURSOR_MAX_RESPONSE_BYTES,
+  SPONSOR_WORKSHOP_INDEX_MAX_RESPONSE_BYTES,
   SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
   type SponsorBootstrapResponse,
   SponsorBootstrapResponseSchema,
@@ -153,6 +130,18 @@ import {
   type SponsorFellowTransferRejectRequest,
   type SponsorFellowTransferRejectResponse,
   SponsorFellowTransferRejectResponseSchema,
+  type SponsorFollowListResponse,
+  SponsorFollowListResponseSchema,
+  type SponsorFollowQuery,
+  SponsorFollowQuerySchema,
+  type SponsorFollowReceipt,
+  SponsorFollowReceiptSchema,
+  type SponsorFollowRequest,
+  SponsorFollowRequestSchema,
+  type SponsorInboxRequest,
+  SponsorInboxRequestSchema,
+  type SponsorInboxResponse,
+  SponsorInboxResponseSchema,
   type SponsorPanicRequest,
   type SponsorPanicResponse,
   SponsorPanicResponseSchema,
@@ -163,27 +152,40 @@ import {
   type SponsorProblemBrief,
   type SponsorProblemBriefListResponse,
   SponsorProblemBriefListResponseSchema,
+  type SponsorProblemHideReceipt,
+  SponsorProblemHideReceiptSchema,
+  type SponsorProblemHideRequest,
+  SponsorProblemHideRequestSchema,
   type SponsorProblemListResponse,
   SponsorProblemListResponseSchema,
   type SponsorProposalListResponse,
   SponsorProposalListResponseSchema,
   type SponsorScreeningPostureResponse,
   SponsorScreeningPostureResponseSchema,
-  type SponsorWorkshopIndexRequest,
-  SponsorWorkshopIndexRequestSchema,
-  type SponsorWorkshopIndexResponse,
-  SponsorWorkshopIndexResponseSchema,
+  type SponsorSuspensionStatus,
+  SponsorSuspensionStatusSchema,
   type SponsorWorkshopCursorRequest,
   SponsorWorkshopCursorRequestSchema,
   type SponsorWorkshopCursorResponse,
   SponsorWorkshopCursorResponseSchema,
+  type SponsorWorkshopIndexRequest,
+  SponsorWorkshopIndexRequestSchema,
+  type SponsorWorkshopIndexResponse,
+  SponsorWorkshopIndexResponseSchema,
   type SponsorWorkshopMutationRequest,
   SponsorWorkshopMutationRequestSchema,
   type SponsorWorkshopMutationResponse,
   SponsorWorkshopMutationResponseSchema,
+  type SponsorWorkshopRequest,
+  SponsorWorkshopRequestSchema,
   type SponsorWorkshopView as SponsorWorkshopViewContract,
   SponsorWorkshopViewSchema,
+  sponsorInboxPageIsValid,
   sponsorWorkshopIndexPageIsValid,
+  type WithdrawProblemBriefRequest,
+  WithdrawProblemBriefRequestSchema,
+  type WithdrawProblemBriefResponse,
+  WithdrawProblemBriefResponseSchema,
 } from "@asimposium/contracts";
 import {
   type SponsorDirectiveListResponse,
@@ -511,7 +513,9 @@ async function refusalInfo(
     const value = await readBoundedStoaJson(response, MAX_STOA_REFUSAL_RESPONSE_BYTES, timeoutMs);
     if (value === undefined) return {};
     if (
-      (workshopMutation === "promote" || commentaryMutation === "post" || screenedPublication === true) &&
+      (workshopMutation === "promote" ||
+        commentaryMutation === "post" ||
+        screenedPublication === true) &&
       response.status === 403
     ) {
       const denied = ScreeningPromotionDeniedResponseSchema.safeParse(value);
@@ -633,7 +637,9 @@ export async function callStoa<T>(options: {
   }
   try {
     const mayBeScreeningHold =
-      (options.workshopMutation === "promote" || options.commentaryMutation === "post" || options.screenedPublication === true) &&
+      (options.workshopMutation === "promote" ||
+        options.commentaryMutation === "post" ||
+        options.screenedPublication === true) &&
       response.status === 202;
     const value = await readBoundedStoaJson(
       response,
@@ -841,6 +847,42 @@ export function stoaSponsorWorkshop(
   });
 }
 
+/** History is an exact private revision read, using the same signed authority
+ * and body ceiling as the current workshop. A substituted head is not history. */
+export function stoaSponsorWorkshopRevision(
+  principalId: string,
+  request: SponsorWorkshopRequest & { object: NonNullable<SponsorWorkshopRequest["object"]> },
+): Promise<StoaCall<SponsorWorkshopViewContract>> {
+  const command = SponsorWorkshopRequestSchema.parse(request);
+  const selection = command.object;
+  if (selection === undefined) throw new TypeError("An exact workshop revision is required");
+  return callStoa({
+    method: "POST",
+    route: ROUTE_SPONSOR_WORKSHOP,
+    path: ROUTE_SPONSOR_WORKSHOP,
+    action: ACTION_WORKSHOP_READ,
+    principalId,
+    body: JSON.stringify(command),
+    responseMaxBytes: MAX_STOA_SPONSOR_WORKSHOP_RESPONSE_BYTES,
+    parse: (value) => {
+      const response = SponsorWorkshopViewSchema.parse(value);
+      const object = response.objects[0];
+      if (
+        response.problem_id !== command.problem_id ||
+        response.fellow_id !== command.fellow_id ||
+        response.objects.length !== 1 ||
+        response.has_more ||
+        response.next_cursor !== null ||
+        object?.workshop_id !== selection.workshop_id ||
+        object.version !== selection.version ||
+        object.current_version < selection.version
+      )
+        throw new TypeError("Workshop revision does not match the signed selection");
+      return response;
+    },
+  });
+}
+
 /** Only an ownership-checked integer crosses this private liveness read.
  * Workshop bodies and Fellow credentials are never requested by the watcher. */
 export function stoaSponsorWorkshopCursor(
@@ -1017,12 +1059,13 @@ export async function stoaSponsorInbox(
     parse: (value) => {
       const page = SponsorInboxResponseSchema.parse(value);
       if (page.sponsor_id !== principalId || !sponsorInboxPageIsValid(page, parsed.data))
-        throw new TypeError("Inbox page does not match the signed sponsor, Fellow or continuation.");
+        throw new TypeError(
+          "Inbox page does not match the signed sponsor, Fellow or continuation.",
+        );
       return page;
     },
   });
 }
-
 
 const ROUTE_SPONSOR_FOLLOWS = "/v1/sponsors/follows";
 
@@ -1034,13 +1077,22 @@ export function stoaSponsorFollows(
   const parsed = SponsorFollowQuerySchema.parse(query);
   const suffix = parsed.after === undefined ? "" : "?after=" + encodeURIComponent(parsed.after);
   return callStoa({
-    method: "GET", route: ROUTE_SPONSOR_FOLLOWS, path: ROUTE_SPONSOR_FOLLOWS + suffix,
-    action: "list-follows", principalId, body: "", responseMaxBytes: 2 * 1024 * 1024,
-    parse: value => {
+    method: "GET",
+    route: ROUTE_SPONSOR_FOLLOWS,
+    path: ROUTE_SPONSOR_FOLLOWS + suffix,
+    action: "list-follows",
+    principalId,
+    body: "",
+    responseMaxBytes: 2 * 1024 * 1024,
+    parse: (value) => {
       const page = SponsorFollowListResponseSchema.parse(value);
-      if (page.sponsor_id !== principalId ||
-          page.follows.some(item => parsed.after !== undefined && item.problem_id <= parsed.after) ||
-          (page.next_after !== null && parsed.after !== undefined && page.next_after <= parsed.after))
+      if (
+        page.sponsor_id !== principalId ||
+        page.follows.some(
+          (item) => parsed.after !== undefined && item.problem_id <= parsed.after,
+        ) ||
+        (page.next_after !== null && parsed.after !== undefined && page.next_after <= parsed.after)
+      )
         throw new TypeError("Follow page does not match the signed sponsor or continuation.");
       return page;
     },
@@ -1054,9 +1106,14 @@ export function stoaSetSponsorFollow(
 ): Promise<StoaCall<SponsorFollowReceipt>> {
   const command = SponsorFollowRequestSchema.parse(request);
   return callStoa({
-    method: "POST", route: ROUTE_SPONSOR_FOLLOWS, path: ROUTE_SPONSOR_FOLLOWS,
-    action: "set-follow", principalId, body: JSON.stringify(command), idempotencyKey,
-    parse: value => {
+    method: "POST",
+    route: ROUTE_SPONSOR_FOLLOWS,
+    path: ROUTE_SPONSOR_FOLLOWS,
+    action: "set-follow",
+    principalId,
+    body: JSON.stringify(command),
+    idempotencyKey,
+    parse: (value) => {
       const receipt = SponsorFollowReceiptSchema.parse(value);
       if (receipt.problem_id !== command.problem_id || receipt.following !== command.following)
         throw new TypeError("Follow receipt does not match the signed command.");
@@ -1101,9 +1158,12 @@ export function stoaSaveProblemBrief(
     idempotencyKey,
     parse: (value) => {
       const { brief } = SaveProblemBriefResponseSchema.parse(value);
-      if (brief.sponsor_id !== principalId || brief.status !== "active" ||
-          (command.id !== undefined && brief.id !== command.id) ||
-          brief.version !== (command.expected_version ?? 0) + 1) {
+      if (
+        brief.sponsor_id !== principalId ||
+        brief.status !== "active" ||
+        (command.id !== undefined && brief.id !== command.id) ||
+        brief.version !== (command.expected_version ?? 0) + 1
+      ) {
         throw new TypeError("The saved brief receipt does not match its command.");
       }
       return brief;
@@ -1120,7 +1180,12 @@ export function stoaWithdrawProblemBrief(
 ): Promise<StoaCall<WithdrawProblemBriefResponse>> {
   const command = WithdrawProblemBriefRequestSchema.parse(request);
   if (typeof briefId !== "string" || briefId.length < 1 || briefId.length > 128) {
-    return Promise.resolve({ ok: false, reason: "refused", status: 400, problemCode: "PROBLEM_BRIEF_BODY_INVALID" });
+    return Promise.resolve({
+      ok: false,
+      reason: "refused",
+      status: 400,
+      problemCode: "PROBLEM_BRIEF_BODY_INVALID",
+    });
   }
   const path = `${ROUTE_SPONSOR_PROBLEM_BRIEFS}/${encodeURIComponent(briefId)}/withdraw`;
   return callStoa({
@@ -1162,14 +1227,22 @@ export function stoaProblemPublicationPreview(
   principalId: string,
   problemId: string,
 ): Promise<StoaCall<ProblemPublicationPreview>> {
-  if (!PublicLedgerProblemIdSchema.safeParse(problemId).success ||
-      typeof problemId !== "string" || problemId.trim() !== problemId) {
+  if (
+    !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
+    typeof problemId !== "string" ||
+    problemId.trim() !== problemId
+  ) {
     return Promise.resolve({ ok: false, reason: "refused", status: 400 });
   }
   const path = `/v1/sponsors/problems/${encodeURIComponent(problemId)}/publication-preview`;
   return callStoa({
-    method: "GET", route: path, path, action: "problem-publication-preview",
-    principalId, body: "", responseMaxBytes: 1024 * 1024,
+    method: "GET",
+    route: path,
+    path,
+    action: "problem-publication-preview",
+    principalId,
+    body: "",
+    responseMaxBytes: 1024 * 1024,
     parse: (value) => {
       const preview = ProblemPublicationPreviewSchema.parse(value);
       if (preview.problem.id !== problemId || preview.acting_sponsor_id !== principalId) {
@@ -1188,10 +1261,14 @@ export function stoaPublishProblem(
   idempotencyKey: string,
 ): Promise<StoaCall<ProblemPublicationResponse>> {
   const command = ProblemLifecycleActionRequestSchema.safeParse(request);
-  if (!command.success || command.data.action !== "publish" ||
-      !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
-      typeof problemId !== "string" || problemId.trim() !== problemId ||
-      /^[A-Za-z0-9._-]{1,160}$/.exec(idempotencyKey)?.[0] !== idempotencyKey) {
+  if (
+    !command.success ||
+    command.data.action !== "publish" ||
+    !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
+    typeof problemId !== "string" ||
+    problemId.trim() !== problemId ||
+    /^[A-Za-z0-9._-]{1,160}$/.exec(idempotencyKey)?.[0] !== idempotencyKey
+  ) {
     return Promise.resolve({ ok: false, reason: "refused", status: 400 });
   }
   const publication = command.data;
@@ -1207,8 +1284,11 @@ export function stoaPublishProblem(
     screenedPublication: true,
     parse: (value) => {
       const receipt = ProblemPublicationResponseSchema.parse(value);
-      if (receipt.problem.id !== problemId || receipt.problem.status !== "sharpening" ||
-          receipt.problem.current_statement_version !== publication.reviewed_statement_version) {
+      if (
+        receipt.problem.id !== problemId ||
+        receipt.problem.status !== "sharpening" ||
+        receipt.problem.current_statement_version !== publication.reviewed_statement_version
+      ) {
         throw new Error("Problem publication receipt does not match the reviewed formulation.");
       }
       return receipt;
@@ -1278,9 +1358,11 @@ export function stoaSetProblemWriterCap(
     body: JSON.stringify(action),
     idempotencyKey,
     parse: (value) => {
-      const problem = (value as {
-        problem?: { id?: unknown; writer_cap?: unknown; updated_at?: unknown };
-      } | null)?.problem;
+      const problem = (
+        value as {
+          problem?: { id?: unknown; writer_cap?: unknown; updated_at?: unknown };
+        } | null
+      )?.problem;
       const receipt = {
         id: ProblemDetailSchema.shape.id.parse(problem?.id),
         writer_cap: ProblemDetailSchema.shape.writer_cap.unwrap().parse(problem?.writer_cap),
@@ -1736,7 +1818,8 @@ export function stoaAdminReportDetail(
     responseMaxBytes: ADMIN_REPORT_DETAIL_MAX_RESPONSE_BYTES,
     parse: (value) => {
       const detail = AdminReportDetailSchema.parse(value);
-      if (detail.report.report_id !== reportId) throw new Error("Report response does not match the requested report.");
+      if (detail.report.report_id !== reportId)
+        throw new Error("Report response does not match the requested report.");
       return detail;
     },
   });
@@ -1797,7 +1880,8 @@ export function stoaSponsorSuspensionStatus(
     body: "",
     parse: (value) => {
       const state = SponsorSuspensionStatusSchema.parse(value);
-      if (state.sponsor_id !== principalId) throw new Error("Sponsor account standing scope mismatch");
+      if (state.sponsor_id !== principalId)
+        throw new Error("Sponsor account standing scope mismatch");
       return state;
     },
   });
@@ -1836,10 +1920,12 @@ export function stoaSuspendSponsor(
 ): Promise<StoaCall<AdminSponsorSuspensionReceipt>> {
   const command = AdminSponsorSuspensionRequestSchema.safeParse(request);
   if (
-    !command.success || !isCanonicalSponsorId(sponsorId) ||
+    !command.success ||
+    !isCanonicalSponsorId(sponsorId) ||
     (command.success && command.data.sponsor_id !== sponsorId) ||
     !/^[A-Za-z0-9._-]{1,160}$/.test(idempotencyKey)
-  ) return Promise.resolve({ ok: false, reason: "refused", status: 422 });
+  )
+    return Promise.resolve({ ok: false, reason: "refused", status: 422 });
   return callStoa({
     method: "POST",
     route: "/v1/operators/sponsors/:sponsorId/suspension",
@@ -1856,7 +1942,8 @@ export function stoaSuspendSponsor(
         receipt.revision !== command.data.expected_revision + 1 ||
         receipt.reviewed_case_id !== command.data.reviewed_case_id ||
         receipt.basis !== command.data.basis
-      ) throw new Error("Sponsor suspension receipt command mismatch");
+      )
+        throw new Error("Sponsor suspension receipt command mismatch");
       return receipt;
     },
   });
@@ -1908,7 +1995,8 @@ export function stoaProblemSlowMode(
   if (
     !ProblemIdSchema.safeParse(problemId).success ||
     (principalType !== "operator" && principalType !== "sponsor")
-  ) return Promise.resolve({ ok: false, reason: "refused", status: 404 });
+  )
+    return Promise.resolve({ ok: false, reason: "refused", status: 404 });
   const route = `/v1/${principalType}s/problems/:problemId/slow-mode`;
   return callStoa({
     method: "GET",
@@ -1936,11 +2024,13 @@ export function stoaChangeProblemSlowMode(
 ): Promise<StoaCall<ProblemSlowModeReceipt>> {
   const command = ProblemSlowModeRequestSchema.safeParse(request);
   if (
-    !command.success || !ProblemIdSchema.safeParse(problemId).success ||
+    !command.success ||
+    !ProblemIdSchema.safeParse(problemId).success ||
     (command.success && command.data.problem_id !== problemId) ||
     (principalType !== "operator" && principalType !== "sponsor") ||
     !/^[A-Za-z0-9._-]{1,160}$/.test(idempotencyKey)
-  ) return Promise.resolve({ ok: false, reason: "refused", status: 422 });
+  )
+    return Promise.resolve({ ok: false, reason: "refused", status: 422 });
   const route = `/v1/${principalType}s/problems/:problemId/slow-mode`;
   return callStoa({
     method: "POST",
@@ -1954,13 +2044,14 @@ export function stoaChangeProblemSlowMode(
     parse: (value) => {
       const receipt = ProblemSlowModeReceiptSchema.parse(value);
       if (
-        receipt.problem_id !== problemId || receipt.action !== command.data.action ||
+        receipt.problem_id !== problemId ||
+        receipt.action !== command.data.action ||
         receipt.revision !== command.data.expected_revision + 1 ||
-        (command.data.action === "set" && (
-          receipt.limit_per_hour !== command.data.limit_per_hour ||
-          Date.parse(receipt.expires_at ?? "") !== Date.parse(command.data.expires_at)
-        ))
-      ) throw new Error("Slow-mode receipt command mismatch");
+        (command.data.action === "set" &&
+          (receipt.limit_per_hour !== command.data.limit_per_hour ||
+            Date.parse(receipt.expires_at ?? "") !== Date.parse(command.data.expires_at)))
+      )
+        throw new Error("Slow-mode receipt command mismatch");
       return receipt;
     },
   });

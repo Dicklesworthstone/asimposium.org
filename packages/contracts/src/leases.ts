@@ -1,4 +1,10 @@
 import { z } from "zod";
+import {
+  EnrollmentProblemBindingSchema,
+  FellowIdSchema,
+  FellowNameSchema,
+  SponsorIdSchema,
+} from "./enrollment.ts";
 
 export const LEASE_OBJECT_KINDS = ["claim", "hypothesis", "proof_gap", "question"] as const;
 export const LeaseObjectKindSchema = z.enum(LEASE_OBJECT_KINDS);
@@ -141,3 +147,55 @@ export const LeaseListResponseSchema = z
   .strict();
 
 export type LeaseListResponse = z.infer<typeof LeaseListResponseSchema>;
+
+export const SPONSOR_LEASE_LIST_PAGE_LIMIT = 20;
+export const SPONSOR_LEASE_LIST_MAX_RESPONSE_BYTES = 32 * 1024;
+export const SponsorLeaseIdSchema = z.string().regex(/^L-[A-HJKMNP-TV-Z0-9]{26}$/);
+
+/** Private current-ownership discovery, including leases held by paused Fellows. */
+export const SponsorLeaseListRequestSchema = z
+  .object({ after: SponsorLeaseIdSchema.optional() })
+  .strict();
+export type SponsorLeaseListRequest = z.infer<typeof SponsorLeaseListRequestSchema>;
+
+export const SponsorLeaseSummarySchema = z
+  .object({
+    lease_id: SponsorLeaseIdSchema,
+    problem_id: EnrollmentProblemBindingSchema,
+    fellow_id: FellowIdSchema,
+    fellow_name: FellowNameSchema,
+    object: LeaseItemSchema.shape.object,
+    object_kind: LeaseObjectKindSchema,
+    parallel_safe: z.boolean(),
+    status: z.literal("active"),
+    leased_at: z.string().datetime(),
+    leased_until: z.string().datetime(),
+  })
+  .strict();
+export type SponsorLeaseSummary = z.infer<typeof SponsorLeaseSummarySchema>;
+
+export const SponsorLeaseListResponseSchema = z
+  .object({
+    schema: z.literal("https://a.asimposium.org/schemas/sessions.v1.json"),
+    sponsor_id: SponsorIdSchema,
+    leases: z.array(SponsorLeaseSummarySchema).max(SPONSOR_LEASE_LIST_PAGE_LIMIT),
+    next_cursor: SponsorLeaseIdSchema.nullable(),
+  })
+  .strict();
+export type SponsorLeaseListResponse = z.infer<typeof SponsorLeaseListResponseSchema>;
+
+/** Immutable ASCII IDs make a live page immune to reordering by heartbeats. */
+export function sponsorLeaseListPageIsValid(
+  page: SponsorLeaseListResponse,
+  request: SponsorLeaseListRequest,
+): boolean {
+  let previous = request.after;
+  for (const lease of page.leases) {
+    if (previous !== undefined && lease.lease_id <= previous) return false;
+    previous = lease.lease_id;
+  }
+  return (
+    page.next_cursor === null ||
+    (page.leases.length === SPONSOR_LEASE_LIST_PAGE_LIMIT && page.next_cursor === previous)
+  );
+}

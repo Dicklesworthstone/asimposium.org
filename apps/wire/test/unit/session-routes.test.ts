@@ -12804,72 +12804,86 @@ describe("session protocol routes", () => {
     expect(await verifierRefusal.text()).toBe(verifierBytes);
   });
 
-  test("the sponsor workshop read does not release loaded bodies after account deletion", async () => {
-    let afterWorkshopRead: (() => Promise<void>) | undefined;
-    const f = await fixture({
-      afterRead: async (read) => {
-        if (read.kind !== "all" || !read.sql.includes("FROM workshop_objects")) return;
-        const action = afterWorkshopRead;
-        afterWorkshopRead = undefined;
-        await action?.();
-      },
-    });
-    const opened = await f.call("/v1/sessions", {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "read-fence-open" },
-      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
-    });
-    expect(opened.status).toBe(201);
-    const session = (await opened.json()) as { session_id: string };
-    const title = "PRIVATE-READ-FENCE-TITLE";
-    const privateBody = "PRIVATE-READ-FENCE-BODY";
-    const pushed = await f.call(`/v1/sessions/${session.session_id}/workshop`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "read-fence-push" },
-      body: JSON.stringify({ type: "note", title, body_md: privateBody, relates_to: [] }),
-    });
-    expect(pushed.status).toBe(201);
-    const object = WorkshopPushResponseSchema.parse(await pushed.json());
-    const sponsorRouter = createSessionRouter({
-      service: f.service,
-      replayProtector: f.replayProtector,
-      verifiedSponsor: async (request) => ({
-        principal: { type: "sponsor", sponsorId: f.binding.sponsorId },
-        rawBody: new Uint8Array(await request.arrayBuffer()),
-      }),
-    });
-    const read = () =>
-      sponsorRouter.fetch(
-        new Request("https://a-staging.asimposium.org/v1/sponsors/workshop", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ problem_id: "P-4DSP", fellow_id: f.binding.fellowId }),
+  test.each(["page", "revision"] as const)(
+    "the sponsor workshop %s read does not release loaded bodies after account deletion",
+    async (selection) => {
+      let afterWorkshopRead: (() => Promise<void>) | undefined;
+      const f = await fixture({
+        afterRead: async (read) => {
+          if (
+            selection === "page"
+              ? read.kind !== "all" || !read.sql.includes("FROM workshop_objects")
+              : read.kind !== "first" || !read.sql.includes("FROM workshop_revisions")
+          )
+            return;
+          const action = afterWorkshopRead;
+          afterWorkshopRead = undefined;
+          await action?.();
+        },
+      });
+      const opened = await f.call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "read-fence-open" },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+      });
+      expect(opened.status).toBe(201);
+      const session = (await opened.json()) as { session_id: string };
+      const title = "PRIVATE-READ-FENCE-TITLE";
+      const privateBody = "PRIVATE-READ-FENCE-BODY";
+      const pushed = await f.call(`/v1/sessions/${session.session_id}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "read-fence-push" },
+        body: JSON.stringify({ type: "note", title, body_md: privateBody, relates_to: [] }),
+      });
+      expect(pushed.status).toBe(201);
+      const object = WorkshopPushResponseSchema.parse(await pushed.json());
+      const sponsorRouter = createSessionRouter({
+        service: f.service,
+        replayProtector: f.replayProtector,
+        verifiedSponsor: async (request) => ({
+          principal: { type: "sponsor", sponsorId: f.binding.sponsorId },
+          rawBody: new Uint8Array(await request.arrayBuffer()),
         }),
-        f.env,
-      );
-    const visible = await read();
-    expect(visible.status).toBe(200);
-    expect(await visible.text()).toContain(privateBody);
+      });
+      const read = () =>
+        sponsorRouter.fetch(
+          new Request("https://a-staging.asimposium.org/v1/sponsors/workshop", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              problem_id: "P-4DSP",
+              fellow_id: f.binding.fellowId,
+              ...(selection === "revision"
+                ? { object: { workshop_id: object.workshop_id, version: 1 } }
+                : {}),
+            }),
+          }),
+          f.env,
+        );
+      const visible = await read();
+      expect(visible.status).toBe(200);
+      expect(await visible.text()).toContain(privateBody);
 
-    // The query captures private rows before this competing account deletion.
-    afterWorkshopRead = async () => {
-      await f.db
-        .prepare("UPDATE sponsors SET tombstoned_at = ? WHERE sponsor_id = ?")
-        .bind(new Date().toISOString(), f.binding.sponsorId)
-        .run();
-    };
-    const lostAuthority = await read();
-    expect(lostAuthority.status).toBe(404);
-    expect(lostAuthority.headers.get("cache-control")).toBe("private, no-store");
-    const refusal = await lostAuthority.text();
-    expect(JSON.parse(refusal)).toMatchObject({ code: "WORKSHOP_NOT_FOUND" });
-    expect(refusal).not.toContain(title);
-    expect(refusal).not.toContain(privateBody);
-    expect(refusal).not.toContain(object.workshop_id);
-    const again = await read();
-    expect(again.status).toBe(404);
-    expect(await again.text()).toBe(refusal);
-  });
+      // The query captures private rows before this competing account deletion.
+      afterWorkshopRead = async () => {
+        await f.db
+          .prepare("UPDATE sponsors SET tombstoned_at = ? WHERE sponsor_id = ?")
+          .bind(new Date().toISOString(), f.binding.sponsorId)
+          .run();
+      };
+      const lostAuthority = await read();
+      expect(lostAuthority.status).toBe(404);
+      expect(lostAuthority.headers.get("cache-control")).toBe("private, no-store");
+      const refusal = await lostAuthority.text();
+      expect(JSON.parse(refusal)).toMatchObject({ code: "WORKSHOP_NOT_FOUND" });
+      expect(refusal).not.toContain(title);
+      expect(refusal).not.toContain(privateBody);
+      expect(refusal).not.toContain(object.workshop_id);
+      const again = await read();
+      expect(again.status).toBe(404);
+      expect(await again.text()).toBe(refusal);
+    },
+  );
 
   test("the sponsor workshop page is a byte-bounded keyset with exact cursor continuity (asimposiumorg-e7j.2)", async () => {
     const { call, db, binding, service, replayProtector } = await fixture();

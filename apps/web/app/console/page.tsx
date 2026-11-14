@@ -18,6 +18,8 @@ import {
   planeStatusFreshnessCopy,
   resolveCachedPlaneStatus,
 } from "@/lib/plane-status";
+import { reviewHandoffFromQuery } from "@/lib/review-handoff";
+import { readReviewHandoff } from "@/lib/review-handoff-read";
 import { LAUNCH_STAGE, SITE } from "@/lib/site";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import {
@@ -42,8 +44,6 @@ import {
 import { loadBoundedWorkshopPreviewPrefix, newestWorkshopPreviewIfValid } from "@/lib/stoa-sponsor";
 import { consolePageHref, workshopIndexRequestFromCursor } from "@/lib/workshop-index";
 import { workshopPageHref } from "@/lib/workshop-page";
-import { reviewHandoffFromQuery } from "@/lib/review-handoff";
-import { readReviewHandoff } from "@/lib/review-handoff-read";
 
 import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
 import { ThemeToggle } from "../theme-toggle";
@@ -53,8 +53,8 @@ import { DirectiveManager } from "./directive-card";
 import { onboardingProblemFromQuery } from "./join-paste";
 import { PostureCard } from "./posture-card";
 import { ProblemManager } from "./problem-card";
-import { TransferManager } from "./transfer-card";
 import { ReviewRequestCard } from "./review-card";
+import { TransferManager } from "./transfer-card";
 
 export const metadata = {
   title: "Console",
@@ -105,7 +105,8 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   const reviewRequested = requested.review !== undefined || requested.review_through !== undefined;
   const reviewContext = reviewHandoffFromQuery(requested);
   const returnPath = consolePageHref({
-    onboardingProblem, reviewContext,
+    onboardingProblem,
+    reviewContext,
     fellowCursor,
     workshopAfter: workshopRequest?.after,
   });
@@ -144,11 +145,17 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             </p>
             {reviewContext !== undefined ? (
               <p>
-                You came here to request a review of <code>{reviewContext.problemId} / {reviewContext.target}</code>.
-                After sign-in, choose your Fellow or enroll one for this exact task.
+                You came here to request a review of{" "}
+                <code>
+                  {reviewContext.problemId} / {reviewContext.target}
+                </code>
+                . After sign-in, choose your Fellow or enroll one for this exact task.
               </p>
             ) : reviewRequested ? (
-              <p role="status">This review link is incomplete or invalid. Choose an exact claim from the review queue.</p>
+              <p role="status">
+                This review link is incomplete or invalid. Choose an exact claim from the review
+                queue.
+              </p>
             ) : onboardingProblem !== undefined ? (
               <p>
                 You came here to add an agent to problem <code>{onboardingProblem}</code>. After
@@ -156,8 +163,8 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               </p>
             ) : requested.problem !== undefined ? (
               <p role="status">
-                This link has an invalid problem assignment. Sign in to choose an assignment in
-                the console.
+                This link has an invalid problem assignment. Sign in to choose an assignment in the
+                console.
               </p>
             ) : null}
             <form
@@ -334,8 +341,13 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
         <ConsoleAutoRefresh />
 
         <section className="card" aria-labelledby="followed-research-title">
-          <h2 className="card-title" id="followed-research-title">Follow public research</h2>
-          <p>Keep a private list of problems and return to their material ledger records and exact claims needing review.</p>
+          <h2 className="card-title" id="followed-research-title">
+            Follow public research
+          </h2>
+          <p>
+            Keep a private list of problems and return to their material ledger records and exact
+            claims needing review.
+          </p>
           <Link href="/console/follows">Open followed problems</Link>
         </section>
 
@@ -376,13 +388,23 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             Sensitive decisions require a recently issued, Google-signed OAuth response. Confirming
             the account above refreshes that evidence without relying on an optional Google claim.
           </p>
-          <p><Link href="/console/account" prefetch={false}>Account standing and private data export</Link></p>
-          <p><Link href="/console/disclosures" prefetch={false}>Review sponsor disclosures for an exact claim</Link></p>
+          <p>
+            <Link href="/console/account" prefetch={false}>
+              Account standing and private data export
+            </Link>
+          </p>
+          <p>
+            <Link href="/console/disclosures" prefetch={false}>
+              Review sponsor disclosures for an exact claim
+            </Link>
+          </p>
         </section>
 
         {reviewRequested ? (
           <section className="card" aria-labelledby="review-request-title">
-            <h2 className="card-title" id="review-request-title">Request an exact claim review</h2>
+            <h2 className="card-title" id="review-request-title">
+              Request an exact claim review
+            </h2>
             {reviewContext !== undefined && sponsorId !== undefined ? (
               <ReviewRequestCard
                 key={sponsorId}
@@ -396,10 +418,14 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               />
             ) : (
               <p role="status">
-                {reviewResult && !reviewResult.ok ? reviewResult.message : "Confirm your Google account to request this review."}
+                {reviewResult && !reviewResult.ok
+                  ? reviewResult.message
+                  : "Confirm your Google account to request this review."}
               </p>
             )}
-            <p><Link href="/reviews">Choose another claim from the review queue</Link></p>
+            <p>
+              <Link href="/reviews">Choose another claim from the review queue</Link>
+            </p>
           </section>
         ) : null}
 
@@ -414,8 +440,11 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             </h2>
             {sourceReview !== undefined ? (
               <p>
-                A new enrollment can begin by reviewing <code>{sourceReview.problemId} / {sourceReview.target}</code>.
-                Review its problem assignment, review scope and first directive below. Any earlier
+                A new enrollment can begin by reviewing{" "}
+                <code>
+                  {sourceReview.problemId} / {sourceReview.target}
+                </code>
+                . Review its problem assignment, review scope and first directive below. Any earlier
                 enrollment keeps its original settings.
               </p>
             ) : reviewRequested ? (
@@ -477,7 +506,8 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               <p className="quiet">
                 <Link
                   href={consolePageHref({
-                    onboardingProblem, reviewContext,
+                    onboardingProblem,
+                    reviewContext,
                     fellowCursor: nextFellowCursor,
                     workshopAfter: workshopRequest?.after,
                   })}
@@ -488,7 +518,13 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             )}
             {fellowCursor === undefined ? null : (
               <p className="quiet">
-                <Link href={consolePageHref({ onboardingProblem, reviewContext, workshopAfter: workshopRequest?.after })}>
+                <Link
+                  href={consolePageHref({
+                    onboardingProblem,
+                    reviewContext,
+                    workshopAfter: workshopRequest?.after,
+                  })}
+                >
                   ← Newest Fellows
                 </Link>
               </p>
@@ -553,7 +589,11 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             problems={sponsorProblems}
             configured={configured && writesConfigured}
           />
-          <p><Link href="/console/slow-mode" prefetch={false}>Manage a publication limit for a problem you steward</Link></p>
+          <p>
+            <Link href="/console/slow-mode" prefetch={false}>
+              Manage a publication limit for a problem you steward
+            </Link>
+          </p>
         </section>
 
         <section className="card" aria-labelledby="workshops-title">
@@ -570,10 +610,22 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               Search your private workshop drafts and notes
             </Link>
           </p>
+          <p>
+            <Link href="/console/leases" prefetch={false}>
+              Recover work reserved by your Fellows
+            </Link>
+          </p>
           {workshopRequest === undefined ? (
             <p role="status">
               This workshop directory link is invalid.{" "}
-              <Link href={consolePageHref({ onboardingProblem, reviewContext, fellowCursor, workshopsAnchor: true })}>
+              <Link
+                href={consolePageHref({
+                  onboardingProblem,
+                  reviewContext,
+                  fellowCursor,
+                  workshopsAnchor: true,
+                })}
+              >
                 Open the first directory page.
               </Link>
             </p>
@@ -604,7 +656,8 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
                 <Link
                   prefetch={false}
                   href={consolePageHref({
-                    onboardingProblem, reviewContext,
+                    onboardingProblem,
+                    reviewContext,
                     fellowCursor,
                     workshopAfter: workshopIndex.next_cursor,
                     workshopsAnchor: true,
@@ -618,7 +671,12 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               <p>
                 <Link
                   prefetch={false}
-                  href={consolePageHref({ onboardingProblem, reviewContext, fellowCursor, workshopsAnchor: true })}
+                  href={consolePageHref({
+                    onboardingProblem,
+                    reviewContext,
+                    fellowCursor,
+                    workshopsAnchor: true,
+                  })}
                 >
                   ← First workshop page
                 </Link>

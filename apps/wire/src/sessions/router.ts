@@ -25,6 +25,7 @@ import {
   type SessionRouterOptions,
 } from "./router-core.ts";
 import { createScientificWithdrawalRouter } from "./scientific-withdrawal-router.ts";
+import { createSponsorLeasesRouter } from "./sponsor-leases.ts";
 import { createSponsorWorkshopCursorRouter } from "./sponsor-workshop-cursor.ts";
 import { createSponsorWorkshopIndexRouter } from "./sponsor-workshop-index.ts";
 
@@ -161,6 +162,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   });
   app.route("/", createSponsorWorkshopCursorRouter(options));
   app.route("/", createSponsorWorkshopIndexRouter(options));
+  app.route("/", createSponsorLeasesRouter(options));
   app.route("/", createProtocolConflictRouter(options));
   app.route("/", createScientificWithdrawalRouter(options));
   app.route("/", createReviewRequestRouter(options));

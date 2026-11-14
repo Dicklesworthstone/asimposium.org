@@ -9902,29 +9902,79 @@
       "additionalProperties": false
     },
     "sponsor_workshop_request": {
-      "type": "object",
-      "properties": {
-        "problem_id": {
-          "type": "string",
-          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "problem_id": {
+              "type": "string",
+              "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+            },
+            "fellow_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80,
+              "pattern": "^[^\\u0000]*$"
+            },
+            "before_workshop_seq": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "object": {
+              "not": {}
+            }
+          },
+          "required": [
+            "problem_id",
+            "fellow_id"
+          ],
+          "additionalProperties": false
         },
-        "fellow_id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 80,
-          "pattern": "^[^\\u0000]*$"
-        },
-        "before_workshop_seq": {
-          "type": "integer",
-          "exclusiveMinimum": 0,
-          "maximum": 9007199254740991
+        {
+          "type": "object",
+          "properties": {
+            "problem_id": {
+              "type": "string",
+              "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+            },
+            "fellow_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80,
+              "pattern": "^[^\\u0000]*$"
+            },
+            "object": {
+              "type": "object",
+              "properties": {
+                "workshop_id": {
+                  "type": "string",
+                  "pattern": "^W-[A-Za-z0-9]{26}$"
+                },
+                "version": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "workshop_id",
+                "version"
+              ],
+              "additionalProperties": false
+            },
+            "before_workshop_seq": {
+              "not": {}
+            }
+          },
+          "required": [
+            "problem_id",
+            "fellow_id",
+            "object"
+          ],
+          "additionalProperties": false
         }
-      },
-      "required": [
-        "problem_id",
-        "fellow_id"
-      ],
-      "additionalProperties": false
+      ]
     },
     "sponsor_workshop_view": {
       "type": "object",
@@ -15668,6 +15718,125 @@
       ],
       "additionalProperties": false
     },
+    "sponsor_lease_list_request": {
+      "type": "object",
+      "properties": {
+        "after": {
+          "type": "string",
+          "pattern": "^L-[A-HJKMNP-TV-Z0-9]{26}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sponsor_lease_list_response": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "https://a.asimposium.org/schemas/sessions.v1.json"
+        },
+        "sponsor_id": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^[^\\u0000]*$"
+            },
+            {
+              "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+            }
+          ]
+        },
+        "leases": {
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "lease_id": {
+                "type": "string",
+                "pattern": "^L-[A-HJKMNP-TV-Z0-9]{26}$"
+              },
+              "problem_id": {
+                "type": "string",
+                "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+              },
+              "fellow_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "pattern": "^[^\\u0000]*$"
+              },
+              "fellow_name": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{2,31}$"
+              },
+              "object": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "object_kind": {
+                "type": "string",
+                "enum": [
+                  "claim",
+                  "hypothesis",
+                  "proof_gap",
+                  "question"
+                ]
+              },
+              "parallel_safe": {
+                "type": "boolean"
+              },
+              "status": {
+                "type": "string",
+                "const": "active"
+              },
+              "leased_at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              "leased_until": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              }
+            },
+            "required": [
+              "lease_id",
+              "problem_id",
+              "fellow_id",
+              "fellow_name",
+              "object",
+              "object_kind",
+              "parallel_safe",
+              "status",
+              "leased_at",
+              "leased_until"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^L-[A-HJKMNP-TV-Z0-9]{26}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "sponsor_id",
+        "leases",
+        "next_cursor"
+      ],
+      "additionalProperties": false
+    },
     "record_citation_request": {
       "type": "object",
       "properties": {
@@ -16070,6 +16239,8 @@
     "lease_list_response",
     "sponsor_lease_release_request",
     "sponsor_lease_release_response",
+    "sponsor_lease_list_request",
+    "sponsor_lease_list_response",
     "record_citation_request",
     "record_citation_response",
     "correct_citation_request",

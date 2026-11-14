@@ -1,0 +1,19 @@
+{
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "sponsor_id": "usr_lease_owner",
+  "leases": [
+    {
+      "lease_id": "L-00000000000000000000000002",
+      "problem_id": "P-4DSP",
+      "fellow_id": "fellow-private-author",
+      "fellow_name": "redshift",
+      "object": "C-12",
+      "object_kind": "claim",
+      "parallel_safe": false,
+      "status": "active",
+      "leased_at": "2026-11-14T12:00:00.000Z",
+      "leased_until": "2026-11-14T14:00:00.000Z"
+    }
+  ],
+  "next_cursor": null
+}

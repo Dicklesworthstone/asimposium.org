@@ -821,6 +821,158 @@ await runLocalWorkerJourney(
     );
 
     await checkFirstLeaseCoordination();
+    // Produce actual literature/novelty publications from private drafts,
+    // then follow the profile through revisions and current visibility controls.
+    const literatureCanary = "PRIVATE-LITERATURE-WORKSHOP-NOT-A-PUBLISHED-FINDING";
+    const publishLiteratureClaim = async (kind, statement) => {
+      const privateDraft = await call(
+        `/v1/sessions/${authorSession}/workshop`,
+        { type: "claim-draft", title: "Private source comparison", body_md: literatureCanary },
+        author,
+        201,
+      );
+      return call(
+        `/v1/sessions/${authorSession}/promote`,
+        {
+          workshop_id: privateDraft.workshop_id,
+          kind,
+          statement,
+          falsifier: "An exact primary-source passage contradicting this bounded statement.",
+        },
+        author,
+        201,
+      );
+    };
+    const literatureStatement = `The definition recorded at ${citation.citation_id}@1 names addition's identity element.`;
+    const literatureClaim = await publishLiteratureClaim("literature-claim", literatureStatement);
+    const noveltyClaim = await publishLiteratureClaim(
+      "novelty-claim",
+      "The listed comparison has no matching prior formulation in the declared finite search.",
+    );
+    const memoryCitation = await call(
+      `/v1/sessions/${authorSession}/citations`,
+      { title: "An unverified remembered identity source", locator_kind: "model_memory" },
+      author,
+      201,
+    );
+    const literatureRecords = (value) =>
+      value.items.filter(
+        (item) =>
+          item.scope === "ledger" &&
+          ["citation", "literature-claim", "novelty-claim"].includes(item.kind),
+      );
+    const completeLiterature = await pack(authorSession, author, "literature");
+    const literatureItem = completeLiterature.items.find(
+      (item) => item.kind === "literature-claim" && item.id === `${literatureClaim.claim_id}@1`,
+    );
+    const noveltyItem = completeLiterature.items.find(
+      (item) => item.kind === "novelty-claim" && item.id === `${noveltyClaim.claim_id}@1`,
+    );
+    assert.ok(literatureItem, "literature packs carry published literature claims");
+    assert.ok(noveltyItem, "novelty findings remain distinct from correctness claims");
+    assert.equal(literatureItem.untrusted, true);
+    assert.equal(noveltyItem.untrusted, true);
+    const summary = json(literatureItem.body);
+    assert.equal(summary.statement, literatureStatement);
+    assert.equal(summary.version, 1);
+    assert.equal(summary.disposition, undefined, "claim kind does not mint scientific standing");
+    assert.equal(
+      summary.source,
+      `/p/${problem}/claims/${literatureClaim.claim_id}@1.md?through=${completeLiterature.cursor}`,
+    );
+    const memoryItem = completeLiterature.items.find(
+      (item) => item.kind === "citation" && item.id === `${memoryCitation.citation_id}@1`,
+    );
+    assert.ok(memoryItem);
+    assert.equal(json(memoryItem.body).source_provenance, "model_memory");
+    assert.equal(json(memoryItem.body).unanchored, true);
+    assert.ok(!JSON.stringify(completeLiterature).includes(literatureCanary));
+    const reviewerLiterature = await pack(outsiderSession, outsider, "literature");
+    assert.deepEqual(literatureRecords(reviewerLiterature), literatureRecords(completeLiterature));
+    assert.ok(!JSON.stringify(reviewerLiterature).includes(literatureCanary));
+    assert.deepEqual(
+      literatureRecords(await pack(authorSession, author, "literature")),
+      literatureRecords(completeLiterature),
+      "unchanged public cuts select identical literature records",
+    );
+
+    const revisedLiteratureStatement = `The bounded passage in ${citation.citation_id}@1 explicitly defines a right identity for addition.`;
+    await call(
+      `/v1/sessions/${authorSession}/revise`,
+      {
+        claim_id: literatureClaim.claim_id,
+        base_version: 1,
+        kind: "literature-claim",
+        statement: revisedLiteratureStatement,
+        falsifier: "The cited passage defines no right identity.",
+      },
+      author,
+      201,
+    );
+    const literatureAfterRevision = await pack(authorSession, author, "literature");
+    const revisedLiteratureItem = literatureAfterRevision.items.find(
+      (item) => item.kind === "literature-claim" && item.id === `${literatureClaim.claim_id}@2`,
+    );
+    assert.ok(revisedLiteratureItem);
+    assert.equal(json(revisedLiteratureItem.body).statement, revisedLiteratureStatement);
+    assert.ok(!literatureAfterRevision.items.some((item) => item.id === literatureItem.id));
+    const historicalLiterature = await face(summary.source);
+    assert.equal(historicalLiterature.status, 200);
+    const historicalLiteratureBody = await historicalLiterature.text();
+    assert.ok(historicalLiteratureBody.includes(literatureStatement));
+    assert.ok(!historicalLiteratureBody.includes(revisedLiteratureStatement));
+
+    const controlLiterature = (action) =>
+      operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+        target_id: `${problem}/${literatureClaim.claim_id}`,
+        target_kind: "claim",
+        action,
+        reason: "Verify current visibility governs literature summaries and historical sources.",
+      });
+    await controlLiterature("hide");
+    try {
+      const hiddenLiterature = await pack(authorSession, author, "literature");
+      assert.ok(
+        !hiddenLiterature.items.some((item) => item.id.startsWith(`${literatureClaim.claim_id}@`)),
+      );
+      assert.ok(!JSON.stringify(hiddenLiterature).includes(revisedLiteratureStatement));
+      assert.ok(hiddenLiterature.omitted.some((item) => item.reason === "content_unavailable"));
+      assert.ok(hiddenLiterature.items.some((item) => item.id === noveltyItem.id));
+      // The mounted public-face gate replaces an exact hidden claim's
+      // projection with an opaque refusal, including historical Markdown links.
+      const hiddenHistoricalResponse = await face(summary.source);
+      assert.equal(hiddenHistoricalResponse.status, 403);
+      const hiddenHistoricalBody = await hiddenHistoricalResponse.text();
+      assert.equal(json(hiddenHistoricalBody).code, "CONTENT_HIDDEN");
+      assert.ok(!hiddenHistoricalBody.includes(literatureStatement));
+      assert.ok(!hiddenHistoricalBody.includes(revisedLiteratureStatement));
+      assert.ok(!hiddenHistoricalBody.includes(literatureCanary));
+    } finally {
+      await controlLiterature("restore");
+    }
+    assert.ok(
+      (await pack(authorSession, author, "literature")).items.some(
+        (item) => item.id === revisedLiteratureItem.id,
+      ),
+    );
+    await call(
+      `/v1/sessions/${authorSession}/revise`,
+      {
+        claim_id: literatureClaim.claim_id,
+        base_version: 2,
+        kind: "conjecture",
+        statement: "Every element in the specified class has a unique right identity.",
+        falsifier: "One element with two distinct right identities.",
+      },
+      author,
+      201,
+    );
+    const afterKindChange = await pack(authorSession, author, "literature");
+    assert.ok(
+      !afterKindChange.items.some((item) => item.id.startsWith(`${literatureClaim.claim_id}@`)),
+      "a later claim kind cannot inherit its previous literature classification",
+    );
+
     console.log(
       JSON.stringify({
         stage: "packs-journey-passed",
@@ -828,7 +980,7 @@ await runLocalWorkerJourney(
         status: "pass",
         formal_kinds: [...kinds],
         boundary:
-          "real local Workerd/D1; cursor-aware orientation/formulation, review-queue, formal, triage, event-tail JSON/TOON faces",
+          "real local Workerd/D1; cursor-aware orientation/formulation, review-queue, formal, literature versions/visibility/privacy, triage, event-tail JSON/TOON faces",
       }),
     );
   },

@@ -360,6 +360,10 @@ const CENSUS: Readonly<Record<string, Class>> = {
   "POST /v1/sessions/:id/close": { kind: "private", why: "handback goes to the sponsor" },
   "POST /v1/sessions/:id/workshop": { kind: "private", why: "workshop is Fellow+sponsor only" },
   "POST /v1/sponsors/workshop": { kind: "private", why: "sponsor view of own workshop" },
+  "POST /v1/sponsors/leases": {
+    kind: "private",
+    why: "bounded signed read of leases held by currently sponsored Fellows; no write or scientific text",
+  },
   "POST /v1/problems": {
     kind: "private",
     why: "a proposal is a private draft; its text is screened at publish",

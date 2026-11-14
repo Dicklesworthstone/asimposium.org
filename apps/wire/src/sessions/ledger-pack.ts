@@ -30,6 +30,7 @@ import {
   prepareDependencyClosure,
 } from "../ledger/claim-dependency-closure";
 import { readClaimRelations } from "../ledger/claim-relations-read.ts";
+import { loadClaimsList } from "../ledger/claims-list-read.ts";
 import { type FiredDeadEndTriggerRow, loadProblemDeadEnds } from "../ledger/dead-ends";
 import { loadFormalRecords } from "../ledger/formal-records-service";
 import { loadKilledHypotheses } from "../ledger/hypotheses-service";
@@ -53,6 +54,7 @@ import { claimInputStatuses } from "./claim-input-status.ts";
 import { composeClaimProofObligations } from "./claim-proof-obligations";
 import { readFormalGapSection, readGraveyardFrictionSection } from "./formal-pack";
 import { readKilledHypothesisPack } from "./killed-hypothesis-pack";
+import { readLiteraturePack } from "./literature-pack.ts";
 import { readCanonicalReviewQueuePack } from "./review-queue-pack";
 
 // One extra row proves truncation. The shared composer applies the tighter
@@ -886,52 +888,11 @@ export async function readLedgerPackSection(
     }
     return { candidates, omitted };
   } else if (profile === "literature") {
-    const result = await loadProblemCitations(db, problemId, {
-      through: cursor,
-      limit: LEDGER_PACK_CANDIDATE_LIMIT,
+    return readLiteraturePack(db, problemId, cursor, {
+      citations: loadProblemCitations,
+      claims: loadClaimsList,
+      neutralize: (body) => neutralizeUntrustedBody(body).text,
     });
-    const omitted: LedgerPackSection["omitted"] = result.omitted.map((detail) => ({
-      reason: "source_omission",
-      detail,
-    }));
-    const candidates: PackCandidate[] = [];
-    for (const [index, item] of result.citations.entries()) {
-      const target = `${item.citation_id}@${item.version}`;
-      const { screening_notice: screeningNotice, ...citation } = item;
-      const body = JSON.stringify({
-        ...citation,
-        source: `/p/${problemId}/citations/${target}.md?through=${cursor}`,
-      });
-      if (body.length > 18000 || neutralizeUntrustedBody(body).text.length > 18000) {
-        omitted.push({ reason: "item_too_large", detail: `literature:${target}` });
-        continue;
-      }
-      candidates.push({
-        kind: "citation",
-        id: target,
-        scope: "ledger",
-        untrusted: true,
-        tokens: 1,
-        body,
-        ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
-        why_included:
-          "committed public citation version at the pack cursor; source provenance and model declarations are not verification",
-        stable_prefix: 20 + index,
-      });
-    }
-    if (candidates.length === 0 && omitted.length === 0) {
-      candidates.push({
-        kind: "standing-context",
-        id: "SYS-literature-empty",
-        scope: "system",
-        untrusted: false,
-        tokens: 1,
-        body: "No readable published citations are available at this problem cursor. This is not a claim that no relevant literature exists.",
-        why_included: "state the public literature baseline without inventing a source",
-        stable_prefix: 20,
-      });
-    }
-    return { candidates, omitted };
   } else {
     return { candidates: [], omitted: [] };
   }

@@ -841,6 +841,38 @@ test("the keyset cursor is optional, positive, and integral (asimposiumorg-e7j.2
   }
 });
 
+test("sponsor history selects one immutable revision and cannot combine page authority", async () => {
+  const valid = await fixture(
+    new URL("../fixtures/valid/sponsor-workshop-revision-request.json", import.meta.url),
+  );
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/sponsor-workshop-revision-request.json", import.meta.url),
+  );
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema((await fixture(GENERATED_SESSIONS_SCHEMA)) as object, "sessions");
+  const validate = ajv.compile({ $ref: "sessions#/properties/sponsor_workshop_request" });
+  expect(SponsorWorkshopRequestSchema.safeParse(valid).success).toBe(true);
+  expect(validate(valid)).toBe(true);
+  expect(SponsorWorkshopRequestSchema.safeParse(invalid).success).toBe(false);
+  expect(validate(invalid)).toBe(false);
+  const scope = { problem_id: "P-4DSP", fellow_id: "fellow-01JXYZ" };
+  const object = { workshop_id: `W-${"B".repeat(26)}`, version: 1 };
+  expect(SponsorWorkshopRequestSchema.parse({ ...scope, object })).toEqual({ ...scope, object });
+  for (const value of [
+    { ...scope, object, before_workshop_seq: 9 },
+    { ...scope, object: { workshop_id: object.workshop_id } },
+    { ...scope, object: { ...object, version: 0 } },
+    { ...scope, object: { ...object, version: 1.5 } },
+    { ...scope, object: { ...object, version: Number.MAX_SAFE_INTEGER + 1 } },
+    { ...scope, object: { ...object, version: "1" } },
+    { ...scope, object: { ...object, body_md: "replacement text" } },
+    { ...scope, object: { ...object, workshop_id: "another/fellow" } },
+  ]) {
+    expect(SponsorWorkshopRequestSchema.safeParse(value).success).toBe(false);
+    expect(validate(value)).toBe(false);
+  }
+});
+
 test("review request and response schemas validate strictly", async () => {
   const validRequest = {
     target_claim_id: "C-1",
