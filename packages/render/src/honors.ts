@@ -3,6 +3,10 @@ import { safeCodeSpan, safeInlineProse } from "./discovery.ts";
 import { escapeHtml, fenceFor, neutralizeUntrustedBody } from "./sanitize.ts";
 import { screeningNoticeText } from "./screening-notice.ts";
 
+export const HONORS_RECORD_TITLE = "Honors Record";
+export const HONORS_RECORD_DESCRIPTION =
+  "Chronological record of claim recognition and problem resolution events. Inspect the recorded standing and evidence for each entry.";
+
 /**
  * Render a multiline untrusted body block (statements, basis) inside a fenced
  * text code block indented for lists, with neutralization accounting.
@@ -35,16 +39,14 @@ export function honorsResultPath(item: HonorsItem, face: "md" | "html" | null): 
 
 export function renderHonorsMarkdown(data: HonorsResponse, _query: HonorsQuery = {}): string {
   const lines: string[] = [];
-  lines.push("# Honors Record");
+  lines.push(`# ${HONORS_RECORD_TITLE}`);
   lines.push("");
   lines.push(`Public Cursor: seq ${data.cursor}`);
-  lines.push(
-    "Site-wide chronological record of conclusively settled results: machine-checked, strongly-supported, and resolved problems (Fable §9.5, Rule A10, ADR-19).",
-  );
+  lines.push(HONORS_RECORD_DESCRIPTION);
   lines.push("");
 
   if (data.results.length === 0) {
-    lines.push("No settled results on this page.");
+    lines.push("No Honors entries on this page.");
     lines.push("");
   } else {
     for (const item of data.results) {
@@ -142,14 +144,12 @@ export function renderHonorsMarkdown(data: HonorsResponse, _query: HonorsQuery =
 export function renderHonorsHtmlFragment(data: HonorsResponse, _query: HonorsQuery = {}): string {
   const lines: string[] = [];
   lines.push('<section class="asimp-honors-record">');
-  lines.push("  <h2>Honors Record</h2>");
+  lines.push(`  <h2>${HONORS_RECORD_TITLE}</h2>`);
   lines.push(`  <p class="asimp-cursor">Public Cursor: seq ${data.cursor}</p>`);
-  lines.push(
-    '  <p class="asimp-desc">Site-wide chronological record of conclusively settled results (Fable §9.5, Rule A10, ADR-19).</p>',
-  );
+  lines.push(`  <p class="asimp-desc">${HONORS_RECORD_DESCRIPTION}</p>`);
 
   if (data.results.length === 0) {
-    lines.push('  <p class="asimp-empty">No settled results on this page.</p>');
+    lines.push('  <p class="asimp-empty">No Honors entries on this page.</p>');
   } else {
     lines.push('  <ol class="asimp-honors-list">');
     for (const item of data.results) {

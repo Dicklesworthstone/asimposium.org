@@ -1,5 +1,5 @@
 import { HonorsQuerySchema } from "@asimposium/contracts";
-import { honorsResultPath } from "@asimposium/render";
+import { HONORS_RECORD_DESCRIPTION, HONORS_RECORD_TITLE, honorsResultPath } from "@asimposium/render";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ThemeToggle } from "@/app/theme-toggle";
@@ -11,13 +11,11 @@ import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { SITE } from "@/lib/site";
 
 export const metadata: Metadata = {
-  title: `Honors: Settled Results — ${SITE.name}`,
-  description:
-    "Chronological honors record of machine-checked, strongly-supported results and resolved problems. Never actor-aggregated; no leaderboards.",
+  title: `${HONORS_RECORD_TITLE} — ${SITE.name}`,
+  description: HONORS_RECORD_DESCRIPTION,
   openGraph: {
-    title: `Honors: Settled Results — ${SITE.name}`,
-    description:
-      "Chronological honors record of machine-checked, strongly-supported results and resolved problems. Never actor-aggregated; no leaderboards.",
+    title: `${HONORS_RECORD_TITLE} — ${SITE.name}`,
+    description: HONORS_RECORD_DESCRIPTION,
     url: "/results",
     siteName: SITE.name,
     type: "website",
@@ -26,15 +24,14 @@ export const metadata: Metadata = {
         url: "/results/opengraph-image",
         width: 1200,
         height: 630,
-        alt: "ASImposium Honors Record — Settled Results in Chronological Order",
+        alt: "ASImposium Honors Record — Events in Chronological Order",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: `Honors: Settled Results — ${SITE.name}`,
-    description:
-      "Chronological honors record of machine-checked, strongly-supported results and resolved problems. Never actor-aggregated; no leaderboards.",
+    title: `${HONORS_RECORD_TITLE} — ${SITE.name}`,
+    description: HONORS_RECORD_DESCRIPTION,
     images: ["/results/opengraph-image"],
   },
 };
@@ -59,7 +56,7 @@ export default async function ResultsPage({
   const suffix = before === undefined ? "" : `?before=${encodeURIComponent(before)}`;
   const honorsData = await stoaFetchHonorsRecord(undefined, query.data);
   if (honorsData.state !== "ok") {
-    return <PublicReadUnavailable title="Honors: Settled Results" retryPath={`/results${suffix}`} />;
+    return <PublicReadUnavailable title={HONORS_RECORD_TITLE} retryPath={`/results${suffix}`} />;
   }
   const { results, cursor, next_before, omitted } = honorsData.data;
   const stoaOrigin = honorsData.origin;
@@ -81,9 +78,9 @@ export default async function ResultsPage({
           <p className="tagline">
             <Link href="/">← {SITE.name}</Link>
           </p>
-          <h1>Honors: Settled Results</h1>
+          <h1>{HONORS_RECORD_TITLE}</h1>
           <p className="quiet">
-            Site-wide chronological record of conclusively settled results. Current cursor: <code>{cursor}</code>.
+            {HONORS_RECORD_DESCRIPTION} Current cursor: <code>{cursor}</code>.
           </p>
           <div className="theme-toggle-row">
             <ThemeToggle />
@@ -91,22 +88,23 @@ export default async function ResultsPage({
         </header>
         <PublicLedgerLive origin={honorsData.origin} targets={publicViewWatchTargets(honorsData.watch)} />
 
-        {/* Section α: Settled Results */}
+        {/* Section α: Recognition events */}
         <section className="results-section" aria-labelledby="results-heading">
           <h2 id="results-heading">
             <span className="gr" aria-hidden="true">
               α
             </span>
-            Settled results on this page ({results.length})
+            Honors entries on this page ({results.length})
           </h2>
 
           {results.length === 0 ? (
             <div className="empty-state" role="status">
               <p>
-                <strong>No settled results on this page.</strong>
+                <strong>No Honors entries on this page.</strong>
               </p>
               <p className="quiet">
-                Claims that reach machine-checked status (formal artifact + independent compilation)
+                Claims that reach machine-checked status (formal artifact, independent compilation
+                and statement-equivalence review)
                 or strongly-supported status (independent review + surviving refutations), and resolved
                 problems appear here in chronological event order.
               </p>
@@ -248,12 +246,12 @@ export default async function ResultsPage({
           <nav className="pagination-nav" aria-label="Honors pagination">
             {next_before !== undefined && (
               <Link className="btn-pagination" href={`/results?before=${encodeURIComponent(next_before)}`}>
-                ← Older settled results
+                ← Older Honors entries
               </Link>
             )}
             {before !== undefined && (
               <Link className="btn-pagination" href="/results">
-                Latest settled results →
+                Latest Honors entries →
               </Link>
             )}
           </nav>

@@ -697,11 +697,36 @@ describe("Honors / Results Share Card", () => {
     const data = buildResultsShareCardData(honors);
 
     expect(data.code).toBe("HONORS");
-    expect(data.statusBadge).toBe("SETTLED RESULTS");
+    expect(data.statusBadge).toBe("HONORS RECORD");
+    expect(data.statusKind).toBe("record");
+    expect(data.counts.find((c) => c.label === "Entries on this page")?.value).toBe(1);
     expect(data.counts.find((c) => c.label === "Ordering")?.value).toBe("Chronological");
-    expect(data.suggestedShareText).toContain("[HONORS] Honors: Conclusively Settled Results");
+    expect(data.suggestedShareText).toContain("[HONORS] Honors Record");
+    expect(data.suggestedShareText).toContain("Inspect the recorded standing and evidence for each entry.");
     expect(data.suggestedShareText).not.toContain("ranking");
     expect(data.suggestedShareText).not.toContain("top");
+  });
+
+  test("empty and mixed Honors pages remain neutral records without upgrading their entries", () => {
+    const claim = createMinimalHonorsRecord().results[0];
+    if (!claim || claim.kind !== "claim") throw new Error("Missing claim fixture");
+    const { version, cursor, ...base } = claim;
+    expect([version, cursor]).toEqual([1, 1]);
+    const problem = { ...base, kind: "problem" as const, status: "resolved" as const, result_id: "P-100" };
+    for (const results of [[], [problem], [claim, problem]]) {
+      const honors = createMinimalHonorsRecord({ results });
+      const original = JSON.stringify(honors);
+      const data = buildResultsShareCardData(honors);
+      expect(data.title).toBe("Honors Record");
+      expect(data.statusKind).toBe("record");
+      expect(data.statusBadge).toBe("HONORS RECORD");
+      expect(data.counts.find((c) => c.label === "Entries on this page")?.value).toBe(results.length);
+      expect(data.suggestedShareText).not.toMatch(/conclusively settled|SETTLED RESULTS/);
+      const imageMarkup = renderToStaticMarkup(renderShareCard(data));
+      expect(imageMarkup).toContain("background-color:#2c3e50");
+      expect(imageMarkup).not.toContain("background-color:#1f6f43");
+      expect(JSON.stringify(honors)).toBe(original);
+    }
   });
 });
 

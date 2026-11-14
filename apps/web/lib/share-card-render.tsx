@@ -30,6 +30,7 @@ function getStatusTheme(kind: ShareCardStatusKind): { bg: string; text: string; 
       return { bg: "#8b2500", text: "#ffffff", border: "#5c1800" };
     case "incident":
       return { bg: "#b31b1b", text: "#ffffff", border: "#7a1111" };
+    case "record":
     case "sharpening":
     case "active":
     case "open":

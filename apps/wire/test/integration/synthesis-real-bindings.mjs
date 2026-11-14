@@ -1187,12 +1187,12 @@ await runLocalWorkerJourney(
     );
     assert.equal(closingFace.synthesis.body_md, closingWarningBody.body_md);
     assert.notEqual(
-      (await env.DB.prepare("SELECT status FROM problems WHERE id=?").bind(problemId).first()).status,
+      (await env.DB.prepare("SELECT status FROM problems WHERE id=?").bind(problemId).first())
+        .status,
       "resolved",
       "publishing a warned closing declaration never resolves a problem by itself",
     );
     console.log(JSON.stringify({ stage: "closing-synthesis-warning-publication", status: "pass" }));
-
 
     // W2.6 (79n, z3or): claims (anchored across a statement revision), their
     // versions and the syntheses rebuild from the log.

@@ -14,6 +14,7 @@ import {
 import {
   ProblemDormancyEventSchema,
   ProblemLifecycleActionRequestSchema,
+  ProblemResolutionRecordSchema,
 } from "../../src/problems.ts";
 import {
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
@@ -412,6 +413,7 @@ function problemFixtures(directory: "valid" | "invalid"): readonly ProblemFixtur
         "problem-dormancy.json": ProblemDormancyEventSchema,
         "problem-slow-mode-set.json": ProblemSlowModeRequestSchema,
         "problem-slow-mode-disabled.json": ProblemSlowModeRequestSchema,
+        "problem-resolution-screening-notice.json": ProblemResolutionRecordSchema,
       };
     const operationalSchema = operationalSchemas[filename];
     if (operationalSchema !== undefined) {

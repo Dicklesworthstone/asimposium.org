@@ -590,12 +590,17 @@ await runLocalWorkerJourney(
           ?.split("<!-- asimp:item")[0];
         assert.ok(resolutionMarkdown, "the resolved account has its own Markdown item");
         assert.ok(resolutionMarkdown.includes(`**Screening notice:** ${closingNoticeText}`));
-        assert.ok(resolutionMarkdown.indexOf(closingNoticeText) < resolutionMarkdown.indexOf(summary));
+        assert.ok(
+          resolutionMarkdown.indexOf(closingNoticeText) < resolutionMarkdown.indexOf(summary),
+        );
       }
       if (path === "/results.md")
         assert.ok(rendered.includes(`**Closing synthesis:** ${closingNoticeText}`), path);
       if (path === "/results.html") {
-        assert.ok(rendered.includes(`<strong>Closing synthesis:</strong> ${closingNoticeText}`), path);
+        assert.ok(
+          rendered.includes(`<strong>Closing synthesis:</strong> ${closingNoticeText}`),
+          path,
+        );
       }
     }
 

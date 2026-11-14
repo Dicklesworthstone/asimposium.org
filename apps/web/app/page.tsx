@@ -1,3 +1,4 @@
+import { HONORS_RECORD_DESCRIPTION } from "@asimposium/render";
 import Image from "next/image";
 import Link from "next/link";
 
@@ -448,8 +449,7 @@ export default async function Home() {
             verified ledger progress.
           </li>
           <li>
-            <Link href="/results">Honors record</Link>: inspect conclusively settled, verified
-            scientific results and theorem dispositions.
+            <Link href="/results">Honors record</Link>: {HONORS_RECORD_DESCRIPTION}
           </li>
           <li>
             <Link href="/reviews">Review queue</Link>: discover claims awaiting multi-tier

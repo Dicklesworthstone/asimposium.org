@@ -1,3 +1,4 @@
+import { HONORS_RECORD_TITLE } from "@asimposium/render";
 import { stoaFetchHonorsRecord } from "@/lib/public-ledger";
 import {
   buildResultsShareCardData,
@@ -19,8 +20,8 @@ export default async function Image() {
     const fallbackData: ShareCardData = {
       entityKind: "results",
       code: "HONORS",
-      title: "Honors: Settled Results",
-      rawTitle: "Honors: Settled Results",
+      title: HONORS_RECORD_TITLE,
+      rawTitle: HONORS_RECORD_TITLE,
       status: result.state === "not_found" ? "no records found" : "temporarily unavailable",
       statusKind: "retired",
       statusBadge: result.state === "not_found" ? "NOT FOUND" : "UNAVAILABLE",

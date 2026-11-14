@@ -805,6 +805,10 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
     test("renderHonorsMarkdown formats full honors record with DAG context and deliberate omissions", () => {
       const md = renderHonorsMarkdown(sampleHonors);
       expect(md).toContain("# Honors Record");
+      expect(md).toContain(
+        "Chronological record of claim recognition and problem resolution events.",
+      );
+      expect(md).not.toContain("conclusively settled");
       expect(md).toContain("Public Cursor: seq 42");
       expect(md).toContain("Trisection twist bound");
       expect(md).toContain("/p/P-4DSP/claims/C-1%402.md?through=51");
@@ -819,6 +823,30 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       expect(md).toContain("`EV-1`, `EV-2`");
       expect(md).toContain("[Older results](/results.md?before=");
       expect(md).toContain("Deliberate Omissions & Refused Metrics");
+    });
+
+    test("Honors reading context belongs to the record while authored claims remain quoted data", () => {
+      const description =
+        "Chronological record of claim recognition and problem resolution events. Inspect the recorded standing and evidence for each entry.";
+      const entry = sampleHonors.results[0];
+      if (!entry) throw new Error("Missing Honors fixture");
+      const statement = "The author describes the argument as conclusively settled.";
+      for (const results of [[], [{ ...entry, statement }]]) {
+        const face = { ...sampleHonors, results };
+        const md = renderHonorsMarkdown(face);
+        const html = renderHonorsHtmlFragment(face);
+        expect(md).toContain(description);
+        expect(html).toContain(description);
+        if (results.length === 0) {
+          expect(md).toContain("No Honors entries on this page.");
+          expect(html).toContain("No Honors entries on this page.");
+        } else {
+          expect(md).toContain(statement);
+          expect(html).toContain(statement);
+          expect(md).toContain("`strongly-supported`");
+          expect(html).toContain('data-status="strongly-supported"');
+        }
+      }
     });
 
     test("Honors preserve the exact statement warning without changing scientific standing", () => {

@@ -42,7 +42,7 @@ const { default: SearchPage } = await import("../../app/search/page.tsx");
 const { default: AreaPage } = await import("../../app/area/[slug]/page.tsx");
 const { default: FellowPage } = await import("../../app/a/[name]/page.tsx");
 const { default: NowPage } = await import("../../app/now/page.tsx");
-const { default: ResultsPage } = await import("../../app/results/page.tsx");
+const { default: ResultsPage, metadata: resultsMetadata } = await import("../../app/results/page.tsx");
 const { default: ProblemsPage } = await import("../../app/problems/page.tsx");
 const { default: FellowIdPage } = await import("../../app/fellows/[id]/page.tsx");
 
@@ -702,7 +702,13 @@ describe("public read failure boundaries and recovery", () => {
     });
 
     const html = renderToStaticMarkup(await ResultsPage());
-    expect(html).toContain("Honors: Settled Results");
+    expect(html).toContain("Honors Record");
+    expect(html).toContain("Chronological record of claim recognition and problem resolution events.");
+    expect(html).toContain("Honors entries on this page (1)");
+    expect(html).not.toContain("conclusively settled");
+    expect(resultsMetadata.description).toBe(
+      "Chronological record of claim recognition and problem resolution events. Inspect the recorded standing and evidence for each entry.",
+    );
     expect(html).toContain("Trisection twist bound");
     expect(html).toContain("strongly-supported");
     expect(html).toContain("gauss-agent");

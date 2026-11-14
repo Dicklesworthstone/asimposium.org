@@ -51,6 +51,7 @@ import {
   ProblemFaceResponseSchema,
   SINGLE_TEAM_PROBLEM_NOTICE,
 } from "../../packages/contracts/src/ledger.ts";
+import { HonorsResponseSchema } from "../../packages/contracts/src/honors.ts";
 import {
   parsePublicProblemExport,
   PUBLIC_EXPORT_FORMAT,
@@ -1401,6 +1402,7 @@ async function main() {
       `/p/${problemId}/gaps`,
       `/r/p/${problemId}/gaps/${gapIds[0]}`,
       "/now",
+      "/results",
       "/search?q=parity",
     ];
 
@@ -1418,6 +1420,54 @@ async function main() {
         if (/Content Security Policy/i.test(message.text())) cspViolations.push(message.text());
       });
       const mode = javaScriptEnabled ? "js" : "no-js";
+      const honorsResponse = await fetch(`${target.origin}/results.json`, {
+        headers: { "user-agent": USER_AGENT },
+      });
+      assert.equal(honorsResponse.status, 200, "canonical Honors record");
+      const honorsFace = HonorsResponseSchema.parse(await honorsResponse.json());
+      await page.goto(agora.origin, { waitUntil: "load" });
+      await page.getByRole("link", { name: "Honors record", exact: true }).click();
+      await page.waitForURL(`${agora.origin}/results`);
+      await page.getByRole("heading", { name: "Honors Record", exact: true, level: 1 }).waitFor();
+      const honorsDescription = "Chronological record of claim recognition and problem resolution events. Inspect the recorded standing and evidence for each entry.";
+      const honorsHeader = await page.locator("main > header").innerText();
+      record(`${mode} Honors: discovery and metadata describe recognition events without blanket certainty`,
+        honorsHeader.includes(honorsDescription) &&
+          !honorsHeader.includes("conclusively settled") &&
+          await page.locator('meta[name="description"]').getAttribute("content") === honorsDescription);
+      const displayedHonors = await page.locator("li.result-card").evaluateAll((cards) => cards.map((card) => [
+        card.querySelector(".result-sub code")?.textContent?.trim(),
+        card.querySelector(".status-badge")?.textContent?.trim(),
+      ]));
+      const honorsHeading = page.locator("#results-heading");
+      const headingText = await honorsHeading.textContent();
+      const visibleHeadingText = await honorsHeading.innerText();
+      const expectedHeading = `Honors entries on this page (${honorsFace.results.length})`;
+      const entriesMatch = JSON.stringify(displayedHonors) === JSON.stringify(honorsFace.results.map((item) => [
+        `${item.result_id}${item.kind === "claim" ? `@${item.version}` : ""}`, item.status,
+      ]));
+      record(`${mode} Honors: the returned page keeps canonical entry order and individual standing`,
+        entriesMatch && await honorsHeading.isVisible() && headingText.includes(expectedHeading),
+        {
+          entries_match: entriesMatch,
+          expected_count: honorsFace.results.length,
+          rendered_count: displayedHonors.length,
+          logical_heading_matches: headingText.includes(expectedHeading),
+          visible_heading_matches_case: visibleHeadingText.includes(expectedHeading),
+          heading_text_transform: await honorsHeading.evaluate((element) => getComputedStyle(element).textTransform),
+        });
+      const honorsMdHref = await page.getByRole("link", { name: "Honors Markdown face", exact: false }).getAttribute("href");
+      record(`${mode} Honors: the human page points at its canonical agent record`,
+        honorsMdHref === `${target.origin}/results.md`);
+      for (const suffix of ["md", "html"]) {
+        const response = await fetch(`${target.origin}/results.${suffix}`, {
+          headers: { "user-agent": USER_AGENT },
+        });
+        const body = await response.text();
+        record(`${mode} Honors: canonical ${suffix} retains the same event-reading context`,
+          response.status === 200 && body.includes(honorsDescription) &&
+            !body.includes(WORKSHOP_CANARY) && !body.includes(SCRATCH_CANARY));
+      }
       const followClaimPublication = async (kind, id, claimPin, work, fellow, sponsor) => {
         const previous = page.url();
         const segment = kind === "evidence" ? "evidence" : "reviews";
@@ -2708,6 +2758,7 @@ async function main() {
       const context = await browser.newContext();
       const page = await context.newPage();
       for (const path of [
+        "/results",
         `/p/${problemId}`,
         `/p/${problemId}/claims/${claimId}`,
         `/p/${singleTeamProblemId}`,
@@ -3101,7 +3152,7 @@ async function main() {
 
     const context = await browser.newContext({ reducedMotion: "reduce" });
     const page = await context.newPage();
-    for (const path of ["/", "/problems", `/p/${problemId}`, `/p/${problemId}/claims/${claimId}`]) {
+    for (const path of ["/", "/problems", "/results", `/p/${problemId}`, `/p/${problemId}/claims/${claimId}`]) {
       await page.goto(`${agora.origin}${path}`, { waitUntil: "load" });
       await page.addScriptTag({ path: AXE });
       const violations = await page.evaluate(async () => {

@@ -23,11 +23,12 @@
 
 import type { ClaimFaceResponse, HonorsResponse, ProblemFaceResponse } from "@asimposium/contracts";
 import { ProblemResolutionRecordSchema, SINGLE_TEAM_PROBLEM_NOTICE } from "@asimposium/contracts";
-import { screeningNoticeText } from "@asimposium/render";
+import { HONORS_RECORD_DESCRIPTION, HONORS_RECORD_TITLE, screeningNoticeText } from "@asimposium/render";
 import { parseJsonBody } from "./claim-page-view";
 import { SITE } from "./site";
 
 export type ShareCardStatusKind =
+  | "record"
   | "open"
   | "sharpening"
   | "active"
@@ -535,10 +536,10 @@ export function buildResultsShareCardData(
   const canonicalAgentUrl = "https://a.asimposium.org/results.md";
 
   const totalResults = honors.results.length;
-  const title = `Honors: Conclusively Settled Results (${totalResults} entries)`;
+  const title = HONORS_RECORD_TITLE;
 
   const counts: ShareCardCountItem[] = [
-    { label: "Settled Results", value: totalResults },
+    { label: "Entries on this page", value: totalResults },
     { label: "Cursor", value: `#${honors.cursor}` },
     { label: "Ordering", value: "Chronological" },
   ];
@@ -548,9 +549,9 @@ export function buildResultsShareCardData(
     code: "HONORS",
     title,
     rawTitle: title,
-    status: "chronological honors record (no leaderboards)",
-    statusKind: "strongly-supported",
-    statusBadge: "SETTLED RESULTS",
+    status: HONORS_RECORD_DESCRIPTION,
+    statusKind: "record",
+    statusBadge: "HONORS RECORD",
     cursor: honors.cursor,
     url: resultsUrl,
     canonicalAgentUrl,
