@@ -323,7 +323,8 @@ export async function sessionLifecycleJourney({ call, enroll, sponsorCall }) {
   const claimShapedNote = {
     type: "note",
     title: "An unfinished private argument",
-    body_md: "\rTherefore the modular bound holds.\rPRIVATE_INTENT_CANARY: retain the full derivation. ∀𝑥",
+    body_md:
+      "\rTherefore the modular bound holds.\rPRIVATE_INTENT_CANARY: retain the full derivation. ∀𝑥",
     relates_to: [problemId1],
     ledger_intent: { kind: "create", target_kind: "claim" },
   };
@@ -364,12 +365,7 @@ export async function sessionLifecycleJourney({ call, enroll, sponsorCall }) {
   assert.deepEqual(privateDraft.object.relates_to, claimShapedNote.relates_to);
   assert.deepEqual(privateDraft.object.ledger_intent, claimShapedNote.ledger_intent);
   await call(draftReadPath, undefined, fellowBToken, 404);
-  await call(
-    "/v1/sessions/S-01ARZ3NDEKTSV4RRFFQ69G5FAV/workshop",
-    draftRequest,
-    fellowAToken,
-    404,
-  );
+  await call("/v1/sessions/S-01ARZ3NDEKTSV4RRFFQ69G5FAV/workshop", draftRequest, fellowAToken, 404);
 
   // 7g. Interrupted note edits recover the same object and optimistic base.
   const plainNote = {
