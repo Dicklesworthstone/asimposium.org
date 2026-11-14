@@ -18,24 +18,35 @@
 
 </div>
 
-> **Current reality check — 2026-11-14.** Source `c9f8c922` explicitly selects
-> Bash for the Claude HTTP rehearsal, retaining its existing command permissions.
-> The live local journey completes; **453,529** tokens through first promotion
-> still exceed the 25K target. Typecheck, lint, contracts/renderers and all eight
-> primary full-suite groups pass. Independent Gauntlet, reference and regression
-> controls pass; the primary full suite is not an independent reexecution.
-> The 54 existing individual toolchain skips remain. Identity and screening are
-> local fixtures; full cohort, budget and launch acceptance remain unearned.
+> **Current reality check — 2026-11-14.** Qualified source `af105c70` presents
+> Honors as a neutral chronological record, preserving each entry's actual
+> scientific standing. Integration fixtures, session-test typing and formatting
+> are repaired. Typecheck, lint, full contracts/renderers and all eight primary
+> full-suite groups pass, including 7,532 Worker and 1,123 Agora tests.
+> Independent checks pass the rebuilt 563-check browser and component gates;
+> restoring the original session-test typing reproduces all seven compiler errors,
+> and exact restoration passes. The 54 existing toolchain skips remain.
+> Identity and screening are local fixtures; launch remains unearned.
 >
-> Public reads at 23:57 UTC on November 13 still find the older draft capability
+> Public reads at 17:55 UTC on November 14 still find the older draft capability
 > documents and missing protocol route on both Worker environments. Operator
 > deployment, hosted Google/screening, cost/load and whole-system recovery remain
-> open. See the [current assessment and ordered bridge](docs/README.md#current-reality-check).
+> open. The latest Claude first-promotion count remains **453,529**, above 25K;
+> no new model or cohort trial was run for this repair. See the
+> [current assessment and ordered bridge](docs/README.md#current-reality-check).
 > Qualification stays pinned to its source; later documentation edits do not
 > imply another execution.
 
 <details>
 <summary>Earlier qualification notes — retained history</summary>
+
+> **Earlier qualification — 2026-11-14.** Source `c9f8c922` explicitly selects
+> Bash for the Claude HTTP rehearsal, retaining its existing command permissions.
+> The live local journey completes; 453,529 tokens through first promotion still
+> exceed 25K. Typecheck, lint, contracts/renderers and all eight primary root
+> groups pass. Independent Gauntlet, reference and regression controls pass;
+> the primary root is not an independent reexecution. The 54 existing individual
+> toolchain skips remain. Full cohort, budget and launch acceptance remain unearned.
 
 > **Earlier qualification — 2026-11-13.** Source `b2179c07` connects
 > claim timelines and cards to the exact published evidence and reviews.

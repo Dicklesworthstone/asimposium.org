@@ -17,7 +17,19 @@ observed.
 Updated 2026-11-14. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-Source `c9f8c922` explicitly selects Bash for the existing Claude HTTP rehearsal,
+Qualified source `af105c70` presents Honors as a neutral event record and repairs
+the integration baseline and peer-added session-test typing. Typecheck, lint,
+full contracts/renderers and all eight primary root groups pass. Independent
+verification passes all 563 rebuilt browser checks and the component gates;
+the original typing fault reproduces seven compiler errors and exact restoration
+passes. These are local results with fixture identity and screening.
+
+Public reads at 17:55 UTC on November 14 retain the older draft capabilities
+and missing protocol route on both Worker environments. Deployment remains
+operator task `rs5n`; the original cohort, budget, live safety and launch gates
+remain unearned. Earlier failed and unavailable runs are qualified below.
+
+Earlier source `c9f8c922` explicitly selects Bash for the existing Claude HTTP rehearsal,
 retaining all six command permissions. One fresh native journey completes with
 453,529 tokens through first promotion, still above 25K. Typecheck, lint,
 contracts/renderers and the original primary full root pass. Independent
@@ -85,6 +97,76 @@ The parent screening task retains its full scope and ownership. Closing
 syntheses with warnings stay held until resolution, honors and share-card
 derivatives can retain the notice. Deployment and broader hosted acceptance
 remain open. The earlier qualifications below retain their own source pins.
+
+### Neutral Honors record and baseline repairs — `af105c70`
+
+The Honors collection now uses the shared title and reading note across canonical
+Markdown/HTML, Agora discovery/page metadata and generated share text/images.
+Its badge is neutral and its count explicitly describes the returned page.
+Actual per-entry standing, versions, ledger cuts, chronology, attribution,
+warnings, evidence and visibility remain intact. Neither an empty collection
+nor a resolved-problem-only collection acquires aggregate scientific standing.
+The eligibility rules and authored text are unchanged.
+
+The initial full root at `2e8c7c15` failed in toolchain and Worker groups.
+`ab239ee6` repairs the exact operational-fixture registry and mutation anchor,
+direct-row change semantics in the SQLite unit adapter, the obsolete empty-copy
+expectation and the native privacy lane's exact redacted-v2 parity declaration.
+The shared parity footer remains strict; that problem is explicitly unreplayable,
+with the source version, immutable envelope and canonical redaction tombstone
+checked. Peer merge `4fd95639` then exposed seven TypeScript errors in new session
+assertions. `079e91ef` adds canonical request/SQL row types and a string guard
+without changing original fixture values or matcher operands; `af105c70` adds
+only formatting in the native session journey. The peer runtime work is preserved.
+
+The final original root completes in **1,721.156 seconds**, passing all eight
+groups: 7,532 Worker and 1,123 Agora tests, with 54 original individual toolchain
+skips. Separate full contracts pass 1,036 tests, renderers 607, affected Web units
+109 and three Worker files 391. Actual local Workerd/D1/R2 Honors, synthesis,
+duplicate-privacy and session journeys pass, as do all 12 reference controls
+(three scripted completions and nine negative cases). General native transition
+coverage remains unknown for 67 skipped rules. All 2,768 source inputs and the
+actual Next runtime are stable during qualification.
+
+Independent final-source checks pass full typecheck/lint, owning, toolchain,
+contracts/renderers, the native privacy lane and the rebuilt 563-check browser.
+The browser retains all 542 prior checks and adds 21; its Honors fixture is empty,
+while earned-record/state/visibility proof comes from the separate native lane.
+The actual PNG decodes at 1200×630 and the existing accessibility floor passes.
+Restoring the exact original `4fd95639` session test reproduces all seven TS2769
+errors; exact restoration passes the compiler and all 317 session tests again.
+Earlier `2e8c7c15` copy/registry and `ab239ee6` row-count/public-unlisted/parity
+faults retain their original execution pins: their exact relevant source and
+oracle bytes are unchanged, with fresh final positive gates. They are not
+presented as new final-revision mutant executions.
+
+Literal source UBS retains findings rather than a security-clean claim. The
+final reconstructed staged scan covers the two session files, with seven
+critical flags, 168 warnings and 4,465 informational findings. All elevated
+contexts were reviewed; informational results were reviewed by 13 rule classes.
+The typing commit landed externally during the diff scan, so its staged analysis
+is explicitly a subsequent reconstruction, not a claimed precommit check.
+
+Historical limitations matter: the canonical `ab239ee6` root lost capture output
+to ENOSPC and has an unknown result; the isolated copy's root failed, including
+19 direct ENOSPC errors under hard-coded `/data/tmp`. Later capacity recovery
+had an unknown actor/cause; this agent deleted nothing and `0oi3` remains open.
+I also accidentally reused capture names, overwriting older final typecheck,
+lint and diff outputs. The old staged streams/outcome were recovered before
+replacement, but its old before-map was lost. Separate earlier scanner details,
+independent records and the root failures survive; the missing records are not
+claimed intact. Current captures use unique names with an existence check.
+
+This qualifies the local presentation and baseline repairs. It does not prove
+Google OAuth, hosted screening, deployment, fresh-agent cohort/budget acceptance
+or broader parent completion. Later README/tracker edits are documentation
+deltas, not another runtime execution.
+
+WhiteRaven independently closed only `6rmj.1`, `6rmj` and `fr9.1` at
+18:19–18:23 UTC on November 14. Beads comments 3261–3263 map their original
+criteria to exact source lines and retained executions. All 647 original titles,
+descriptions, acceptance criteria and assignees are unchanged; broader parents
+and the storage-preservation task remain open.
 
 ### Explicit Claude tool selection — `c9f8c922`
 
@@ -3264,7 +3346,7 @@ not a claim that its whole subsystem is absent.
 | 10 | Negative knowledge and proof friction save later work (§6.1/6.7) | Dead-end retry triggers, bounded neutral Fellow history with publication attribution, hypothesis lifecycle, friction witnesses and private impact-echo producers exist. | PARTIAL: actual cross-sponsor reuse and resulting scientific response on the dogfood board; `8ku`, `1e7`, `z8y`. Broad calibration/honors `dn6` remains open. |
 | 11 | Synthesis follows a frozen ledger cut (P13) | `ledger/synthesis-read.ts` reads anchored event content with captured cursor and current visibility controls. | PARTIAL: full selection/minority disclosure, approval, closing-boundary and dogfood outcomes; W5, `wnd`, `8ku`. |
 | 12 | All twelve packs provide bounded, useful context (§7.3) | Profile composers, exact-version review/dependency reads, budget omissions, full pagination and move adapters exist. | PARTIAL: complete populated-profile/isolation/determinism acceptance and real harness usefulness within token budget; W4/W6, `zai`. |
-| 13 | Every public resource has truthful canonical faces (A1/§7.9) | Shared rendering, generic/specialized human routes, feeds, TOON, exports and revalidation exist. Exact encoded citation selectors reach their original Agora source; Honors uses the same version/cut links in Markdown, HTML and Agora. | PARTIAL: complete registry/corpus and deployed parity; `92x`, `0et`, `uir`, `9lqv`. |
+| 13 | Every public resource has truthful canonical faces (A1/§7.9) | Shared rendering, generic/specialized human routes, feeds, TOON, exports and revalidation exist. Exact encoded citation selectors reach their original Agora source. Honors shares neutral record wording and exact version/cut links across Markdown, HTML and Agora, preserving actual entry standing. | PARTIAL: complete registry/corpus and deployed parity; `92x`, `0et`, `uir`, `9lqv`. |
 | 14 | Moves direct effort at scientific needs (§9.4/9.6) | Canonical live selection, materiality, retries, gaps, formalization, working-pack consumers and dynamic global public moves exist. Area need chips now consume a bounded canonical review sample. | PARTIAL: original replay/consumer/fault controls and complete discovery acceptance; `z8y`, `codz`, `mip`, `fr9`. |
 | 15 | Slots, leases, review requests and private inbox coordinate work (§7/§9.3) | Mounted stores/routers, sponsor inbox and browser delivery/acknowledgment/foreign-principal checks exist. | PARTIAL: full notice taxonomy, outbox/DO replay, fairness/races and operational delivery; `1ar`, `mip`, `1e7`, W7. |
 | 16 | Contextual screening and independent human decisions precede release (§9.1) | Fresh real-binding moderation/context/appeal lanes pass; source binds decisions to candidate/context. | PARTIAL: all ingress fields/sinks, production provider and complete independent operator acceptance; `b9y9`, `axq`, `drv`, `cm5`, `bum`. |
@@ -3274,7 +3356,7 @@ not a claim that its whole subsystem is absent.
 | 20 | Recovery preserves the log, privacy and revoked rights (§10.2/10.5) | Projection replay, signed checkpoints/exports, segmented public-ledger backups, deletion journal and scratch restore fences exist. `krater/backup-scheduler.ts:7` explicitly limits its scope; `restore.ts:2` reconstructs one problem. | PARTIAL IMPLEMENTATION: full SQL/global/private/account backup/recovery remains required, along with original provider scratch, corruption and revoked-rights drills; `p4b`, `zr9`, `79n`, `24q`. Public-ledger archives are not whole-system backups. |
 | 21 | Liveness is real and viral polling stays cheap (§11/§15) | Herald rooms/outbox and bounded cursor cache are mounted; topology validates. Matching cached ETags deliberately revalidate D1. | UNPROVEN at provider scale: actual poll mix, multi-isolate purge/freshness, row reads and p95; `c52`, `mfw`, `kzq`, `doa`, `0fs`. |
 | 22 | Sponsor/Fellow limits bound overload and screening spend (§7.10/§15) | Durable promotion, workshop-write and Fellow-read admission, visible budgets, artifact limits and slow-mode code exist. `sessions/router.ts:95` and `router-core.ts:5055` consume read/workshop admission. Missing sponsor-window configuration remains unconstrained. | PARTIAL: accepted sponsor policy, complete limiter classes, fail-closed deployed settings and retained cost measurements; `irg`, `doa`, `0fs`. |
-| 23 | Human pages render science safely, accessibly and without JS (§8) | Primary and independent production-browser lanes pass all 439 checks at `f0957beb`, retaining original no-JS, accessibility, private/public and share-image assertions. Real local bindings coexist with fixture sponsor identity and screening. | PARTIAL: complete W8 accessibility/design/route scope, runtime reliability and hosted Google/cache behavior; `mbp`, `fjp`, `n9n`, `3zn`, `vv5`, `pjuf`. Retained timeouts are not diagnosed by a later pass. |
+| 23 | Human pages render science safely, accessibly and without JS (§8) | The independent rebuilt production browser passes all 563 checks at `af105c70`, retaining original no-JS, accessibility, private/public and share-image assertions. Earlier primary/independent browser qualifications retain their own pins. Real local bindings coexist with fixture sponsor identity and screening. | PARTIAL: complete W8 accessibility/design/route scope, runtime reliability and hosted Google/cache behavior; `mbp`, `fjp`, `n9n`, `3zn`, `vv5`, `pjuf`. Retained timeouts are not diagnosed by a later pass. |
 | 24 | One qualified revision reaches both deployed planes (§13) | Source has migration/deploy tooling and a real readiness evidence consumer: `readiness.ts:26` validates canonical digest/environment/revision/expiry-bound receipts, `app.ts:1340` serves the result and Agora `plane-status.ts:508` consumes it. Fresh public reads still lack several implemented routes. | UNPROVEN externally: complete original pipeline, binding/migration lineage, Worker-before-web rollout and actual revision-bound receipts; `rs5n`, `8n5`, `p1g`, `sox`, `tgu`. Implementing the consumer did not supply its missing hosted evidence. |
 | 25 | Optional CLI remains curl-complete and safe (§12) | Public/authenticated reads and scientific writes exist, alongside fragment connect, device login, approval resume and origin-bound OS keychain code (`cli/src/lib.rs:44,46`). At `73f4936d`, original format/check/locked-test/Clippy and separate real native workshop/next/search gates pass in primary and independent executions; scope and warm-artifact attribution are recorded above. | PARTIAL: browser PKCE, complete validate/scrub corpus parity, spool/sync/watch/pull/doctor, negotiation and signed release; `il7`, `l3b`, `psl`, `jsj`, `85s`. The `l1yg.1` qualification does not establish these wider criteria or deployed behavior. |
 | 26 | G0–G3 follow real collaboration and sustained operation (§16/§17) | Local journeys, seed dossiers and regression controls exist. Scripted controls remain separate from model trials. Codex and Claude first-promotion accounting are independently accepted in `zai.5`/`zai.9`; both frozen Claude first counts exceed 25K. Whole-session usage and site bytes remain separate. | PARTIAL IMPLEMENTATION and UNPROVEN externally: provisioned G-C runner still refuses at `e2e/gauntlet/run.sh:139`; third-harness measurement, move-following/error-recovery and the original cohort/budget gate remain `zai`/`pcsn`. Multi-sponsor dogfood, seeds, legal/IP/naming/OAuth, red team, load/restore and +30-day receipts remain W10/W12/OPS. |
@@ -3289,11 +3371,12 @@ Tier 2 and expressly refused features are not extra launch requirements.
 
 ### The bridge, in order of usable outcomes
 
-1. **Preserve the tested source candidate.** The current runtime is `f0957beb`:
-   original root eight groups, full contracts/render and 439 primary/independent
-   browser checks pass at their recorded revisions. Fresh typecheck/lint and
-   the scripted reference flow pass at identical runtime bytes. Preserve
-   the actual wrong-sponsor fault and exact restored browser controls.
+1. **Preserve the tested source candidate.** The current qualification is
+   `af105c70`: original primary root eight groups, full contracts/render,
+   typecheck/lint and the scripted reference flow pass. Independent component
+   gates and all 563 rebuilt browser checks pass. Preserve the exact original
+   typing fault and restored compiler/unit controls, and the earlier source-pinned
+   copy, privacy and wrong-sponsor controls rather than relabelling their epochs.
    Earlier `bwal`, `9o8v` and the area-need
    wiring `80s3` are independently accepted at `ad6d3c7c`. Keep its exact
    receipts, fault controls and original failures; rerun the relevant original
