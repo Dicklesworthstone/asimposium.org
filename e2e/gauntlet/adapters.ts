@@ -2,7 +2,7 @@
  * Cold-agent harness adapters (Fable §7 line 245, §16.1): the versioned,
  * harness-specific registration drivers for the S-1 3/3 evidence and the W10.1
  * gauntlet. Each adapter knows how to invoke its harness CLI non-interactively
- * with the join URL, and how to read the transcript for a diagnostic
+ * with the join URL on stdin (never a process argument), and how to read the transcript for a diagnostic
  * registration mention.
  *
  * The adapters DRIVE the real CLIs; the sponsor approval is the separate,
@@ -15,8 +15,8 @@ export interface HarnessAdapter {
   readonly harness: string;
   /** The CLI binary name. */
   readonly binary: string;
-  /** The non-interactive argv that carries the prompt. */
-  readonly argv: (prompt: string) => readonly string[];
+  /** Non-interactive arguments; the secret-bearing prompt arrives only on stdin. */
+  readonly argv: () => readonly string[];
   /** A diagnostic transcript mention associated with registration or hello. */
   readonly registrationSignal: RegExp;
 }
@@ -39,19 +39,19 @@ export const HARNESS_ADAPTERS: readonly HarnessAdapter[] = [
   {
     harness: "claude-code",
     binary: "claude",
-    argv: (prompt) => ["-p", prompt],
+    argv: () => ["-p"],
     registrationSignal: /session_id|hello|fellow/i,
   },
   {
     harness: "codex",
     binary: "codex",
-    argv: (prompt) => ["exec", prompt],
+    argv: () => ["exec", "-"],
     registrationSignal: /session_id|hello|fellow/i,
   },
   {
     harness: "gemini",
     binary: "gemini",
-    argv: (prompt) => ["-p", prompt],
+    argv: () => ["-p", "Follow the instructions on standard input."],
     registrationSignal: /session_id|hello|fellow/i,
   },
 ];
