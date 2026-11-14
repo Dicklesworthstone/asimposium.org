@@ -51,6 +51,7 @@ import {
   SynthesizeResponseSchema,
   WorkshopObjectResponseSchema,
   WorkshopPublicationDraftSchema,
+  type WorkshopPushRequest,
   WorkshopPushRequestSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
@@ -8529,8 +8530,11 @@ describe("session protocol routes", () => {
       method: "GET",
       path: `/v1/sessions/${session.session_id}/pack?profile=working&since=0`,
     });
+    assert.ok(typeof duplicateProblem.example.path === "string");
     expect(duplicateProblem.refetch_url).toBe(duplicateProblem.example.path);
-    expect(duplicateProblem.fix_hint).toContain(`GET /v1/sessions/${session.session_id} for status`);
+    expect(duplicateProblem.fix_hint).toContain(
+      `GET /v1/sessions/${session.session_id} for status`,
+    );
     const recoverySchema = getPublicSchemaSlice(new URL(duplicateProblem.schema).pathname);
     expect(recoverySchema).toBeDefined();
     expect(recoverySchema?.body.length).toBeLessThan(2_048);
@@ -11242,13 +11246,14 @@ describe("session protocol routes", () => {
     const note = {
       type: "note",
       title: "A developing claim",
-      body_md: "\r  \rTherefore the invariant holds.\rPRIVATE_INTENT_DRAFT: retain the derivation. ∀𝑥",
+      body_md:
+        "\r  \rTherefore the invariant holds.\rPRIVATE_INTENT_DRAFT: retain the derivation. ∀𝑥",
       relates_to: ["C-context"],
       ledger_intent: { kind: "revise", target_id: "C-context", base_version: 3 },
-    };
+    } satisfies WorkshopPushRequest;
     const publicCursorBefore = await db
       .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
-      .first();
+      .first<{ cursor: number }>();
     const post = (body: unknown, key: string) =>
       call(path, {
         method: "POST",
@@ -11271,7 +11276,9 @@ describe("session protocol routes", () => {
     expect(recoverySchema).toBeDefined();
     expect(recoverySchema?.body.length).toBeLessThan(32_768);
     expect(JSON.parse(recoverySchema!.body).$id).toBe(refusal.schema);
-    expect(await db.prepare("SELECT COUNT(*) AS n FROM workshop_objects").first()).toEqual({ n: 0 });
+    expect(
+      await db.prepare("SELECT COUNT(*) AS n FROM workshop_objects").first<{ n: number }>(),
+    ).toEqual({ n: 0 });
 
     const saved = await post(recovery, "intent-draft");
     expect(saved.status).toBe(201);
@@ -11299,10 +11306,14 @@ describe("session protocol routes", () => {
       "intent-plain",
     );
     expect(plain.status).toBe(201);
-    expect(await db.prepare("SELECT cursor FROM public_cursor WHERE singleton = 1").first()).toEqual(
-      publicCursorBefore,
-    );
-    expect(await db.prepare("SELECT COUNT(*) AS n FROM claims").first()).toEqual({ n: 0 });
+    expect(
+      await db
+        .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+        .first<{ cursor: number }>(),
+    ).toEqual(publicCursorBefore);
+    expect(await db.prepare("SELECT COUNT(*) AS n FROM claims").first<{ n: number }>()).toEqual({
+      n: 0,
+    });
   });
 
   test.each([false, true])(
@@ -11399,8 +11410,12 @@ describe("session protocol routes", () => {
       if (staleProblem.code !== "WORKSHOP_VERSION_CONFLICT") throw new Error("Expected stale base");
       expect(staleProblem.refetch_url).toBe(`${path}/${draft.workshop_id}`);
       expect(staleProblem.schema).toBe(refusal.schema);
-      expect(await db.prepare("SELECT COUNT(*) AS n FROM claims").first()).toEqual({ n: 0 });
-      expect(await db.prepare("SELECT COUNT(*) AS n FROM hypotheses").first()).toEqual({ n: 0 });
+      expect(await db.prepare("SELECT COUNT(*) AS n FROM claims").first<{ n: number }>()).toEqual({
+        n: 0,
+      });
+      expect(
+        await db.prepare("SELECT COUNT(*) AS n FROM hypotheses").first<{ n: number }>(),
+      ).toEqual({ n: 0 });
     },
   );
 
