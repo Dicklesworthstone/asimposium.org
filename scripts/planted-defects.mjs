@@ -918,9 +918,9 @@ export const PLANTS = [
     id: "duplicate-screen-exempts-public-unlisted",
     bead: "u2fe",
     file: "apps/wire/src/problems/proposal-commands.ts",
-    find: "(p.status IN ('active', 'sharpening', 'under-result-review') AND EXISTS (",
+    find: "WHERE v.norm_hash = ? AND p.status IN ('active', 'sharpening', 'under-result-review')",
     replace:
-      "(p.status IN ('active', 'sharpening', 'under-result-review') AND p.unlisted = 0 AND EXISTS (",
+      "WHERE v.norm_hash = ? AND p.status IN ('active', 'sharpening', 'under-result-review') AND p.unlisted = 0",
     command: LANE("problem-duplicate-privacy"),
   },
   {

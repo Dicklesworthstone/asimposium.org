@@ -2287,7 +2287,7 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     expect(resMd.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
     const mdText = await resMd.text();
     expect(mdText).toContain("# Honors Record");
-    expect(mdText).toContain("No settled results on this page.");
+    expect(mdText).toContain("No Honors entries on this page.");
 
     // GET /results.json returns structured JSON
     const resJson = await app.request(

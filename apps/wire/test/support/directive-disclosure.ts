@@ -49,7 +49,10 @@ export async function directiveDisclosureFixture(
         const before = (sql.query("SELECT total_changes() AS n").get() as { n: number }).n;
         const results = sql.query(query).all(...args);
         const after = (sql.query("SELECT total_changes() AS n").get() as { n: number }).n;
-        return { success: true, results, meta: { changes: after - before } };
+        // D1 counts direct rows; total_changes also includes cursor-trigger writes.
+        const changes =
+          after === before ? 0 : (sql.query("SELECT changes() AS n").get() as { n: number }).n;
+        return { success: true, results, meta: { changes } };
       },
     };
     return statement;

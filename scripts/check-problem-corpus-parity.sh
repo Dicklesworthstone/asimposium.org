@@ -62,7 +62,7 @@ while IFS= read -r fixture; do
   # their own Zod schemas before excluding them from the refusal inventory.
   # Keep every other problem-* name subject to the live-code check below.
   case "${base}" in
-    problem-dormancy.json|problem-publication-reviewed.json|problem-slow-mode-set.json)
+    problem-dormancy.json|problem-publication-reviewed.json|problem-slow-mode-set.json|problem-resolution-screening-notice.json)
       continue
       ;;
   esac

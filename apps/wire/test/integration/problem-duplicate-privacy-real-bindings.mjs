@@ -157,7 +157,20 @@ await runLocalWorkerJourney(
       .bind(problem)
       .first();
     assert.ok(source, "the source has an actual public admission");
+    assert.equal(source.object_kind, "problem");
+    assert.equal(source.object_id, problem);
     await fixtures.redactPublicContent(source.id);
+    const redactedContent = await env.DB.prepare(
+      "SELECT payload_json,payload_sha256,redacted_at FROM event_content WHERE event_id=?",
+    )
+      .bind(source.id)
+      .first();
+    assert.equal(redactedContent?.payload_json, '{"control":"redacted"}');
+    assert.equal(redactedContent?.payload_sha256, source.payload_sha256);
+    assert.ok(
+      typeof redactedContent?.redacted_at === "string" && redactedContent.redacted_at.length > 0,
+      "the exact admission content is lawfully redacted",
+    );
     const retained = await env.DB.prepare(
       "SELECT statement,norm_hash FROM problem_statement_versions WHERE problem_id=? AND version=?",
     )
@@ -180,6 +193,11 @@ await runLocalWorkerJourney(
       source,
       "duplicate screening and redaction preserve the immutable envelope",
     );
+    assert.equal(
+      source.object_version,
+      2,
+      "the redacted admission published the revised statement",
+    );
 
     console.log(
       JSON.stringify({
@@ -188,5 +206,15 @@ await runLocalWorkerJourney(
         boundary: "local Workerd/D1; signed sponsor lifecycle; no deploy claim",
       }),
     );
+    // The exact lawfully redacted admission cannot rebuild its statement row.
+    // The shared footer still compares every drift item and every other problem.
+    return {
+      projectionParityExpect: {
+        [problem]: {
+          status: "unreplayable",
+          drift: [`problem_statement_versions:orphan_row:${source.object_version}`],
+        },
+      },
+    };
   },
 );
