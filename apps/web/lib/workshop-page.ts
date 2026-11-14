@@ -1,12 +1,14 @@
 import {
-  type SponsorWorkshopPromotionReceipt,
   type SponsorWorkshopCursorRequest,
   SponsorWorkshopCursorRequestSchema,
   type SponsorWorkshopCursorResponse,
   SponsorWorkshopCursorResponseSchema,
+  type SponsorWorkshopObject,
+  type SponsorWorkshopPromotionReceipt,
   type SponsorWorkshopRequest,
   SponsorWorkshopRequestSchema,
   type SponsorWorkshopView,
+  SponsorWorkshopViewSchema,
 } from "@asimposium/contracts";
 
 import { isCanonicalSponsorId } from "./sponsor-id";
@@ -16,6 +18,94 @@ import { newestWorkshopPreviewIfValid } from "./stoa-sponsor";
 export function workshopPageHref(fellowId: string, problemId: string, before?: number): string {
   const path = `/console/workshop/${encodeURIComponent(fellowId)}/${encodeURIComponent(problemId)}`;
   return before === undefined ? path : `${path}?before_workshop_seq=${before}`;
+}
+
+export function workshopRevisionHref(
+  fellowId: string,
+  problemId: string,
+  workshopId: string,
+  version: number,
+): string {
+  return `${workshopPageHref(fellowId, problemId)}/${encodeURIComponent(workshopId)}?version=${version}`;
+}
+
+export type WorkshopRevisionRequest = SponsorWorkshopRequest & {
+  object: NonNullable<SponsorWorkshopRequest["object"]>;
+};
+
+type WorkshopRevisionPage =
+  | { readonly status: "sign-in" | "invalid" | "unavailable" }
+  | {
+      readonly status: "ready";
+      readonly object: SponsorWorkshopObject;
+      readonly workshopHref: string;
+      readonly previousHref: string | null;
+      readonly nextHref: string | null;
+      readonly currentHref: string;
+    };
+
+/** No fallback to the current draft: a pinned history link must retain the
+ * chosen revision across reloads, concurrent edits and closed sessions. */
+export async function loadWorkshopRevisionPage(
+  sponsorId: unknown,
+  fellowId: string,
+  problemId: string,
+  workshopId: string,
+  version: string | readonly string[] | undefined,
+  read: (
+    sponsorId: string,
+    request: WorkshopRevisionRequest,
+  ) => Promise<StoaCall<SponsorWorkshopView>>,
+): Promise<WorkshopRevisionPage> {
+  if (!isCanonicalSponsorId(sponsorId)) return { status: "sign-in" };
+  if (
+    typeof version !== "string" ||
+    !/^[1-9][0-9]*$/.test(version) ||
+    !Number.isSafeInteger(Number(version))
+  )
+    return { status: "invalid" };
+  const request = SponsorWorkshopRequestSchema.safeParse({
+    fellow_id: fellowId,
+    problem_id: problemId,
+    object: { workshop_id: workshopId, version: Number(version) },
+  });
+  if (!request.success || request.data.object === undefined) return { status: "invalid" };
+  try {
+    const result = await read(sponsorId, { ...request.data, object: request.data.object });
+    if (!result.ok) return { status: "unavailable" };
+    const parsed = SponsorWorkshopViewSchema.safeParse(result.data);
+    if (!parsed.success) return { status: "unavailable" };
+    const view = parsed.data;
+    const object = view.objects[0];
+    if (
+      view.fellow_id !== fellowId ||
+      view.problem_id !== problemId ||
+      view.objects.length !== 1 ||
+      view.has_more ||
+      view.next_cursor !== null ||
+      object?.workshop_id !== workshopId ||
+      object.version !== Number(version) ||
+      !Number.isSafeInteger(object.current_version) ||
+      object.current_version < object.version
+    )
+      return { status: "unavailable" };
+    const href = (selected: number) =>
+      workshopRevisionHref(fellowId, problemId, workshopId, selected);
+    return {
+      status: "ready",
+      object,
+      workshopHref: `${workshopPageHref(
+        fellowId,
+        problemId,
+        object.workshop_seq < Number.MAX_SAFE_INTEGER ? object.workshop_seq + 1 : undefined,
+      )}#${encodeURIComponent(workshopId)}`,
+      previousHref: object.version > 1 ? href(object.version - 1) : null,
+      nextHref: object.version < object.current_version ? href(object.version + 1) : null,
+      currentHref: href(object.current_version),
+    };
+  } catch {
+    return { status: "unavailable" };
+  }
 }
 
 export function privateWorkshopCursorResponse(status: number, body: unknown): Response {

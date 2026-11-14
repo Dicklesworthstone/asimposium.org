@@ -445,6 +445,7 @@ describe("reviewed sponsor suspension", () => {
         ["POST", "workshop.read"],
         ["POST", "workshop.list"],
         ["POST", "workshop.search"],
+        ["POST", "lease.list"],
         ["POST", "sponsor.screening-appeals.submit"],
       ])
         expect(

@@ -4,7 +4,7 @@ import { WorkshopLive } from "@/app/console/workshop-live";
 import { WorkshopPublicationPreview } from "@/app/console/workshop-publication";
 import { auth } from "@/auth";
 import { configuredStoaOrigin, stoaSponsorWorkshop } from "@/lib/stoa";
-import { loadWorkshopPage } from "@/lib/workshop-page";
+import { loadWorkshopPage, workshopRevisionHref } from "@/lib/workshop-page";
 
 export const metadata = {
   title: "Private workshop",
@@ -125,6 +125,19 @@ export default async function WorkshopPage({
                     </code>
                   </div>
                   <h3 className="text-base font-bold my-1">{object.title}</h3>
+                  <p className="text-sm">
+                    <Link
+                      prefetch={false}
+                      href={workshopRevisionHref(
+                        page.view.fellow_id,
+                        page.view.problem_id,
+                        object.workshop_id,
+                        object.current_version,
+                      )}
+                    >
+                      Read revision history
+                    </Link>
+                  </p>
                   <div className="quiet text-xs mb-2">
                     <time dateTime={object.created_at}>{object.created_at}</time>
                     {object.relates_to && object.relates_to.length > 0 ? (

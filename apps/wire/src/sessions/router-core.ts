@@ -344,6 +344,7 @@ import {
 import { readWorkingMovesPack } from "./working-moves";
 import { readWorkshopDirectory, WorkshopDirectoryUnavailable } from "./workshop-directory.ts";
 import { reserveWorkshopWrite, workshopRateLimitedProblem } from "./workshop-quota";
+import { readWorkshopRevision } from "./workshop-revision-read.ts";
 import { logFellowWrite } from "./write-ops-log";
 
 /**
@@ -2874,44 +2875,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       };
 
       if (requestedVersion !== undefined) {
-        const rev = await c.env.DB.prepare(
-          `SELECT workshop_id, version, type, title, body_md, cas_hash, relates_to_json,
-            revision_json, publication_json, ledger_intent_json, revise_action, created_at
-           FROM workshop_revisions
-           WHERE workshop_id = ? AND version = ?`,
-        )
-          .bind(head.workshop_id, requestedVersion)
-          .first<{
-            workshop_id: string;
-            version: number;
-            type: string;
-            title: string;
-            body_md: string;
-            cas_hash: string | null;
-            relates_to_json: string;
-            revision_json: string | null;
-            publication_json: string | null;
-            ledger_intent_json: string | null;
-            revise_action: string;
-            created_at: string;
-          }>();
+        const rev = await readWorkshopRevision(c.env.DB, head, requestedVersion);
         if (rev === null) return workshopNotFound();
-        target = {
-          workshop_id: head.workshop_id,
-          type: rev.type,
-          title: rev.title,
-          body_md: rev.body_md,
-          cas_hash: rev.cas_hash,
-          relates_to_json: rev.relates_to_json,
-          revision_json: rev.revision_json,
-          publication_json: rev.publication_json,
-          workshop_seq: head.workshop_seq,
-          created_at: rev.created_at,
-          version: rev.version,
-          current_version: head.current_version,
-          state: head.state,
-          ledger_intent_json: rev.ledger_intent_json,
-        };
+        target = rev;
       }
 
       const object = await materializeWorkshopObject(c.env, target);
@@ -19133,9 +19099,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           code: "WORKSHOP_READ_BODY_INVALID",
           title: "Workshop read body is invalid",
           detail:
-            "The signed JSON body must contain exactly problem_id and fellow_id, plus an optional positive before_workshop_seq cursor.",
+            "The signed JSON body must contain problem_id and fellow_id, with either an optional before_workshop_seq cursor or an exact object { workshop_id, version } selection.",
           fixHint:
-            "Send the problem and one of your own Fellows in the signed JSON body; pass before_workshop_seq from a prior page's next_cursor to page older rows.",
+            "Send the problem and one of your own Fellows; follow next_cursor for older objects, or select one stored object revision without a page cursor.",
           rule: "A5",
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -19154,13 +19120,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // hard byte ceiling (asimposiumorg-e7j.2). Ownership was proven above,
       // before this query ever runs.
       const beforeWorkshopSeq = parsedRequest.data.before_workshop_seq;
+      const selection = parsedRequest.data.object;
       const objects = await c.env.DB.prepare(
         `SELECT workshop_id, type, title, body_md, cas_hash, relates_to_json, workshop_seq, created_at, revision_json, publication_json, current_version, state, ledger_intent_json
            FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?
              AND (? IS NULL OR workshop_seq < ?)
+             AND (? IS NULL OR workshop_id = ?)
            ORDER BY workshop_seq DESC LIMIT ${SPONSOR_WORKSHOP_PAGE_LIMIT + 1}`,
       )
-        .bind(problemId, fellowId, beforeWorkshopSeq ?? null, beforeWorkshopSeq ?? null)
+        .bind(
+          problemId,
+          fellowId,
+          beforeWorkshopSeq ?? null,
+          beforeWorkshopSeq ?? null,
+          selection?.workshop_id ?? null,
+          selection?.workshop_id ?? null,
+        )
         .all<{
           workshop_id: string;
           type: string;
@@ -19179,6 +19154,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const rows = objects.results ?? [];
       let hasMore = rows.length > SPONSOR_WORKSHOP_PAGE_LIMIT;
       const pageRows = hasMore ? rows.slice(0, SPONSOR_WORKSHOP_PAGE_LIMIT) : rows;
+      if (selection !== undefined && pageRows.length !== 1) return sponsorWorkshopNotFound();
       // The D1 row holds only an excerpt after a spill. Retrieve complete
       // private bytes only AFTER sponsor ownership is established. A sequence
       // of bounded edits can leave both long notes and a long typed publication
@@ -19188,7 +19164,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // Reserve more than the bounded envelope, cursor and array punctuation.
       let remainingBytes = SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES - 1024;
       for (const row of pageRows) {
-        const object = await materializeWorkshopObject(c.env, row);
+        const revision =
+          selection === undefined
+            ? row
+            : await readWorkshopRevision(c.env.DB, row, selection.version);
+        if (revision === null) return sponsorWorkshopNotFound();
+        const object = await materializeWorkshopObject(c.env, revision);
         const bytes = encoder.encode(JSON.stringify(object)).byteLength + 1;
         if (bytes > remainingBytes) {
           if (materialized.length === 0)

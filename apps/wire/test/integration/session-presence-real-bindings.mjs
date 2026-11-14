@@ -4,6 +4,8 @@ import {
   SessionHeartbeatResponseSchema,
   SessionOpenResponseSchema,
   SessionStatusResponseSchema,
+  SponsorLeaseListResponseSchema,
+  SponsorLeaseReleaseResponseSchema,
 } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertRacedWriteLeavesNoTrace } from "./raced-ledger-write.mjs";
@@ -461,6 +463,131 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
     assert.equal(replay.n, 0, "refused pulse must not retain a successful replay");
   }
 
+  // Sponsor recovery is a real signed administrative path, including a paused
+  // Fellow. Retrying the old exact lease must never release a new reservation
+  // acquired on the same object after that first command committed.
+  const recoverySponsor = "usr_sponsor_lease_recovery";
+  const recoveryToken = await enroll("sponsor-lease-recovery-fellow", recoverySponsor);
+  const recoveryProblem = "P-SPONSOR-LEASE-RECOVERY";
+  await fixtures.seedProblem(recoveryProblem, recoverySponsor);
+  const recoverySession = await call(
+    "/v1/sessions",
+    { problem_id: recoveryProblem, intent: "explore" },
+    recoveryToken,
+    201,
+  );
+  const recoveryQuestion = await call(
+    `/v1/sessions/${recoverySession.session_id}/questions`,
+    { body_md: "Which boundary cases need an independent check?", target_refs: [] },
+    recoveryToken,
+    201,
+  );
+  const acquireRecoveryLease = () =>
+    call(
+      `/v1/sessions/${recoverySession.session_id}/leases`,
+      {
+        object: recoveryQuestion.question_id,
+        objective: "Check the boundary cases",
+        deliverable: "A scoped review with a counterexample attempt",
+      },
+      recoveryToken,
+      201,
+    );
+  const recoveryLease = (await acquireRecoveryLease()).lease;
+  const listPath = "/v1/sponsors/leases";
+  const releasePath = "/v1/sponsors/leases/release";
+  const list = async (sponsor = recoverySponsor) =>
+    SponsorLeaseListResponseSchema.parse(
+      await sponsorCall(sponsor, "POST", listPath, "lease.list", {}),
+    );
+  const releaseExact = (lease, sponsor = recoverySponsor, expected = 200) =>
+    sponsorCall(
+      sponsor,
+      "POST",
+      releasePath,
+      "lease.release",
+      { problem_id: recoveryProblem, object: lease.lease_id },
+      expected,
+      releasePath,
+      `console-lease-release-${lease.lease_id}`,
+    );
+  const publicState = () =>
+    env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?").bind(recoveryProblem).first();
+  const beforeReads = await publicState();
+  const ownerPage = await list();
+  assert.equal(ownerPage.sponsor_id, recoverySponsor);
+  assert.equal(ownerPage.leases.length, 1);
+  assert.equal(ownerPage.leases[0].lease_id, recoveryLease.lease_id);
+  assert.equal(ownerPage.leases[0].object, recoveryLease.object);
+  assert.equal(ownerPage.next_cursor, null);
+  assert.ok(!JSON.stringify(ownerPage).includes(recoveryLease.objective));
+  assert.deepEqual((await list(sponsorB)).leases, []);
+  assert.deepEqual(await publicState(), beforeReads, "private discovery appends no public event");
+  const denied = await releaseExact(recoveryLease, sponsorB, 403);
+  assert.equal(denied.code, "NOT_LESSEE_SPONSOR");
+  const firstRelease = SponsorLeaseReleaseResponseSchema.parse(await releaseExact(recoveryLease));
+  assert.equal(firstRelease.lease_id, recoveryLease.lease_id);
+  assert.equal(firstRelease.released_by, recoverySponsor);
+  assert.deepEqual((await list()).leases, []);
+
+  const replacementLease = (await acquireRecoveryLease()).lease;
+  assert.notEqual(replacementLease.lease_id, recoveryLease.lease_id);
+  assert.equal(replacementLease.object, recoveryLease.object);
+  const beforeRetry = await publicState();
+  assert.deepEqual(await releaseExact(recoveryLease), firstRelease);
+  assert.deepEqual(
+    await publicState(),
+    beforeRetry,
+    "an old retry appends no second release event",
+  );
+  const replacementPage = await list();
+  assert.deepEqual(
+    replacementPage.leases.map((lease) => lease.lease_id),
+    [replacementLease.lease_id],
+  );
+  const releaseEvents = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM events WHERE problem_id = ? AND type = 'lease.released'",
+  )
+    .bind(recoveryProblem)
+    .first();
+  assert.equal(releaseEvents.n, 1);
+
+  await sponsorCall(recoverySponsor, "POST", "/v1/fellows/lifecycle", "fellow.lifecycle.change", {
+    fellow_id: recoveryLease.fellow_id,
+    status: "paused",
+    confirm: "change-fellow-lifecycle",
+    step_up_authenticated_at: Math.floor(Date.now() / 1000),
+  });
+  assert.deepEqual(
+    (await list()).leases.map((lease) => lease.lease_id),
+    [replacementLease.lease_id],
+  );
+  const pausedRelease = SponsorLeaseReleaseResponseSchema.parse(
+    await releaseExact(replacementLease),
+  );
+  assert.equal(pausedRelease.lease_id, replacementLease.lease_id);
+  assert.deepEqual(await releaseExact(replacementLease), pausedRelease);
+  assert.deepEqual((await list()).leases, []);
+  const replacementSession = await call(
+    "/v1/sessions",
+    { problem_id: recoveryProblem, intent: "explore" },
+    fellowBToken,
+    201,
+  );
+  const resumedWork = await call(
+    `/v1/sessions/${replacementSession.session_id}/leases`,
+    {
+      object: recoveryQuestion.question_id,
+      objective: "Independently check the boundary cases",
+      deliverable: "A scoped independent review",
+    },
+    fellowBToken,
+    201,
+  );
+  assert.equal(resumedWork.lease.sponsor_id, sponsorB);
+  assert.equal(resumedWork.lease.object, recoveryLease.object);
+  assert.equal(resumedWork.lease.status, "active");
+
   return {
     kind: "session-presence-journey",
     status: "pass",
@@ -468,6 +595,14 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
     concurrent_same_key_requests: 3,
     atomic_races: ["close", "revoke", "pause", "release"],
     lease_challenge_screening: ["held-without-publication", "pass-with-provenance", "exact-replay"],
+    sponsor_lease_recovery: [
+      "private-owner-list",
+      "other-sponsor-refused",
+      "exact-id-replay",
+      "replacement-preserved",
+      "paused-fellow-release",
+      "work-reserved-by-another-fellow",
+    ],
     session_id: sessionIdA,
     problem_id: problemId,
     question_id: questionId,

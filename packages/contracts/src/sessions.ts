@@ -55,6 +55,8 @@ import {
   LeaseReleaseResponseSchema,
   type LeaseStatus,
   LeaseStatusSchema,
+  SponsorLeaseListRequestSchema,
+  SponsorLeaseListResponseSchema,
   type SponsorLeaseReleaseRequest,
   SponsorLeaseReleaseRequestSchema,
   type SponsorLeaseReleaseResponse,
@@ -767,22 +769,32 @@ export const SPONSOR_WORKSHOP_PAGE_LIMIT = 16;
  */
 export const SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 
-export const SponsorWorkshopRequestSchema = z
-  .object({
-    problem_id: ProblemIdSchema,
-    fellow_id: FellowIdSchema,
+const SponsorWorkshopScopeSchema = z
+  .object({ problem_id: ProblemIdSchema, fellow_id: FellowIdSchema })
+  .strict();
+export const SponsorWorkshopRequestSchema = z.union([
+  SponsorWorkshopScopeSchema.extend({
     // Keyset cursor: only objects strictly older than this workshop_seq are
     // eligible. Absent means page one (the newest end of the workshop).
     before_workshop_seq: z.number().int().positive().optional(),
-  })
-  .strict();
+    object: z.never().optional(),
+  }),
+  SponsorWorkshopScopeSchema.extend({
+    /** An exact immutable revision, instead of a page of current heads. */
+    object: z
+      .object({
+        workshop_id: WorkshopObjectIdSchema,
+        version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      })
+      .strict(),
+    before_workshop_seq: z.never().optional(),
+  }),
+]);
 export type SponsorWorkshopRequest = z.infer<typeof SponsorWorkshopRequestSchema>;
 
 /** A small private change signal. No workshop object, body, title, or CAS key
  * belongs in this response; full pages are read only when the cursor changes. */
-export const SponsorWorkshopCursorRequestSchema = SponsorWorkshopRequestSchema.omit({
-  before_workshop_seq: true,
-});
+export const SponsorWorkshopCursorRequestSchema = SponsorWorkshopScopeSchema;
 export type SponsorWorkshopCursorRequest = z.infer<typeof SponsorWorkshopCursorRequestSchema>;
 export const SPONSOR_WORKSHOP_CURSOR_MAX_RESPONSE_BYTES = 2048;
 
@@ -1830,6 +1842,8 @@ export const SessionsContractsSchema = z
     lease_list_response: LeaseListResponseSchema,
     sponsor_lease_release_request: SponsorLeaseReleaseRequestSchema,
     sponsor_lease_release_response: SponsorLeaseReleaseResponseSchema,
+    sponsor_lease_list_request: SponsorLeaseListRequestSchema,
+    sponsor_lease_list_response: SponsorLeaseListResponseSchema,
     record_citation_request: RecordCitationRequestSchema,
     record_citation_response: RecordCitationResponseSchema,
     correct_citation_request: CorrectCitationRequestSchema,

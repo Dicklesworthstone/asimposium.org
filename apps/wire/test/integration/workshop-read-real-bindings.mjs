@@ -3,7 +3,11 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
-import { ProblemNextResponseSchema, WorkshopObjectResponseSchema } from "@asimposium/contracts";
+import {
+  ProblemNextResponseSchema,
+  SponsorWorkshopViewSchema,
+  WorkshopObjectResponseSchema,
+} from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 const cliMode = process.argv[2] === "cli";
@@ -310,6 +314,54 @@ await runLocalWorkerJourney(
     assert.equal(latest.data.body_sha256, sha(editedBody));
     assert.equal(latest.data.object.current_version, 2);
     assert.equal(latest.data.object.version, 2);
+    const sponsorRevision = (draft, version, actor = sponsor, status = 200, extra = {}) =>
+      sponsorCall(
+        actor,
+        "POST",
+        "/v1/sponsors/workshop",
+        "workshop.read",
+        {
+          problem_id: problem,
+          fellow_id: fellow.fellow_id,
+          object: { workshop_id: draft.workshop_id, version },
+          ...extra,
+        },
+        status,
+      );
+    const historyBefore = await env.DB.prepare(
+      "SELECT public_seq, (SELECT MAX(workshop_seq) FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?) AS workshop_seq FROM problems WHERE id = ?",
+    )
+      .bind(problem, fellow.fellow_id, problem)
+      .first();
+    for (const [draft, version, expected] of [
+      [drafts[0], 1, original.data.object],
+      [drafts[0], 2, (await read(`${pathFor(drafts[0])}?version=2`, token)).data.object],
+      [drafts[1], 1, (await read(`${pathFor(drafts[1])}?version=1`, token)).data.object],
+    ]) {
+      const page = SponsorWorkshopViewSchema.parse(await sponsorRevision(draft, version));
+      assert.deepEqual(
+        page.objects,
+        [expected],
+        "both principals read the identical immutable revision, including complete private CAS bytes",
+      );
+      assert.equal(page.has_more, false);
+      assert.equal(page.next_cursor, null);
+    }
+    await sponsorRevision(drafts[0], 999, sponsor, 404);
+    await sponsorRevision({ workshop_id: "W-00000000000000000000000000" }, 1, sponsor, 404);
+    await sponsorRevision(drafts[0], 1, "usr_workshop_stranger", 404);
+    await sponsorRevision(drafts[0], 1, sponsor, 404, { problem_id: "P-WORKSHOP-OTHER" });
+    await sponsorRevision(drafts[0], 1, sponsor, 422, { before_workshop_seq: 10 });
+    await sponsorRevision(drafts[0], 0, sponsor, 422);
+    assert.deepEqual(
+      await env.DB.prepare(
+        "SELECT public_seq, (SELECT MAX(workshop_seq) FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?) AS workshop_seq FROM problems WHERE id = ?",
+      )
+        .bind(problem, fellow.fellow_id, problem)
+        .first(),
+      historyBefore,
+      "reading history never mutates either cursor",
+    );
     await read(`${pathFor(drafts[0])}?version=999`, token, 404);
     await read(`${pathFor(drafts[0], peerSession)}?version=1`, peer, 404);
 
@@ -378,6 +430,7 @@ await runLocalWorkerJourney(
       await env.ARTIFACTS.put(key, corrupt);
       await read(pathFor(drafts[1]), token, 500, "GET", etags[1]);
       await read(pathFor(drafts[1]), token, 500, "HEAD");
+      await sponsorRevision(drafts[1], 1, sponsor, 500);
     }
     await env.ARTIFACTS.put(key, bodies[1]);
     assert.equal((await read(pathFor(drafts[1]), token)).data.object.body_md, bodies[1]);
@@ -397,6 +450,7 @@ await runLocalWorkerJourney(
       (await read(`${pathFor(drafts[0])}?version=1`, token)).data.object.body_md,
       bodies[0],
     );
+    assert.equal((await sponsorRevision(drafts[0], 1)).objects[0].body_md, bodies[0]);
     const resumed = await open(token);
     assert.equal((await read(pathFor(drafts[1], resumed), token)).data.object.body_md, bodies[1]);
     await call(
@@ -453,6 +507,11 @@ await runLocalWorkerJourney(
     });
     await read(pathFor(drafts[0]), token, 401, "GET", etags[0]);
     await read(pathFor(drafts[0]), token, 401, "HEAD");
+    assert.equal(
+      (await sponsorRevision(drafts[0], 1)).objects[0].body_md,
+      bodies[0],
+      "current sponsors can recover immutable drafts after their Fellow is paused",
+    );
     const peerDraft = await call(
       `/v1/sessions/${peerSession.session_id}/workshop`,
       {
@@ -898,6 +957,10 @@ if (!cliMode) {
       assert.match(row.cas_hash, /^sha256:[a-f0-9]{64}$/);
       const read = (actor, selected = scope, expected = 200) =>
         sponsorCall(actor, "POST", path, "workshop.read", selected, expected);
+      const historicalScope = {
+        ...scope,
+        object: { workshop_id: spilled.workshop_id, version: 1 },
+      };
       const assertRefusal = (data, extraCanaries = []) => {
         assert.equal(data.code, "WORKSHOP_NOT_FOUND");
         const serialized = JSON.stringify(data);
@@ -926,6 +989,9 @@ if (!cliMode) {
         spilledBody,
       );
       assertRefusal(await read(recipient, scope, 404));
+      const firstHistory = await read(owner, historicalScope);
+      assert.equal(firstHistory.objects[0].body_md, spilledBody);
+      assertRefusal(await read(recipient, historicalScope, 404));
       for (const headers of [
         {},
         { authorization: `Bearer ${token}` },
@@ -1012,6 +1078,8 @@ if (!cliMode) {
         first.objects,
         "the current sponsor can recover unchanged work",
       );
+      assertRefusal(await read(owner, historicalScope, 404));
+      assert.deepEqual((await read(recipient, historicalScope)).objects, firstHistory.objects);
       await whileBodyHeld(recipient, scope, row.cas_hash, async () => {
         const preview = await sponsorCall(
           recipient,
@@ -1034,6 +1102,8 @@ if (!cliMode) {
       });
       assertRefusal(await read(recipient, scope, 404));
       assertRefusal(await read(owner, scope, 404));
+      assertRefusal(await read(recipient, historicalScope, 404));
+      assertRefusal(await read(owner, historicalScope, 404));
 
       const privateToken = await enroll("workshop-read-erasure", owner);
       const privateProblem = await call(
@@ -1070,6 +1140,11 @@ if (!cliMode) {
         spilledBody,
       );
       assert.equal((await read(owner, privateScope)).objects[0].body_md, spilledBody);
+      const privateHistory = {
+        ...privateScope,
+        object: { workshop_id: privateDraft.workshop_id, version: 1 },
+      };
+      assert.equal((await read(owner, privateHistory)).objects[0].body_md, spilledBody);
       await whileBodyHeld(
         owner,
         privateScope,
@@ -1086,6 +1161,7 @@ if (!cliMode) {
         [privateDraft.workshop_id, "Private erasure canary"],
       );
       assertRefusal(await read(owner, privateScope, 404), [privateDraft.workshop_id]);
+      assertRefusal(await read(owner, privateHistory, 404), [privateDraft.workshop_id]);
       assert.deepEqual(await call("/cursor"), publicBefore);
       assert.deepEqual((await env.PUBLIC_ARTIFACTS.list()).objects, publicObjectsBefore);
       assert.equal(

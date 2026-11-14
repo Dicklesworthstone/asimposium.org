@@ -183,6 +183,7 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/sponsors/screening-posture": true,
   "POST /v1/sponsors/screening-posture/clear": true,
   "POST /v1/sponsors/bootstrap": true,
+  "POST /v1/sponsors/leases": true,
   "POST /v1/sponsors/leases/release": true,
   "POST /v1/sponsors/transfers": true,
   "GET /v1/sponsors/transfers": true,

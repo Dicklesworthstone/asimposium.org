@@ -1765,6 +1765,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       pathname !== "/v1/sponsors/workshop" &&
       pathname !== "/v1/sponsors/workshop/cursor" &&
       pathname !== "/v1/sponsors/workshop/action" &&
+      pathname !== "/v1/sponsors/leases" &&
       pathname !== "/v1/sponsors/leases/release"
     ) {
       await next();
