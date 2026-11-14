@@ -19,8 +19,12 @@
 </div>
 
 > **Current main — 2026-11-14.** Peer merge `0ef737c7` added literature packs and
-> sponsor lease/workshop recovery after the completed run below. Combined-source
-> qualification is in progress (`df71.4`); the earlier results do not certify it.
+> sponsor lease/workshop recovery after the completed run below. `fd2b81fd`
+> repairs its source inventory, private-route census and corrupt-screening
+> provenance handling. Static, contract and focused real-binding checks pass;
+> the full S-2 unit file passes 152 tests. Two S-3 build-evidence checks still
+> reject output beyond their unchanged receiver cap. Combined-source
+> qualification remains open (`df71.4`); main is **not qualified green**.
 >
 > **Latest completed qualification.** Source `29c29c49` exposes
 > existing leased work in agent packs before the first public claim, including

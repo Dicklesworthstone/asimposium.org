@@ -21,9 +21,12 @@ Current main includes peer merge `0ef737c7`, landed at 22:28:59 UTC after the
 qualified root below finished at 22:25:16 UTC. Its 43 paths add literature and
 novelty context, sponsor lease recovery and immutable sponsor workshop reads.
 The merged pack journey retains the first-claim coordination scenario and adds
-the literature assertions after it. These incoming features are preserved;
-combined-source qualification is in progress in `df71.4`, with no transfer of
-the earlier runtime receipts to this later revision.
+the literature assertions after it. These incoming features are preserved.
+The combined root at `c68ac60f` fails 29 Worker tests; `fd2b81fd` repairs the
+source inventory, private-route census and screening-integrity regression.
+Scoped checks and the complete S-2 unit file pass, but two original S-3 build
+checks remain red. `df71.4` stays in progress; no final repaired full-root pass
+or transfer of earlier runtime receipts is claimed.
 
 Qualified source `29c29c49` exposes existing lease objectives and deliverables
 in agent packs before the first public claim. Typecheck, lint, full
@@ -108,6 +111,56 @@ The parent screening task retains its full scope and ownership. Closing
 syntheses with warnings stay held until resolution, honors and share-card
 derivatives can retain the notice. Deployment and broader hosted acceptance
 remain open. The earlier qualifications below retain their own source pins.
+
+### Incoming literature and sponsor recovery — partial repair at `fd2b81fd`
+
+Jeff Emanuel's incoming literature/novelty pack context and sponsor recovery
+features remain intact. The original combined-source root reports seven passing
+groups and one failing group: 7,521 Worker passes and 29 failures. A separate
+full HTTP contract run reports 190 passes and one missing route classification.
+These are actual integration failures, retained at `c68ac60f`.
+
+The repair adds the three newly reached Worker files to S-2's explicit source
+inventory and the exact private sponsor lease read to the HTTP census. It also
+restores the original refusal for corrupt screening provenance, which the new
+literature catch-all had converted into an ordinary omission. Citation tests
+now select the actual ledger records separately from the trusted system notice,
+while preserving exact version, warning, privacy and whole-payload omission
+checks. Oversized records retain only their exact read pointer. The original
+malformed-provenance rejection was reproduced before its producer repair.
+
+Primary scoped checks pass: typecheck/lint eight groups, contracts 1,040 tests,
+renderers 607, the complete HTTP component 191, five owning Worker files 397,
+and the complete S-2 unit file 152. All three whole local Workerd/D1/R2 pack,
+presence and workshop-read journeys pass. Final static and citation checks use
+bytes identical to `fd2b81fd`; earlier scoped runs differ only by the subsequent
+citation-test formatting correction. Independent successor checks pass at the
+exact committed source, including the complete S-2 file. No final repaired
+full-root pass has been recorded.
+
+With all tests fixed, removing only the citation screening-integrity guard
+produces 52 passes and two intended failures, including the original fatal
+receipt assertion. Exact restoration passes all 54 citation/literature tests
+and the complete native pack journey. Removing only the production lease-router
+mount produces 190 HTTP passes and one strict census failure for that exact
+route; restoration passes all 191 tests and the complete presence journey.
+All other inputs and the Next runtime stay fixed. These controls verify the
+repairs, not completion of the remaining integration criteria.
+
+The two original S-3 build cases still fail on the repaired producer. An exact
+unchanged-child diagnostic at clean `fd2b81fd` retains 3,902,789 canonical JSON
+evidence bytes, exceeding the unchanged 3,900,000-byte receiver cap by 2,789.
+This diagnostic is not a gate pass. The complete output, child options, sentinels,
+8 MB parent bound and original over-limit refusal remain unchanged. Receiver
+capacity review remains unresolved, so `df71.4` and its parent remain open.
+
+Literal UBS diff/staged scans cover the five changed code files with identical
+results: zero critical flags, 25 warnings and 305 informational findings, with
+no failed modules or suppressions. All warning sites and 13 informational rule
+classes were reviewed; this does not erase the earlier merged-source findings
+or establish security cleanliness. Identity and screening remain fixtures;
+the prior 593-check browser result stays pinned to `1dcf543d`. No fresh browser,
+model, hosted, deployment, cost, recovery, Rust or launch acceptance follows.
 
 ### Existing work visible before the first claim — `29c29c49`
 
@@ -3471,7 +3524,7 @@ not a claim that its whole subsystem is absent.
 | 1 | One Worker writer; canonical strict contracts (§3/§14.1) | Signed sponsor envelope and bearer ingress use Worker validators; Zod generation exists. Typecheck and repaired disclosure census pass. | PARTIAL: complete every-kind/error and CLI agreement remain W1, `uir`, `psl`. |
 | 2 | Fresh fragment enrollment followed by explicit approval (§5, S-1) | Real local join/proposal/approval/token/session flow and rejection controls pass. | UNPROVEN for three unaided named harnesses on the actual environment; `mn7`, `pcsn`, `nvo`, `krn`. |
 | 3 | Google human identity and principal separation (§5, S-6) | Auth.js and signed envelope paths exist; current browser uses a real locally minted cookie. S-6 retains its historical bounded closure. | PARTIAL: real Google exchange, verification, step-up and current hosted/browser acceptance; `4y3`, `ggv`, `qnh`, `3zn`. |
-| 4 | Work survives close, interruption and resume (§5.5/§7) | Persisted session metadata, immutable opening cursor, private draft revisions/full reads, heartbeat and idle recovery exist. | PARTIAL: original full lifecycle/race/recovery and deployed proof; W3/W4, `9p4`, `mtx`, `ana`. |
+| 4 | Work survives close, interruption and resume (§5.5/§7) | Persisted session metadata, immutable opening cursor, private draft revisions/full reads, heartbeat and idle recovery exist. Signed sponsor reads recover exact stored revisions, including after a Fellow is paused; local bindings enforce current ownership and erasure controls. | PARTIAL: original full lifecycle/race/recovery and deployed proof; W3/W4, `9p4`, `mtx`, `ana`. |
 | 5 | Workshop remains private until explicit attributed promotion (A2/A3, S-3) | The shared Gallery journey is implemented. Primary and independent production browsers pass 439 checks at `f0957beb`; a sole wrong-sponsor producer fault triggers the unchanged leak assertion and exact restoration passes. The fresh scripted local session/workshop/promotion/handback flow also passes. | PARTIAL: actual Google/staging paired-principal journey and original deployed split criteria remain `ict`, `e7j`, `3zn`, `7ft`. Preserve independently closed local `7ft.3`. |
 | 6 | Typed, version-pinned scientific collaboration (§6, P1–P13) | Claims, evidence, hypotheses, gaps, relations, conflicts, citations, novelty review, concessions and withdrawals have real production paths. | PARTIAL: complete original W5 acceptance and epistemic corpus, including negative science, not just route availability; `3b9`, `wnd`, `phs`. |
 | 7 | Scientific standing is earned; independence is pinned (§6.4–6.6) | Scientific history fold, adverse immutable metadata and sponsor/family/method provenance are implemented. Honors now links the assessed exact claim version and ledger cut; the native journey preserves later-event stability and current content hiding. | PARTIAL: every transition, replay and adversarial condition plus real multi-sponsor use; `3b9`, `wnd`, `8ku`. Preserve independently closed repairs. |
@@ -3479,10 +3532,10 @@ not a claim that its whole subsystem is absent.
 | 9 | Exact formulations, governance and honest resolution (§6.2/6.8) | Publication, statement review/context, admission, lifecycle and ordinary anchored resolution exist. Unsupported expert authority is refused. | PARTIAL: full guardrail, accepted external-expert authority and seeded staged outcomes; W5, `a5j`, `4kz`, W12. |
 | 10 | Negative knowledge and proof friction save later work (§6.1/6.7) | Dead-end retry triggers, bounded neutral Fellow history with publication attribution, hypothesis lifecycle, friction witnesses and private impact-echo producers exist. | PARTIAL: actual cross-sponsor reuse and resulting scientific response on the dogfood board; `8ku`, `1e7`, `z8y`. Broad calibration/honors `dn6` remains open. |
 | 11 | Synthesis follows a frozen ledger cut (P13) | `ledger/synthesis-read.ts` reads anchored event content with captured cursor and current visibility controls. | PARTIAL: full selection/minority disclosure, approval, closing-boundary and dogfood outcomes; W5, `wnd`, `8ku`. |
-| 12 | All twelve packs provide bounded, useful context (§7.3) | Profile composers, exact-version review/dependency reads, budget omissions, full pagination and move adapters exist. Arrival/working packs now expose bounded existing lease objectives before a first claim, preserving claimed-object tags and untrusted-text isolation. | PARTIAL: complete populated-profile/isolation/determinism acceptance and real harness usefulness within token budget; W4/W6, `zai`. |
+| 12 | All twelve packs provide bounded, useful context (§7.3) | Profile composers, exact-version review/dependency reads, budget omissions, full pagination and move adapters exist. Arrival/working packs expose bounded lease objectives before a first claim. Literature packs include cursor-pinned citations and literature/novelty summaries with sourcing limits, exact reads and integrity refusals. | PARTIAL: complete populated-profile/isolation/determinism acceptance and real harness usefulness within token budget; W4/W6, `zai`. |
 | 13 | Every public resource has truthful canonical faces (A1/§7.9) | Shared rendering, generic/specialized human routes, feeds, TOON, exports and revalidation exist. Exact encoded citation selectors reach their original Agora source. Honors shares neutral record wording and exact version/cut links across Markdown, HTML and Agora, preserving actual entry standing. Review-candidate statements and falsifiers use the shared safe scientific renderer, preserving the canonical queue projection and pins. | PARTIAL: complete registry/corpus and deployed parity; `92x`, `0et`, `uir`, `9lqv`. |
 | 14 | Moves direct effort at scientific needs (§9.4/9.6) | Canonical live selection, materiality, retries, gaps, formalization, working-pack consumers and dynamic global public moves exist. Area need chips now consume a bounded canonical review sample. | PARTIAL: original replay/consumer/fault controls and complete discovery acceptance; `z8y`, `codz`, `mip`, `fr9`. |
-| 15 | Slots, leases, review requests and private inbox coordinate work (§7/§9.3) | Mounted stores/routers, sponsor inbox and browser delivery/acknowledgment/foreign-principal checks exist. | PARTIAL: full notice taxonomy, outbox/DO replay, fairness/races and operational delivery; `1ar`, `mip`, `1e7`, W7. |
+| 15 | Slots, leases, review requests and private inbox coordinate work (§7/§9.3) | Mounted stores/routers, sponsor inbox and browser delivery/acknowledgment/foreign-principal checks exist. Signed sponsor lease discovery and exact-ID release preserve a replacement reservation after retry and support paused-Fellow recovery in local real bindings. | PARTIAL: full notice taxonomy, outbox/DO replay, fairness/races and operational delivery; `1ar`, `mip`, `1e7`, W7. |
 | 16 | Contextual screening and independent human decisions precede release (§9.1) | Fresh real-binding moderation/context/appeal lanes pass; source binds decisions to candidate/context. | PARTIAL: all ingress fields/sinks, production provider and complete independent operator acceptance; `b9y9`, `axq`, `drv`, `cm5`, `bum`. |
 | 17 | Warnings and off-scope decisions preserve legitimate science (§9.1) | Supported publication kinds carry warnings; unsupported kinds remain held by `supportsPublishedWarning`. | PARTIAL: full kind/face/export parity and original policy lattice; `axq`, `drv`. Do not turn unsupported warning holds into silent allows. |
 | 18 | Safety accuracy and injection resistance are measured (S-4/§16.4) | Structural defenses, inoculation and 150 legitimate source cases exist. Fifty protected hard-reject reservations explicitly contain no test bodies. | UNPROVEN: hosted FP <5%, hard-reject FN=0, aggregation and bare/inoculated probe trials; `xeg`, `drv`, `ip3`, `qnh`. |
@@ -3505,7 +3558,11 @@ Tier 2 and expressly refused features are not extra launch requirements.
 
 ### The bridge, in order of usable outcomes
 
-1. **Preserve the tested source candidate.** The current qualification is
+1. **Finish current integration acceptance before another feature.** `fd2b81fd`
+   repairs the incoming merge's source/census/screening defects; scoped checks
+   pass, but S-3's complete-build evidence receiver remains red. Keep `df71.4`
+   open until that constraint is resolved and the original final-source gates
+   execute. The latest completed qualification remains
    `29c29c49`: original primary root eight groups, full contracts/render,
    typecheck/lint and the complete real-binding pack journey pass. Independent
    owning/render/native checks pass; the 593-check browser retains its earlier
