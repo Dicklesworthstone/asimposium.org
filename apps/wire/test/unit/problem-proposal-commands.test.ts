@@ -4,10 +4,16 @@ import {
   SaveProblemBriefResponseSchema,
 } from "@asimposium/contracts";
 import type { D1PreparedStatement } from "@cloudflare/workers-types";
+import { redactEventContent } from "../../src/krater/krater.ts";
 import { expireSecurityRecords, hardDeletePrivateDraft } from "../../src/krater/retention.ts";
+import { PUBLIC_EVENT_CONTENT_MAX_BYTES } from "../../src/ledger/citation-read-integrity.ts";
+import { applyOperatorControl } from "../../src/moderation/store.ts";
 import { runSponsorBriefCommand } from "../../src/problems/brief-commands.ts";
 import { getProblemCreationBudget } from "../../src/problems/creation-quota.ts";
+import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
 import { runProblemProposalCommand } from "../../src/problems/proposal-commands.ts";
+import { readProblemPublicationPreview } from "../../src/problems/publication-preview.ts";
+import { normHash } from "../../src/split/policy.ts";
 import { problemProposalFixture } from "../support/problem-proposal.ts";
 
 const fixtures: Awaited<ReturnType<typeof problemProposalFixture>>[] = [];
@@ -442,4 +448,212 @@ test("an unreadable creation allowance fails closed without writing a draft", as
   expect(drafts(f)).toEqual([]);
   expect(f.sql.query("SELECT * FROM problem_creation_admissions").all()).toEqual([]);
   expect(f.sql.query("SELECT * FROM problem_proposal_command_receipts").all()).toEqual([]);
+});
+
+async function publishedDuplicateSource(f: Awaited<ReturnType<typeof fixture>>) {
+  const response = await f.propose({ ...formulation, unlisted: true }, "duplicate-source");
+  expect(response.status).toBe(201);
+  const problemId = ProposeProblemResponseSchema.parse(await response.json()).problem.id;
+  const preview = await readProblemPublicationPreview(f.baseDb, problemId, f.principal.sponsorId);
+  const problem = await f.baseDb
+    .prepare("SELECT * FROM problems WHERE id=?")
+    .bind(problemId)
+    .first<Parameters<typeof applyPublicProblemGovernance>[1]>();
+  if (!preview || !problem) throw new Error("Duplicate fixture publication is unavailable.");
+  const published = await applyPublicProblemGovernance(
+    f.baseDb,
+    problem,
+    f.principal.sponsorId,
+    {
+      action: "publish",
+      reviewed_statement_version: preview.problem.current_statement_version,
+      reviewed_digest: preview.review_digest,
+    },
+    new Request("https://a.asimposium.org/v1/sponsors/problems/" + problemId + "/lifecycle", {
+      method: "POST",
+      headers: { "idempotency-key": "duplicate-source-publish" },
+    }),
+  );
+  expect(published.status).toBe(200);
+  const event = await f.baseDb
+    .prepare(
+      "SELECT id,seq,object_version FROM events WHERE problem_id=? AND type='problem.admitted'",
+    )
+    .bind(problemId)
+    .first<{ id: string; seq: number; object_version: number }>();
+  if (!event) throw new Error("Duplicate fixture has no publication event.");
+  return { problemId, ...event };
+}
+
+async function foreignProposalToken(f: Awaited<ReturnType<typeof fixture>>) {
+  const grant = await f.service.mint(f.receiver, { requested_scopes: ["propose-problems"] });
+  const claimed = await f.service.claim({
+    enrollment_id: grant.enrollmentId,
+    secret: grant.secret,
+    name: "foreign-duplicate-proposer",
+    model: "test/foreign-duplicate-proposer",
+    harness: "curl",
+  });
+  await f.service.decide(f.receiver, grant.enrollmentId, {
+    enrollment_id: grant.enrollmentId,
+    decision: "approve",
+    step_up_authenticated_at: Math.floor(Date.now() / 1000),
+  });
+  const issued = await f.service.poll({ flow_handle: claimed.flowHandle });
+  if (!("token" in issued)) throw new Error("Foreign duplicate proposer has no credential.");
+  return issued.token;
+}
+
+for (const target of ["problem", "object", "version", "event"] as const) {
+  test("duplicate feedback respects current " + target + " controls and restoration", async () => {
+    const f = await fixture();
+    const source = await publishedDuplicateSource(f);
+    const token = await foreignProposalToken(f);
+    const targetRef =
+      target === "problem"
+        ? "problem"
+        : target === "object"
+          ? source.problemId
+          : target === "version"
+            ? source.problemId + "@" + source.object_version
+            : "#" + source.seq;
+    const control = (visibility: "hidden" | "visible") =>
+      applyOperatorControl(f.baseDb, "usr_duplicate_operator", {
+        problemId: source.problemId,
+        targetKind: "problem",
+        targetRef,
+        visibility,
+        reason: "Review the exact duplicate-source publication.",
+      });
+    expect((await control("hidden")).ok).toBe(true);
+    expect((await control("visible")).ok).toBe(true);
+    const restored = await f.propose(formulation, "restored-source", token);
+    expect(restored.status).toBe(409);
+    expect(await restored.json()).toMatchObject({
+      code: "POSSIBLE_DUPLICATE",
+      existing_problem_id: source.problemId,
+    });
+    expect((await control("hidden")).ok).toBe(true);
+    const fresh = await f.propose(formulation, "hidden-source", token);
+    expect(fresh.status).toBe(201);
+    const body = ProposeProblemResponseSchema.parse(await fresh.json());
+    expect(body.problem.id).not.toBe(source.problemId);
+    expect(JSON.stringify(body)).not.toContain(source.problemId);
+    expect(
+      f.sql
+        .query("SELECT * FROM problem_creation_admissions WHERE sponsor_id=?")
+        .all(f.receiver.sponsorId),
+    ).toHaveLength(1);
+  });
+}
+
+for (const unavailable of ["redacted", "corrupt-bytes", "wrong-digest", "oversize"] as const) {
+  test("duplicate feedback ignores " + unavailable + " publication content", async () => {
+    const f = await fixture();
+    const source = await publishedDuplicateSource(f);
+    const token = await foreignProposalToken(f);
+    if (unavailable === "redacted") {
+      await redactEventContent(f.baseDb, source.id, "privacy", new Date().toISOString());
+    } else {
+      // Fault injection only: production storage rejects these mutations.
+      // The retained statement and immutable event must never substitute for
+      // unavailable or unverified publication bytes.
+      f.sql.exec("DROP TRIGGER event_content_lawful_redaction_only");
+      if (unavailable === "wrong-digest")
+        f.sql
+          .query("UPDATE event_content SET payload_sha256=? WHERE event_id=?")
+          .run("0".repeat(64), source.id);
+      else
+        f.sql
+          .query("UPDATE event_content SET payload_json=? WHERE event_id=?")
+          .run(
+            unavailable === "oversize"
+              ? "X".repeat(PUBLIC_EVENT_CONTENT_MAX_BYTES + 1)
+              : '{"corrupt":true}',
+            source.id,
+          );
+    }
+    const fresh = await f.propose(formulation, "unavailable-source", token);
+    expect(fresh.status).toBe(201);
+    const body = ProposeProblemResponseSchema.parse(await fresh.json());
+    expect(body.problem.id).not.toBe(source.problemId);
+    expect(JSON.stringify(body)).not.toContain(source.problemId);
+  });
+}
+
+test("a retained projection hash cannot manufacture a public statement match", async () => {
+  const f = await fixture();
+  const source = await publishedDuplicateSource(f);
+  const token = await foreignProposalToken(f);
+  const different = {
+    ...formulation,
+    statement: "Every finite cycle has equally many edges and vertices.",
+  };
+  // Fault injection only: the immutable publication still contains the tree
+  // statement, so a forged candidate hash cannot authorize duplicate feedback.
+  f.sql.exec("DROP TRIGGER problem_statement_versions_immutable_update");
+  f.sql
+    .query("UPDATE problem_statement_versions SET norm_hash=? WHERE problem_id=?")
+    .run("sha256:" + (await normHash(different.statement)), source.problemId);
+  const fresh = await f.propose(different, "forged-source-hash", token);
+  expect(fresh.status).toBe(201);
+  expect(ProposeProblemResponseSchema.parse(await fresh.json()).problem.id).not.toBe(
+    source.problemId,
+  );
+});
+
+test("a source hidden after candidate selection cannot appear in duplicate feedback", async () => {
+  const f = await fixture();
+  const source = await publishedDuplicateSource(f);
+  let hidden = false;
+  const db = new Proxy(f.baseDb, {
+    get(target, property) {
+      if (property === "prepare")
+        return (query: string) => {
+          const statement = target.prepare(query);
+          if (!query.includes("AND e.id > ?")) return statement;
+          const wrapped: D1PreparedStatement = new Proxy(statement, {
+            get(prepared, method) {
+              if (method === "bind")
+                return (...values: unknown[]) => {
+                  prepared.bind(...values);
+                  return wrapped;
+                };
+              if (method === "all")
+                return async () => {
+                  const result = await prepared.all();
+                  if (!hidden) {
+                    hidden = true;
+                    const changed = await applyOperatorControl(f.baseDb, "usr_duplicate_operator", {
+                      problemId: source.problemId,
+                      targetKind: "problem",
+                      targetRef: "#" + source.seq,
+                      visibility: "hidden",
+                      reason: "Withdraw the source while duplicate verification is in flight.",
+                    });
+                    expect(changed.ok).toBe(true);
+                  }
+                  return result;
+                };
+              const value = Reflect.get(prepared, method);
+              return typeof value === "function" ? value.bind(prepared) : value;
+            },
+          });
+          return wrapped;
+        };
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const fresh = await runProblemProposalCommand(
+    db,
+    f.binding,
+    "hide-during-verification",
+    formulation,
+  );
+  expect(hidden).toBe(true);
+  expect(fresh.status).toBe(201);
+  expect(ProposeProblemResponseSchema.parse(await fresh.json()).problem.id).not.toBe(
+    source.problemId,
+  );
 });
