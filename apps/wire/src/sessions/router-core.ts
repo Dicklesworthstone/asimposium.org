@@ -44,6 +44,7 @@ import {
   LeaseQuestionResponseSchema,
   LeaseReleaseRequestSchema,
   LeaseReleaseResponseSchema,
+  type LedgerIntent,
   LedgerIntentSchema,
   NormalizeConflictRequestSchema,
   NormalizeConflictResponseSchema,
@@ -104,6 +105,7 @@ import {
   WorkshopObjectResponseSchema,
   type WorkshopPublicationDraft,
   WorkshopPublicationDraftSchema,
+  type WorkshopPushRequest,
   WorkshopPushRequestSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
@@ -145,7 +147,7 @@ import { validatedProblem } from "../http/envelope";
 import { planBatchCommit } from "../krater/batch";
 import { casKeyForHash, storeWorkshopBody } from "../krater/cas";
 import { mintClaimVersion } from "../krater/claim-version";
-import { assessNoteIntent, suggestedClaimFromNote } from "../krater/intent";
+import { assessNoteIntent } from "../krater/intent";
 import {
   canonicalClaimPayload,
   canonicalJson,
@@ -1622,6 +1624,25 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       fixHint: "Check the console for the credential state or contact your sponsor.",
     });
 
+  const sessionExistsProblem = (sessionId: string): Response => {
+    const packPath = `/v1/sessions/${sessionId}/pack?profile=working&since=0`;
+    return validatedProblem({
+      status: 409,
+      code: "SESSION_EXISTS",
+      title: "An open session already exists for this problem",
+      detail: "Each Fellow keeps at most one open session per problem.",
+      fixHint: `GET ${packPath} to resume. GET /v1/sessions/${sessionId} for status and next actions.`,
+      rule: "A5",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/sessions.v1/pack_since_query.json",
+        existing_session_id: sessionId,
+        suggested_action: "resume_existing_session",
+        refetch_url: packPath,
+        example: { method: "GET", path: packPath },
+      },
+    });
+  };
+
   // Fable §5.5: the global two-open-session cap (asimposiumorg-zdz.6). A
   // teaching refusal: it names the open sessions to close so the caller can
   // free a slot without a second round trip.
@@ -1634,7 +1655,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       fixHint: "Close one of the open sessions with POST /v1/sessions/:id/close, then reopen.",
       rule: "A5",
       extensions: {
-        schema: SESSIONS_SCHEMA_URI,
+        schema: "https://a.asimposium.org/schemas/sessions.v1/session_close_request.json",
         open_session_ids: [...openSessionIds].slice(0, 2),
         example: {
           method: "POST",
@@ -2507,6 +2528,43 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (!("object_kind" in publication)) return ["claim-draft"];
     if (publication.object_kind === "dead-end") return ["dead-end-draft"];
     return publication.object_kind === "hypothesis" ? ["scratch", "note"] : ["evidence-draft"];
+  }
+
+  function claimShapedNoteProblem(
+    request: WorkshopPushRequest,
+    retainedPublication?: WorkshopPublicationDraft,
+    retainedIntent?: LedgerIntent,
+  ): Response {
+    const publication = request.publication ?? retainedPublication;
+    const intent = request.ledger_intent ?? retainedIntent;
+    // A typed hypothesis belongs in a note. Preserve that choice, including
+    // inherited fields on revisions, rather than inventing a different payload.
+    const publicationTypes =
+      publication === undefined ? undefined : workshopPublicationTypes(publication);
+    const keepNote =
+      publicationTypes !== undefined
+        ? publicationTypes.includes("note")
+        : intent?.kind === "create" && intent.target_kind !== "claim";
+    const draftType = publicationTypes?.[0] ?? "claim-draft";
+    return validatedProblem({
+      status: 422,
+      code: "LOOKS_LIKE_CLAIM",
+      title: "This note looks like a claim",
+      detail:
+        "The body is claim-shaped (proposition markers, or long and unanchored). Save it in its matching private draft type, or explicitly keep a note. Publication is a separate action.",
+      fixHint: keepNote
+        ? "Your publication payload or ledger intent targets another kind of object. POST the example to this workshop route with a new Idempotency-Key to preserve it privately with force_note: true; that choice is recorded."
+        : publication === undefined
+          ? "POST the example to this workshop route with a new Idempotency-Key to save a private claim-draft. To keep the original note, resend your original request with force_note: true and a new key; that choice is recorded."
+          : `Your publication payload requires ${draftType}. POST the example to this workshop route with a new Idempotency-Key to preserve the complete private draft. No publication occurs.`,
+      rule: "§7.6",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/sessions.v1/workshop_push_request.json",
+        // Preserve the complete text, links, ledger intent and revision base.
+        // Never synthesize a public statement/falsifier or discard later prose.
+        example: keepNote ? { ...request, force_note: true } : { ...request, type: draftType },
+      },
+    });
   }
 
   async function materializeWorkshopObject(
@@ -3584,19 +3642,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
       }
       if (error instanceof SessionExistsError) {
-        return validatedProblem({
-          status: 409,
-          code: "SESSION_EXISTS",
-          title: "An open session already exists for this problem",
-          detail: "Each Fellow keeps at most one open session per problem.",
-          fixHint: `Resume or close session ${error.sessionId} first.`,
-          rule: "A5",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            existing_session_id: error.sessionId,
-            example: { path: "/v1/sessions/<existing_session_id>/pack?profile=working" },
-          },
-        });
+        return sessionExistsProblem(error.sessionId);
       }
       if (error instanceof ReplayClaimNotCommittedError) {
         const problemRow = await db
@@ -3624,19 +3670,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           .bind(auth.binding.fellowId, parsed.data.problem_id)
           .first<{ session_id: string }>();
         if (existing !== null && existing !== undefined) {
-          return validatedProblem({
-            status: 409,
-            code: "SESSION_EXISTS",
-            title: "An open session already exists for this problem",
-            detail: "Each Fellow keeps at most one open session per problem.",
-            fixHint: `Resume or close session ${existing.session_id} first.`,
-            rule: "A5",
-            extensions: {
-              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-              existing_session_id: existing.session_id,
-              example: { path: "/v1/sessions/<existing_session_id>/pack?profile=working" },
-            },
-          });
+          return sessionExistsProblem(existing.session_id);
         }
         // The cap trigger can abort the batch at commit time when a concurrent
         // same-Fellow open won the last free slot: re-read the live count and
@@ -5089,25 +5123,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     if (!("workshop_id" in parsed.data)) {
       // The §7.6 intent classifier: a note that looks like a claim is not accepted
-      // as a note. Refuse with the claim schema and a prefilled body; the author
-      // may promote it, or resubmit with force_note: true (recorded, ranked last).
+      // as a note. Offer a lossless private draft, or the author's explicit
+      // force_note escape. Saving a draft never publishes a scientific claim.
       if (parsed.data.type === "note" && parsed.data.force_note !== true) {
         const assessment = assessNoteIntent(parsed.data.body_md, parsed.data.relates_to.length > 0);
         if (assessment.looksLikeClaim) {
-          return validatedProblem({
-            status: 422,
-            code: "LOOKS_LIKE_CLAIM",
-            title: "This note looks like a claim",
-            detail:
-              "The body is claim-shaped (proposition markers, or long and unanchored). A claim belongs on the public ledger, not the private workshop.",
-            fixHint:
-              "Promote it with the claim schema (a falsifier is required for conjecture-class claims), or resubmit with force_note: true to keep it as a note (recorded, ranked last, visible to the sponsor).",
-            rule: "§7.6",
-            extensions: {
-              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-              example: suggestedClaimFromNote(parsed.data.body_md),
-            },
-          });
+          return claimShapedNoteProblem(parsed.data);
         }
       }
     }
@@ -5242,7 +5263,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               "Refetch the current workshop object version with GET /v1/sessions/:id/workshop/:workshop_id and reapply your edit.",
             rule: "A5",
             extensions: {
-              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              schema: "https://a.asimposium.org/schemas/sessions.v1/workshop_push_request.json",
               current_version: currentVersion,
               suggested_action: "refetch_and_reapply",
               refetch_url: `/v1/sessions/${session.session_id}/workshop/${head.workshop_id}`,
@@ -5289,20 +5310,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         const relatesToCount = (reviseData.relates_to ?? JSON.parse(head.relates_to_json)).length;
         const assessment = assessNoteIntent(reviseData.body_md, relatesToCount > 0);
         if (assessment.looksLikeClaim) {
-          return validatedProblem({
-            status: 422,
-            code: "LOOKS_LIKE_CLAIM",
-            title: "This note looks like a claim",
-            detail:
-              "The body is claim-shaped (proposition markers, or long and unanchored). A claim belongs on the public ledger, not the private workshop.",
-            fixHint:
-              "Promote it with the claim schema (a falsifier is required for conjecture-class claims), or resubmit with force_note: true to keep it as a note (recorded, ranked last, visible to the sponsor).",
-            rule: "§7.6",
-            extensions: {
-              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-              example: suggestedClaimFromNote(reviseData.body_md),
-            },
-          });
+          return claimShapedNoteProblem(
+            reviseData,
+            head.publication_json
+              ? WorkshopPublicationDraftSchema.parse(JSON.parse(head.publication_json))
+              : undefined,
+            head.ledger_intent_json
+              ? LedgerIntentSchema.parse(JSON.parse(head.ledger_intent_json))
+              : undefined,
+          );
         }
       }
 
@@ -5438,6 +5454,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                          state = ?,
                          ledger_intent_json = ?,
                          publication_json = ?,
+                         force_note = CASE WHEN ? = 1 THEN 1 ELSE force_note END,
                          updated_at = ?
                      WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ? AND current_version = ?
                        AND EXISTS (
@@ -5458,6 +5475,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                     newState,
                     newLedgerIntentJson,
                     newPublicationJson,
+                    reviseData.force_note === true ? 1 : 0,
                     updatedAt,
                     head.workshop_id,
                     session.problem_id,

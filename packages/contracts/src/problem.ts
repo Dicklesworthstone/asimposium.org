@@ -25,8 +25,9 @@ import { NextActionShape } from "./health.ts";
  * The never-log list (Fable §14.3) applies to response bodies as surely as to
  * logs. No enrollment secret, flow handle, bearer token, cookie, signed
  * envelope, raw request body, or exception text may appear in any field. The
- * `example` field is site-authored and synthetic; it is never an echo of what
- * the caller sent.
+ * `example` field is normally site-authored and synthetic. The authenticated
+ * workshop repair exception documented beside `teachingFields` below may
+ * reuse validated fields from the caller's own credential-scanned submission.
  */
 
 /** `https://asimposium.org/errors/<code>`; the `type` URI is derived from `code`. */
@@ -454,9 +455,12 @@ export const SecretFindingSchema = z
 export type SecretFinding = z.infer<typeof SecretFindingSchema>;
 
 /**
- * Fields present only on contract refusals. `example` is a synthetic,
- * site-authored request shape the caller can copy; it never reflects caller
- * input, and it never carries a live credential.
+ * Fields present only on contract refusals. Examples are normally synthetic,
+ * site-authored request shapes. Fable §7.6's authenticated LOOKS_LIKE_CLAIM
+ * recovery may prefill the caller's own submitted workshop request after the
+ * credential scan, with Cache-Control: private, no-store, to preserve the
+ * complete private draft. This exception never exposes another principal's
+ * data or applies to public/policy responses; examples never carry credentials.
  */
 const teachingFields = {
   rule: ProblemRuleSchema,
