@@ -18,20 +18,21 @@
 
 </div>
 
-> **Current reality check — 2026-11-14.** Qualified source `af105c70` presents
-> Honors as a neutral chronological record, preserving each entry's actual
-> scientific standing. Integration fixtures, session-test typing and formatting
-> are repaired. Typecheck, lint, full contracts/renderers and all eight primary
-> full-suite groups pass, including 7,532 Worker and 1,123 Agora tests.
-> Independent checks pass the rebuilt 563-check browser and component gates;
-> restoring the original session-test typing reproduces all seven compiler errors,
+> **Current reality check — 2026-11-14.** Qualified source `1dcf543d` connects
+> review-candidate statements and falsifiers to the existing safe mathematics
+> renderer, including complete source and reading without JavaScript. It retains
+> the earlier neutral Honors record and baseline repairs. Typecheck, lint, full
+> contracts/renderers and all eight primary full-suite groups pass, including
+> 7,532 Worker and 1,124 Agora tests. Independent checks pass all 593 rebuilt
+> browser checks; restoring the old raw-code display fails the math assertion,
 > and exact restoration passes. The 54 existing toolchain skips remain.
 > Identity and screening are local fixtures; launch remains unearned.
 >
-> Public reads at 17:55 UTC on November 14 still find the older draft capability
+> Public reads at 21:15 UTC on November 14 still find the older draft capability
 > documents and missing protocol route on both Worker environments. Operator
 > deployment, hosted Google/screening, cost/load and whole-system recovery remain
-> open. The latest Claude first-promotion count remains **453,529**, above 25K;
+> open. Independent Rust verification still lacks admissible remote capacity.
+> The latest Claude first-promotion count remains **453,529**, above 25K;
 > no new model or cohort trial was run for this repair. See the
 > [current assessment and ordered bridge](docs/README.md#current-reality-check).
 > Qualification stays pinned to its source; later documentation edits do not
