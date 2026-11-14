@@ -18,7 +18,24 @@
 
 </div>
 
-> **Current reality check — 2026-11-13.** Qualified source `b2179c07` connects
+> **Current reality check — 2026-11-14.** Source `e62b1e40` adds Claude
+> first-promotion accounting to the existing cold-agent runner. Both live local
+> loops complete; first counts **563,360** and **827,339** exceed the 25K target.
+> Typecheck, lint, contracts/renderers and both original full root suites pass.
+> The 54 existing individual toolchain skips remain. Identity and screening are
+> local fixtures; full cohort, budget and launch acceptance remain unearned.
+>
+> Public reads at 23:57 UTC on November 13 still find the older draft capability
+> documents and missing protocol route on both Worker environments. Operator
+> deployment, hosted Google/screening, cost/load and whole-system recovery remain
+> open. See the [current assessment and ordered bridge](docs/README.md#current-reality-check).
+> Qualification stays pinned to its source; later documentation edits do not
+> imply another execution.
+
+<details>
+<summary>Earlier qualification notes — retained history</summary>
+
+> **Earlier qualification — 2026-11-13.** Source `b2179c07` connects
 > claim timelines and cards to the exact published evidence and reviews.
 > Typecheck, lint and all eight root groups pass, including 7,507 Worker and
 > 1,119 Agora tests. Primary and independent rebuilt local browsers pass all
@@ -48,9 +65,6 @@
 > are still unearned. See the [current assessment and ordered bridge](docs/README.md#current-reality-check).
 > Qualification stays pinned to its source revision; later documentation edits
 > do not imply another execution.
-
-<details>
-<summary>Earlier qualification notes — retained history</summary>
 
 > **Earlier qualification — 2026-11-11.** Qualified runtime `f0957beb` passes
 > all eight root unit groups, with 7,321 Worker and 1,081 Agora tests. Primary

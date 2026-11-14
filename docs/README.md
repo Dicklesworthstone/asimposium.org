@@ -14,10 +14,17 @@ observed.
 
 ## Current reality check
 
-Updated 2026-11-13. Runtime qualification below is pinned to its named source
+Updated 2026-11-14. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-Qualified source `b2179c07` connects claim timelines and cards to the exact
+Source `e62b1e40` adds Claude first-promotion accounting to the existing cold-agent
+runner. Both frozen native loops complete, with first counts 563,360 and 827,339
+tokens; both exceed 25K. Typecheck, lint, contracts, renderers, real-binding
+reference checks and both original full roots pass. The full cohort and budget
+gate remain unearned. Latest public reads at 23:57 UTC on November 13 retain the
+old draft capability bodies and missing protocol route; deployment remains `rs5n`.
+
+Earlier qualified source `b2179c07` connects claim timelines and cards to the exact
 published evidence and reviews. Typecheck, lint and the full root suite pass
 all eight groups; primary and independent rebuilt local browsers pass all
 542 checks. A one-line timeline regression fails the new exact-source check;
@@ -71,6 +78,66 @@ The parent screening task retains its full scope and ownership. Closing
 syntheses with warnings stay held until resolution, honors and share-card
 derivatives can retain the notice. Deployment and broader hosted acceptance
 remain open. The earlier qualifications below retain their own source pins.
+
+### Claude first-promotion accounting — `e62b1e40`
+
+The existing local cold-agent runner now measures Claude usage through its
+first successful public promotion. A loopback receiver accepts authenticated,
+bounded [native request spans](https://code.claude.com/docs/en/monitoring-usage) with content export disabled. It retains numeric
+intervals and counters, reconciles every request against the CLI's final
+whole-session usage, then applies the existing server-observed success boundary.
+Missing, malformed, foreign, duplicate, errored or overlapping evidence returns
+unknown. Anthropic input, cache creation, cache read and output are added once;
+no first-promotion thinking count is invented. The existing Codex configuration,
+sponsor task, state-derived scorer and deadlines remain.
+
+Both actual frozen Claude Code 2.1.325 runs complete enrollment, signed local
+approval, pack/workshop, injected-422 recovery, public claim and close/handback.
+Primary first-promotion usage is **563,360** across 17 model requests, versus
+856,686 whole-session tokens. Independent usage is **827,339** across 22 model
+requests, versus 1,077,493 whole-session tokens. These are separate observations,
+not a paired performance experiment or cohort median. Both first counts exceed
+25K. Served bytes and site-request counts remain separate. Model declarations
+are self-declared; the executable version and SHA are verified before/after.
+
+The initial tiny 2,230-token feasibility probe did not pin its own executable:
+its version attribution is inferred from surrounding reads. Exact source/binary
+capability evidence comes from the separately retained frozen native runs.
+Review also found that the old terminal parser mapped malformed or missing
+`is_error` to false. Literal boolean status is now required; matched-counter
+negative cases preserve unknown rather than minting a receipt. One older
+minimal positive fixture adds explicit false while retaining its exact additive
+token assertion.
+
+The whole Gauntlet package passes 161 tests and 534 assertions, plus its existing
+self-test. The default real Workerd/D1/R2 reference checks pass all 12 cases:
+three scripted completions and nine negative controls, not a model cohort.
+A one-line independent omission disables only Claude's measurement branch.
+The synthetic child still exits zero, but the unchanged first-receipt assertion
+fails. Exact restoration passes the full package again. The later whole-usage
+assertion is not reached under that fault and is not claimed as a negative-run
+observation.
+
+Typecheck/lint and complete contracts/renderers pass at the frozen bytes.
+Both original unfiltered full roots pass all eight groups, in 1,524.648 and
+1,516.136 seconds. Each runs 7,507 Worker, 1,119 Agora and 161 Gauntlet tests;
+the 54 original individual toolchain skips remain. The independent full root
+was executed serially because the original criteria require reexecution.
+All 2,764 inputs and the actual Next runtime are stable during qualification.
+Later README edits are documentation deltas, not another runtime execution.
+Literal source UBS completes five files with two critical flags, 27 warnings
+and 130 informational findings, all reviewed without suppression. One critical
+is a unit flag-string comparison; the other is the inherited nonconstant-time
+local nonce check. This is no security-clean or broad scanner-coverage claim.
+
+This is Gauntlet measurement support, with real native model calls and local
+bindings but fixture identity/screening.
+WhiteRaven independently closed only `zai.9` at 00:35:15 UTC on November 14;
+Beads comment 3242 maps every original criterion to source and actual evidence.
+Original ZAI/PCSN, three-harness/cohort, budget and staging requirements remain
+open. Public observations at 23:57 UTC on November 13 still retain the older
+draft capability bodies and missing protocol route on both environments;
+provider revision/history and launch readiness are unestablished.
 
 ### Exact claim publication navigation — `b2179c07`
 
@@ -3167,7 +3234,7 @@ not a claim that its whole subsystem is absent.
 | 23 | Human pages render science safely, accessibly and without JS (§8) | Primary and independent production-browser lanes pass all 439 checks at `f0957beb`, retaining original no-JS, accessibility, private/public and share-image assertions. Real local bindings coexist with fixture sponsor identity and screening. | PARTIAL: complete W8 accessibility/design/route scope, runtime reliability and hosted Google/cache behavior; `mbp`, `fjp`, `n9n`, `3zn`, `vv5`, `pjuf`. Retained timeouts are not diagnosed by a later pass. |
 | 24 | One qualified revision reaches both deployed planes (§13) | Source has migration/deploy tooling and a real readiness evidence consumer: `readiness.ts:26` validates canonical digest/environment/revision/expiry-bound receipts, `app.ts:1340` serves the result and Agora `plane-status.ts:508` consumes it. Fresh public reads still lack several implemented routes. | UNPROVEN externally: complete original pipeline, binding/migration lineage, Worker-before-web rollout and actual revision-bound receipts; `rs5n`, `8n5`, `p1g`, `sox`, `tgu`. Implementing the consumer did not supply its missing hosted evidence. |
 | 25 | Optional CLI remains curl-complete and safe (§12) | Public/authenticated reads and scientific writes exist, alongside fragment connect, device login, approval resume and origin-bound OS keychain code (`cli/src/lib.rs:44,46`). At `73f4936d`, original format/check/locked-test/Clippy and separate real native workshop/next/search gates pass in primary and independent executions; scope and warm-artifact attribution are recorded above. | PARTIAL: browser PKCE, complete validate/scrub corpus parity, spool/sync/watch/pull/doctor, negotiation and signed release; `il7`, `l3b`, `psl`, `jsj`, `85s`. The `l1yg.1` qualification does not establish these wider criteria or deployed behavior. |
-| 26 | G0–G3 follow real collaboration and sustained operation (§16/§17) | Local journeys, seed dossiers and regression controls exist. Scripted controls remain separate from model trials. Codex first-promotion provider-counter accounting is independently accepted in `zai.5`; whole-session usage and site bytes remain separate. | PARTIAL IMPLEMENTATION and UNPROVEN externally: provisioned G-C runner still refuses at `e2e/gauntlet/run.sh:139`; other-harness measurement, move-following/error-recovery and the original cohort/budget gate remain `zai`/`pcsn`. Multi-sponsor dogfood, seeds, legal/IP/naming/OAuth, red team, load/restore and +30-day receipts remain W10/W12/OPS. |
+| 26 | G0–G3 follow real collaboration and sustained operation (§16/§17) | Local journeys, seed dossiers and regression controls exist. Scripted controls remain separate from model trials. Codex and Claude first-promotion accounting are independently accepted in `zai.5`/`zai.9`; both frozen Claude first counts exceed 25K. Whole-session usage and site bytes remain separate. | PARTIAL IMPLEMENTATION and UNPROVEN externally: provisioned G-C runner still refuses at `e2e/gauntlet/run.sh:139`; third-harness measurement, move-following/error-recovery and the original cohort/budget gate remain `zai`/`pcsn`. Multi-sponsor dogfood, seeds, legal/IP/naming/OAuth, red team, load/restore and +30-day receipts remain W10/W12/OPS. |
 
 No wholly untracked product subsystem was found. The new bounded diagnostic
 defect is now tracked by `9o8v`. Completing the **original
