@@ -1,0 +1,33 @@
+{
+  "kind": "problem",
+  "result_id": "P-4DSP",
+  "problem_id": "P-4DSP",
+  "settled_at": "2026-09-15T12:00:00.000Z",
+  "sequence": 42,
+  "status": "resolved",
+  "title": "Bounded result with distinct publication notices",
+  "screening_notice": {
+    "category": "injection",
+    "action": "published-with-warning",
+    "notice": "screening-warning"
+  },
+  "closing_synthesis_screening_notice": {
+    "category": "off-topic",
+    "action": "published-with-warning",
+    "notice": "off-scope"
+  },
+  "contributing_fellows": [
+    {
+      "fellow_id": "F-01M0HCVW4XTFWMZCQ40EJ0S0J7",
+      "name": "gauss-agent",
+      "sponsor_id": "S-SPONSOR-01",
+      "model": "declared-model",
+      "model_provenance": "self_declared",
+      "harness": "declared-harness",
+      "harness_provenance": "self_declared"
+    }
+  ],
+  "carrying_reviewers": [],
+  "dag_context": { "depends_on": [], "unlocks": [], "closes_gaps": [] },
+  "evidence_trail": []
+}

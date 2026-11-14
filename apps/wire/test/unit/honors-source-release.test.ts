@@ -21,6 +21,7 @@ function fixture() {
     CREATE TABLE events(id TEXT PRIMARY KEY,problem_id TEXT,seq INTEGER,payload_sha256 TEXT,
       actor_fellow_id TEXT,actor_sponsor_id TEXT,object_id TEXT,object_version INTEGER,type TEXT,object_kind TEXT);
     CREATE TABLE event_content(event_id TEXT,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
+    CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY,provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,visibility TEXT,version INTEGER);
     CREATE TABLE directive_disclosure_targets(problem_id TEXT,claim_id TEXT,claim_version INTEGER,
       content_digest TEXT,source_event_id TEXT,lineage_json TEXT,scope_requirements_json TEXT,invalidated INTEGER);
@@ -108,6 +109,52 @@ function fixture() {
 test("the final release check accepts matching science, disclosure and DAG witnesses", async () => {
   const f = fixture();
   expect(await f.available()).toBe(1);
+});
+test("a closing screening receipt is pinned through the final honors release", async () => {
+  const f = fixture();
+  // This helper verifies exact already-decoded witnesses, not schema admission.
+  const receipt = '{"retained":"closing-publication-receipt"}';
+  f.db.query("INSERT INTO screening_publications VALUES('E-context',?)").run(receipt);
+  const record: HonorsResultRecord = {
+    ...f.record,
+    closingScreeningReceipt: { event: "E-context", provenance: receipt },
+  };
+  const available = async () =>
+    (await prepareHonorsSourceCheck(f.d1, record).all<{ available: number }>()).results[0]
+      ?.available;
+  expect(await available()).toBe(1);
+  f.db.exec(
+    "UPDATE screening_publications SET provenance_json='changed' WHERE event_id='E-context'",
+  );
+  expect(await available()).toBe(0);
+  f.db
+    .query("UPDATE screening_publications SET provenance_json=? WHERE event_id='E-context'")
+    .run(receipt);
+  expect(await available()).toBe(1);
+});
+test("legacy notice absence is also a pinned source fact, and unrelated receipts do not qualify it", async () => {
+  const f = fixture();
+  const record: HonorsResultRecord = {
+    ...f.record,
+    closingScreeningReceipt: { event: "E-context", provenance: null },
+  };
+  const available = async () =>
+    (await prepareHonorsSourceCheck(f.d1, record).all<{ available: number }>()).results[0]
+      ?.available;
+  expect(await available()).toBe(1);
+  f.db.exec("INSERT INTO screening_publications VALUES('E-science','unrelated')");
+  expect(await available()).toBe(1);
+  f.db.exec("INSERT INTO screening_publications VALUES('E-context','changed')");
+  expect(await available()).toBe(0);
+});
+test("a closing notice cannot name a source outside the retained publication witnesses", () => {
+  const f = fixture();
+  expect(() =>
+    prepareHonorsSourceCheck(f.d1, {
+      ...f.record,
+      closingScreeningReceipt: { event: "E-foreign", provenance: null },
+    }),
+  ).toThrow("exact source witness");
 });
 for (const [label, change] of [
   ["later science event", "UPDATE problems SET public_seq=4"],

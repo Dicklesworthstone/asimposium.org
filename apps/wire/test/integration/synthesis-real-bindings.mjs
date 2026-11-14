@@ -991,24 +991,6 @@ await runLocalWorkerJourney(
     assert.deepEqual(await footprint(), afterWarning);
     assert.equal(await fixtures.screeningCalls(), warningScreens, "replay is not screened again");
 
-    // Closing-resolution derivatives do not yet carry warning context. A
-    // structurally valid closing declaration must still be held, with no
-    // scientific publication or successful replay receipt escaping the hold.
-    const heldClosing = await call(
-      `/v1/sessions/${retainedSession.session_id}/synthesize`,
-      {
-        ...warningBody,
-        closing_resolution: {
-          ...closing,
-          result_claim: { claim_id: claim1Id, version: 2 },
-        },
-      },
-      retainedWriter,
-      202,
-      "synthesis-closing-warning-hold",
-    );
-    assert.equal(heldClosing.code, "SCREENING_HOLD");
-    assert.deepEqual(await footprint(), afterWarning);
     await fixtures.setScreenMode("pass");
 
     const warningReceipt = await env.DB.prepare(
@@ -1148,6 +1130,69 @@ await runLocalWorkerJourney(
     );
     assert.deepEqual(restoredWarning.synthesis.screening_notice, warningNotice);
     console.log(JSON.stringify({ stage: "synthesis-warning-readers", status: "pass" }));
+
+    // A closing declaration may also publish with its own context notice. It
+    // remains an attributed account, not permission to declare a resolution.
+    const closingWarningBody = {
+      ...warningBody,
+      body_md: "NATIVE-CLOSING-WARNING: only the exact claim and its recorded limits.",
+      closing_resolution: {
+        ...closing,
+        result_claim: { claim_id: claim1Id, version: 2 },
+      },
+    };
+    await fixtures.setScreenMode("allow-with-warning");
+    const beforeClosingWarning = await footprint();
+    const warnedClosing = await call(
+      `/v1/sessions/${retainedSession.session_id}/synthesize`,
+      closingWarningBody,
+      retainedWriter,
+      201,
+      "synthesis-closing-published-warning",
+    );
+    const afterClosingWarning = await footprint();
+    assert.equal(afterClosingWarning.events, beforeClosingWarning.events + 1);
+    assert.equal(afterClosingWarning.syntheses, beforeClosingWarning.syntheses + 1);
+    assert.equal(
+      afterClosingWarning.screening_publications,
+      beforeClosingWarning.screening_publications + 1,
+    );
+    assert.equal(afterClosingWarning.public_seq, beforeClosingWarning.public_seq + 1);
+    const closingScreenCalls = await fixtures.screeningCalls();
+    assert.deepEqual(
+      await call(
+        `/v1/sessions/${retainedSession.session_id}/synthesize`,
+        closingWarningBody,
+        retainedWriter,
+        200,
+        "synthesis-closing-published-warning",
+      ),
+      warnedClosing,
+    );
+    assert.deepEqual(await footprint(), afterClosingWarning);
+    assert.equal(await fixtures.screeningCalls(), closingScreenCalls);
+    await fixtures.setScreenMode("pass");
+    const closingFace = SingleSynthesisResponseSchema.parse(
+      await (
+        await worker.fetch(
+          `${origin}/p/${problemId}/syntheses/${warnedClosing.synthesis_id}.json`,
+          { headers: { "User-Agent": userAgent } },
+        )
+      ).json(),
+    );
+    assert.deepEqual(closingFace.synthesis.screening_notice, warningNotice);
+    assert.deepEqual(
+      closingFace.synthesis.closing_resolution,
+      closingWarningBody.closing_resolution,
+    );
+    assert.equal(closingFace.synthesis.body_md, closingWarningBody.body_md);
+    assert.notEqual(
+      (await env.DB.prepare("SELECT status FROM problems WHERE id=?").bind(problemId).first()).status,
+      "resolved",
+      "publishing a warned closing declaration never resolves a problem by itself",
+    );
+    console.log(JSON.stringify({ stage: "closing-synthesis-warning-publication", status: "pass" }));
+
 
     // W2.6 (79n, z3or): claims (anchored across a statement revision), their
     // versions and the syntheses rebuild from the log.

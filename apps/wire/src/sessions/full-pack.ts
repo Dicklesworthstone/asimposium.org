@@ -126,6 +126,7 @@ function recordCandidate(
 ): RecordCandidate {
   const { envelope } = record;
   const event = envelope.event;
+  const notice = record.screening_notice ?? event?.screening_notice;
   const envelopeUrl = eventTailPath(input.problem, "json", {
     since: envelope.seq - 1,
     through: input.through,
@@ -175,9 +176,7 @@ function recordCandidate(
       kind: "full-event",
       id: `FULL-${envelope.seq}`,
       scope: "ledger",
-      ...(event?.screening_notice === undefined
-        ? {}
-        : { screening_notice: event.screening_notice }),
+      ...(notice === undefined ? {} : { screening_notice: notice }),
       untrusted: true,
       tokens: 1,
       stable_prefix: envelope.seq - input.after,

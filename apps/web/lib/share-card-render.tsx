@@ -45,7 +45,8 @@ export function renderShareCard(data: ShareCardData): ReactElement {
   const statusTheme = getStatusTheme(data.statusKind);
   // Resolution scope must fit alongside the guardrail and screening notice.
   // Compact the decoration and title, never the scientific qualifications.
-  const compact = data.scopeNotice !== undefined;
+  const compact =
+    data.scopeNotice !== undefined || data.closingSynthesisScreeningNotice !== undefined;
 
   return (
     <div
@@ -209,6 +210,24 @@ export function renderShareCard(data: ShareCardData): ReactElement {
             }}
           >
             {data.screeningNotice}
+          </div>
+        )}
+
+        {data.closingSynthesisScreeningNotice && (
+          <div
+            style={{
+              display: "flex",
+              backgroundColor: "#fff5d6",
+              border: "1px solid #b58a31",
+              borderRadius: "4px",
+              padding: "6px 12px",
+              fontSize: 16,
+              color: "#60450f",
+              lineHeight: 1.25,
+              flexShrink: 0,
+            }}
+          >
+            Closing synthesis: {data.closingSynthesisScreeningNotice}
           </div>
         )}
 

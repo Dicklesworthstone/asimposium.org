@@ -111,7 +111,7 @@ function createMinimalClaimFace(overrides: Partial<ClaimFaceResponse> = {}): Cla
   };
 }
 
-function createDenseScopedShareCard() {
+function createDenseScopedProblemFace() {
   const face = createMinimalProblemFace({ problem: "P-4DSP", problem_status: "resolved" });
   face.items[0]!.body =
     "Smooth four-dimensional manifold classification under finite-domain assumptions, with independent validation of all stated boundary cases.";
@@ -154,9 +154,18 @@ function createDenseScopedShareCard() {
         payload_digest: "c".repeat(64),
         covers_through: 39,
       },
+      screening_notice: {
+        category: "off-topic",
+        action: "published-with-warning",
+        notice: "off-scope",
+      },
     }),
   });
-  return buildProblemShareCardData(face);
+  return face;
+}
+
+function createDenseScopedShareCard() {
+  return buildProblemShareCardData(createDenseScopedProblemFace());
 }
 
 function createMinimalHonorsRecord(overrides: Partial<HonorsResponse> = {}): HonorsResponse {
@@ -224,6 +233,45 @@ describe("screening context on public share surfaces", () => {
     const data = buildProblemShareCardData(face);
     expect(data.suggestedShareText).toContain("screening context notice: dual-use-boundary");
     expect(renderToStaticMarkup(renderShareCard(data))).toContain(data.screeningNotice!);
+  });
+
+  test("closing synthesis and formulation notices remain distinct on resolved and incident shares", () => {
+    const face = createDenseScopedProblemFace();
+    for (const options of [{}, { incident: "freeze" as const }]) {
+      const data = buildProblemShareCardData(face, options);
+      expect(data.screeningNotice).toContain("dual-use-boundary");
+      expect(data.closingSynthesisScreeningNotice).toContain("Off-scope science");
+      expect(data.suggestedShareText).toContain(data.screeningNotice!);
+      expect(data.suggestedShareText).toContain(
+        `Closing synthesis: ${data.closingSynthesisScreeningNotice}`,
+      );
+      const markup = renderToStaticMarkup(renderShareCard(data));
+      expect(markup).toContain(data.screeningNotice!);
+      expect(markup).toContain(data.closingSynthesisScreeningNotice!);
+      expect(markup).toContain("Closing synthesis:");
+      if (options.incident === "freeze") expect(markup).toContain("INCIDENT NOTICE");
+    }
+  });
+
+  test("only a valid recorded resolution supplies the closing synthesis notice", () => {
+    const face = createDenseScopedProblemFace();
+    const item = face.items.find((entry) => entry.kind === "problem-resolution")!;
+    const original = item.body;
+    const record = JSON.parse(original);
+    for (const body of [
+      "not-json",
+      JSON.stringify({ ...record, screening_notice: { ...notice, category: "invented" } }),
+    ]) {
+      item.body = body;
+      const data = buildProblemShareCardData(face);
+      expect(data.closingSynthesisScreeningNotice).toBeUndefined();
+      expect(data.scopeNotice).toContain("scope is unavailable");
+      expect(data.suggestedShareText).not.toContain("invented");
+      expect(data.screeningNotice).toContain("dual-use-boundary");
+    }
+    item.body = original;
+    face.problem_status = "active";
+    expect(buildProblemShareCardData(face).closingSynthesisScreeningNotice).toBeUndefined();
   });
 });
 
@@ -722,7 +770,12 @@ describe("Dynamic Image Rendering", () => {
     expect(data.title).toHaveLength(120);
     expect(data.scopeNotice!.length).toBeGreaterThan(300);
     const markup = renderToStaticMarkup(renderShareCard(data));
-    for (const notice of [data.guardrailNotice!, data.scopeNotice!, data.screeningNotice!]) {
+    for (const notice of [
+      data.guardrailNotice!,
+      data.scopeNotice!,
+      data.screeningNotice!,
+      data.closingSynthesisScreeningNotice!,
+    ]) {
       expect(markup).toContain(notice);
     }
     expect(markup).toContain("RESOLVED (WITH SCOPE)");

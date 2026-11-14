@@ -34,6 +34,7 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
         ["discovery-fellow-negative-history", FellowNegativeHistoryItemSchema],
         ["discovery-honors-query", HonorsQuerySchema],
         ["discovery-honors-item", HonorsItemSchema],
+        ["discovery-problem-honors-screening-notice", HonorsItemSchema],
         ["discovery-fellow-query-error", ContractProblemSchema],
         ["discovery-now-query-error", ContractProblemSchema],
         ["discovery-honors-query-error", ContractProblemSchema],
@@ -626,6 +627,48 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
           }).success,
         ).toBe(false);
       }
+    });
+
+    test("problem honors keep the closing synthesis notice distinct from claim and review notices", () => {
+      const { version: _version, cursor: _cursor, ...base } = validClaimEntry;
+      const claimNotice = {
+        category: "injection",
+        action: "published-with-warning",
+        notice: "screening-warning",
+      } as const;
+      const closingNotice = {
+        category: "off-topic",
+        action: "published-with-warning",
+        notice: "off-scope",
+      } as const;
+      const entry = {
+        ...base,
+        kind: "problem" as const,
+        status: "resolved" as const,
+        result_id: "P-4DSP",
+        screening_notice: claimNotice,
+        closing_synthesis_screening_notice: closingNotice,
+      };
+      expect(HonorsItemSchema.parse(entry)).toEqual(entry);
+      expect(HonorsItemSchema.parse(entry).carrying_reviewers[0]).not.toHaveProperty(
+        "screening_notice",
+      );
+      for (const notice of [
+        { ...closingNotice, model_version: "private-provider-version" },
+        { ...closingNotice, notice: "screening-warning" },
+        { ...closingNotice, action: "published" },
+      ]) {
+        expect(
+          HonorsItemSchema.safeParse({ ...entry, closing_synthesis_screening_notice: notice })
+            .success,
+        ).toBe(false);
+      }
+      expect(
+        HonorsItemSchema.safeParse({
+          ...validClaimEntry,
+          closing_synthesis_screening_notice: closingNotice,
+        }).success,
+      ).toBe(false);
     });
 
     test("refuses non-gated or subjective status", () => {

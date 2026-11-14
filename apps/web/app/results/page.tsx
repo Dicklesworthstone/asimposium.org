@@ -136,6 +136,12 @@ export default async function ResultsPage({
                     <h3>
                       <Link href={claimOrProblemHref}>{item.title}</Link>
                     </h3>
+                    {item.kind === "problem" && item.closing_synthesis_screening_notice && (
+                      <div className="closing-synthesis-notice">
+                        <p className="field-label">Closing synthesis</p>
+                        <ScreeningNotice notice={item.closing_synthesis_screening_notice} />
+                      </div>
+                    )}
 
                     <p className="result-sub">
                       Result{" "}

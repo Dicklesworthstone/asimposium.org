@@ -98,6 +98,9 @@ export const HonorsItemSchema = z.discriminatedUnion("kind", [
   HonorsItemBaseSchema.extend({
     kind: z.literal("problem"),
     status: z.literal("resolved"),
+    // The result claim's notice remains screening_notice. A closing digest
+    // has its own publication decision and must not borrow that provenance.
+    closing_synthesis_screening_notice: ScreeningPublicationNoticeSchema.optional(),
   }),
 ]);
 export type HonorsItem = z.infer<typeof HonorsItemSchema>;

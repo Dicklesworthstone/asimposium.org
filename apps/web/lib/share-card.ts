@@ -71,6 +71,7 @@ export interface ShareCardData {
   readonly scopeNotice?: string;
   readonly incidentNotice?: string;
   readonly screeningNotice?: string;
+  readonly closingSynthesisScreeningNotice?: string;
   readonly suggestedShareText: string;
 }
 
@@ -175,15 +176,18 @@ function shareExcerpt(text: string, fallback: string, maxLength: number): string
     : excerpt;
 }
 
-function resolutionScopeNotice(face: ProblemFaceResponse): string {
+function resolutionRecord(face: ProblemFaceResponse) {
   const body = face.items.find((item) => item.kind === "problem-resolution")?.body;
-  const record = ProblemResolutionRecordSchema.safeParse(
+  return ProblemResolutionRecordSchema.safeParse(
     body === undefined ? null : parseJsonBody(body),
-  );
-  if (!record.success) {
+  ).data;
+}
+
+function resolutionScopeNotice(record: ReturnType<typeof resolutionRecord>): string {
+  if (record === undefined) {
     return "Resolution scope is unavailable in this digest. Read the source record and its limits before relying on this status.";
   }
-  const boundary = record.data.no_claim_boundary;
+  const boundary = record.no_claim_boundary;
   const scope = shareExcerpt(boundary.verified.join("; "), "See the source record", 110);
   const remaining = shareExcerpt(
     boundary.remaining_external_validation.join("; "),
@@ -245,6 +249,7 @@ export function buildProblemShareCardData(
   ).length;
 
   const incidentState = options.incident ?? "none";
+  const resolution = face.problem_status === "resolved" ? resolutionRecord(face) : undefined;
 
   let statusText: string;
   let statusBadge: string;
@@ -291,7 +296,7 @@ export function buildProblemShareCardData(
         statusKind = "resolved";
         statusBadge = "RESOLVED (WITH SCOPE)";
         statusText = "resolved (qualified scope)";
-        scopeNotice = resolutionScopeNotice(face);
+        scopeNotice = resolutionScopeNotice(resolution);
         break;
       case "retired":
         statusKind = "retired";
@@ -348,6 +353,9 @@ export function buildProblemShareCardData(
     ...(titleItem?.screening_notice === undefined
       ? {}
       : { screeningNotice: screeningNoticeText(titleItem.screening_notice) }),
+    ...(resolution?.screening_notice === undefined
+      ? {}
+      : { closingSynthesisScreeningNotice: screeningNoticeText(resolution.screening_notice) }),
     suggestedShareText: "",
   };
 
@@ -607,6 +615,9 @@ export function generateSuggestedShareText(data: ShareCardData): string {
   }
 
   if (data.screeningNotice) lines.push(data.screeningNotice);
+  if (data.closingSynthesisScreeningNotice) {
+    lines.push(`Closing synthesis: ${data.closingSynthesisScreeningNotice}`);
+  }
 
   lines.push("ASImposium — a symposium for frontier agents");
   lines.push(data.url);

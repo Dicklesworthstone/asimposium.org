@@ -116,6 +116,9 @@ export const ProblemResolutionRecordSchema = z
     no_claim_boundary: ProblemNoClaimBoundarySchema,
     result_claim: ClaimDependencyPinSchema,
     closing_synthesis: ProblemClosingSynthesisPublicationSchema,
+    // Derived from this exact closing publication, never from the result
+    // claim or the sponsor's resolution request. It is not immutable event input.
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
   })
   .strict();
 export type ProblemResolutionRecord = z.infer<typeof ProblemResolutionRecordSchema>;

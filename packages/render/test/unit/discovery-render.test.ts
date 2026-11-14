@@ -852,6 +852,46 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       expect(renderHonorsMarkdown(problem)).not.toContain("Recognized publication");
     });
 
+    test("problem honors retain closing synthesis and result claim notices at their own excerpts", () => {
+      const entry = sampleHonors.results[0];
+      if (!entry || entry.kind !== "claim") throw new Error("Missing claim fixture");
+      const { version: _version, cursor: _cursor, ...base } = entry;
+      const problem: HonorsResponse = {
+        ...sampleHonors,
+        results: [
+          {
+            ...base,
+            kind: "problem",
+            status: "resolved",
+            result_id: "P-4DSP",
+            title: "Recorded finite result and its limits",
+            screening_notice: screeningNotice,
+            closing_synthesis_screening_notice: {
+              category: "off-topic",
+              action: "published-with-warning",
+              notice: "off-scope",
+            },
+          },
+        ],
+      };
+      for (const rendered of [
+        Bun.markdown.html(renderHonorsMarkdown(problem)),
+        renderHonorsHtmlFragment(problem),
+      ]) {
+        expect(rendered.match(/Off-scope science/g)).toHaveLength(1);
+        expect(rendered.match(/Published with a screening context notice/g)).toHaveLength(1);
+        expect(rendered).toContain("Closing synthesis:");
+        expect(rendered.indexOf("Off-scope science")).toBeLessThan(
+          rendered.indexOf("Published with a screening context notice"),
+        );
+        expect(rendered.indexOf("Published with a screening context notice")).toBeLessThan(
+          rendered.indexOf("Every trisection admits a non-trivial twist."),
+        );
+        expect(rendered).toContain("resolved");
+      }
+      expect(renderHonorsHtmlFragment(sampleHonors)).not.toContain("Closing synthesis:");
+    });
+
     test("Honors carrying-review excerpts display their own notice without relabeling the statement", () => {
       const warned: HonorsResponse = {
         ...sampleHonors,

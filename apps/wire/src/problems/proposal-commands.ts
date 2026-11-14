@@ -8,6 +8,12 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { authorizeFellowWrite, type FellowCredentialBinding } from "../enrollment/service.ts";
 import { type ValidatedProblemInput, validatedProblem } from "../http/envelope.ts";
 import { genesisChainDigest, sha256Hex } from "../krater/krater.ts";
+import { eventContentHiddenSql } from "../krater/public-content.ts";
+import { PUBLIC_EVENT_CONTENT_MAX_BYTES } from "../ledger/citation-read-integrity.ts";
+import {
+  type FormulationRow,
+  verifyPublishedProblemFormulation,
+} from "../ledger/problem-formulation-read.ts";
 import { normHash } from "../split/policy.ts";
 import { problemBoundariesRequired, problemBoundaryFields } from "./boundaries.ts";
 import { privateBriefResponse } from "./brief-commands.ts";
@@ -33,6 +39,72 @@ interface ReceiptRow {
   problem_available: number;
   event_budget: number | null;
   events_recorded: number;
+}
+
+/** Duplicate feedback is a disclosure of an exact statement. Retained hashes
+ * are candidate hints; a foreign match needs a verified, currently visible
+ * publication of that version. Unlisted publications remain eligible.
+ */
+async function readableDuplicate(
+  db: D1Database,
+  fullHash: string,
+  sponsorId: string,
+): Promise<{ id: string } | null> {
+  const ownDraft = await db
+    .prepare(`SELECT p.id FROM problem_statement_versions v JOIN problems p ON p.id = v.problem_id
+      WHERE v.norm_hash = ? AND p.status = 'private-draft' AND p.sponsor_id = ?
+      ORDER BY p.id LIMIT 1`)
+    .bind(fullHash, sponsorId)
+    .first<{ id: string }>();
+  if (ownDraft) return ownDraft;
+
+  // Bound both payload hydration and the total verification work. Continue past
+  // unavailable/corrupt candidates so they cannot conceal a readable match.
+  const pageSize = 16;
+  const maxPages = 4;
+  let after = "";
+  for (let page = 0; page < maxPages; page += 1) {
+    const candidates = await db
+      .prepare(`SELECT e.id, e.problem_id, e.seq, e.type, e.object_id, e.object_version,
+          p.public_seq, e.payload_sha256, c.payload_sha256 AS content_sha256,
+          c.redacted_at, c.payload_json
+        FROM problem_statement_versions v JOIN problems p ON p.id = v.problem_id
+        JOIN events e ON e.problem_id = p.id AND e.object_id = p.id
+          AND e.object_kind = 'problem' AND e.object_version = v.version
+          AND e.type IN ('problem.admitted', 'problem.statement-revised')
+        JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+        WHERE v.norm_hash = ? AND p.status IN ('active', 'sharpening', 'under-result-review')
+          AND e.seq <= p.public_seq AND e.id > ? AND c.redacted_at IS NULL
+          AND length(CAST(c.payload_json AS BLOB)) <= ${PUBLIC_EVENT_CONTENT_MAX_BYTES}
+          AND NOT ${eventContentHiddenSql("e")}
+        ORDER BY e.id LIMIT ?`)
+      .bind(fullHash, after, pageSize)
+      .all<FormulationRow>();
+    for (const row of candidates.results) {
+      const formulation = await verifyPublishedProblemFormulation(row.problem_id, row.seq, row);
+      if (!formulation || `sha256:${await normHash(formulation.problem.statement)}` !== fullHash)
+        continue;
+
+      // Hashing yields. Recheck the exact bytes and every current control before
+      // using the source in a refusal; hiding/redaction may have won meanwhile.
+      const current = await db
+        .prepare(`SELECT p.id FROM events e JOIN problems p ON p.id = e.problem_id
+          JOIN event_content c ON c.event_id = e.id
+          WHERE e.id = ? AND e.payload_sha256 = ? AND c.payload_sha256 = e.payload_sha256
+            AND c.payload_json = ? AND c.redacted_at IS NULL
+            AND p.status IN ('active', 'sharpening', 'under-result-review')
+            AND e.seq <= p.public_seq AND NOT ${eventContentHiddenSql("e")}`)
+        .bind(row.id, row.payload_sha256, formulation.source_payload_json)
+        .first<{ id: string }>();
+      if (current) return current;
+    }
+    if (candidates.results.length < pageSize) return null;
+    const last = candidates.results.at(-1);
+    if (!last) return null;
+    after = last.id;
+  }
+  // An incomplete scan cannot establish that a proposal is distinct.
+  throw new Error("PROBLEM_DUPLICATE_SCAN_EXHAUSTED");
 }
 
 function refusal(input: ValidatedProblemInput): Response {
@@ -249,15 +321,7 @@ export async function runProblemProposalCommand(
     if (briefRefusal !== null) return (await readReceipt()) ?? briefRefusal;
 
     const fullHash = `sha256:${await normHash(request.statement)}`;
-    const matches = await db
-      .prepare(`SELECT p.id FROM problem_statement_versions v JOIN problems p ON p.id = v.problem_id
-        WHERE v.norm_hash = ? AND (
-          (p.status IN ('active', 'sharpening', 'under-result-review') AND EXISTS (
-            SELECT 1 FROM events e WHERE e.problem_id = p.id AND e.object_kind = 'problem'
-              AND e.type IN ('problem.admitted', 'problem.statement-revised') AND e.object_version = v.version))
-          OR (p.status = 'private-draft' AND p.sponsor_id = ?)) LIMIT 1`)
-      .bind(fullHash, binding.sponsorId)
-      .first<{ id: string }>();
+    const matches = await readableDuplicate(db, fullHash, binding.sponsorId);
     if (matches && !request.distinct_because) {
       return (
         (await readReceipt()) ??

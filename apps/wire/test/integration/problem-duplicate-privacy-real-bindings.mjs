@@ -9,6 +9,8 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // matches, while published unlisted wording still refuses as POSSIBLE_DUPLICATE.
 // Unlisted hides a public problem from discovery, not from a known-URL read or
 // a duplicate refusal. Never-published foreign wording remains private.
+// Current controls and lawful redaction withdraw duplicate feedback even when
+// the retained statement/hash and immutable publication envelope still exist.
 
 const problemBody = (title, statement) => ({
   title,
@@ -19,7 +21,18 @@ const problemBody = (title, statement) => ({
 });
 
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, reviseStatement, worker, origin, userAgent }) => {
+  async ({
+    call,
+    enroll,
+    sponsorCall,
+    reviseStatement,
+    operatorCall,
+    fixtures,
+    env,
+    worker,
+    origin,
+    userAgent,
+  }) => {
     const SPONSOR_A = "usr_dup_privacy_a";
     const SPONSOR_B = "usr_dup_privacy_b";
     const fellowA = await enroll("dup-privacy-a", SPONSOR_A);
@@ -103,6 +116,70 @@ await runLocalWorkerJourney(
       409,
     );
     assert.equal(own.existing_problem_id, fresh.problem.id);
+
+    // Current visibility overrides an old public envelope. A new foreign
+    // proposer must be able to create a draft without learning the hidden ID.
+    const control = (action) =>
+      operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+        target_id: problem,
+        target_kind: "problem",
+        action,
+        reason: "Review the duplicate-source publication.",
+      });
+    await control("hide");
+    assert.equal((await publicRead(`/p/${problem}.json`)).status, 404);
+    const hiddenProposer = await enroll("dup-privacy-hidden", "usr_dup_privacy_hidden");
+    const hiddenFresh = await call(
+      "/v1/problems",
+      problemBody("Independent proposal after source withdrawal", PUBLISHED_WORDING),
+      hiddenProposer,
+      201,
+    );
+    assert.notEqual(hiddenFresh.problem.id, problem);
+    assert.ok(!JSON.stringify(hiddenFresh).includes(problem));
+
+    // A later restore makes the same exact public source eligible again.
+    await control("restore");
+    const restored = await call(
+      "/v1/problems",
+      problemBody("Restored public formulation again", PUBLISHED_WORDING),
+      fellowB,
+      409,
+    );
+    assert.equal(restored.code, "POSSIBLE_DUPLICATE");
+    assert.equal(restored.existing_problem_id, problem);
+
+    // Lawful redaction removes the publication bytes, while immutable envelope
+    // and statement projection survive. Neither retained row authorizes a leak.
+    const source = await env.DB.prepare(
+      "SELECT * FROM events WHERE problem_id=? AND type='problem.admitted'",
+    )
+      .bind(problem)
+      .first();
+    assert.ok(source, "the source has an actual public admission");
+    await fixtures.redactPublicContent(source.id);
+    const retained = await env.DB.prepare(
+      "SELECT statement,norm_hash FROM problem_statement_versions WHERE problem_id=? AND version=?",
+    )
+      .bind(problem, source.object_version)
+      .first();
+    assert.ok(retained, "the old statement projection survives redaction");
+    assert.equal(retained.statement, PUBLISHED_WORDING);
+    assert.match(retained.norm_hash, /^sha256:[0-9a-f]{64}$/);
+    const redactedProposer = await enroll("dup-privacy-redacted", "usr_dup_privacy_redacted");
+    const redactedFresh = await call(
+      "/v1/problems",
+      problemBody("Independent proposal after lawful redaction", PUBLISHED_WORDING),
+      redactedProposer,
+      201,
+    );
+    assert.notEqual(redactedFresh.problem.id, problem);
+    assert.ok(!JSON.stringify(redactedFresh).includes(problem));
+    assert.deepEqual(
+      await env.DB.prepare("SELECT * FROM events WHERE id=?").bind(source.id).first(),
+      source,
+      "duplicate screening and redaction preserve the immutable envelope",
+    );
 
     console.log(
       JSON.stringify({

@@ -12,6 +12,7 @@ import {
   ProblemLifecycleActionRequestSchema,
   ProblemPublicationPreviewSchema,
   ProblemResolutionDirectionSchema,
+  ProblemResolutionRecordSchema,
   ProblemStatementReviewEventSchema,
   ProblemStatementReviewRequestSchema,
   ProblemStatementReviewResponseSchema,
@@ -197,6 +198,78 @@ test("resolution records require exact Fellow closing publication and result pro
       },
     }).success,
   ).toBe(false);
+  // The public reader derives the warning from the exact published synthesis.
+  // Neither a sponsor request nor immutable resolution prose can assert it.
+  const notice = {
+    category: "off-topic",
+    action: "published-with-warning",
+    notice: "off-scope",
+  } as const;
+  const resolveRequest = {
+    action: "resolve",
+    direction: "affirmed",
+    closing_synthesis: {
+      synthesis_id: "SYNTH-1",
+      summary: event.problem.resolution_summary,
+      no_claim_boundary: boundary,
+    },
+  };
+  for (const request of [
+    { ...resolveRequest, screening_notice: notice },
+    {
+      ...resolveRequest,
+      closing_synthesis: { ...resolveRequest.closing_synthesis, screening_notice: notice },
+    },
+  ]) {
+    expect(ProblemLifecycleActionRequestSchema.safeParse(request).success).toBe(false);
+  }
+  const forgedEvent = {
+    ...event,
+    problem: { ...event.problem, screening_notice: notice },
+  };
+  expect(ProblemGovernanceEventSchema.safeParse(forgedEvent).success).toBe(false);
+  expect(published(forgedEvent)).toBe(false);
+});
+
+test("closing resolution warning goldens preserve public-only notices and exact publication pins", () => {
+  const read = (path: string) => JSON.parse(readFileSync(new URL(path, import.meta.url), "utf8"));
+  const schema = read("../../generated/problems.schema.json");
+  const published = new Ajv2020({ strict: true }).compile(
+    schema.properties.detail.properties.resolution,
+  );
+  const valid = read("../fixtures/valid/problem-resolution-screening-notice.json");
+  const invalid = read("../fixtures/invalid/problem-resolution-screening-notice.json");
+  expect(ProblemResolutionRecordSchema.parse(valid)).toEqual(valid);
+  expect(published(valid)).toBe(true);
+  expect(ProblemResolutionRecordSchema.safeParse(invalid).success).toBe(false);
+  expect(published(invalid)).toBe(false);
+  const { screening_notice: _notice, ...unwarned } = valid;
+  expect(ProblemResolutionRecordSchema.parse(unwarned)).toEqual(unwarned);
+  expect(published(unwarned)).toBe(true);
+  for (const notice of [
+    { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
+    { category: "injection", action: "published-with-warning", notice: "screening-warning" },
+  ]) {
+    const record = { ...valid, screening_notice: notice };
+    expect(ProblemResolutionRecordSchema.parse(record)).toEqual(record);
+    expect(published(record)).toBe(true);
+  }
+  for (const notice of [
+    { ...valid.screening_notice, notice: "none" },
+    { ...valid.screening_notice, action: "published" },
+    { ...valid.screening_notice, category: "benign-context" },
+    { ...valid.screening_notice, scores: { injection: 0.6 } },
+  ]) {
+    const record = { ...valid, screening_notice: notice };
+    expect(ProblemResolutionRecordSchema.safeParse(record).success).toBe(false);
+    expect(published(record)).toBe(false);
+  }
+  for (const field of ["result_claim", "closing_synthesis", "no_claim_boundary"]) {
+    const incomplete = { ...valid };
+    delete incomplete[field];
+    expect(ProblemResolutionRecordSchema.safeParse(incomplete).success).toBe(false);
+    expect(published(incomplete)).toBe(false);
+  }
 });
 
 test("publication requires exact reviewed pins and publishes a private preview schema", () => {

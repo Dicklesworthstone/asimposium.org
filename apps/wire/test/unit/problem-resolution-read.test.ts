@@ -1,7 +1,11 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { ProblemFaceResponseSchema } from "@asimposium/contracts";
+import {
+  ProblemFaceResponseSchema,
+  type ScreeningPublicationNotice,
+  ScreeningPublicationProvenanceSchema,
+} from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { Env } from "../../src/env.ts";
 import { PUBLIC_EVENT_CONTENT_MAX_BYTES } from "../../src/ledger/citation-read-integrity.ts";
@@ -25,6 +29,39 @@ const declaration = {
   no_claim_boundary: boundary,
 };
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+const CLOSING_NOTICE = {
+  action: "published-with-warning",
+  category: "dual-use-boundary",
+  notice: "screening-warning",
+} as const;
+const OFF_SCOPE_NOTICE = {
+  action: "published-with-warning",
+  category: "off-topic",
+  notice: "off-scope",
+} as const;
+
+// Synthetic immutable receipt for reader qualification, not a classifier result.
+function screeningReceipt(notice: ScreeningPublicationNotice) {
+  return JSON.stringify(
+    ScreeningPublicationProvenanceSchema.parse({
+      version: "ledger-publication-screening.v1",
+      scope: "candidate-and-actor-only",
+      principal: "platform:symposiarch",
+      input_digest: "a".repeat(64),
+      context_digest: "b".repeat(64),
+      configuration_digest: "c".repeat(64),
+      model_version: "fixture-private-model",
+      policy_version: "fixture-private-policy",
+      decided_at: AT,
+      latency_ms: 1,
+      retry_count: 0,
+      outcome: "allow-with-warning",
+      provider_status: "ok",
+      decision_path: "provider",
+      public_action: notice,
+    }),
+  );
+}
 
 // Production SQL and decoders run against SQLite. This fixture is not a
 // real-binding or scientific admission proof; it tests immutable read authority.
@@ -189,6 +226,9 @@ function fixture(synthesisChange: Record<string, unknown> = {}) {
       FROM content_controls WHERE problem_id=? AND target_ref=?`)
       .run(scope, target, visibility, scope, target);
   }
+  function notice(event: string, value: ScreeningPublicationNotice) {
+    sql.query("INSERT INTO screening_publications VALUES(?,?)").run(event, screeningReceipt(value));
+  }
   const expected = {
     direction: "affirmed" as const,
     summary: SUMMARY,
@@ -206,6 +246,7 @@ function fixture(synthesisChange: Record<string, unknown> = {}) {
     closing,
     resolve,
     control,
+    notice,
     expected,
     onQuery: (hook: (query: string) => void) => {
       queryHook = hook;
@@ -231,6 +272,79 @@ describe("immutable published problem resolution", () => {
       expect(await f.read()).toEqual(f.expected);
       expect(await f.read(2)).toBeUndefined();
       expect(await f.read(4)).toBeUndefined();
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  for (const notice of [CLOSING_NOTICE, OFF_SCOPE_NOTICE]) {
+    test(`the exact closing ${notice.notice} qualifies copied conclusions without borrowing other notices`, async () => {
+      const f = fixture();
+      try {
+        f.resolve();
+        f.notice(f.claim.eventId, OFF_SCOPE_NOTICE);
+        f.notice(f.synthesis.eventId, notice);
+        f.notice("E-3", { ...CLOSING_NOTICE, category: "injection" });
+        const record = await f.read();
+        expect(record).toEqual({ ...f.expected, screening_notice: notice });
+        expect(JSON.stringify(record)).not.toContain("fixture-private");
+        expect(JSON.stringify(record)).not.toContain("configuration_digest");
+        expect(JSON.stringify(record)).not.toContain("injection");
+      } finally {
+        f.sql.close();
+      }
+    });
+  }
+
+  test("an authored notice cannot supply missing platform publication provenance", async () => {
+    const f = fixture({ screening_notice: CLOSING_NOTICE });
+    try {
+      f.resolve();
+      expect(await f.read()).toEqual(f.expected);
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  for (const raw of [
+    "{",
+    JSON.stringify({ public_action: CLOSING_NOTICE }),
+    JSON.stringify({
+      ...JSON.parse(screeningReceipt(CLOSING_NOTICE)),
+      public_action: { ...CLOSING_NOTICE, notice: "off-scope" },
+    }),
+    "x".repeat(4097),
+  ]) {
+    test(`an invalid closing screening receipt cannot turn into unqualified resolution (${raw.length} bytes)`, async () => {
+      const f = fixture();
+      try {
+        f.resolve();
+        f.sql.query("INSERT INTO screening_publications VALUES(?,?)").run(f.synthesis.eventId, raw);
+        expect(await f.read()).toBeUndefined();
+      } finally {
+        f.sql.close();
+      }
+    });
+  }
+
+  test("a changed closing receipt during hydration withholds the copied resolution", async () => {
+    const f = fixture();
+    try {
+      f.resolve();
+      f.notice(f.synthesis.eventId, CLOSING_NOTICE);
+      expect(await f.read()).toEqual({ ...f.expected, screening_notice: CLOSING_NOTICE });
+      let changed = false;
+      f.onQuery((query) => {
+        if (!changed && query.includes("JOIN events resolution")) {
+          changed = true;
+          f.sql
+            .query("UPDATE screening_publications SET provenance_json=? WHERE event_id=?")
+            .run(screeningReceipt(OFF_SCOPE_NOTICE), f.synthesis.eventId);
+        }
+      });
+      expect(await f.read()).toBeUndefined();
+      expect(changed).toBe(true);
+      expect(await f.read()).toEqual({ ...f.expected, screening_notice: OFF_SCOPE_NOTICE });
     } finally {
       f.sql.close();
     }
@@ -339,7 +453,7 @@ describe("immutable published problem resolution", () => {
       f.resolve();
       let raced = false;
       f.onQuery((query) => {
-        if (!raced && query.includes("SELECT 1 AS available FROM problems")) {
+        if (!raced && query.includes("JOIN events resolution")) {
           raced = true;
           f.sql.exec(
             "UPDATE event_content SET payload_json=replace(payload_json,'finite','fabricated') WHERE event_id='E-2'",
@@ -480,6 +594,32 @@ describe("immutable published problem resolution", () => {
       f.sql.close();
     }
   });
+  test("a full export retains the closing notice outside its copied resolution body", async () => {
+    const f = fixture();
+    try {
+      f.resolve();
+      f.notice(f.synthesis.eventId, CLOSING_NOTICE);
+      const pack = await readFullPack(f.db, {
+        session: `S-${"0".repeat(26)}`,
+        problem: PROBLEM,
+        after: 2,
+        through: 3,
+        requestedMaxTokens: 8000,
+        membership: "contributor",
+      });
+      const item = pack.items.find((entry) => entry.kind === "full-event");
+      expect(item?.screening_notice).toEqual(CLOSING_NOTICE);
+      const record = JSON.parse(item?.body ?? "null");
+      expect(record.content_omitted).toBeNull();
+      expect(record.content).toEqual({ ...f.expected, screening_notice: CLOSING_NOTICE });
+      // This is the closing source's notice, not a forged notice on the
+      // immutable sponsor resolution envelope or a private screening receipt.
+      expect(record.publication.screening_notice).toBeUndefined();
+      expect(JSON.stringify(pack)).not.toContain("fixture-private");
+    } finally {
+      f.sql.close();
+    }
+  });
 });
 
 function digestRoutes(f: ReturnType<typeof fixture>) {
@@ -530,6 +670,8 @@ test("public full release rechecks closing work outside its event window before 
       f.sql.exec(
         "UPDATE event_content SET payload_json=replace(payload_json,'finite','fabricated') WHERE event_id='E-2'",
       ),
+    (f: ReturnType<typeof fixture>) =>
+      f.sql.query("INSERT INTO screening_publications VALUES('E-2',?)").run("invalid-receipt"),
   ]) {
     const f = fixture();
     try {
@@ -604,6 +746,47 @@ test("primary digest and full Markdown expose only verified resolution and exist
     expect(JSON.stringify(unavailable)).not.toContain(SUMMARY);
   } finally {
     f.sql.close();
+  }
+});
+
+test("resolution digest faces preserve platform notices with qualified public metadata and cache identity", async () => {
+  for (const notice of [CLOSING_NOTICE, OFF_SCOPE_NOTICE]) {
+    const f = fixture();
+    try {
+      f.resolve();
+      const get = digestRoutes(f);
+      const clean = await get("json");
+      expect(clean.status).toBe(200);
+      const originalEtag = clean.headers.get("etag");
+      f.notice(f.synthesis.eventId, notice);
+      const response = await get("json", originalEtag ?? undefined);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("etag")).not.toBe(originalEtag);
+      const face = ProblemFaceResponseSchema.parse(await response.json());
+      const item = face.items.find((entry) => entry.kind === "problem-resolution");
+      expect(item?.screening_notice).toEqual(notice);
+      expect(JSON.parse(item?.body ?? "null")).toEqual({ ...f.expected, screening_notice: notice });
+      for (const suffix of ["md", "full.md"]) {
+        const rendered = await get(suffix);
+        expect(rendered.status).toBe(200);
+        const body = await rendered.text();
+        expect(body).toContain(SUMMARY);
+        expect(body).toContain(
+          notice.category === "off-topic" ? "Off-scope" : "screening context notice",
+        );
+        expect(body).not.toContain("fixture-private");
+      }
+      const conditional = await get("json", response.headers.get("etag") ?? undefined);
+      expect(conditional.status).toBe(304);
+      f.control("#2", "hidden");
+      const hidden = await get("json", response.headers.get("etag") ?? undefined);
+      expect(hidden.status).toBe(200);
+      const bytes = await hidden.text();
+      expect(bytes).not.toContain(SUMMARY);
+      expect(bytes).not.toContain(notice.notice);
+    } finally {
+      f.sql.close();
+    }
   }
 });
 
