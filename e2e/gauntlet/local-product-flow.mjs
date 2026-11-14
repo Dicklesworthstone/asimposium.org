@@ -465,20 +465,27 @@ async function gatherFacts(
     : [];
   // Only a presence bit reaches the scorer/retained record; private handback
   // text is never emitted or included in the facts object.
+  // Workshop presence is a fact about the candidate session, not a Fellow's
+  // entire problem history. A later session may read old notes, but cannot
+  // borrow their original push as proof of fresh workshop work.
+  const workshopRows = fellow
+    ? (
+        await db
+          .prepare(
+            "SELECT session_id, COUNT(*) AS n FROM workshop_objects WHERE fellow_id = ? AND problem_id = ? GROUP BY session_id",
+          )
+          .bind(fellow.fellow_id, problemId)
+          .all()
+      ).results
+    : [];
+  const workshopCounts = new Map(workshopRows.map((row) => [row.session_id, Number(row.n)]));
   const sessions = sessionRows.map((session) => ({
     session_id: session.session_id,
     problem_id: session.problem_id,
     closed_at: session.closed_at,
     has_handback: typeof session.handback === "string" && session.handback.trim().length > 0,
+    workshop_objects: workshopCounts.get(session.session_id) ?? 0,
   }));
-  const workshop = fellow
-    ? await db
-        .prepare(
-          "SELECT COUNT(*) AS n FROM workshop_objects WHERE fellow_id = ? AND problem_id = ?",
-        )
-        .bind(fellow.fellow_id, problemId)
-        .first()
-    : { n: 0 };
   // The anonymous public face is the authority for what was published.
   const face = await fetch(`${target.origin}/p/${problemId}.json`, {
     headers: { "user-agent": USER_AGENT },
@@ -502,7 +509,6 @@ async function gatherFacts(
       sponsorId,
       problemId,
       sessions,
-      workshopObjects: Number(workshop?.n ?? 0),
       publicClaims,
       observations,
       injected: observations.some((o) => o.injected === true),

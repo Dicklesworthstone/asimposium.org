@@ -26,8 +26,7 @@ const PACK_PATH = /^\/v1\/sessions\/([^/]+)\/pack$/;
  *   fellow: { fellow_id: string, sponsor_id: string } | null,
  *   sponsorId: string,
  *   problemId: string,
- *   sessions: { session_id: string, problem_id: string, closed_at: string | null, has_handback: boolean }[],
- *   workshopObjects: number,
+ *   sessions: { session_id: string, problem_id: string, closed_at: string | null, has_handback: boolean, workshop_objects: number }[],
  *   publicClaims: { claim_id?: string | null, author_fellow_id: string | null, session_id: string | null, has_falsifier: boolean, conjecture_class: boolean }[],
  *   observations: { started_order?: number, completed_order?: number | null, claim_id?: string | null, method: string, path: string, status: number, code: string | null, injected?: boolean }[],
  *   injected: boolean,
@@ -89,7 +88,10 @@ function sessionVerdict(facts, session) {
     })
   )
     reached.push("pack_read");
-  if (facts.workshopObjects > 0) reached.push("workshop");
+  // A Fellow may have worked on this problem in several sessions. Only a
+  // private object actually created by this session can satisfy its loop.
+  if (session !== null && Number.isSafeInteger(session.workshop_objects) && session.workshop_objects > 0)
+    reached.push("workshop");
 
   // Recovery: the actual injected contract 422 followed by success on that
   // same owned session. A natural refusal or an ineffective injection cannot
@@ -107,11 +109,17 @@ function sessionVerdict(facts, session) {
       refused.injected === true &&
       refused.status === 422 &&
       refused.code === "PROMOTE_BODY_INVALID" &&
+      Number.isSafeInteger(refused.started_order) &&
+      Number.isSafeInteger(refused.completed_order) &&
+      refused.completed_order > refused.started_order &&
       promotes
         .slice(index + 1)
         .some(
           (accepted) =>
-            accepted.path === refused.path && (accepted.status === 200 || accepted.status === 201),
+            accepted.path === refused.path &&
+            (accepted.status === 200 || accepted.status === 201) &&
+            Number.isSafeInteger(accepted.started_order) &&
+            accepted.started_order > refused.completed_order,
         ),
   );
   if (recovered) reached.push("refusal_recovered");
@@ -148,29 +156,47 @@ function sessionVerdict(facts, session) {
               observation.completed_order > observation.started_order)),
       ) && new Set(endpoints).size === endpoints.length;
     const receipts = promotes.filter((o) => o.status === 200 || o.status === 201);
-    const prepared =
-      timelineValid &&
-      withFalsifier.some((claim) => {
-        if (typeof claim.claim_id !== "string" || claim.claim_id.length === 0) return false;
-        // The first successful request for this ID is its publication witness.
-        // A later idempotent replay cannot turn an old publication into new work.
+    let packBeforePublication = false;
+    let workshopBeforePublication = false;
+    let prepared = false;
+    if (timelineValid) {
+      for (const claim of withFalsifier) {
+        if (typeof claim.claim_id !== "string" || claim.claim_id.length === 0) continue;
+        // Only the original 201 for this exact public claim is a creation
+        // witness. Later 200 idempotent replays must not grant preparation.
         const first = receipts
           .filter((receipt) => receipt.claim_id === claim.claim_id)
           .sort((left, right) => left.started_order - right.started_order)[0];
-        return (
-          first !== undefined &&
-          first.status === 201 &&
-          facts.observations.some(
-            (observation) =>
-              observation.method === "GET" &&
-              observation.path === `/v1/sessions/${session.session_id}/pack` &&
-              observation.status === 200 &&
-              Number.isSafeInteger(observation.completed_order) &&
-              observation.completed_order < first.started_order,
-          )
+        if (first?.status !== 201) continue;
+        const packRead = facts.observations.some(
+          (o) =>
+            o.method === "GET" &&
+            o.path === `/v1/sessions/${session.session_id}/pack` &&
+            o.status === 200 &&
+            Number.isSafeInteger(o.completed_order) &&
+            o.completed_order < first.started_order,
         );
-      });
-    if (!prepared) reached.splice(reached.indexOf("pack_read"), 1);
+        const workshopWrite = facts.observations.some(
+          (o) =>
+            o.method === "POST" &&
+            o.path === `/v1/sessions/${session.session_id}/workshop` &&
+            (o.status === 200 || o.status === 201) &&
+            Number.isSafeInteger(o.completed_order) &&
+            o.completed_order < first.started_order,
+        );
+        packBeforePublication ||= packRead;
+        workshopBeforePublication ||= workshopWrite;
+        if (packRead && workshopWrite) prepared = true;
+      }
+    }
+    if (!prepared) {
+      // A later private push, a different session's workshop or two separate
+      // claims with disjoint preparation cannot complete one honest loop.
+      if ((!packBeforePublication || workshopBeforePublication) && reached.includes("pack_read"))
+        reached.splice(reached.indexOf("pack_read"), 1);
+      if (!workshopBeforePublication && reached.includes("workshop"))
+        reached.splice(reached.indexOf("workshop"), 1);
+    }
   }
   if (sessions.some((s) => s.closed_at !== null && s.has_handback === true)) reached.push("closed");
   if (facts.secretSeenInPaths) failures.push("the enrollment secret appeared in a request path");
