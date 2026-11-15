@@ -61,6 +61,7 @@ export interface RealAttemptDiagnostic {
   /** null when the binary could not be executed or was killed at the deadline. */
   readonly exitCode: number | null;
   readonly timedOut: boolean;
+  readonly stdinWriteFailed: boolean;
   /** true when stdout exceeded the cap; excess was drained and counted, never retained. */
   readonly truncated: boolean;
   readonly binaryFound: boolean;
@@ -166,13 +167,14 @@ export async function runRealAttempt(
   const prompt = registrationPrompt(joinUrl);
   const startedAt = Date.now();
 
-  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
+  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
   try {
     proc = Bun.spawn({
-      cmd: [adapter.binary, ...adapter.argv(prompt)],
+      // A fragment-secret enrollment URL must never appear in process arguments.
+      cmd: [adapter.binary, ...adapter.argv()],
       cwd: options.cwd,
       env: buildChildEnv(options.extraEnv),
-      stdin: "ignore",
+      stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -186,6 +188,7 @@ export async function runRealAttempt(
       diagnostic: {
         exitCode: null,
         timedOut: false,
+        stdinWriteFailed: false,
         truncated: false,
         binaryFound: false,
         durationMs: Date.now() - startedAt,
@@ -194,6 +197,22 @@ export async function runRealAttempt(
     };
   }
 
+  // The prompt includes an enrollment secret. Only the child input pipe may
+  // receive it; a failed write never counts as a completed harness run.
+  const inputWritten = (async () => {
+    try {
+      proc.stdin.write(prompt);
+      await proc.stdin.end();
+      return true;
+    } catch {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        // The child may already have exited.
+      }
+      return false;
+    }
+  })();
   let timedOut = false;
   const deadline = setTimeout(() => {
     timedOut = true;
@@ -212,10 +231,11 @@ export async function runRealAttempt(
   }, timeoutMs);
   deadline.unref?.();
 
-  const [drained, stderrTail, exitCode] = await Promise.all([
+  const [drained, stderrTail, exitCode, stdinWritten] = await Promise.all([
     drainWithCap(proc.stdout as ReadableStream<Uint8Array>, maxTranscriptBytes),
     tailOf(proc.stderr as ReadableStream<Uint8Array>, STDERR_TAIL_BYTES),
     proc.exited,
+    inputWritten,
   ]);
   clearTimeout(deadline);
 
@@ -228,8 +248,9 @@ export async function runRealAttempt(
     transcriptBytes: captured.byteLength,
     discardedBytes,
     diagnostic: {
-      exitCode,
+      exitCode: stdinWritten ? exitCode : null,
       timedOut,
+      stdinWriteFailed: !stdinWritten,
       truncated: discardedBytes > 0,
       binaryFound: true,
       durationMs,
@@ -246,7 +267,8 @@ export interface RetainedAttemptRecord {
   readonly transcriptSha256: string;
   readonly transcriptBytes: number;
   readonly discardedBytes: number;
-  readonly diagnostic: RealAttemptDiagnostic;
+  /** Transient raw stderr may contain secrets and must never be retained. */
+  readonly diagnostic: Omit<RealAttemptDiagnostic, "stderrTail">;
 }
 
 /**
@@ -261,6 +283,7 @@ export function redactForRetention(
   stageReached: string,
   tokensEstimate: number,
 ): RetainedAttemptRecord {
+  const { stderrTail: _privateStderr, ...safeDiagnostic } = outcome.diagnostic;
   return {
     harness,
     stageReached,
@@ -268,6 +291,6 @@ export function redactForRetention(
     transcriptSha256: outcome.transcriptSha256,
     transcriptBytes: outcome.transcriptBytes,
     discardedBytes: outcome.discardedBytes,
-    diagnostic: outcome.diagnostic,
+    diagnostic: safeDiagnostic,
   };
 }

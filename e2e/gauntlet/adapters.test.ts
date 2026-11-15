@@ -15,12 +15,16 @@ describe("the cold-agent harness adapters", () => {
     ]);
   });
 
-  test("every adapter invokes its CLI non-interactively with the prompt", () => {
+  test("the secret-bearing join URL stays in stdin, not process arguments", () => {
+    const prompt = registrationPrompt("https://a.asimposium.org/join/ASIMP-EN-1#v1.PRIVATE-CANARY");
     for (const adapter of HARNESS_ADAPTERS) {
-      const argv = adapter.argv("the prompt");
+      const argv = adapter.argv();
       expect(argv.length).toBeGreaterThan(0);
-      expect(argv).toContain("the prompt");
+      expect(JSON.stringify(argv)).not.toContain(prompt);
+      expect(JSON.stringify(argv)).not.toContain("PRIVATE-CANARY");
+      expect(argv).not.toContain("ASIMP-EN-1");
     }
+    expect(HARNESS_ADAPTERS.find((a) => a.harness === "codex")?.argv()).toContain("-");
   });
 
   test("the registration prompt carries the join URL and the hello instruction", () => {

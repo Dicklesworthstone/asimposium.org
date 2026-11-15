@@ -99,6 +99,20 @@ describe("runRealAttempt", () => {
     expect(outcome.transcriptSha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  test("an enrollment fragment goes only through stdin, never CLI argv", async () => {
+    installFakeCli("claude", `
+      input="$(cat)"
+      case "$input" in *"#v1.s"*) ;; *) exit 4 ;; esac
+      case "$*" in *"#v1.s"*) exit 5 ;; esac
+      printf "stdin-only\\n"
+    `);
+    const outcome = await attempt();
+    expect(outcome.diagnostic.exitCode).toBe(0);
+    expect(outcome.diagnostic.stdinWriteFailed).toBe(false);
+    expect(outcome.transcript).toContain("stdin-only");
+    expect(outcome.transcript).not.toContain(JOIN_URL);
+  });
+
   test("a nonzero exit carries its code and a bounded stderr tail", async () => {
     installFakeCli(
       "claude",
@@ -126,6 +140,18 @@ describe("the Rule A11 retention boundary", () => {
     expect(record.transcriptBytes).toBe(outcome.transcriptBytes);
     expect(record.stageReached).toBe("promote");
     expect(record.tokensEstimate).toBe(1200);
+    expect(record.diagnostic).not.toHaveProperty("stderrTail");
+  });
+
+  test("raw stderr can echo credentials, but none may enter a retained record", async () => {
+    const credential = "SECRET-ENROLLMENT-FRAGMENT-CANARY";
+    installFakeCli("claude", `printf "${credential}\\n" >&2; printf "started\\n"`);
+    const outcome = await attempt();
+    expect(outcome.diagnostic.stderrTail).toContain(credential);
+    const retained = redactForRetention(ADAPTER.harness, outcome, "none", 0);
+    expect(JSON.stringify(retained)).not.toContain(credential);
+    expect(retained.diagnostic).not.toHaveProperty("stderrTail");
+    expect(retained.diagnostic.exitCode).toBe(0);
   });
 });
 

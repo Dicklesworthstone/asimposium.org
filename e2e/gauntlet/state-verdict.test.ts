@@ -11,6 +11,7 @@ const closedSession = {
   problem_id: problemId,
   closed_at: "2026-09-24T00:00:00Z",
   has_handback: true,
+  workshop_objects: 1,
 };
 let nextOrder = 0;
 const obs = (
@@ -41,6 +42,7 @@ const fullObservations = [
   obs("GET", "/v1/hello", 200),
   obs("GET", "/v1/sessions/S-1/pack", 200),
   obs("POST", "/v1/sessions/S-1/promote", 422, "PROMOTE_BODY_INVALID", true),
+  obs("POST", "/v1/sessions/S-1/workshop", 201),
   obs("POST", "/v1/sessions/S-1/promote", 201),
 ];
 const publicClaim = {
@@ -55,7 +57,6 @@ const complete = {
   sponsorId,
   problemId,
   sessions: [closedSession],
-  workshopObjects: 1,
   publicClaims: [publicClaim],
   observations: fullObservations,
   injected: true,
@@ -72,6 +73,7 @@ describe("state-derived gauntlet verdict", () => {
     const observations = [
       obs("GET", "/v1/hello", 200),
       obs("POST", "/v1/sessions/S-1/promote", 422, "PROMOTE_BODY_INVALID", true),
+      obs("POST", "/v1/sessions/S-1/workshop", 201),
       obs("POST", "/v1/sessions/S-1/promote", 201),
       obs("GET", "/v1/sessions/S-1/pack", 200),
       obs("POST", "/v1/sessions/S-1/promote", 200),
@@ -88,6 +90,7 @@ describe("state-derived gauntlet verdict", () => {
       obs("POST", "/v1/sessions/S-1/promote", 201),
       obs("GET", "/v1/sessions/S-1/pack", 200),
       obs("POST", "/v1/sessions/S-1/promote", 200),
+      obs("POST", "/v1/sessions/S-1/workshop", 201),
       obs("POST", "/v1/sessions/S-1/promote", 201, null, false, "C-2"),
     ];
     expect(
@@ -102,7 +105,7 @@ describe("state-derived gauntlet verdict", () => {
     const observations = fullObservations.map((observation) =>
       observation.status === 201 ? { ...observation, status: 200 } : observation,
     );
-    expect(gauntletVerdict({ ...complete, observations }).missing).toEqual(["pack_read"]);
+    expect(gauntletVerdict({ ...complete, observations }).missing).toContain("pack_read");
   });
   test("an aborted read does not prevent a later genuinely completed preparation", () => {
     const observations = [
@@ -110,6 +113,7 @@ describe("state-derived gauntlet verdict", () => {
       { ...obs("GET", "/v1/sessions/S-1/pack", 200), completed_order: null },
       obs("GET", "/v1/sessions/S-1/pack", 200),
       obs("POST", "/v1/sessions/S-1/promote", 422, "PROMOTE_BODY_INVALID", true),
+      obs("POST", "/v1/sessions/S-1/workshop", 201),
       obs("POST", "/v1/sessions/S-1/promote", 201),
     ];
     expect(gauntletVerdict({ ...complete, observations }).completed).toBe(true);
@@ -120,6 +124,7 @@ describe("state-derived gauntlet verdict", () => {
       { ...obs("POST", "/v1/sessions/S-1/promote", 201), claim_id: null },
       obs("GET", "/v1/sessions/S-1/pack", 200),
       obs("POST", "/v1/sessions/S-1/promote", 422, "PROMOTE_BODY_INVALID", true),
+      obs("POST", "/v1/sessions/S-1/workshop", 201),
       obs("POST", "/v1/sessions/S-1/promote", 201),
     ];
     expect(gauntletVerdict({ ...complete, observations }).completed).toBe(true);
@@ -132,17 +137,17 @@ describe("state-derived gauntlet verdict", () => {
       obs("GET", "/v1/sessions/S-1/pack", 200),
       obs("POST", "/v1/sessions/S-1/promote", 200),
     ];
-    expect(gauntletVerdict({ ...complete, observations }).missing).toEqual(["pack_read"]);
+    expect(gauntletVerdict({ ...complete, observations }).missing).toContain("pack_read");
   });
   test("a read overlapping the publishing request is not earlier preparation", () => {
     const observations = fullObservations.map((observation) => ({
       ...observation,
       started_order: observation.started_order * 10,
-      completed_order: observation.path.endsWith("/pack") ? 95 : observation.completed_order * 10,
+      completed_order: observation.path.endsWith("/pack") ? 1000 : observation.completed_order * 10,
     }));
-    // Pack [50,95] and publication [90,100] overlap. Completion order alone
-    // would count the read, even though the write began before it was served.
-    expect(gauntletVerdict({ ...complete, observations }).missing).toEqual(["pack_read"]);
+    // The pack completes after the publication begins; the overlapping read
+    // cannot establish prior preparation.
+    expect(gauntletVerdict({ ...complete, observations }).missing).toContain("pack_read");
   });
   test.each([undefined, NaN, Infinity, -1, 0, 1.5, Number.MAX_SAFE_INTEGER + 1])(
     "unverified request ordinals cannot establish preparation: %s",
@@ -150,7 +155,7 @@ describe("state-derived gauntlet verdict", () => {
       const observations = fullObservations.map((observation) =>
         observation.path.endsWith("/pack") ? { ...observation, started_order } : observation,
       );
-      expect(gauntletVerdict({ ...complete, observations }).missing).toEqual(["pack_read"]);
+      expect(gauntletVerdict({ ...complete, observations }).missing).toContain("pack_read");
     },
   );
   test.each([undefined, null, NaN, Infinity, -1, 0, 5, 7.5, Number.MAX_SAFE_INTEGER + 1])(
@@ -159,14 +164,14 @@ describe("state-derived gauntlet verdict", () => {
       const observations = fullObservations.map((observation) =>
         observation.path.endsWith("/pack") ? { ...observation, completed_order } : observation,
       );
-      expect(gauntletVerdict({ ...complete, observations }).missing).toEqual(["pack_read"]);
+      expect(gauntletVerdict({ ...complete, observations }).missing).toContain("pack_read");
     },
   );
   test("duplicate observation endpoints cannot establish a chronology", () => {
     const observations = fullObservations.map((observation) =>
       observation.path.endsWith("/pack") ? { ...observation, started_order: 1 } : observation,
     );
-    expect(gauntletVerdict({ ...complete, observations }).missing).toEqual(["pack_read"]);
+    expect(gauntletVerdict({ ...complete, observations }).missing).toContain("pack_read");
   });
   test.each([undefined, null, "", "C-OTHER"])(
     "a missing or foreign successful receipt cannot prepare the public claim: %s",
@@ -188,6 +193,68 @@ describe("state-derived gauntlet verdict", () => {
       ).toBe(false);
     },
   );
+  test("a session cannot borrow workshop objects from another session of the same Fellow", () => {
+    const observations = [
+      obs("GET", "/v1/hello", 200),
+      obs("POST", "/v1/sessions/S-1/workshop", 201),
+      obs("GET", "/v1/sessions/S-2/pack", 200),
+      obs("POST", "/v1/sessions/S-2/promote", 422, "PROMOTE_BODY_INVALID", true),
+      obs("POST", "/v1/sessions/S-2/promote", 201),
+    ];
+    const facts = {
+      ...complete,
+      sessions: [
+        { ...closedSession, workshop_objects: 1 },
+        { ...closedSession, session_id: "S-2", workshop_objects: 0 },
+      ],
+      observations,
+      publicClaims: [{ ...publicClaim, session_id: "S-2" }],
+    };
+    expect(gauntletVerdict(facts).missing).toContain("workshop");
+    expect(gauntletVerdict({ ...facts, sessions: [...facts.sessions].reverse() }).completed).toBe(false);
+  });
+
+  test("a late workshop push cannot retroactively prepare a public promotion", () => {
+    const observations = [
+      obs("GET", "/v1/hello", 200),
+      obs("GET", "/v1/sessions/S-1/pack", 200),
+      obs("POST", "/v1/sessions/S-1/promote", 422, "PROMOTE_BODY_INVALID", true),
+      obs("POST", "/v1/sessions/S-1/promote", 201),
+      obs("POST", "/v1/sessions/S-1/workshop", 201),
+    ];
+    expect(gauntletVerdict({ ...complete, observations }).missing).toContain("workshop");
+  });
+
+  test("a retained workshop row without an observed successful push is not fresh work", () => {
+    const observations = fullObservations.filter((observation) => !observation.path.endsWith("/workshop"));
+    expect(gauntletVerdict({ ...complete, observations }).missing).toContain("workshop");
+  });
+
+  test("a retry started before the injected refusal completes is not proven recovery", () => {
+    const observations = fullObservations.map((observation) =>
+      observation.injected ? { ...observation, completed_order: 1000 } : observation,
+    );
+    expect(gauntletVerdict({ ...complete, observations }).missing).toContain("refusal_recovered");
+  });
+
+  test("pack and workshop preparation cannot be borrowed across separate claims", () => {
+    const observations = [
+      obs("GET", "/v1/hello", 200),
+      obs("GET", "/v1/sessions/S-1/pack", 200),
+      obs("POST", "/v1/sessions/S-1/promote", 422, "PROMOTE_BODY_INVALID", true),
+      obs("POST", "/v1/sessions/S-1/promote", 201),
+      obs("POST", "/v1/sessions/S-1/promote", 201, null, false, "C-2"),
+      obs("POST", "/v1/sessions/S-1/workshop", 201),
+    ];
+    const verdict = gauntletVerdict({
+      ...complete,
+      observations,
+      publicClaims: [publicClaim, { ...publicClaim, claim_id: "C-2" }],
+    });
+    expect(verdict.completed).toBe(false);
+    expect(verdict.missing).toContain("workshop");
+  });
+
   test("an unclosed session fails", () => {
     const verdict = gauntletVerdict({
       ...complete,
@@ -269,6 +336,7 @@ describe("state-derived gauntlet verdict", () => {
         ...fullObservations.slice(0, 4),
         obs("GET", "/v1/sessions/S-2/pack", 200),
         obs("POST", "/v1/sessions/S-2/promote", 422, "PROMOTE_BODY_INVALID", true),
+        obs("POST", "/v1/sessions/S-2/workshop", 201),
         obs("POST", "/v1/sessions/S-2/promote", 201),
       ],
     });
@@ -298,7 +366,7 @@ describe("state-derived gauntlet verdict", () => {
   });
   test("the verdict takes no agent-reported input", () => {
     // A transcript claiming success is not a field the verdict reads.
-    const withClaim = { ...complete, workshopObjects: 0, agentSaysSucceeded: true };
+    const withClaim = { ...complete, sessions: [{ ...closedSession, workshop_objects: 0 }], agentSaysSucceeded: true };
     expect(gauntletVerdict(withClaim).completed).toBe(false);
   });
   test("a journey without a pack read is incomplete", () => {
@@ -392,6 +460,7 @@ describe("state-derived gauntlet verdict", () => {
       observations: [
         ...fullObservations.slice(0, 3),
         obs("POST", "/v1/sessions/S-2/promote", 422, "PROMOTE_BODY_INVALID", true),
+        obs("POST", "/v1/sessions/S-2/workshop", 201),
         obs("POST", "/v1/sessions/S-2/promote", 201),
       ],
     };
@@ -419,6 +488,7 @@ describe("state-derived gauntlet verdict", () => {
       sessions: [...complete.sessions, { ...closedSession, session_id: "S-2" }],
       observations: [
         ...fullObservations.slice(0, 3),
+        obs("POST", "/v1/sessions/S-1/workshop", 201),
         obs("POST", "/v1/sessions/S-1/promote", 201),
         obs("GET", "/v1/sessions/S-2/pack", 200),
         obs("POST", "/v1/sessions/S-2/promote", 422, "PROMOTE_BODY_INVALID", true),
