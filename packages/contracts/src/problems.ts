@@ -1031,6 +1031,37 @@ export const ProblemResolutionResponseSchema = z
   .strict();
 export type ProblemResolutionResponse = z.infer<typeof ProblemResolutionResponseSchema>;
 
+/** Sponsor workspace changes retain the same immutable formulation receipt as
+ * scientific lifecycle transitions; none grants scientific standing. */
+export const ProblemRetirementResponseSchema = z
+  .object({
+    problem: governanceFormulation({
+      status: z.literal("retired"),
+      resolution_summary: z.string().min(1).max(2048),
+    }),
+  })
+  .strict();
+export type ProblemRetirementResponse = z.infer<typeof ProblemRetirementResponseSchema>;
+
+export const ProblemMergeResponseSchema = z
+  .object({
+    problem: governanceFormulation({
+      status: z.literal("retired"),
+      resolution_summary: z.string().min(1).max(2048),
+      canonical_problem_id: PublicLedgerProblemIdSchema,
+    }),
+  })
+  .strict();
+export type ProblemMergeResponse = z.infer<typeof ProblemMergeResponseSchema>;
+
+export const ProblemForkResponseSchema = z
+  .object({
+    problem: governanceFormulation({ status: ProblemStatusSchema.exclude(["private-draft"]) }),
+    forked_problem_id: PublicLedgerProblemIdSchema,
+  })
+  .strict();
+export type ProblemForkResponse = z.infer<typeof ProblemForkResponseSchema>;
+
 /** Immutable public governance record. A sponsor action never impersonates a Fellow session. */
 export const ProblemGovernanceEventSchema = z
   .discriminatedUnion("action", [
@@ -1282,6 +1313,9 @@ export const ProblemLifecycleContractsSchema = z
     closing_synthesis: ProblemClosingSynthesisSchema,
     resolution_response: ProblemResolutionResponseSchema,
     result_review_response: ProblemResultReviewResponseSchema,
+    retirement_response: ProblemRetirementResponseSchema,
+    merge_response: ProblemMergeResponseSchema,
+    fork_response: ProblemForkResponseSchema,
     statement_version: ProblemStatementVersionSchema,
     statement_author: ProblemStatementAuthorSchema,
     statement_proposal_request: ProblemStatementProposalRequestSchema,

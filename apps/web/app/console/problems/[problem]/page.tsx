@@ -1,6 +1,7 @@
 import { PublicLedgerProblemIdSchema } from "@asimposium/contracts";
 import Link from "next/link";
 import { auth, signIn } from "@/auth";
+import { ProblemLifecycleControl } from "@/components/problem-lifecycle-control";
 import { ProblemPublicationControl } from "@/components/problem-publication-control";
 import { ProblemResearchControl } from "@/components/problem-research-control";
 import { stoaProblemGovernance } from "@/lib/problem-governance";
@@ -151,16 +152,28 @@ export default async function ProblemPublicationPage({
           </form>
         </section>
       ) : workspace !== undefined ? (
-        <ProblemResearchControl
-          key={`${principal}:${workspace.problem.id}:${workspace.problem.updated_at}:${returnPath}`}
-          sponsorId={principal}
-          initial={{ problem: workspace.problem, authority: workspace.authority }}
-          returnPath={returnPath}
-          stoaOrigin={configuredStoaOrigin()}
-          synthesisChoices={synthesisChoices}
-          synthesisQuery={synthesisQuery?.list}
-          selectedSynthesis={synthesisQuery?.selected}
-        />
+        <>
+          <ProblemResearchControl
+            key={`${principal}:${workspace.problem.id}:${workspace.problem.updated_at}:${returnPath}`}
+            sponsorId={principal}
+            initial={{ problem: workspace.problem, authority: workspace.authority }}
+            returnPath={returnPath}
+            stoaOrigin={configuredStoaOrigin()}
+            synthesisChoices={synthesisChoices}
+            synthesisQuery={synthesisQuery?.list}
+            selectedSynthesis={synthesisQuery?.selected}
+          />
+          <ProblemLifecycleControl
+            key={`workspace:${principal}:${workspace.problem.id}`}
+            sponsorId={principal}
+            initial={{ problem: workspace.problem, authority: workspace.authority }}
+            returnPath={returnPath}
+            reauthenticate={async () => {
+              "use server";
+              await signIn("google", { redirectTo: returnPath }, { prompt: "login" });
+            }}
+          />
+        </>
       ) : preview === undefined ? (
         <section className="card">
           <h2>Publication review unavailable</h2>

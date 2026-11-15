@@ -1,0 +1,41 @@
+{
+  "retirement_response": {
+    "problem": {
+      "id": "P-LINEAGE",
+      "title": "Finite paths",
+      "status": "resolved",
+      "current_statement_version": 2,
+      "statement": "Every simple path with n edges has n + 1 vertices.",
+      "falsifier": "A simple path with a different vertex count.",
+      "motivation": "Specify the path counting convention for review.",
+      "resolution_summary": "A governance action must not invent scientific resolution.",
+      "updated_at": "2026-11-14T20:00:00.000Z"
+    }
+  },
+  "merge_response": {
+    "problem": {
+      "id": "P-LINEAGE",
+      "title": "Finite paths",
+      "status": "retired",
+      "current_statement_version": 2,
+      "statement": "Every simple path with n edges has n + 1 vertices.",
+      "falsifier": "A simple path with a different vertex count.",
+      "motivation": "Specify the path counting convention for review.",
+      "resolution_summary": "An unspecified destination cannot confirm a merge.",
+      "updated_at": "2026-11-14T20:00:00.000Z"
+    }
+  },
+  "fork_response": {
+    "problem": {
+      "id": "P-LINEAGE",
+      "title": "Finite paths",
+      "status": "private-draft",
+      "current_statement_version": 2,
+      "statement": "Private source bytes are not a published parent.",
+      "falsifier": "A simple path with a different vertex count.",
+      "motivation": "Specify the path counting convention for review.",
+      "updated_at": "2026-11-14T20:00:00.000Z"
+    },
+    "forked_problem_id": "P-PRIVATEFORK"
+  }
+}

@@ -46,20 +46,20 @@ import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
+import { SITE } from "../../apps/web/lib/site.ts";
+import {
+  PUBLIC_EXPORT_FORMAT,
+  parsePublicProblemExport,
+  verifyPublicProblemExportChain,
+} from "../../apps/wire/src/krater/export.ts";
+import { PUBLIC_EXPORT_MAX_BYTES } from "../../apps/wire/src/ledger/event-export-snapshot.ts";
+import { HonorsResponseSchema } from "../../packages/contracts/src/honors.ts";
 import {
   ClaimFaceResponseSchema,
   ProblemFaceResponseSchema,
   SINGLE_TEAM_PROBLEM_NOTICE,
 } from "../../packages/contracts/src/ledger.ts";
-import { HonorsResponseSchema } from "../../packages/contracts/src/honors.ts";
 import { ReviewQueueResponseSchema } from "../../packages/contracts/src/review-queue.ts";
-import {
-  parsePublicProblemExport,
-  PUBLIC_EXPORT_FORMAT,
-  verifyPublicProblemExportChain,
-} from "../../apps/wire/src/krater/export.ts";
-import { PUBLIC_EXPORT_MAX_BYTES } from "../../apps/wire/src/ledger/event-export-snapshot.ts";
-import { SITE } from "../../apps/web/lib/site.ts";
 import {
   enrollSetupFellow,
   fellowPost,
@@ -67,25 +67,25 @@ import {
   setUpProblem,
 } from "../gauntlet/local-product-flow.mjs";
 import { startLocalTarget, USER_AGENT } from "../gauntlet/local-target.mjs";
+import { citationsBrowsing, citationsWithdrawal, seedCitations } from "./citations-browsing.mjs";
 import {
   claimsListBrowsing,
   claimsListWithdrawal,
   seedClaimsList,
 } from "./claims-list-browsing.mjs";
+import { runGalleryJourney } from "./gallery-runner.ts";
 import {
   hypothesisLifecycleBrowsing,
   hypothesisPublicationWithdrawal,
   seedHypothesisLifecycle,
 } from "./hypotheses-lifecycle.mjs";
+import { ADMIN_OPERATORS, operatorModerationJourney } from "./operator-moderation.mjs";
 import {
   scientificCollectionsBrowsing,
   scientificCollectionsWithdrawal,
   seedScientificCollections,
 } from "./scientific-collections-browsing.mjs";
-import { citationsBrowsing, citationsWithdrawal, seedCitations } from "./citations-browsing.mjs";
 import { seedSyntheses, synthesisBrowsing, synthesisClosingReview } from "./synthesis-browsing.mjs";
-import { ADMIN_OPERATORS, operatorModerationJourney } from "./operator-moderation.mjs";
-import { runGalleryJourney } from "./gallery-runner.ts";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const require = createRequire(`${root}e2e/package.json`);
@@ -1431,44 +1431,69 @@ async function main() {
       await page.getByRole("link", { name: "Honors record", exact: true }).click();
       await page.waitForURL(`${agora.origin}/results`);
       await page.getByRole("heading", { name: "Honors Record", exact: true, level: 1 }).waitFor();
-      const honorsDescription = "Chronological record of claim recognition and problem resolution events. Inspect the recorded standing and evidence for each entry.";
+      const honorsDescription =
+        "Chronological record of claim recognition and problem resolution events. Inspect the recorded standing and evidence for each entry.";
       const honorsHeader = await page.locator("main > header").innerText();
-      record(`${mode} Honors: discovery and metadata describe recognition events without blanket certainty`,
+      record(
+        `${mode} Honors: discovery and metadata describe recognition events without blanket certainty`,
         honorsHeader.includes(honorsDescription) &&
           !honorsHeader.includes("conclusively settled") &&
-          await page.locator('meta[name="description"]').getAttribute("content") === honorsDescription);
-      const displayedHonors = await page.locator("li.result-card").evaluateAll((cards) => cards.map((card) => [
-        card.querySelector(".result-sub code")?.textContent?.trim(),
-        card.querySelector(".status-badge")?.textContent?.trim(),
-      ]));
+          (await page.locator('meta[name="description"]').getAttribute("content")) ===
+            honorsDescription,
+      );
+      const displayedHonors = await page
+        .locator("li.result-card")
+        .evaluateAll((cards) =>
+          cards.map((card) => [
+            card.querySelector(".result-sub code")?.textContent?.trim(),
+            card.querySelector(".status-badge")?.textContent?.trim(),
+          ]),
+        );
       const honorsHeading = page.locator("#results-heading");
       const headingText = await honorsHeading.textContent();
       const visibleHeadingText = await honorsHeading.innerText();
       const expectedHeading = `Honors entries on this page (${honorsFace.results.length})`;
-      const entriesMatch = JSON.stringify(displayedHonors) === JSON.stringify(honorsFace.results.map((item) => [
-        `${item.result_id}${item.kind === "claim" ? `@${item.version}` : ""}`, item.status,
-      ]));
-      record(`${mode} Honors: the returned page keeps canonical entry order and individual standing`,
-        entriesMatch && await honorsHeading.isVisible() && headingText.includes(expectedHeading),
+      const entriesMatch =
+        JSON.stringify(displayedHonors) ===
+        JSON.stringify(
+          honorsFace.results.map((item) => [
+            `${item.result_id}${item.kind === "claim" ? `@${item.version}` : ""}`,
+            item.status,
+          ]),
+        );
+      record(
+        `${mode} Honors: the returned page keeps canonical entry order and individual standing`,
+        entriesMatch && (await honorsHeading.isVisible()) && headingText.includes(expectedHeading),
         {
           entries_match: entriesMatch,
           expected_count: honorsFace.results.length,
           rendered_count: displayedHonors.length,
           logical_heading_matches: headingText.includes(expectedHeading),
           visible_heading_matches_case: visibleHeadingText.includes(expectedHeading),
-          heading_text_transform: await honorsHeading.evaluate((element) => getComputedStyle(element).textTransform),
-        });
-      const honorsMdHref = await page.getByRole("link", { name: "Honors Markdown face", exact: false }).getAttribute("href");
-      record(`${mode} Honors: the human page points at its canonical agent record`,
-        honorsMdHref === `${target.origin}/results.md`);
+          heading_text_transform: await honorsHeading.evaluate(
+            (element) => getComputedStyle(element).textTransform,
+          ),
+        },
+      );
+      const honorsMdHref = await page
+        .getByRole("link", { name: "Honors Markdown face", exact: false })
+        .getAttribute("href");
+      record(
+        `${mode} Honors: the human page points at its canonical agent record`,
+        honorsMdHref === `${target.origin}/results.md`,
+      );
       for (const suffix of ["md", "html"]) {
         const response = await fetch(`${target.origin}/results.${suffix}`, {
           headers: { "user-agent": USER_AGENT },
         });
         const body = await response.text();
-        record(`${mode} Honors: canonical ${suffix} retains the same event-reading context`,
-          response.status === 200 && body.includes(honorsDescription) &&
-            !body.includes(WORKSHOP_CANARY) && !body.includes(SCRATCH_CANARY));
+        record(
+          `${mode} Honors: canonical ${suffix} retains the same event-reading context`,
+          response.status === 200 &&
+            body.includes(honorsDescription) &&
+            !body.includes(WORKSHOP_CANARY) &&
+            !body.includes(SCRATCH_CANARY),
+        );
       }
       const followClaimPublication = async (kind, id, claimPin, work, fellow, sponsor) => {
         const previous = page.url();
@@ -1520,8 +1545,11 @@ async function main() {
         const cardRecord = cardCount === 1 ? await publicationBody.innerText() : "";
         record(
           `${mode} claim ${kind}: record card opens the same complete published work`,
-          cardCount === 1 && cardRecord.includes(work) && cardRecord.includes(claimPin) &&
-            cardRecord.includes(fellow) && cardRecord.includes(sponsor),
+          cardCount === 1 &&
+            cardRecord.includes(work) &&
+            cardRecord.includes(claimPin) &&
+            cardRecord.includes(fellow) &&
+            cardRecord.includes(sponsor),
         );
         record(
           `${mode} claim ${kind}: both source entry points preserve private-workshop and markup boundaries`,
@@ -1640,44 +1668,81 @@ async function main() {
           }
         }
         if (path === `/reviews?problem=${encodeURIComponent(problemId)}`) {
-          const queueResponse = await fetch(`${target.origin}/reviews.json?problem=${encodeURIComponent(problemId)}`, {
-            headers: { "user-agent": USER_AGENT },
-          });
+          const queueResponse = await fetch(
+            `${target.origin}/reviews.json?problem=${encodeURIComponent(problemId)}`,
+            {
+              headers: { "user-agent": USER_AGENT },
+            },
+          );
           assert.equal(queueResponse.status, 200, "the actual canonical review projection");
           const queue = ReviewQueueResponseSchema.parse(await queueResponse.json());
-          record(`${mode} reviews: canonical candidates include the published mathematical claim`,
-            queue.candidates.some(item => item.claim_id === claimId && item.statement === XSS_CANARY));
-          const headings = await page.locator(".claims-list > .claim-card h3 code").allTextContents();
-          record(`${mode} reviews: human candidates preserve exact canonical order and versions`,
-            JSON.stringify(headings) === JSON.stringify(queue.candidates.map(
-              item => `${item.problem_id} / ${item.claim_id}@${item.version}`,
-            )));
-          const exactLinks = await page.getByRole("link", {
-            name: "Read this exact claim, evidence and reviews", exact: true,
-          }).evaluateAll(elements => elements.map(element => element.getAttribute("href")));
-          record(`${mode} reviews: every candidate links the canonical version and problem-local cut`,
-            JSON.stringify(exactLinks) === JSON.stringify(queue.candidates.map(
-              item => `/p/${encodeURIComponent(item.problem_id)}/claims/${item.claim_id}@${item.version}?through=${item.cursor}`,
-            )));
-          const mathematicalClaim = queue.candidates.find(item => item.claim_id === claimId);
+          record(
+            `${mode} reviews: canonical candidates include the published mathematical claim`,
+            queue.candidates.some(
+              (item) => item.claim_id === claimId && item.statement === XSS_CANARY,
+            ),
+          );
+          const headings = await page
+            .locator(".claims-list > .claim-card h3 code")
+            .allTextContents();
+          record(
+            `${mode} reviews: human candidates preserve exact canonical order and versions`,
+            JSON.stringify(headings) ===
+              JSON.stringify(
+                queue.candidates.map(
+                  (item) => `${item.problem_id} / ${item.claim_id}@${item.version}`,
+                ),
+              ),
+          );
+          const exactLinks = await page
+            .getByRole("link", {
+              name: "Read this exact claim, evidence and reviews",
+              exact: true,
+            })
+            .evaluateAll((elements) => elements.map((element) => element.getAttribute("href")));
+          record(
+            `${mode} reviews: every candidate links the canonical version and problem-local cut`,
+            JSON.stringify(exactLinks) ===
+              JSON.stringify(
+                queue.candidates.map(
+                  (item) =>
+                    `/p/${encodeURIComponent(item.problem_id)}/claims/${item.claim_id}@${item.version}?through=${item.cursor}`,
+                ),
+              ),
+          );
+          const mathematicalClaim = queue.candidates.find((item) => item.claim_id === claimId);
           assert.ok(mathematicalClaim, "the actual mathematical review candidate");
           const mathematicalCard = page.locator(".claims-list > .claim-card").filter({
-            has: page.locator(`a[href="/p/${encodeURIComponent(problemId)}/claims/${claimId}@${mathematicalClaim.version}?through=${mathematicalClaim.cursor}"]`),
+            has: page.locator(
+              `a[href="/p/${encodeURIComponent(problemId)}/claims/${claimId}@${mathematicalClaim.version}?through=${mathematicalClaim.cursor}"]`,
+            ),
           });
-          record(`${mode} reviews: the rendered falsifier keeps its complete canonical source`,
-            (await mathematicalCard.locator(".scientific-markdown").nth(1)
-              .locator(".asimp-source code").textContent()) === mathematicalClaim.falsifier);
+          record(
+            `${mode} reviews: the rendered falsifier keeps its complete canonical source`,
+            (await mathematicalCard
+              .locator(".scientific-markdown")
+              .nth(1)
+              .locator(".asimp-source code")
+              .textContent()) === mathematicalClaim.falsifier,
+          );
           const previousViewport = page.viewportSize();
           await page.setViewportSize({ width: 390, height: 844 });
           const dimensions = await page.evaluate(() => ({
-            viewport: window.innerWidth, document: document.documentElement.scrollWidth,
+            viewport: window.innerWidth,
+            document: document.documentElement.scrollWidth,
           }));
-          record(`${mode} reviews: mathematics and source controls fit a 390px viewport`,
-            dimensions.document <= dimensions.viewport, dimensions);
+          record(
+            `${mode} reviews: mathematics and source controls fit a 390px viewport`,
+            dimensions.document <= dimensions.viewport,
+            dimensions,
+          );
           await page.setViewportSize(previousViewport);
         }
-        if (path === `/p/${problemId}` || path === `/p/${problemId}/claims/${claimId}` ||
-          path === `/reviews?problem=${encodeURIComponent(problemId)}`) {
+        if (
+          path === `/p/${problemId}` ||
+          path === `/p/${problemId}/claims/${claimId}` ||
+          path === `/reviews?problem=${encodeURIComponent(problemId)}`
+        ) {
           record(
             `${mode} ${path} renders the published mathematics through KaTeX and MathML`,
             (await page.locator(".scientific-markdown .katex").count()) > 0 &&
@@ -1746,8 +1811,10 @@ async function main() {
             await page.keyboard.press("Enter");
             const closedByKeyboard = !(await source.locator("pre").isVisible());
             await page.keyboard.press("Enter");
-            record(`${mode} reviews: the full mathematical source opens and closes with the keyboard`,
-              closedByKeyboard && await source.locator("pre").isVisible());
+            record(
+              `${mode} reviews: the full mathematical source opens and closes with the keyboard`,
+              closedByKeyboard && (await source.locator("pre").isVisible()),
+            );
           }
         }
         if (path === "/") {
@@ -2650,6 +2717,56 @@ async function main() {
         !(await sponsorPage.locator("main").textContent()).includes(DIRECTIVE_TEXT),
       );
 
+      // Route a review from a real canonical publication, with author and
+      // same-sponsor reviewer both present in the actual Fellow inventory.
+      const handoffFace = ClaimFaceResponseSchema.parse(
+        await (
+          await fetch(`${target.origin}/p/${problemId}/claims/${claimId}.json`, {
+            headers: { "user-agent": USER_AGENT },
+          })
+        ).json(),
+      );
+      const handoffTarget = `${claimId}@${handoffFace.claim_state.version}`;
+      const handoffQuery = new URLSearchParams({
+        problem: problemId,
+        review: handoffTarget,
+        review_through: String(handoffFace.cursor),
+      });
+      await sponsorPage.goto(`${agora.origin}/console?${handoffQuery}`, { waitUntil: "load" });
+      const reviewCard = sponsorPage.locator('section[aria-labelledby="review-request-title"]');
+      const reviewerSelect = reviewCard.getByLabel("Your reviewer Fellow");
+      await reviewerSelect.waitFor({ state: "visible", timeout: 20_000 });
+      const reviewerOptions = await reviewerSelect
+        .locator("option")
+        .evaluateAll((options) => options.map((option) => option.value));
+      record(
+        "review handoff: canonical authorship excludes the author but preserves a same-sponsor reviewer",
+        !reviewerOptions.includes(fellowId) && reviewerOptions.includes(claimReviewFellowId),
+      );
+      await reviewerSelect.selectOption(claimReviewFellowId);
+      await reviewCard.getByRole("button", { name: "Send review request", exact: true }).click();
+      await reviewCard
+        .getByRole("button", { name: "Review request delivered", exact: true })
+        .waitFor({
+          state: "visible",
+          timeout: 20_000,
+        });
+      const reviewRoutingText = `Review problem ${problemId}, exact claim ${handoffTarget} (discovered at ledger cursor ${handoffFace.cursor}).`;
+      record(
+        "review handoff: the real signed directive reaches only the chosen non-author Fellow",
+        (await inbox(spareToken)).filter(
+          (item) =>
+            item.type === "sponsor_directive" && JSON.stringify(item).includes(reviewRoutingText),
+        ).length === 1 &&
+          !(await inbox(authorToken)).some((item) =>
+            JSON.stringify(item).includes(reviewRoutingText),
+          ),
+      );
+      record(
+        "review handoff: the receipt distinguishes assignment from a completed scientific review",
+        (await reviewCard.textContent()).includes("not a completed review"),
+      );
+
       // The public page, read by the signed-in sponsor, still omits workshop bytes.
       await sponsorPage.goto(`${agora.origin}/p/${problemId}`, { waitUntil: "load" });
       const sponsorPublic = await sponsorPage.content();
@@ -3200,7 +3317,14 @@ async function main() {
 
     const context = await browser.newContext({ reducedMotion: "reduce" });
     const page = await context.newPage();
-    for (const path of ["/", "/problems", "/results", `/reviews?problem=${encodeURIComponent(problemId)}`, `/p/${problemId}`, `/p/${problemId}/claims/${claimId}`]) {
+    for (const path of [
+      "/",
+      "/problems",
+      "/results",
+      `/reviews?problem=${encodeURIComponent(problemId)}`,
+      `/p/${problemId}`,
+      `/p/${problemId}/claims/${claimId}`,
+    ]) {
       await page.goto(`${agora.origin}${path}`, { waitUntil: "load" });
       await page.addScriptTag({ path: AXE });
       const violations = await page.evaluate(async () => {

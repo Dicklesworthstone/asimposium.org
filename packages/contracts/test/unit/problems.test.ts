@@ -7,12 +7,15 @@ import {
   ProblemClosingSynthesisSchema,
   ProblemDormancyEventSchema,
   ProblemFamousGuardrailSchema,
+  ProblemForkResponseSchema,
   ProblemGovernanceEventSchema,
   ProblemGovernanceKeySchema,
   ProblemLifecycleActionRequestSchema,
+  ProblemMergeResponseSchema,
   ProblemPublicationPreviewSchema,
   ProblemResolutionDirectionSchema,
   ProblemResolutionRecordSchema,
+  ProblemRetirementResponseSchema,
   ProblemStatementReviewEventSchema,
   ProblemStatementReviewRequestSchema,
   ProblemStatementReviewResponseSchema,
@@ -25,6 +28,32 @@ import {
   WithdrawProblemBriefRequestSchema,
   WithdrawProblemBriefResponseSchema,
 } from "../../src/problems.ts";
+
+test("workspace response contracts distinguish retirement, merge and private-fork receipts", () => {
+  const document = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
+  for (const [property, schema] of [
+    ["retirement_response", ProblemRetirementResponseSchema],
+    ["merge_response", ProblemMergeResponseSchema],
+    ["fork_response", ProblemForkResponseSchema],
+  ] as const) {
+    const published = new Ajv2020({ strict: true }).compile(document.properties[property]);
+    for (const state of ["valid", "invalid"] as const) {
+      const fixtures = JSON.parse(
+        readFileSync(
+          new URL(`../fixtures/${state}/problem-workspace-responses.json`, import.meta.url),
+          "utf8",
+        ),
+      );
+      expect(schema.safeParse(fixtures[property]).success).toBe(state === "valid");
+      expect(published(fixtures[property])).toBe(state === "valid");
+      expect(schema.safeParse({ ...fixtures[property], invented_author: "sponsor" }).success).toBe(
+        false,
+      );
+    }
+  }
+});
 
 test("dormancy records only the explicit platform clock transition", () => {
   const schema = JSON.parse(

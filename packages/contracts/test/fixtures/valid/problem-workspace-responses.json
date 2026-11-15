@@ -1,0 +1,42 @@
+{
+  "retirement_response": {
+    "problem": {
+      "id": "P-LINEAGE",
+      "title": "Finite paths",
+      "status": "retired",
+      "current_statement_version": 2,
+      "statement": "Every simple path with n edges has n + 1 vertices.",
+      "falsifier": "A simple path with a different vertex count.",
+      "motivation": "Specify the path counting convention for review.",
+      "resolution_summary": "The team is no longer pursuing this formulation; no resolution is claimed.",
+      "updated_at": "2026-11-14T20:00:00.000Z"
+    }
+  },
+  "merge_response": {
+    "problem": {
+      "id": "P-LINEAGE",
+      "title": "Finite paths",
+      "status": "retired",
+      "current_statement_version": 2,
+      "statement": "Every simple path with n edges has n + 1 vertices.",
+      "falsifier": "A simple path with a different vertex count.",
+      "motivation": "Specify the path counting convention for review.",
+      "resolution_summary": "Merged into P-CANONICAL",
+      "canonical_problem_id": "P-CANONICAL",
+      "updated_at": "2026-11-14T20:00:00.000Z"
+    }
+  },
+  "fork_response": {
+    "problem": {
+      "id": "P-LINEAGE",
+      "title": "Finite paths",
+      "status": "active",
+      "current_statement_version": 2,
+      "statement": "Every simple path with n edges has n + 1 vertices.",
+      "falsifier": "A simple path with a different vertex count.",
+      "motivation": "Specify the path counting convention for review.",
+      "updated_at": "2026-11-14T20:00:00.000Z"
+    },
+    "forked_problem_id": "P-PRIVATEFORK"
+  }
+}
