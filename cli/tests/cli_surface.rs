@@ -690,3 +690,202 @@ fn enrollment_rejects_untrusted_origins_before_keychain_stdin_or_network() {
     assert!(!stderr.contains("canary"));
     assert!(!stderr.contains("unavailable or locked"));
 }
+
+#[test]
+fn coordination_help_explains_explicit_actions_and_different_acknowledgment_semantics() {
+    for (args, expected) in [
+        (
+            vec!["inbox", "list", "--help"],
+            vec![
+                "--since",
+                "--limit",
+                "--unread-only",
+                "--json",
+                "without acknowledging",
+            ],
+        ),
+        (
+            vec!["inbox", "ack", "--help"],
+            vec![
+                "--file",
+                "--idempotency-key",
+                "--json",
+                "does not replay ack receipts",
+            ],
+        ),
+        (
+            vec!["lease", "list", "--help"],
+            vec!["<SESSION>", "--json", "without acquiring"],
+        ),
+        (
+            vec!["lease", "acquire", "--help"],
+            vec![
+                "<SESSION>",
+                "--file",
+                "--idempotency-key",
+                "--json",
+                "objective",
+            ],
+        ),
+        (
+            vec!["lease", "release", "--help"],
+            vec![
+                "<SESSION>",
+                "<OBJECT>",
+                "--file",
+                "--idempotency-key",
+                "--json",
+                "empty object",
+            ],
+        ),
+        (
+            vec!["lease", "challenge", "--help"],
+            vec![
+                "<SESSION>",
+                "<OBJECT>",
+                "--file",
+                "--idempotency-key",
+                "--json",
+                "checks eligibility",
+            ],
+        ),
+    ] {
+        let output = invoke(&args).output;
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let help = String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for text in expected {
+            assert!(help.contains(text), "missing help: {text}");
+        }
+    }
+}
+
+#[test]
+fn malformed_recovery_inputs_fail_before_consulting_credentials_or_private_files() {
+    for (args, expected) in [
+        (
+            vec!["inbox", "list", "--since", "9007199254740992"],
+            "JavaScript-safe",
+        ),
+        (vec!["inbox", "list", "--limit", "101"], "1 to 100"),
+        (vec!["inbox", "list", "--limit", "0"], "1 to 100"),
+        (
+            vec!["lease", "list", "private-canary/path"],
+            "path component",
+        ),
+        (
+            vec![
+                "lease",
+                "acquire",
+                "private-canary/path",
+                "--file",
+                "private-file-canary.json",
+                "--idempotency-key",
+                "private-key-canary",
+            ],
+            "path component",
+        ),
+        (
+            vec![
+                "lease",
+                "release",
+                "S-1",
+                "private-canary/path",
+                "--file",
+                "private-file-canary.json",
+                "--idempotency-key",
+                "private-key-canary",
+            ],
+            "path component",
+        ),
+        (
+            vec![
+                "lease",
+                "challenge",
+                "private-canary/path",
+                "C-1",
+                "--file",
+                "private-file-canary.json",
+                "--idempotency-key",
+                "private-key-canary",
+            ],
+            "path component",
+        ),
+        (
+            vec![
+                "lease",
+                "challenge",
+                "S-1",
+                "private-canary?query",
+                "--file",
+                "private-file-canary.json",
+                "--idempotency-key",
+                "private-key-canary",
+            ],
+            "path component",
+        ),
+        (
+            vec!["pack", "S-1", "--since", "9007199254740992"],
+            "JavaScript-safe",
+        ),
+        (
+            vec!["pack", "S-1", "--profile", "full", "--after", "1"],
+            "requires",
+        ),
+        (
+            vec!["workshop", "list", "private-canary/path"],
+            "path component",
+        ),
+        (
+            vec!["workshop", "list", "S-1", "--limit", "101"],
+            "1 to 100",
+        ),
+    ] {
+        for token in [None, Some("private-token-canary\r\nx:bad")] {
+            let mut command = binary();
+            command.args(&args);
+            if let Some(token) = token {
+                command.env("ASIMP_TOKEN", token);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(2));
+            assert!(output.stdout.is_empty());
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                error.contains(expected),
+                "expected local validation: {expected}"
+            );
+            assert!(!error.contains("ASIMP_TOKEN"));
+            assert!(!error.contains("keychain"));
+            assert!(!error.contains("canary"));
+            assert!(!error.contains("9007199254740992"));
+            assert!(!error.contains("Cannot read --file"));
+        }
+    }
+}
+
+#[test]
+fn recovery_commands_validate_the_origin_before_token_selection() {
+    for args in [vec!["inbox", "list"], vec!["lease", "list", "S-1"]] {
+        for origin in [
+            "http://private-origin-canary.test",
+            "https://private-user-canary:private-token-canary@example.test",
+            "https://example.test/private-path-canary",
+        ] {
+            let output = binary()
+                .args([vec!["--origin", origin], args.clone()].concat())
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(2));
+            assert!(output.stdout.is_empty());
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(error.contains("origin"));
+            assert!(!error.contains("ASIMP_TOKEN"));
+            assert!(!error.contains("keychain"));
+            assert!(!error.contains("canary"));
+        }
+    }
+}

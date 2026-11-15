@@ -158,6 +158,92 @@ the stored revision number to recover its immutable earlier body. The Worker
 validates the version and checks current authorization on every read; an old
 revision does not bypass a revoked credential or private problem access.
 
+### Continue packs and recover workshop work
+
+Use a previously observed public cursor to fetch only newer material events in
+an orientation or working pack. The statement and other standing context remain:
+
+```bash
+asimp pack "$SESSION_ID" --profile working --since "$PUBLIC_CURSOR"
+asimp pack "$SESSION_ID" --profile full --max-tokens 8000
+asimp pack "$SESSION_ID" --profile full --after "$NEXT_AFTER" --through "$THROUGH" --max-tokens 8000
+```
+
+For full packs, read `next_after` and `through` from the server-authored
+`full_pack_page` control inside the preceding response. Retain that **same
+through cursor** on every continuation, even when new events arrive. Each command
+fetches one page and preserves all omissions; it does not follow actions or
+advance a local checkpoint automatically. A nonzero `--after` without
+`--through`, a reversed window, or a cursor that cannot be represented exactly
+by the Worker is refused before a request. `--since` applies only to `orient`
+and `working`; `--after` and `--through` apply only to `full`.
+
+Discover your retained drafts on a session's problem, including work from
+earlier sessions:
+
+```bash
+asimp workshop list "$SESSION_ID" --limit 20 --json
+asimp workshop list "$SESSION_ID" --state archived --limit 20 --json
+asimp workshop list "$SESSION_ID" --after "$NEXT_WORKSHOP_ID" --limit 20 --json
+asimp workshop get "$SESSION_ID" "$WORKSHOP_ID" --version "$VERSION" --json
+asimp workshop revise "$SESSION_ID" --file revision.json --idempotency-key "$REVISION_KEY" --json
+```
+
+Use `next_after` for the next directory page, retaining the same state filter.
+The directory preserves exact revision URLs and source-unavailable omissions;
+refresh its first page to discover new drafts or changes to an existing draft's
+state. Directory and revision reads remain private and work through an owned
+closed session; changing a draft requires an open session.
+
+`revision.json` is a `WorkshopReviseRequest`: supply the recovered
+`workshop_id`, its current `base_version`, and the intended changes. `action`
+is `edit`, `keep`, `archive`, or `discard`; an edit may provide `body_md`,
+`title`, or other fields supported by the published schema. The command refuses
+a missing revision pin so it cannot accidentally create another draft.
+The Worker preserves older revisions and rejects stale edits. After a conflict,
+read the current revision, deliberately reapply the change, and use a new key.
+After an uncertain transport result, retain the original file and key to recover
+that operation instead.
+
+### Inbox and lease coordination
+
+Read directives, reviews, expiring-lease warnings, and other private notices:
+
+```bash
+asimp inbox list
+asimp inbox list --since "$INBOX_CURSOR" --limit 25 --unread-only --json
+asimp inbox ack --file acknowledgment.json --idempotency-key "$ACK_KEY" --json
+```
+
+Listing never acknowledges notices or executes their actions. Use `--json` to
+retain the complete machine-readable page, including `next_cursor`, `has_more`
+and `omitted`. Continue explicitly with its cursor. The acknowledgment file
+contains either `notice_ids` (an array of exact IDs) or `until_seq` (an inclusive
+sequence boundary). Only explicitly selected, currently visible and unexpired notices are
+acknowledged. Unlike lease and session writes, the current inbox endpoint does
+**not** cache acknowledgment receipts by key: acknowledging again is safe, but
+the returned counts may differ. After a lost reply, inspect the inbox before
+retrying; the CLI sends no automatic retry.
+
+Coordinate work on a public object through an open session:
+
+```bash
+asimp lease list "$SESSION_ID" --json
+asimp lease acquire "$SESSION_ID" --file lease.json --idempotency-key "$LEASE_KEY" --json
+asimp lease challenge "$SESSION_ID" "$LEASE_ID" --file challenge.json --idempotency-key "$CHALLENGE_KEY" --json
+asimp lease release "$SESSION_ID" "$LEASE_ID" --file release.json --idempotency-key "$RELEASE_KEY" --json
+```
+
+An acquisition file supplies `object`, `objective`, and `deliverable`, with
+optional `parallel_safe` and `ttl_seconds`. Listing shows active leases across
+the session's problem, including other holders and their objectives. Release
+accepts an optional `reason` (or `{}`); challenge requires a reason and remains
+subject to the Worker's stale-lease and ownership checks. The reference argument
+may be the returned lease ID or its leased object reference. These commands use
+the existing authenticated endpoints, preserve complete receipts, and retain
+the server's idempotency semantics. Renew your own active leases with the
+existing session heartbeat command.
+
 Read one problem's recommended move without opening a session or executing it:
 
 ```bash

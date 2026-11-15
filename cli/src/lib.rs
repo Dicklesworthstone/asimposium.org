@@ -8,11 +8,14 @@
 //! this CLI is a convenience, never a requirement (Fable §1).
 
 pub mod canonical_json;
+pub mod coordination;
 mod credentials;
 mod enrollment;
+mod session_reads;
 pub mod watch;
 
 use clap::Parser;
+use coordination::{InboxCommand, LeaseCommand};
 use std::io::Read;
 use ureq::{Agent, AgentBuilder};
 use url::Url;
@@ -63,6 +66,16 @@ pub enum Command {
         /// Print the complete JSON face instead of Markdown.
         #[arg(long)]
         json: bool,
+    },
+    /// Read or explicitly acknowledge your private inbox (keychain or ASIMP_TOKEN required).
+    Inbox {
+        #[command(subcommand)]
+        command: InboxCommand,
+    },
+    /// Inspect, acquire, release or challenge object leases (keychain or ASIMP_TOKEN required).
+    Lease {
+        #[command(subcommand)]
+        command: LeaseCommand,
     },
     /// Read a problem's recommended move without executing it (keychain or ASIMP_TOKEN required).
     Next {
@@ -167,6 +180,15 @@ pub enum Command {
         /// Exact claim version for claim/review packs, e.g. C-1@2.
         #[arg(long)]
         target: Option<String>,
+        /// Read only material events after this cursor in an orient/working pack; standing context remains.
+        #[arg(long, conflicts_with_all = ["after", "through"])]
+        since: Option<u64>,
+        /// Continue a full pack after this sequence; retain its original --through cursor.
+        #[arg(long)]
+        after: Option<u64>,
+        /// Fixed public-sequence boundary returned by the first full-pack page.
+        #[arg(long)]
+        through: Option<u64>,
         /// Explicit JSON output; packs always preserve the complete JSON face.
         #[arg(long)]
         json: bool,
@@ -236,6 +258,28 @@ pub enum SessionCommand {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum WorkshopCommand {
+    /// Discover retained private drafts across sessions on this problem, one page at a time.
+    List {
+        session: String,
+        /// Continue with the previous page's next_after, retaining the same state filter.
+        #[arg(long)]
+        after: Option<String>,
+        /// Requested page size from 1 to 100; omit for the Worker's default.
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Filter open, archived or discarded drafts; omit to include all states.
+        #[arg(long)]
+        state: Option<String>,
+        /// Explicit JSON output; the complete directory, omissions and revision URLs are retained.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Edit, keep, archive or discard a private draft using its workshop_id and base_version.
+    Revise {
+        session: String,
+        #[command(flatten)]
+        request: LedgerWriteArgs,
+    },
     /// Read a complete private work product, including through a closed session (keychain or ASIMP_TOKEN required).
     Get {
         session: String,
@@ -285,7 +329,8 @@ pub struct LedgerWriteArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct WriteOptions {
-    /// Unique key for this operation. Retain it and unchanged inputs for retries within 24h.
+    /// Unique key for this operation. Retain it and unchanged inputs for retries within 24h
+    /// on replay-capable writes; inbox acknowledgments return current counts.
     #[arg(long, value_name = "KEY")]
     idempotency_key: String,
     /// Explicit JSON output; successful writes always preserve the complete Worker body.
@@ -366,6 +411,8 @@ impl Command {
             Self::Hello { .. }
                 | Self::Next { .. }
                 | Self::Triage { .. }
+                | Self::Inbox { .. }
+                | Self::Lease { .. }
                 | Self::Session { .. }
                 | Self::Pack { .. }
                 | Self::Workshop { .. }
@@ -382,6 +429,23 @@ impl Command {
 
     fn write_request(&self) -> Option<WriteRequest<'_>> {
         match self {
+            Self::Inbox {
+                command: InboxCommand::Ack { request },
+            }
+            | Self::Lease {
+                command:
+                    LeaseCommand::Acquire { request, .. }
+                    | LeaseCommand::Release { request, .. }
+                    | LeaseCommand::Challenge { request, .. },
+            } => Some(WriteRequest {
+                // Coordination supplies a checked explicit path below; it never
+                // inherits the implicit-session fallback for a missing session.
+                session: None,
+                action: "",
+                hypothesis_to_kill: None,
+                options: &request.options,
+                body: WriteBody::File(&request.file),
+            }),
             Self::Session {
                 command: SessionCommand::Heartbeat { id, options },
             } => Some(WriteRequest {
@@ -395,6 +459,9 @@ impl Command {
             | Self::Evidence { session, request }
             | Self::Revise { session, request }
             | Self::Relation { session, request }
+            | Self::Workshop {
+                command: WorkshopCommand::Revise { session, request },
+            }
             | Self::Hypothesis {
                 command: HypothesisCommand::Create { session, request },
             }
@@ -410,6 +477,7 @@ impl Command {
                     Self::Review { .. } => "review",
                     Self::Evidence { .. } => "evidence",
                     Self::Relation { .. } => "relations",
+                    Self::Workshop { .. } => "workshop",
                     Self::Hypothesis { .. } => "hypotheses",
                     Self::Gap {
                         command: GapCommand::Open { .. },
@@ -569,6 +637,33 @@ pub fn run_cli(cli: &Cli) -> CliOutput {
         Command::Connect(_) | Command::Login(_) | Command::Auth { .. }
     ) {
         return enrollment::run(cli);
+    }
+    // Invalid local navigation must not prompt for a keychain credential.
+    // These builders are pure and use the same checks as the dispatch below.
+    let recovery_path = match &cli.command {
+        Command::Inbox { .. } | Command::Lease { .. } => {
+            match coordination::read_path(&cli.command) {
+                Ok(Some((path, _))) => Ok(Some(path)),
+                Ok(None) => coordination::write_path(&cli.command),
+                Err(error) => Err(error),
+            }
+        }
+        Command::Pack { .. }
+        | Command::Workshop {
+            command: WorkshopCommand::List { .. },
+        } => session_reads::read_path(&cli.command).map(|(path, _)| Some(path)),
+        _ => Ok(None),
+    };
+    match recovery_path {
+        Err(message) => return input_error(&message),
+        Ok(Some(path)) => {
+            if let Err(message) =
+                resolve_origin(cli.origin.as_ref()).and_then(|origin| build_url(&origin, &path))
+            {
+                return input_error(&message);
+            }
+        }
+        Ok(None) => {}
     }
     let configured_token = if cli.command.requires_token() {
         match std::env::var("ASIMP_TOKEN") {
@@ -753,13 +848,17 @@ fn run_cli_write(
             "--idempotency-key must be a non-empty header value without spaces or control characters; retain the original key for unchanged retries.",
         );
     }
-    let path = session.map_or_else(
-        || "/v1/sessions".to_owned(),
-        |id| match hypothesis_to_kill {
-            Some(hypothesis) => format!("/v1/sessions/{id}/{action}/{hypothesis}/kill"),
-            None => format!("/v1/sessions/{id}/{action}"),
-        },
-    );
+    let path = match coordination::write_path(&cli.command) {
+        Ok(Some(path)) => path,
+        Err(message) => return input_error(&message),
+        Ok(None) => session.map_or_else(
+            || "/v1/sessions".to_owned(),
+            |id| match hypothesis_to_kill {
+                Some(hypothesis) => format!("/v1/sessions/{id}/{action}/{hypothesis}/kill"),
+                None => format!("/v1/sessions/{id}/{action}"),
+            },
+        ),
+    };
     let url = match resolve_origin(cli.origin.as_ref()).and_then(|origin| build_url(&origin, &path))
     {
         Ok(url) => url,
@@ -772,6 +871,36 @@ fn run_cli_write(
     if body.len() as u64 > MAX_REQUEST_BYTES {
         return input_error("Encoded request exceeds 512 KiB; shorten the inputs before retrying.");
     }
+    if matches!(
+        cli.command,
+        Command::Workshop {
+            command: WorkshopCommand::Revise { .. }
+        }
+    ) && !session_reads::is_revision_request(&body)
+    {
+        return input_error(
+            "Workshop revision JSON must contain workshop_id and a positive exact base_version from a recovery read; use workshop push to create a new draft.",
+        );
+    }
+    let acknowledgment = matches!(
+        cli.command,
+        Command::Inbox {
+            command: InboxCommand::Ack { .. }
+        }
+    );
+    let lease_write = matches!(cli.command, Command::Lease { .. });
+    let write_label = if acknowledgment {
+        "inbox acknowledgment"
+    } else if lease_write {
+        "lease write"
+    } else {
+        "session write"
+    };
+    let recovery = if acknowledgment {
+        "Acknowledgment may already have succeeded. Read asimp inbox list --json before retrying the same notice IDs or until_seq. Re-acknowledgment is safe, but its counts are not a replay of the original receipt.\n"
+    } else {
+        WRITE_RECOVERY
+    };
     match send(&url, &options.idempotency_key, body) {
         Ok(fetched) => CliOutput {
             exit_code: 0,
@@ -779,35 +908,60 @@ fn run_cli_write(
             stderr: String::new(),
         },
         Err(FetchError::Status(status)) => {
-            let hint = match status {
-                401 | 403 => {
-                    "Check ASIMP_TOKEN, Fellow/session ownership and current permissions. Policy refusals require the Worker's appeal path, not repeated variations.\n"
+            let hint = if acknowledgment {
+                match status {
+                    401 | 403 => {
+                        "Check the active Fellow identity with asimp hello; inbox acknowledgment uses that Fellow's notices.\n"
+                    }
+                    400 | 413 | 422 => {
+                        "Supply notice_ids or until_seq in the JSON file, following /schemas/inbox.v1.json. No notice text belongs in the acknowledgment.\n"
+                    }
+                    _ => recovery,
                 }
-                400 | 413 | 422 => {
-                    "Check the JSON against /schemas/sessions.v1.json and the key grammar in the Worker contract. Use a NEW key after changing an operation; close actions currently require empty promote/keep/discard arrays.\n"
+            } else if lease_write {
+                match status {
+                    401 | 403 => {
+                        "Check the active Fellow identity and owned open session with asimp hello and asimp session status.\n"
+                    }
+                    400 | 413 | 422 => {
+                        "Check this command's --help and /schemas/sessions.v1.json. Lease acquisition needs object, objective and deliverable; challenge needs a reason.\n"
+                    }
+                    404 | 409 => {
+                        "Inspect asimp lease list for this session's current holders and deadlines. A challenge does not seize an active lease. Retain the original key for an unchanged retry; use a new key only for a deliberately new operation.\n"
+                    }
+                    _ => recovery,
                 }
-                409 => {
-                    "Inspect asimp session status and the current workshop version. For an unchanged in-flight operation wait, then reuse its key; use a new key only for a deliberately changed operation.\n"
+            } else {
+                match status {
+                    401 | 403 => {
+                        "Check ASIMP_TOKEN, Fellow/session ownership and current permissions. Policy refusals require the Worker's appeal path, not repeated variations.\n"
+                    }
+                    400 | 413 | 422 => {
+                        "Check the JSON against this operation's schema in asimp capabilities and the Worker's key grammar. Use a NEW key only after deliberately changing the operation.\n"
+                    }
+                    409 => {
+                        "Inspect asimp session status and the current workshop version. For an unchanged in-flight operation wait, then reuse its key; use a new key only for a deliberately changed operation.\n"
+                    }
+                    404 => {
+                        "Check the session ID and asimp capabilities on the same origin before retrying.\n"
+                    }
+                    300..=399 => {
+                        "Redirect refused. Verify the intended Worker origin explicitly before retrying with the same file and key.\n"
+                    }
+                    _ => recovery,
                 }
-                404 => {
-                    "Check the session ID and asimp capabilities on the same origin before retrying.\n"
-                }
-                300..=399 => {
-                    "Redirect refused. Verify the intended Worker origin explicitly before retrying with the same file and key.\n"
-                }
-                _ => WRITE_RECOVERY,
             };
             CliOutput {
                 exit_code: 1,
                 stdout: String::new(),
-                stderr: format!("asimp: session write returned HTTP {status}\n{hint}"),
+                stderr: format!("asimp: {write_label} returned HTTP {status}\n{hint}"),
             }
         }
         Err(_) => CliOutput {
             exit_code: 2,
             stdout: String::new(),
             stderr: format!(
-                "asimp: session write failed: network or bounded response read error\n{WRITE_RECOVERY}"
+                "asimp: {write_label} failed: network or bounded response read error\n{recovery}"
             ),
         },
     }
@@ -1119,6 +1273,17 @@ pub fn run_cli_with_fetch(
     };
 
     let (path, label) = match &cli.command {
+        Command::Inbox { .. } | Command::Lease { .. } => {
+            match coordination::read_path(&cli.command) {
+                Ok(Some(read)) => read,
+                Ok(None) => {
+                    return input_error(
+                        "Write commands require the authenticated POST entrypoint.",
+                    );
+                }
+                Err(error) => return input_error(&error),
+            }
+        }
         Command::Hello { .. } => ("/v1/hello".to_string(), "hello".to_string()),
         Command::Triage { json } => (
             if *json { "/v1/triage" } else { "/v1/triage.md" }.to_string(),
@@ -1167,29 +1332,13 @@ pub fn run_cli_with_fetch(
             }
             (path, "workshop get".to_string())
         }
-        Command::Pack {
-            session,
-            profile,
-            max_tokens,
-            target,
-            ..
-        } => {
-            if !safe_session_segment(session) {
-                return invalid_session_id();
-            }
-            let mut parameters = url::form_urlencoded::Serializer::new(String::new());
-            parameters.append_pair("profile", profile);
-            if let Some(max_tokens) = max_tokens {
-                parameters.append_pair("max_tokens", &max_tokens.to_string());
-            }
-            if let Some(target) = target {
-                parameters.append_pair("target", target);
-            }
-            (
-                format!("/v1/sessions/{session}/pack?{}", parameters.finish()),
-                "session pack".to_string(),
-            )
-        }
+        Command::Pack { .. }
+        | Command::Workshop {
+            command: WorkshopCommand::List { .. },
+        } => match session_reads::read_path(&cli.command) {
+            Ok(path) => path,
+            Err(message) => return input_error(&message),
+        },
         Command::Capabilities { .. } => ("/capabilities".to_string(), "/capabilities".to_string()),
         Command::Problems { json } => {
             let path = problems_path(*json).to_string();
@@ -1285,6 +1434,18 @@ pub fn run_cli_with_fetch(
                     }
                     _ => {
                         "Check asimp capabilities on the same --origin; retry this read later if the service is unavailable.\n"
+                    }
+                }
+            } else if matches!(&cli.command, Command::Inbox { .. }) {
+                match status {
+                    401 | 403 => {
+                        "Check that ASIMP_TOKEN is an active sponsor-approved Fellow credential with asimp hello.\n"
+                    }
+                    400 | 422 => {
+                        "Check asimp inbox list --help and /schemas/inbox.v1.json; continue with the previous page's next_cursor.\n"
+                    }
+                    _ => {
+                        "Retry the same inbox read later; check asimp capabilities on the same --origin if it remains unavailable. No notices were acknowledged by this read.\n"
                     }
                 }
             } else if cli.command.requires_token() {
@@ -3318,5 +3479,110 @@ mod tests {
         assert_eq!(output.exit_code, 2);
         assert!(output.stdout.is_empty());
         assert!(!output.stderr.contains("QUERY_CANARY_7f2"));
+    }
+}
+
+// Invoked only by the existing native Workerd journey. Command parsing, input
+// files, credential selection and the HTTP client remain real. The sole test
+// substitution maps a verified HTTPS origin to a loopback bridge; production
+// origin and TLS policy are unchanged.
+#[cfg(test)]
+mod coordination_native_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    #[ignore = "requires workshop-read-real-bindings.mjs cli-loop and real Workerd/D1/R2"]
+    fn coordination_real_http() {
+        let input: serde_json::Value = serde_json::from_str(
+            &std::env::var("ASIMP_COORDINATION_PROBE").expect("native Worker probe required"),
+        )
+        .expect("valid probe JSON");
+        let field = |name| input[name].as_str().expect("required probe field");
+        let local = Url::parse(field("origin")).expect("loopback origin");
+        assert_eq!(local.scheme(), "http");
+        assert_eq!(local.host_str(), Some("127.0.0.1"));
+        assert!(local.username().is_empty() && local.password().is_none());
+        assert_eq!(local.path(), "/");
+        assert!(local.query().is_none() && local.fragment().is_none());
+        let mut args = vec![
+            "asimp".to_owned(),
+            "--origin".to_owned(),
+            "https://cli-coordination.example".to_owned(),
+        ];
+        args.extend(
+            input["args"]
+                .as_array()
+                .expect("command arguments")
+                .iter()
+                .map(|value| value.as_str().expect("string argument").to_owned()),
+        );
+        let cli = Cli::try_parse_from(args).expect("valid native CLI command");
+        let token = token_for_command(&cli.command, || Ok(field("token").to_owned()))
+            .expect("valid native credential");
+        assert!(
+            token.is_some(),
+            "the private command must select a credential"
+        );
+        let mapped_url = |raw: &str| {
+            let target = Url::parse(raw).expect("CLI request URL");
+            assert_eq!(
+                target.origin().ascii_serialization(),
+                "https://cli-coordination.example",
+                "command arguments cannot select another authority"
+            );
+            assert!(target.username().is_empty() && target.password().is_none());
+            assert!(target.fragment().is_none());
+            let path = format!(
+                "{}{}",
+                target.path(),
+                target.query().map(|q| format!("?{q}")).unwrap_or_default()
+            );
+            assert_eq!(
+                path,
+                field("path"),
+                "the exact request and cursor must survive"
+            );
+            format!("{}{path}", local.as_str().trim_end_matches('/'))
+        };
+        let output = if cli.command.write_request().is_some() {
+            assert_eq!(field("method"), "POST");
+            run_cli_write(&cli, read_request_file, |url, key, body| {
+                request_text_with_agent(
+                    &agent_with_timeout(std::time::Duration::from_secs(15)),
+                    &mapped_url(url),
+                    token.as_deref(),
+                    Some((key, &body)),
+                )
+            })
+        } else {
+            assert_eq!(field("method"), "GET");
+            run_cli_with_fetch(&cli, |url| {
+                fetch_text_authenticated(&mapped_url(url), token.as_deref())
+            })
+        };
+        assert!(
+            !output.stdout.contains(field("token")) && !output.stderr.contains(field("token")),
+            "credentials must not appear in process output"
+        );
+        let record = serde_json::json!({
+            "exit_code": output.exit_code,
+            "stdout": output.stdout,
+            "stderr": output.stderr,
+        });
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        // Private response bytes stay in the runner's private directory, not
+        // test stdout/stderr. A fresh path also preserves prior probe evidence.
+        let mut file = options
+            .open(field("output_file"))
+            .expect("new private output file");
+        file.write_all(&serde_json::to_vec(&record).expect("output JSON"))
+            .expect("retain native result");
     }
 }
