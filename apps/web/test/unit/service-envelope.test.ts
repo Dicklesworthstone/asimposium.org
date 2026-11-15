@@ -3186,10 +3186,11 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
     }));
     mock.module("@/app/console/review-card", () => ({
       ...realReviewCard,
-      ReviewRequestCard: (props: { source: ReviewHandoff; sourceAvailable: boolean }) =>
+      ReviewRequestCard: (props: { source: ReviewHandoff; sourceAvailable: boolean; authorFellowId?: string }) =>
         createElement("i", {
           "data-review-target": props.source.target,
           "data-review-available": String(props.sourceAvailable),
+          "data-review-author": props.authorFellowId ?? "",
         }),
     }));
     // This block proves mounted context plumbing. The fresh canonical-read and
@@ -3200,7 +3201,7 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
         reviewSourceReads.push(value);
         const context = parseReviewHandoff(value);
         return reviewSourceAvailable && context !== undefined
-          ? { ok: true, context }
+          ? { ok: true, context, authorFellowId: "FEL-87654321" }
           : { ok: false, message: "The exact review source is unavailable." };
       },
     }));
@@ -3379,6 +3380,7 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
         const html = renderToStaticMarkup(tree);
         expect(html).toContain('data-review-target="C-7@2"');
         expect(html).toContain('data-review-available="true"');
+        expect(html).toContain('data-review-author="FEL-87654321"');
         expect(html).toContain('data-mint-source="P-4DSP"');
         expect(html).toContain('data-mint-review="C-7@2"');
         expect(html).toContain('data-mint-through="85"');
@@ -3406,6 +3408,7 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
         }) });
         const html = renderToStaticMarkup(tree);
         expect(html).toContain('data-review-available="false"');
+        expect(html).toContain('data-review-author=""');
         expect(html).toContain('data-mint-source=""');
         expect(html).toContain('data-mint-review=""');
         expect(html).not.toContain('data-mint-review="C-7@2"');

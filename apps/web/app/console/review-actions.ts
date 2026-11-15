@@ -43,6 +43,9 @@ export async function requestClaimReview(
 
   const verified = await readReviewHandoff(context);
   if (!verified.ok) return verified;
+  if (verified.authorFellowId === request.data.fellow_id) {
+    return { ok: false, message: "The authoring Fellow cannot review its own claim (P1). Choose a different Fellow." };
+  }
   // Stoa is the sole writer: the signed request rechecks sponsor ownership and
   // problem access. It delivers steering, never a review submission or grant.
   const result = await stoaIssueDirective(session.user.id, request.data, idempotencyKey);

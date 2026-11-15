@@ -1,6 +1,7 @@
 import {
   ClaimFaceQuerySchema,
   EnrollmentProblemBindingSchema,
+  FellowIdSchema,
   PublicClaimTargetSchema,
   type SponsorFellowSummary,
 } from "@asimposium/contracts";
@@ -83,8 +84,11 @@ export function reviewDirectiveText(source: ReviewHandoff): string {
 export function reviewFellows(
   fellows: readonly SponsorFellowSummary[],
   source: ReviewHandoff,
+  authorFellowId: string | undefined,
 ): readonly SponsorFellowSummary[] {
+  if (!FellowIdSchema.safeParse(authorFellowId).success) return [];
   return fellows.filter((fellow) =>
+    fellow.fellow_id !== authorFellowId &&
     fellow.status === "active" &&
     fellow.granted_scopes.includes("review") &&
     (fellow.granted_resources.problem_binding === undefined ||

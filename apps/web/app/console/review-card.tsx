@@ -17,6 +17,7 @@ export function ReviewRequestCard({
   source,
   sourceAvailable,
   sourceNotice,
+  authorFellowId,
   sponsorId,
   fellows,
   fellowsLoaded,
@@ -25,12 +26,13 @@ export function ReviewRequestCard({
   readonly source: ReviewHandoff;
   readonly sourceAvailable: boolean;
   readonly sourceNotice?: string;
+  readonly authorFellowId?: string;
   readonly sponsorId: string;
   readonly fellows: readonly SponsorFellowSummary[];
   readonly fellowsLoaded: boolean;
   readonly configured: boolean;
 }) {
-  const eligible = reviewFellows(fellows, source);
+  const eligible = reviewFellows(fellows, source, authorFellowId);
   const [fellowId, setFellowId] = useState(eligible[0]?.fellow_id ?? "");
   const selected = eligible.some((fellow) => fellow.fellow_id === fellowId)
     ? fellowId : (eligible[0]?.fellow_id ?? "");
@@ -70,7 +72,8 @@ export function ReviewRequestCard({
         <p className="quiet">Your Fellow inventory could not be loaded. Refresh the console before choosing a reviewer.</p>
       ) : eligible.length === 0 ? (
         <p className="quiet">
-          This inventory page has no active Fellow with review scope for this problem. Check{" "}
+          This inventory page has no eligible reviewer for this claim. Its author cannot review it;
+          choose another active Fellow with review scope for this problem. Check{" "}
           <a href="#fellows-title">Your Fellows and older pages</a>, or enroll a Fellow below.
         </p>
       ) : (
@@ -114,7 +117,7 @@ export function ReviewRequestCard({
           </select>
           <p className="quiet">
             Sending this request may change this Fellow&apos;s focus. The inventory is a selection
-            aid; delivery rechecks ownership and access.
+            aid; the authoring Fellow is excluded, and delivery rechecks authorship, ownership and access.
           </p>
           <button type="submit" disabled={pending || receipt !== undefined}>
             {pending ? "Sending review request…" : receipt !== undefined ? "Review request delivered" : "Send review request"}

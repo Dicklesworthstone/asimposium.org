@@ -118,10 +118,14 @@ test("the Fellow selector shows only active review grants usable for this proble
   }) as SponsorFellowSummary;
   const bound = fellow("bound", ["review"], "P-4DSP");
   const unbound = fellow("unbound", ["review"]);
+  const author = fellow("author", ["review"], "P-4DSP");
   expect(reviewFellows([
-    bound, unbound, fellow("wrong-problem", ["review"], "P-7KQZ"),
+    bound, unbound, author, fellow("wrong-problem", ["review"], "P-7KQZ"),
     fellow("no-review", ["promote"], "P-4DSP"),
     { ...bound, fellow_id: "paused", status: "paused" },
     { ...bound, fellow_id: "revoked", status: "revoked" },
-  ], source).map((item) => item.fellow_id)).toEqual(["bound", "unbound"]);
+  ], source, author.fellow_id).map((item) => item.fellow_id)).toEqual(["bound", "unbound"]);
+  expect(reviewFellows([author], source, author.fellow_id)).toEqual([]);
+  expect(reviewFellows([bound, unbound], source, undefined)).toEqual([]);
+  expect(reviewFellows([bound, unbound], source, "")).toEqual([]);
 });

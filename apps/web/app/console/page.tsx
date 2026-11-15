@@ -410,6 +410,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
                 key={sponsorId}
                 source={reviewContext}
                 sourceAvailable={sourceReview !== undefined}
+                authorFellowId={reviewResult?.ok ? reviewResult.authorFellowId : undefined}
                 sourceNotice={reviewResult && !reviewResult.ok ? reviewResult.message : undefined}
                 sponsorId={sponsorId}
                 fellows={fellows}
