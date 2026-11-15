@@ -8,6 +8,7 @@ import {
   PublicMovesResponseSchema,
   ScreeningPublicationProvenanceSchema,
 } from "@asimposium/contracts";
+import type { PublicHypothesis } from "@asimposium/contracts/hypotheses";
 import {
   REVIEW_QUEUE_BOUNDARY,
   type ReviewQueueItem,
@@ -167,7 +168,12 @@ function fixture() {
     },
     async hypotheses(_database, id, cursor) {
       return {
-        unlisted: false,
+        unlisted:
+          (
+            sqlite.query("SELECT unlisted FROM problems WHERE id=?").get(id) as {
+              unlisted: number;
+            }
+          ).unlisted === 1,
         face: {
           schema: "https://a.asimposium.org/schemas/hypotheses.v1.json",
           problem_id: id,
@@ -574,20 +580,92 @@ test("a visible lifecycle event cannot substitute for a hidden canonical claim p
   expect(exact?.missing).toBe(1);
 });
 
-test("formalization shares canonical review admissions instead of scanning the same page again", async () => {
+for (const unlisted of [0, 1])
+  test(`formalization shares canonical admissions and captured listing state ${unlisted}`, async () => {
+    const f = fixture();
+    f.problem("P-DEMO", { claim: "C-1", unlisted });
+    f.items.set("P-DEMO", [f.claim("P-DEMO", "C-1")]);
+    const queue = f.selectors.queue;
+    f.selectors.queue = async (...args) => {
+      expect(args[2]?.includeUnlisted === true).toBe(unlisted === 1);
+      return queue(...args);
+    };
+    f.selectors.formalize = async (db, id, cursor, source, options) => {
+      expect(source).toBeDefined();
+      expect(options).toEqual({ includeUnlisted: unlisted === 1 });
+      const page = await source!.load(db, id, cursor);
+      expect(page.candidates[0]?.cursor).toBe(20);
+      await source!.load(db, id, cursor);
+      return { move: null, degraded: false };
+    };
+    const face = await loadPublicProblemMoves(f.db, "P-DEMO", { selectors: f.selectors });
+    expect(face?.primary_move?.move).toBe("review");
+    expect(f.calls).toHaveLength(1);
+  });
+
+test("known unlisted discrimination is readable by URL, excluded from discovery and withheld after hiding", async () => {
   const f = fixture();
-  f.problem("P-DEMO", { claim: "C-1" });
-  f.items.set("P-DEMO", [f.claim("P-DEMO", "C-1")]);
-  f.selectors.formalize = async (db, id, cursor, source) => {
-    expect(source).toBeDefined();
-    const page = await source!.load(db, id, cursor);
-    expect(page.candidates[0]?.cursor).toBe(20);
-    await source!.load(db, id, cursor);
-    return { move: null, degraded: false };
-  };
-  const face = await loadPublicProblemMoves(f.db, "P-DEMO", { selectors: f.selectors });
-  expect(face?.primary_move?.move).toBe("review");
-  expect(f.calls).toHaveLength(1);
+  f.problem("P-UNLISTED", { unlisted: 1 });
+  const hypotheses: PublicHypothesis[] = [1, 2, 3].map((index) => {
+    const seq = index + 1;
+    const hypothesis_id = `H-${index}`;
+    const publication = {
+      event_id: f.event("P-UNLISTED", seq, hypothesis_id, "hypothesis", "hypothesis.created"),
+      seq,
+      created_at: instant,
+      payload_sha256: hash("{}"),
+      fellow_id: "F-author",
+      sponsor_id: "usr_author",
+      session_id: "S-author",
+      model_self_declared: "unit/model",
+      harness_self_declared: "unit-fixture",
+    };
+    return {
+      hypothesis_id,
+      publication,
+      last_event: publication,
+      status: "active",
+      kill: null,
+      content: {
+        route: "UNLISTED_ROUTE_CANARY",
+        mechanism: "Proposed route.",
+        falsifier: "A reproducible counterexample.",
+        body_md: "Untrusted authored content.",
+        expected_evidence: null,
+        discriminating_predictions: ["A distinct predicted outcome."],
+        origin: "proposed",
+      },
+    };
+  });
+  f.selectors.hypotheses = async (_db, problem, cursor) => ({
+    unlisted: true,
+    face: {
+      schema: "https://a.asimposium.org/schemas/hypotheses.v1.json",
+      problem_id: problem,
+      cursor,
+      after: 0,
+      hypotheses,
+      next_after: null,
+      omitted: [],
+    },
+  });
+  const named = () => loadPublicProblemMoves(f.db, "P-UNLISTED", { selectors: f.selectors });
+  const face = await named();
+  expect(face?.primary_move?.move).toBe("discriminate");
+  expect(face?.primary_move?.refs).toEqual(["P-UNLISTED", "H-1", "H-2", "H-3"]);
+  expect(JSON.stringify(face)).not.toContain("UNLISTED_ROUTE_CANARY");
+  expect((await loadPublicMoves(f.db, {}, { selectors: f.selectors })).discovery.problems).toEqual(
+    [],
+  );
+  f.hide("P-UNLISTED", "H-1");
+  const hidden = await named();
+  expect(
+    [hidden?.primary_move, ...(hidden?.alternatives ?? [])].some(
+      (move) => move?.move === "discriminate",
+    ),
+  ).toBe(false);
+  f.hide("P-UNLISTED", "problem");
+  expect(await named()).toBeNull();
 });
 
 test("exact-version hiding and publication redaction suppress selected references", async () => {

@@ -69,19 +69,25 @@ export async function selectFormalizeMove(
   problemId: string,
   cursor: number,
   source?: FormalizeMoveSource,
+  options: { readonly includeUnlisted?: boolean } = {},
 ): Promise<FormalizeMoveResult> {
   const unavailable = { move: null, degraded: true } as const;
   try {
     if (
       !/^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}(?![\s\S])/.test(problemId) ||
       !Number.isSafeInteger(cursor) ||
-      cursor < 0
+      cursor < 0 ||
+      (options.includeUnlisted !== undefined && typeof options.includeUnlisted !== "boolean")
     )
       return unavailable;
     let canonical = source;
     if (canonical === undefined) {
       const { loadReviewQueueAtCursor } = await import("../discovery/review-queue-service");
-      canonical = { load: loadReviewQueueAtCursor, template: () => getMoveTemplate("formalize") };
+      canonical = {
+        load: (database, problem, through, after) =>
+          loadReviewQueueAtCursor(database, problem, through, after, options),
+        template: () => getMoveTemplate("formalize"),
+      };
     }
     const template = canonical.template();
     if (template.availability !== "available" || template.move !== "formalize") return unavailable;
@@ -232,7 +238,10 @@ export async function selectFormalizeMove(
               ? {}
               : { read_prioritized_claim: read(focus.priorityRoot) }),
             ...(target === limitingTarget ? {} : { read_limiting_premise: read(limitingTarget) }),
-            ...(after === undefined
+            // The public queue deliberately excludes unlisted work. Keep a
+            // bounded known-problem selection useful without advertising a
+            // continuation that cannot serve its remaining admissions.
+            ...(after === undefined || options.includeUnlisted === true
               ? {}
               : {
                   continue_discovery: {

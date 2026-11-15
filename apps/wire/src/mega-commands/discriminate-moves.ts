@@ -7,11 +7,12 @@ import { isReadableActiveHypothesis } from "./hypothesis-moves.ts";
 export const DISCRIMINATE_BOUNDARY =
   "discrimination-draft-v1: three verified active hypotheses at a captured cursor justify inspecting competing predictions, not a claim that they fit all evidence or lack a pending test. Draft privately; no experiment, evidence, verdict or reservation is manufactured. The bounded sample may omit other routes.";
 
-/** Revalidate visibility after the canonical read. No private/unlisted problem,
- * hidden route or redacted publication can become a trusted move reference.
+/** Revalidate the captured listing state after a known-problem read. Unlisted
+ * problems remain usable by URL; private problems, hidden routes and redacted
+ * publications cannot become trusted move references.
  * JSON binding keeps this one bounded query regardless of the three pins. */
 export const DISCRIMINATE_VISIBLE_SQL = `SELECT p.id FROM problems p
-  WHERE p.id = ? AND p.status <> 'private-draft' AND p.unlisted = 0
+  WHERE p.id = ? AND p.status <> 'private-draft' AND p.unlisted = ?
     AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
     AND NOT EXISTS (
       SELECT 1 FROM json_each(?) selected
@@ -57,7 +58,7 @@ export function composeDiscriminateMove(
     !Number.isSafeInteger(cursor) ||
     cursor < 0 ||
     !result ||
-    result.unlisted ||
+    typeof result.unlisted !== "boolean" ||
     result.face.problem_id !== problemId ||
     result.face.cursor !== cursor ||
     result.face.after !== 0
@@ -184,7 +185,7 @@ export async function selectDiscriminateMove(
       canonical = {
         async load(db, problemId, cursor) {
           const result = await hypotheses.loadLiveHypotheses(db, problemId, cursor);
-          if (result === null || result.unlisted) return null;
+          if (result === null) return null;
           const pins = result.face.hypotheses.map(({ hypothesis_id, publication }) => ({
             hypothesis_id,
             event_id: publication.event_id,
@@ -193,7 +194,7 @@ export async function selectDiscriminateMove(
           }));
           const visible = await db
             .prepare(DISCRIMINATE_VISIBLE_SQL)
-            .bind(problemId, JSON.stringify(pins))
+            .bind(problemId, result.unlisted ? 1 : 0, JSON.stringify(pins))
             .first<{ id: string }>();
           return visible?.id === problemId ? result : null;
         },

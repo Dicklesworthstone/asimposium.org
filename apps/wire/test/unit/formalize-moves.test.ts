@@ -225,6 +225,21 @@ test("scan stops after two pages and discloses live continuation instead of clai
   assert.match(prep.continue_discovery.note, /live state/);
 });
 
+test("bounded unlisted formalization keeps its exact reads without a listed-only discovery link", async () => {
+  const f = source([page([item(1)], after1), page([item(2)], after2)]);
+  const result = await selectFormalizeMove(db, p, 200, f.source, { includeUnlisted: true });
+  assert.equal(f.calls.length, FORMALIZE_MAX_PAGES);
+  assert.equal(result.move?.move, "formalize");
+  assert.equal(result.degraded, true);
+  const prep = result.move!.contract.preparation as Record<string, unknown>;
+  assert.equal(prep.selection_complete, false);
+  assert.equal(prep.continue_discovery, undefined);
+  assert.deepEqual(prep.read_first, {
+    method: "GET",
+    path: "/p/P-TEST/claims/C-1@2.md?through=200",
+  });
+});
+
 test("empty filtered page does not stop the scan or change its cut", async () => {
   const empty = page([], after1);
   empty.scanned = 8;

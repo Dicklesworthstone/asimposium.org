@@ -283,15 +283,21 @@ async function selectProblem(
         selectors.frictions(db, head.id, head.cursor, items),
       );
       await attempt("Load-bearing formalization", () =>
-        selectors.formalize(db, head.id, head.cursor, {
-          load: (database, problem, cursor, after) =>
-            queue(
-              database,
-              { problem, ...(after === undefined ? {} : { after }) },
-              { problemId: problem, through: cursor, includeUnlisted: head.unlisted === 1 },
-            ),
-          template: () => getMoveTemplate("formalize"),
-        }),
+        selectors.formalize(
+          db,
+          head.id,
+          head.cursor,
+          {
+            load: (database, problem, cursor, after) =>
+              queue(
+                database,
+                { problem, ...(after === undefined ? {} : { after }) },
+                { problemId: problem, through: cursor, includeUnlisted: head.unlisted === 1 },
+              ),
+            template: () => getMoveTemplate("formalize"),
+          },
+          { includeUnlisted: head.unlisted === 1 },
+        ),
       );
     } catch {
       omissions.push(
@@ -305,6 +311,8 @@ async function selectProblem(
   if (head.status !== "sharpening")
     try {
       const hypotheses = await selectors.hypotheses(db, head.id, head.cursor);
+      if (hypotheses && hypotheses.unlisted !== (head.unlisted === 1))
+        throw new Error("PUBLIC_MOVE_HYPOTHESES_SCOPE_CHANGED");
       for (const item of hypotheses?.face.hypotheses ?? []) {
         hypothesisPins.set(
           item.hypothesis_id,
@@ -324,13 +332,12 @@ async function selectProblem(
         ),
         "Third alternative",
       );
-      if (head.unlisted === 0)
-        collect(
-          composeDiscriminateMove(head.id, head.cursor, hypotheses, () =>
-            getMoveTemplate("discriminate"),
-          ),
-          "Discrimination",
-        );
+      collect(
+        composeDiscriminateMove(head.id, head.cursor, hypotheses, () =>
+          getMoveTemplate("discriminate"),
+        ),
+        "Discrimination",
+      );
     } catch {
       omissions.push(
         omitted(

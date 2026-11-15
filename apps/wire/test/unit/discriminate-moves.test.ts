@@ -81,6 +81,12 @@ test("three verified routes produce an executable private drafting contract, not
   assert.ok(!result.move?.why.includes("no pending test"));
 });
 
+test("a known unlisted problem retains the same pinned discrimination work", () => {
+  const unlisted = fixture();
+  unlisted.unlisted = true;
+  assert.deepEqual(select(unlisted), select(fixture()));
+});
+
 test("each source read reaches the exact admission even after a long killed-route history", () => {
   const prep = select(fixture()).move?.contract.preparation as {
     read_first: { path: string };
@@ -149,9 +155,9 @@ for (const count of [0, 1, 2]) {
 
 const refusals: [string, (f: SourceResult) => void][] = [
   [
-    "unlisted",
+    "unknown listing state",
     (f) => {
-      f.unlisted = true;
+      f.unlisted = undefined as unknown as boolean;
     },
   ],
   [
@@ -324,59 +330,68 @@ test("adapter forwards exact problem and snapshot once; storage failures remain 
   assert.equal(calls.length, 1);
 });
 
-test("visibility SQL enforces current controls, publication pins and redactions on real SQLite", () => {
-  const sql = new Database(":memory:");
-  try {
-    sql.exec(`CREATE TABLE problems(id TEXT,status TEXT,unlisted INTEGER,public_seq INTEGER);
+for (const unlisted of [0, 1])
+  test(`visibility SQL preserves listing state ${unlisted}, current controls and publication pins`, () => {
+    const sql = new Database(":memory:");
+    try {
+      sql.exec(`CREATE TABLE problems(id TEXT,status TEXT,unlisted INTEGER,public_seq INTEGER);
       CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,version INTEGER,visibility TEXT);
       CREATE TABLE events(id TEXT,problem_id TEXT,object_id TEXT,object_kind TEXT,type TEXT,object_version INTEGER,seq INTEGER,payload_sha256 TEXT);
       CREATE TABLE event_content(event_id TEXT,payload_sha256 TEXT,redacted_at TEXT);
-      INSERT INTO problems VALUES('P-TEST','active',0,200);`);
-    const pins = fixture().face.hypotheses.map(({ hypothesis_id, publication }) => ({
-      hypothesis_id,
-      event_id: publication.event_id,
-      seq: publication.seq,
-      payload_sha256: publication.payload_sha256,
-    }));
-    for (const pin of pins) {
-      sql
-        .query("INSERT INTO events VALUES(?, 'P-TEST', ?, 'hypothesis','hypothesis.created',1,?,?)")
-        .run(pin.event_id, pin.hypothesis_id, pin.seq, pin.payload_sha256);
-      sql.query("INSERT INTO event_content VALUES(?,?,NULL)").run(pin.event_id, pin.payload_sha256);
-    }
-    const visible = () => sql.query(DISCRIMINATE_VISIBLE_SQL).get("P-TEST", JSON.stringify(pins));
-    assert.ok(visible());
-    for (const target of ["H-1", "problem"]) {
-      sql.query("INSERT INTO content_controls VALUES('P-TEST',?,1,'hidden')").run(target);
-      assert.equal(visible(), null);
-      sql.query("INSERT INTO content_controls VALUES('P-TEST',?,2,'visible')").run(target);
+      INSERT INTO problems VALUES('P-TEST','active',${unlisted},200);`);
+      const pins = fixture().face.hypotheses.map(({ hypothesis_id, publication }) => ({
+        hypothesis_id,
+        event_id: publication.event_id,
+        seq: publication.seq,
+        payload_sha256: publication.payload_sha256,
+      }));
+      for (const pin of pins) {
+        sql
+          .query(
+            "INSERT INTO events VALUES(?, 'P-TEST', ?, 'hypothesis','hypothesis.created',1,?,?)",
+          )
+          .run(pin.event_id, pin.hypothesis_id, pin.seq, pin.payload_sha256);
+        sql
+          .query("INSERT INTO event_content VALUES(?,?,NULL)")
+          .run(pin.event_id, pin.payload_sha256);
+      }
+      const visible = () =>
+        sql.query(DISCRIMINATE_VISIBLE_SQL).get("P-TEST", unlisted, JSON.stringify(pins));
       assert.ok(visible());
-    }
-    for (const [change, undo] of [
-      ["UPDATE problems SET status='private-draft'", "UPDATE problems SET status='active'"],
-      ["UPDATE problems SET unlisted=1", "UPDATE problems SET unlisted=0"],
-      ["UPDATE problems SET public_seq=149", "UPDATE problems SET public_seq=200"],
-      [
-        "UPDATE event_content SET redacted_at='redacted' WHERE event_id='EV-1'",
-        "UPDATE event_content SET redacted_at=NULL",
-      ],
-      [
-        "UPDATE events SET problem_id='P-OTHER' WHERE id='EV-1'",
-        "UPDATE events SET problem_id='P-TEST'",
-      ],
-      [
-        "UPDATE event_content SET payload_sha256='forged' WHERE event_id='EV-1'",
-        `UPDATE event_content SET payload_sha256='${"1".repeat(64)}' WHERE event_id='EV-1'`,
-      ],
-    ]) {
-      sql.exec(change!);
+      for (const target of ["H-1", "problem"]) {
+        sql.query("INSERT INTO content_controls VALUES('P-TEST',?,1,'hidden')").run(target);
+        assert.equal(visible(), null);
+        sql.query("INSERT INTO content_controls VALUES('P-TEST',?,2,'visible')").run(target);
+        assert.ok(visible());
+      }
+      for (const [change, undo] of [
+        ["UPDATE problems SET status='private-draft'", "UPDATE problems SET status='active'"],
+        [
+          `UPDATE problems SET unlisted=${1 - unlisted}`,
+          `UPDATE problems SET unlisted=${unlisted}`,
+        ],
+        ["UPDATE problems SET public_seq=149", "UPDATE problems SET public_seq=200"],
+        [
+          "UPDATE event_content SET redacted_at='redacted' WHERE event_id='EV-1'",
+          "UPDATE event_content SET redacted_at=NULL",
+        ],
+        [
+          "UPDATE events SET problem_id='P-OTHER' WHERE id='EV-1'",
+          "UPDATE events SET problem_id='P-TEST'",
+        ],
+        [
+          "UPDATE event_content SET payload_sha256='forged' WHERE event_id='EV-1'",
+          `UPDATE event_content SET payload_sha256='${"1".repeat(64)}' WHERE event_id='EV-1'`,
+        ],
+      ]) {
+        sql.exec(change!);
+        assert.equal(visible(), null);
+        sql.exec(undo!);
+        assert.ok(visible());
+      }
+      pins[0]!.event_id = "EV-FORGED";
       assert.equal(visible(), null);
-      sql.exec(undo!);
-      assert.ok(visible());
+    } finally {
+      sql.close();
     }
-    pins[0]!.event_id = "EV-FORGED";
-    assert.equal(visible(), null);
-  } finally {
-    sql.close();
-  }
-});
+  });

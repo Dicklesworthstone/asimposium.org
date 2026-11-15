@@ -187,6 +187,29 @@ for (const unlisted of [0, 1])
     }
   });
 
+for (const unlisted of [0, 1])
+  test(`member formalization uses the captured listing state ${unlisted}`, async () => {
+    const f = fixture();
+    try {
+      f.problem("P-DEMO", unlisted);
+      const calls: unknown[][] = [];
+      f.deps.formalize = {
+        load: async (...args) => {
+          calls.push(args);
+          return { move: null, degraded: false };
+        },
+      };
+      await f.next("P-DEMO", {
+        effectivePermissions: { session_open: true, evidence: true },
+      });
+      assert.deepEqual(calls, [
+        [f.db, "P-DEMO", 10, undefined, { includeUnlisted: unlisted === 1 }],
+      ]);
+    } finally {
+      f.sql.close();
+    }
+  });
+
 test("unlisted observer can review without acquiring promotion rights", async () => {
   const f = fixture();
   try {

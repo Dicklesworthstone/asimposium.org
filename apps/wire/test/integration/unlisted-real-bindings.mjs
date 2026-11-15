@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   ClaimFaceResponseSchema,
+  PackResponseSchema,
   ProblemFaceResponseSchema,
   SearchResponseSchema,
 } from "@asimposium/contracts";
@@ -41,6 +42,7 @@ export async function unlistedJourney({
   for (const suffix of ["json", "md"]) {
     assert.equal((await fetch(`/p/${id}.${suffix}`)).status, 404);
   }
+  assert.equal((await fetch(`/p/${id}/moves.json`)).status, 404);
   for (const suffix of ["json", "md", "html"]) {
     for (const through of ["0", "999999999999999"]) {
       const hidden = await fetch(`/p/${id}/claims/C-1.${suffix}?through=${through}`);
@@ -136,6 +138,97 @@ export async function unlistedJourney({
     201,
   );
 
+  // Known unlisted collaboration must retain the same scientific move engine
+  // as listed work, including its real dependency fold and exact route pins.
+  const dependentDraft = await call(
+    `/v1/sessions/${session.session_id}/workshop`,
+    { type: "claim-draft", title: "Dependent path count", body_md: "Private derivation." },
+    author,
+    201,
+  );
+  await call(
+    `/v1/sessions/${session.session_id}/promote`,
+    {
+      workshop_id: dependentDraft.workshop_id,
+      kind: "conjecture",
+      statement:
+        "The concatenation of two simple three-vertex paths at one endpoint has four edges.",
+      falsifier: "Such a concatenation with an edge count other than four.",
+      depends_on: [claim.claim_id],
+    },
+    author,
+    201,
+  );
+  await call(
+    `/v1/sessions/${session.session_id}/evidence`,
+    {
+      bears_on_kind: "claim",
+      bears_on_id: claim.claim_id,
+      bears_on_version: 1,
+      direction: "refutes",
+      kind: "negative-result",
+      source: { kind: "model_memory" },
+      mode: "exploratory",
+      body_md:
+        "A reported mismatch in the path convention needs independent checking; this is not a verified counterexample.",
+    },
+    author,
+    201,
+  );
+  const next = () => call(`/v1/p/${id}/next`, undefined, author);
+  const moves = (face) => [face.primary_move, ...face.alternatives].filter(Boolean);
+  const formalization = moves(await next()).find((move) => move.move === "formalize");
+  assert.ok(formalization, "known unlisted next retains load-bearing formalization");
+  assert.deepEqual(formalization.refs, [id, `${claim.claim_id}@1`]);
+  assert.equal(formalization.contract.preparation.disposition, "disputed");
+  assert.equal(formalization.contract.preparation.continue_discovery, undefined);
+
+  const hypotheses = [];
+  for (const mechanism of [
+    "Count vertices while extending the path by one edge.",
+    "Delete an endpoint and compare the remaining path.",
+    "Compare vertex degrees with the edge incidence count.",
+  ]) {
+    const route = await call(
+      `/v1/sessions/${session.session_id}/hypotheses`,
+      {
+        route: `Unlisted path route ${hypotheses.length + 1}`,
+        mechanism,
+        falsifier: "A finite simple path violates the predicted count.",
+        discriminating_predictions: ["The proposed check preserves the finite path convention."],
+        origin: "proposed",
+        body_md: "Proposed approach only; no checked result is asserted.",
+      },
+      author,
+      201,
+    );
+    hypotheses.push(route.hypothesis_id);
+  }
+  const scoped = await next();
+  assert.equal(scoped.primary_move.move, "discriminate");
+  assert.deepEqual(scoped.primary_move.refs, [id, ...hypotheses]);
+  assert.ok(moves(scoped).some((move) => move.move === "formalize"));
+  const working = PackResponseSchema.parse(
+    await call(
+      `/v1/sessions/${session.session_id}/pack?profile=working&max_tokens=8000`,
+      undefined,
+      author,
+    ),
+  );
+  const workingMove = working.items.find((item) => item.id === "SYS-working-moves");
+  assert.ok(workingMove);
+  const selected = JSON.parse(workingMove.body);
+  assert.equal(selected.captured_cursor, working.cursor);
+  assert.deepEqual(selected.primary_move, scoped.primary_move);
+  assert.deepEqual(selected.alternatives, scoped.alternatives);
+  const namedMovesResponse = await fetch(`/p/${id}/moves.json`);
+  assert.equal(namedMovesResponse.status, 200);
+  assert.equal(namedMovesResponse.headers.get("x-robots-tag"), "noindex, nofollow");
+  const namedMoves = await namedMovesResponse.json();
+  assert.ok(moves(namedMoves).some((move) => move.move === "discriminate"));
+  assert.ok(moves(namedMoves).some((move) => move.move === "formalize"));
+  assert.ok(!JSON.stringify(namedMoves).includes(privateCanary));
+
   const paths = [
     `/p/${id}.json`,
     `/p/${id}.md`,
@@ -214,6 +307,8 @@ export async function unlistedJourney({
     "/problems.md",
     "/areas.json",
     "/now.json",
+    "/moves.json",
+    "/reviews.json",
     `/search.json?q=${id}`,
     "/search.json?q=UNLISTED_CLAIM_CANARY",
     "/a/unlisted-reader-author.json",
@@ -332,11 +427,15 @@ export async function unlistedJourney({
   // Present-day content withdrawal must win over a cached successful response,
   // including an exact historical citation. This fixture only changes the control.
   const event = await env.DB.prepare(
-    "SELECT id FROM events WHERE problem_id = ? AND type = 'claim.created'",
+    "SELECT id FROM events WHERE problem_id = ? AND type = 'claim.created' AND object_id = ?",
   )
-    .bind(id)
+    .bind(id, claim.claim_id)
     .first();
   await fixtures.redactPublicContent(event.id);
+  assert.ok(
+    !moves(await next()).some((move) => move.move === "formalize"),
+    "current withdrawal of the exact claim suppresses unlisted formalization",
+  );
   for (const path of paths) {
     const response = await fetch(path, "GET", etags.get(path));
     const citation = path.endsWith(".bib") || path.endsWith(".csl.json");

@@ -45,12 +45,13 @@ export async function loadReviewQueueAtCursor(
   problemId: string,
   through: number,
   after?: string,
+  options: Pick<ReviewQueueSnapshot, "includeUnlisted"> = {},
 ) {
   const query = ReviewQueueQuerySchema.parse({
     problem: problemId,
     ...(after === undefined ? {} : { after }),
   });
   return ReviewQueueResponseSchema.parse(
-    await readReviewQueue(db, query, science, { problemId, through }),
+    await readReviewQueue(db, query, science, { problemId, through, ...options }),
   );
 }

@@ -569,7 +569,9 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       effectivePermissions.evidence
     ) {
       try {
-        const fm = await this.dependencies.formalize.load(db, problemId, row.cursor);
+        const fm = await this.dependencies.formalize.load(db, problemId, row.cursor, undefined, {
+          includeUnlisted: row.unlisted === 1,
+        });
         if (fm.move) allCandidates.push(fm.move);
         degraded ||= fm.degraded;
       } catch {

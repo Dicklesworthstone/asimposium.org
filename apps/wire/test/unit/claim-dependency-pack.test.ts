@@ -12,6 +12,7 @@ import { claimContentDigest } from "../../src/krater/claim-version.ts";
 import { loadDeadEndRetryPage } from "../../src/ledger/dead-end-retry-service.ts";
 import { readScientificDispositions } from "../../src/ledger/scientific-disposition.ts";
 import { createLedgerFaceRoutes } from "../../src/ledger-face";
+import { selectFormalizeMove } from "../../src/mega-commands/formalize-moves.ts";
 import { readPublicClaimSnapshot, readTargetClaimPack } from "../../src/sessions/ledger-pack";
 import { installEmptyDirectiveDisclosureTables } from "../support/directive-disclosure-read.ts";
 
@@ -1272,6 +1273,37 @@ test("production review and retry recommendations share premise standing with ex
   expect(
     (await loadDeadEndRetryPage(f.d1, "P-PACK", 5)).items.map((item) => item.dead_end_id),
   ).toEqual(["DE-1"]);
+});
+
+test("production formalization serves known unlisted science while discovery stays listed-only", async () => {
+  const f = fixture();
+  const premise = await f.add(1);
+  await f.add(2, [premise]);
+  await scientificEvidence(f, 3, "C-1", "computation", { direction: "refutes" });
+  const listed = await selectFormalizeMove(f.d1, "P-PACK", 3);
+  expect(listed.move?.refs).toEqual(["P-PACK", "C-1@1"]);
+  expect(listed.degraded).toBe(false);
+
+  f.db.exec("UPDATE problems SET unlisted=1 WHERE id='P-PACK'");
+  expect((await loadReviewQueue(f.d1)).candidates).toEqual([]);
+  expect((await loadReviewQueue(f.d1, { problem: "P-PACK" })).candidates).toEqual([]);
+  expect(await selectFormalizeMove(f.d1, "P-PACK", 3)).toEqual({ move: null, degraded: true });
+  const known = () => selectFormalizeMove(f.d1, "P-PACK", 3, undefined, { includeUnlisted: true });
+  expect(await known()).toEqual(listed);
+  expect(
+    (await selectFormalizeMove(f.d1, "P-PACK", 2, undefined, { includeUnlisted: true })).move,
+  ).toBeNull();
+
+  control(f, "C-1");
+  expect((await known()).move).toBeNull();
+  control(f, "C-1", "visible");
+  expect(await known()).toEqual(listed);
+  control(f, "problem");
+  expect(await known()).toEqual({ move: null, degraded: true });
+  control(f, "problem", "visible");
+  expect(await known()).toEqual(listed);
+  f.db.exec("UPDATE problems SET status='private-draft' WHERE id='P-PACK'");
+  expect(await known()).toEqual({ move: null, degraded: true });
 });
 
 for (const loss of ["hidden", "redacted", "contested"] as const) {
