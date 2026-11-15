@@ -130,16 +130,15 @@ const S3_OWNED_STREAM_BYTES = 1_000_000;
 const S3_OWNED_OUTPUT_BYTES = 1_000_000;
 /**
  * The isolated graph proof retains the complete build output for the parent
- * to scan. With the area rename writer at 41badf04, independent executions
- * of the unchanged child emit 3,760,631 production and 3,795,298 counterfactual
- * evidence bytes. The 3,785,000-byte receiver rejects that full counterfactual.
+ * to scan. At fd2b81fd the unchanged counterfactual child emits 3,902,789
+ * canonical evidence bytes, exceeding the previous 3,900,000-byte receiver.
  *
- * The 3,900,000-byte receiver preserves both arrays with 104,702 bytes of
- * transport headroom for source growth. Nesting canonical JSON in the result
- * can at most double the encoded evidence bytes. The bound
- * below verifies that the complete record fits the 8,000,000-byte result cap.
+ * This reviewed 50,000-byte capacity revision retains that complete output
+ * with 47,211 bytes of headroom. Nesting canonical JSON in the result can at
+ * most double the evidence bytes. The existing bound and an escaped payload
+ * check keep the complete record within the unchanged 8,000,000-byte cap.
  */
-const S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES = 3_900_000;
+const S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES = 3_950_000;
 const S3_FRESH_RUNTIME_FIXED_GRACE_MS = 5_000;
 const S3_FRESH_RUNTIME_RESULT_MAX_BYTES = 8 * S3_OWNED_OUTPUT_BYTES;
 const S3_FRESH_RUNTIME_DIAGNOSTIC_MAX_BYTES = 1_024;
@@ -2419,7 +2418,7 @@ async function isolatedProductionBundle(
 test("measured S3 graph evidence fits its explicitly reviewed capacity", () => {
   for (const bytes of [
     3_500_001, 3_747_282, 3_750_000, 3_750_001, 3_756_005, 3_760_000, 3_781_957, 3_785_000,
-    3_785_001, 3_795_298, 3_900_000,
+    3_785_001, 3_795_298, 3_900_000, 3_900_001, 3_902_789, 3_950_000,
   ]) {
     const body = "x".repeat(bytes - Buffer.byteLength('[""]', "utf8"));
     const raw = JSON.stringify([body]);
@@ -2430,10 +2429,33 @@ test("measured S3 graph evidence fits its explicitly reviewed capacity", () => {
       createHash("sha256").update(body, "utf8").digest("hex"),
     );
   }
-  const oversized = JSON.stringify(["x".repeat(3_900_001 - Buffer.byteLength('[""]', "utf8"))]);
+  // The old one-byte-over value is intentionally accepted by the capacity
+  // revision; the new exact boundary still has a one-byte-over refusal.
+  const oversized = JSON.stringify(["x".repeat(3_950_001 - Buffer.byteLength('[""]', "utf8"))]);
   expect(() => decodeIsolatedProductionBuildOutputEvidence(oversized)).toThrow(
-    "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_OVERRUN:3900001",
+    "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_OVERRUN:3950001",
   );
+  const escaped = JSON.stringify([
+    "\\".repeat((S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES - 4) / 2),
+  ]);
+  expect(Buffer.byteLength(escaped, "utf8")).toBe(S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES);
+  const nested = `${JSON.stringify({
+    nonce: "00000000-0000-4000-8000-000000000000",
+    kind: "result",
+    result: {
+      outcome: "exited",
+      exitCode: 0,
+      stdout: escaped,
+      stderr: "",
+      retainedStdoutBytes: S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES,
+      retainedStderrBytes: 0,
+      retainedOutputBytes: S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES,
+    },
+    cleanupProven: true,
+  })}\n`;
+  const bound = isolatedBuildFreshResultUpperBound(S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES);
+  expect(Buffer.byteLength(nested, "utf8")).toBeLessThanOrEqual(bound);
+  expect(bound).toBeLessThanOrEqual(S3_FRESH_RUNTIME_RESULT_MAX_BYTES);
 });
 
 test("isolated build output evidence refuses fake fields, malformed, empty, noncanonical, and oversized evidence", () => {
