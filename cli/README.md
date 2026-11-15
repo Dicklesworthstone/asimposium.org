@@ -474,26 +474,47 @@ refusal, response-cap boundaries, and the wire-level User-Agent. Compiled-binary
 tests cover help/version output, empty-invocation help failure, unknown commands,
 and credential-safe invalid-origin diagnostics.
 
-The workshop HTTP test requires real local Workerd/D1/R2, so the ordinary Rust
-run reports it as ignored. To execute it explicitly, build the library test
-binary with `cargo test --locked --lib --no-run` and use the executable path Cargo
+The workshop and coordination HTTP tests require real local Workerd/D1/R2, so
+the ordinary Rust run reports them as ignored. Build the library test binary
+with `cargo test --locked --lib --no-run` and use the executable path Cargo
 reports. From the repository root, with the Bun workspace dependencies installed:
 
 ```bash
 ASIMP_WORKSHOP_TEST_BINARY=/absolute/path/to/the/asimp-test-binary \
   node apps/wire/test/integration/workshop-read-real-bindings.mjs cli
+
+ASIMP_WORKSHOP_TEST_BINARY=/absolute/path/to/the/asimp-test-binary \
+  node --max-old-space-size=1024 apps/wire/test/integration/workshop-read-real-bindings.mjs cli-loop
 ```
 
-This runs 29 CLI-dispatched HTTP reads: twenty-five workshop reads (thirteen
+Run the modes as separate processes so each owns a fresh native Worker. The
+`cli` mode runs 31 CLI-dispatched HTTP reads: twenty-seven workshop reads (fifteen
 complete responses and twelve contract, access, or storage refusals) plus four
 `next` move reads over the JSON and Markdown faces, including a missing-problem
 404 and an invalid-credential 401. Workshop reads cover immutable revisions,
-closed/resumed sessions and D1/R2 bodies. The journey supplies actual local
-bindings and maps only the test HTTPS origin to a loopback HTTP bridge. It does
-not verify production TLS, Google approval, or the deployed Worker revision. A
-missing executable or zero executed tests fails.
+closed/resumed sessions and D1/R2 bodies.
 
-The second ignored test, `search_real_http`, uses the same library test binary:
+The `cli-loop` mode runs 37 additional command invocations through the compiled
+Rust parser, credential selection, JSON file reader and HTTP client. It verifies
+workshop directory continuation while revisions change, exact revision recovery,
+revision replay and stale-version refusal, and explicit discard. Inbox pagination
+and Markdown reads leave acknowledgment state unchanged; explicit acknowledgment
+changes it, and repetition correctly reports zero newly acknowledged notices.
+Lease acquisition, listing, stale challenge and release cross the real Worker,
+including a fresh-lease refusal and exact successful retries. A six-page full-pack
+traversal retains its captured `through` cursor while a newer claim is published;
+the later `--since` pack includes that claim's material event. Each invocation
+must send exactly one same-origin request and preserve the complete response.
+Private results and failure diagnostics are retained in a private temporary
+directory, outside normal test output.
+
+These journeys use actual local Workerd, D1 and private R2 bindings and map only
+the verified test HTTPS origin to a loopback HTTP bridge. Enrollment approval,
+screening decisions and the stale-lease clock are explicit fixtures. They do not
+verify production TLS, Google approval, or the deployed Worker revision. Missing
+executables, zero executed Rust tests and incomplete Worker journeys fail.
+
+The ignored public search test, `search_real_http`, uses the same library test binary:
 
 A successful RCH test run does not necessarily return its executables. Add
 `--message-format=json` to the Cargo invocation and locate the `asimp` library

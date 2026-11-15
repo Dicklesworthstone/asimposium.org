@@ -1,16 +1,27 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { promisify } from "node:util";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { inspect, promisify } from "node:util";
 import {
+  FullPackPageSchema,
+  InboxResponseSchema,
+  LeaseAcquireResponseSchema,
+  LeaseListResponseSchema,
+  PackResponseSchema,
   ProblemNextResponseSchema,
   SponsorWorkshopViewSchema,
   WorkshopObjectResponseSchema,
 } from "@asimposium/contracts";
+import { WorkshopDirectoryResponseSchema } from "@asimposium/contracts/workshop-directory";
+import { createInboxNotice } from "../../src/inbox/store.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
-const cliMode = process.argv[2] === "cli";
+const cliLoopMode = process.argv[2] === "cli-loop";
+const cliMode = process.argv[2] === "cli" || cliLoopMode;
 const execute = promisify(execFile);
 if (cliMode)
   assert.ok(
@@ -22,6 +33,10 @@ if (cliMode)
 // and the already-active problems are explicit fixtures; no Google/live claim.
 await runLocalWorkerJourney(
   async ({ call, enroll, fixtures, env, worker, origin, userAgent, sponsorCall }) => {
+    // Each CLI mode owns one native runtime. Run `cli` and `cli-loop` in
+    // separate processes rather than reusing a disposed Wrangler harness.
+    if (cliLoopMode)
+      return cliCoordinationJourney({ call, enroll, sponsorCall, worker, origin, userAgent, env });
     const sponsor = "usr_sponsor_problems";
     const token = await enroll("workshop-reader", sponsor);
     const peer = await enroll("workshop-peer", sponsor);
@@ -599,7 +614,7 @@ await runLocalWorkerJourney(
       (await env.ARTIFACTS.list()).objects.map((entry) => entry.key),
     );
     assert.deepEqual(await call("/cursor"), before);
-    if (cliMode) assert.deepEqual(cliStatuses, { 200: 13, 400: 1, 401: 3, 404: 7, 500: 1 });
+    if (cliMode) assert.deepEqual(cliStatuses, { 200: 15, 400: 1, 401: 3, 404: 7, 500: 1 });
     console.log(
       JSON.stringify({
         kind: "workshop-read-real-bindings",
@@ -1190,4 +1205,573 @@ if (!cliMode) {
       );
     },
   );
+}
+
+// The optional CLI loop extends this existing native lane. Build the matching
+// Rust library test executable, set ASIMP_WORKSHOP_TEST_BINARY, then run this
+// file with `cli-loop`. All requests below cross a real HTTP socket into real
+// Workerd/D1/R2; only the test HTTPS origin is mapped to that loopback socket.
+// Enrollment approval, screening decisions and the idle timestamp are fixtures.
+// Private command results remain in a fresh mode-0700 temporary directory.
+async function cliCoordinationJourney({
+  call,
+  enroll,
+  sponsorCall,
+  worker,
+  origin,
+  userAgent,
+  env,
+}) {
+  const sponsor = "usr_cli_loop_owner";
+  const author = await enroll("cli-loop-author", sponsor);
+  const reviewer = await enroll("cli-loop-reviewer", "usr_cli_loop_reviewer");
+  const inboxReader = await enroll("cli-loop-inbox", "usr_cli_loop_inbox");
+  const problem = (
+    await call(
+      "/v1/problems",
+      {
+        title: "Finite paths and their endpoints",
+        statement: "A finite path with n edges has n + 1 vertices.",
+        falsifier: "A finite path whose vertex count differs from its edge count plus one.",
+        motivation: "Check that recovered work and coordinated effort retain exact scope.",
+        areas: ["combinatorics"],
+      },
+      author,
+      201,
+    )
+  ).problem.id;
+  await sponsorCall(
+    sponsor,
+    "POST",
+    `/v1/sponsors/problems/${problem}/lifecycle`,
+    "problem-lifecycle",
+    { action: "publish" },
+  );
+  const peerSession = (
+    await call("/v1/sessions", { problem_id: problem, intent: "review" }, reviewer, 201)
+  ).session_id;
+  await call(
+    `/v1/problems/${problem}/statement-review`,
+    {
+      session_id: peerSession,
+      statement_version: 1,
+      verdict: "statement-clear",
+      basis: "The graph class and finite vertex-count condition are explicit.",
+    },
+    reviewer,
+  );
+  const session = (
+    await call("/v1/sessions", { problem_id: problem, intent: "explore" }, author, 201)
+  ).session_id;
+  const base = `/v1/sessions/${session}`;
+  const artifacts = mkdtempSync(join(tmpdir(), "asimp-cli-loop-"));
+  let commands = 0;
+  let requestCount = 0;
+  let expected;
+  let observed;
+  let bridgeFailure;
+  const bridge = createServer(async (request, response) => {
+    try {
+      assert.ok(expected, "the bridge accepts only the current command");
+      assert.equal(request.method, expected.method);
+      assert.equal(request.url, expected.path);
+      assert.equal(request.headers["user-agent"], userAgent);
+      assert.ok(request.headers.authorization === `Bearer ${expected.token}`);
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const body = Buffer.concat(chunks).toString("utf8");
+      if (expected.body !== undefined) {
+        assert.equal(request.headers["idempotency-key"], expected.key);
+        assert.deepEqual(JSON.parse(body), expected.body);
+      } else assert.equal(body, "");
+      requestCount++;
+      const result = await worker.fetch(`${origin}${request.url}`, {
+        method: request.method,
+        headers: {
+          authorization: request.headers.authorization,
+          "User-Agent": userAgent,
+          ...(expected.body === undefined
+            ? {}
+            : { "content-type": "application/json", "Idempotency-Key": expected.key }),
+        },
+        ...(expected.body === undefined ? {} : { body }),
+      });
+      observed = { status: result.status, body: await result.text() };
+      response.writeHead(result.status, Object.fromEntries(result.headers));
+      response.end(observed.body);
+    } catch (error) {
+      bridgeFailure = error;
+      response.writeHead(500);
+      response.end();
+    }
+  });
+  await new Promise((resolve, reject) => {
+    bridge.once("error", reject);
+    bridge.listen(0, "127.0.0.1", resolve);
+  });
+
+  async function cli(args, path, options = {}) {
+    const number = ++commands;
+    const body = options.body;
+    const key = options.key ?? `cli-loop-${number}`;
+    const token = options.token ?? author;
+    const status = options.status ?? 200;
+    const outputFile = join(artifacts, `${number}.result.json`);
+    const arguments_ = [...args];
+    if (body !== undefined) {
+      const inputFile = join(artifacts, `${number}.request.json`);
+      writeFileSync(inputFile, JSON.stringify(body), { mode: 0o600, flag: "wx" });
+      arguments_.push("--file", inputFile, "--idempotency-key", key);
+    }
+    expected = { method: body === undefined ? "GET" : "POST", path, body, key, token };
+    observed = undefined;
+    const before = requestCount;
+    const probe = {
+      origin: `http://127.0.0.1:${bridge.address().port}`,
+      args: arguments_,
+      token,
+      path,
+      method: expected.method,
+      output_file: outputFile,
+    };
+    const result = await execute(
+      process.env.ASIMP_WORKSHOP_TEST_BINARY,
+      ["--exact", "coordination_native_tests::coordination_real_http", "--ignored"],
+      {
+        env: { ...process.env, ASIMP_COORDINATION_PROBE: JSON.stringify(probe) },
+        timeout: 20000,
+        maxBuffer: 128 * 1024,
+      },
+    ).catch((error) => {
+      // Preserve diagnostics without publishing private command arguments,
+      // request bodies or environment values in the lane's output.
+      writeFileSync(join(artifacts, `${number}.rust.stdout`), error.stdout ?? "", {
+        mode: 0o600,
+        flag: "wx",
+      });
+      writeFileSync(join(artifacts, `${number}.rust.stderr`), error.stderr ?? "", {
+        mode: 0o600,
+        flag: "wx",
+      });
+      throw new Error(`Native CLI command ${number} failed; diagnostics retained in ${artifacts}`);
+    });
+    assert.match(result.stdout, /test result: ok\. 1 passed; 0 failed; 0 ignored;/);
+    if (bridgeFailure !== undefined) {
+      writeFileSync(join(artifacts, `${number}.bridge.error`), inspect(bridgeFailure), {
+        mode: 0o600,
+        flag: "wx",
+      });
+      throw new Error(`Native CLI bridge ${number} failed; diagnostics retained in ${artifacts}`);
+    }
+    assert.equal(requestCount, before + 1, "one explicit command performs exactly one request");
+    assert.equal(observed?.status, status, `native CLI command ${number} HTTP status`);
+    const output = JSON.parse(readFileSync(outputFile, "utf8"));
+    if (status >= 200 && status < 300) {
+      assert.equal(output.exit_code, 0);
+      assert.equal(output.stderr, "");
+      assert.ok(output.stdout === observed.body, "CLI preserves the complete Worker response");
+    } else {
+      assert.equal(output.exit_code, 1);
+      assert.equal(output.stdout, "");
+      assert.ok(output.stderr.includes(`HTTP ${status}`));
+      assert.ok(!output.stderr.includes(token));
+    }
+    const response = observed.body;
+    expected = undefined;
+    return options.markdown ? response : JSON.parse(response);
+  }
+
+  try {
+    // Discover, edit and discard exact private revisions; edits do not
+    // reorder the immutable directory cursor or publish draft contents.
+    const publicBefore = await call("/cursor");
+    const original = "Private finite-path notes before checking the boundary case.";
+    const replacement = `Corrected private finite-path notes.\n${"Boundary vertices α and β.\n".repeat(60)}`;
+    const first = await cli(["workshop", "push", session], `${base}/workshop`, {
+      body: { type: "scratch", title: "First private draft", body_md: original },
+      status: 201,
+    });
+    const second = await cli(["workshop", "push", session], `${base}/workshop`, {
+      body: {
+        type: "scratch",
+        title: "Second private draft",
+        body_md: "A separate private approach.",
+      },
+      status: 201,
+    });
+    const page = WorkshopDirectoryResponseSchema.parse(
+      await cli(
+        ["workshop", "list", session, "--limit", "1", "--state", "open"],
+        `${base}/workshop?limit=1&state=open`,
+      ),
+    );
+    assert.equal(page.items.length, 1);
+    assert.ok(page.next_after);
+    const selected = page.items[0];
+    const originalBody =
+      selected.workshop_id === first.workshop_id ? original : "A separate private approach.";
+    assert.equal(selected.read_url, `${base}/workshop/${selected.workshop_id}?version=1`);
+    const edit = {
+      workshop_id: selected.workshop_id,
+      base_version: 1,
+      action: "edit",
+      body_md: replacement,
+    };
+    const revised = await cli(["workshop", "revise", session], `${base}/workshop`, {
+      body: edit,
+      key: "cli-loop-edit",
+      status: 201,
+    });
+    assert.equal(revised.version, 2);
+    assert.deepEqual(
+      await cli(["workshop", "revise", session], `${base}/workshop`, {
+        body: edit,
+        key: "cli-loop-edit",
+        status: 200,
+      }),
+      revised,
+      "an unchanged retry retains the immutable revision receipt",
+    );
+    const stale = await cli(["workshop", "revise", session], `${base}/workshop`, {
+      body: { ...edit, body_md: "A stale replacement must not overwrite the current draft." },
+      status: 409,
+    });
+    assert.equal(stale.code, "WORKSHOP_VERSION_CONFLICT");
+    const next = WorkshopDirectoryResponseSchema.parse(
+      await cli(
+        [
+          "workshop",
+          "list",
+          session,
+          "--after",
+          page.next_after,
+          "--limit",
+          "1",
+          "--state",
+          "open",
+        ],
+        `${base}/workshop?after=${page.next_after}&limit=1&state=open`,
+      ),
+    );
+    assert.equal(next.items.length, 1);
+    assert.notEqual(next.items[0].workshop_id, selected.workshop_id);
+    assert.equal(next.next_after, null);
+    assert.deepEqual(
+      [selected.workshop_id, next.items[0].workshop_id].sort(),
+      [first.workshop_id, second.workshop_id].sort(),
+    );
+    for (const [version, body] of [
+      [1, originalBody],
+      [2, replacement],
+    ]) {
+      const recovered = WorkshopObjectResponseSchema.parse(
+        await cli(
+          ["workshop", "get", session, selected.workshop_id, "--version", String(version)],
+          `${base}/workshop/${selected.workshop_id}?version=${version}`,
+        ),
+      );
+      assert.ok(recovered.object.body_md === body);
+      assert.equal(recovered.object.version, version);
+      assert.equal(recovered.body_sha256, createHash("sha256").update(body).digest("hex"));
+    }
+    await cli(["workshop", "revise", session], `${base}/workshop`, {
+      body: { workshop_id: selected.workshop_id, base_version: 2, action: "discard" },
+      status: 201,
+    });
+    const discarded = WorkshopDirectoryResponseSchema.parse(
+      await cli(
+        ["workshop", "list", session, "--state", "discarded"],
+        `${base}/workshop?state=discarded`,
+      ),
+    );
+    assert.deepEqual(
+      discarded.items.map((item) => item.workshop_id),
+      [selected.workshop_id],
+    );
+    assert.deepEqual(
+      await call("/cursor"),
+      publicBefore,
+      "private recovery does not advance the public cursor",
+    );
+
+    // Reading is not acknowledgment. The explicit ack is state-idempotent;
+    // unlike publication writes, its repeat count is correctly zero.
+    const inboxFellow = (await call("/v1/hello", undefined, inboxReader)).fellow.fellow_id;
+    const notices = [];
+    for (let i = 0; i < 2; i++)
+      notices.push(
+        await createInboxNotice(env.DB, {
+          fellowId: inboxFellow,
+          noticeType: "protocol_notice",
+          title: `Private coordination notice ${i + 1}`,
+        }),
+      );
+    const inboxBefore = (
+      await env.DB.prepare(
+        "SELECT id, acknowledged_at FROM fellow_inbox_notices WHERE fellow_id=? ORDER BY seq",
+      )
+        .bind(inboxFellow)
+        .all()
+    ).results;
+    const firstInbox = InboxResponseSchema.parse(
+      await cli(
+        ["inbox", "list", "--since", "0", "--limit", "1", "--unread-only", "--json"],
+        "/v1/inbox?since=0&limit=1&unread_only=true",
+        { token: inboxReader },
+      ),
+    );
+    assert.equal(firstInbox.items[0].id, notices[0].id);
+    assert.equal(firstInbox.next_cursor, notices[0].seq);
+    assert.equal(firstInbox.has_more, true);
+    const lastInbox = InboxResponseSchema.parse(
+      await cli(
+        [
+          "inbox",
+          "list",
+          "--since",
+          String(firstInbox.next_cursor),
+          "--limit",
+          "1",
+          "--unread-only",
+          "--json",
+        ],
+        `/v1/inbox?since=${firstInbox.next_cursor}&limit=1&unread_only=true`,
+        { token: inboxReader },
+      ),
+    );
+    assert.equal(lastInbox.items[0].id, notices[1].id);
+    assert.equal(lastInbox.has_more, false);
+    await cli(["inbox", "list"], "/v1/inbox.md", { token: inboxReader, markdown: true });
+    assert.deepEqual(
+      (
+        await env.DB.prepare(
+          "SELECT id, acknowledged_at FROM fellow_inbox_notices WHERE fellow_id=? ORDER BY seq",
+        )
+          .bind(inboxFellow)
+          .all()
+      ).results,
+      inboxBefore,
+      "all CLI reads leave acknowledgment unchanged",
+    );
+    const ackOptions = {
+      token: inboxReader,
+      body: { notice_ids: [notices[0].id] },
+      key: "cli-loop-ack",
+    };
+    assert.deepEqual(await cli(["inbox", "ack"], "/v1/inbox/ack", ackOptions), {
+      acknowledged_count: 1,
+      unacknowledged_count: 1,
+    });
+    assert.deepEqual(await cli(["inbox", "ack"], "/v1/inbox/ack", ackOptions), {
+      acknowledged_count: 0,
+      unacknowledged_count: 1,
+    });
+    const unread = InboxResponseSchema.parse(
+      await cli(["inbox", "list", "--unread-only", "--json"], "/v1/inbox?unread_only=true", {
+        token: inboxReader,
+      }),
+    );
+    assert.deepEqual(
+      unread.items.map((item) => item.id),
+      [notices[1].id],
+    );
+
+    // Publish a target through the ordinary validator, then coordinate it.
+    const draft = await cli(["workshop", "push", session], `${base}/workshop`, {
+      body: {
+        type: "claim-draft",
+        title: "Finite path count",
+        body_md: "Private count calculation.",
+      },
+      status: 201,
+    });
+    const claim = await cli(["promote", session], `${base}/promote`, {
+      body: {
+        workshop_id: draft.workshop_id,
+        kind: "conjecture",
+        statement: "Every finite path with n edges has exactly n + 1 vertices.",
+        falsifier: "A finite path whose vertex count is not one greater than its edge count.",
+      },
+      status: 201,
+    });
+    const acquire = {
+      object: claim.claim_id,
+      objective: "Check the endpoint count.",
+      deliverable: "A checked finite-path argument.",
+      parallel_safe: false,
+    };
+    const held = LeaseAcquireResponseSchema.parse(
+      await cli(["lease", "acquire", session], `${base}/leases`, {
+        body: acquire,
+        key: "cli-loop-lease",
+        status: 201,
+      }),
+    ).lease;
+    const peerBase = `/v1/sessions/${peerSession}`;
+    const listed = LeaseListResponseSchema.parse(
+      await cli(["lease", "list", peerSession], `${peerBase}/leases`, { token: reviewer }),
+    );
+    assert.deepEqual(listed.leases, [held]);
+    const challengeOptions = {
+      token: reviewer,
+      body: { reason: "The holder has been idle beyond the documented interval." },
+      key: "cli-loop-challenge",
+    };
+    const challengeArgs = ["lease", "challenge", peerSession, held.lease_id];
+    const challengePath = `${peerBase}/leases/${held.lease_id}/challenge`;
+    const refusal = await cli(challengeArgs, challengePath, {
+      ...challengeOptions,
+      status: 409,
+    });
+    assert.equal(refusal.code, "LEASE_NOT_STALE");
+    // Explicit clock fixture; the subsequent decision and write remain the
+    // real guarded Worker transition, not a mocked lease response.
+    await env.DB.prepare("UPDATE sessions SET last_heartbeat_at=? WHERE session_id=?")
+      .bind(new Date(Date.now() - 31 * 60 * 1000).toISOString(), session)
+      .run();
+    const challenged = await cli(challengeArgs, challengePath, challengeOptions);
+    assert.equal(challenged.lease_id, held.lease_id);
+    assert.equal(challenged.status, "challenged");
+    assert.deepEqual(await cli(challengeArgs, challengePath, challengeOptions), challenged);
+    const replacementLease = LeaseAcquireResponseSchema.parse(
+      await cli(["lease", "acquire", peerSession], `${peerBase}/leases`, {
+        token: reviewer,
+        body: acquire,
+        status: 201,
+      }),
+    ).lease;
+    const releaseOptions = {
+      token: reviewer,
+      body: { reason: "The bounded check is complete." },
+      key: "cli-loop-release",
+    };
+    const releaseArgs = ["lease", "release", peerSession, replacementLease.lease_id];
+    const releasePath = `${peerBase}/leases/${replacementLease.lease_id}/release`;
+    const released = await cli(releaseArgs, releasePath, releaseOptions);
+    assert.equal(released.status, "released");
+    assert.deepEqual(await cli(releaseArgs, releasePath, releaseOptions), released);
+    assert.deepEqual(
+      LeaseListResponseSchema.parse(
+        await cli(["lease", "list", peerSession], `${peerBase}/leases`, { token: reviewer }),
+      ).leases,
+      [],
+    );
+
+    // A full continuation retains its captured upper bound when a newer
+    // public event arrives. Ordinary --since reads select only the delta.
+    const firstFull = PackResponseSchema.parse(
+      await cli(
+        ["pack", session, "--profile", "full", "--max-tokens", "800"],
+        `${base}/pack?profile=full&max_tokens=800`,
+      ),
+    );
+    const controlOf = (pack) =>
+      FullPackPageSchema.parse(
+        JSON.parse(pack.items.find((item) => item.kind === "full-page").body),
+      );
+    const recordsOf = (pack) =>
+      pack.items.filter((item) => item.kind === "full-event").map((item) => JSON.parse(item.body));
+    let control = controlOf(firstFull);
+    const through = control.through;
+    assert.equal(control.after, 0);
+    assert.equal(control.has_more, true, "the small token budget must produce a continuation");
+    const sequences = recordsOf(firstFull).map((record) => record.seq);
+    const newerDraft = await cli(["workshop", "push", session], `${base}/workshop`, {
+      body: {
+        type: "claim-draft",
+        title: "Endpoint removal",
+        body_md: "Check the resulting counts after removing one endpoint and its incident edge.",
+      },
+      status: 201,
+    });
+    const newer = await cli(["promote", session], `${base}/promote`, {
+      body: {
+        workshop_id: newerDraft.workshop_id,
+        kind: "conjecture",
+        statement:
+          "Removing an endpoint and its incident edge from a path with at least two vertices reduces the vertex and edge counts by one each.",
+        falsifier: "A qualifying endpoint removal that changes either count by a different amount.",
+      },
+      status: 201,
+    });
+    let pages = 1;
+    while (control.has_more) {
+      assert.ok(pages++ < 25, "full traversal is bounded by its captured event window");
+      const after = control.next_after;
+      const pack = PackResponseSchema.parse(
+        await cli(
+          [
+            "pack",
+            session,
+            "--profile",
+            "full",
+            "--max-tokens",
+            "800",
+            "--after",
+            String(after),
+            "--through",
+            String(through),
+          ],
+          `${base}/pack?profile=full&max_tokens=800&after=${after}&through=${through}`,
+        ),
+      );
+      assert.equal(pack.cursor, through);
+      control = controlOf(pack);
+      assert.equal(control.after, after);
+      assert.equal(control.through, through);
+      sequences.push(...recordsOf(pack).map((record) => record.seq));
+    }
+    assert.deepEqual(
+      sequences,
+      Array.from({ length: through }, (_, i) => i + 1),
+    );
+    const changed = PackResponseSchema.parse(
+      await cli(
+        [
+          "pack",
+          session,
+          "--profile",
+          "working",
+          "--max-tokens",
+          "8000",
+          "--since",
+          String(through),
+        ],
+        `${base}/pack?profile=working&max_tokens=8000&since=${through}`,
+      ),
+    );
+    assert.ok(changed.cursor > through);
+    const delta = changed.items
+      .filter((item) => item.kind === "orientation-event")
+      .map((item) => JSON.parse(item.body));
+    assert.ok(delta.length > 0);
+    assert.ok(delta.every((event) => event.seq > through));
+    assert.ok(
+      delta.some(
+        (event) =>
+          event.event?.type === "claim.created" && event.event.object_id === newer.claim_id,
+      ),
+    );
+    assert.ok(!JSON.stringify(firstFull).includes(original));
+    console.log(
+      JSON.stringify({
+        kind: "cli-coordination-real-bindings",
+        status: "pass",
+        commands,
+        http_requests: requestCount,
+        full_pack_pages: pages,
+        private_revision_history: true,
+        inbox_reads_do_not_ack: true,
+        explicit_ack_state_idempotent: true,
+        lease_transitions: ["active", "challenged", "released"],
+        proof_scope:
+          "compiled Rust command/credential/file/HTTP paths through a loopback bridge to local Workerd/D1/R2; fixture approval, screening and idle clock; no TLS, Google or deployment claim",
+      }),
+    );
+  } finally {
+    bridge.closeAllConnections();
+    await new Promise((resolve, reject) =>
+      bridge.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
 }
