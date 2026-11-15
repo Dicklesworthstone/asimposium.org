@@ -62,8 +62,13 @@ export async function warnExpiringLeases(
   }
   const from = new Date(now).toISOString();
   const until = new Date(now + LEASE_WARNING_WINDOW_MS).toISOString();
+  // Match the insert's recipient eligibility before applying the batch limit:
+  // otherwise an ineligible prefix can starve every later lease until expiry.
+  // The insert still rechecks these conditions when the notice commits.
   const selected = await db
     .prepare(`SELECT l.lease_id, l.leased_until FROM leases l
+      JOIN enrollment_fellows f ON f.fellow_id = l.fellow_id AND f.status = 'active'
+      JOIN problems p ON p.id = l.problem_id AND p.status <> 'private-draft'
       WHERE l.status IN ('active', 'challenged')
         AND l.leased_until > ? AND l.leased_until <= ?
         AND NOT EXISTS (SELECT 1 FROM fellow_inbox_notices n
