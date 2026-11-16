@@ -15789,7 +15789,10 @@
               },
               "status": {
                 "type": "string",
-                "const": "active"
+                "enum": [
+                  "active",
+                  "challenged"
+                ]
               },
               "leased_at": {
                 "type": "string",

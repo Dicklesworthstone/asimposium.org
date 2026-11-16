@@ -43,7 +43,7 @@ const selectedFields = `SELECT l.lease_id, l.problem_id, l.fellow_id,
   FROM enrollment_fellows f
   JOIN sponsors s ON s.sponsor_id = f.sponsor_id AND s.tombstoned_at IS NULL
   JOIN leases l ON l.fellow_id = f.fellow_id
-  WHERE f.sponsor_id = ? AND l.status = 'active'
+  WHERE f.sponsor_id = ? AND l.status IN ('active', 'challenged')
     AND NOT EXISTS (SELECT 1 FROM private_draft_erasures e WHERE e.problem_id = l.problem_id)`;
 
 function parseRow(row: Record<string, unknown>) {

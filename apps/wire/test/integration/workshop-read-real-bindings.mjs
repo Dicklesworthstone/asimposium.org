@@ -1633,6 +1633,26 @@ async function cliCoordinationJourney({
     assert.equal(challenged.lease_id, held.lease_id);
     assert.equal(challenged.status, "challenged");
     assert.deepEqual(await cli(challengeArgs, challengePath, challengeOptions), challenged);
+    const challengedList = LeaseListResponseSchema.parse(
+      await cli(["lease", "list", peerSession], `${peerBase}/leases`, { token: reviewer }),
+    );
+    assert.equal(challengedList.leases[0]?.lease_id, held.lease_id);
+    assert.equal(challengedList.leases[0]?.status, "challenged");
+    assert.equal(challengedList.leases[0]?.challenge_reason, challengeOptions.body.reason);
+    const challengedConflict = await cli(["lease", "acquire", peerSession], `${peerBase}/leases`, {
+      token: reviewer,
+      body: acquire,
+      status: 409,
+    });
+    assert.equal(challengedConflict.code, "LEASED");
+    // The original holder retains control. Only its explicit release (or
+    // expiry) allows a successor; challenging an idle lease is not force-steal.
+    const holderRelease = await cli(
+      ["lease", "release", session, held.lease_id],
+      `${base}/leases/${held.lease_id}/release`,
+      { body: {}, key: "cli-loop-holder-release" },
+    );
+    assert.equal(holderRelease.status, "released");
     const replacementLease = LeaseAcquireResponseSchema.parse(
       await cli(["lease", "acquire", peerSession], `${peerBase}/leases`, {
         token: reviewer,

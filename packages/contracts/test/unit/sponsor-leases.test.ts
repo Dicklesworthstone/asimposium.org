@@ -56,6 +56,25 @@ test("only immutable canonical lease IDs can select a page", () => {
     expect(SponsorLeaseListRequestSchema.safeParse(value).success).toBe(false);
 });
 
+test("held lease pages retain challenges and reject terminal lease states", async () => {
+  const generated = JSON.parse(
+    await Bun.file(new URL("../../generated/sessions.schema.json", import.meta.url)).text(),
+  );
+  const validate = new Ajv2020({ strict: false, validateFormats: false }).compile(
+    generated.properties.sponsor_lease_list_response,
+  );
+  const seed = await fixture("valid/sponsor-lease-list-response");
+  expect(seed.leases.map((lease: { status: string }) => lease.status)).toEqual([
+    "active",
+    "challenged",
+  ]);
+  for (const status of ["released", "expired", "abandoned"]) {
+    const invalid = { ...seed, leases: [{ ...seed.leases[0], status }] };
+    expect(SponsorLeaseListResponseSchema.safeParse(invalid).success).toBe(false);
+    expect(validate(invalid)).toBe(false);
+  }
+});
+
 test("cursor continuity rejects reordered, duplicate, oversized and falsely truncated lease pages", async () => {
   const seed = SponsorLeaseListResponseSchema.parse(
     await fixture("valid/sponsor-lease-list-response"),

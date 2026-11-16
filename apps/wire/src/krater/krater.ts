@@ -2105,7 +2105,7 @@ export function claimRevisionProjection(
       AND NOT EXISTS (
         SELECT 1 FROM leases lease WHERE lease.problem_id = c.problem_id
           AND (lease.object_id = c.id OR lease.object_ref = c.id)
-          AND lease.status = 'active' AND lease.parallel_safe = 0
+          AND lease.status IN ('active', 'challenged') AND lease.parallel_safe = 0
           AND lease.fellow_id <> ?
           AND lease.leased_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
       )

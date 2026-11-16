@@ -383,6 +383,93 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
   assert.deepEqual(await challengeSnapshot(), afterChallenge);
   assert.equal(await fixtures.screeningCalls(), beforeChallengeScreens + 2);
 
+  // A challenge is a recorded concern, never an early transfer of an
+  // unexpired reservation. Exercise the idle-holder path through real HTTP.
+  const protectedRequest = {
+    object: questionId,
+    objective: "Independently check the boundary while retaining coordination.",
+    deliverable: "A scoped boundary calculation.",
+  };
+  const protectedLease = (
+    await call(`/v1/sessions/${challenger.session_id}/leases`, protectedRequest, fellowBToken, 201)
+  ).lease;
+  await env.DB.prepare("UPDATE sessions SET last_heartbeat_at = ? WHERE session_id = ?")
+    .bind(new Date(Date.now() - 31 * 60_000).toISOString(), challenger.session_id)
+    .run();
+  const challengedUnexpired = await call(
+    `/v1/sessions/${sessionIdA}/leases/${protectedLease.lease_id}/challenge`,
+    { reason: "The holder is idle; request coordination without taking the reservation." },
+    fellowAToken,
+    200,
+    "presence-unexpired-challenge",
+  );
+  const conflict = await call(
+    `/v1/sessions/${sessionIdA}/leases`,
+    protectedRequest,
+    fellowAToken,
+    409,
+  );
+  assert.equal(conflict.code, "LEASED", "a challenge never transfers an unexpired lease");
+  const challengedList = await call(
+    `/v1/sessions/${challenger.session_id}/leases`,
+    undefined,
+    fellowBToken,
+  );
+  assert.equal(challengedList.leases.length, 1);
+  assert.equal(challengedList.leases[0].lease_id, protectedLease.lease_id);
+  assert.equal(challengedList.leases[0].status, "challenged");
+  assert.equal(challengedList.leases[0].challenge_reason, challengedUnexpired.reason);
+  const challengedPack = await call(
+    `/v1/sessions/${challenger.session_id}/pack?profile=working&max_tokens=8000`,
+    undefined,
+    fellowBToken,
+  );
+  assert.equal(
+    JSON.parse(challengedPack.items.find((item) => item.id === protectedLease.lease_id).body)
+      .status,
+    "challenged",
+  );
+  const renewedChallenge = SessionHeartbeatResponseSchema.parse(
+    await call(`/v1/sessions/${challenger.session_id}/heartbeat`, {}, fellowBToken),
+  );
+  assert.ok(renewedChallenge.renewed_leases.includes(questionId));
+  const retainedChallenge = await env.DB.prepare(
+    "SELECT status, leased_until, challenge_reason FROM leases WHERE lease_id = ?",
+  )
+    .bind(protectedLease.lease_id)
+    .first();
+  assert.equal(retainedChallenge.status, "challenged");
+  assert.equal(retainedChallenge.challenge_reason, challengedUnexpired.reason);
+  assert.ok(Date.parse(retainedChallenge.leased_until) >= Date.parse(protectedLease.leased_until));
+  const challengedOwnerPage = SponsorLeaseListResponseSchema.parse(
+    await sponsorCall(sponsorB, "POST", "/v1/sponsors/leases", "lease.list", {}),
+  );
+  assert.deepEqual(
+    challengedOwnerPage.leases.map((lease) => [lease.lease_id, lease.status]),
+    [[protectedLease.lease_id, "challenged"]],
+  );
+  const sponsorReleasedChallenge = await sponsorCall(
+    sponsorB,
+    "POST",
+    "/v1/sponsors/leases/release",
+    "lease.release",
+    { problem_id: problemId, object: protectedLease.lease_id },
+    200,
+  );
+  assert.equal(sponsorReleasedChallenge.status, "released");
+  const closingLease = (
+    await call(`/v1/sessions/${sessionIdA}/leases`, protectedRequest, fellowAToken, 201)
+  ).lease;
+  await env.DB.prepare("UPDATE sessions SET last_heartbeat_at = ? WHERE session_id = ?")
+    .bind(new Date(Date.now() - 31 * 60_000).toISOString(), sessionIdA)
+    .run();
+  await call(
+    `/v1/sessions/${challenger.session_id}/leases/${closingLease.lease_id}/challenge`,
+    { reason: "The replacement holder is idle; its session close must release this reservation." },
+    fellowBToken,
+    200,
+  );
+
   // 10. Close session and verify subsequent heartbeat rejection (409 SESSION_CLOSED)
   const closeRes = await call(
     `/v1/sessions/${sessionIdA}/close`,
@@ -397,6 +484,13 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
     "presence-close-key",
   );
   assert.equal(closeRes.session_id, sessionIdA);
+  assert.deepEqual(
+    await env.DB.prepare("SELECT status FROM leases WHERE lease_id = ?")
+      .bind(closingLease.lease_id)
+      .first(),
+    { status: "released" },
+    "closing the holder's session releases challenged reservations",
+  );
 
   const closedHeartbeat = await call(`/v1/sessions/${sessionIdA}/heartbeat`, {}, fellowAToken, 409);
   assert.equal(closedHeartbeat.code, "SESSION_CLOSED");
@@ -595,6 +689,14 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
     concurrent_same_key_requests: 3,
     atomic_races: ["close", "revoke", "pause", "release"],
     lease_challenge_screening: ["held-without-publication", "pass-with-provenance", "exact-replay"],
+    challenged_lease_coordination: [
+      "no-force-steal",
+      "holder-and-sponsor-visibility",
+      "pack-status",
+      "heartbeat-preserves-challenge",
+      "sponsor-release",
+      "session-close-release",
+    ],
     sponsor_lease_recovery: [
       "private-owner-list",
       "other-sponsor-refused",

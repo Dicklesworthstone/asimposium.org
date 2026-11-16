@@ -13,6 +13,18 @@
       "status": "active",
       "leased_at": "2026-11-14T12:00:00.000Z",
       "leased_until": "2026-11-14T14:00:00.000Z"
+    },
+    {
+      "lease_id": "L-00000000000000000000000003",
+      "problem_id": "P-4DSP",
+      "fellow_id": "fellow-private-author",
+      "fellow_name": "redshift",
+      "object": "G-1",
+      "object_kind": "proof_gap",
+      "parallel_safe": false,
+      "status": "challenged",
+      "leased_at": "2026-11-14T12:00:00.000Z",
+      "leased_until": "2026-11-14T14:00:00.000Z"
     }
   ],
   "next_cursor": null

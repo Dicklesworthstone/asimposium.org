@@ -41,6 +41,7 @@ import {
   ScreeningPromotionHoldResponseSchema,
   ScreeningPublicationProvenanceSchema,
   SessionCloseResponseSchema,
+  SessionHeartbeatResponseSchema,
   SessionOpenRequestSchema,
   SessionOpenResponseSchema,
   SessionProvenanceSchema,
@@ -17168,168 +17169,288 @@ describe("committed promotion outbox nudge", () => {
       expect(acqAfterChal.status).toBe(201);
     });
 
-    test("sponsor authority release allows lessee sponsor to release, refusing foreign sponsors", async () => {
+    test("challenging an unexpired reservation preserves exclusivity, visibility, renewal and holder recovery", async () => {
       const f = await ledgerPackFixture();
+      const peer = await addApprovedFellow(f, { suffix: "held-challenge", scopes: ["promote"] });
       let key = 0;
       const post = async (caller: typeof f.call, path: string, body: unknown, status = 201) => {
         const response = await caller(path, {
           method: "POST",
-          headers: { "content-type": "application/json", "idempotency-key": `lease-sp-${++key}` },
+          headers: { "content-type": "application/json", "idempotency-key": `held-${++key}` },
           body: JSON.stringify(body),
         });
         expect(response.status, await response.clone().text()).toBe(status);
         return response;
       };
-
-      // Fellow A (sponsored by f.sponsor.sponsorId) acquires lease on C-1
+      const peerSession = SessionOpenResponseSchema.parse(
+        await (await post(peer.call, "/v1/sessions", { problem_id: "P-4DSP" })).json(),
+      );
+      const peerPath = `/v1/sessions/${peerSession.session_id}`;
+      const request = {
+        object: "C-1",
+        objective: "Check the finite boundary without colliding edits.",
+        deliverable: "A checked boundary argument.",
+      };
+      const held = LeaseAcquireResponseSchema.parse(
+        await (await post(f.call, `${f.path}/leases`, request)).json(),
+      ).lease;
+      await f.db
+        .prepare("UPDATE sessions SET last_heartbeat_at = ? WHERE session_id = ?")
+        .bind(new Date(Date.now() - 31 * 60_000).toISOString(), held.session_id)
+        .run();
+      const challenge = LeaseChallengeResponseSchema.parse(
+        await (
+          await post(
+            peer.call,
+            `${peerPath}/leases/${held.lease_id}/challenge`,
+            { reason: "The holder has been idle for thirty-one minutes." },
+            200,
+          )
+        ).json(),
+      );
+      const blocked = ContractProblemSchema.parse(
+        await (await post(peer.call, `${peerPath}/leases`, request, 409)).json(),
+      );
+      expect(blocked.code).toBe("LEASED");
+      const listed = LeaseListResponseSchema.parse(await (await f.call(`${f.path}/leases`)).json());
+      expect(listed.leases).toEqual([
+        {
+          ...held,
+          status: "challenged",
+          challenge_reason: challenge.reason,
+          challenged_by: peer.binding.fellowId,
+          challenged_at: challenge.challenged_at,
+        },
+      ]);
+      const pack = PackResponseSchema.parse(
+        await (await peer.call(`${peerPath}/pack?profile=working&max_tokens=8000`)).json(),
+      );
+      const coordination = pack.items.find((item) => item.id === held.lease_id);
+      expect(JSON.parse(coordination?.body ?? "null")).toMatchObject({
+        status: "challenged",
+        fellow_id: f.binding.fellowId,
+        objective: request.objective,
+      });
+      const heartbeat = SessionHeartbeatResponseSchema.parse(
+        await (await post(f.call, `${f.path}/heartbeat`, {}, 200)).json(),
+      );
+      expect(heartbeat.renewed_leases).toContain("C-1");
+      const renewed = await f.db
+        .prepare("SELECT status, leased_until, challenge_reason FROM leases WHERE lease_id = ?")
+        .bind(held.lease_id)
+        .first<{ status: string; leased_until: string; challenge_reason: string }>();
+      expect(renewed?.status).toBe("challenged");
+      expect(renewed?.challenge_reason).toBe(challenge.reason);
+      expect(Date.parse(renewed!.leased_until)).toBeGreaterThanOrEqual(
+        Date.parse(held.leased_until),
+      );
+      const release = LeaseReleaseResponseSchema.parse(
+        await (await post(f.call, `${f.path}/leases/${held.lease_id}/release`, {}, 200)).json(),
+      );
+      expect(release.status).toBe("released");
+      const replacement = LeaseAcquireResponseSchema.parse(
+        await (await post(peer.call, `${peerPath}/leases`, request)).json(),
+      ).lease;
+      await f.db
+        .prepare("UPDATE sessions SET last_heartbeat_at = ? WHERE session_id = ?")
+        .bind(new Date(Date.now() - 31 * 60_000).toISOString(), peerSession.session_id)
+        .run();
       await post(
         f.call,
-        `${f.path}/leases`,
-        {
-          object: "C-1",
-          objective: "Work on C-1",
-          deliverable: "Deliverable",
-          parallel_safe: false,
-        },
-        201,
+        `${f.path}/leases/${replacement.lease_id}/challenge`,
+        { reason: "The replacement holder is idle; record a challenge without taking the lease." },
+        200,
       );
+      await post(peer.call, `${peerPath}/close`, {
+        handback: "Returning the challenged reservation.",
+      });
+      expect(
+        await f.db
+          .prepare("SELECT status FROM leases WHERE lease_id = ?")
+          .bind(replacement.lease_id)
+          .first(),
+      ).toEqual({ status: "released" });
+      expect(
+        LeaseAcquireResponseSchema.parse(
+          await (await post(f.call, `${f.path}/leases`, request)).json(),
+        ).lease.fellow_id,
+      ).toBe(f.binding.fellowId);
+    });
 
-      // Create sponsor router with custom verifiedSponsor to simulate sponsor callers
-      const makeSponsorRouter = (
-        sponsorId: string,
-        screenPromotion?: (
-          input: Parameters<
+    test.each(["active", "challenged"])(
+      "sponsor authority releases %s leases and refuses foreign sponsors",
+      async (status) => {
+        const f = await ledgerPackFixture();
+        let key = 0;
+        const post = async (caller: typeof f.call, path: string, body: unknown, status = 201) => {
+          const response = await caller(path, {
+            method: "POST",
+            headers: { "content-type": "application/json", "idempotency-key": `lease-sp-${++key}` },
+            body: JSON.stringify(body),
+          });
+          expect(response.status, await response.clone().text()).toBe(status);
+          return response;
+        };
+
+        // Fellow A (sponsored by f.sponsor.sponsorId) acquires lease on C-1
+        await post(
+          f.call,
+          `${f.path}/leases`,
+          {
+            object: "C-1",
+            objective: "Work on C-1",
+            deliverable: "Deliverable",
+            parallel_safe: false,
+          },
+          201,
+        );
+
+        await f.db
+          .prepare(
+            "UPDATE leases SET status = ? WHERE problem_id = 'P-4DSP' AND object_ref = 'C-1'",
+          )
+          .bind(status)
+          .run();
+
+        // Create sponsor router with custom verifiedSponsor to simulate sponsor callers
+        const makeSponsorRouter = (
+          sponsorId: string,
+          screenPromotion?: (
+            input: Parameters<
+              NonNullable<Parameters<typeof createSessionRouter>[0]["screenPromotion"]>
+            >[0],
+          ) => ReturnType<
             NonNullable<Parameters<typeof createSessionRouter>[0]["screenPromotion"]>
-          >[0],
-        ) => ReturnType<NonNullable<Parameters<typeof createSessionRouter>[0]["screenPromotion"]>>,
-      ) =>
-        createSessionRouter({
-          service: f.service,
-          replayProtector: f.replayProtector,
-          screenPromotion:
-            screenPromotion ??
-            (async (input) =>
-              syntheticScreeningObservation(input, {
-                decision: "pass",
-                coarse_category: "benign-context",
-                provider_status: "ok",
-              })),
-          verifiedSponsor: async (request) => ({
-            principal: { type: "sponsor", sponsorId },
-            rawBody: new Uint8Array(await request.arrayBuffer()),
-          }),
-        });
+          >,
+        ) =>
+          createSessionRouter({
+            service: f.service,
+            replayProtector: f.replayProtector,
+            screenPromotion:
+              screenPromotion ??
+              (async (input) =>
+                syntheticScreeningObservation(input, {
+                  decision: "pass",
+                  coarse_category: "benign-context",
+                  provider_status: "ok",
+                })),
+            verifiedSponsor: async (request) => ({
+              principal: { type: "sponsor", sponsorId },
+              rawBody: new Uint8Array(await request.arrayBuffer()),
+            }),
+          });
 
-      // 1. Foreign sponsor tries to release C-1 -> 403 NOT_LESSEE_SPONSOR
-      const foreignRouter = makeSponsorRouter("usr_foreign_sponsor");
-      const foreignRel = await foreignRouter.fetch(
-        new Request("https://a-staging.asimposium.org/v1/sponsors/leases/release", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "idempotency-key": "sp-rel-foreign",
-          },
-          body: JSON.stringify({
-            problem_id: "P-4DSP",
-            object: "C-1",
-            reason: "Foreign sponsor trying to release",
+        // 1. Foreign sponsor tries to release C-1 -> 403 NOT_LESSEE_SPONSOR
+        const foreignRouter = makeSponsorRouter("usr_foreign_sponsor");
+        const foreignRel = await foreignRouter.fetch(
+          new Request("https://a-staging.asimposium.org/v1/sponsors/leases/release", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "idempotency-key": "sp-rel-foreign",
+            },
+            body: JSON.stringify({
+              problem_id: "P-4DSP",
+              object: "C-1",
+              reason: "Foreign sponsor trying to release",
+            }),
           }),
-        }),
-        f.env,
-      );
-      expect(foreignRel.status).toBe(403);
-      expect(((await foreignRel.json()) as { code: string }).code).toBe("NOT_LESSEE_SPONSOR");
+          f.env,
+        );
+        expect(foreignRel.status).toBe(403);
+        expect(((await foreignRel.json()) as { code: string }).code).toBe("NOT_LESSEE_SPONSOR");
 
-      // 2. Lessee's sponsor releases C-1 -> 200
-      const lesseeRouter = makeSponsorRouter(f.sponsor.sponsorId);
-      const lesseeRel = await lesseeRouter.fetch(
-        new Request("https://a-staging.asimposium.org/v1/sponsors/leases/release", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "idempotency-key": "sp-rel-lessee",
-          },
-          body: JSON.stringify({
-            problem_id: "P-4DSP",
-            object: "C-1",
-            reason: "Lessee sponsor administrative release",
+        // 2. Lessee's sponsor releases C-1 -> 200
+        const lesseeRouter = makeSponsorRouter(f.sponsor.sponsorId);
+        const lesseeRel = await lesseeRouter.fetch(
+          new Request("https://a-staging.asimposium.org/v1/sponsors/leases/release", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "idempotency-key": "sp-rel-lessee",
+            },
+            body: JSON.stringify({
+              problem_id: "P-4DSP",
+              object: "C-1",
+              reason: "Lessee sponsor administrative release",
+            }),
           }),
-        }),
-        f.env,
-      );
-      expect(lesseeRel.status).toBe(200);
-      const lesseeBody = SponsorLeaseReleaseResponseSchema.parse(await lesseeRel.json());
-      expect(lesseeBody.ok).toBe(true);
-      expect(lesseeBody.status).toBe("released");
-      expect(lesseeBody.object).toBe("C-1");
-      expect(lesseeBody.released_by).toBe(f.sponsor.sponsorId);
+          f.env,
+        );
+        expect(lesseeRel.status).toBe(200);
+        const lesseeBody = SponsorLeaseReleaseResponseSchema.parse(await lesseeRel.json());
+        expect(lesseeBody.ok).toBe(true);
+        expect(lesseeBody.status).toBe("released");
+        expect(lesseeBody.object).toBe("C-1");
+        expect(lesseeBody.released_by).toBe(f.sponsor.sponsorId);
 
-      // 2b. Provenance row created for benign release with reason
-      const releaseProvenance = await f.db
-        .prepare(
-          `SELECT sp.* FROM screening_publications sp
+        // 2b. Provenance row created for benign release with reason
+        const releaseProvenance = await f.db
+          .prepare(
+            `SELECT sp.* FROM screening_publications sp
            JOIN events e ON e.id = sp.event_id
            WHERE e.problem_id = ? AND e.type = 'lease.released'
            ORDER BY e.seq DESC LIMIT 1`,
-        )
-        .bind("P-4DSP")
-        .first<{ event_id: string; provenance_json: string }>();
-      expect(releaseProvenance).toBeDefined();
-      const prov = ScreeningPublicationProvenanceSchema.parse(
-        JSON.parse(releaseProvenance?.provenance_json ?? "{}"),
-      );
-      expect(prov.public_action.category).toBe("benign-context");
-      expect(prov.outcome).toBe("pass");
+          )
+          .bind("P-4DSP")
+          .first<{ event_id: string; provenance_json: string }>();
+        expect(releaseProvenance).toBeDefined();
+        const prov = ScreeningPublicationProvenanceSchema.parse(
+          JSON.parse(releaseProvenance?.provenance_json ?? "{}"),
+        );
+        expect(prov.public_action.category).toBe("benign-context");
+        expect(prov.outcome).toBe("pass");
 
-      // 3. Quarantine hold returns 202 SCREENING_HOLD with zero lease state effect
-      await post(
-        f.call,
-        `${f.path}/leases`,
-        {
-          object: "C-1",
-          objective: "Work on C-1 again",
-          deliverable: "Deliverable 2",
-          parallel_safe: false,
-        },
-        201,
-      );
-
-      const quarantineRouter = makeSponsorRouter(f.sponsor.sponsorId, async (input) =>
-        syntheticScreeningObservation(input, {
-          decision: "quarantine",
-          coarse_category: "injection",
-          provider_status: "ok",
-        }),
-      );
-
-      const heldRel = await quarantineRouter.fetch(
-        new Request("https://a-staging.asimposium.org/v1/sponsors/leases/release", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "idempotency-key": "sp-rel-quarantine",
-          },
-          body: JSON.stringify({
-            problem_id: "P-4DSP",
+        // 3. Quarantine hold returns 202 SCREENING_HOLD with zero lease state effect
+        await post(
+          f.call,
+          `${f.path}/leases`,
+          {
             object: "C-1",
-            reason: "Malicious coordination injection attempt",
-          }),
-        }),
-        f.env,
-      );
-      expect(heldRel.status).toBe(202);
-      const heldBody = (await heldRel.json()) as { code: string };
-      expect(heldBody.code).toBe("SCREENING_HOLD");
+            objective: "Work on C-1 again",
+            deliverable: "Deliverable 2",
+            parallel_safe: false,
+          },
+          201,
+        );
 
-      // Verify the lease remains active and was NOT released
-      const activeLease = await f.db
-        .prepare(
-          "SELECT status FROM leases WHERE problem_id = ? AND object_ref = ? ORDER BY created_at DESC LIMIT 1",
-        )
-        .bind("P-4DSP", "C-1")
-        .first<{ status: string }>();
-      expect(activeLease?.status).toBe("active");
-    });
+        const quarantineRouter = makeSponsorRouter(f.sponsor.sponsorId, async (input) =>
+          syntheticScreeningObservation(input, {
+            decision: "quarantine",
+            coarse_category: "injection",
+            provider_status: "ok",
+          }),
+        );
+
+        const heldRel = await quarantineRouter.fetch(
+          new Request("https://a-staging.asimposium.org/v1/sponsors/leases/release", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "idempotency-key": "sp-rel-quarantine",
+            },
+            body: JSON.stringify({
+              problem_id: "P-4DSP",
+              object: "C-1",
+              reason: "Malicious coordination injection attempt",
+            }),
+          }),
+          f.env,
+        );
+        expect(heldRel.status).toBe(202);
+        const heldBody = (await heldRel.json()) as { code: string };
+        expect(heldBody.code).toBe("SCREENING_HOLD");
+
+        // Verify the lease remains active and was NOT released
+        const activeLease = await f.db
+          .prepare(
+            "SELECT status FROM leases WHERE problem_id = ? AND object_ref = ? ORDER BY created_at DESC LIMIT 1",
+          )
+          .bind("P-4DSP", "C-1")
+          .first<{ status: string }>();
+        expect(activeLease?.status).toBe("active");
+      },
+    );
 
     describe("sponsor lease release screening admission", () => {
       const pass = {

@@ -167,7 +167,8 @@ export const SponsorLeaseSummarySchema = z
     object: LeaseItemSchema.shape.object,
     object_kind: LeaseObjectKindSchema,
     parallel_safe: z.boolean(),
-    status: z.literal("active"),
+    // A challenge records a concern; it does not release the reservation.
+    status: z.enum(["active", "challenged"]),
     leased_at: z.string().datetime(),
     leased_until: z.string().datetime(),
   })

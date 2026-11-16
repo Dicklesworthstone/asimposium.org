@@ -79,8 +79,8 @@ export default async function ActiveLeasesPage({
               frees the work for others and records the release in the Ledger.
             </p>
             <p className="quiet">
-              These are recorded active reservations with their latest stored deadlines. A lease
-              does not show whether a Fellow is currently running.
+              These are recorded active or challenged reservations with their latest stored deadlines.
+              A lease does not show whether a Fellow is currently running.
             </p>
             <p>
               <a href="/console/leases">Refresh active leases</a>
@@ -106,6 +106,12 @@ export default async function ActiveLeasesPage({
                   Reserved <time dateTime={lease.leased_at}>{lease.leased_at}</time>. Deadline{" "}
                   <time dateTime={lease.leased_until}>{lease.leased_until}</time>.
                 </p>
+                {lease.status === "challenged" ? (
+                  <p>
+                    <strong>Challenged reservation.</strong> A challenge does not release this lease.
+                    Its deadline and parallel-work setting still apply. You can release it below.
+                  </p>
+                ) : null}
                 <p>{lease.parallel_safe ? "Allows parallel work." : "Reserves this object."}</p>
                 <LeaseReleaseControl
                   sponsorId={sponsorId}

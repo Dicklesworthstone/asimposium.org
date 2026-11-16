@@ -3135,7 +3135,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             .prepare(
               `SELECT lease_id, problem_id, object_ref, object_id, session_id, fellow_id, sponsor_id, objective, deliverable, parallel_safe, leased_until
          FROM leases
-         WHERE problem_id = ? AND fellow_id = ? AND session_id = ? AND status = 'active' AND leased_until > ?
+         WHERE problem_id = ? AND fellow_id = ? AND session_id = ? AND status IN ('active', 'challenged') AND leased_until > ?
          ORDER BY lease_id ASC`,
             )
             .bind(session.problem_id, auth.binding.fellowId, sessionId, lastHeartbeatAt)
@@ -3216,7 +3216,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ORDER BY question_id)) = ?
           AND (SELECT json_group_array(json_array(lease_id, leased_until)) FROM
             (SELECT lease_id, leased_until FROM leases WHERE problem_id = ? AND fellow_id = ? AND session_id = ?
-              AND status = 'active' AND leased_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              AND status IN ('active', 'challenged') AND leased_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
               ORDER BY lease_id)) = ?
         ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`)
                   .bind(
@@ -3277,7 +3277,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                     .prepare(
                       `UPDATE leases
              SET leased_until = ?, updated_at = ?
-             WHERE problem_id = ? AND fellow_id = ? AND session_id = ? AND status = 'active' AND leased_until > ? AND ${owns}`,
+             WHERE problem_id = ? AND fellow_id = ? AND session_id = ? AND status IN ('active', 'challenged') AND leased_until > ? AND ${owns}`,
                     )
                     .bind(
                       renewedLeaseUntil,
@@ -4371,9 +4371,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const activeLeases = await db
         .prepare(
           `SELECT lease_id, object_ref, object_id, fellow_id, objective, deliverable,
-                  leased_until, parallel_safe
+                  leased_until, parallel_safe, status
            FROM leases
-           WHERE problem_id = ? AND status = 'active' AND leased_until > ?
+           WHERE problem_id = ? AND status IN ('active', 'challenged') AND leased_until > ?
            ORDER BY leased_at ASC, lease_id ASC LIMIT ?`,
         )
         .bind(session.problem_id, leaseObservedAt, PACK_LEASE_CANDIDATE_LIMIT + 1)
@@ -4386,6 +4386,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           deliverable: string;
           leased_until: string;
           parallel_safe: number;
+          status: "active" | "challenged";
         }>();
       leasesTruncated = activeLeases.results.length > PACK_LEASE_CANDIDATE_LIMIT;
       const selectedLeases = activeLeases.results.slice(0, PACK_LEASE_CANDIDATE_LIMIT);
@@ -4397,7 +4398,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           scope: "system",
           tokens: 1,
           untrusted: false,
-          body: `Active leases on this problem (current coordination, not frozen at the ledger cursor):\n${selectedLeases.map((l) => `- ${l.object_ref}: leased by ${l.fellow_id} until ${l.leased_until}${l.parallel_safe ? " (parallel-safe)" : ""}`).join("\n")}`,
+          body: `Active leases on this problem (current coordination, not frozen at the ledger cursor; a challenge does not release a reservation):\n${selectedLeases.map((l) => `- ${l.object_ref}: leased by ${l.fellow_id} until ${l.leased_until}${l.parallel_safe ? " (parallel-safe)" : ""}${l.status === "challenged" ? " · challenged" : ""}`).join("\n")}`,
           why_included:
             "display the bounded current lease holders; descriptions below are Fellow-authored data",
           stable_prefix: 12,
@@ -4416,6 +4417,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               deliverable: lease.deliverable,
               leased_until: lease.leased_until,
               parallel_safe: Boolean(lease.parallel_safe),
+              status: lease.status,
             }),
             why_included:
               "recorded work objective and deliverable; coordination is not evidence or permission",
@@ -4468,11 +4470,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         // lease tag. Return at most one current holder per selected claim,
         // using one JSON parameter rather than exceeding D1's bind ceiling.
         const claimLeases = await db
-          .prepare(`SELECT object_id, fellow_id, parallel_safe FROM (
-            SELECT object_id, fellow_id, parallel_safe,
+          .prepare(`SELECT object_id, fellow_id, parallel_safe, status FROM (
+            SELECT object_id, fellow_id, parallel_safe, status,
               ROW_NUMBER() OVER (PARTITION BY object_id ORDER BY leased_at DESC, lease_id DESC) AS lease_rank
             FROM leases
-            WHERE problem_id = ? AND status = 'active' AND leased_until > ?
+            WHERE problem_id = ? AND status IN ('active', 'challenged') AND leased_until > ?
               AND object_kind = 'claim' AND object_id IN (SELECT value FROM json_each(?))
           ) WHERE lease_rank = 1 ORDER BY object_id LIMIT ?`)
           .bind(
@@ -4481,7 +4483,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             JSON.stringify(selectedClaims.map((claim) => claim.id)),
             PACK_CLAIM_CANDIDATE_LIMIT,
           )
-          .all<{ object_id: string; fellow_id: string; parallel_safe: number }>();
+          .all<{
+            object_id: string;
+            fellow_id: string;
+            parallel_safe: number;
+            status: "active" | "challenged";
+          }>();
         const leaseMap = new Map(claimLeases.results.map((lease) => [lease.object_id, lease]));
 
         for (const [index, claim] of selectedClaims.entries()) {
@@ -4493,7 +4500,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           if (!fold) throw new Error("Public claim has no scientific ledger timeline");
           const leaseInfo = leaseMap.get(claim.id);
           const leaseTag = leaseInfo
-            ? ` · leased by ${leaseInfo.fellow_id}${leaseInfo.parallel_safe ? " (parallel-safe)" : ""}`
+            ? ` · leased by ${leaseInfo.fellow_id}${leaseInfo.parallel_safe ? " (parallel-safe)" : ""}${leaseInfo.status === "challenged" ? " · challenged" : ""}`
             : "";
           // Fable §6.6: the review-state facet displays beside the disposition,
           // computed from public reviews of the head version (as on claim faces).
@@ -7221,7 +7228,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         `SELECT lease_id, fellow_id, leased_until, object_ref, parallel_safe
          FROM leases
          WHERE problem_id = ? AND (object_id = ? OR object_ref = ?)
-           AND status = 'active' AND parallel_safe = 0 AND leased_until > ?
+           AND status IN ('active', 'challenged') AND parallel_safe = 0 AND leased_until > ?
            AND fellow_id <> ?`,
       )
       .bind(session.problem_id, data.claim_id, data.claim_id, nowIso, auth.binding.fellowId)
@@ -16685,7 +16692,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       .prepare(
         `SELECT lease_id, session_id, fellow_id, sponsor_id, leased_until, parallel_safe, status
          FROM leases
-         WHERE problem_id = ? AND (object_id = ? OR object_ref = ?) AND status = 'active' AND leased_until > ?`,
+         WHERE problem_id = ? AND (object_id = ? OR object_ref = ?) AND status IN ('active', 'challenged') AND leased_until > ?`,
       )
       .bind(session.problem_id, target.objectId, target.canonicalRef, nowIso)
       .all<{
@@ -16808,7 +16815,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         {
           // rg73: the route's state check, repeated inside the ledger transaction.
           preconditionSql:
-            " AND NOT EXISTS (SELECT 1 FROM leases l WHERE l.problem_id = ? AND (l.object_id = ? OR l.object_ref = ?) AND l.status = 'active' AND l.leased_until > ? AND (l.fellow_id = ? OR l.parallel_safe = 0 OR ? = 0))",
+            " AND NOT EXISTS (SELECT 1 FROM leases l WHERE l.problem_id = ? AND (l.object_id = ? OR l.object_ref = ?) AND l.status IN ('active', 'challenged') AND l.leased_until > ? AND (l.fellow_id = ? OR l.parallel_safe = 0 OR ? = 0))",
           preconditionBindings: [
             session.problem_id,
             target.objectId,
@@ -16822,7 +16829,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               .prepare(
                 `UPDATE leases
                  SET status = 'expired', updated_at = ?
-                 WHERE problem_id = ? AND (object_id = ? OR object_ref = ?) AND status = 'active' AND leased_until <= ?
+                 WHERE problem_id = ? AND (object_id = ? OR object_ref = ?) AND status IN ('active', 'challenged') AND leased_until <= ?
                    AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
               )
               .bind(
@@ -16965,7 +16972,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   });
 
-  // --- GET /v1/sessions/:id/leases (W4.4: list active leases) ---------------
+  // --- GET /v1/sessions/:id/leases (W4.4: list held leases) -----------------
   app.get("/v1/sessions/:id/leases", async (c) => {
     const auth = await authenticate(c.req.raw);
     if (!auth.ok) return auth.response;
@@ -16979,9 +16986,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       .prepare(
         `SELECT lease_id, session_id, problem_id, object_ref, object_kind, object_id,
                 fellow_id, sponsor_id, objective, deliverable, parallel_safe,
-                status, leased_at, leased_until
+                status, leased_at, leased_until, challenge_reason,
+                challenged_by_fellow_id, challenged_at
          FROM leases
-         WHERE problem_id = ? AND status = 'active' AND leased_until > ?
+         WHERE problem_id = ? AND status IN ('active', 'challenged') AND leased_until > ?
          ORDER BY leased_at DESC`,
       )
       .bind(session.problem_id, nowIso)
@@ -16997,9 +17005,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         objective: string;
         deliverable: string;
         parallel_safe: number;
-        status: "active";
+        status: "active" | "challenged";
         leased_at: string;
         leased_until: string;
+        challenge_reason: string | null;
+        challenged_by_fellow_id: string | null;
+        challenged_at: string | null;
       }>();
 
     const leases: LeaseItem[] = (rows.results ?? []).map((r) => ({
@@ -17017,6 +17028,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       status: r.status,
       leased_at: r.leased_at,
       leased_until: r.leased_until,
+      ...(r.status === "challenged"
+        ? {
+            challenge_reason: r.challenge_reason,
+            challenged_by: r.challenged_by_fellow_id,
+            challenged_at: r.challenged_at,
+          }
+        : {}),
     }));
 
     return privateNoStore(c.json(LeaseListResponseSchema.parse({ ok: true, leases }), 200));
@@ -17117,13 +17135,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     const nowIso = new Date().toISOString();
-    if (lease.status !== "active" || lease.leased_until <= nowIso) {
+    if (!["active", "challenged"].includes(lease.status) || lease.leased_until <= nowIso) {
       return validatedProblem({
         status: 409,
         code: "LEASE_NOT_ACTIVE",
         title: "Lease is not active",
         detail: `Lease '${lease.lease_id}' is '${lease.status}' and cannot be released.`,
-        fixHint: "Only active unexpired leases can be released.",
+        fixHint: "Only active or challenged unexpired leases can be released.",
         rule: "§7.5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -17210,7 +17228,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         {
           // rg73: the route's state check, repeated inside the ledger transaction.
           preconditionSql:
-            " AND EXISTS (SELECT 1 FROM leases l WHERE l.lease_id = ? AND l.status = 'active' AND l.leased_until > ?)",
+            " AND EXISTS (SELECT 1 FROM leases l WHERE l.lease_id = ? AND l.status IN ('active', 'challenged') AND l.leased_until > ?)",
           preconditionBindings: [lease.lease_id, nowIso],
           statementsAfterEvent: () => [
             db
@@ -18113,7 +18131,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             db
               .prepare(`UPDATE leases
               SET status = 'released', released_by = ?, released_at = ?, updated_at = ?
-              WHERE session_id = ? AND status = 'active'`)
+              WHERE session_id = ? AND status IN ('active', 'challenged')`)
               .bind(principal, closedAt, closedAt, sessionId),
             // A close that merely matched zero rows must never leave public
             // promotions or a success receipt. This assertion is in the same
@@ -18125,7 +18143,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 AND closed_at = ? AND handback = ?
                 AND close_keep_json = ? AND close_discard_json = ?
               ) AND NOT EXISTS (SELECT 1 FROM leases
-                WHERE session_id = ? AND status = 'active')
+                WHERE session_id = ? AND status IN ('active', 'challenged'))
               THEN 1 ELSE json_extract('[]', '$[SESSION_CLOSE_COMMIT_CHANGED') END`)
               .bind(
                 sessionId,
@@ -18467,7 +18485,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 .prepare(
                   `UPDATE leases
                    SET status = 'released', released_by = ?, released_at = ?, updated_at = ?
-                   WHERE session_id = ? AND status = 'active'`,
+                   WHERE session_id = ? AND status IN ('active', 'challenged')`,
                 )
                 .bind(auth.binding.fellowId, closedAt, closedAt, session.session_id),
             ],
@@ -19420,14 +19438,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     }
 
-    if (lease.status !== "active") {
+    if (!["active", "challenged"].includes(lease.status)) {
       return privateNoStore(
         validatedProblem({
           status: 409,
           code: "LEASE_NOT_ACTIVE",
           title: "Lease is not active",
           detail: `Lease '${lease.lease_id}' is '${lease.status}' and cannot be released.`,
-          fixHint: "Only active unexpired leases can be released.",
+          fixHint: "Only active or challenged leases can be released.",
           rule: "§7.5",
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -19527,7 +19545,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             JOIN sponsors sponsor ON sponsor.sponsor_id = f.sponsor_id
             WHERE l.lease_id = ? AND l.problem_id = ? AND l.fellow_id = ?
               AND l.session_id = ? AND l.sponsor_id = ? AND l.object_ref = ?
-              AND l.object_kind = ? AND l.object_id = ? AND l.status = 'active'
+              AND l.object_kind = ? AND l.object_id = ? AND l.status IN ('active', 'challenged')
               AND f.sponsor_id = ? AND sponsor.tombstoned_at IS NULL
           )`,
           preconditionBindings: [

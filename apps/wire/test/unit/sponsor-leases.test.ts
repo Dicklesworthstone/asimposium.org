@@ -205,6 +205,29 @@ test("current ownership discovers paused Fellow reservations without another spo
   }
 });
 
+test("challenged reservations remain recoverable without exposing the challenge narrative", async () => {
+  const f = fixture();
+  try {
+    f.add(1, "fellow-a", "P-OWN", "challenged");
+    f.add(2, "fellow-paused", "P-OWN", "challenged");
+    f.add(3, "fellow-other", "P-SECRET", "challenged");
+    f.add(4, "fellow-a", "P-OWN", "released");
+    const response = await f.request();
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    const page = SponsorLeaseListResponseSchema.parse(JSON.parse(body));
+    expect(page.leases.map((lease) => [lease.lease_id, lease.status])).toEqual([
+      [leaseId(1), "challenged"],
+      [leaseId(2), "challenged"],
+    ]);
+    expect(body).not.toContain("PRIVATE_OBJECTIVE_CANARY");
+    expect(body).not.toContain("PRIVATE_DELIVERABLE_CANARY");
+    expect(body).not.toContain("P-SECRET");
+  } finally {
+    f.sql.close();
+  }
+});
+
 test("the bounded immutable-ID cursor survives heartbeat renewal and released earlier rows", async () => {
   const f = fixture();
   try {

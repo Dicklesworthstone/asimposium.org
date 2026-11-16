@@ -80,7 +80,7 @@ export function proofGapsSql(unowned: boolean): string {
         AND done.type IN ('gap.closed-by', 'gap.withdrawn'))
       AND NOT EXISTS (SELECT 1 FROM leases l WHERE l.problem_id = g.problem_id
         AND (l.object_id = g.object_id OR l.object_ref = g.object_id)
-        AND l.status = 'active' AND l.leased_until > ?)`
+        AND l.status IN ('active', 'challenged') AND l.leased_until > ?)`
           : ""
       }
     ORDER BY g.seq, g.id LIMIT 9

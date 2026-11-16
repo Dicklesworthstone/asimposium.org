@@ -698,36 +698,48 @@ describe("shared atomic claim revisions", () => {
       expect(fixture.sql.query("PRAGMA foreign_key_check").all()).toEqual([]);
     }));
 
-  test("a foreign exclusive lease acquired after preparation rolls back the complete batch", () =>
-    usingFixture(async (fixture) => {
-      await seedRevisionClaim(fixture);
-      revisionLease(fixture, "own", FELLOW);
-      const input = await revisionInput("lease-race");
-      const member = revisionMember(fixture, input);
-      const later = fixture.command(fixture.input(), undefined, "E-REVISION-after-lease");
-      const before = await inspectProblem(fixture.db, PROBLEM);
-      let acquired = false;
-      await expect(
-        writeLedgerBatch(fixture.db, [member, later], (values) => receipt(fixture, values), {
-          afterReadHead: async () => {
-            if (acquired) return;
-            acquired = true;
-            revisionLease(fixture, "foreign");
-          },
-        }),
-      ).rejects.toThrow();
-      expect(acquired).toBe(true);
-      expect(await inspectProblem(fixture.db, PROBLEM)).toEqual(before);
-      expect(
-        fixture.sql.query("SELECT version FROM claim_versions ORDER BY version").all(),
-      ).toEqual([{ version: 1 }]);
-      expect(fixture.sql.query("SELECT receipt_id FROM atomic_test_receipts").all()).toEqual([]);
-    }));
+  test.each(["active", "challenged"])(
+    "a foreign %s exclusive lease acquired after preparation rolls back the complete batch",
+    (status) =>
+      usingFixture(async (fixture) => {
+        await seedRevisionClaim(fixture);
+        revisionLease(fixture, "own", FELLOW);
+        const input = await revisionInput("lease-race");
+        const member = revisionMember(fixture, input);
+        const later = fixture.command(fixture.input(), undefined, "E-REVISION-after-lease");
+        const before = await inspectProblem(fixture.db, PROBLEM);
+        let acquired = false;
+        await expect(
+          writeLedgerBatch(fixture.db, [member, later], (values) => receipt(fixture, values), {
+            afterReadHead: async () => {
+              if (acquired) return;
+              acquired = true;
+              revisionLease(fixture, "foreign", OTHER, 0, false, status);
+            },
+          }),
+        ).rejects.toThrow();
+        expect(acquired).toBe(true);
+        expect(await inspectProblem(fixture.db, PROBLEM)).toEqual(before);
+        expect(
+          fixture.sql.query("SELECT version FROM claim_versions ORDER BY version").all(),
+        ).toEqual([{ version: 1 }]);
+        expect(fixture.sql.query("SELECT receipt_id FROM atomic_test_receipts").all()).toEqual([]);
+      }),
+  );
 
   test.each([
     { name: "own", fellow: FELLOW, parallel: 0, expired: false, status: "active" },
+    { name: "own-challenged", fellow: FELLOW, parallel: 0, expired: false, status: "challenged" },
     { name: "parallel", fellow: OTHER, parallel: 1, expired: false, status: "active" },
+    {
+      name: "parallel-challenged",
+      fellow: OTHER,
+      parallel: 1,
+      expired: false,
+      status: "challenged",
+    },
     { name: "expired", fellow: OTHER, parallel: 0, expired: true, status: "active" },
+    { name: "expired-challenged", fellow: OTHER, parallel: 0, expired: true, status: "challenged" },
     { name: "released", fellow: OTHER, parallel: 0, expired: false, status: "released" },
   ])("does not block a revision for a $name lease", ({ name, fellow, parallel, expired, status }) =>
     usingFixture(async (fixture) => {

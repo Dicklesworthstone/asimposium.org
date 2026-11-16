@@ -81,9 +81,27 @@ test("the private server-rendered lease page exposes an exact confirmation contr
   expect(html).toContain("Release lease");
   expect(html).toContain("Refresh active leases");
   expect(html).toContain("A lease does not show whether a Fellow is currently running.");
+  expect(html).not.toContain("Challenged reservation.");
   expect(writes).toHaveLength(0);
   expect(page.dynamic).toBe("force-dynamic");
   expect(page.metadata.robots).toEqual({ index: false, follow: false });
+});
+
+test("challenged reservations stay visible with their exact release control and original terms", async () => {
+  listResult = {
+    ok: true,
+    data: { ...leasePage, leases: [{ ...leaseSummary, status: "challenged" }] },
+  };
+  const html = await render();
+  expect(html).toContain(leaseSummary.lease_id);
+  expect(html).toContain(leaseSummary.leased_until);
+  expect(html).toContain("Challenged reservation.");
+  expect(html).toContain("A challenge does not release this lease.");
+  expect(html).toContain("Reserves this object.");
+  expect(html).toContain('name="confirm_release"');
+  expect(html).toContain("Release lease");
+  expect(html).not.toContain("Active leases unavailable");
+  expect(writes).toHaveLength(0);
 });
 
 test("anonymous and malformed page requests never read private rows", async () => {

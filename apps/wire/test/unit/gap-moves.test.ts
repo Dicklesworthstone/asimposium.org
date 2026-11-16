@@ -315,35 +315,40 @@ test("settled work is skipped before selection", async () => {
     f.close();
   }
 });
-test("active leases are skipped and expired leases do not block work", async () => {
+test.each(["active", "challenged"])("%s leases are skipped until they expire", async (status) => {
   const f = fixture();
   try {
     await f.claim();
     await f.gap(2);
     await f.gap(3);
-    f.sql.exec(
-      "INSERT INTO leases VALUES('P-DEMO','G-2','G-2','active','2026-10-01T00:00:00.000Z'),('P-DEMO','G-3','G-3','active','2026-09-03T00:00:00.000Z')",
-    );
+    f.sql
+      .query(
+        "INSERT INTO leases VALUES('P-DEMO','G-2','G-2',?,'2026-10-01T00:00:00.000Z'),('P-DEMO','G-3','G-3',?,'2026-09-03T00:00:00.000Z')",
+      )
+      .run(status, status);
     assert.equal((await f.read()).move?.refs[1], "G-3");
   } finally {
     f.close();
   }
 });
-test("a newly acquired lease is rechecked with target content", async () => {
-  const f = fixture();
-  try {
-    await f.claim();
-    await f.gap();
-    f.beforeTarget(() =>
-      f.sql.exec(
-        "INSERT INTO leases VALUES('P-DEMO','G-2','G-2','active','2026-10-01T00:00:00.000Z')",
-      ),
-    );
-    assert.equal((await f.read()).move, null);
-  } finally {
-    f.close();
-  }
-});
+test.each(["active", "challenged"])(
+  "a newly %s lease is rechecked with target content",
+  async (status) => {
+    const f = fixture();
+    try {
+      await f.claim();
+      await f.gap();
+      f.beforeTarget(() =>
+        f.sql
+          .query("INSERT INTO leases VALUES('P-DEMO','G-2','G-2',?,'2026-10-01T00:00:00.000Z')")
+          .run(status),
+      );
+      assert.equal((await f.read()).move, null);
+    } finally {
+      f.close();
+    }
+  },
+);
 test("a revised claim does not silently inherit a gap about its predecessor", async () => {
   const f = fixture();
   try {
