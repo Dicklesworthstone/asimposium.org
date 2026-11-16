@@ -1737,6 +1737,67 @@ describe("SearchPage Server Component & stoaFetchSearch", () => {
     expect(html).toContain('rel="next"');
   });
 
+  test("SearchPage preserves area and status on requests, controls, faces and continuation links", async () => {
+    const cursor = `sc1.${"a".repeat(64)}.${"b".repeat(64)}.20`;
+    const next = `sc1.${"a".repeat(64)}.${"b".repeat(64)}.40`;
+    const urls: string[] = [];
+    setMockFetch(async (url) => {
+      urls.push(String(url));
+      return Response.json({ ...MOCK_SEARCH_RESPONSE, cursor: next });
+    });
+    const html = renderToStaticMarkup(
+      await SearchPage({
+        searchParams: Promise.resolve({
+          q: "riemann",
+          kind: "claim",
+          area: "number-theory",
+          status: "active",
+          cursor,
+        }),
+      }),
+    );
+    const sent = new URL(urls[0] ?? "");
+    expect(sent.searchParams.get("area")).toBe("number-theory");
+    expect(sent.searchParams.get("status")).toBe("active");
+    expect(sent.searchParams.get("cursor")).toBe(cursor);
+    const filters = "q=riemann&amp;kind=claim&amp;area=number-theory&amp;status=active";
+    expect(html).toContain(`/search?${filters}&amp;cursor=${next}`);
+    expect(html).toContain(`/search.md?${filters}`);
+    expect(html).toContain(`/search.json?${filters}`);
+    expect(html).toContain('name="area"');
+    expect(html).toContain('value="number-theory"');
+    expect(html).toContain('value="active" selected=""');
+    expect(html).toContain("excluding Fellow");
+  });
+
+  test("SearchPage treats blank filter controls as an unrestricted search", async () => {
+    const urls: string[] = [];
+    setMockFetch(async (url) => {
+      urls.push(String(url));
+      return Response.json(MOCK_SEARCH_RESPONSE);
+    });
+    const html = renderToStaticMarkup(
+      await SearchPage({ searchParams: Promise.resolve({ q: "riemann", area: "", status: "" }) }),
+    );
+    expect(urls).toHaveLength(1);
+    expect(new URL(urls[0] ?? "").searchParams.has("area")).toBe(false);
+    expect(new URL(urls[0] ?? "").searchParams.has("status")).toBe(false);
+    expect(html).toContain("Found <strong>1</strong> match");
+  });
+
+  test("a refused cursor restarts with the selected area and status intact", async () => {
+    const cursor = `sc1.${"a".repeat(64)}.${"b".repeat(64)}.20`;
+    setMockFetch(async () => new Response("{}", { status: 409 }));
+    const html = renderToStaticMarkup(
+      await SearchPage({
+        searchParams: Promise.resolve({ q: "riemann", area: "number-theory", status: "active", cursor }),
+      }),
+    );
+    expect(html).toContain('<input type="hidden" name="area" value="number-theory"/>');
+    expect(html).toContain('<input type="hidden" name="status" value="active"/>');
+    expect(html).not.toContain(cursor);
+  });
+
   test("SearchPage restarts from the first page when a cursor is refused", async () => {
     const cursor = `sc1.${"a".repeat(64)}.${"b".repeat(64)}.20`;
     setMockFetch(async () => new Response("{}", { status: 409 }));
@@ -1795,6 +1856,8 @@ describe("SearchPage Server Component & stoaFetchSearch", () => {
     { q: ["P-ALPHA#C-1", "P-BETA#C-1"] },
     { q: "P-ALPHA#C-1", kind: ["claim", "all"] },
     { kind: ["claim", "all"] },
+    { q: "bounded", area: ["algebra", "analysis"] },
+    { q: "bounded", status: ["active", "resolved"] },
   ])("SearchPage teaches repeated query parameters without fetching: %j", async (parameters) => {
     let calls = 0;
     setMockFetch(async () => {

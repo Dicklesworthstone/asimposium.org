@@ -19,7 +19,7 @@ function searchCursorRefusal(method: string, reason: "invalid" | "changed"): Res
           status: 400,
           code: "SEARCH_CURSOR_INVALID",
           title: "Search cursor is invalid",
-          detail: "The cursor is not one issued for this exact q, kind and limit.",
+          detail: "The cursor is not one issued for this exact q, kind, area, status and limit.",
           fixHint:
             "Follow the next page link from the previous response exactly, or remove cursor to start again.",
           rule: "A5",
@@ -118,12 +118,18 @@ export function createSearchRoutes(): Hono<{ Bindings: Env }> {
     const rawKind = url.searchParams.get("kind");
     const rawLimit = url.searchParams.get("limit");
     const rawCursor = url.searchParams.get("cursor");
+    const scalar = (name: string, value: string | null) =>
+      url.searchParams.getAll(name).length > 1
+        ? url.searchParams.getAll(name)
+        : (value ?? undefined);
 
     const parseResult = SearchQueryRequestSchema.safeParse({
-      q: rawQ ?? "",
-      kind: rawKind ?? undefined,
-      limit: rawLimit ?? undefined,
-      cursor: rawCursor ?? undefined,
+      q: scalar("q", rawQ) ?? "",
+      kind: scalar("kind", rawKind),
+      area: scalar("area", url.searchParams.get("area")),
+      status: scalar("status", url.searchParams.get("status")),
+      limit: scalar("limit", rawLimit),
+      cursor: scalar("cursor", rawCursor),
     });
 
     if (!parseResult.success) {

@@ -13,7 +13,7 @@ export function searchPaginationFixture() {
   sqlite.exec(`CREATE TABLE public_cursor(singleton INTEGER PRIMARY KEY, cursor INTEGER);
     INSERT INTO public_cursor VALUES(1,1000);
     CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER, updated_at TEXT, created_at TEXT, title TEXT,
-      current_statement_version INTEGER NOT NULL DEFAULT 1);
+      current_statement_version INTEGER NOT NULL DEFAULT 1, areas TEXT NOT NULL DEFAULT '[]');
     CREATE TABLE claims(id TEXT,problem_id TEXT,source_seq INTEGER,payload_sha256 TEXT,statement TEXT,created_at TEXT,
       PRIMARY KEY(problem_id,id));
     CREATE TABLE events(id TEXT PRIMARY KEY,problem_id TEXT,object_id TEXT,object_kind TEXT,type TEXT,seq INTEGER,payload_sha256 TEXT,
@@ -46,12 +46,18 @@ export function searchPaginationFixture() {
       };
     },
   } as unknown as D1Database;
-  function problem(id = "P-DEMO", status = "active", unlisted = 0, title: string | null = null) {
+  function problem(
+    id = "P-DEMO",
+    status = "active",
+    unlisted = 0,
+    title: string | null = null,
+    areas: readonly string[] = [],
+  ) {
     sqlite
       .query(
-        "INSERT OR IGNORE INTO problems(id,public_seq,status,unlisted,updated_at,created_at,title) VALUES(?,1000,?,?,?,?,?)",
+        "INSERT OR IGNORE INTO problems(id,public_seq,status,unlisted,updated_at,created_at,title,areas) VALUES(?,1000,?,?,?,?,?,?)",
       )
-      .run(id, status, unlisted, "2026-09-16", "2026-09-15", title);
+      .run(id, status, unlisted, "2026-09-16", "2026-09-15", title, JSON.stringify(areas));
   }
   let n = 0;
   function claim(id: string, text = "test science", pid = "P-DEMO") {

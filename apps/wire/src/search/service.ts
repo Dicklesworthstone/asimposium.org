@@ -25,6 +25,7 @@ import {
 } from "../screening/publication-notice";
 import { readSearchContinuation, SearchContinuationError } from "./continuation";
 import { executeSearchPage } from "./page";
+import { SEARCH_PROBLEM_FILTER_SQL, searchProblemFilterBindings } from "./window";
 
 interface ProblemRow {
   readonly id: string;
@@ -73,9 +74,16 @@ export async function executeSearch(
   request = SearchQueryRequestSchema.parse(request);
   const limit = Math.min(request.limit ?? SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX);
   const filterKind = request.kind ?? "all";
-  // A cursor is bound to this exact q/kind/limit; refuse a foreign one before
+  // A cursor is bound to this exact query and filters; refuse a foreign one before
   // any lookup, so it can never act as an existence oracle.
-  const pageQuery = { q: request.q, kind: filterKind, limit } as const;
+  const pageQuery = {
+    q: request.q,
+    kind: filterKind,
+    area: request.area,
+    status: request.status,
+    limit,
+  } as const;
+  const problemFiltered = request.area !== undefined || request.status !== undefined;
   const continuation = await readSearchContinuation({ ...pageQuery, cursor: request.cursor });
 
   // 1. Fetch current global public cursor
@@ -132,9 +140,10 @@ export async function executeSearch(
                CASE WHEN length(trim(p.title)) > 0 THEN p.title ELSE p.id END AS title
              FROM problems p
              WHERE p.id = ? AND p.status <> 'private-draft' AND p.unlisted = 0
-               AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}`,
+               AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
+               AND ${SEARCH_PROBLEM_FILTER_SQL}`,
           )
-          .bind(exactTarget.id)
+          .bind(exactTarget.id, ...searchProblemFilterBindings(pageQuery))
           .first<ProblemRow>();
 
         if (problem) {
@@ -164,6 +173,19 @@ export async function executeSearch(
 
       if ((filterKind === "all" || filterKind === "claim") && exactTarget.kind === "claim") {
         if (exactTarget.version !== undefined) {
+          // A historical claim is filtered by its problem's current lifecycle
+          // and areas, not by an old statement's metadata. resolveExact runs
+          // again after hydration, including the no-FTS exact-version path.
+          if (problemFiltered) {
+            const matchingProblem = await db
+              .prepare(`SELECT p.id FROM problems p
+                WHERE p.id = ? AND p.status <> 'private-draft' AND p.unlisted = 0
+                  AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
+                  AND ${SEARCH_PROBLEM_FILTER_SQL}`)
+              .bind(exactTarget.problemId, ...searchProblemFilterBindings(pageQuery))
+              .first<{ id: string }>();
+            if (matchingProblem === null) return found;
+          }
           const claim = await findScientificClaim(
             db,
             exactTarget.problemId,
@@ -197,9 +219,10 @@ export async function executeSearch(
               `SELECT claims.id, claims.problem_id, claims.statement, claims.source_seq, claims.created_at
                FROM claims
                JOIN problems p ON p.id = claims.problem_id AND p.status != 'private-draft' AND p.unlisted = 0
-               WHERE claims.id = ? AND claims.problem_id = ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}`,
+               WHERE claims.id = ? AND claims.problem_id = ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
+                 AND ${SEARCH_PROBLEM_FILTER_SQL}`,
             )
-            .bind(exactTarget.id, exactTarget.problemId)
+            .bind(exactTarget.id, exactTarget.problemId, ...searchProblemFilterBindings(pageQuery))
             .first<ClaimRow>();
 
           if (claim) {
@@ -222,7 +245,11 @@ export async function executeSearch(
         }
       }
 
-      if ((filterKind === "all" || filterKind === "fellow") && exactTarget.kind === "fellow") {
+      if (
+        !problemFiltered &&
+        (filterKind === "all" || filterKind === "fellow") &&
+        exactTarget.kind === "fellow"
+      ) {
         const fellow = await db
           .prepare(
             "SELECT fellow_id, name, model, harness, created_at FROM enrollment_fellows WHERE fellow_id = ? OR name = ? COLLATE NOCASE",
@@ -298,6 +325,15 @@ export async function executeSearch(
 
   // 6. Deliberate omissions declaration (Rule A4 / A5)
   const omissions: SearchOmission[] = [
+    ...(problemFiltered
+      ? [
+          {
+            reason: "problem_filters_applied",
+            detail:
+              "Area and status select problems and their claims using current problem metadata. Fellow profiles have neither and are excluded.",
+          },
+        ]
+      : []),
     ...(indexLag === null ? [] : [indexLag]),
     ...(pinnedClaim
       ? [
@@ -332,7 +368,7 @@ export async function executeSearch(
   if (windowTruncated) {
     omissions.push({
       reason: "result_window_truncated",
-      detail: `Only the first ${SEARCH_WINDOW_MAX} matches can be paged; refine q or kind to reach the rest.`,
+      detail: `Only the first ${SEARCH_WINDOW_MAX} matches can be paged; refine q, kind, area or status to reach the rest.`,
     });
   }
 
@@ -358,6 +394,16 @@ export async function executeSearch(
       href: "/explore",
     },
   ];
+  if (problemFiltered) {
+    const unfiltered = `${facePath}?${searchQueryString({ q: request.q, kind: filterKind, limit })}`;
+    if (unfiltered.length <= 512) {
+      nextActions.push({
+        label: "Search all areas and problem statuses",
+        method: "GET",
+        href: unfiltered,
+      });
+    }
+  }
 
   let explanation: string | undefined;
   if (items.length === 0) {

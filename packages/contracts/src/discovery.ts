@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { PublicLedgerProblemIdSchema } from "./ledger.ts";
+import { AreaSlugSchema } from "./problem-taxonomy.ts";
 import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 
 /**
@@ -7,116 +8,14 @@ import { ScreeningPublicationNoticeSchema } from "./screening.ts";
  * Every problem belongs to at least one area and still requires a falsifier.
  * Sponsors can request areas, which are auto-created under other-* pending admin rename.
  */
-export const SEED_AREAS = Object.freeze([
-  {
-    slug: "algebra",
-    label: "Algebra",
-    description: "Groups, rings, fields, modules, representation theory, algebraic geometry.",
-  },
-  {
-    slug: "number-theory",
-    label: "Number Theory",
-    description:
-      "Arithmetic geometry, analytic number theory, Diophantine equations, modular forms.",
-  },
-  {
-    slug: "topology-and-geometry",
-    label: "Topology & Geometry",
-    description:
-      "Differential geometry, algebraic topology, geometric analysis, low-dimensional topology.",
-  },
-  {
-    slug: "analysis",
-    label: "Analysis",
-    description:
-      "Harmonic analysis, PDEs, functional analysis, complex analysis, dynamical systems.",
-  },
-  {
-    slug: "logic-and-foundations",
-    label: "Logic & Foundations",
-    description: "Set theory, model theory, proof theory, constructive mathematics.",
-  },
-  {
-    slug: "combinatorics",
-    label: "Combinatorics",
-    description: "Graph theory, extremal combinatorics, probabilistic method, enumeration.",
-  },
-  {
-    slug: "probability",
-    label: "Probability",
-    description: "Stochastic processes, random matrices, percolation, probabilistic combinatorics.",
-  },
-  {
-    slug: "mathematical-physics",
-    label: "Mathematical Physics",
-    description:
-      "Statistical mechanics, integrable systems, conformal field theory, operator algebras.",
-  },
-  {
-    slug: "quantum-foundations",
-    label: "Quantum Foundations",
-    description: "Quantum information theory, measurement theory, non-locality, quantum channels.",
-  },
-  {
-    slug: "high-energy-theory",
-    label: "High Energy Theory",
-    description: "String theory, quantum field theory, particle phenomenology, dualities.",
-  },
-  {
-    slug: "condensed-matter-theory",
-    label: "Condensed Matter Theory",
-    description: "Topological phases, strongly correlated electrons, superconductivity.",
-  },
-  {
-    slug: "gravitation-and-cosmology",
-    label: "Gravitation & Cosmology",
-    description:
-      "General relativity, black hole thermodynamics, gravitational waves, cosmological models.",
-  },
-  {
-    slug: "dynamical-systems",
-    label: "Dynamical Systems",
-    description: "Ergodic theory, Hamiltonian dynamics, chaos, bifurcations.",
-  },
-  {
-    slug: "cs-theory",
-    label: "CS Theory",
-    description: "Complexity theory, algorithms, cryptography, automata, computational learning.",
-  },
-  {
-    slug: "formal-verification",
-    label: "Formal Verification",
-    description:
-      "Interactive theorem proving, Lean, Isabelle, Coq, proof assistants, certified software.",
-  },
-  {
-    slug: "other-exact-sciences",
-    label: "Other Exact Sciences",
-    description: "Other exact sciences requiring falsifiable hypotheses and rigorous deduction.",
-  },
-] as const);
-
-export type SeedAreaSlug = (typeof SEED_AREAS)[number]["slug"];
-
-export const SEED_AREA_SLUGS = Object.freeze(
-  SEED_AREAS.map((a) => a.slug),
-) as readonly SeedAreaSlug[];
-
-/**
- * Valid area slug: matches a seed area slug or sponsor-requested other-* slug
- * (e.g. other-computational-biology).
- */
-export const AREA_SLUG_PATTERN = /^(?:[a-z0-9]+(?:-[a-z0-9]+)*|other-[a-z0-9-]+)$/;
-
-export const AreaSlugSchema = z.union([
-  z.enum(SEED_AREA_SLUGS),
-  z
-    .string()
-    .max(64)
-    .regex(/^other-[a-z0-9]+(?:-[a-z0-9]+)*$/, "use a seed area or a named other-* area"),
-]);
-
-export type AreaSlug = z.infer<typeof AreaSlugSchema>;
+export {
+  AREA_SLUG_PATTERN,
+  type AreaSlug,
+  AreaSlugSchema,
+  SEED_AREA_SLUGS,
+  SEED_AREAS,
+  type SeedAreaSlug,
+} from "./problem-taxonomy.ts";
 
 /**
  * Scientific need chip types for human and agent discovery (Fable §8.1).

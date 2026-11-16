@@ -52,6 +52,15 @@ export interface SearchWindow {
   truncated: boolean;
 }
 
+/** Shared by exact lookup and every lexical problem/claim selection. Filters
+ * run before the bounded window, never after a page has been sliced. */
+export const SEARCH_PROBLEM_FILTER_SQL = `(? IS NULL OR p.status = ?)
+  AND (? IS NULL OR EXISTS (SELECT 1 FROM json_each(p.areas) area WHERE area.value = ?))`;
+
+export function searchProblemFilterBindings(query: SearchPageQuery): readonly (string | null)[] {
+  return [query.status ?? null, query.status ?? null, query.area ?? null, query.area ?? null];
+}
+
 export const SEARCH_CLAIM_KEYS_SQL = `SELECT 'claim' AS kind, public_claim_fts.claim_id AS id,
   public_claim_fts.problem_id, claims.source_seq, claims.payload_sha256,
   bm25(public_claim_fts) AS rank
@@ -60,6 +69,7 @@ JOIN claims ON claims.id = public_claim_fts.claim_id AND claims.problem_id = pub
   AND claims.statement = public_claim_fts.statement
 JOIN problems p ON p.id = claims.problem_id AND p.status <> 'private-draft' AND p.unlisted = 0
 WHERE public_claim_fts MATCH ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
+  AND ${SEARCH_PROBLEM_FILTER_SQL}
   AND NOT (claims.problem_id = ? AND claims.id = ?)
 ORDER BY rank ASC, public_claim_fts.problem_id ASC, public_claim_fts.claim_id ASC LIMIT ?`;
 
@@ -74,6 +84,7 @@ FROM problems p
 WHERE (p.id LIKE ? ESCAPE '\\' OR p.title LIKE ? ESCAPE '\\')
   AND p.status <> 'private-draft' AND p.unlisted = 0 AND p.id <> ?
   AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
+  AND ${SEARCH_PROBLEM_FILTER_SQL}
 ORDER BY p.id COLLATE BINARY ASC LIMIT ?`;
 
 /** A problem can be discoverable before it has any claims. Match only its
@@ -100,6 +111,7 @@ export const SEARCH_PROBLEM_STATEMENT_KEYS_SQL = `WITH current_formulations AS (
   WHERE p.status <> 'private-draft' AND p.unlisted = 0
     AND p.id NOT IN (SELECT value FROM json_each(?))
     AND NOT ${eventContentHiddenSql("e")}
+    AND ${SEARCH_PROBLEM_FILTER_SQL}
 )
 SELECT 'problem-statement' AS kind, id, public_seq, event_id, source_seq,
   statement_version, payload_sha256
@@ -227,7 +239,13 @@ export async function readSearchWindow(
     const maximum = capacity();
     const rows = await db
       .prepare(SEARCH_CLAIM_KEYS_SQL)
-      .bind(ftsQuery, exact?.problem_id ?? "", exact?.id ?? "", maximum)
+      .bind(
+        ftsQuery,
+        ...searchProblemFilterBindings(query),
+        exact?.problem_id ?? "",
+        exact?.id ?? "",
+        maximum,
+      )
       .all<ClaimKey>();
     append(rows.results, maximum);
   }
@@ -236,7 +254,13 @@ export async function readSearchWindow(
     const maximum = capacity();
     const rows = await db
       .prepare(SEARCH_PROBLEM_KEYS_SQL)
-      .bind(pattern, pattern, exactItems.find((item) => item.kind === "problem")?.id ?? "", maximum)
+      .bind(
+        pattern,
+        pattern,
+        exactItems.find((item) => item.kind === "problem")?.id ?? "",
+        ...searchProblemFilterBindings(query),
+        maximum,
+      )
       .all<ProblemKey>();
     append(rows.results, maximum);
   }
@@ -248,11 +272,21 @@ export async function readSearchWindow(
     });
     const rows = await db
       .prepare(SEARCH_PROBLEM_STATEMENT_KEYS_SQL)
-      .bind(JSON.stringify(selectedProblems), pattern, maximum)
+      .bind(
+        JSON.stringify(selectedProblems),
+        ...searchProblemFilterBindings(query),
+        pattern,
+        maximum,
+      )
       .all<ProblemStatementKey>();
     append(rows.results, maximum);
   }
-  if (capacity() > 0 && (kind === "all" || kind === "fellow")) {
+  if (
+    capacity() > 0 &&
+    query.area === undefined &&
+    query.status === undefined &&
+    (kind === "all" || kind === "fellow")
+  ) {
     const maximum = capacity();
     const rows = await db
       .prepare(`SELECT 'fellow' AS kind, fellow_id AS id, name, model, harness FROM enrollment_fellows

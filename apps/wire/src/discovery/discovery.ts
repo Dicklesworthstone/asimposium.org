@@ -1222,6 +1222,22 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
     responses: responseFor(operation.openApiPath, origins, operation.method),
     "x-asimposium-auth": operation.auth,
     parameters: [
+      ...(["/search", "/search.json", "/search.md"].includes(operation.openApiPath)
+        ? (["q", "kind", "area", "status", "limit", "cursor"] as const).map((name) => ({
+            name,
+            in: "query",
+            required: name === "q",
+            description:
+              name === "area" || name === "status"
+                ? "Filter problems and their claims by current problem metadata; Fellow profiles are excluded. Preserve the filter on continuation links."
+                : name === "cursor"
+                  ? "Follow the returned cursor with unchanged q, kind, area, status and limit. Changed results require restarting from the first page."
+                  : "Canonical public search query. Exact references take precedence; private and unlisted sources remain excluded.",
+            schema: {
+              $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/search_query_request/properties/${name}`,
+            },
+          }))
+        : []),
       ...(operation.openApiPath === "/p/{id}/full.md"
         ? [
             [

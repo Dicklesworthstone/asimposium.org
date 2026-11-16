@@ -75,6 +75,34 @@ function mockEnv(db: Env["DB"]): Env {
 }
 
 describe("W6.8 Public Search Routes", () => {
+  test("invalid or repeated problem filters are refused before a database lookup", async () => {
+    let reads = 0;
+    const db = {
+      prepare() {
+        reads++;
+        throw new Error("invalid query reached database");
+      },
+    } as unknown as Env["DB"];
+    for (const query of [
+      "area=algebra&area=analysis",
+      "status=active&status=resolved",
+      "area=unknown",
+      "status=private-draft",
+      "status=proved",
+      "area=algebra%27%20OR%201=1",
+    ]) {
+      const response = await createApp().request(
+        `https://a.asimposium.org/search.json?q=bounded&${query}`,
+        {},
+        mockEnv(db),
+      );
+      expect(response.status).toBe(400);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(((await response.json()) as { code: string }).code).toBe("SCHEMA_INVALID");
+    }
+    expect(reads).toBe(0);
+  });
+
   test.each([false, true])(
     "versioned lookup verifies stored bytes (corrupt=%s)",
     async (corrupt) => {
@@ -85,8 +113,8 @@ describe("W6.8 Public Search Routes", () => {
       // SQLite projection fixture for read-side faults; production writes are
       // exercised independently by scientific-journey on real Workerd/D1.
       raw.run(`
-      INSERT INTO problems (id, public_seq, created_at, updated_at, chain_version, chain_digest)
-      VALUES ('P-PIN', 1, '2026-09-08T00:00:00.000Z', '2026-09-08T00:00:00.000Z', 2, 'sha256:fixture-chain');
+      INSERT INTO problems (id, public_seq, created_at, updated_at, chain_version, chain_digest, areas)
+      VALUES ('P-PIN', 1, '2026-09-08T00:00:00.000Z', '2026-09-08T00:00:00.000Z', 2, 'sha256:fixture-chain', '["algebra"]');
       INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, chain_version)
       VALUES ('P-PIN', 'complete', 0, 2);
     `);
@@ -131,6 +159,14 @@ describe("W6.8 Public Search Routes", () => {
         });
         expect(result.items[0]?.snippet).toHaveLength(2000);
         expect(result.omitted.map((x) => x.reason)).not.toContain("lexical_search_unavailable");
+        const matchingFilter = await app.request(`${url}&area=algebra&status=active`, {}, env);
+        expect(matchingFilter.status).toBe(200);
+        expect(SearchResponseSchema.parse(await matchingFilter.json()).items[0]?.version).toBe(1);
+        for (const filter of ["area=number-theory", "status=resolved"]) {
+          const filtered = await app.request(`${url}&${filter}`, {}, env);
+          expect(filtered.status).toBe(200);
+          expect(SearchResponseSchema.parse(await filtered.json()).items).toEqual([]);
+        }
         const absent = await app.request(url.replace("%401", "%409"), {}, env);
         expect(absent.status).toBe(200);
         expect(SearchResponseSchema.parse(await absent.json()).items).toEqual([]);

@@ -5,6 +5,7 @@ test.each([
   "positive",
   "now-pagination",
   "fellow-pagination",
+  "search-filters",
   "reject",
   "quarantine",
   "unavailable",
@@ -78,8 +79,8 @@ test.each([
         node,
         resolve(
           import.meta.dir,
-          screenMode === "fellow-pagination"
-            ? "fellow-pagination-real-bindings.mjs"
+          screenMode === "search-filters" || screenMode === "fellow-pagination"
+            ? `${screenMode}-real-bindings.mjs`
             : screenMode === "now-pagination"
               ? "now-pagination-real-bindings.mjs"
               : screenMode === "working-review"
@@ -162,8 +163,8 @@ test.each([
     for (const record of records) if (record !== null) console.info(JSON.stringify(record));
     if (exit !== 0) throw new Error(`Real binding lane failed (${exit}): ${stderr}`);
     const kind =
-      screenMode === "fellow-pagination"
-        ? "fellow-pagination-real-bindings"
+      screenMode === "search-filters" || screenMode === "fellow-pagination"
+        ? `${screenMode}-real-bindings`
         : screenMode === "now-pagination"
           ? "now-pagination-real-bindings"
           : screenMode === "working-review"
@@ -223,6 +224,7 @@ test.each([
     if (
       screenMode === "now-pagination" ||
       screenMode === "fellow-pagination" ||
+      screenMode === "search-filters" ||
       screenMode === "areas" ||
       screenMode === "governance" ||
       screenMode === "unlisted" ||

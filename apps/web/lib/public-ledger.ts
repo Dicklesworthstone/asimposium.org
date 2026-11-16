@@ -35,6 +35,8 @@ import {
   PublicMovesQuerySchema,
   type PublicMovesResponse,
   PublicMovesResponseSchema,
+  type SearchQueryRequest,
+  SearchQueryRequestSchema,
   type SearchResponse,
   SearchResponseSchema,
 } from "@asimposium/contracts";
@@ -509,10 +511,15 @@ export async function stoaFetchSearch(
   kind?: string,
   stoaOrigin: string | undefined = configuredStoaOrigin(),
   cursor?: string,
+  filters: Pick<SearchQueryRequest, "area" | "status"> = {},
 ): Promise<PublicRead<SearchResponse>> {
+  const parsed = SearchQueryRequestSchema.safeParse({ q: query, kind, cursor, ...filters });
+  if (!parsed.success) return { state: "unavailable", reason: "invalid_response" };
   const params = new URLSearchParams({ q: query });
   if (kind && kind !== "all") params.set("kind", kind);
-  // The cursor is bound to q/kind/limit; Agora always uses the default limit.
+  if (parsed.data.area !== undefined) params.set("area", parsed.data.area);
+  if (parsed.data.status !== undefined) params.set("status", parsed.data.status);
+  // The cursor is bound to all filters; Agora always uses the default limit.
   if (cursor !== undefined) params.set("cursor", cursor);
   return readPublic(`/search.json?${params}`, stoaOrigin, SearchResponseSchema, 10);
 }

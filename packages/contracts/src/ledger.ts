@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { EvidenceArtifactDiscoverySchema } from "./artifact-publications.ts";
 import { EVENT_TAIL_ID_PATTERN } from "./event-tail-model.ts";
+import { ProblemStatusSchema } from "./problem-taxonomy.ts";
 import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 import {
   PUBLIC_CLAIM_TARGET_PATTERN,
@@ -65,19 +66,7 @@ export const ProblemIndexTimestampSchema = z
   .regex(PROBLEM_INDEX_TIMESTAMP_PATTERN, "invalid canonical UTC timestamp")
   .refine(isRealCanonicalUtcInstant, "invalid real canonical UTC instant");
 
-// Shared by lifecycle writes and public projections. Keeping this definition
-// below the common primitives avoids a ledger -> problems -> ledger cycle.
-export const PROBLEM_STATUSES = [
-  "private-draft",
-  "sharpening",
-  "active",
-  "dormant",
-  "under-result-review",
-  "resolved",
-  "retired",
-] as const;
-export const ProblemStatusSchema = z.enum(PROBLEM_STATUSES);
-export type ProblemStatus = z.infer<typeof ProblemStatusSchema>;
+export { PROBLEM_STATUSES, type ProblemStatus, ProblemStatusSchema } from "./problem-taxonomy.ts";
 
 export const ProblemIndexEntrySchema = z
   .object({

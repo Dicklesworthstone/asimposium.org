@@ -4955,6 +4955,49 @@
             "fellow"
           ]
         },
+        "area": {
+          "description": "Restrict problems and claims to this scientific area. Fellow profiles are excluded when area or status is set.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "algebra",
+                "number-theory",
+                "topology-and-geometry",
+                "analysis",
+                "logic-and-foundations",
+                "combinatorics",
+                "probability",
+                "mathematical-physics",
+                "quantum-foundations",
+                "high-energy-theory",
+                "condensed-matter-theory",
+                "gravitation-and-cosmology",
+                "dynamical-systems",
+                "cs-theory",
+                "formal-verification",
+                "other-exact-sciences"
+              ]
+            },
+            {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^other-[a-z0-9]+(?:-[a-z0-9]+)*$"
+            }
+          ]
+        },
+        "status": {
+          "description": "Current public problem lifecycle, including for an exact historical claim. Fellow profiles are excluded when area or status is set.",
+          "type": "string",
+          "enum": [
+            "sharpening",
+            "active",
+            "dormant",
+            "under-result-review",
+            "resolved",
+            "retired"
+          ]
+        },
         "limit": {
           "default": 20,
           "type": "integer",

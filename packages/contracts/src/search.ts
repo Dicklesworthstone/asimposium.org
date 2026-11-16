@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AreaSlugSchema, ProblemStatusSchema } from "./problem-taxonomy.ts";
 import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 import { SEARCH_CURSOR_MAX_LENGTH, SEARCH_CURSOR_PATTERN } from "./search-pagination.ts";
 
@@ -59,6 +60,14 @@ export const SearchQueryRequestSchema = z
       )
       .refine((val) => !val.includes("\u0000"), "search query cannot contain null bytes"),
     kind: SearchKindFilterSchema.optional().default("all"),
+    area: AreaSlugSchema.optional().describe(
+      "Restrict problems and claims to this scientific area. Fellow profiles are excluded when area or status is set.",
+    ),
+    status: ProblemStatusSchema.exclude(["private-draft"])
+      .optional()
+      .describe(
+        "Current public problem lifecycle, including for an exact historical claim. Fellow profiles are excluded when area or status is set.",
+      ),
     limit: z.coerce
       .number()
       .int()
@@ -67,7 +76,7 @@ export const SearchQueryRequestSchema = z
       .optional()
       .default(SEARCH_LIMIT_DEFAULT),
     // Opaque continuation from a previous page's `cursor`, bound to this exact
-    // q/kind/limit and to the matched window; it confers no access.
+    // q/kind/area/status/limit and to the matched window; it confers no access.
     cursor: z.string().max(SEARCH_CURSOR_MAX_LENGTH).regex(SEARCH_CURSOR_PATTERN).optional(),
   })
   .strict();

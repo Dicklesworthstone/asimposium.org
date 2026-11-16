@@ -1,3 +1,4 @@
+import { AreaSlugSchema, ProblemStatusSchema } from "@asimposium/contracts";
 import {
   SEARCH_CURSOR_PATTERN,
   SEARCH_WINDOW_MAX,
@@ -30,7 +31,7 @@ export async function searchDigest(value: unknown): Promise<string> {
 }
 
 /** Validate before any lookup. Binding is to the normalized query, filter,
- * page size and algorithm version, not a caller-selected SQL rank/offset. */
+ * area/status, page size and algorithm version, not a caller-selected SQL rank/offset. */
 export async function readSearchContinuation(query: SearchPageQuery): Promise<SearchContinuation> {
   const limit = query.limit ?? 20;
   if (
@@ -39,6 +40,9 @@ export async function readSearchContinuation(query: SearchPageQuery): Promise<Se
     query.q.length > 256 ||
     query.q.includes("\0") ||
     !["all", "claim", "problem", "fellow"].includes(query.kind ?? "all") ||
+    (query.area !== undefined && !AreaSlugSchema.safeParse(query.area).success) ||
+    (query.status !== undefined &&
+      !ProblemStatusSchema.exclude(["private-draft"]).safeParse(query.status).success) ||
     !Number.isSafeInteger(limit) ||
     limit < 1 ||
     limit > 50
@@ -49,6 +53,11 @@ export async function readSearchContinuation(query: SearchPageQuery): Promise<Se
     query.q.trim(),
     query.kind ?? "all",
     limit,
+    // Keep existing unfiltered cursors valid; filtered windows have a distinct
+    // binding that cannot be borrowed after changing or removing either filter.
+    ...(query.area !== undefined || query.status !== undefined
+      ? [query.area ?? null, query.status ?? null]
+      : []),
   ]);
   if (query.cursor === undefined) return { offset: 0, queryDigest };
   if (

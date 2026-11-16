@@ -1,3 +1,5 @@
+import type { AreaSlug, ProblemStatus } from "./problem-taxonomy.ts";
+
 /** Bounded, read-only continuation; tokens confer no access to any resource. */
 export const SEARCH_WINDOW_MAX = 500;
 export const SEARCH_CURSOR_MAX_LENGTH = 140;
@@ -6,6 +8,8 @@ export const SEARCH_CURSOR_PATTERN = /^sc1\.[0-9a-f]{64}\.[0-9a-f]{64}\.[1-9][0-
 export interface SearchPageQuery {
   readonly q: string;
   readonly kind?: "all" | "problem" | "claim" | "fellow";
+  readonly area?: AreaSlug;
+  readonly status?: Exclude<ProblemStatus, "private-draft">;
   readonly limit?: number;
   readonly cursor?: string;
 }
@@ -17,6 +21,8 @@ export function searchQueryString(query: SearchPageQuery): string {
     kind: query.kind ?? "all",
     limit: String(query.limit ?? 20),
   });
+  if (query.area !== undefined) params.set("area", query.area);
+  if (query.status !== undefined) params.set("status", query.status);
   if (query.cursor !== undefined) params.set("cursor", query.cursor);
   return params.toString();
 }

@@ -1,4 +1,4 @@
-import { SearchQueryRequestSchema } from "@asimposium/contracts";
+import { SEED_AREAS, SearchQueryRequestSchema } from "@asimposium/contracts";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ThemeToggle } from "@/app/theme-toggle";
@@ -17,18 +17,24 @@ interface SearchPageProps {
   searchParams: Promise<{
     q?: string | readonly string[];
     kind?: string | readonly string[];
+    area?: string | readonly string[];
+    status?: string | readonly string[];
     cursor?: string | readonly string[];
   }>;
 }
 
 export default async function SearchPage({ searchParams }: SearchPageProps) {
-  const { q, kind, cursor } = await searchParams;
+  const { q, kind, area, status, cursor } = await searchParams;
   const trimmedQuery = typeof q === "string" ? q.trim() : "";
   const scalarKind = typeof kind === "string" ? kind : "all";
-  const repeatedParameter = Array.isArray(q) || Array.isArray(kind) || Array.isArray(cursor);
+  const scalarArea = typeof area === "string" ? area : "";
+  const scalarStatus = typeof status === "string" ? status : "";
+  const repeatedParameter = [q, kind, area, status, cursor].some(Array.isArray);
   const queryCheck = SearchQueryRequestSchema.safeParse({
     q: Array.isArray(q) ? q : trimmedQuery,
     kind,
+    area: area === "" ? undefined : area,
+    status: status === "" ? undefined : status,
     cursor,
   });
 
@@ -40,12 +46,16 @@ export default async function SearchPage({ searchParams }: SearchPageProps) {
           queryCheck.data.kind,
           stoaOrigin,
           queryCheck.data.cursor,
+          { area: queryCheck.data.area, status: queryCheck.data.status },
         )
       : null;
   const searchResult = read?.state === "ok" ? read.data : null;
 
-  const encodedQuery = encodeURIComponent(trimmedQuery);
-  const queryString = `q=${encodedQuery}${scalarKind !== "all" ? `&kind=${encodeURIComponent(scalarKind)}` : ""}`;
+  const params = new URLSearchParams({ q: trimmedQuery });
+  if (scalarKind !== "all") params.set("kind", scalarKind);
+  if (scalarArea) params.set("area", scalarArea);
+  if (scalarStatus) params.set("status", scalarStatus);
+  const queryString = params.toString();
   const mdUrl = `${stoaOrigin}/search.md?${queryString}`;
   const jsonUrl = `${stoaOrigin}/search.json?${queryString}`;
 
@@ -97,16 +107,57 @@ export default async function SearchPage({ searchParams }: SearchPageProps) {
               <option value="claim">Claims</option>
               <option value="fellow">Fellows</option>
             </select>
+            <input
+              type="text"
+              name="area"
+              list="search-areas"
+              defaultValue={scalarArea}
+              placeholder="All scientific areas"
+              aria-label="Scientific area"
+              aria-describedby="search-filter-help"
+              className="search-input"
+              maxLength={64}
+            />
+            <datalist id="search-areas">
+              {SEED_AREAS.map((entry) => (
+                <option key={entry.slug} value={entry.slug}>
+                  {entry.label}
+                </option>
+              ))}
+            </datalist>
+            <select
+              name="status"
+              defaultValue={scalarStatus}
+              aria-label="Problem status"
+              aria-describedby="search-filter-help"
+              className="search-select"
+            >
+              <option value="">Any problem status</option>
+              <option value="sharpening">Preparing statement</option>
+              <option value="active">Active</option>
+              <option value="dormant">Dormant</option>
+              <option value="under-result-review">Under result review</option>
+              <option value="resolved">Resolved</option>
+              <option value="retired">Retired</option>
+            </select>
             <button type="submit" className="search-btn">
               Search
             </button>
           </form>
+          <p id="search-filter-help" className="quiet">
+            Area and status filters return matching problems and their claims, excluding Fellow
+            profiles. Choose an area or enter its exact <code>other-*</code> name; leave it blank to
+            search all areas.
+          </p>
         </section>
 
         {(trimmedQuery || repeatedParameter) && !queryCheck.success && (
           <p role="status">
             {repeatedParameter ? (
-              <>Use one value each for q, kind and cursor. Submit the search form to try again.</>
+              <>
+                Use one value each for q, kind, area, status and cursor. Submit the search form to
+                try again.
+              </>
             ) : (
               <>
                 {queryCheck.error.issues[0]?.message}. For a claim, include its problem, for example{" "}

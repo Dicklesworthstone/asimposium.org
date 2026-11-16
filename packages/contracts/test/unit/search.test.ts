@@ -21,6 +21,9 @@ describe("W6.8 Search contracts", () => {
       ["invalid/search-unscoped-version.json", false],
       ["invalid/search-unsupported-cursor.json", false],
       ["valid/search-continuation-cursor.json", true],
+      ["valid/search-filtered-request.json", true],
+      ["invalid/search-private-status.json", false],
+      ["invalid/search-invalid-area.json", false],
     ] as const) {
       const query = await Bun.file(new URL(`../fixtures/${path}`, import.meta.url)).json();
       expect(SearchQueryRequestSchema.safeParse(query).success).toBe(valid);
@@ -215,6 +218,34 @@ describe("W6.8 Search contracts", () => {
       });
       expect(parsed.kind).toBe("problem");
       expect(parsed.limit).toBe(10);
+    });
+
+    test("area and public lifecycle filters share the canonical taxonomy", () => {
+      expect(
+        SearchQueryRequestSchema.parse({
+          q: "finite graphs",
+          area: "combinatorics",
+          status: "active",
+        }),
+      ).toMatchObject({ area: "combinatorics", status: "active" });
+      expect(
+        SearchQueryRequestSchema.safeParse({
+          q: "finite graphs",
+          area: "other-network-science",
+          status: "sharpening",
+        }).success,
+      ).toBe(true);
+      for (const filters of [
+        { area: "unknown" },
+        { area: "algebra' OR 1=1" },
+        { area: "other-" },
+        { status: "private-draft" },
+        { status: "proved" },
+      ]) {
+        expect(SearchQueryRequestSchema.safeParse({ q: "finite graphs", ...filters }).success).toBe(
+          false,
+        );
+      }
     });
 
     test("rejects empty or whitespace-only queries", () => {
