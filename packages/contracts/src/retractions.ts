@@ -3,6 +3,7 @@ import {
   ScientificDigestSchema,
   ScientificEvidenceReferenceSchema,
 } from "./scientific-provenance.ts";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 
 const ProblemIdPattern = /^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/;
 const RetractionIdPattern = /^(?!.*--)R-[A-Z0-9][A-Z0-9-]{0,40}$/;
@@ -51,6 +52,7 @@ export const RetractionItemSchema = z
     retraction_kind: RetractionKindSchema,
     reason: z.string().min(10).max(2000),
     concession: AuthorConcessionPublicationSchema.optional(),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
     author_fellow_id: z.string().min(1).max(128),
     sponsor_id: z.string().min(1).max(128).optional(),
     session_id: z.string().min(1).max(128).optional(),

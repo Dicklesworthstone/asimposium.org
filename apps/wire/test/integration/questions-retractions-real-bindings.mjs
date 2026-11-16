@@ -693,7 +693,28 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.equal(invalidTargetRes.code, "RETRACTION_TARGET_INVALID");
 
-  // 14. Self-corrected retraction: Author A retracts unrefuted Claim 1 (201)
+  // 14. A publishable screening warning must not prevent an author from
+  // correcting the public record. Its exact notice survives every read face.
+  const retractionWarning = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  };
+  const screensBeforeForgery = await fixtures.screeningCalls();
+  const forgedRetraction = await call(
+    `/v1/sessions/${sessionIdA}/retract`,
+    {
+      target_object: claim1Id,
+      reason: "Author self-correction: found counterexample in 2-adic valuations at depth 12.",
+      screening_notice: retractionWarning,
+    },
+    authorA,
+    422,
+    "retract-forged-warning",
+  );
+  assert.equal(forgedRetraction.code, "RETRACT_BODY_INVALID");
+  assert.equal(await fixtures.screeningCalls(), screensBeforeForgery);
+  await fixtures.setScreenMode("allow-with-warning");
   const retract1 = await call(
     `/v1/sessions/${sessionIdA}/retract`,
     {
@@ -704,6 +725,7 @@ await runLocalWorkerJourney(async (context) => {
     201,
     "retract-idempotency-1",
   );
+  await fixtures.setScreenMode("pass");
   assert.equal(retract1.ok, true);
   assert.ok(retract1.retraction_id.startsWith("R-"));
   assert.equal(retract1.target_object, claim1Id);
@@ -720,6 +742,7 @@ await runLocalWorkerJourney(async (context) => {
     (await call("/v1/inbox/ack", { notice_ids: [answerNotice.id] }, authorA)).acknowledged_count,
     0,
   );
+  const screensAfterRetraction = await fixtures.screeningCalls();
 
   // Idempotent replay of retraction (200)
   const replayRetract1 = await call(
@@ -734,6 +757,34 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.equal(replayRetract1.retraction_id, retraction1Id);
   assert.equal(replayRetract1.ok, true);
+  assert.deepEqual(replayRetract1, retract1, "warning replay retains the original receipt");
+  assert.equal(await fixtures.screeningCalls(), screensAfterRetraction);
+  const warningReceipts = await env.DB.prepare(
+    `SELECT s.provenance_json FROM events e
+     JOIN screening_publications s ON s.event_id=e.id
+     WHERE e.problem_id=? AND e.object_id=? AND e.type='object.retracted'`,
+  )
+    .bind(problemId, retraction1Id)
+    .all();
+  assert.equal(
+    warningReceipts.results.length,
+    1,
+    "one event and exact warning receipt after replay",
+  );
+  assert.deepEqual(
+    JSON.parse(warningReceipts.results[0].provenance_json).public_action,
+    retractionWarning,
+  );
+  const warningPack = await call(
+    `/v1/sessions/${sessionIdA}/pack?profile=full&max_tokens=8000&through=${retract1.seq}&after=${retract1.seq - 1}`,
+    undefined,
+    authorA,
+  );
+  assert.deepEqual(
+    warningPack.items.find((item) => item.kind === "full-event")?.screening_notice,
+    retractionWarning,
+    "the exact event in the full pack retains the same notice",
+  );
 
   // Retracting already retracted target (409)
   const alreadyRetractedRes = await call(
@@ -961,10 +1012,12 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(ret1Item.retraction_kind, "self-corrected");
   assert.equal(ret1Item.sponsor_id, sponsorA);
   assert.equal(ret1Item.session_id, sessionIdA);
+  assert.deepEqual(ret1Item.screening_notice, retractionWarning);
 
   const ret2Item = parsedRetList.data.retractions.find((r) => r.retraction_id === retraction2Id);
   assert.ok(ret2Item);
   assert.equal(ret2Item.retraction_kind, "externally-refuted");
+  assert.equal(ret2Item.screening_notice, undefined, "another correction cannot borrow its notice");
 
   const retListMdRes = await worker.fetch(`${origin}/p/${problemId}/retractions.md`);
   assert.equal(retListMdRes.status, 200);
@@ -973,12 +1026,33 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(retListMd.includes("- **Kind**: self-corrected"));
   assert.ok(retListMd.includes(`## Retraction \`${retraction2Id}\``));
   assert.ok(retListMd.includes("- **Kind**: externally-refuted"));
+  assert.ok(retListMd.includes("Published with a screening context notice: dual-use-boundary."));
+  assert.ok(
+    retListMd.indexOf("Published with a screening context notice:") <
+      retListMd.indexOf("Author self-correction: found counterexample"),
+    "trusted warning precedes the correction's authored explanation",
+  );
 
   const retListHtmlRes = await worker.fetch(`${origin}/p/${problemId}/retractions.html`);
   assert.equal(retListHtmlRes.status, 200);
   const retListHtml = await retListHtmlRes.text();
   assert.ok(retListHtml.includes('class="asimp-retraction-kind asimp-kind-self-corrected"'));
   assert.ok(retListHtml.includes('class="asimp-retraction-kind asimp-kind-externally-refuted"'));
+  assert.ok(retListHtml.includes("Published with a screening context notice: dual-use-boundary."));
+  assert.ok(
+    retListHtml.indexOf("Published with a screening context notice:") <
+      retListHtml.indexOf("Author self-correction: found counterexample"),
+  );
+  for (const [format, original] of [
+    ["json", retListJsonRes],
+    ["md", retListMdRes],
+    ["html", retListHtmlRes],
+  ]) {
+    const cached = await worker.fetch(`${origin}/p/${problemId}/retractions.${format}`, {
+      headers: { "If-None-Match": original.headers.get("etag") },
+    });
+    assert.equal(cached.status, 304);
+  }
 
   // 17. Private-draft secrecy
   await env.DB.prepare(
@@ -1071,6 +1145,20 @@ await runLocalWorkerJourney(async (context) => {
     "redaction must never cosmetically restore support to open",
   );
   assert.equal(redactedClaim1Json.claim_state.stale, true, "redaction must mark standing stale");
+  for (const [format, original] of [
+    ["json", retListJsonRes],
+    ["md", retListMdRes],
+    ["html", retListHtmlRes],
+  ]) {
+    const current = await worker.fetch(`${origin}/p/${problemId}/retractions.${format}`, {
+      headers: { "If-None-Match": original.headers.get("etag") },
+    });
+    assert.equal(current.status, 200, "redaction invalidates every cached public face");
+    const text = await current.text();
+    assert.ok(!text.includes("Author self-correction: found counterexample"));
+    assert.ok(!text.includes("screening-warning"));
+    assert.ok(!text.includes("Published with a screening context notice:"));
+  }
 
   // A new version preserves withdrawal and the readable original statement.
   const revised = await call(

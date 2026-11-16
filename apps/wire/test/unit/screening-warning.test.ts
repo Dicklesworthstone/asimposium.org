@@ -439,6 +439,39 @@ describe("published screening warnings", () => {
       expect(f.state().events).toEqual([]);
     }));
 
+  test("retraction warnings require the exact writer and remain bound to its screened bytes", () =>
+    withFixture(async (f) => {
+      const input = {
+        ...candidate(f, "retraction"),
+        statement: "Author correction: the boundary case contradicts the proposed finite bound.",
+        falsifier: null,
+      };
+      for (const category of ["dual-use-boundary", "off-topic"] as const) {
+        const receipt = published(await screen(f, input, { coarse_category: category }, "retract"));
+        expect(receipt.provenance.public_action).toEqual({
+          category,
+          action: "published-with-warning",
+          notice: category === "off-topic" ? "off-scope" : "screening-warning",
+        });
+      }
+      expect(count(f, "screening_cases")).toBe(0);
+      for (const [kind, route, patch] of [
+        ["retraction", "questions", {}],
+        ["question", "retract", {}],
+        ["question-withdraw", "questions/withdraw", {}],
+        ["gap-close", "gaps/close", {}],
+        ["retraction", "retract", { provider_status: "timeout" }],
+        ["retraction", "retract", { evaluated_body_digest: `sha256:${"f".repeat(64)}` }],
+        ["retraction", "retract", { evaluated_context_digest: `sha256:${"f".repeat(64)}` }],
+        ["retraction", "retract", { coarse_category: "benign-context" }],
+      ] as const) {
+        const result = await screen(f, { ...input, kind }, patch, route);
+        expect(result instanceof Response && result.status).toBe(202);
+      }
+      expect(f.state().events).toEqual([]);
+      expect(count(f, "screening_refusals")).toBe(0);
+    }));
+
   test("unsupported kinds still hold, and a warning cannot relax provider failure, incoherence or digest binding", () =>
     withFixture(async (f) => {
       for (const [kind, patch] of [

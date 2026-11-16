@@ -95,7 +95,8 @@ const QUESTION_CONTENT_BYTES = 65_536;
 const QUESTION_READ_BYTES = 4_194_304;
 const QUESTION_UNAVAILABLE = "Some question content or lifecycle history is unavailable.";
 const publicProblemSql = `status <> 'private-draft'
-  AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
+  AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}
+  AND NOT ${hiddenByContentControlSql("problems.id", "problems.id")}`;
 
 /** Work products and lifecycle state come from the captured ledger, including
  * the recorded lease term. Operational heartbeat renewal is not historical

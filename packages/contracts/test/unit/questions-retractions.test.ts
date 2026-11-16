@@ -373,6 +373,52 @@ describe("W5.8d Questions & Retractions contracts", () => {
       expect(RetractionsListResponseSchema.safeParse(listRes).success).toBe(true);
     });
 
+    test("public retraction notices are typed platform metadata that authors cannot set", () => {
+      const request = {
+        target_object: "C-12",
+        reason: "The finite boundary case contradicts the earlier claim.",
+      };
+      const record = {
+        ...request,
+        retraction_id: "R-1",
+        problem_id: "P-100",
+        seq: 7,
+        retraction_kind: "self-corrected",
+        author_fellow_id: "fel_alpha",
+        created_at: "2026-09-09T14:00:00.000Z",
+      };
+      for (const notice of [
+        {
+          category: "dual-use-boundary",
+          action: "published-with-warning",
+          notice: "screening-warning",
+        },
+        { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
+      ]) {
+        expect(
+          RetractionItemSchema.parse({ ...record, screening_notice: notice }).screening_notice,
+        ).toEqual(notice);
+        expect(
+          RetractRequestSchema.safeParse({ ...request, screening_notice: notice }).success,
+        ).toBe(false);
+        expect(
+          RetractionItemSchema.safeParse({
+            ...record,
+            screening_notice: { ...notice, input_digest: "private-detector-metadata" },
+          }).success,
+        ).toBe(false);
+      }
+      for (const notice of [
+        { category: "dual-use-boundary", action: "published-with-warning" },
+        { category: "off-topic", action: "published-with-warning", notice: "screening-warning" },
+        { category: "benign-context", action: "published", notice: "none" },
+      ])
+        expect(
+          RetractionItemSchema.safeParse({ ...record, screening_notice: notice }).success,
+        ).toBe(false);
+      expect(RetractionItemSchema.parse(record).screening_notice).toBeUndefined();
+    });
+
     test("RetractResponseSchema validates canonical response", () => {
       const res = {
         ok: true,

@@ -1,13 +1,21 @@
 import { afterEach, expect, test } from "bun:test";
+import type { ScreeningPublicationNotice } from "@asimposium/contracts";
+import { screeningNoticeText } from "@asimposium/render";
 import type { Env } from "../../src/env.ts";
 import { sha256Hex, writeLedgerEvent } from "../../src/krater/krater.ts";
 import { loadProblemRetractions } from "../../src/ledger/retractions.ts";
 import { createLedgerFaceRoutes } from "../../src/ledger-face.ts";
 import {
+  publicationProvenance,
+  type ScreenedPublication,
+  screeningPublicationStatements,
+} from "../../src/screening/ingress.ts";
+import {
   directiveDisclosureFixture,
   DISCLOSURE_PROBLEM as problemId,
   DISCLOSURE_SPONSOR as sponsorId,
 } from "../support/directive-disclosure.ts";
+import { syntheticScreeningObservation } from "../support/screening.ts";
 
 type Fixture = Awaited<ReturnType<typeof directiveDisclosureFixture>>;
 const fixtures: Fixture[] = [];
@@ -24,7 +32,12 @@ async function fixture() {
   fixtures.push(f);
   return f;
 }
-async function publish(f: Fixture, retractionId = "R-1", extra: Record<string, unknown> = {}) {
+async function publish(
+  f: Fixture,
+  retractionId = "R-1",
+  extra: Record<string, unknown> = {},
+  screened?: ScreenedPublication,
+) {
   const payloadJson = JSON.stringify({
     retraction_id: retractionId,
     target_object: "C-1",
@@ -34,13 +47,14 @@ async function publish(f: Fixture, retractionId = "R-1", extra: Record<string, u
   });
   const eventId = `E-retraction-${crypto.randomUUID()}`,
     createdAt = new Date().toISOString();
+  const requestDigest = await sha256Hex(payloadJson);
   return writeLedgerEvent(
     f.db,
     {
       problemId,
       eventId,
       idempotencyKey: eventId,
-      requestDigest: await sha256Hex(payloadJson),
+      requestDigest,
       eventType: "object.retracted",
       objectKind: "retraction",
       objectId: retractionId,
@@ -63,8 +77,28 @@ async function publish(f: Fixture, retractionId = "R-1", extra: Record<string, u
       reason,author_fellow_id,created_at) VALUES(?,?,?,'C-1','self-corrected',?,?,?)`,
           )
           .bind(retractionId, problemId, sequence, reason, f.binding.fellowId, createdAt),
+        ...(screened === undefined
+          ? []
+          : screeningPublicationStatements(f.db, screened, eventId, "S-retraction", requestDigest)),
       ],
     },
+  );
+}
+async function warning(f: Fixture, category: "dual-use-boundary" | "off-topic") {
+  const input = {
+    problemId,
+    fellowId: f.binding.fellowId,
+    kind: "retraction",
+    statement: reason,
+    falsifier: null,
+  };
+  return publicationProvenance(
+    input,
+    await syntheticScreeningObservation(input, {
+      decision: "allow-with-warning",
+      coarse_category: category,
+      provider_status: "ok",
+    }),
   );
 }
 function control(f: Fixture, ref: string, visibility: "hidden" | "visible", version: number) {
@@ -146,22 +180,100 @@ test("retraction identity, target, classification and attribution come from immu
   }
 });
 
-test("whole-problem visibility precedes retraction conditional GET and HEAD", async () => {
-  const f = await fixture();
-  await publish(f);
-  f.sql.query("UPDATE problems SET unlisted=1 WHERE id=?").run(problemId);
-  const response = await face(f, "json"),
-    etag = response.headers.get("etag") ?? "";
-  expect(response.headers.get("x-robots-tag")).toContain("noindex");
-  control(f, "problem", "hidden", 1);
-  for (const format of formats)
-    for (const method of ["GET", "HEAD"]) {
-      const hidden = await face(f, format, { method, headers: { "if-none-match": etag } });
-      expect(hidden.status).toBe(404);
-      expect(await hidden.text()).not.toContain(reason);
+test.each(["problem", problemId])(
+  "whole-problem visibility %s precedes retraction conditional GET and HEAD",
+  async (target) => {
+    const f = await fixture();
+    await publish(f, "R-1", {}, await warning(f, "dual-use-boundary"));
+    f.sql.query("UPDATE problems SET unlisted=1 WHERE id=?").run(problemId);
+    const response = await face(f, "json"),
+      etag = response.headers.get("etag") ?? "";
+    expect(response.headers.get("x-robots-tag")).toContain("noindex");
+    control(f, target, "hidden", 1);
+    for (const format of formats)
+      for (const method of ["GET", "HEAD"]) {
+        const hidden = await face(f, format, { method, headers: { "if-none-match": etag } });
+        expect(hidden.status).toBe(404);
+        const text = await hidden.text();
+        expect(text).not.toContain(reason);
+        expect(text).not.toContain("screening-warning");
+        expect(text).not.toContain("Published with a screening context notice:");
+      }
+    control(f, target, "visible", 2);
+    expect((await face(f, "json")).status).toBe(200);
+  },
+);
+
+test("retraction notices come only from each exact publication receipt and precede its prose", async () => {
+  for (const category of ["dual-use-boundary", "off-topic"] as const) {
+    const f = await fixture(),
+      receipt = await warning(f, category);
+    await publish(f, "R-1", {}, receipt);
+    // Legacy absence remains absence; authored content cannot supply a notice
+    // or borrow the neighboring publication's trusted screening receipt.
+    await publish(f, "R-2", { screening_notice: receipt.provenance.public_action });
+    const notice = receipt.provenance.public_action as ScreeningPublicationNotice;
+    const result = await loadProblemRetractions(f.db, problemId);
+    expect(result.retractions[0]?.screening_notice).toEqual(notice);
+    expect(result.retractions[1]?.screening_notice).toBeUndefined();
+    for (const format of formats) {
+      const response = await face(f, format);
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      if (format === "json") {
+        const data = JSON.parse(text);
+        expect(data.retractions[0].screening_notice).toEqual(notice);
+        expect(data.retractions[1].screening_notice).toBeUndefined();
+      } else {
+        expect(text.indexOf(screeningNoticeText(notice))).toBeGreaterThan(-1);
+        expect(text.indexOf(screeningNoticeText(notice))).toBeLessThan(text.indexOf(reason));
+        expect(text.split(screeningNoticeText(notice))).toHaveLength(2);
+      }
+      expect(text).not.toMatch(/input_digest|context_digest|configuration_digest|policy_version/);
+      expect(
+        (await face(f, format, { headers: { "if-none-match": response.headers.get("etag") ?? "" } }))
+          .status,
+      ).toBe(304);
     }
-  control(f, "problem", "visible", 2);
-  expect((await face(f, "json")).status).toBe(200);
+  }
+});
+
+test("corrupt retraction screening provenance cannot return an unqualified explanation or cached success", async () => {
+  const f = await fixture();
+  const admitted = await publish(f, "R-1", {}, await warning(f, "dual-use-boundary"));
+  const original = await face(f, "json");
+  expect(original.status).toBe(200);
+  const etag = original.headers.get("etag") ?? "";
+  // Deliberate corruption below the immutable write guard: public reads must
+  // not silently turn the damaged record into an ordinary publication.
+  f.sql.exec("DROP TRIGGER screening_publications_no_update");
+  f.sql
+    .query("UPDATE screening_publications SET provenance_json='{}' WHERE event_id=?")
+    .run(admitted.eventId);
+  await expect(loadProblemRetractions(f.db, problemId)).rejects.toThrow(
+    "PUBLIC_SCREENING_RECEIPT_UNAVAILABLE",
+  );
+  for (const format of formats) {
+    const response = await face(f, format, { headers: { "if-none-match": etag } });
+    expect(response.status).toBe(500);
+    expect(await response.text()).not.toContain(reason);
+  }
+});
+
+test("a warning receipt without its public notice cannot commit a retraction", async () => {
+  const f = await fixture(),
+    receipt = await warning(f, "dual-use-boundary");
+  const before = f.sql.query("SELECT id,seq FROM events ORDER BY seq").all();
+  const forged = {
+    ...receipt,
+    provenance: {
+      ...receipt.provenance,
+      public_action: { category: "benign-context", action: "published", notice: "none" },
+    },
+  } as ScreenedPublication;
+  await expect(publish(f, "R-1", {}, forged)).rejects.toThrow("SCREENING_WARNING_INVALID");
+  expect(f.sql.query("SELECT id,seq FROM events ORDER BY seq").all()).toEqual(before);
+  expect(f.sql.query("SELECT retraction_id FROM retractions").all()).toEqual([]);
 });
 
 test("unavailable retraction sources never resurrect retained bytes or invent an empty ledger", async () => {

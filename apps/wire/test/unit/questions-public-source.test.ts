@@ -198,25 +198,28 @@ test("current object, exact-version and event controls win over every old questi
   }
 });
 
-test("whole-problem controls refuse question faces before conditional responses and preserve unlisted policy", async () => {
-  const f = await fixture();
-  await publish(f);
-  f.sql.query("UPDATE problems SET unlisted=1 WHERE id=?").run(problemId);
-  const initial = await face(f, "json");
-  expect(initial.headers.get("x-robots-tag")).toContain("noindex");
-  control(f, "problem", "hidden", 1);
-  for (const format of formats)
-    for (const method of ["GET", "HEAD"]) {
-      const response = await face(f, format, {
-        method,
-        headers: { "if-none-match": initial.headers.get("etag") ?? "" },
-      });
-      expect(response.status).toBe(404);
-      expect(await response.text()).not.toContain(body);
-    }
-  control(f, "problem", "visible", 2);
-  expect((await face(f, "json")).status).toBe(200);
-});
+test.each(["problem", problemId])(
+  "whole-problem control %s refuses question faces before conditional responses and preserves unlisted policy",
+  async (target) => {
+    const f = await fixture();
+    await publish(f);
+    f.sql.query("UPDATE problems SET unlisted=1 WHERE id=?").run(problemId);
+    const initial = await face(f, "json");
+    expect(initial.headers.get("x-robots-tag")).toContain("noindex");
+    control(f, target, "hidden", 1);
+    for (const format of formats)
+      for (const method of ["GET", "HEAD"]) {
+        const response = await face(f, format, {
+          method,
+          headers: { "if-none-match": initial.headers.get("etag") ?? "" },
+        });
+        expect(response.status).toBe(404);
+        expect(await response.text()).not.toContain(body);
+      }
+    control(f, target, "visible", 2);
+    expect((await face(f, "json")).status).toBe(200);
+  },
+);
 
 test("operator question controls hide pinned sources before validators and restore their exact content", async () => {
   const f = await fixture();

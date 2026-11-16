@@ -8,10 +8,12 @@ import {
   neutralizeUntrustedBody,
   safeCodeSpan,
   safeInlineProse,
+  screeningNoticeText,
 } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import { sha256Hex } from "../krater/krater.ts";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 
 /**
  * W5.8d / Fable §5.4, §6.1, Rule P6, P9:
@@ -83,7 +85,8 @@ export interface LoadProblemRetractionsOptions {
 const RETRACTION_CONTENT_BYTES = 65_536;
 const RETRACTION_UNAVAILABLE = "A retraction explanation is unavailable.";
 const publicProblemSql = `status <> 'private-draft'
-  AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
+  AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}
+  AND NOT ${hiddenByContentControlSql("problems.id", "problems.id")}`;
 
 interface RetractionReadRow {
   retraction_id: string;
@@ -98,6 +101,7 @@ interface RetractionReadRow {
   created_at: string;
   payload_json: string | null;
   payload_sha256: string;
+  screening_provenance_json: string | null;
 }
 
 export async function loadProblemRetractions(
@@ -138,10 +142,15 @@ export async function loadProblemRetractions(
       CASE WHEN c.redacted_at IS NULL AND NOT ${eventContentHiddenSql("e")}
         AND length(CAST(c.payload_json AS BLOB)) <= ${RETRACTION_CONTENT_BYTES}
         THEN c.payload_json END AS payload_json,
-      e.payload_sha256
+      e.payload_sha256,
+      CASE WHEN screening.event_id IS NOT NULL
+        THEN CASE WHEN length(CAST(screening.provenance_json AS BLOB)) <= 4096
+          THEN screening.provenance_json ELSE '' END
+        END AS screening_provenance_json
     FROM page a JOIN scope p
     JOIN events e ON e.problem_id = p.id AND e.seq = a.first_seq
     LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+    LEFT JOIN screening_publications screening ON screening.event_id = e.id
     ORDER BY e.seq
   `;
   // The scope check and source selection share a snapshot. Current controls
@@ -194,6 +203,10 @@ export async function loadProblemRetractions(
       unavailable();
       continue;
     }
+    // The exact immutable correction supplies its own notice. A claim's or
+    // another correction's receipt cannot authorize unqualified retraction
+    // prose. Current content controls are applied before reading the notice.
+    const screeningNotice = publicationScreeningNotice(row.screening_provenance_json);
     const item = {
       retraction_id: row.retraction_id,
       problem_id: row.problem_id,
@@ -202,6 +215,7 @@ export async function loadProblemRetractions(
       retraction_kind: payload.retraction_kind,
       reason: payload.reason,
       concession: payload.concession,
+      ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
       author_fellow_id: row.actor_fellow_id,
       sponsor_id: row.actor_sponsor_id ?? undefined,
       session_id: row.actor_session_id ?? undefined,
@@ -252,6 +266,10 @@ export function renderRetractionsMarkdown(
   for (const r of retractions) {
     parts.push(`## Retraction \`${r.retraction_id}\``);
     parts.push("");
+    if (r.screening_notice !== undefined) {
+      parts.push(screeningNoticeText(r.screening_notice));
+      parts.push("");
+    }
     parts.push(`- **Target object**: ${safeCodeSpan(r.target_object)}`);
     parts.push(`- **Kind**: ${r.retraction_kind}`);
     if (r.concession) {
@@ -334,6 +352,10 @@ export function renderRetractionsHtmlFragment(
   for (const r of retractions) {
     parts.push('    <li class="asimp-retraction-entry">');
     parts.push(`      <h3>Retraction <code>${escapeHtml(r.retraction_id)}</code></h3>`);
+    if (r.screening_notice !== undefined)
+      parts.push(
+        `      <p class="asimp-screening-notice">${escapeHtml(screeningNoticeText(r.screening_notice))}</p>`,
+      );
     parts.push('      <ul class="asimp-metadata">');
     parts.push(
       `        <li><strong>Target object:</strong> <code>${escapeHtml(r.target_object)}</code></li>`,

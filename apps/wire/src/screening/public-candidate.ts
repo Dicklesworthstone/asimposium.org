@@ -138,7 +138,10 @@ function supportsPublishedWarning(
     // Claim and statement reviews share a classifier kind. Their server-owned
     // writers preserve each publication's notice through canonical faces and packs.
     (kind === "review" &&
-      (holdContext?.route === "review" || holdContext?.route === "statement-review"))
+      (holdContext?.route === "review" || holdContext?.route === "statement-review")) ||
+    // Self-corrections preserve their exact publication notice on canonical
+    // retraction faces, event history and exports; the notice is not a verdict.
+    (kind === "retraction" && holdContext?.route === "retract")
   );
 }
 
