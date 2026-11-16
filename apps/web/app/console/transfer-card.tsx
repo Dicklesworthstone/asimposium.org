@@ -153,6 +153,17 @@ export function TransferManager({
     void recoveryOwner;
     return new Map();
   }, [recoveryOwner]);
+  // A server refresh preserves this form's state while its eligible Fellows
+  // can change. Reconcile before committing the controls so their displayed
+  // and submitted selection agree, and a replacement needs fresh consent.
+  // Retained commands below keep their original sealed intent unchanged.
+  const eligibleFellowId = offerable.some((fellow) => fellow.fellow_id === fellowId)
+    ? fellowId
+    : (offerable[0]?.fellow_id ?? "");
+  if (eligibleFellowId !== fellowId) {
+    setFellowId(eligibleFellowId);
+    setConfirmed(false);
+  }
   void recoveryRevision;
   let retained: readonly RetainedEnrollmentAttempt[] = [];
   let unreadable = false;

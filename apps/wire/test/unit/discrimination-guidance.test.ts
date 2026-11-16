@@ -106,9 +106,11 @@ test("withheld or corrupted source cannot acquire publication guidance", () => {
   const value = selected();
   value.face.hypotheses[0]!.content = null;
   assert.equal(composeDiscriminateMove("P-TEST", 3, value, template).move, null);
-  assert.equal(
-    composeDiscriminateMove("P-TEST", 3, { ...selected(), unlisted: true }, template).move,
-    null,
-  );
   assert.equal(composeDiscriminateMove("P-TEST", 4, selected(), template).move, null);
+});
+
+test("a known unlisted problem retains the same pinned publication guidance", () => {
+  const value = selected();
+  value.unlisted = true;
+  assert.deepEqual(preparation(value), preparation());
 });

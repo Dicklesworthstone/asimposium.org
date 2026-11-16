@@ -424,6 +424,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/problem.ts
   packages/contracts/src/field-hints.ts
   packages/contracts/src/problems.ts
+  packages/contracts/src/problem-taxonomy.ts
   packages/contracts/src/problem-hiding.ts
   packages/contracts/src/problem-boundaries.ts
   packages/contracts/src/schema.ts

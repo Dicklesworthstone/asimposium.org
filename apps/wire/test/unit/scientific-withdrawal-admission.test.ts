@@ -40,12 +40,14 @@ function fixture() {
     CREATE TABLE scientific_withdrawals(source_event_id TEXT PRIMARY KEY);
     CREATE VIEW artifact_publication_evidence AS SELECT 1 AS old_view;
     INSERT INTO problems VALUES('P-DEMO',3,'active',0),('P-OTHER',3,'active',0);`);
-  sql.exec(
-    readFileSync(
-      new URL("../../../../db/migrations/0072_withdrawn_artifact_evidence.sql", import.meta.url),
-      "utf8",
-    ),
-  );
+  for (const migration of [
+    "0043_screening_publication_provenance.sql",
+    "0072_withdrawn_artifact_evidence.sql",
+  ]) {
+    sql.exec(
+      readFileSync(new URL(`../../../../db/migrations/${migration}`, import.meta.url), "utf8"),
+    );
+  }
   const body = JSON.stringify({
     bears_on_kind: "claim",
     bears_on_id: "C-1",
