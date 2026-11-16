@@ -1,3 +1,4 @@
+import { EvidenceRequestSchema } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { loadPublicHypothesisItem } from "../ledger/hypotheses-service.ts";
@@ -10,6 +11,7 @@ export const INBOX_DELIVERY_JOB_LIMIT = 8;
 export const INBOX_DELIVERY_RECIPIENT_LIMIT = 20;
 const MAX_SOURCE_BYTES = 512 * 1024;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/;
+const EvidenceDirectionSchema = EvidenceRequestSchema.options[0].shape.direction;
 
 interface DeliveryJob {
   id: number;
@@ -203,13 +205,10 @@ async function templateFor(db: D1Database, job: DeliveryJob): Promise<DeliveryTe
     version < 1
   )
     return null;
-  if (
-    isEvidence &&
-    fields.direction !== "supports" &&
-    fields.direction !== "refutes" &&
-    fields.direction !== "informs"
-  )
-    return null;
+  // Notifications accept the same directions as the publication contract.
+  // In particular, a failed reproduction is actionable feedback, not an
+  // invalid delivery source to quarantine after its evidence was accepted.
+  if (isEvidence && !EvidenceDirectionSchema.safeParse(fields.direction).success) return null;
   const target = `${claimId}@${version}`;
   return {
     targetKind: "claim",

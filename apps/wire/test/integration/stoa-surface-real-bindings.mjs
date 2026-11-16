@@ -674,6 +674,92 @@ await runLocalWorkerJourney(
     );
     assert.ok(firstEvidence.evidence_id && secondEvidence.evidence_id);
 
+    // Bounds and replication outcomes are accepted evidence directions too.
+    // Exercise the real publication/queue/delivery loop: a failed reproduction
+    // must reach the author rather than being quarantined as an invalid source.
+    const replicationEvidence = [];
+    for (const [direction, body] of [
+      ["bounds", "The finite check is limited to the integer zero."],
+      ["reproduces", "A second direct multiplication gives zero again."],
+      [
+        "fails-to-reproduce",
+        "The claimed reproduction could not be completed in this fixture environment.",
+      ],
+    ]) {
+      const publication = await call(
+        `/v1/sessions/${secondSession}/evidence`,
+        { ...evidenceBody(body), direction },
+        second,
+        201,
+      );
+      const event = await env.DB.prepare(
+        "SELECT id FROM events WHERE problem_id = ? AND object_id = ? AND type = 'evidence.created'",
+      )
+        .bind(problem, publication.evidence_id)
+        .first();
+      assert.ok(event?.id);
+      replicationEvidence.push({
+        direction,
+        evidenceId: publication.evidence_id,
+        eventId: event.id,
+      });
+    }
+    const replicationTick = await fixtures.deliverInboxTick();
+    assert.equal(replicationTick.failed, 0);
+    assert.equal(replicationTick.quarantined, 0, "valid evidence directions are never quarantined");
+    assert.equal(replicationTick.notices, 3);
+    const replicationInbox = await inbox(author, "?limit=100");
+    const replicationNoticeIds = [];
+    for (const { direction, evidenceId, eventId } of replicationEvidence) {
+      const notices = replicationInbox.items.filter((item) => item.caused_by_event_id === eventId);
+      assert.equal(notices.length, 1, `${direction}: one causal notice reaches the claim author`);
+      const [notice] = notices;
+      replicationNoticeIds.push(notice.id);
+      assert.equal(notice.target_id, `${claim.claim_id}@1`);
+      assert.ok(notice.detail.includes(`direction '${direction}'`));
+      assert.ok(notice.detail.includes("does not certify"));
+      const sourcePath = `/p/${problem}/evidence/${evidenceId}.json`;
+      assert.ok(notice.next_actions?.some((action) => action.url === sourcePath));
+      const source = ClaimFaceResponseSchema.parse(await call(sourcePath));
+      assert.ok(source.items.some((item) => item.id === evidenceId));
+    }
+    for (const token of [reviewer, second]) {
+      assert.ok(
+        (await inbox(token, "?limit=100")).items.every(
+          (item) =>
+            !replicationEvidence.some((source) => source.eventId === item.caused_by_event_id),
+        ),
+        "replication notices stay private to the claim author and do not notify the actor",
+      );
+    }
+    const replicationAck = InboxAckResponseSchema.parse(
+      await call("/v1/inbox/ack", { notice_ids: replicationNoticeIds }, author),
+    );
+    assert.equal(replicationAck.acknowledged_count, 3);
+    for (const { eventId } of replicationEvidence) {
+      const replay = await env.DB.prepare(
+        "UPDATE inbox_event_deliveries SET state = 'pending', after_fellow_id = '' WHERE event_id = ?",
+      )
+        .bind(eventId)
+        .run();
+      assert.equal(replay.meta.changes, 1);
+    }
+    assert.equal((await fixtures.deliverInboxTick()).notices, 0);
+    const replayedReplicationInbox = await inbox(author, "?limit=100");
+    for (const { eventId } of replicationEvidence) {
+      const notices = replayedReplicationInbox.items.filter(
+        (item) => item.caused_by_event_id === eventId,
+      );
+      assert.equal(notices.length, 1);
+      assert.ok(
+        notices[0].acknowledged_at,
+        "replayed replication feedback preserves acknowledgment",
+      );
+    }
+    console.log(
+      JSON.stringify({ stage: "claim-replication-feedback", directions: 3, replayed: 3 }),
+    );
+
     // Acknowledgement clears the unread view.
     assert.ok(after.unacknowledged_count >= 1);
     const acked = InboxAckResponseSchema.parse(

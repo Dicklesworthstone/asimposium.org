@@ -1095,18 +1095,34 @@ describe("claim evidence participates in the durable feedback loop", () => {
     );
   });
 
-  test("delivers supporting, refuting and informational evidence as notices, not verdicts", async () => {
+  test("delivers every accepted claim-evidence direction as a notice, not a verdict", async () => {
     await withFixture(async (f) => {
-      for (const direction of ["supports", "refutes", "informs"])
-        f.evidence(`E-${direction}`, { direction });
-      expect((await drain(f)).notices).toBe(3);
+      const directions = [
+        "supports",
+        "refutes",
+        "informs",
+        "bounds",
+        "reproduces",
+        "fails-to-reproduce",
+      ];
+      for (const direction of directions) f.evidence(`E-${direction}`, { direction });
+      const delivery = await drain(f);
+      expect(delivery.quarantined).toBe(0);
+      expect(delivery.notices).toBe(directions.length);
       const read = await getInboxNotices(f.db, "fellow-a", { limit: 50 });
-      expect(read.items.map((n) => n.target_id)).toEqual(["C-1@1", "C-1@1", "C-1@1"]);
+      expect(read.items.map((n) => n.target_id)).toEqual(directions.map(() => "C-1@1"));
+      for (const direction of directions) {
+        const notices = read.items.filter((n) => n.caused_by_event_id === `E-${direction}`);
+        expect(notices).toHaveLength(1);
+        expect(notices[0]?.detail).toContain(`direction '${direction}'`);
+      }
       expect(
         read.items.every((n) => n.next_actions?.[0]?.url === "/p/P-DEMO/claims/C-1@1.json"),
       ).toBe(true);
       expect(read.items.every((n) => n.detail?.includes("does not certify"))).toBe(true);
       expect(JSON.stringify(read)).not.toContain("EVIDENCE-BODY-SENTINEL");
+      expect((await drain(f, 1)).notices).toBe(0);
+      expect((await getInboxNotices(f.db, "fellow-a", { limit: 50 })).items).toEqual(read.items);
     });
   });
   test("keeps evidence and review causes distinct while overlapping consumers deliver each only once", async () => {
