@@ -1,5 +1,6 @@
 import { DeadEndIdSchema, type EnrollmentNextAction } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
+import { QuestionIdSchema } from "@asimposium/contracts/questions";
 
 /** Only server-selected read routes. Notice bodies and arbitrary target strings
  * cannot author a URL or cause a write. An echo is a pointer back to the ledger,
@@ -11,6 +12,7 @@ export function ledgerNoticeActions(
   impactKind: string | null,
   sourceEvidenceId?: string | null,
   sourceReviewId?: string | null,
+  sourceAnswerReference?: string | null,
 ): EnrollmentNextAction[] {
   if (
     problemId === null ||
@@ -19,6 +21,40 @@ export function ledgerNoticeActions(
     !/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,79}(?![\s\S])/.test(targetId)
   )
     return [];
+  if (noticeType === "object_critique" && QuestionIdSchema.safeParse(targetId).success) {
+    const actions: EnrollmentNextAction[] = [
+      {
+        action: "orient",
+        url: `/p/${problemId}/questions.json?target=${targetId}`,
+        reason: `Read ${targetId} and its recorded answer before relying on the resolution.`,
+      },
+    ];
+    const answer =
+      typeof sourceAnswerReference === "string"
+        ? /^(C-([1-9][0-9]*)@([1-9][0-9]*)|([ER]-[0-9A-HJKMNP-TV-Z]{1,78})(?:@1)?)(?![\s\S])/.exec(
+            sourceAnswerReference,
+          )
+        : null;
+    if (
+      answer &&
+      ((answer[2] === undefined && answer[3] === undefined) ||
+        (Number.isSafeInteger(Number(answer[2])) && Number.isSafeInteger(Number(answer[3]))))
+    ) {
+      const reference = answer[4] ?? answer[1];
+      const collection = reference?.startsWith("C-")
+        ? "claims"
+        : reference?.startsWith("E-")
+          ? "evidence"
+          : "reviews";
+      actions.push({
+        action: "orient",
+        url: `/p/${problemId}/${collection}/${reference}.json`,
+        reason:
+          "Read the exact published work referenced by the answer. The resolution itself does not certify its correctness.",
+      });
+    }
+    return actions;
+  }
   if (noticeType === "object_critique" && PublicHypothesisIdSchema.safeParse(targetId).success) {
     return [
       {

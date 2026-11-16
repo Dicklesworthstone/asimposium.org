@@ -1,4 +1,5 @@
 import { VISIBLE_HYPOTHESIS_NOTICE_SQL } from "./hypothesis-notices.ts";
+import { VISIBLE_QUESTION_ANSWER_NOTICE_SQL } from "./question-notices.ts";
 
 /** Known-ID reads may reach unlisted public problems. Private drafts require
  * current durable membership; a follow is never an access grant. Keep these
@@ -44,7 +45,7 @@ export const VISIBLE_INBOX_NOTICE_SQL = `(
       )
     )
   )
-) AND ${VISIBLE_HYPOTHESIS_NOTICE_SQL}`;
+) AND ${VISIBLE_HYPOTHESIS_NOTICE_SQL} AND ${VISIBLE_QUESTION_ANSWER_NOTICE_SQL}`;
 
 /** Expiry ends inbox actionability, not durable history or cursor allocation.
  * Bind one captured request time after any visibility bindings. */

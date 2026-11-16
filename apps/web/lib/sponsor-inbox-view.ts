@@ -10,6 +10,7 @@ import {
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import { citationPath, citationsListPath, PublicCitationTargetSchema } from "@asimposium/contracts/citations";
 import { ProofGapIdSchema } from "@asimposium/contracts/proof-gaps";
+import { QuestionIdSchema } from "@asimposium/contracts/questions";
 import { isCanonicalSponsorId } from "./sponsor-id";
 import type { StoaCall } from "./stoa";
 
@@ -179,6 +180,15 @@ export function sponsorInboxNoticeLinks(
     links.push({
       label: `Read ${target}`,
       href: `${problem}/hypotheses/${encodeURIComponent(target)}`,
+    });
+  } else if (
+    item.type === "object_critique" &&
+    target.trim() === target &&
+    QuestionIdSchema.safeParse(target).success
+  ) {
+    links.push({
+      label: `Read ${target} and its recorded answer`,
+      href: `${problem}/questions?target=${encodeURIComponent(target)}`,
     });
   } else if (
     item.type === "impact_echo" &&

@@ -23,6 +23,7 @@ function fixture(run: (db: Database) => void) {
       CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,version INTEGER,visibility TEXT);
       CREATE TABLE scientific_withdrawals(event_id TEXT,problem_id TEXT,seq INTEGER,event_sha256 TEXT,
         retraction_id TEXT,target_kind TEXT,target_object TEXT,source_event_id TEXT,source_sha256 TEXT);
+      CREATE TABLE retractions(problem_id TEXT,seq INTEGER,target_object TEXT,author_fellow_id TEXT);
       CREATE TABLE enrollment_fellows (fellow_id TEXT PRIMARY KEY);
       CREATE TABLE problem_memberships (problem_id TEXT, fellow_id TEXT, PRIMARY KEY(problem_id, fellow_id));
       CREATE TABLE problem_follows (principal_id TEXT, problem_id TEXT, created_at INTEGER, PRIMARY KEY(principal_id, problem_id));

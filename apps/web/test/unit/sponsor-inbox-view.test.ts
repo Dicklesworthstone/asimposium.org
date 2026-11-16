@@ -135,6 +135,10 @@ test("notice links target mounted human routes and never turn prose into command
       `/p/${inboxProblem}/hypotheses/H-7`,
     ],
     [
+      { ...inboxNotice, type: "object_critique" as const, target_id: "Q-ANSWER7" },
+      `/p/${inboxProblem}/questions?target=Q-ANSWER7`,
+    ],
+    [
       { ...inboxNotice, impact_kind: "retry_trigger_fired" as const, target_id: "DE-7" },
       `/p/${inboxProblem}/dead-ends?include_superseded=true#DE-7`,
     ],
@@ -153,6 +157,10 @@ test("notice links target mounted human routes and never turn prose into command
     "javascript:alert(1)",
     "../inbox/ack",
     "C-2@9007199254740992",
+    "Q-7\n",
+    "Q-7?target=Q-8",
+    "Q-7/../../console",
+    "Q--7",
   ]) {
     const offered = sponsorInboxNoticeLinks(inboxFellow, {
       ...inboxNotice,
@@ -166,5 +174,6 @@ test("notice links target mounted human routes and never turn prose into command
     expect(JSON.stringify(offered)).not.toContain("evil.invalid");
     expect(JSON.stringify(offered)).not.toContain("/v1/");
     expect(offered.some((link) => link.href.includes("/claims/"))).toBe(false);
+    expect(offered.some((link) => link.href.includes("/questions?"))).toBe(false);
   }
 });

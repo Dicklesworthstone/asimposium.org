@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
+  InboxResponseSchema,
   QuestionsListResponseSchema,
   RetractionsListResponseSchema,
   ScreeningPromotionDeniedResponseSchema,
+  SponsorInboxResponseSchema,
 } from "@asimposium/contracts";
 import Ajv from "ajv/dist/2020.js";
 import { assertFullPackPublication } from "./full-pack-publication.mjs";
@@ -23,6 +25,23 @@ await runLocalWorkerJourney(async (context) => {
   const reviewerB = await enroll("qr-reviewer-b", sponsorB);
   const helloB = await call("/v1/hello", undefined, reviewerB);
   const _fellowIdB = helloB.fellow.fellow_id;
+  const inbox = async (token) =>
+    InboxResponseSchema.parse(await call("/v1/inbox?since=0&limit=100", undefined, token));
+  const questionNotices = (response, questionId) =>
+    response.items.filter(
+      (item) => item.type === "object_critique" && item.target_id === questionId,
+    );
+  const sponsorInbox = async () =>
+    SponsorInboxResponseSchema.parse(
+      await sponsorCall(sponsorA, "POST", "/v1/sponsors/inbox", "inbox.read", {
+        fellow_id: fellowIdA,
+        limit: 50,
+      }),
+    );
+  const drainAnswers = async () => {
+    for (let tick = 0; tick < 3; tick++)
+      assert.equal((await fixtures.deliverInboxTick()).failed, 0);
+  };
 
   // 1. Propose and publish problem
   const created = await call(
@@ -333,6 +352,85 @@ await runLocalWorkerJourney(async (context) => {
     "the original bare request replays its exact pinned receipt",
   );
 
+  const answerSource = await env.DB.prepare(
+    "SELECT id FROM events WHERE problem_id = ? AND object_id = ? AND type = 'question.answered'",
+  )
+    .bind(problemId, question1Id)
+    .first();
+  assert.ok(answerSource);
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT COUNT(*) AS n FROM inbox_event_deliveries WHERE event_id = ?")
+        .bind(answerSource.id)
+        .first()
+    ).n,
+    1,
+    "answer publication and replay enqueue exactly one delivery",
+  );
+  await drainAnswers();
+  const answerNotices = questionNotices(await inbox(authorA), question1Id);
+  assert.equal(answerNotices.length, 1, "the original question author receives the answer");
+  const answerNotice = answerNotices[0];
+  assert.equal(answerNotice.caused_by_event_id, answerSource.id);
+  assert.deepEqual(
+    answerNotice.next_actions.map((action) => action.url),
+    [
+      `/p/${problemId}/questions.json?target=${question1Id}`,
+      `/p/${problemId}/claims/${claim1Id}@1.json`,
+    ],
+  );
+  for (const action of answerNotice.next_actions) await call(action.url, undefined, undefined, 200);
+  assert.deepEqual(questionNotices(await inbox(reviewerB), question1Id), []);
+  assert.equal(
+    (await call("/v1/inbox/ack", { notice_ids: [answerNotice.id] }, reviewerB)).acknowledged_count,
+    0,
+  );
+  assert.deepEqual(
+    questionNotices(await sponsorInbox(), question1Id).map((item) => item.id),
+    [answerNotice.id],
+  );
+  await call("/v1/inbox", undefined, undefined, 401);
+
+  // A live content control removes the receipt from Fellow and sponsor reads
+  // before counting, and ack cannot reveal a hidden question's existence.
+  const answerQuestionControl = (action) =>
+    operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+      target_id: `${problemId}/${question1Id}`,
+      target_kind: "question",
+      action,
+      reason: "Verify the private answer notice follows current question visibility.",
+    });
+  const beforeHiddenAnswer = await inbox(authorA);
+  await answerQuestionControl("hide");
+  const hiddenAnswerInbox = await inbox(authorA);
+  assert.deepEqual(questionNotices(hiddenAnswerInbox, question1Id), []);
+  assert.equal(hiddenAnswerInbox.unacknowledged_count, beforeHiddenAnswer.unacknowledged_count - 1);
+  assert.deepEqual(questionNotices(await sponsorInbox(), question1Id), []);
+  assert.equal(
+    (await call("/v1/inbox/ack", { notice_ids: [answerNotice.id] }, authorA)).acknowledged_count,
+    0,
+  );
+  await answerQuestionControl("restore");
+  assert.equal(questionNotices(await inbox(authorA), question1Id)[0].id, answerNotice.id);
+  await call("/v1/inbox/ack", { notice_ids: [answerNotice.id] }, authorA);
+  await drainAnswers();
+  const repeatedAnswerNotices = questionNotices(await inbox(authorA), question1Id);
+  assert.deepEqual(
+    repeatedAnswerNotices.map((item) => item.id),
+    [answerNotice.id],
+  );
+  assert.ok(repeatedAnswerNotices[0].acknowledged_at, "delivery retry preserves acknowledgment");
+  console.log(
+    JSON.stringify({
+      stage: "question-answer-inbox",
+      status: "pass",
+      recipient_isolation: true,
+      exact_question_and_answer_reads: true,
+      current_visibility_counts_and_ack: true,
+      replay_preserves_acknowledgment: true,
+    }),
+  );
+
   // Answering already resolved question (409)
   const alreadyResolvedRes = await call(
     `/v1/sessions/${sessionIdB}/questions/${question1Id}/answer`,
@@ -612,6 +710,16 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(retract1.retraction_kind, "self-corrected");
   assert.ok(retract1.seq > 0);
   const retraction1Id = retract1.retraction_id;
+  assert.deepEqual(
+    questionNotices(await inbox(authorA), question1Id),
+    [],
+    "withdrawing the exact answer publication removes its old actionable receipt",
+  );
+  assert.deepEqual(questionNotices(await sponsorInbox(), question1Id), []);
+  assert.equal(
+    (await call("/v1/inbox/ack", { notice_ids: [answerNotice.id] }, authorA)).acknowledged_count,
+    0,
+  );
 
   // Idempotent replay of retraction (200)
   const replayRetract1 = await call(
@@ -714,6 +822,18 @@ await runLocalWorkerJourney(async (context) => {
     "answer-with-review-publication",
   );
   assert.equal(reviewAnswer.resolved_by_object, refutingReview.review_id);
+  await drainAnswers();
+  const reviewAnswerNotices = questionNotices(await inbox(authorA), reviewQuestion.question_id);
+  assert.equal(reviewAnswerNotices.length, 1);
+  assert.deepEqual(
+    reviewAnswerNotices[0].next_actions.map((action) => action.url),
+    [
+      `/p/${problemId}/questions.json?target=${reviewQuestion.question_id}`,
+      `/p/${problemId}/reviews/${refutingReview.review_id}.json`,
+    ],
+  );
+  for (const action of reviewAnswerNotices[0].next_actions)
+    await call(action.url, undefined, undefined, 200);
   assert.deepEqual(
     await env.DB.prepare("SELECT status, resolved_by_object FROM questions WHERE question_id = ?")
       .bind(reviewQuestion.question_id)
@@ -1064,6 +1184,39 @@ await runLocalWorkerJourney(async (context) => {
   await questionControl("restore");
   assert.equal((await worker.fetch(`${origin}${exactQuestionPath}`)).status, 200);
 
+  // Self-resolution has the same durable transaction and retry behavior but
+  // must never become a new private notification to the answering Fellow.
+  const selfQuestion = await call(
+    `/v1/sessions/${sessionIdA}/questions`,
+    {
+      body_md: "Which published review explains the cycle counterexample?",
+      target_refs: [refutingReview.review_id],
+    },
+    authorA,
+    201,
+    "self-answer-question",
+  );
+  const selfAnswerPath = `/v1/sessions/${sessionIdA}/questions/${selfQuestion.question_id}/answer`;
+  const selfAnswerBody = { resolved_by_object: refutingReview.review_id };
+  const selfAnswer = await call(selfAnswerPath, selfAnswerBody, authorA, 200, "self-answer");
+  assert.deepEqual(
+    await call(selfAnswerPath, selfAnswerBody, authorA, 200, "self-answer"),
+    selfAnswer,
+  );
+  await drainAnswers();
+  assert.deepEqual(questionNotices(await inbox(authorA), selfQuestion.question_id), []);
+  assert.deepEqual(questionNotices(await sponsorInbox(), selfQuestion.question_id), []);
+  assert.equal(
+    (
+      await env.DB.prepare(`SELECT COUNT(*) AS n FROM inbox_event_deliveries q
+    JOIN events e ON e.id = q.event_id WHERE e.problem_id = ? AND e.object_id = ?
+      AND e.type = 'question.answered' AND q.state = 'delivered'`)
+        .bind(problemId, selfQuestion.question_id)
+        .first()
+    ).n,
+    1,
+  );
+
   console.log(
     JSON.stringify({
       stage: "questions-retractions-real-bindings",
@@ -1077,6 +1230,9 @@ await runLocalWorkerJourney(async (context) => {
       canary_screening_verified: true,
       author_authority_p9_verified: true,
       leasing_and_answering_verified: true,
+      private_answer_inbox_delivery_verified: true,
+      answer_inbox_exact_reads_and_visibility_verified: true,
+      self_answer_and_replay_do_not_duplicate_inbox_verified: true,
       self_corrected_vs_externally_refuted_verified: true,
       diptych_faces_verified: true,
       private_draft_secrecy_verified: true,

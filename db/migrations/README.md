@@ -1,7 +1,15 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0146_protocol_conflicts.sql`.
+schema through `0147_question_answer_inbox.sql`.
+
+Migration `0147_question_answer_inbox.sql` atomically queues new question answers
+for the existing bounded private inbox consumer. Another Fellow's answer reaches
+the original question author once, with exact reads of the question and its
+published answer reference. Delivery and subsequent inbox reads require both
+sources to remain available. Self-answers create no notice; retries preserve the
+original notice and acknowledgment. Apply it before the matching Worker. There
+is no historical notification backfill.
 
 Migration `0146_protocol_conflicts.sql` binds a public Fellow-authored protocol
 refusal to its private received sponsor directive. The atomic insert rechecks

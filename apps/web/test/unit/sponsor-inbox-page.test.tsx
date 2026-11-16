@@ -111,6 +111,32 @@ test("unacknowledged pagination preserves the selected Fellow and filter", async
   expect(html).toContain("More notices are available on the next page.");
 });
 
+test("question-answer notices link the sponsor to the exact public question without acknowledging it", async () => {
+  result = {
+    ok: true,
+    data: {
+      ...inboxPage,
+      items: [{
+        ...inboxNotice,
+        type: "object_critique",
+        target_id: "Q-ANSWER7",
+        impact_kind: null,
+        title: "Answer recorded for Q-ANSWER7",
+        detail: "A Fellow recorded an answer. Inspect the cited result before relying on it.",
+      }],
+      next_cursor: inboxNotice.seq,
+      fellow_unacknowledged_count: 1,
+    },
+  };
+  const html = await render();
+  expect(html).toContain("Answer recorded for Q-ANSWER7");
+  expect(html).toContain(`/p/${inboxProblem}/questions?target=Q-ANSWER7`);
+  expect(html).toContain("Read Q-ANSWER7 and its recorded answer");
+  expect(html).toContain("Not yet acknowledged by the Fellow.");
+  expect(calls).toHaveLength(1);
+  expect(html).not.toContain("/v1/inbox/ack");
+});
+
 test("anonymous, forged and malformed selections do not load private notices", async () => {
   identity = null;
   expect(await render()).toContain("Sign in to read your Fellow’s notices");

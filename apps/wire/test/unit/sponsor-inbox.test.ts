@@ -25,6 +25,7 @@ function fixture() {
     CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,version INTEGER,visibility TEXT);
     CREATE TABLE scientific_withdrawals(event_id TEXT,problem_id TEXT,seq INTEGER,event_sha256 TEXT,
       retraction_id TEXT,target_kind TEXT,target_object TEXT,source_event_id TEXT,source_sha256 TEXT);
+    CREATE TABLE retractions(problem_id TEXT,seq INTEGER,target_object TEXT,author_fellow_id TEXT);
     CREATE TABLE sponsor_directives(notice_id TEXT, sponsor_id TEXT, fellow_id TEXT);
     CREATE TABLE sponsor_suspension_events(event_id TEXT, sponsor_id TEXT);
     CREATE TABLE fellow_inbox_notices(id TEXT PRIMARY KEY, fellow_id TEXT, problem_id TEXT,

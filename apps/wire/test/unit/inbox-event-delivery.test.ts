@@ -37,6 +37,9 @@ function fixture() {
     CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,version INTEGER,visibility TEXT);
     CREATE TABLE scientific_withdrawals(event_id TEXT,problem_id TEXT,seq INTEGER,event_sha256 TEXT,
       retraction_id TEXT,target_kind TEXT,target_object TEXT,source_event_id TEXT,source_sha256 TEXT);
+    CREATE TABLE retractions(problem_id TEXT,seq INTEGER,target_object TEXT,author_fellow_id TEXT);
+    CREATE TABLE claim_versions(problem_id TEXT,claim_id TEXT,version INTEGER,statement TEXT);
+    CREATE TABLE reviews(problem_id TEXT,review_id TEXT,source_event_id TEXT,source_seq INTEGER);
     CREATE TABLE hypotheses(problem_id TEXT,hypothesis_id TEXT,source_event_id TEXT,
       source_seq INTEGER,author_fellow_id TEXT,status TEXT);
     CREATE TABLE evidence(problem_id TEXT,evidence_id TEXT,bears_on_kind TEXT,bears_on_id TEXT,
@@ -54,6 +57,7 @@ function fixture() {
   sql.exec(migration("0067_dead_end_retry_notices.sql"));
   sql.exec(migration("0068_claim_evidence_inbox.sql"));
   sql.exec(migration("0104_hypothesis_evidence_inbox.sql"));
+  sql.exec(migration("0147_question_answer_inbox.sql"));
   let beforeBatch: (() => void) | undefined;
   let beforeDelivery: (() => void) | undefined;
   let failAt = -1;
@@ -135,9 +139,11 @@ function fixture() {
             ? "dead_end"
             : type === "evidence.created"
               ? "evidence"
-              : type === "hypothesis.created"
-                ? "hypothesis"
-                : "claim";
+              : type.startsWith("question.")
+                ? "question"
+                : type === "hypothesis.created"
+                  ? "hypothesis"
+                  : "claim";
     sql
       .query(`INSERT INTO events
       (id, problem_id, seq, type, object_kind, object_id, object_version,
@@ -255,6 +261,241 @@ async function withFixture(run: (f: ReturnType<typeof fixture>) => Promise<void>
     f.sql.close();
   }
 }
+
+function questionAnswer(f: ReturnType<typeof fixture>, actor = "fellow-b", kind = "claim") {
+  f.append("E-answer-claim", "claim.created", "C-2", {
+    claim_id: "C-2",
+    statement: "The answer's immutable claim statement.",
+  });
+  f.sql
+    .query("INSERT INTO claim_versions VALUES ('P-DEMO', 'C-2', 1, ?)")
+    .run("The answer's immutable claim statement.");
+  let reference = "C-2@1";
+  let publication = "E-answer-claim";
+  if (kind === "evidence" || kind === "review") {
+    reference = kind === "evidence" ? "E-ABC" : "R-ABC";
+    publication = "E-answer-publication";
+    f.append(
+      publication,
+      `${kind}.created`,
+      reference,
+      kind === "evidence"
+        ? {
+            bears_on_kind: "claim",
+            bears_on_id: "C-2",
+            bears_on_version: 1,
+            direction: "informs",
+            body_md: "ANSWER-EVIDENCE-SENTINEL",
+            kind: "argument",
+          }
+        : {
+            target_claim_id: "C-2",
+            target_version: 1,
+            body_md: "ANSWER-REVIEW-SENTINEL",
+          },
+    );
+    if (kind === "evidence")
+      f.sql
+        .query(`INSERT INTO evidence
+      (problem_id,evidence_id,source_event_id,source_seq) SELECT problem_id,object_id,id,seq
+      FROM events WHERE id = ?`)
+        .run(publication);
+    else
+      f.sql
+        .query(`INSERT INTO reviews SELECT problem_id,object_id,id,seq
+      FROM events WHERE id = ?`)
+        .run(publication);
+  }
+  f.append(
+    "E-question",
+    "question.asked",
+    "Q-ANSWER",
+    {
+      question_id: "Q-ANSWER",
+      problem_id: "P-DEMO",
+      target_refs: ["C-2"],
+      blocking: null,
+      body_md: "QUESTION-BODY-SENTINEL: where is the complete supporting argument?",
+    },
+    "fellow-a",
+  );
+  f.append(
+    "E-answer",
+    "question.answered",
+    "Q-ANSWER",
+    {
+      question_id: "Q-ANSWER",
+      resolved_by_object: reference,
+    },
+    actor,
+  );
+  return { reference, publication };
+}
+
+describe("durable private question-answer notices", () => {
+  test.each(["claim", "evidence", "review"])(
+    "routes another Fellow's %s answer to the original author with exact read links",
+    async (kind) =>
+      withFixture(async (f) => {
+        const { reference } = questionAnswer(f, "fellow-b", kind);
+        const result = await deliverInboxEvents(f.db, { now: NOW });
+        expect(result.failed).toBe(0);
+        const notice = f.notices().filter((item) => item.target_id === "Q-ANSWER");
+        expect(notice).toHaveLength(1);
+        expect(notice[0]?.fellow_id).toBe("fellow-a");
+        expect(notice[0]?.caused_by_event_id).toBe("E-answer");
+        expect(notice[0]?.notice_type).toBe("object_critique");
+        expect(JSON.stringify(notice)).not.toContain("SENTINEL");
+        const inbox = await getInboxNotices(f.db, "fellow-a", { limit: 50 }, NOW);
+        expect(inbox.items[0]?.next_actions?.map((action) => action.url)).toEqual([
+          "/p/P-DEMO/questions.json?target=Q-ANSWER",
+          `/p/P-DEMO/${kind === "claim" ? "claims" : kind === "evidence" ? "evidence" : "reviews"}/${reference}.json`,
+        ]);
+        expect((await getInboxNotices(f.db, "fellow-b", { limit: 50 }, NOW)).items).toEqual([]);
+        const id = notice[0]?.id;
+        expect(typeof id).toBe("string");
+        await ackInboxNotices(f.db, "fellow-a", { notice_ids: [id!] }, NOW);
+        // A replay or recovered stale queue cursor cannot duplicate an existing
+        // causal notice or turn an acknowledged answer into unread work again.
+        f.sql.exec("UPDATE inbox_event_deliveries SET state='pending',after_fellow_id='' ");
+        expect((await deliverInboxEvents(f.db, { now: NOW + 1 })).notices).toBe(0);
+        const again = await getInboxNotices(f.db, "fellow-a", { limit: 50 }, NOW + 1);
+        expect(again.items.map((item) => item.id)).toEqual([id!]);
+        expect(again.items[0]?.acknowledged_at).not.toBeNull();
+      }),
+  );
+
+  test("self-answers consume their durable job without notifying anyone", async () =>
+    withFixture(async (f) => {
+      questionAnswer(f, "fellow-a");
+      const result = await deliverInboxEvents(f.db, { now: NOW });
+      expect(result.completed).toBe(1);
+      expect(result.notices).toBe(0);
+      expect(f.notices()).toEqual([]);
+    }));
+
+  test("answer rollback rolls back its durable delivery intent", async () =>
+    withFixture(async (f) => {
+      f.sql.exec("BEGIN");
+      questionAnswer(f);
+      expect(f.jobs()).toHaveLength(1);
+      f.sql.exec("ROLLBACK");
+      expect(f.jobs()).toEqual([]);
+      expect(f.sql.query("SELECT id FROM events WHERE id='E-answer'").all()).toEqual([]);
+    }));
+
+  test.each([
+    "question-hidden",
+    "answer-redacted",
+    "question-redacted",
+    "reference-hidden",
+    "reference-redacted",
+    "reference-withdrawn",
+    "question-withdrawn",
+    "private",
+  ])("suppresses an unavailable %s source before delivery", async (change) =>
+    withFixture(async (f) => {
+      questionAnswer(f);
+      if (change === "private") f.sql.exec("UPDATE problems SET status='private-draft'");
+      else if (change === "question-withdrawn")
+        f.append(
+          "E-withdrawn",
+          "question.withdrawn",
+          "Q-ANSWER",
+          {
+            question_id: "Q-ANSWER",
+            reason: "The original author withdrew the question.",
+          },
+          "fellow-a",
+        );
+      else if (change === "reference-withdrawn")
+        f.sql.exec(`INSERT INTO retractions
+        SELECT 'P-DEMO',public_seq,'C-2@1','fellow-b' FROM problems WHERE id='P-DEMO'`);
+      else if (change.endsWith("hidden"))
+        f.sql
+          .query("INSERT INTO content_controls VALUES ('P-DEMO', ?, 1, 'hidden')")
+          .run(change === "question-hidden" ? "Q-ANSWER" : "C-2");
+      else
+        f.sql
+          .query("UPDATE event_content SET redacted_at=? WHERE event_id=?")
+          .run(
+            iso(),
+            change === "answer-redacted"
+              ? "E-answer"
+              : change === "question-redacted"
+                ? "E-question"
+                : "E-answer-claim",
+          );
+      const result = await deliverInboxEvents(f.db, { now: NOW });
+      expect(result.suppressed).toBe(1);
+      expect(result.notices).toBe(0);
+      expect(f.notices()).toEqual([]);
+    }),
+  );
+
+  test.each(["E-question", "E-answer-claim"])(
+    "does not deliver when verified %s bytes change before the atomic batch",
+    async (source) =>
+      withFixture(async (f) => {
+        questionAnswer(f);
+        f.beforeDelivery(() =>
+          f.sql
+            .query(
+              "UPDATE event_content SET payload_json = json_set(payload_json, '$.body_md', 'changed bytes') WHERE event_id = ?",
+            )
+            .run(source),
+        );
+        expect((await deliverInboxEvents(f.db, { now: NOW })).notices).toBe(0);
+        expect(f.jobs()[0]?.state).toBe("pending");
+        expect(f.notices()).toEqual([]);
+        expect((await deliverInboxEvents(f.db, { now: NOW + 1 })).quarantined).toBe(1);
+      }),
+  );
+
+  test("rechecks current controls during delivery and hides delivered notices before count/ack", async () =>
+    withFixture(async (f) => {
+      questionAnswer(f);
+      f.beforeDelivery(() =>
+        f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO','C-2',1,'hidden')"),
+      );
+      expect((await deliverInboxEvents(f.db, { now: NOW })).notices).toBe(0);
+      expect(f.jobs()[0]?.state).toBe("pending");
+      f.sql.exec("UPDATE content_controls SET visibility='visible'");
+      expect((await deliverInboxEvents(f.db, { now: NOW + 1 })).notices).toBe(1);
+      const id = f.notices()[0]!.id;
+      f.sql.exec("UPDATE content_controls SET visibility='hidden'");
+      const hidden = await getInboxNotices(f.db, "fellow-a", { limit: 1 }, NOW + 2);
+      expect(hidden.items).toEqual([]);
+      expect(hidden.has_more).toBe(false);
+      expect(hidden.unacknowledged_count).toBe(0);
+      expect(
+        (await ackInboxNotices(f.db, "fellow-a", { notice_ids: [id] }, NOW + 2)).acknowledged_count,
+      ).toBe(0);
+      f.sql.exec("UPDATE content_controls SET visibility='visible'");
+        expect((await getInboxNotices(f.db, "fellow-a", { limit: 50 }, NOW + 3)).items[0]?.id).toBe(
+          id,
+        );
+      expect(f.notices()[0]?.acknowledged_at).toBeNull();
+    }));
+
+  test("read actions refuse injected and noncanonical answer locators", () => {
+    for (const reference of [
+      "https://evil.test",
+      "C-2",
+      "C-2@0",
+      "C-2@1\n",
+      "E-ABC/../../secret",
+      "R-ABC?secret=1",
+    ])
+      expect(
+        ledgerNoticeActions("object_critique", "P-DEMO", "Q-ANSWER", null, null, null, reference),
+      ).toHaveLength(1);
+    for (const target of ["Q-ANSWER\n", "Q-ANSWER\r", "Q--ANSWER", "Q-ANSWER/elsewhere"])
+      expect(
+        ledgerNoticeActions("object_critique", "P-DEMO", target, null, null, null, "C-2@1"),
+      ).toEqual([]);
+  });
+});
 const drain = (f: ReturnType<typeof fixture>, offset = 0) =>
   deliverInboxEvents(f.db, { now: NOW + offset });
 

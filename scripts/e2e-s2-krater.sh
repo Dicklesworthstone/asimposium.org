@@ -392,6 +392,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0144_problem_creation_rate_limit.sql
   db/migrations/0145_sponsor_problem_hides.sql
   db/migrations/0146_protocol_conflicts.sql
+  db/migrations/0147_question_answer_inbox.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -793,6 +794,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/enrollment/account-deletion.ts
   apps/wire/src/enrollment/account-export.ts
   apps/wire/src/inbox/hypothesis-notices.ts
+  apps/wire/src/inbox/question-notices.ts
   apps/wire/src/inbox/sponsor-follow-activity.ts
   apps/wire/src/inbox/sponsor-follow-router.ts
   apps/wire/src/inbox/sponsor-follows.ts
@@ -1033,6 +1035,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0144_problem_creation_rate_limit.sql
   0145_sponsor_problem_hides.sql
   0146_protocol_conflicts.sql
+  0147_question_answer_inbox.sql
 )
 
 

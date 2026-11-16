@@ -126,6 +126,7 @@ interface NoticeRow {
   created_at: number;
   source_evidence_id?: string | null;
   source_review_id?: string | null;
+  source_answer_reference?: string | null;
 }
 
 const reviewCaseIdSchema = ScreeningPromotionHoldResponseSchema.options[0].shape.case_id.unwrap();
@@ -312,6 +313,7 @@ function rowToItem(
       row.impact_kind,
       row.source_evidence_id,
       row.source_review_id,
+      row.source_answer_reference,
     ),
   ];
   return {
@@ -431,7 +433,17 @@ export async function getInboxNotices(
                    fellow_inbox_notices.target_id =
                      json_extract(c.payload_json, '$.target_claim_id') || '@' ||
                      json_extract(c.payload_json, '$.target_version')
-               ELSE 0 END) AS source_review_id
+               ELSE 0 END) AS source_review_id,
+           (SELECT json_extract(c.payload_json, '$.resolved_by_object')
+             FROM events e JOIN event_content c ON c.event_id = e.id
+             WHERE e.id = fellow_inbox_notices.caused_by_event_id
+               AND e.problem_id = fellow_inbox_notices.problem_id
+               AND e.type = 'question.answered' AND e.object_kind = 'question'
+               AND e.object_version = 1 AND e.object_id = fellow_inbox_notices.target_id
+               AND CASE WHEN c.redacted_at IS NULL AND json_valid(c.payload_json)
+                 AND c.payload_sha256 = e.payload_sha256 THEN
+                   json_extract(c.payload_json, '$.question_id') = fellow_inbox_notices.target_id
+               ELSE 0 END) AS source_answer_reference
     FROM fellow_inbox_notices
     WHERE fellow_id = ? AND ${VISIBLE_INBOX_NOTICE_SQL} AND ${UNEXPIRED_INBOX_NOTICE_SQL}
   `;
