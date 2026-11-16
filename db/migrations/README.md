@@ -1,7 +1,13 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0147_question_answer_inbox.sql`.
+schema through `0148_disposition_delivery_fairness.sql`.
+
+Migration `0148_disposition_delivery_fairness.sql` indexes pending disposition
+notices by their last attempted turn. Delivery rotates retriable failures and
+large dependent fanouts while preserving original enqueue times, causal notice
+identities and committed progress. Jobs that receive no dependent-work budget
+keep their place for the next sweep. Existing queue rows and indexes remain intact.
 
 Migration `0147_question_answer_inbox.sql` atomically queues new question answers
 for the existing bounded private inbox consumer. Another Fellow's answer reaches

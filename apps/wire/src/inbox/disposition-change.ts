@@ -181,7 +181,7 @@ async function noticeId(eventId: string, claimId: string, fellowId: string): Pro
 async function settle(db: D1Database, eventId: string, state: string, now: number, code?: string) {
   await db
     .prepare(
-      `UPDATE disposition_change_deliveries SET state = ?, updated_at = ?, failure_code = ?
+      `UPDATE disposition_change_deliveries SET state = ?, updated_at = max(updated_at, ?), failure_code = ?
        WHERE event_id = ? AND state = 'pending'`,
     )
     .bind(state, now, code ?? null, eventId)
@@ -234,7 +234,7 @@ function advanceTarget(
     .prepare(`UPDATE disposition_change_deliveries
     SET direct_complete = CASE WHEN ? IS NULL THEN 1 ELSE direct_complete END,
       dependent_after_seq = max(dependent_after_seq, coalesce(?, 0)),
-      standing_changed = max(standing_changed, ?), updated_at = ?
+      standing_changed = max(standing_changed, ?), updated_at = max(updated_at, ?)
     WHERE event_id = ? AND state = 'pending'`)
     .bind(target.dependentSeq, target.dependentSeq, changed ? 1 : 0, now, job.event_id);
 }
@@ -312,7 +312,7 @@ export async function deliverDispositionChanges(
          AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
          AND c.payload_json = disclosure.public_payload_json
        WHERE q.state = 'pending'
-       ORDER BY q.queued_at, q.event_id LIMIT ?`,
+       ORDER BY q.updated_at, q.event_id LIMIT ?`,
     )
     .bind(Math.min(limit, DISPOSITION_CHANGE_JOB_LIMIT))
     .all<Job>();
@@ -341,7 +341,30 @@ export async function deliverDispositionChanges(
           latency_ms: Math.max(0, Date.now() - startedAt),
         }),
       );
+    // A selected continuation has not had a turn if earlier jobs consumed the
+    // entire dependent budget. Keep its place ahead of the work that ran.
+    if (
+      job.direct_complete === 1 &&
+      dependentBudget === 0 &&
+      job.type !== "directive.disclosure-recorded"
+    ) {
+      result.pending++;
+      log("pending", { dependent_budget_remaining: dependentBudget });
+      continue;
+    }
     try {
+      // Rotate attempted work before reading its source, so an unavailable
+      // source cannot occupy the first page forever. Move behind every pending
+      // turn, including rows whose timestamp is ahead of this tick's clock.
+      const attempted = await db
+        .prepare(`UPDATE disposition_change_deliveries
+          SET updated_at = min(9007199254740991, max(?, (
+            SELECT max(updated_at) + 1 FROM disposition_change_deliveries WHERE state = 'pending'
+          )))
+          WHERE event_id = ? AND state = 'pending'`)
+        .bind(now, job.event_id)
+        .run();
+      if (attempted.meta.changes !== 1) continue;
       const direct = await affectedTarget(db, job);
       if (direct === null || !Number.isSafeInteger(job.seq) || job.seq < 1) {
         await settle(db, job.event_id, "quarantined", now, "SOURCE_INVALID");
@@ -353,7 +376,8 @@ export async function deliverDispositionChanges(
       // A concurrent completed delivery or different pin cannot be overwritten.
       const pinned = await db
         .prepare(`UPDATE disposition_change_deliveries
-          SET target_claim_id = ?, target_version = ?, target_payload_sha256 = ?, updated_at = ?
+          SET target_claim_id = ?, target_version = ?, target_payload_sha256 = ?,
+            updated_at = max(updated_at, ?)
           WHERE event_id = ? AND state = 'pending'
             AND ((target_claim_id IS NULL AND target_version IS NULL AND target_payload_sha256 IS NULL)
               OR (target_claim_id = ? AND target_version = ? AND target_payload_sha256 = ?))
@@ -568,7 +592,7 @@ export async function deliverDispositionChanges(
         await db
           .prepare(`UPDATE disposition_change_deliveries
           SET state = CASE WHEN standing_changed = 1 THEN 'delivered' ELSE 'unchanged' END,
-            updated_at = ?
+            updated_at = max(updated_at, ?)
           WHERE event_id = ? AND state = 'pending' AND direct_complete = 1`)
           .bind(now, job.event_id)
           .run();

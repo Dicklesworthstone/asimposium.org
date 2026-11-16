@@ -4,6 +4,7 @@ import type { ClaimDependencyPin } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
   DISPOSITION_CHANGE_DEPENDENT_LIMIT,
+  DISPOSITION_CHANGE_JOB_LIMIT,
   DISPOSITION_CHANGE_RECIPIENT_LIMIT,
   deliverDispositionChanges,
 } from "../../src/inbox/disposition-change.ts";
@@ -21,6 +22,7 @@ async function using(run: (fixture: Fixture) => Promise<void>) {
       "0064_inbox_and_follows.sql",
       "0083_disposition_change_deliveries.sql",
       "0127_disposition_dependency_fanout.sql",
+      "0148_disposition_delivery_fairness.sql",
     ])
       f.sql.exec(
         readFileSync(new URL(`../../../../db/migrations/${migration}`, import.meta.url), "utf8"),
@@ -97,6 +99,7 @@ function premisePublications(f: Fixture) {
     pins: ClaimDependencyPin[] = [],
     version = 1,
     author = "fellow-b",
+    problemId = "P-DEMO",
   ) => {
     const statement = `Published ${claimId}@${version} statement.`;
     const event = f.append(
@@ -113,15 +116,15 @@ function premisePublications(f: Fixture) {
         ...(version > 1 ? { base_version: version - 1 } : {}),
       },
       author,
-      "P-DEMO",
+      problemId,
       version,
     );
     const contentDigest = `sha256:${sha(statement)}`;
     f.sql
-      .query("INSERT INTO claim_versions VALUES('P-DEMO',?,?,?,?, 'lemma')")
-      .run(claimId, version, contentDigest, statement);
+      .query("INSERT INTO claim_versions VALUES(?,?,?,?,?, 'lemma')")
+      .run(problemId, claimId, version, contentDigest, statement);
     if (version === 1)
-      f.sql.query("INSERT INTO claims VALUES('P-DEMO',?,?)").run(claimId, event.seq);
+      f.sql.query("INSERT INTO claims VALUES(?,?,?)").run(problemId, claimId, event.seq);
     return {
       claim_id: claimId,
       version,
@@ -703,4 +706,144 @@ test("delivery failure leaves the job pending and a retry preserves one causal n
     expect(notices(f)).toHaveLength(0);
     expect(await deliverDispositionChanges(f.db)).toMatchObject({ failed: 0, notices: 1 });
     expect(await deliverDispositionChanges(f.db)).toMatchObject({ examined: 0, notices: 0 });
+  }));
+
+test("a full page of failing causes cannot starve a later notice and all causes remain retryable", () =>
+  using(async (f) => {
+    const p = premisePublications(f);
+    const causes: string[] = [];
+    for (let index = 0; index <= DISPOSITION_CHANGE_JOB_LIMIT; index++) {
+      const claimId = `C-${index + 2}`;
+      p.add(claimId);
+      const review = f.source("review", `R-fair-${index}`, { target_claim_id: claimId });
+      f.sql
+        .query("UPDATE reviews SET target_claim_id=? WHERE source_event_id=?")
+        .run(claimId, review.event.id);
+      f.sql
+        .query("UPDATE disposition_change_deliveries SET queued_at=?,updated_at=? WHERE event_id=?")
+        .run(
+          NOW + index,
+          // A healthy later row must get a turn even when its stored timestamp
+          // is ahead of repeated tick clocks after an adjustment or overlap.
+          NOW + (index === DISPOSITION_CHANGE_JOB_LIMIT ? 60_000 : index),
+          review.event.id,
+        );
+      causes.push(review.event.id);
+    }
+    const unavailable = new Set(causes.slice(0, DISPOSITION_CHANGE_JOB_LIMIT));
+    const failing = {
+      prepare(sql: string) {
+        const statement = f.db.prepare(sql);
+        if (!sql.includes("SET target_claim_id = ?")) return statement;
+        return {
+          bind(...values: (string | number | null)[]) {
+            statement.bind(...values);
+            return {
+              async first() {
+                if (unavailable.has(String(values[4])))
+                  throw new Error("Source routing storage is temporarily unavailable");
+                return statement.first();
+              },
+            };
+          },
+        };
+      },
+      batch: f.db.batch.bind(f.db),
+    } as unknown as D1Database;
+    const queued = f.sql
+      .query("SELECT event_id,queued_at FROM disposition_change_deliveries ORDER BY event_id")
+      .all();
+    expect(await deliverDispositionChanges(failing, { now: NOW + 1000 })).toMatchObject({
+      examined: DISPOSITION_CHANGE_JOB_LIMIT,
+      failed: DISPOSITION_CHANGE_JOB_LIMIT,
+      notices: 0,
+    });
+    expect(await deliverDispositionChanges(failing, { now: NOW + 1000 })).toMatchObject({
+      notices: 1,
+    });
+    expect(notices(f)).toMatchObject([
+      { caused_by_event_id: causes.at(-1), target_id: `C-${DISPOSITION_CHANGE_JOB_LIMIT + 2}` },
+    ]);
+    expect(
+      f.sql
+        .query("SELECT COUNT(*) AS n FROM disposition_change_deliveries WHERE state='pending'")
+        .get(),
+    ).toEqual({ n: DISPOSITION_CHANGE_JOB_LIMIT });
+    for (let round = 0; round < 3; round++)
+      await deliverDispositionChanges(f.db, { now: NOW + 1000 });
+    expect(notices(f)).toHaveLength(causes.length);
+    expect(new Set(notices(f).map((notice) => notice.caused_by_event_id)).size).toBe(causes.length);
+    expect(await deliverDispositionChanges(f.db, { now: NOW + 1000 })).toMatchObject({
+      examined: 0,
+      notices: 0,
+    });
+    expect(
+      f.sql
+        .query("SELECT event_id,queued_at FROM disposition_change_deliveries ORDER BY event_id")
+        .all(),
+    ).toEqual(queued);
+  }));
+
+test("long dependent fanout yields to another cause without resetting either continuation", () =>
+  using(async (f) => {
+    const p = premisePublications(f);
+    const dependentCount = 3 * DISPOSITION_CHANGE_DEPENDENT_LIMIT + 1;
+    for (let index = 0; index < dependentCount; index++) p.add(`C-${index + 2}`, [p.leaf]);
+    const other = p.add("C-90", [], 1, "fellow-b", "P-OTHER");
+    p.add("C-91", [other], 1, "fellow-b", "P-OTHER");
+    const long = p.add("C-1", [], 2, "fellow-a"),
+      short = p.add("C-90", [], 2, "fellow-a", "P-OTHER");
+    for (const [index, cause] of [long, short].entries())
+      f.sql
+        .query("UPDATE disposition_change_deliveries SET queued_at=?,updated_at=? WHERE event_id=?")
+        .run(NOW + index, NOW + index, cause.event_id);
+    const queued = f.sql
+      .query("SELECT event_id,queued_at FROM disposition_change_deliveries ORDER BY event_id")
+      .all();
+    expect(await deliverDispositionChanges(f.db, { now: NOW + 1000 })).toMatchObject({
+      notices: DISPOSITION_CHANGE_DEPENDENT_LIMIT,
+      failed: 0,
+      pending: 2,
+    });
+    const shortBefore = f.sql
+      .query(
+        "SELECT updated_at,dependent_after_seq FROM disposition_change_deliveries WHERE event_id=?",
+      )
+      .get(short.event_id);
+    expect(await deliverDispositionChanges(f.db, { now: NOW + 1000 })).toMatchObject({
+      notices: DISPOSITION_CHANGE_DEPENDENT_LIMIT,
+      failed: 0,
+      pending: 2,
+    });
+    expect(
+      f.sql
+        .query(
+          "SELECT updated_at,dependent_after_seq FROM disposition_change_deliveries WHERE event_id=?",
+        )
+        .get(short.event_id),
+    ).toEqual(shortBefore);
+    // Repeated or older tick timestamps must not move attempted work back to
+    // the front. The short branch gets this turn before the large one finishes.
+    expect(await deliverDispositionChanges(f.db, { now: NOW + 500 })).toMatchObject({
+      failed: 0,
+    });
+    expect(notices(f).filter((notice) => notice.target_id === "C-91")).toHaveLength(1);
+    expect(
+      f.sql
+        .query("SELECT state FROM disposition_change_deliveries WHERE event_id=?")
+        .get(long.event_id),
+    ).toEqual({ state: "pending" });
+    for (let round = 0; round < 3; round++)
+      await deliverDispositionChanges(f.db, { now: NOW + 500 });
+    expect(notices(f)).toHaveLength(dependentCount + 1);
+    expect(new Set(notices(f).map((notice) => notice.target_id)).size).toBe(dependentCount + 1);
+    expect(await deliverDispositionChanges(f.db, { now: NOW + 500 })).toMatchObject({
+      examined: 0,
+      notices: 0,
+    });
+    expect(
+      f.sql
+        .query("SELECT event_id,queued_at FROM disposition_change_deliveries ORDER BY event_id")
+        .all(),
+    ).toEqual(queued);
   }));
