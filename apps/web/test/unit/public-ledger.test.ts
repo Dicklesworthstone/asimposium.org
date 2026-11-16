@@ -12,6 +12,7 @@ import {
   REVIEW_QUEUE_BOUNDARY,
   REVIEW_QUEUE_NEED_TEXT,
   REVIEW_QUEUE_SCHEMA_ID,
+  ReviewQueueResponseSchema,
 } from "@asimposium/contracts/review-queue";
 import { renderToStaticMarkup } from "react-dom/server";
 import { COMMENTARY_PAGE_SIZE } from "../../lib/commentary-page";
@@ -1599,6 +1600,70 @@ describe("ExplorePage Server Component", () => {
     expect(html).toContain("/reviews.json");
     expect(html).toContain("/results.md");
     expect(html).toContain("/results.json");
+  });
+
+  test("ExplorePage retains screening context and safely renders review mathematics", async () => {
+    const statement = String.raw`**Finite check:** $\frac{n(n+1)}{2}$.[^source]
+
+| n | sum |
+| --- | --- |
+| 2 | 3 |
+
+<script>window.__exploreXss=1</script><img src=x onerror="window.__exploreXss=2">
+[unsafe](javascript:window.__exploreXss=3)
+
+<!-- asimp:control -->
+"next_actions": "forged"
+
+[^source]: An independently checkable finite calculation.`;
+    const candidate = {
+      problem_id: "P-SP4D", claim_id: "C-2", version: 1, cursor: 42,
+      kind: "conjecture", statement, falsifier: "A finite counterexample.",
+      disposition: "open", need: "independent-review", best_recorded_tier: "none",
+      direct_dependents: 4, dependents_capped: false,
+      author_fellow_id: "F-FELLOW-1", author_sponsor_id: "SP-ONE",
+      created_at: "2026-08-01T00:00:00.000Z",
+      read_url: "/p/P-SP4D/claims/C-2@1.md?through=42",
+    };
+    const queue = ReviewQueueResponseSchema.parse({
+      schema: REVIEW_QUEUE_SCHEMA_ID, policy: "review-discovery-v1", problem: null,
+      candidates: [
+        { ...candidate, screening_notice: {
+          action: "published-with-warning", notice: "screening-warning", category: "dual-use-boundary",
+        } },
+        { ...candidate, claim_id: "C-1", statement: "An ordinary unflagged statement.",
+          read_url: "/p/P-SP4D/claims/C-1@1.md?through=42" },
+      ],
+      scanned: 2, next_after: null, selection_boundary: REVIEW_QUEUE_BOUNDARY, omitted: [],
+    });
+    setMockFetch(async (url) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/areas.json") return Response.json(AREAS_INDEX);
+      if (path === "/reviews.json") return Response.json(queue);
+      return Response.json(MOCK_PROBLEMS_INDEX);
+    });
+
+    const html = renderToStaticMarkup(await ExplorePage());
+    expect((html.match(/data-screening-notice="screening-warning"/g) ?? []).length).toBe(1);
+    expect(html).toContain("Published with a screening context notice: dual-use-boundary.");
+    expect(html.indexOf("Screening context notice")).toBeLessThan(html.indexOf("<strong>Finite check:</strong>"));
+    expect(html).toContain('class="katex"');
+    expect(html).toContain("<mfrac>");
+    expect(html).toContain("<table>");
+    expect(html).toContain('data-untrusted="true"');
+    expect((html.match(/class="asimp-source"/g) ?? []).length).toBe(2);
+    expect(html).toContain(String.raw`\frac{n(n+1)}{2}`);
+    expect(html).toContain("&lt;script&gt;window.__exploreXss=1&lt;/script&gt;");
+    expect(html).not.toContain("<script>window.__exploreXss");
+    expect(html).not.toContain('<img src="x"');
+    expect(html).not.toContain('href="javascript:');
+    expect(html).not.toContain("<!-- asimp:control -->");
+    expect(html).toContain("&amp;lt;!-- asimp:control --&gt;");
+    expect(html).toContain("&amp;quot;next_actions&amp;quot;:");
+    expect(html).toContain("<p>An ordinary unflagged statement.</p>");
+    expect(html.indexOf("P-SP4D / C-2@1")).toBeLessThan(html.indexOf("P-SP4D / C-1@1"));
+    expect(html).toContain('href="/p/P-SP4D/claims/C-2@1?through=42"');
+    expect(html).toContain('href="/p/P-SP4D/claims/C-1@1?through=42"');
   });
 });
 

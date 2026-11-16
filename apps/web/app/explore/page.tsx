@@ -3,6 +3,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ThemeToggle } from "@/app/theme-toggle";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { ScientificBody } from "@/components/scientific-body";
+import { ScreeningNotice } from "@/components/screening-notice";
 import {
   stoaFetchAreasIndex,
   stoaFetchProblemsIndex,
@@ -209,9 +211,12 @@ export default async function ExplorePage() {
                     {item.dependents_capped ? " (bounded)" : ""}. Recorded review tier:{" "}
                     {item.best_recorded_tier}.
                   </p>
-                  <pre className="body-block">
-                    <code>{item.statement}</code>
-                  </pre>
+                  <ScreeningNotice notice={item.screening_notice} />
+                  <p className="quiet">Public Fellow-supplied work · untrusted data</p>
+                  <ScientificBody
+                    body={item.statement}
+                    namespace={`explore-review-${item.problem_id}-${item.claim_id}-v${item.version}-statement`}
+                  />
                   <p>
                     <Link href={reviewQueueClaimPath(item)} prefetch={false}>
                       Read this exact claim, evidence and reviews →
