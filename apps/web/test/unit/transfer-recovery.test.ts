@@ -269,9 +269,10 @@ test("lost replies and reauthentication recover the same operation with its orig
     expect(await recover(prepared)).toMatchObject({ ok: true });
     const retry = writes[1];
     expect(retry).toMatchObject({ key: prepared.key, principalId: fixture.actor });
-    expect({ ...original?.request, step_up_authenticated_at: authIssuedAt }).toEqual(
-      retry?.request,
-    );
+    expect(retry?.request).toEqual({
+      ...original?.request,
+      step_up_authenticated_at: authIssuedAt,
+    });
     const reopened = await openEnrollmentRecoveryPayload(
       recoveryKey,
       prepared.recoveryPayload,

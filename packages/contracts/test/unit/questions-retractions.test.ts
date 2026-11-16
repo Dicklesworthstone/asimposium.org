@@ -394,7 +394,7 @@ describe("W5.8d Questions & Retractions contracts", () => {
           notice: "screening-warning",
         },
         { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
-      ]) {
+      ] as const) {
         expect(
           RetractionItemSchema.parse({ ...record, screening_notice: notice }).screening_notice,
         ).toEqual(notice);

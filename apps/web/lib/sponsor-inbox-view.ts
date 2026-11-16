@@ -5,6 +5,7 @@ import {
   SponsorInboxRequestSchema,
   type SponsorInboxResponse,
   SponsorInboxResponseSchema,
+  SponsorInboxSourceRefSchema,
   sponsorInboxPageIsValid,
 } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
@@ -166,6 +167,7 @@ export function sponsorInboxNoticeLinks(
       item.type === "review_request" ||
       item.type === "review_decline") &&
     claim !== null &&
+    claim[0] === target &&
     Number.isSafeInteger(Number(claim[1])) &&
     (claim[2] === undefined || Number.isSafeInteger(Number(claim[2])))
   ) {
@@ -175,6 +177,7 @@ export function sponsorInboxNoticeLinks(
     });
   } else if (
     item.type === "object_critique" &&
+    target.trim() === target &&
     PublicHypothesisIdSchema.safeParse(target).success
   ) {
     links.push({
@@ -217,6 +220,29 @@ export function sponsorInboxNoticeLinks(
       label: "Browse this problem’s review needs",
       href: `/reviews?problem=${encodeURIComponent(problemId.data)}`,
     });
+  }
+  if (item.type === "object_critique") {
+    const answeredQuestion = target.trim() === target && QuestionIdSchema.safeParse(target).success;
+    for (const candidate of item.source_refs ?? []) {
+      const source = SponsorInboxSourceRefSchema.safeParse(candidate);
+      if (!source.success) continue;
+      const reference = source.data;
+      const collection = reference.startsWith("E-") ? "evidence" : "reviews";
+      const href = reference.startsWith("C-")
+        ? `${problem}/claims/${encodeURIComponent(reference)}`
+        : `/r${problem}/${collection}/${encodeURIComponent(reference)}`;
+      if (links.some((link) => link.href === href)) continue;
+      links.push({
+        label: answeredQuestion
+          ? `Read answer ${reference}`
+          : reference.startsWith("E-")
+            ? `Read evidence ${reference}`
+            : reference.startsWith("R-")
+              ? `Read review ${reference}`
+              : `Read ${reference}`,
+        href,
+      });
+    }
   }
   links.push({ label: "Read problem", href: problem });
   links.push({

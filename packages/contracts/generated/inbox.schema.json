@@ -497,6 +497,17 @@
                     "type": "null"
                   }
                 ]
+              },
+              "source_refs": {
+                "minItems": 1,
+                "maxItems": 2,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 80,
+                  "pattern": "^(?:C-[1-9][0-9]{0,15}@[1-9][0-9]{0,15}|[ER]-[0-9A-HJKMNP-TV-Z]{1,78})(?![\\s\\S])"
+                },
+                "uniqueItems": true
               }
             },
             "required": [
@@ -507,7 +518,34 @@
               "acknowledged_at",
               "title"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "anyOf": [
+                  {
+                    "not": {
+                      "required": [
+                        "source_refs"
+                      ]
+                    }
+                  },
+                  {
+                    "required": [
+                      "problem_id"
+                    ],
+                    "properties": {
+                      "type": {
+                        "const": "object_critique"
+                      },
+                      "problem_id": {
+                        "type": "string",
+                        "pattern": "^[^\\s]+(?![\\s\\S])"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
           }
         },
         "next_cursor": {

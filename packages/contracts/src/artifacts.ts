@@ -1051,7 +1051,7 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
     {
       relativePath: "generated/inbox.types.ts",
       content:
-        "// Generated from src/inbox.ts. Do not edit.\nexport type { InboxNoticeType, ImpactEchoKind, InboxItem, InboxQuery, InboxResponse, InboxAckRequest, InboxAckResponse, ProblemFollowResponse, SponsorInboxRequest, SponsorInboxItem, SponsorInboxResponse } from '../src/inbox.ts';\n",
+        "// Generated from src/inbox.ts. Do not edit.\nexport type { InboxNoticeType, ImpactEchoKind, InboxItem, InboxQuery, InboxResponse, InboxAckRequest, InboxAckResponse, ProblemFollowResponse, SponsorInboxRequest, SponsorInboxItem, SponsorInboxResponse, SponsorInboxSourceRef } from '../src/inbox.ts';\n",
     },
 
     {

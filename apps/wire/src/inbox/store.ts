@@ -27,6 +27,10 @@ import {
 } from "./follow-access.ts";
 import { ledgerNoticeActions } from "./ledger-notice-actions.ts";
 import {
+  ledgerNoticeSourceColumnsSql,
+  ledgerNoticeSourcePinsSql,
+} from "./ledger-notice-sources.ts";
+import {
   INBOX_NOTICE_RECEIPT_SQL,
   INSERT_INBOX_NOTICE_ONCE_SQL,
   inboxNoticeId,
@@ -410,40 +414,7 @@ export async function getInboxNotices(
     SELECT id, fellow_id, problem_id, notice_type, seq, title, detail,
            impact_kind, caused_by_event_id, target_id, acknowledged_at,
            expires_at, created_at,
-           (SELECT e.object_id FROM events e JOIN event_content c ON c.event_id = e.id
-             WHERE e.id = fellow_inbox_notices.caused_by_event_id
-             AND e.problem_id = fellow_inbox_notices.problem_id
-             AND e.type = 'evidence.created' AND e.object_kind = 'evidence'
-             AND e.object_version = 1
-             AND (fellow_inbox_notices.target_id LIKE 'H-%' OR
-               CASE WHEN c.redacted_at IS NULL AND json_valid(c.payload_json)
-                 AND c.payload_sha256 = e.payload_sha256 THEN
-                   json_extract(c.payload_json, '$.bears_on_kind') = 'claim'
-                   AND fellow_inbox_notices.target_id =
-                     json_extract(c.payload_json, '$.bears_on_id') || '@' ||
-                     json_extract(c.payload_json, '$.bears_on_version')
-               ELSE 0 END)) AS source_evidence_id,
-           (SELECT e.object_id FROM events e JOIN event_content c ON c.event_id = e.id
-             WHERE e.id = fellow_inbox_notices.caused_by_event_id
-               AND e.problem_id = fellow_inbox_notices.problem_id
-               AND e.type = 'review.created' AND e.object_kind = 'review'
-               AND e.object_version = 1
-               AND CASE WHEN c.redacted_at IS NULL AND json_valid(c.payload_json)
-                 AND c.payload_sha256 = e.payload_sha256 THEN
-                   fellow_inbox_notices.target_id =
-                     json_extract(c.payload_json, '$.target_claim_id') || '@' ||
-                     json_extract(c.payload_json, '$.target_version')
-               ELSE 0 END) AS source_review_id,
-           (SELECT json_extract(c.payload_json, '$.resolved_by_object')
-             FROM events e JOIN event_content c ON c.event_id = e.id
-             WHERE e.id = fellow_inbox_notices.caused_by_event_id
-               AND e.problem_id = fellow_inbox_notices.problem_id
-               AND e.type = 'question.answered' AND e.object_kind = 'question'
-               AND e.object_version = 1 AND e.object_id = fellow_inbox_notices.target_id
-               AND CASE WHEN c.redacted_at IS NULL AND json_valid(c.payload_json)
-                 AND c.payload_sha256 = e.payload_sha256 THEN
-                   json_extract(c.payload_json, '$.question_id') = fellow_inbox_notices.target_id
-               ELSE 0 END) AS source_answer_reference
+           ${ledgerNoticeSourceColumnsSql("fellow_inbox_notices")}
     FROM fellow_inbox_notices
     WHERE fellow_id = ? AND ${VISIBLE_INBOX_NOTICE_SQL} AND ${UNEXPIRED_INBOX_NOTICE_SQL}
   `;
@@ -506,7 +477,8 @@ export async function getInboxNotices(
       (SELECT COUNT(*) FROM eligible n JOIN json_each(?7) pin
         ON n.id = json_extract(pin.value, '$.id')
         AND n.seq = json_extract(pin.value, '$.seq')
-        AND n.acknowledged_at IS json_extract(pin.value, '$.acknowledged_at')) AS matched
+        AND n.acknowledged_at IS json_extract(pin.value, '$.acknowledged_at')
+        AND ${ledgerNoticeSourcePinsSql("n", "pin")}) AS matched
     FROM authority`)
     .bind(
       fellowId,
@@ -517,7 +489,16 @@ export async function getInboxNotices(
       authority?.binding.credentialId ?? null,
       authority?.binding.tokenHash ?? null,
       authority === undefined ? now : Date.now(),
-      JSON.stringify(rows.map(({ id, seq, acknowledged_at }) => ({ id, seq, acknowledged_at }))),
+      JSON.stringify(
+        rows.map((row) => ({
+          id: row.id,
+          seq: row.seq,
+          acknowledged_at: row.acknowledged_at,
+          source_evidence_id: row.source_evidence_id ?? null,
+          source_review_id: row.source_review_id ?? null,
+          source_answer_reference: row.source_answer_reference ?? null,
+        })),
+      ),
       ...(authority === undefined
         ? []
         : [

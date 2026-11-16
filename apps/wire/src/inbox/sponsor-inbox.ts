@@ -12,11 +12,17 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { Hono } from "hono";
+import { z } from "zod";
 import { cancelUnconsumedRequestBody, parseExactJsonBytes } from "../auth/http.ts";
 import type { DirectiveRouterOptions } from "../directives/router.ts";
 import type { Env } from "../env.ts";
 import { validatedProblem } from "../http/envelope.ts";
 import { UNEXPIRED_INBOX_NOTICE_SQL, VISIBLE_INBOX_NOTICE_SQL } from "./follow-access.ts";
+import {
+  ledgerNoticeSourceColumnsSql,
+  ledgerNoticeSourcePinsSql,
+  ledgerNoticeSourceRefs,
+} from "./ledger-notice-sources.ts";
 
 export const SPONSOR_INBOX_ROUTE = "/v1/sponsors/inbox";
 const MAX_REQUEST_BYTES = 2048;
@@ -45,6 +51,14 @@ interface InboxSnapshot {
   notices_json: string;
 }
 
+// These ephemeral fields are never part of a sponsor response. Keep the
+// source identities beside the selected notices until the final scoped read.
+const selectedNoticeSchema = SponsorInboxItemSchema.safeExtend({
+  source_evidence_id: z.string().max(80).nullable(),
+  source_review_id: z.string().max(80).nullable(),
+  source_answer_reference: z.string().max(128).nullable(),
+});
+
 /** Private read only: no acknowledgements, new credentials or session effects.
  * The page and its lookahead use the same ownership/visibility snapshot. A
  * second scoped read checks that every selected notice is still visible and
@@ -58,13 +72,16 @@ export async function readSponsorInbox(
   const request = SponsorInboxRequestSchema.parse(input);
   const snapshot = await db
     .prepare(`${eligibleNotices}, page AS (
-      SELECT * FROM eligible WHERE seq > ?4 AND (?6 = 0 OR acknowledged_at IS NULL)
+      SELECT *, ${ledgerNoticeSourceColumnsSql("eligible")} FROM eligible
+      WHERE seq > ?4 AND (?6 = 0 OR acknowledged_at IS NULL)
       ORDER BY seq ASC LIMIT ?5
     ) SELECT name, (SELECT json_group_array(json_object(
       'id', id, 'type', notice_type, 'seq', seq, 'created_at', created_at,
       'acknowledged_at', acknowledged_at, 'expires_at', expires_at,
       'caused_by_event_id', caused_by_event_id, 'problem_id', problem_id,
-      'target_id', target_id, 'title', title, 'detail', detail, 'impact_kind', impact_kind
+      'target_id', target_id, 'title', title, 'detail', detail, 'impact_kind', impact_kind,
+      'source_evidence_id', source_evidence_id, 'source_review_id', source_review_id,
+      'source_answer_reference', source_answer_reference
     )) FROM page) AS notices_json FROM owned_fellow`)
     .bind(
       sponsorId,
@@ -77,23 +94,53 @@ export async function readSponsorInbox(
     .first<InboxSnapshot>();
   if (snapshot === null) return undefined;
   // Validate the lookahead too: malformed rows cannot establish has_more.
-  const rows = SponsorInboxItemSchema.array()
+  const rows = selectedNoticeSchema
+    .array()
     .max(request.limit + 1)
     .parse(JSON.parse(snapshot.notices_json));
-  const pins = rows.map(({ id, seq, acknowledged_at }) => ({ id, seq, acknowledged_at }));
+  const pins = rows.map(
+    ({
+      id,
+      seq,
+      acknowledged_at,
+      source_evidence_id,
+      source_review_id,
+      source_answer_reference,
+    }) => ({
+      id,
+      seq,
+      acknowledged_at,
+      source_evidence_id,
+      source_review_id,
+      source_answer_reference,
+    }),
+  );
+  const items = rows.slice(0, request.limit).map((row) => {
+    const { source_evidence_id, source_review_id, source_answer_reference, ...item } = row;
+    const sourceRefs = ledgerNoticeSourceRefs(
+      item.type,
+      item.problem_id ?? null,
+      item.target_id ?? null,
+      { source_evidence_id, source_review_id, source_answer_reference },
+    );
+    return SponsorInboxItemSchema.parse({
+      ...item,
+      ...(sourceRefs.length ? { source_refs: sourceRefs } : {}),
+    });
+  });
   const current = await db
     .prepare(`${eligibleNotices} SELECT name,
       (SELECT COUNT(*) FROM eligible WHERE acknowledged_at IS NULL) AS unacknowledged,
       (SELECT COUNT(*) FROM eligible n JOIN json_each(?4) pin
         ON n.id = json_extract(pin.value, '$.id')
         AND n.seq = json_extract(pin.value, '$.seq')
-        AND n.acknowledged_at IS json_extract(pin.value, '$.acknowledged_at')) AS matched
+        AND n.acknowledged_at IS json_extract(pin.value, '$.acknowledged_at')
+        AND ${ledgerNoticeSourcePinsSql("n", "pin")}) AS matched
       FROM owned_fellow`)
     .bind(sponsorId, request.fellow_id, now, JSON.stringify(pins))
     .first<{ name: string; unacknowledged: number; matched: number }>();
   if (current === null) return undefined;
   if (current.matched !== rows.length) throw new Error("SPONSOR_INBOX_CHANGED");
-  const items = rows.slice(0, request.limit);
   const hasMore = rows.length > request.limit;
   const response = SponsorInboxResponseSchema.parse({
     schema: INBOX_SCHEMA_ID,

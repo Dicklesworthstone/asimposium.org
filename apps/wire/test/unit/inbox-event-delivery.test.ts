@@ -472,9 +472,9 @@ describe("durable private question-answer notices", () => {
         (await ackInboxNotices(f.db, "fellow-a", { notice_ids: [id] }, NOW + 2)).acknowledged_count,
       ).toBe(0);
       f.sql.exec("UPDATE content_controls SET visibility='visible'");
-        expect((await getInboxNotices(f.db, "fellow-a", { limit: 50 }, NOW + 3)).items[0]?.id).toBe(
-          id,
-        );
+      expect((await getInboxNotices(f.db, "fellow-a", { limit: 50 }, NOW + 3)).items[0]?.id).toBe(
+        id,
+      );
       expect(f.notices()[0]?.acknowledged_at).toBeNull();
     }));
 

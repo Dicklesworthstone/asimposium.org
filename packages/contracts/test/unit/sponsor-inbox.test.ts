@@ -5,12 +5,57 @@ import {
   SPONSOR_INBOX_PAGE_LIMIT,
   SponsorInboxRequestSchema,
   SponsorInboxResponseSchema,
+  SponsorInboxSourceRefSchema,
   sponsorInboxPageIsValid,
 } from "../../src/inbox.ts";
 
 async function fixture(path: string) {
   return JSON.parse(await Bun.file(new URL(path, import.meta.url)).text());
 }
+
+test("sponsor feedback carries only bounded distinct exact publication references", async () => {
+  const page = await fixture("../fixtures/valid/sponsor-inbox-response.json");
+  const item = {
+    ...page.items[0],
+    type: "object_critique",
+    problem_id: "P-DEMO",
+    target_id: "Q-ANSWER",
+  };
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema(await fixture("../../generated/inbox.schema.json"), "inbox");
+  const validate = ajv.compile({ $ref: "inbox#/properties/sponsor_inbox_response" });
+  for (const source_refs of [["C-7@3"], ["E-ABC"], ["R-ABC"], ["E-ABC", "R-ABC"]]) {
+    const response = { ...page, items: [{ ...item, source_refs }] };
+    expect(SponsorInboxResponseSchema.safeParse(response).success).toBe(true);
+    expect(validate(response)).toBe(true);
+  }
+  for (const fields of [
+    { source_refs: [] },
+    { source_refs: ["E-ABC", "E-ABC"] },
+    { source_refs: ["C-1@1", "E-ABC", "R-ABC"] },
+    { source_refs: ["https://evil.invalid"] },
+    { source_refs: ["/v1/inbox/ack"] },
+    { source_refs: ["C-7"] },
+    { source_refs: ["C-7@0"] },
+    { source_refs: ["C-07@1"] },
+    { source_refs: ["R-ABC\n"] },
+    { source_refs: ["E-ABC@1"] },
+    { source_refs: ["E-ABC?x=1"] },
+    { source_refs: ["E-ABC"], type: "sponsor_directive" },
+    { source_refs: ["E-ABC"], problem_id: null },
+    { source_refs: ["E-ABC"], problem_id: "P-DEMO\n" },
+    { source_refs: ["E-ABC"], next_actions: [] },
+  ]) {
+    const response = { ...page, items: [{ ...item, ...fields }] };
+    expect(SponsorInboxResponseSchema.safeParse(response).success).toBe(false);
+    expect(validate(response)).toBe(false);
+  }
+  for (const reference of ["C-9007199254740992@1", "C-1@9007199254740992", "E-ABC/../../secret"])
+    expect(SponsorInboxSourceRefSchema.safeParse(reference).success).toBe(false);
+  expect(SponsorInboxSourceRefSchema.safeParse("C-9007199254740991@9007199254740991").success).toBe(
+    true,
+  );
+});
 
 test("signed sponsor inbox contracts exclude injected authority and Fellow commands", async () => {
   const ajv = new Ajv2020({ strict: false, validateFormats: false });

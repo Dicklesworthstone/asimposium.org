@@ -448,11 +448,11 @@ describe("published screening warnings", () => {
       };
       for (const category of ["dual-use-boundary", "off-topic"] as const) {
         const receipt = published(await screen(f, input, { coarse_category: category }, "retract"));
-        expect(receipt.provenance.public_action).toEqual({
-          category,
-          action: "published-with-warning",
-          notice: category === "off-topic" ? "off-scope" : "screening-warning",
-        });
+        expect(receipt.provenance.public_action).toEqual(
+          category === "off-topic"
+            ? { category, action: "published-with-warning", notice: "off-scope" }
+            : { category, action: "published-with-warning", notice: "screening-warning" },
+        );
       }
       expect(count(f, "screening_cases")).toBe(0);
       for (const [kind, route, patch] of [

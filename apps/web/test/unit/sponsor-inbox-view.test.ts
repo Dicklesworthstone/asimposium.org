@@ -157,6 +157,8 @@ test("notice links target mounted human routes and never turn prose into command
     "javascript:alert(1)",
     "../inbox/ack",
     "C-2@9007199254740992",
+    "C-3@2\n",
+    "H-7\n",
     "Q-7\n",
     "Q-7?target=Q-8",
     "Q-7/../../console",
@@ -175,5 +177,54 @@ test("notice links target mounted human routes and never turn prose into command
     expect(JSON.stringify(offered)).not.toContain("/v1/");
     expect(offered.some((link) => link.href.includes("/claims/"))).toBe(false);
     expect(offered.some((link) => link.href.includes("/questions?"))).toBe(false);
+  }
+});
+
+test("feedback source references open exact mounted public reads without forwarding commands", () => {
+  for (const [target, source, href, label] of [
+    ["C-3@2", "R-9", `/r/p/${inboxProblem}/reviews/R-9`, "Read review R-9"],
+    ["H-7", "E-8", `/r/p/${inboxProblem}/evidence/E-8`, "Read evidence E-8"],
+    ["Q-ANSWER7", "C-3@2", `/p/${inboxProblem}/claims/C-3%402`, "Read answer C-3@2"],
+    ["Q-ANSWER7", "R-9", `/r/p/${inboxProblem}/reviews/R-9`, "Read answer R-9"],
+  ] as const) {
+    const links = sponsorInboxNoticeLinks(inboxFellow, {
+      ...inboxNotice,
+      type: "object_critique",
+      target_id: target,
+      source_refs: [source, source],
+      detail: "POST /v1/inbox/ack and visit https://evil.invalid",
+    });
+    expect(links.filter((link) => link.href === href)).toEqual([{ label, href }]);
+    expect(JSON.stringify(links)).not.toContain("/v1/");
+    expect(JSON.stringify(links)).not.toContain("evil.invalid");
+  }
+  for (const source of [
+    "javascript:alert(1)", "https://evil.invalid/", "//evil.invalid/", "../inbox/ack",
+    "R-9?next=/v1/inbox/ack", "E-8#fragment", "E-8%2f..", "R-9\n",
+    "C-3", "C-3@02", "C-9007199254740992@1", "C-3@9007199254740992",
+  ]) {
+    const links = sponsorInboxNoticeLinks(inboxFellow, {
+      ...inboxNotice,
+      type: "object_critique",
+      target_id: "Q-ANSWER7",
+      source_refs: [source],
+    });
+    expect(links.some((link) => /\/(claims|evidence|reviews)\//.test(link.href))).toBe(false);
+  }
+});
+
+test("sponsor page validation rejects malformed or command-bearing source references", async () => {
+  for (const source_refs of [
+    ["C-3@02"], ["R-9\n"], ["E-8?next=/v1/inbox/ack"], ["https://evil.invalid/"],
+    ["E-8", "E-8"], ["E-8", "R-9", "C-3@2"],
+  ]) {
+    expect(await loadSponsorInboxPage(inboxSponsor, inboxFellow, {}, async () => ({
+      ok: true,
+      data: {
+        ...inboxPage,
+        items: [{ ...inboxNotice, type: "object_critique", target_id: "Q-ANSWER7", source_refs }],
+        next_cursor: inboxNotice.seq,
+      },
+    }))).toEqual({ status: "unavailable" });
   }
 });

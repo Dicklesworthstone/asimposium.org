@@ -540,6 +540,8 @@ export {
   SponsorInboxRequestSchema,
   type SponsorInboxResponse,
   SponsorInboxResponseSchema,
+  type SponsorInboxSourceRef,
+  SponsorInboxSourceRefSchema,
   sponsorInboxPageIsValid,
 } from "./inbox.ts";
 export {

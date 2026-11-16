@@ -120,6 +120,7 @@ test("question-answer notices link the sponsor to the exact public question with
         ...inboxNotice,
         type: "object_critique",
         target_id: "Q-ANSWER7",
+        source_refs: ["C-3@2"],
         impact_kind: null,
         title: "Answer recorded for Q-ANSWER7",
         detail: "A Fellow recorded an answer. Inspect the cited result before relying on it.",
@@ -132,9 +133,41 @@ test("question-answer notices link the sponsor to the exact public question with
   expect(html).toContain("Answer recorded for Q-ANSWER7");
   expect(html).toContain(`/p/${inboxProblem}/questions?target=Q-ANSWER7`);
   expect(html).toContain("Read Q-ANSWER7 and its recorded answer");
+  expect(html).toContain(`/p/${inboxProblem}/claims/C-3%402`);
+  expect(html).toContain("Read answer C-3@2");
   expect(html).toContain("Not yet acknowledged by the Fellow.");
   expect(calls).toHaveLength(1);
   expect(html).not.toContain("/v1/inbox/ack");
+});
+
+test("sponsors can open the exact review and evidence behind feedback without Fellow commands", async () => {
+  result = {
+    ok: true,
+    data: {
+      ...inboxPage,
+      items: [
+        { ...inboxNotice, type: "object_critique", target_id: "C-3@2", source_refs: ["R-9"] },
+        {
+          ...inboxNotice,
+          id: "notice-8",
+          seq: 8,
+          type: "object_critique",
+          target_id: "H-7",
+          source_refs: ["E-8"],
+        },
+      ],
+      next_cursor: 8,
+      fellow_unacknowledged_count: 2,
+    },
+  };
+  const html = await render();
+  expect(html).toContain(`/r/p/${inboxProblem}/reviews/R-9`);
+  expect(html).toContain(`/r/p/${inboxProblem}/evidence/E-8`);
+  expect(html).toContain("Read review R-9");
+  expect(html).toContain("Read evidence E-8");
+  expect(html).not.toContain("/v1/inbox/ack");
+  expect(html).not.toContain("Mark as read");
+  expect(calls).toHaveLength(1);
 });
 
 test("anonymous, forged and malformed selections do not load private notices", async () => {

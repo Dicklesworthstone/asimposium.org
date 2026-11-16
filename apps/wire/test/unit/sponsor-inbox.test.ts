@@ -1,9 +1,11 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { SponsorInboxResponseSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { Env } from "../../src/env.ts";
 import { createSponsorInboxRouter, readSponsorInbox } from "../../src/inbox/sponsor-inbox.ts";
+import { getInboxNotices } from "../../src/inbox/store.ts";
 import { sponsorMutationRefusal } from "../../src/moderation/sponsor-suspension.ts";
 
 const NOW = 1_800_000_000_000;
@@ -53,6 +55,12 @@ function fixture() {
           if (query.includes("AS notices_json")) afterPageRead?.();
           return result ?? null;
         },
+        async all() {
+          reads++;
+          const results = sql.query(query).all(...values);
+          if (query.includes("AS source_answer_reference")) afterPageRead?.();
+          return { results };
+        },
       };
     },
   } as unknown as D1Database;
@@ -78,6 +86,24 @@ function fixture() {
     onPageRead(callback: () => void) {
       afterPageRead = callback;
     },
+    event(
+      seq: number,
+      type: string,
+      object: string,
+      payload: unknown,
+      actor = FELLOW,
+      problem = "P-PUBLIC",
+    ) {
+      const id = `EV-source-${seq}`;
+      const body = JSON.stringify(payload);
+      const digest = createHash("sha256").update(body).digest("hex");
+      sql
+        .query("INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?)")
+        .run(id, problem, seq, type, type.split(".")[0]!, object, 1, digest, actor);
+      sql.query("INSERT INTO event_content VALUES (?,?,?,NULL)").run(id, digest, body);
+      sql.query("UPDATE problems SET public_seq = MAX(public_seq, ?) WHERE id=?").run(seq, problem);
+      return id;
+    },
     add(
       seq: number,
       options: {
@@ -88,6 +114,7 @@ function fixture() {
         expires?: number | null;
         target?: string | null;
         detail?: string;
+        cause?: string | null;
       } = {},
     ) {
       const id = `${options.fellow ?? FELLOW}-${seq}`;
@@ -102,7 +129,7 @@ function fixture() {
           `Notice ${seq}`,
           options.detail ?? "PRIVATE_OWN_NOTICE",
           options.type ? null : "gap_closed",
-          null,
+          options.cause ?? null,
           options.target ?? null,
           options.acknowledged ?? null,
           options.expires ?? null,
@@ -137,6 +164,165 @@ async function page(response: Response) {
   expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
   return SponsorInboxResponseSchema.parse(await response.json());
 }
+
+function feedback(
+  f: ReturnType<typeof fixture>,
+  kind = "review",
+  hypothesis = false,
+  noticeSeq = 1,
+) {
+  const target = hypothesis ? "H-1" : "C-1@1";
+  f.event(
+    1,
+    hypothesis ? "hypothesis.created" : "claim.created",
+    hypothesis ? "H-1" : "C-1",
+    hypothesis
+      ? { hypothesis_id: "H-1", statement: "A proposed route with a falsifier." }
+      : { claim_id: "C-1", statement: "A published statement." },
+  );
+  const reference = kind === "review" ? "R-ABC" : "E-ABC";
+  const cause = f.event(
+    2,
+    `${kind}.created`,
+    reference,
+    kind === "review"
+      ? { target_claim_id: "C-1", target_version: 1, body_md: "SOURCE_REVIEW_BODY" }
+      : {
+          bears_on_kind: hypothesis ? "hypothesis" : "claim",
+          bears_on_id: hypothesis ? "H-1" : "C-1",
+          bears_on_version: hypothesis ? null : 1,
+          direction: "informs",
+          body_md: "SOURCE_EVIDENCE_BODY",
+        },
+    "fellow-bob",
+  );
+  const id = f.add(noticeSeq, { type: "object_critique", problem: "P-PUBLIC", target, cause });
+  return { cause, reference, id };
+}
+
+describe("sponsor exact publication references", () => {
+  test.each([
+    ["review", false],
+    ["evidence", false],
+    ["evidence", true],
+  ] as const)(
+    "%s feedback on a hypothesis=%s exposes only the exact public cause",
+    async (kind, hypothesis) => {
+      const f = fixture();
+      try {
+        const { reference } = feedback(f, kind, hypothesis);
+        const before = f.sql.query("SELECT * FROM fellow_inbox_notices").all();
+        const result = await f.read();
+        expect(result?.items[0]?.source_refs).toEqual([reference]);
+        expect(JSON.stringify(result)).not.toContain("next_actions");
+        expect(JSON.stringify(result)).not.toContain("SOURCE_REVIEW_BODY");
+        expect(JSON.stringify(result)).not.toContain("SOURCE_EVIDENCE_BODY");
+        expect(JSON.stringify(result)).not.toContain("source_evidence_id");
+        expect(JSON.stringify(result)).not.toContain("source_review_id");
+        expect(f.sql.query("SELECT * FROM fellow_inbox_notices").all()).toEqual(before);
+      } finally {
+        f.sql.close();
+      }
+    },
+  );
+
+  test("an answered question exposes its pinned answering claim, never the answer action", async () => {
+    const f = fixture();
+    try {
+      f.event(1, "claim.created", "C-7", { claim_id: "C-7", statement: "A complete answer." });
+      f.event(2, "question.asked", "Q-ANSWER", {
+        question_id: "Q-ANSWER",
+        problem_id: "P-PUBLIC",
+        body_md: "Where is the published answer?",
+      });
+      const cause = f.event(
+        3,
+        "question.answered",
+        "Q-ANSWER",
+        { question_id: "Q-ANSWER", resolved_by_object: "C-7@1" },
+        "fellow-bob",
+      );
+      f.add(1, { type: "object_critique", problem: "P-PUBLIC", target: "Q-ANSWER", cause });
+      expect((await f.read())?.items[0]?.source_refs).toEqual(["C-7@1"]);
+      f.sql.exec("INSERT INTO content_controls VALUES ('P-PUBLIC','C-7',1,'hidden')");
+      expect((await f.read())?.items).toEqual([]);
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test.each([
+    "hidden",
+    "redacted",
+    "withdrawn",
+    "cross-problem",
+    "wrong-target",
+    "beyond-public-cut",
+  ])("an unavailable %s publication contributes no read reference", async (change) => {
+    const f = fixture();
+    try {
+      const { cause } = feedback(f);
+      if (change === "hidden")
+        f.sql.exec("INSERT INTO content_controls VALUES ('P-PUBLIC','R-ABC',1,'hidden')");
+      else if (change === "redacted")
+        f.sql.exec(
+          "UPDATE event_content SET redacted_at='2026-11-16' WHERE event_id='EV-source-2'",
+        );
+      else if (change === "withdrawn")
+        f.sql.query("INSERT INTO scientific_withdrawals(source_event_id) VALUES (?)").run(cause);
+      else if (change === "cross-problem")
+        f.sql.exec("UPDATE events SET problem_id='P-PRIVATE' WHERE id='EV-source-2'");
+      else if (change === "wrong-target")
+        f.sql.exec("UPDATE fellow_inbox_notices SET target_id='C-2@1'");
+      else f.sql.exec("UPDATE problems SET public_seq=1 WHERE id='P-PUBLIC'");
+      expect((await f.read())?.items[0]?.source_refs).toBeUndefined();
+      const fellow = await getInboxNotices(f.db, FELLOW, { limit: 50 }, NOW);
+      expect(
+        fellow.items[0]?.next_actions?.some((action) => action.url.includes("/reviews/")),
+      ).toBe(false);
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test.each(["sponsor", "fellow"])(
+    "%s read pins source visibility through its final snapshot",
+    async (reader) => {
+      for (const change of [
+        "INSERT INTO content_controls VALUES ('P-PUBLIC','R-ABC',1,'hidden')",
+        "UPDATE event_content SET redacted_at='2026-11-16' WHERE event_id='EV-source-2'",
+        "INSERT INTO scientific_withdrawals(source_event_id) VALUES ('EV-source-2')",
+      ]) {
+        const f = fixture();
+        try {
+          feedback(f);
+          f.onPageRead(() => f.sql.exec(change));
+          if (reader === "sponsor") await expect(f.read()).rejects.toThrow("SPONSOR_INBOX_CHANGED");
+          else
+            await expect(getInboxNotices(f.db, FELLOW, { limit: 50 }, NOW)).rejects.toThrow(
+              "INBOX_PAGE_CHANGED",
+            );
+        } finally {
+          f.sql.close();
+        }
+      }
+    },
+  );
+
+  test("the sponsor pins the lookahead source as well as returned references", async () => {
+    const f = fixture();
+    try {
+      f.add(1);
+      feedback(f, "review", false, 2);
+      f.onPageRead(() =>
+        f.sql.exec("INSERT INTO content_controls VALUES ('P-PUBLIC','R-ABC',1,'hidden')"),
+      );
+      await expect(f.read({ limit: 1 })).rejects.toThrow("SPONSOR_INBOX_CHANGED");
+    } finally {
+      f.sql.close();
+    }
+  });
+});
 
 describe("sponsor inbox reads currently owned Fellow notices", () => {
   test("chronological continuation and Fellow acknowledgement filter never consume notices", async () => {

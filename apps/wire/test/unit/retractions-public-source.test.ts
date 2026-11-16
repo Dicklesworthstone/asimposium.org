@@ -231,8 +231,11 @@ test("retraction notices come only from each exact publication receipt and prece
       }
       expect(text).not.toMatch(/input_digest|context_digest|configuration_digest|policy_version/);
       expect(
-        (await face(f, format, { headers: { "if-none-match": response.headers.get("etag") ?? "" } }))
-          .status,
+        (
+          await face(f, format, {
+            headers: { "if-none-match": response.headers.get("etag") ?? "" },
+          })
+        ).status,
       ).toBe(304);
     }
   }

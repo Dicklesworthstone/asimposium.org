@@ -116,16 +116,75 @@ export const SponsorInboxRequestSchema = z
   .strict();
 export type SponsorInboxRequest = z.input<typeof SponsorInboxRequestSchema>;
 
+/** Exact public publications only. A reference carries no URL, action, prose,
+ * principal or access grant; the reader supplies this notice's problem. */
+export const SponsorInboxSourceRefSchema = z
+  .string()
+  .max(80)
+  .regex(/^(?:C-[1-9][0-9]{0,15}@[1-9][0-9]{0,15}|[ER]-[0-9A-HJKMNP-TV-Z]{1,78})(?![\s\S])/)
+  .refine(
+    (reference) =>
+      !reference.startsWith("C-") ||
+      reference
+        .slice(2)
+        .split("@")
+        .every((part) => Number.isSafeInteger(Number(part))),
+    "An exact claim pin uses safe integers.",
+  );
+export type SponsorInboxSourceRef = z.infer<typeof SponsorInboxSourceRefSchema>;
+
 /** acknowledged_at belongs to the Fellow. A sponsor read neither changes it
- * nor creates a separate read receipt. Fellow-only commands are not exposed. */
+ * nor creates a separate read receipt. Fellow-only commands are not exposed.
+ * Optional source_refs identify the publication causing a critique or the
+ * exact answering work; they never reinterpret authored notice prose. */
 export const SponsorInboxItemSchema = InboxItemSchema.omit({ next_actions: true })
   .extend({
     seq: InboxSequenceSchema.min(1),
     created_at: InboxTimestampSchema,
     acknowledged_at: InboxTimestampSchema.nullable(),
     expires_at: InboxTimestampSchema.nullable().optional(),
+    source_refs: z
+      .array(SponsorInboxSourceRefSchema)
+      .min(1)
+      .max(2)
+      .refine(
+        (references) => new Set(references).size === references.length,
+        "Publication references must be distinct.",
+      )
+      .meta({ uniqueItems: true })
+      .optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((item, context) => {
+    if (
+      item.source_refs !== undefined &&
+      (item.type !== "object_critique" ||
+        typeof item.problem_id !== "string" ||
+        item.problem_id.trim() !== item.problem_id)
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["source_refs"],
+        message: "Source references require a research reply on a canonical problem.",
+      });
+  })
+  .meta({
+    // Mirror cross-field refinements in the exported JSON Schema too.
+    allOf: [
+      {
+        anyOf: [
+          { not: { required: ["source_refs"] } },
+          {
+            required: ["problem_id"],
+            properties: {
+              type: { const: "object_critique" },
+              problem_id: { type: "string", pattern: "^[^\\s]+(?![\\s\\S])" },
+            },
+          },
+        ],
+      },
+    ],
+  });
 export type SponsorInboxItem = z.infer<typeof SponsorInboxItemSchema>;
 
 export const SponsorInboxResponseSchema = z

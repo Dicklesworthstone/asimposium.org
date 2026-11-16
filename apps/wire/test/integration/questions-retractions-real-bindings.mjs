@@ -389,6 +389,11 @@ await runLocalWorkerJourney(async (context) => {
     questionNotices(await sponsorInbox(), question1Id).map((item) => item.id),
     [answerNotice.id],
   );
+  assert.deepEqual(
+    questionNotices(await sponsorInbox(), question1Id)[0].source_refs,
+    [`${claim1Id}@1`],
+    "the sponsor receives an exact answer identity without Fellow actions",
+  );
   await call("/v1/inbox", undefined, undefined, 401);
 
   // A live content control removes the receipt from Fellow and sponsor reads
@@ -885,6 +890,43 @@ await runLocalWorkerJourney(async (context) => {
   );
   for (const action of reviewAnswerNotices[0].next_actions)
     await call(action.url, undefined, undefined, 200);
+  const sponsorReviewPage = await sponsorInbox();
+  assert.deepEqual(questionNotices(sponsorReviewPage, reviewQuestion.question_id)[0].source_refs, [
+    refutingReview.review_id,
+  ]);
+  const reviewFeedback = sponsorReviewPage.items.find(
+    (item) =>
+      item.type === "object_critique" &&
+      item.target_id === `${claim2Id}@1` &&
+      item.source_refs?.includes(refutingReview.review_id),
+  );
+  assert.ok(reviewFeedback, "the sponsor can open the exact review causing claim feedback");
+  assert.ok(!sponsorReviewPage.items.some((item) => "next_actions" in item));
+  const reviewControl = (action) =>
+    operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+      target_id: `${problemId}/${refutingReview.review_id}`,
+      target_kind: "review",
+      action,
+      reason: "Verify private feedback navigation follows current publication visibility.",
+    });
+  await reviewControl("hide");
+  const hiddenReviewFeedback = (await sponsorInbox()).items.find(
+    (item) => item.id === reviewFeedback.id,
+  );
+  assert.equal(hiddenReviewFeedback.source_refs, undefined);
+  assert.ok(
+    !(await inbox(authorA)).items
+      .find((item) => item.id === reviewFeedback.id)
+      .next_actions.some((action) =>
+        action.url.includes(`/reviews/${refutingReview.review_id}.json`),
+      ),
+  );
+  await reviewControl("restore");
+  assert.deepEqual(
+    (await sponsorInbox()).items.find((item) => item.id === reviewFeedback.id).source_refs,
+    [refutingReview.review_id],
+  );
+  console.log(JSON.stringify({ stage: "sponsor-feedback-source-references", status: "pass" }));
   assert.deepEqual(
     await env.DB.prepare("SELECT status, resolved_by_object FROM questions WHERE question_id = ?")
       .bind(reviewQuestion.question_id)

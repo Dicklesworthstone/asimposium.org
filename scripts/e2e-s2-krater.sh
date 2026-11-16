@@ -699,6 +699,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/inbox/follow-access.ts
   apps/wire/src/inbox/follow-principal.ts
   apps/wire/src/inbox/ledger-notice-actions.ts
+  apps/wire/src/inbox/ledger-notice-sources.ts
   apps/wire/src/inbox/notice-write.ts
   apps/wire/src/mega-commands/ledger-moves.ts
   apps/wire/src/mega-commands/live-provider.ts
