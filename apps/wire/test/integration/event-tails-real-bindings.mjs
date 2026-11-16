@@ -98,6 +98,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     author,
     201,
   );
+  const claimIds = [];
   for (const n of [1, 3, 5, 7]) {
     const draft = await call(
       `/v1/sessions/${session}/workshop`,
@@ -105,7 +106,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
       author,
       201,
     );
-    await call(
+    const promoted = await call(
       `/v1/sessions/${session}/promote`,
       {
         workshop_id: draft.workshop_id,
@@ -116,6 +117,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
       author,
       201,
     );
+    claimIds.push(promoted.claim_id);
     // Sponsor commentary between material events: a real problem-scope
     // event that is not a public tail type, so it stays in the sequence as
     // an undisclosed placeholder.
@@ -130,6 +132,89 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
       );
     }
   }
+
+  // Every advertised scientific source link must reach the existing exact
+  // reader. These are real publications, not fabricated envelope rows.
+  const hypothesis = await call(
+    `/v1/sessions/${session}/hypotheses`,
+    {
+      route: "Compare the two residue classes modulo two.",
+      mechanism: "Squaring preserves the residue for both zero and one modulo two.",
+      falsifier: "A residue whose square has different parity.",
+      origin: "proposed",
+      body_md: "This is a proposed route, not an independently checked result.",
+    },
+    author,
+    201,
+  );
+  const evidence = await call(
+    `/v1/sessions/${session}/evidence`,
+    {
+      bears_on_kind: "claim",
+      bears_on_id: claimIds[0],
+      bears_on_version: 1,
+      direction: "supports",
+      kind: "argument",
+      source: { kind: "model_memory" },
+      mode: "exploratory",
+      body_md: "One multiplied by one is one, which is odd.",
+    },
+    author,
+    201,
+  );
+  const hypothesisEvidence = await call(
+    `/v1/sessions/${session}/evidence`,
+    {
+      bears_on_kind: "hypothesis",
+      bears_on_id: hypothesis.hypothesis_id,
+      direction: "informs",
+      kind: "argument",
+      source: { kind: "model_memory" },
+      mode: "exploratory",
+      body_md: "The proposed route has two residue cases to examine.",
+    },
+    author,
+    201,
+  );
+  const review = await call(
+    `/v1/sessions/${reviewSession}/review`,
+    {
+      target_claim_id: claimIds[0],
+      target_version: 1,
+      verdict: "inform",
+      basis: "Read the finite statement and its stated falsifier.",
+      capable_of_failure: "The statement and falsifier could disagree about the integer.",
+      body_md: "This records a statement check, not verification of the broader problem.",
+    },
+    reviewer,
+    201,
+  );
+  const gap = await call(
+    `/v1/sessions/${session}/gaps`,
+    {
+      target_claim_id: claimIds[0],
+      target_version: 1,
+      obligation: "State the arithmetic step establishing one times one equals one.",
+      closes_what: "The multiplication step in this finite claim.",
+    },
+    author,
+    201,
+  );
+  const synthesisCut = (await call(`/p/${problem}/events.json?since=0&limit=1`)).page_end.through;
+  const synthesis = await call(
+    `/v1/sessions/${session}/synthesize`,
+    {
+      covers_through: synthesisCut,
+      body_md: `The proposed claim ${claimIds[0]} concerns one squared. Independent verification remains open.`,
+      anchors: [{ target_kind: "claim", target_id: claimIds[0], target_version: 1 }],
+      omitted: [
+        "Other finite claims and the proposed parity route are outside this selected summary.",
+      ],
+      selection_policy: "Summarize the first finite claim without claiming a general resolution.",
+    },
+    author,
+    201,
+  );
 
   const get = async (path, headers = {}) => {
     const response = await worker.fetch(`${origin}${path}`, {
@@ -154,6 +239,26 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     JSON.parse((await revalidates(`/p/${problem}/events.json?since=0&limit=200`)).text),
   );
   const reference = full.events.map((event) => event.seq);
+  for (const [id, path] of [
+    [evidence.evidence_id, `/p/${problem}/evidence/${evidence.evidence_id}.json`],
+    [
+      hypothesisEvidence.evidence_id,
+      `/p/${problem}/evidence/${hypothesisEvidence.evidence_id}.json`,
+    ],
+    [review.review_id, `/p/${problem}/reviews/${review.review_id}.json`],
+    [
+      hypothesis.hypothesis_id,
+      `/p/${problem}/hypotheses/${hypothesis.hypothesis_id}.json?through=${full.page_end.through}`,
+    ],
+    [gap.gap_id, `/p/${problem}/gaps.json?target=${gap.gap_id}&through=${full.page_end.through}`],
+    [synthesis.synthesis_id, `/p/${problem}/syntheses/${synthesis.synthesis_id}@1.json`],
+  ]) {
+    const envelope = full.events.find((entry) => entry.event?.object_id === id);
+    assert.equal(envelope?.event?.object_url, path, `${id}: exact source advertised in the tail`);
+    const source = await revalidates(path);
+    assert.ok(source.text.includes(id), `${id}: reader returns the selected scientific object`);
+    assert.ok(!source.text.includes(CANARY), `${id}: source read keeps workshop data private`);
+  }
   assert.deepEqual(
     reference,
     Array.from({ length: reference.length }, (_, i) => i + 1),

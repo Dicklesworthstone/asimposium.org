@@ -97,6 +97,27 @@ describe("W6.4 strict public event contracts", () => {
       },
     };
     expect(PublicEventEnvelopeSchema.safeParse(entry).success).toBe(true);
+    for (const object_url of [
+      "/p/P-DEMO/evidence/E-1.json",
+      "/p/P-DEMO/reviews/R-1.json",
+      "/p/P-DEMO/hypotheses/H-1.json?through=10",
+      "/p/P-DEMO/gaps.json?target=G-1&through=10",
+      "/p/P-DEMO/syntheses/SYNTH-1@1.json",
+    ])
+      expect(
+        PublicEventEnvelopeSchema.safeParse({ ...entry, event: { ...entry.event, object_url } })
+          .success,
+      ).toBe(true);
+    for (const object_url of [
+      "https://elsewhere.example/evidence/E-1.json",
+      "/v1/sessions/private/workshop",
+      "/p/P-DEMO/workshop/W-1.json",
+      "/p/P-DEMO/evidence/E-1.json#fragment",
+    ])
+      expect(
+        PublicEventEnvelopeSchema.safeParse({ ...entry, event: { ...entry.event, object_url } })
+          .success,
+      ).toBe(false);
     expect(
       PublicEventEnvelopeSchema.safeParse({
         ...entry,

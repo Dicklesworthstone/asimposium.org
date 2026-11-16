@@ -1,4 +1,7 @@
 import { BatchEventCauseSchema, MAX_CAUSED_BY_PER_MEMBER } from "@asimposium/contracts";
+import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
+import { ProofGapIdSchema } from "@asimposium/contracts/proof-gaps";
+import { SynthesisIdSchema } from "@asimposium/contracts/syntheses";
 import {
   EVENT_TAIL_ID_PATTERN,
   EVENT_TAIL_MAX_BYTES,
@@ -205,6 +208,26 @@ function publicObjectUrl(problemId: string, row: TailRow, through: number): stri
     /^L-[0-9]+$/.test(row.object_id ?? "")
   )
     return `${prefix}/citations/${row.object_id}@${row.object_version}.json?through=${through}`;
+  // Evidence and review ids identify immutable publications. Their exact
+  // readers intentionally accept no query parameters: the selected source
+  // stays pinned while its surrounding claim assessment uses current safety
+  // and scientific state. Do not attach an unsupported snapshot parameter.
+  if (
+    row.object_version === 1 &&
+    ((row.object_kind === "evidence" && /^E-[0-9A-HJKMNP-TV-Z]{1,78}$/.test(row.object_id ?? "")) ||
+      (row.object_kind === "review" && /^R-[0-9A-HJKMNP-TV-Z]{1,78}$/.test(row.object_id ?? "")))
+  )
+    return `${prefix}/${row.object_kind === "evidence" ? "evidence" : "reviews"}/${row.object_id}.json`;
+  if (row.object_kind === "hypothesis" && PublicHypothesisIdSchema.safeParse(row.object_id).success)
+    return `${prefix}/hypotheses/${row.object_id}.json?through=${through}`;
+  if (row.object_kind === "gap" && ProofGapIdSchema.safeParse(row.object_id).success)
+    return `${prefix}/gaps.json?target=${row.object_id}&through=${through}`;
+  if (
+    row.object_kind === "synthesis" &&
+    row.object_version === 1 &&
+    SynthesisIdSchema.safeParse(row.object_id).success
+  )
+    return `${prefix}/syntheses/${row.object_id}@1.json`;
   return null;
 }
 

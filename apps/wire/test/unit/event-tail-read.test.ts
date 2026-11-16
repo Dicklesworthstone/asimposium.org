@@ -220,6 +220,90 @@ describe("W6.4 actual SQLite public event tail", () => {
       f.sql.close();
     }
   });
+  test("scientific events link to their exact mounted readers at the captured snapshot", async () => {
+    const f = fixture();
+    const cases = [
+      ["evidence", "evidence.created", "E-01AB", 1, "/evidence/E-01AB.json"],
+      ["review", "review.created", "R-01AB", 1, "/reviews/R-01AB.json"],
+      ["hypothesis", "hypothesis.created", "H-01AB", 1, "/hypotheses/H-01AB.json?through=8"],
+      ["hypothesis", "hypothesis.narrowed", "H-01AB", 2, "/hypotheses/H-01AB.json?through=8"],
+      ["gap", "gap.filed", "G-7", 1, "/gaps.json?target=G-7&through=8"],
+      ["gap", "gap.closed-by", "G-7", 2, "/gaps.json?target=G-7&through=8"],
+      ["synthesis", "synthesis.created", "SYNTH-01AB", 1, "/syntheses/SYNTH-01AB@1.json"],
+      [
+        "hypothesis",
+        "hypothesis.created",
+        `H-${"a".repeat(64)}`,
+        1,
+        `/hypotheses/H-${"a".repeat(64)}.json?through=8`,
+      ],
+    ] as const;
+    try {
+      for (const [index, [kind, type, id, version]] of cases.entries()) {
+        f.append(index + 1, kind, type);
+        f.sql
+          .prepare("UPDATE events SET object_id=?, object_version=? WHERE seq=?")
+          .run(id, version, index + 1);
+      }
+      // Later writes must not change the destinations in a frozen traversal.
+      f.append(9);
+      const result = await readPublicEventTail(f.db, "P-DEMO", { since: 0, through: 8, limit: 10 });
+      const page = EventTailResponseSchema.parse(result?.page);
+      expect(page.events.map((entry) => entry.event?.object_url)).toEqual(
+        cases.map(([, , , , path]) => `/p/P-DEMO${path}`),
+      );
+      for (const body of [
+        renderEventTail(page, "json"),
+        renderEventTail(page, "ndjson"),
+        renderEventTailMarkdown(page),
+      ]) {
+        expect(body).toContain("/evidence/E-01AB.json");
+        expect(body).toContain("/reviews/R-01AB.json");
+        expect(body).not.toContain("PRIVATE-");
+      }
+      f.sql.exec("UPDATE event_content SET redacted_at='2026-11-15T00:00:00.000Z'");
+      const redacted = await readPublicEventTail(f.db, "P-DEMO", {
+        since: 0,
+        through: 8,
+        limit: 10,
+      });
+      expect(redacted?.page.events.map((entry) => entry.body_omitted)).toEqual(
+        cases.map(() => "content_unavailable"),
+      );
+      expect(redacted?.page.events.map((entry) => entry.event?.object_url)).toEqual(
+        page.events.map((entry) => entry.event?.object_url),
+      );
+      expect(JSON.stringify(redacted)).not.toContain("PRIVATE-");
+    } finally {
+      f.sql.close();
+    }
+  });
+  test("unsupported object spellings and mutable versions never invent exact source links", async () => {
+    const f = fixture();
+    const cases = [
+      ["evidence", "evidence.created", "R-1", 1],
+      ["evidence", "evidence.created", "E-1", 2],
+      ["review", "review.created", "R-lowercase", 1],
+      ["review", "review.created", "R-1", 2],
+      ["hypothesis", "hypothesis.created", "H-lowercase", 1],
+      ["gap", "gap.filed", "G-ABC", 1],
+      ["synthesis", "synthesis.created", "SYNTH-1", 2],
+    ] as const;
+    try {
+      for (const [index, [kind, type, id, version]] of cases.entries()) {
+        f.append(index + 1, kind, type);
+        f.sql
+          .prepare("UPDATE events SET object_id=?, object_version=? WHERE seq=?")
+          .run(id, version, index + 1);
+      }
+      const result = await readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 10 });
+      expect(result?.page.events.map((entry) => entry.event?.object_url)).toEqual(
+        cases.map(() => null),
+      );
+    } finally {
+      f.sql.close();
+    }
+  });
   test("real relation composite IDs remain public across every event face with bounded object IDs", async () => {
     const f = fixture();
     const prefix = "C-1@1-implies-C-";
