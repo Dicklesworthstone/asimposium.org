@@ -153,6 +153,13 @@ async function artifactUploadGatewayHasMount(key: string): Promise<boolean> {
     },
   );
   if (fellThrough || route === undefined || method !== route.method) return false;
+  if (method === "HEAD")
+    return (
+      response.status === 401 &&
+      response.headers.get("content-type") === "application/problem+json; charset=utf-8" &&
+      response.headers.get("cache-control") === "private, no-store" &&
+      (await response.text()) === ""
+    );
   const problem = ProblemDocumentSchema.safeParse(await response.json());
   return response.status === 401 && problem.success && problem.data.code === "UNAUTHORIZED";
 }
@@ -625,7 +632,7 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     ).toBe(false);
   });
 
-  test("the nine private upload operations reach typed authorization without blessing fallback paths or methods", async () => {
+  test("the private upload and download operations reach typed authorization without blessing fallback paths or methods", async () => {
     const advertised = new Set<string>(
       (await servedCapabilities()).operations.map((operation) =>
         normalizeAdvertisedEntry(`${operation.method} ${operation.path}`),
@@ -636,6 +643,7 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "POST /v1/artifacts",
       "GET /v1/artifacts/<uploadId>",
       "GET /v1/artifacts/<uploadId>/content",
+      "HEAD /v1/artifacts/<uploadId>/content",
       "POST /v1/artifacts/<uploadId>/complete",
       "POST /v1/artifacts/<uploadId>/renew",
       "POST /v1/artifacts/<uploadId>/resumable",

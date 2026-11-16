@@ -569,6 +569,9 @@ try {
   assert.equal(downloadRes.headers.get("content-security-policy"), "sandbox; default-src 'none'");
   assert.equal(downloadRes.headers.get("cache-control"), "private, no-store");
   assert.equal(downloadRes.headers.get("x-artifact-sha256"), textSha256);
+  const downloadEtag = `"sha256:${textSha256}"`;
+  assert.equal(downloadRes.headers.get("etag"), downloadEtag);
+  assert.equal(downloadRes.headers.get("accept-ranges"), "bytes");
 
   // Anonymous retrieval refused (401)
   await call(completeData.content_path, undefined, undefined, 401);
@@ -576,10 +579,75 @@ try {
   // Cross-sponsor retrieval refused (401)
   await call(completeData.content_path, undefined, reviewerTokenB, 401);
 
-  // Byte range request refused (400)
-  await call(completeData.content_path, undefined, authorTokenA, 400, undefined, {
+  // A resumed download traverses the same real private R2 verification path.
+  const partial = await call(completeData.content_path, undefined, authorTokenA, 206, undefined, {
     range: "bytes=0-10",
+    "if-range": downloadEtag,
   });
+  assert.equal(partial.raw, textContent.slice(0, 11));
+  assert.equal(partial.headers.get("content-range"), `bytes 0-10/${textSize}`);
+  assert.equal(partial.headers.get("content-length"), "11");
+  assert.equal(partial.headers.get("cache-control"), "private, no-store");
+  assert.equal(partial.headers.get("etag"), downloadEtag);
+  const remainder = await call(completeData.content_path, undefined, authorTokenA, 206, undefined, {
+    range: "bytes=11-",
+    "if-range": downloadEtag,
+  });
+  assert.equal(partial.raw + remainder.raw, textContent);
+  assert.equal(remainder.headers.get("content-range"), `bytes 11-${textSize - 1}/${textSize}`);
+  const suffix = await call(completeData.content_path, undefined, authorTokenA, 206, undefined, {
+    range: "bytes=-5",
+  });
+  assert.equal(suffix.raw, textContent.slice(-5));
+  const unsatisfiable = await call(
+    completeData.content_path,
+    undefined,
+    authorTokenA,
+    416,
+    undefined,
+    {
+      range: `bytes=${textSize}-`,
+    },
+  );
+  assert.equal(unsatisfiable.headers.get("content-range"), `bytes */${textSize}`);
+  assert.equal(unsatisfiable.data.code, "SCHEMA_INVALID");
+  for (const ifRange of [`W/${downloadEtag}`, '"older-object"', "Wed, 21 Oct 2015 07:28:00 GMT"]) {
+    const complete = await call(
+      completeData.content_path,
+      undefined,
+      authorTokenA,
+      200,
+      undefined,
+      {
+        range: "bytes=0-10",
+        "if-range": ifRange,
+      },
+    );
+    assert.equal(complete.raw, textContent);
+    assert.equal(complete.headers.get("content-range"), null);
+  }
+  for (const token of [undefined, reviewerTokenB]) {
+    const refused = await call(completeData.content_path, undefined, token, 401, undefined, {
+      range: "bytes=999999-",
+      "if-range": downloadEtag,
+    });
+    assert.equal(refused.headers.get("content-range"), null);
+    assert.equal(refused.headers.get("etag"), null);
+    assert.equal(refused.headers.get("x-artifact-sha256"), null);
+  }
+  const head = await worker.fetch(`${origin}${completeData.content_path}`, {
+    method: "HEAD",
+    headers: {
+      "User-Agent": userAgent,
+      authorization: `Bearer ${authorTokenA}`,
+      range: "bytes=999999-",
+    },
+  });
+  assert.equal(head.status, 200);
+  assert.equal(await head.text(), "");
+  assert.equal(head.headers.get("content-length"), String(textSize));
+  assert.equal(head.headers.get("content-range"), null);
+  assert.equal(head.headers.get("etag"), downloadEtag);
 
   // 10. Mismatch and Terminal Quarantine
   const decl2 = await call(
@@ -607,6 +675,19 @@ try {
 
   // Quarantined upload cannot be downloaded
   await call(`/v1/artifacts/${uploadIdMismatch}/content`, undefined, authorTokenA, 401);
+  const quarantinedRange = await call(
+    `/v1/artifacts/${uploadIdMismatch}/content`,
+    undefined,
+    authorTokenA,
+    401,
+    undefined,
+    {
+      range: "bytes=0-3",
+      "if-range": downloadEtag,
+    },
+  );
+  assert.equal(quarantinedRange.headers.get("content-range"), null);
+  assert.equal(quarantinedRange.headers.get("etag"), null);
 
   await call(decl2.data.renew_path, {}, authorTokenA, 403, "key-renew-quarantined");
 

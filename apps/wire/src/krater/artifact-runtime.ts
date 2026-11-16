@@ -58,10 +58,10 @@ export async function artifactFetch(
       clock,
       waitUntil,
     });
-    return response ?? artifactUnavailable();
+    return response ?? artifactUnavailable(request.method);
   } catch {
     cancelUnconsumedRequestBody(request);
-    return artifactUnavailable();
+    return artifactUnavailable(request.method);
   }
 }
 

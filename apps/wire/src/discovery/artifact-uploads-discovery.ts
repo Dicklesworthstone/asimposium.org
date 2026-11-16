@@ -49,7 +49,12 @@ export const ARTIFACT_UPLOAD_OPERATIONS: readonly [string, "fellow-bearer", stri
   [
     "GET /v1/artifacts/:uploadId/content",
     "fellow-bearer",
-    "Retrieve exact verified bytes through current owner/grant/membership checks with private no-store headers and attachment disposition. Closed authoring sessions retain readable verified objects. Partial ranges are not supported.",
+    "Retrieve exact verified bytes through current owner/grant/membership checks with private no-store headers and attachment disposition. Resume with one byte Range and the strong ETag in If-Range; the complete object is verified before returning any interval. Closed authoring sessions retain readable verified objects.",
+  ],
+  [
+    "HEAD /v1/artifacts/:uploadId/content",
+    "fellow-bearer",
+    "Read the complete verified private artifact's byte length, digest ETag and download headers without a response body. The same current authority and whole-object integrity checks apply. Range is ignored on HEAD.",
   ],
 ];
 
@@ -62,6 +67,7 @@ function operation(path: string, method: string): string | undefined {
     if (path === "/v1/artifacts/{uploadId}") return "status";
     if (path === "/v1/artifacts/{uploadId}/content") return "content";
   }
+  if (method === "HEAD" && path === "/v1/artifacts/{uploadId}/content") return "content";
   if (method === "PUT" && path === "/v1/artifacts/{uploadId}/parts/{partNumber}") return "part";
   if (method === "POST") {
     for (const name of ["renew", "resumable", "complete", "resume"])
@@ -90,7 +96,26 @@ export function artifactUploadParameters(
         $ref: `${origin}/schemas/artifact-uploads.v1.json#/properties/inventory_query/properties/${name}`,
       },
     }));
-  if (method === "GET") return [];
+  if (kind === "content" && method === "GET")
+    return [
+      {
+        name: "Range",
+        in: "header",
+        required: false,
+        description:
+          "One bytes interval: bytes=0-1023, bytes=1024- or bytes=-1024. A valid unsatisfiable range returns 416 with the total size. Multiple ranges, unsupported units, malformed syntax and headers longer than 128 characters return the complete object instead.",
+        schema: { type: "string" },
+      },
+      {
+        name: "If-Range",
+        in: "header",
+        required: false,
+        description:
+          "The strong ETag from this artifact's earlier response. A mismatch, weak tag or date returns the complete 200 response. Without Range this header has no effect.",
+        schema: { type: "string" },
+      },
+    ];
+  if (method === "GET" || method === "HEAD") return [];
   return [
     {
       name: "Idempotency-Key",
@@ -130,36 +155,82 @@ export function artifactUploadResponses(
       : kind === "resumable" || kind === "complete"
         ? "status_response"
         : `${kind}_response`;
+  const privateHeaders = {
+    "Cache-Control": { schema: { type: "string", const: "private, no-store" } },
+    "X-Robots-Tag": { schema: { type: "string", const: "noindex, nofollow" } },
+  };
+  const downloadHeaders = {
+    ...privateHeaders,
+    "Accept-Ranges": { schema: { type: "string", const: "bytes" } },
+    ETag: { schema: { type: "string", pattern: '^"sha256:[a-f0-9]{64}"$' } },
+    "Content-Length": { schema: { type: "string", pattern: "^[0-9]+$" } },
+  };
+  const byteContent = {
+    "text/plain": { schema: { type: "string" } },
+    "application/gzip": { schema: { type: "string", format: "binary" } },
+  };
   return {
     [kind === "declare" ? "201" : "200"]: {
       description:
         kind === "content"
-          ? "Owner-private complete verified bytes, served as an attachment."
+          ? method === "HEAD"
+            ? "Owner-private complete verified representation headers without a body."
+            : "Owner-private complete verified bytes, served as an attachment."
           : kind === "inventory"
             ? "Bounded current metadata with explicit continuation; no storage capabilities, bytes or foreign bindings."
             : "Private artifact receipt or status. Verification is bytes-only and never publishes the object.",
-      content:
-        kind === "content"
-          ? {
-              "text/plain": { schema: { type: "string" } },
-              "application/gzip": { schema: { type: "string", format: "binary" } },
-            }
-          : {
-              "application/json": {
-                schema: { $ref: `${origin}/schemas/artifact-uploads.v1.json#/properties/${root}` },
+      ...(method === "HEAD"
+        ? {}
+        : {
+            content:
+              kind === "content"
+                ? byteContent
+                : {
+                    "application/json": {
+                      schema: {
+                        $ref: `${origin}/schemas/artifact-uploads.v1.json#/properties/${root}`,
+                      },
+                    },
+                  },
+          }),
+      headers: kind === "content" ? downloadHeaders : privateHeaders,
+    },
+    ...(kind === "content" && method === "GET"
+      ? {
+          "206": {
+            description:
+              "One exact interval from the fully verified private object. The digest ETag identifies the whole artifact; Content-Range identifies the returned interval.",
+            content: byteContent,
+            headers: {
+              ...downloadHeaders,
+              "Content-Range": {
+                schema: { type: "string", pattern: "^bytes [0-9]+-[0-9]+/[0-9]+$" },
               },
             },
-      headers: {
-        "Cache-Control": { schema: { type: "string", const: "private, no-store" } },
-        "X-Robots-Tag": { schema: { type: "string", const: "noindex, nofollow" } },
-      },
-    },
+          },
+          "416": {
+            description:
+              "The authorized, fully verified object's requested interval is not satisfiable. No artifact bytes are returned.",
+            content: {
+              "application/problem+json": { schema: { $ref: `${origin}/schemas/problem.v1.json` } },
+            },
+            headers: {
+              ...privateHeaders,
+              "Content-Range": { schema: { type: "string", pattern: "^bytes \\*/[0-9]+$" } },
+            },
+          },
+        }
+      : {}),
     default: {
       description:
         "Typed opaque refusal for invalid shape, missing or foreign upload, changed authority, exhausted budgets, expiry, immutable-part conflict, rejected content or unavailable storage.",
-      content: {
-        "application/problem+json": { schema: { $ref: `${origin}/schemas/problem.v1.json` } },
-      },
+      ...(method === "HEAD"
+        ? {}
+        : {
+            content: {
+              "application/problem+json": { schema: { $ref: `${origin}/schemas/problem.v1.json` } },
+            },
+          }),
     },
   };
 }

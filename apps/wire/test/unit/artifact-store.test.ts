@@ -19,6 +19,7 @@ import {
 import { artifactSha256 } from "../../src/krater/artifact-inspection.ts";
 import { artifactStagingKey } from "../../src/krater/artifact-presign.ts";
 import { resumeArtifactUpload } from "../../src/krater/artifact-recovery.ts";
+import { artifactFetch } from "../../src/krater/artifact-runtime.ts";
 import {
   ARTIFACT_STAGING_RETRY_MS,
   reconcileArtifactStaging,
@@ -1042,6 +1043,136 @@ test("HTTP completes manifest → PUT bytes → verification → private downloa
     assert.equal(f.rows().length, 1);
     assert.equal(f.audit().length, 2);
     assert.equal(h.authentications(), 6);
+  });
+});
+
+test("HTTP resumable private downloads return exact bounded byte ranges and digest validators", async () => {
+  await withArtifactFixture(async (f) => {
+    const receipt = await f.create();
+    f.objects.set(artifactStagingKey(receipt.upload_id), bytes);
+    await f.complete(receipt.upload_id);
+    const h = http(f);
+    const path = `/v1/artifacts/${receipt.upload_id}/content`;
+    const etag = `"sha256:${receipt.sha256}"`;
+    const full = await h.call(path);
+    assert.equal(full.headers.get("etag"), etag);
+    assert.equal(full.headers.get("accept-ranges"), "bytes");
+    assert.equal(full.headers.get("content-length"), String(bytes.length));
+    const ranges = [
+      ["bytes=0-10", 0, 10],
+      ["bytes=11-", 11, bytes.length - 1],
+      ["bytes=-5", bytes.length - 5, bytes.length - 1],
+      ["bytes=2-999999999999999999999999", 2, bytes.length - 1],
+      ["bytes=-999999999999999999999999", 0, bytes.length - 1],
+      ["BYTES=0001-0002", 1, 2],
+    ] as const;
+    for (const [range, start, end] of ranges) {
+      const response = await h.call(path, "GET", undefined, { range, "if-range": etag });
+      assert.equal(response.status, 206, range);
+      assert.deepEqual(new Uint8Array(await response.arrayBuffer()), bytes.slice(start, end + 1));
+      assert.equal(response.headers.get("content-range"), `bytes ${start}-${end}/${bytes.length}`);
+      assert.equal(response.headers.get("content-length"), String(end - start + 1));
+      assert.equal(response.headers.get("etag"), etag);
+      assert.equal(response.headers.get("x-artifact-sha256"), receipt.sha256);
+      assert.equal(response.headers.get("cache-control"), "private, no-store");
+      assert.equal(response.headers.get("content-security-policy"), "sandbox; default-src 'none'");
+      assert.match(response.headers.get("content-disposition") ?? "", /^attachment;/);
+    }
+    for (const range of ["bytes=999-", "bytes=2-1", "bytes=-0", "bytes=9007199254740992-"]) {
+      const response = await h.call(path, "GET", undefined, { range });
+      assert.equal(response.status, 416, range);
+      assert.equal(response.headers.get("content-range"), `bytes */${bytes.length}`);
+      assert.equal(response.headers.get("cache-control"), "private, no-store");
+      assert.equal(((await response.json()) as { code: string }).code, "SCHEMA_INVALID");
+    }
+    for (const range of [
+      "bytes=0-1,4-5",
+      "items=0-1",
+      "bytes=three-ten",
+      `bytes=0-${"9".repeat(256)}`,
+    ]) {
+      const response = await h.call(path, "GET", undefined, { range });
+      assert.equal(response.status, 200, range);
+      assert.deepEqual(new Uint8Array(await response.arrayBuffer()), bytes);
+      assert.equal(response.headers.get("content-range"), null);
+    }
+    assert.equal(f.audit().length, 2, "downloads do not append upload transitions");
+  });
+});
+
+test("HTTP artifact If-Range falls back safely and HEAD reports the complete verified representation", async () => {
+  await withArtifactFixture(async (f) => {
+    const receipt = await f.create();
+    f.objects.set(artifactStagingKey(receipt.upload_id), bytes);
+    await f.complete(receipt.upload_id);
+    const h = http(f);
+    const path = `/v1/artifacts/${receipt.upload_id}/content`;
+    const etag = `"sha256:${receipt.sha256}"`;
+    for (const ifRange of [`W/${etag}`, '"different"', "Wed, 21 Oct 2015 07:28:00 GMT", "*"]) {
+      const response = await h.call(path, "GET", undefined, {
+        range: "bytes=0-10",
+        "if-range": ifRange,
+      });
+      assert.equal(response.status, 200, ifRange);
+      assert.deepEqual(new Uint8Array(await response.arrayBuffer()), bytes);
+      assert.equal(response.headers.get("content-range"), null);
+    }
+    for (const range of ["bytes=0-10", "bytes=999-"]) {
+      const head = await h.call(path, "HEAD", undefined, { range, "if-range": etag });
+      assert.equal(head.status, 200);
+      assert.equal(await head.text(), "");
+      assert.equal(head.headers.get("content-length"), String(bytes.length));
+      assert.equal(head.headers.get("content-range"), null);
+      assert.equal(head.headers.get("etag"), etag);
+      assert.equal(head.headers.get("accept-ranges"), "bytes");
+    }
+    const unavailable = await artifactFetch(
+      new Request(`https://a.asimposium.org${path}`, { method: "HEAD" }),
+      {} as Parameters<typeof artifactFetch>[1],
+      () => new Response("Unexpected route fallthrough"),
+    );
+    assert.equal(unavailable.status, 503, "invalid runtime configuration remains unavailable");
+    assert.equal(await unavailable.text(), "");
+    assert.equal(unavailable.headers.get("etag"), null);
+    assert.equal(unavailable.headers.get("content-range"), null);
+  });
+});
+
+test("HTTP artifact range and conditional headers cannot bypass authority or whole-object integrity", async () => {
+  await withArtifactFixture(async (f) => {
+    const receipt = await f.create();
+    f.objects.set(artifactStagingKey(receipt.upload_id), bytes);
+    await f.complete(receipt.upload_id);
+    const path = `/v1/artifacts/${receipt.upload_id}/content`;
+    const headers = { range: "bytes=0-3", "if-range": `"sha256:${receipt.sha256}"` };
+    for (const h of [http(f, "invalid-test-token"), http(f, "valid-test-token", other)]) {
+      for (const method of ["GET", "HEAD"]) {
+        const refused = await h.call(path, method, undefined, headers);
+        assert.equal(refused.status, 401);
+        assert.equal(refused.headers.get("content-range"), null);
+        assert.equal(refused.headers.get("etag"), null);
+        assert.equal(refused.headers.get("x-artifact-sha256"), null);
+        if (method === "HEAD") assert.equal(await refused.text(), "");
+      }
+    }
+    // Corruption outside the requested range must still refuse the read.
+    const corrupted = bytes.slice();
+    const lastByte = corrupted[corrupted.length - 1];
+    assert.ok(lastByte !== undefined);
+    corrupted[corrupted.length - 1] = lastByte ^ 1;
+    f.objects.set(`cas/sha256/${receipt.sha256}`, corrupted);
+    for (const range of ["bytes=0-3", "bytes=999-"]) {
+      const refused = await http(f).call(path, "GET", undefined, { ...headers, range });
+      assert.equal(refused.status, 503);
+      assert.equal(refused.headers.get("content-range"), null);
+      assert.equal(refused.headers.get("etag"), null);
+    }
+    f.objects.set(`cas/sha256/${receipt.sha256}`, bytes);
+    f.onGet(() => f.sql.exec("DELETE FROM problem_memberships"));
+    const raced = await http(f).call(path, "GET", undefined, headers);
+    assert.equal(raced.status, 401, "authority is rechecked after the full storage read");
+    assert.equal(raced.headers.get("content-range"), null);
+    assert.equal(raced.headers.get("etag"), null);
   });
 });
 

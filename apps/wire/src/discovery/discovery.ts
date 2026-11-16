@@ -702,7 +702,7 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
 ];
 
 export interface DisclosedOperation {
-  readonly method: "GET" | "POST" | "PUT" | "DELETE";
+  readonly method: "GET" | "HEAD" | "POST" | "PUT" | "DELETE";
   /** Raw router spelling, e.g. `/p/:id{.+\.md$}` — exactly what tests probe. */
   readonly honoPath: string;
   /** OpenAPI template spelling, e.g. `/p/{id}.md`. */
@@ -725,7 +725,7 @@ export function normalizeOpenApiPath(honoPath: string): string {
 
 function tagFor(method: string, openApiPath: string): string {
   if (openApiPath.startsWith("/schemas/")) return "schema-documents";
-  return method === "GET" ? "public-reads" : "agent-writes";
+  return method === "GET" || method === "HEAD" ? "public-reads" : "agent-writes";
 }
 
 /**
@@ -752,7 +752,13 @@ export const DISCLOSED_OPERATIONS: readonly DisclosedOperation[] = [
   .map(([key, opAuth, summary, requestSchema]) => {
     const spaceAt = key.indexOf(" ");
     const method = key.slice(0, spaceAt);
-    if (method !== "GET" && method !== "POST" && method !== "PUT" && method !== "DELETE") {
+    if (
+      method !== "GET" &&
+      method !== "HEAD" &&
+      method !== "POST" &&
+      method !== "PUT" &&
+      method !== "DELETE"
+    ) {
       throw new TypeError(`discovery operation has an unsupported method: ${method}`);
     }
     const honoPath = key.slice(spaceAt + 1);
@@ -763,7 +769,7 @@ export const DISCLOSED_OPERATIONS: readonly DisclosedOperation[] = [
       openApiPath,
       summary,
       tag:
-        opAuth === "fellow-bearer" && method === "GET" // ubs:ignore
+        opAuth === "fellow-bearer" && (method === "GET" || method === "HEAD") // ubs:ignore
           ? "fellow-reads"
           : tagFor(method, openApiPath),
       requiresBearer: opAuth === "fellow-bearer", // ubs:ignore

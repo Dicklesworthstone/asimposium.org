@@ -34,8 +34,13 @@ test("capabilities and OpenAPI expose the complete authenticated private upload 
     const accepted = method === "POST" && path === "/v1/artifacts" ? "201" : "200";
     const result = operation.responses[accepted];
     assert.equal(result.headers["Cache-Control"].schema.const, "private, no-store");
-    const ref = result.content["application/json"]?.schema.$ref;
+    const ref = result.content?.["application/json"]?.schema.$ref;
     if (ref) assert.ok(schema.properties[ref.split("/").at(-1)]);
+    if (method === "HEAD") {
+      assert.equal(result.content, undefined);
+      assert.equal(operation.responses.default.content, undefined);
+      assert.equal(operation.requestBody, undefined);
+    }
   }
   const part = document.paths["/v1/artifacts/{uploadId}/parts/{partNumber}"].put;
   assert.equal(part.requestBody.content["application/octet-stream"].schema.format, "binary");
@@ -46,4 +51,13 @@ test("capabilities and OpenAPI expose the complete authenticated private upload 
     ["after", "limit"],
   );
   assert.equal(inventory.requestBody, undefined);
+  const content = document.paths["/v1/artifacts/{uploadId}/content"].get;
+  assert.deepEqual(content.parameters.map((item: { name: string }) => item.name).sort(), [
+    "If-Range",
+    "Range",
+    "uploadId",
+  ]);
+  assert.ok(content.responses["206"].headers["Content-Range"]);
+  assert.ok(content.responses["416"].headers["Content-Range"]);
+  assert.equal(content.responses["200"].headers["Accept-Ranges"].schema.const, "bytes");
 });

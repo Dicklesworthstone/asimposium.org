@@ -104,7 +104,9 @@ export function artifactRoute(
       operation === "resumable" ||
       operation === "resume"
         ? "POST"
-        : "GET",
+        : operation === "content" && method === "HEAD"
+          ? "HEAD"
+          : "GET",
   };
 }
 
@@ -132,6 +134,61 @@ function contract(status: number, detail: string, extra: Record<string, string> 
     headers: { ...PRIVATE_HEADERS, ...extra },
   });
 }
+
+/** Only one byte interval is served. Unsupported units, malformed syntax,
+ * multiple ranges and oversized headers fall back to the complete response.
+ * Bounded BigInt parsing avoids rounding an attacker-supplied large offset into
+ * a different interval; an oversized end or suffix still has ordinary HTTP
+ * clamping semantics. null means a valid but unsatisfiable byte range. */
+function artifactByteRange(
+  value: string | null,
+  size: number,
+): { start: number; end: number } | null | undefined {
+  if (value === null || value.length > 128) return undefined;
+  const match = /^bytes=(\d*)-(\d*)$/i.exec(value.trim());
+  const startText = match?.[1];
+  const endText = match?.[2];
+  if (startText === undefined || endText === undefined || (startText === "" && endText === ""))
+    return undefined;
+  const length = BigInt(size);
+  if (length === 0n) return null;
+  if (startText === "") {
+    const suffix = BigInt(endText);
+    if (suffix === 0n) return null;
+    return { start: suffix >= length ? 0 : Number(length - suffix), end: size - 1 };
+  }
+  const start = BigInt(startText);
+  const end = endText === "" ? length - 1n : BigInt(endText);
+  if (start >= length || end < start) return null;
+  return { start: Number(start), end: end >= length ? size - 1 : Number(end) };
+}
+
+function artifactRangeUnavailable(size: number, etag: string): Response {
+  return validatedProblem({
+    status: 416,
+    code: "SCHEMA_INVALID",
+    title: "Artifact byte range is not satisfiable",
+    detail: "The requested interval does not overlap the verified private artifact.",
+    fixHint:
+      "Resume with one byte range inside the Content-Range total, or omit Range to retrieve the complete artifact. Use its strong ETag in If-Range when continuing an earlier download.",
+    rule: "A5",
+    extensions: {
+      schema: ARTIFACT_UPLOADS_SCHEMA_ID,
+      example: {
+        method: "GET",
+        path: "/v1/artifacts/{uploadId}/content",
+        headers: { Range: "bytes=0-" },
+      },
+    },
+    headers: {
+      ...PRIVATE_HEADERS,
+      "accept-ranges": "bytes",
+      "content-range": `bytes */${size}`,
+      etag,
+    },
+  });
+}
+
 function denied(): Response {
   return validatedProblem({
     status: 401,
@@ -143,8 +200,8 @@ function denied(): Response {
     headers: PRIVATE_HEADERS,
   });
 }
-export function artifactUnavailable(): Response {
-  return validatedProblem({
+export function artifactUnavailable(method = "GET"): Response {
+  const response = validatedProblem({
     status: 503,
     code: "INTERNAL_ERROR",
     title: "Artifact storage unavailable",
@@ -153,6 +210,9 @@ export function artifactUnavailable(): Response {
       "Retry later with the same request and Idempotency-Key. Contact the operator if this persists.",
     headers: { ...PRIVATE_HEADERS, "retry-after": "30" },
   });
+  return method === "HEAD"
+    ? new Response(null, { status: response.status, headers: response.headers })
+    : response;
 }
 function failure(error: unknown): Response {
   if (!(error instanceof ArtifactUploadError)) return artifactUnavailable();
@@ -410,6 +470,18 @@ export async function handleArtifactHttp(
   request: Request,
   options: ArtifactHttpOptions,
 ): Promise<Response | undefined> {
+  const response = await handleArtifactHttpRequest(request, options);
+  // HEAD never emits bytes, including authentication and storage refusals.
+  // It still passes through the same authority and full-integrity checks.
+  return request.method === "HEAD" && response !== undefined
+    ? new Response(null, { status: response.status, headers: response.headers })
+    : response;
+}
+
+async function handleArtifactHttpRequest(
+  request: Request,
+  options: ArtifactHttpOptions,
+): Promise<Response | undefined> {
   const url = new URL(request.url);
   const route = artifactRoute(url.pathname, request.method);
   if (!route) return undefined;
@@ -421,7 +493,7 @@ export async function handleArtifactHttp(
       );
     if (request.method !== route.method)
       return contract(405, `This artifact operation requires ${route.method}.`, {
-        allow: route.method,
+        allow: route.operation === "content" ? "GET, HEAD" : route.method,
       });
     if (request.headers.has("asimp-service-envelope")) return denied();
     const match = /^Bearer ([^\s,]+)$/i.exec(request.headers.get("authorization") ?? "");
@@ -639,11 +711,6 @@ export async function handleArtifactHttp(
       }
       return json(await statusView(options.db, row, clock(), mayResume));
     }
-    if (request.headers.has("range"))
-      return contract(
-        400,
-        "Private artifact downloads return the complete verified object, not byte ranges.",
-      );
     const result = await readVerifiedArtifact(
       options.db,
       options.bucket,
@@ -651,16 +718,37 @@ export async function handleArtifactHttp(
       route.id!,
       clock,
     );
-    return new Response(result.bytes.slice().buffer as ArrayBuffer, {
-      headers: {
-        ...PRIVATE_HEADERS,
-        "content-type": result.manifest.content_type!,
-        "content-length": String(result.bytes.length),
-        "content-disposition": `attachment; filename="${result.manifest.sha256}.${result.manifest.encoding === "text" ? "txt" : "tar.gz"}"`,
-        "content-security-policy": "sandbox; default-src 'none'",
-        "x-artifact-sha256": result.manifest.sha256,
+    const etag = `"sha256:${result.manifest.sha256}"`;
+    // A partial read never bypasses whole-object digest verification or the
+    // final authority recheck. No date validator is issued, so dates and weak
+    // If-Range values conservatively receive the complete representation.
+    const ifRange = request.headers.get("if-range");
+    const range =
+      request.method === "GET" && (ifRange === null || ifRange === etag)
+        ? artifactByteRange(request.headers.get("range"), result.bytes.length)
+        : undefined;
+    if (range === null) return artifactRangeUnavailable(result.bytes.length, etag);
+    const contentBytes =
+      range === undefined ? result.bytes : result.bytes.subarray(range.start, range.end + 1);
+    return new Response(
+      request.method === "HEAD" ? null : (contentBytes.slice().buffer as ArrayBuffer),
+      {
+        status: range === undefined ? 200 : 206,
+        headers: {
+          ...PRIVATE_HEADERS,
+          "content-type": result.manifest.content_type!,
+          "content-length": String(contentBytes.length),
+          "accept-ranges": "bytes",
+          etag,
+          ...(range === undefined
+            ? {}
+            : { "content-range": `bytes ${range.start}-${range.end}/${result.bytes.length}` }),
+          "content-disposition": `attachment; filename="${result.manifest.sha256}.${result.manifest.encoding === "text" ? "txt" : "tar.gz"}"`,
+          "content-security-policy": "sandbox; default-src 'none'",
+          "x-artifact-sha256": result.manifest.sha256,
+        },
       },
-    });
+    );
   } catch (error) {
     return failure(error);
   } finally {

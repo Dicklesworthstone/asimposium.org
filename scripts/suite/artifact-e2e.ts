@@ -8,7 +8,7 @@
  * 4. Premature completion refusal (409 NOT_UPLOADED before staging).
  * 5. Staging and verification in real R2 -> 200 OK with state "verified", bytes-only verification label, bytes written to private CAS.
  * 6. Private status and download -> 200 OK with exact bytes, cache-control: private, no-store, content-disposition: attachment, CSP sandbox.
- * 7. Anonymous and cross-sponsor download refusals (401) and byte range refusal (400).
+ * 7. Resumable private byte ranges (206), unsatisfiable intervals (416), digest validators, HEAD, and anonymous/cross-sponsor refusals (401).
  * 8. Digest mismatch detection -> 422 MISMATCH, terminal quarantine state, download refused.
  * 9. Secret/PII screening refusal (403 WRITE_REFUSED on private key).
  * 10. Claim promotion, evidence submission, and publication request (POST /v1/artifacts/:id/publish -> 202 Accepted).
