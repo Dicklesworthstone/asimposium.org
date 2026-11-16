@@ -90,7 +90,11 @@ function sessionVerdict(facts, session) {
     reached.push("pack_read");
   // A Fellow may have worked on this problem in several sessions. Only a
   // private object actually created by this session can satisfy its loop.
-  if (session !== null && Number.isSafeInteger(session.workshop_objects) && session.workshop_objects > 0)
+  if (
+    session !== null &&
+    Number.isSafeInteger(session.workshop_objects) &&
+    session.workshop_objects > 0
+  )
     reached.push("workshop");
 
   // Recovery: the actual injected contract 422 followed by success on that

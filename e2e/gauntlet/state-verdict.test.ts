@@ -211,7 +211,9 @@ describe("state-derived gauntlet verdict", () => {
       publicClaims: [{ ...publicClaim, session_id: "S-2" }],
     };
     expect(gauntletVerdict(facts).missing).toContain("workshop");
-    expect(gauntletVerdict({ ...facts, sessions: [...facts.sessions].reverse() }).completed).toBe(false);
+    expect(gauntletVerdict({ ...facts, sessions: [...facts.sessions].reverse() }).completed).toBe(
+      false,
+    );
   });
 
   test("a late workshop push cannot retroactively prepare a public promotion", () => {
@@ -226,7 +228,9 @@ describe("state-derived gauntlet verdict", () => {
   });
 
   test("a retained workshop row without an observed successful push is not fresh work", () => {
-    const observations = fullObservations.filter((observation) => !observation.path.endsWith("/workshop"));
+    const observations = fullObservations.filter(
+      (observation) => !observation.path.endsWith("/workshop"),
+    );
     expect(gauntletVerdict({ ...complete, observations }).missing).toContain("workshop");
   });
 
@@ -366,7 +370,11 @@ describe("state-derived gauntlet verdict", () => {
   });
   test("the verdict takes no agent-reported input", () => {
     // A transcript claiming success is not a field the verdict reads.
-    const withClaim = { ...complete, sessions: [{ ...closedSession, workshop_objects: 0 }], agentSaysSucceeded: true };
+    const withClaim = {
+      ...complete,
+      sessions: [{ ...closedSession, workshop_objects: 0 }],
+      agentSaysSucceeded: true,
+    };
     expect(gauntletVerdict(withClaim).completed).toBe(false);
   });
   test("a journey without a pack read is incomplete", () => {

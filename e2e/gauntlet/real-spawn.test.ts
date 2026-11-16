@@ -100,12 +100,15 @@ describe("runRealAttempt", () => {
   });
 
   test("an enrollment fragment goes only through stdin, never CLI argv", async () => {
-    installFakeCli("claude", `
+    installFakeCli(
+      "claude",
+      `
       input="$(cat)"
       case "$input" in *"#v1.s"*) ;; *) exit 4 ;; esac
       case "$*" in *"#v1.s"*) exit 5 ;; esac
       printf "stdin-only\\n"
-    `);
+    `,
+    );
     const outcome = await attempt();
     expect(outcome.diagnostic.exitCode).toBe(0);
     expect(outcome.diagnostic.stdinWriteFailed).toBe(false);
