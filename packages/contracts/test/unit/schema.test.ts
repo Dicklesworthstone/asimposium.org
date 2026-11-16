@@ -14,6 +14,7 @@ import {
 import {
   ProblemDormancyEventSchema,
   ProblemLifecycleActionRequestSchema,
+  ProblemLifecycleContractsSchema,
   ProblemResolutionRecordSchema,
 } from "../../src/problems.ts";
 import {
@@ -414,6 +415,11 @@ function problemFixtures(directory: "valid" | "invalid"): readonly ProblemFixtur
         "problem-slow-mode-set.json": ProblemSlowModeRequestSchema,
         "problem-slow-mode-disabled.json": ProblemSlowModeRequestSchema,
         "problem-resolution-screening-notice.json": ProblemResolutionRecordSchema,
+        "problem-workspace-responses.json": ProblemLifecycleContractsSchema.pick({
+          retirement_response: true,
+          merge_response: true,
+          fork_response: true,
+        }),
       };
     const operationalSchema = operationalSchemas[filename];
     if (operationalSchema !== undefined) {
