@@ -17268,7 +17268,7 @@ describe("committed promotion outbox nudge", () => {
         await f.db
           .prepare("SELECT status FROM leases WHERE lease_id = ?")
           .bind(replacement.lease_id)
-          .first(),
+          .first<{ status: string }>(),
       ).toEqual({ status: "released" });
       expect(
         LeaseAcquireResponseSchema.parse(

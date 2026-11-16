@@ -1,7 +1,11 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { D1Database } from "@cloudflare/workers-types";
-import { findStaleRoutes, staleRouteReferences } from "../../src/ledger/stale-route";
+import {
+  findStaleRoutes,
+  staleRouteAdmissionGuards,
+  staleRouteReferences,
+} from "../../src/ledger/stale-route";
 
 // Real SQLite queries behind the narrow D1 read interface. This is local SQL
 // coverage, not a claim about deployed D1 or the whole promotion transaction.
@@ -335,5 +339,64 @@ describe("version-pinned retractions share the promotion gate", () => {
     const { db, queries } = fixture();
     expect(await findStaleRoutes(db, "p", [])).toEqual([]);
     expect(queries).toHaveLength(0);
+  });
+});
+
+describe("stale-route admission runs in the publication transaction", () => {
+  const publication = (sql: Database, problem = "p") =>
+    sql
+      .query(
+        "INSERT INTO events VALUES (?, 'publication', 100, 'claim', 'C-100', 1, 'claim.created')",
+      )
+      .run(problem);
+
+  const check = (db: D1Database, references: string[]) => {
+    const [guard] = staleRouteAdmissionGuards(
+      db,
+      "p",
+      staleRouteReferences(references),
+      "publication",
+    );
+    if (!guard) throw new Error("missing admission guard");
+    return guard.first();
+  };
+
+  for (const closure of [
+    "claim-retracted",
+    "claim-version-superseded",
+    "hypothesis-killed",
+    "hypothesis-refined",
+  ] as const) {
+    test(`a ${closure} route cannot pass between preflight and publication`, async () => {
+      const { sql, db } = fixture();
+      const reference = closure.startsWith("hypothesis") ? "H-route" : "C-90@1";
+      expect(await findStaleRoutes(db, "p", staleRouteReferences([reference]))).toEqual([]);
+      if (closure === "claim-retracted") retract(sql, "p", reference);
+      else if (closure === "claim-version-superseded") revise(sql, "p", "C-90");
+      else
+        sql
+          .query("INSERT INTO hypotheses VALUES ('p', 'H-route', ?)")
+          .run(closure === "hypothesis-killed" ? "killed" : "refined-into");
+      publication(sql);
+      await expect(check(db, [...openPrefix(), reference])).rejects.toThrow("STALE_ROUTE_CHANGED");
+    });
+  }
+
+  test("a lost-head attempt without its event stays inert for Krater retry", async () => {
+    const { sql, db } = fixture();
+    retract(sql, "p", "C-90@1");
+    await expect(check(db, ["C-90@1"])).resolves.toBeDefined();
+    publication(sql, "other");
+    await expect(check(db, ["C-90@1"])).resolves.toBeDefined();
+  });
+
+  test("live current pins and unknown non-route references remain admissible", async () => {
+    const { sql, db } = fixture();
+    revise(sql, "p", "C-90");
+    retract(sql, "p", "C-90@1");
+    sql.exec("INSERT INTO hypotheses VALUES ('p', 'H-route', 'open')");
+    publication(sql);
+    await expect(check(db, ["C-90", "C-90@3", "H-route", "G-unknown"])).resolves.toBeDefined();
+    expect(staleRouteAdmissionGuards(db, "p", [], "publication")).toEqual([]);
   });
 });

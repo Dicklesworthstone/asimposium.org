@@ -15,7 +15,7 @@
  */
 
 import type { StaleRouteEntry } from "@asimposium/contracts";
-import type { D1Database } from "@cloudflare/workers-types";
+import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { validatedProblem } from "../http/envelope";
 
 type Db = D1Database;
@@ -67,7 +67,7 @@ export function staleRouteReferences(refs: readonly string[]): StaleRouteReferen
 // different snapshots. The JSON parameter also avoids a bind-variable ceiling.
 // Retractions of an entire claim retain their existing meaning. A retraction
 // of C-N@V closes that pin only; an unpinned reference resolves to the live head.
-const STALE_ROUTES_SQL = `
+const STALE_ROUTES_CTE = `
   WITH input(j) AS (VALUES (?)),
   requested AS MATERIALIZED (
     SELECT CAST(entry.key AS INTEGER) AS ordinal,
@@ -126,9 +126,29 @@ const STALE_ROUTES_SQL = `
       )) END AS closure_json
     FROM requested LEFT JOIN heads ON heads.claim_id = requested.claim_id
   )
+`;
+
+const STALE_ROUTES_SQL = `${STALE_ROUTES_CTE}
   SELECT ref, closure_json FROM closures WHERE closure_json IS NOT NULL
   ORDER BY ordinal ASC LIMIT 20
 `;
+
+function uniqueReferences(references: readonly StaleRouteReference[]): StaleRouteReference[] {
+  const unique: StaleRouteReference[] = [];
+  const seen = new Set<string>();
+  for (const reference of references) {
+    const key =
+      reference.kind === "hypothesis"
+        ? `hypothesis:${reference.hypothesisId}`
+        : reference.kind === "claim-version"
+          ? `claim-version:${reference.claimId}@${reference.version}`
+          : `claim:${reference.claimId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(reference);
+  }
+  return unique;
+}
 
 /**
  * Resolve which of `references` are closed routes on `problemId`. Unknown
@@ -146,19 +166,7 @@ export async function findStaleRoutes(
   problemId: string,
   references: readonly StaleRouteReference[],
 ): Promise<StaleRouteEntry[]> {
-  const unique: StaleRouteReference[] = [];
-  const seen = new Set<string>();
-  for (const reference of references) {
-    const key =
-      reference.kind === "hypothesis"
-        ? `hypothesis:${reference.hypothesisId}`
-        : reference.kind === "claim-version"
-          ? `claim-version:${reference.claimId}@${reference.version}`
-          : `claim:${reference.claimId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    unique.push(reference);
-  }
+  const unique = uniqueReferences(references);
   if (unique.length === 0) return [];
   const rows = await db
     .prepare(STALE_ROUTES_SQL)
@@ -166,6 +174,38 @@ export async function findStaleRoutes(
     .all<{ ref: string; closure_json: string }>();
   // The JSON is assembled by this query, not supplied by a ledger author.
   return rows.results.map((row) => ({ ref: row.ref, ...JSON.parse(row.closure_json) }));
+}
+
+/** The preflight read and the policy screen observe different snapshots.
+ * Recheck the same complete route set inside the publication batch, including
+ * relates_to references that are not dependency pins. A lost-head attempt
+ * which inserted no event stays inert so Krater can retry its transaction.
+ * A closed route aborts event, projections, cursors and success receipt together. */
+export function staleRouteAdmissionGuards(
+  db: Db,
+  problemId: string,
+  references: readonly StaleRouteReference[],
+  eventId: string,
+): D1PreparedStatement[] {
+  const unique = uniqueReferences(references);
+  if (unique.length === 0) return [];
+  return [
+    db
+      .prepare(`${STALE_ROUTES_CTE}
+        SELECT CASE WHEN NOT EXISTS (
+          SELECT 1 FROM events WHERE id = ? AND problem_id = ?
+        ) OR NOT EXISTS (SELECT 1 FROM closures WHERE closure_json IS NOT NULL)
+        THEN 1 ELSE json_extract('[]', '$[STALE_ROUTE_CHANGED') END`)
+      .bind(JSON.stringify({ problem: problemId, references: unique }), eventId, problemId),
+  ];
+}
+
+export function isStaleRouteChanged(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.message.includes("STALE_ROUTE_CHANGED") ||
+      (error.cause !== undefined && isStaleRouteChanged(error.cause)))
+  );
 }
 
 function describe(entry: StaleRouteEntry): string {

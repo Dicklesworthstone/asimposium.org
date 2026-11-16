@@ -218,7 +218,13 @@ import {
   findSettlementReference,
   settlementReferenceGuards,
 } from "../ledger/settlement-references.ts";
-import { findStaleRoutes, staleRouteProblem, staleRouteReferences } from "../ledger/stale-route";
+import {
+  findStaleRoutes,
+  isStaleRouteChanged,
+  staleRouteAdmissionGuards,
+  staleRouteProblem,
+  staleRouteReferences,
+} from "../ledger/stale-route";
 import {
   computeDroppedSingleAuthorCount,
   loadProblemSyntheses,
@@ -6411,6 +6417,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               AND e.type = 'claim.created' AND e.object_id <> ?`)
           .bind(dep, settlement.eventId, problemId, settlement.sequence, settlement.objectId, dep),
       ),
+      ...staleRouteAdmissionGuards(
+        db,
+        problemId,
+        staleRouteReferences([...content.resolvedDeps, ...(data.relates_to ?? [])]),
+        settlement.eventId,
+      ),
     ];
   }
 
@@ -6810,6 +6822,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
       if (contextRefusal) return contextRefusal;
       if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
+      if (isStaleRouteChanged(error)) {
+        const current = await prepareClaimContent({
+          db,
+          problemId: session.problem_id,
+          fellowId: auth.binding.fellowId,
+          data,
+        });
+        return current instanceof Response ? current : screeningContextStaleProblem();
+      }
       if (isScientificReferenceChanged(error)) return dependencyUnavailableProblem();
       if (
         error instanceof Error &&
@@ -10825,6 +10846,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         if (contextRefusal) return contextRefusal;
       }
       if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
+      if (isStaleRouteChanged(error) && prepared.claimData) {
+        const current = await prepareClaimContent({
+          db,
+          problemId: session.problem_id,
+          fellowId: auth.binding.fellowId,
+          data: prepared.claimData,
+        });
+        return current instanceof Response ? current : screeningContextStaleProblem();
+      }
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (
@@ -18273,6 +18303,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
       if (isScientificReferenceChanged(error)) return dependencyUnavailableProblem();
       if (error instanceof ReplayClaimNotCommittedError) return idempotencyConflictProblem();
+      if (isStaleRouteChanged(error)) return screeningContextStaleProblem();
       throw error;
     }
   }
@@ -21390,6 +21421,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               : "evidence",
             "Referenced scientific content changed during publication; fetch a fresh pack. No members were committed.",
           );
+        if (isStaleRouteChanged(error)) return screeningContextStaleProblem();
         throw error;
       }
     });

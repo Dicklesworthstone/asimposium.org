@@ -282,6 +282,11 @@ let raceAfterNextRead: {
   readonly commit: (db: D1Database) => Promise<void>;
 } | null = null;
 
+/** Hold one completed native read while a second mounted HTTP writer runs.
+ * This changes scheduling only: both the old result and the competing
+ * transition come from actual D1 and the ordinary production handlers. */
+let heldRead: { readonly matchSql: string; blocked: boolean } | null = null;
+
 /**
  * A real event the competing write commits instead of the stand-in, so the
  * problem stays replayable and the projection-parity sweep still compares its
@@ -412,6 +417,18 @@ function racingDb(db: D1Database): D1Database {
                 if ((key === "first" || key === "all") && typeof value === "function") {
                   return async (...args: unknown[]) => {
                     const result = await Reflect.apply(value, inner, args);
+                    const barrier = heldRead;
+                    if (barrier !== null && !barrier.blocked && query.includes(barrier.matchSql)) {
+                      barrier.blocked = true;
+                      const deadline = Date.now() + 15_000;
+                      while (heldRead === barrier) {
+                        if (Date.now() >= deadline) {
+                          heldRead = null;
+                          throw new Error("Read barrier was not released");
+                        }
+                        await new Promise<void>((resolve) => setTimeout(resolve, 25));
+                      }
+                    }
                     const race = raceAfterNextRead;
                     if (race !== null && query.includes(race.matchSql)) {
                       raceAfterNextRead = null;
@@ -524,6 +541,20 @@ function heldPrivateBodyBucket(bucket: R2Bucket): R2Bucket {
 }
 
 export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
+  holdNextRead(matchSql: string): void {
+    if (matchSql.length === 0 || matchSql.length > 200 || heldRead !== null)
+      throw new Error("Read barrier requires one bounded SQL marker");
+    heldRead = { matchSql, blocked: false };
+  }
+
+  readBlocked(): boolean {
+    return heldRead?.blocked === true;
+  }
+
+  releaseRead(): void {
+    heldRead = null;
+  }
+
   holdPrivateBodyRead(key: string): void {
     if (!/^cas\/sha256\/[a-f0-9]{64}$/.test(key) || heldPrivateBodyRead !== null)
       throw new Error("Private body barrier requires one CAS object");
@@ -835,6 +866,7 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
                   DB:
                     raceBeforeNextBatch === null &&
                     raceAfterNextRead === null &&
+                    heldRead === null &&
                     competingLedgerWriteBeforeNextBatch === null &&
                     !captureDependencyGuardErrors
                       ? this.env.DB
