@@ -8,7 +8,8 @@ export type EnrollmentAttemptScope =
   | "decision"
   | "credential-revoke"
   | "fellow-lifecycle"
-  | "sponsor-panic";
+  | "sponsor-panic"
+  | "fellow-transfer";
 
 export interface EnrollmentAttemptStorage {
   getItem(key: string): string | null;

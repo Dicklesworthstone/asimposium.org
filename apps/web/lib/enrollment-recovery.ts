@@ -3,7 +3,8 @@ export type EnrollmentRecoveryScope =
   | "decision"
   | "credential-revoke"
   | "fellow-lifecycle"
-  | "sponsor-panic";
+  | "sponsor-panic"
+  | "fellow-transfer";
 
 const RECOVERY_SCOPES: ReadonlySet<EnrollmentRecoveryScope> = new Set([
   "mint",
@@ -11,6 +12,7 @@ const RECOVERY_SCOPES: ReadonlySet<EnrollmentRecoveryScope> = new Set([
   "credential-revoke",
   "fellow-lifecycle",
   "sponsor-panic",
+  "fellow-transfer",
 ]);
 
 export function isEnrollmentRecoveryScope(value: unknown): value is EnrollmentRecoveryScope {

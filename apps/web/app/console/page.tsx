@@ -562,20 +562,29 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           />
         </section>
 
-        <section className="card" aria-labelledby="transfers-title">
-          <h2 className="card-title" id="transfers-title">
-            Fellow transfers
-          </h2>
-          <TransferManager
-            fellows={fellows}
-            incoming={transfers.incoming}
-            outgoing={transfers.outgoing}
-            loaded={transfersLoaded}
-            rebinds={rebinds}
-            rebindsLoaded={rebindsLoaded}
-            configured={configured && writesConfigured}
-          />
-        </section>
+        <EnrollmentRecoveryFence
+          enabled={sponsorId !== undefined}
+          recoveryOwner={recoveryOwner}
+          renderToken={`${recoveryRenderToken}-transfer`}
+        >
+          <section className="card" aria-labelledby="transfers-title">
+            <h2 className="card-title" id="transfers-title">
+              Fellow transfers
+            </h2>
+            <TransferManager
+              key={sponsorId ?? "unconfigured"}
+              sponsorId={sponsorId ?? ""}
+              recoveryOwner={recoveryOwner}
+              fellows={fellows}
+              incoming={transfers.incoming}
+              outgoing={transfers.outgoing}
+              loaded={transfersLoaded}
+              rebinds={rebinds}
+              rebindsLoaded={rebindsLoaded}
+              configured={configured && writesConfigured}
+            />
+          </section>
+        </EnrollmentRecoveryFence>
 
         <section className="card" aria-labelledby="problems-title">
           <h2 className="card-title" id="problems-title">
