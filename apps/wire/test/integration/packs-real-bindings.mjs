@@ -165,6 +165,7 @@ await runLocalWorkerJourney(
             objective: acquired.objective,
             deliverable: acquired.deliverable,
             leased_until: acquired.leased_until,
+            status: "active",
             parallel_safe: acquired.parallel_safe,
           });
           assert.ok(

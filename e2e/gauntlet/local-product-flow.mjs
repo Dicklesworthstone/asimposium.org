@@ -707,21 +707,33 @@ async function main() {
         const publication = facts.publicClaims.find(
           (claim) => claim.author_fellow_id === facts.fellow?.fellow_id && claim.has_falsifier,
         );
-        assert.ok(publication?.session_id, "split control actually publishes an attributed claim");
+        assert.ok(
+          publication?.session_id && publication.claim_id,
+          "split control actually publishes an attributed claim",
+        );
         const publishingSession = facts.sessions.find(
           (session) => session.session_id === publication.session_id,
         );
         assert.ok(publishingSession, "split control publication belongs to an owned session");
         assert.equal(publishingSession.closed_at, null, "publishing session remains open");
         assert.equal(publishingSession.has_handback, false, "publishing session has no handback");
+        assert.equal(publishingSession.workshop_objects, 0, "publishing session owns no draft");
+        const draftSession = facts.sessions.find(
+          (session) =>
+            session.session_id !== publishingSession.session_id &&
+            session.closed_at !== null &&
+            session.has_handback &&
+            session.workshop_objects > 0,
+        );
+        assert.ok(draftSession, "a different owned session saves a draft and closes with handback");
         assert.ok(
-          facts.sessions.some(
-            (session) =>
-              session.session_id !== publishingSession.session_id &&
-              session.closed_at !== null &&
-              session.has_handback,
+          facts.observations.some(
+            (observation) =>
+              observation.method === "GET" &&
+              observation.path === `/v1/sessions/${draftSession.session_id}/pack` &&
+              observation.status === 200,
           ),
-          "a different owned session supplies the misleading closure",
+          "the closed draft session successfully reads its own pack",
         );
         assert.ok(
           !facts.observations.some(
@@ -730,6 +742,34 @@ async function main() {
               observation.path === `/v1/sessions/${publishingSession.session_id}/pack`,
           ),
           "publishing session never reads its pack",
+        );
+        const promotePath = `/v1/sessions/${publishingSession.session_id}/promote`;
+        const refused = facts.observations.find(
+          (observation) =>
+            observation.method === "POST" &&
+            observation.path === promotePath &&
+            observation.injected === true &&
+            observation.status === 422 &&
+            observation.code === "PROMOTE_BODY_INVALID",
+        );
+        assert.ok(
+          refused &&
+            Number.isSafeInteger(refused.started_order) &&
+            Number.isSafeInteger(refused.completed_order) &&
+            refused.completed_order > refused.started_order,
+          "publishing session receives the injected contract refusal",
+        );
+        assert.ok(
+          facts.observations.some(
+            (observation) =>
+              observation.method === "POST" &&
+              observation.path === promotePath &&
+              observation.status === 201 &&
+              observation.claim_id === publication.claim_id &&
+              Number.isSafeInteger(observation.started_order) &&
+              observation.started_order > refused.completed_order,
+          ),
+          "publishing session recovers after the refusal and commits the observed claim",
         );
       } else if (mode === "definition-only") {
         assert.ok(
@@ -782,7 +822,7 @@ async function main() {
           : mode === "no-pack" || mode === "late-pack"
             ? ["pack_read"]
             : mode === "split-session"
-              ? ["pack_read", "closed"]
+              ? ["refusal_recovered", "promoted_public"] // The closed draft session reaches more stages.
               : mode === "definition-only"
                 ? ["promoted_public"]
                 : mode === "skip-close" || mode === "idle-closed"

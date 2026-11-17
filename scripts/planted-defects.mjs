@@ -1071,7 +1071,7 @@ export const PLANTS = [
     id: "fellow-lease-release-precondition-dropped",
     bead: "rg73",
     file: "apps/wire/src/sessions/router-core.ts",
-    find: "preconditionSql:\n            \" AND EXISTS (SELECT 1 FROM leases l WHERE l.lease_id = ? AND l.status = 'active' AND l.leased_until > ?)\",",
+    find: "preconditionSql:\n            \" AND EXISTS (SELECT 1 FROM leases l WHERE l.lease_id = ? AND l.status IN ('active', 'challenged') AND l.leased_until > ?)\",",
     replace: 'preconditionSql:\n            " AND ? IS NOT NULL AND ? IS NOT NULL",',
     command: LANE("transition-race"),
   },
@@ -1079,7 +1079,7 @@ export const PLANTS = [
     id: "sponsor-lease-release-precondition-dropped",
     bead: "rg73",
     file: "apps/wire/src/sessions/router-core.ts",
-    find: "              AND l.object_kind = ? AND l.object_id = ? AND l.status = 'active'\n              AND f.sponsor_id = ? AND sponsor.tombstoned_at IS NULL",
+    find: "              AND l.object_kind = ? AND l.object_id = ? AND l.status IN ('active', 'challenged')\n              AND f.sponsor_id = ? AND sponsor.tombstoned_at IS NULL",
     replace:
       "              AND l.object_kind = ? AND l.object_id = ?\n              AND f.sponsor_id = ? AND sponsor.tombstoned_at IS NULL",
     command: LANE("transition-race"),
@@ -2015,8 +2015,9 @@ export const PLANTS = [
     id: "console-rebind-approval-not-sent",
     bead: "dwml",
     file: "apps/web/app/console/transfer-card.tsx",
-    find: 'onClick={() => decideRebind(rebind.rebind_id, "approve")}',
-    replace: 'onClick={() => decideRebind(rebind.rebind_id, "deny")}',
+    find: 'rebind_id: rebind.rebind_id,\n                                decision: "approve",\n                                confirm: "decide-fellow-rebind",',
+    replace:
+      'rebind_id: rebind.rebind_id,\n                                decision: "deny",\n                                confirm: "decide-fellow-rebind",',
     // Rebuilds apps/web so the plant reaches the browser.
     command: ["node", "e2e/playwright/agora-local-lane.mjs", "--build"],
   },
@@ -2024,8 +2025,11 @@ export const PLANTS = [
     id: "transfer-refusal-reason-guessed",
     bead: "d52t",
     file: "apps/web/app/console/transfer-actions.ts",
-    find: "  return result.detail ? `Stoa refused: ${result.detail}` : fallback;",
-    replace: "  return fallback;",
+    find: `: result.reason === "refused" && result.detail
+            ? \`Stoa refused: \${result.detail}\`
+            : "The transfer or rebind could not be confirmed. Recover the unchanged command to reuse its original retry key.",`,
+    replace:
+      ': "The transfer or rebind could not be confirmed. Recover the unchanged command to reuse its original retry key.",',
     // Rebuilds apps/web so the plant reaches the browser.
     command: ["node", "e2e/playwright/agora-local-lane.mjs", "--build"],
   },
@@ -2033,8 +2037,8 @@ export const PLANTS = [
     id: "console-transfers-load-failure-hidden",
     bead: "d52t",
     file: "apps/web/app/console/transfer-card.tsx",
-    find: "  if (!loaded) {",
-    replace: "  if (false && !loaded) {",
+    find: "  if (!configured || !loaded) {",
+    replace: "  if (!configured) {",
     // Rebuilds apps/web so the plant reaches the browser.
     command: ["node", "e2e/playwright/agora-local-lane.mjs", "--build"],
   },

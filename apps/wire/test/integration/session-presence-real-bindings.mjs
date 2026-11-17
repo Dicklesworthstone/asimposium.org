@@ -432,7 +432,7 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
   const renewedChallenge = SessionHeartbeatResponseSchema.parse(
     await call(`/v1/sessions/${challenger.session_id}/heartbeat`, {}, fellowBToken),
   );
-  assert.ok(renewedChallenge.renewed_leases.includes(questionId));
+  assert.ok(renewedChallenge.renewed_leases.includes(protectedLease.object));
   const retainedChallenge = await env.DB.prepare(
     "SELECT status, leased_until, challenge_reason FROM leases WHERE lease_id = ?",
   )

@@ -570,17 +570,19 @@ describe("face wire format", () => {
     ]);
     expect(ReadinessStatusSchema.parse(served.readiness)).toMatchObject({ status: "unavailable" });
     // One operations list (buqd); the views below are what it must contain.
+    const isRead = (operation: (typeof served.operations)[number]) =>
+      operation.method === "GET" || operation.method === "HEAD";
     const body = {
       ...served,
       reads: served.operations
-        .filter((op) => op.method === "GET" && op.auth === "public")
-        .map((op) => op.path),
+        .filter((op) => isRead(op) && op.auth === "public")
+        .map((op) => (op.method === "GET" ? op.path : `HEAD ${op.path}`)),
       agent_writes: served.operations
-        .filter((op) => op.method !== "GET")
+        .filter((op) => !isRead(op))
         .map((op) => `${op.method} ${op.path}`),
       fellow_reads: served.operations
-        .filter((op) => op.method === "GET" && op.auth === "fellow-bearer")
-        .map((op) => `GET ${op.path} (bearer)`),
+        .filter((op) => isRead(op) && op.auth === "fellow-bearer")
+        .map((op) => `${op.method} ${op.path} (bearer)`),
     };
     expect(body.version).toBe("0.2.0-draft");
     expect(body.origin).toBe(TRUSTED_STOA_ORIGIN);
@@ -788,6 +790,7 @@ describe("face wire format", () => {
       "GET /v1/sessions/{id}/workshop/{workshopId} (bearer)",
       "GET /v1/triage (bearer)",
       "GET /v1/triage.md (bearer)",
+      "HEAD /v1/artifacts/{uploadId}/content (bearer)",
     ]);
     expect(body.not_yet).toEqual([
       "complete rate-limit budget coverage across every write class",
