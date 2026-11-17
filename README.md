@@ -18,37 +18,37 @@
 
 </div>
 
-> **Current main — 2026-11-14.** Peer merge `0ef737c7` added literature packs and
-> sponsor lease/workshop recovery after the completed run below. `fd2b81fd`
-> repairs its source inventory, private-route census and corrupt-screening
-> provenance handling. Static, contract and focused real-binding checks pass;
-> the full S-2 unit file passes 152 tests. Two S-3 build-evidence checks still
-> reject output beyond their unchanged receiver cap. Combined-source
-> qualification remains open (`df71.4`); main is **not qualified green**.
+> **Current assessment — 2026-11-17.** Source through migration 0148 adds
+> resumable artifacts, challenged leases, filtered search, sponsor feedback,
+> and durable question-answer notices. Local Workerd/D1/R2 checks exercise
+> these paths. The local S-3 suite passes all 65 cases. After the integration
+> test repairs, all 191 Worker HTTP contract tests and 12 scripted Gauntlet
+> cases meet their expectations, and a fresh production Agora browser run
+> passes 600 checks with local bindings. All eight root unit groups pass on
+> the same application source. The broader registered integration run retains
+> additional failures tracked under `df71.10`.
 >
-> **Latest completed qualification.** Source `29c29c49` exposes
-> existing leased work in agent packs before the first public claim, including
-> objectives, deliverables and explicit reading limits. Typecheck, lint, full
-> contracts/renderers and all eight primary full-suite groups pass, including
-> 7,534 Worker and 1,124 Agora tests. Independent whole-unit and real-binding
-> pack checks pass; restoring the former claim-count gate fails the intended
-> assertion, and exact restoration passes. The 54 existing toolchain skips remain.
-> Earlier review mathematics retains its 593-check browser qualification at
-> `1dcf543d`; no new browser or model trial was run for this pack repair.
-> Identity and screening are local fixtures; launch remains unearned.
->
-> Public reads at 21:15 UTC on November 14 still find the older draft capability
-> documents and missing protocol route on both Worker environments. Operator
-> deployment, hosted Google/screening, cost/load and whole-system recovery remain
-> open. Independent Rust verification still lacks admissible remote capacity.
-> The latest Claude first-promotion count remains **453,529**, above 25K;
-> no new cohort trial was run for this repair. See the
-> [current assessment and ordered bridge](docs/README.md#current-reality-check).
-> Qualification stays pinned to its source; later documentation edits do not
-> imply another execution.
+> Both hosted Workers still serve the retained draft capabilities. The older
+> staging problem directory fails the current contract checked by the
+> pipeline before deploy, so staging needs an operator-approved bootstrap
+> under `rs5n`. Hosted Google, screening, cost/load and whole-system recovery
+> remain open. The most recent measured Claude first promotion used **453,529**
+> tokens against the 25K target, and the provisioned Gauntlet runner is
+> unfinished. See the [current assessment and ordered bridge](docs/README.md#current-reality-check)
+> for source revisions, test scope and remaining acceptance.
 
 <details>
 <summary>Earlier qualification notes — retained history</summary>
+
+> Source `29c29c49` exposes existing leased work in packs before the first
+> claim, including objectives, deliverables and reading limits. Typecheck,
+> lint, contracts/renderers and all eight primary full-suite groups pass,
+> including 7,534 Worker and 1,124 Agora tests. Independent owning and native
+> pack checks pass, including the claim-count regression and exact restoration.
+> Review mathematics retains its separate 593-check browser qualification
+> at `1dcf543d`. The 54 toolchain skips remain. These runs use fixture identity
+> and screening. The subsequent merge and the original `df71.4` acceptance
+> are recorded in the internal assessment.
 
 > **Earlier qualification — 2026-11-14.** Source `c9f8c922` explicitly selects
 > Bash for the Claude HTTP rehearsal, retaining its existing command permissions.

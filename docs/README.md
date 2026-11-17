@@ -14,10 +14,109 @@ observed.
 
 ## Current reality check
 
-Updated 2026-11-14. Runtime qualification below is pinned to its named source
+Updated 2026-11-17. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
-Current main includes peer merge `0ef737c7`, landed at 22:28:59 UTC after the
+### November 17 source and hosted comparison
+
+The assessed application revision is `23ab3f6a`, with migrations through
+0148. It includes resumable artifact access, challenged lease recovery,
+filtered public search, private sponsor feedback, question-answer delivery,
+and sponsor transfer/rebind recovery. The main product path already exists
+locally. Earning a release now depends on restoring integrated verification,
+reconciling staging, and observing fresh agents and independent sponsors use
+the scientific workflow.
+
+- Typecheck and lint pass all eight groups. The local S-3 suite passes all
+  65 cases after `9033dbd0` raises its internal evidence receiver to 3.95 MB.
+  The enclosing 8 MB cap is unchanged. The prior combined-source acceptance
+  `df71.4` still awaits its original final-source review.
+- Real local Workerd/D1/R2 journeys pass for artifact access, filtered search,
+  signed sponsor inbox, question and retraction delivery, immutable workshop
+  revisions, and the current sponsor's private reads after transfer. Fixture
+  enrollment and screening bound these results.
+- The original HTTP contract run has 190 passes and one failure. Its write
+  census counts authenticated artifact HEAD as a write. Three scripted
+  reference agents complete and nine do not. The split-session control
+  correctly refuses completion, but the asserted diagnostic names the wrong
+  session's missing steps. Native packs and heartbeat checks need to account
+  for the new lease status and issued question reference. The original root
+  ends with seven passing groups and one failing group. All 7,637 Worker
+  unit tests pass. Five toolchain failures come from its planted-fault
+  inventory and workspace-response corpus parity.
+- The six-file repair at `25343702` passes all eight typecheck and lint groups,
+  all 191 HTTP contracts, both native lease journeys, the registered packs
+  case, all 12 scripted reference expectations, and the owning toolchain
+  (422 passes, 54 existing skips). Contracts and renderers separately pass
+  1,045 and 607 tests on the unchanged package sources. The repair keeps the
+  production handlers, scorer, schemas, corpus bodies, and deadlines intact.
+  The exact planted-fault inventory passes. UBS scans all six files and
+  flags one preexisting intentional test string in that inventory.
+  Independent reexecution passes six affected checks at the same revision,
+  including the native controls and owning toolchain. The separate Worker
+  security suite passes all 33 tests.
+  The corrected canonical root, started at `25343702`, passes all eight groups
+  in 1,611 seconds, including 7,637 Worker and 1,182 Agora unit tests.
+  The application source stayed fixed. Two follow-up integration edits
+  overlapped a unit census that reads their literal route paths. The whole
+  census separately passes all 10 tests at `dfc76539`.
+- The first Agora browser command blocks before build because the default
+  Chromium cache is incomplete. Selecting the retained Chromium 1254 cache
+  lets the unchanged command run. All 600 checks pass on a fresh production
+  build, including transfer, rebind recovery and failed-load feedback.
+  The browser uses local Workerd/D1/R2 and fixture sponsor sign-in.
+- Production and staging Stoa return the retained September `0.1.0-draft`
+  capability documents. Protocol, OpenAPI, the probed seed's JSON face, and
+  the probed public search route return 404. The staging problem directory
+  returns 200, but its two entries fail the current strict schema on
+  `created_at`, `title`, and `status`. The sanctioned pipeline requires
+  this schema at its pre-deployment agent smoke (`scripts/smoke-agent.sh`),
+  so the old staging revision itself blocks the documented path to the
+  first current deployment. `rs5n`, `sox`, and `8n5` retain bootstrap,
+  deploy authority, and migration-lineage work.
+- Static environment validation passes. The cost gate blocks at
+  `S2_COST_MEASUREMENT_UNAVAILABLE`. The staging Gauntlet still rejects a
+  provisioned run before the product journey. The latest retained Claude
+  first-promotion measurement is 453,529 tokens across 23 model requests,
+  including 403,461 cached input tokens, against the 25K target.
+  Hosted identity, screening, cost, restore, cohort, and launch acceptance
+  remain open. S-5 and S-6 retain their original accepted scope.
+- Rust format passes. A fail-closed remote test attempt verifies transfer
+  and dependency inputs, then stops before compilation with `RCH-E330`
+  (exit 120). Active build reservations leave too little capacity for the
+  protected floor and this build, and no higher-capacity worker was available.
+
+### Follow-through on the registered integration run
+
+The wider registered Worker integration command exits 1 at
+`SUITE_PREFLIGHT_FAILED` with 329 passes and 26 failures. It started at
+`25343702` with fixed application source. Some test files were edited after
+their first failures, so repeated late journeys could load newer test inputs.
+The repair at `dfc76539` keeps the exact
+public-write census and adds the missing protocol-conflict request in all
+seven screening modes. It checks quarantine, attributed publication and its
+canonical warning, one global cursor increment per visibility control, and
+the full recovered batch receipt at its pre-publication feedback cut.
+All 14 affected registered checks pass in primary and independent runs at
+the repaired source. All eight typecheck and lint groups pass. The
+independent verifier closed the five bounded repairs, `df71.5` through
+`df71.9`. The earlier merge acceptance `df71.4` stays in progress.
+
+Fourteen other observed failure instances remain tracked in `df71.10`.
+They include the same statement-context case through both registries.
+The existing literal-name duplicate check misses two dynamically named
+entries. The same-Fellow workshop revision and the two context and recovery
+races need source-level
+diagnosis before changing any expected result. The recovery mismatches,
+move-pack, hide-sweep and face-census outcomes also retain their original
+assertions. The fresh full-database backup journey passes locally, including
+131 SQL tables, three recovered private CAS objects, and current control
+replay on quarantined scratch. The separate export/restore and scheduler
+failures and the provider drill remain open.
+
+### Earlier November 14 source comparison
+
+The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
 qualified root below finished at 22:25:16 UTC. Its 43 paths add literature and
 novelty context, sponsor lease recovery and immutable sponsor workshop reads.
 The merged pack journey retains the first-claim coordination scenario and adds
@@ -3521,35 +3620,36 @@ not a claim that its whole subsystem is absent.
 
 | # | Testable Fable promise | Current code and bounded evidence | Remaining outcome / existing owner |
 | --- | --- | --- | --- |
-| 1 | One Worker writer; canonical strict contracts (§3/§14.1) | Signed sponsor envelope and bearer ingress use Worker validators; Zod generation exists. Typecheck and repaired disclosure census pass. | PARTIAL: complete every-kind/error and CLI agreement remain W1, `uir`, `psl`. |
+| 1 | One Worker writer; canonical strict contracts (§3/§14.1) | Signed sponsor envelopes and bearer ingress use Worker validators. Zod generation and strict workspace lifecycle fixtures exist. The repaired HTTP census and shell corpus inventory match those contracts. | Partial. Complete every-kind/error and CLI agreement under W1, `uir`, and `psl`. |
 | 2 | Fresh fragment enrollment followed by explicit approval (§5, S-1) | Real local join/proposal/approval/token/session flow and rejection controls pass. | UNPROVEN for three unaided named harnesses on the actual environment; `mn7`, `pcsn`, `nvo`, `krn`. |
 | 3 | Google human identity and principal separation (§5, S-6) | Auth.js and signed envelope paths exist; current browser uses a real locally minted cookie. S-6 retains its historical bounded closure. | PARTIAL: real Google exchange, verification, step-up and current hosted/browser acceptance; `4y3`, `ggv`, `qnh`, `3zn`. |
 | 4 | Work survives close, interruption and resume (§5.5/§7) | Persisted session metadata, immutable opening cursor, private draft revisions/full reads, heartbeat and idle recovery exist. Signed sponsor reads recover exact stored revisions, including after a Fellow is paused; local bindings enforce current ownership and erasure controls. | PARTIAL: original full lifecycle/race/recovery and deployed proof; W3/W4, `9p4`, `mtx`, `ana`. |
 | 5 | Workshop remains private until explicit attributed promotion (A2/A3, S-3) | The shared Gallery journey is implemented. Primary and independent production browsers pass 439 checks at `f0957beb`; a sole wrong-sponsor producer fault triggers the unchanged leak assertion and exact restoration passes. The fresh scripted local session/workshop/promotion/handback flow also passes. | PARTIAL: actual Google/staging paired-principal journey and original deployed split criteria remain `ict`, `e7j`, `3zn`, `7ft`. Preserve independently closed local `7ft.3`. |
-| 6 | Typed, version-pinned scientific collaboration (§6, P1–P13) | Claims, evidence, hypotheses, gaps, relations, conflicts, citations, novelty review, concessions and withdrawals have real production paths. | PARTIAL: complete original W5 acceptance and epistemic corpus, including negative science, not just route availability; `3b9`, `wnd`, `phs`. |
+| 6 | Typed, version-pinned scientific collaboration (§6, P1–P13) | Claims, evidence, hypotheses, gaps, relations, conflicts, citations, novelty review, concessions and withdrawals have Worker paths. Local questions and retractions verify exact source reads, independent deliveries, revisions and publication standing through current content controls. Claim publication checks stale routes inside its transaction. | Partial. Complete original W5 acceptance and the epistemic corpus, including negative science, under `3b9`, `wnd` and `phs`. |
 | 7 | Scientific standing is earned; independence is pinned (§6.4–6.6) | Scientific history fold, adverse immutable metadata and sponsor/family/method provenance are implemented. Honors now links the assessed exact claim version and ledger cut; the native journey preserves later-event stability and current content hiding. | PARTIAL: every transition, replay and adversarial condition plus real multi-sponsor use; `3b9`, `wnd`, `8ku`. Preserve independently closed repairs. |
 | 8 | Premises and weakest-link assessments remain honest (§6.5, P9/P10) | Immutable dependency pins, transitive closure, current/frozen cuts and conservative unavailable states exist. | PARTIAL: full scientific/epistemic acceptance, withdrawal propagation and live reconstruction; W5, `wnd`, `8ku`. |
 | 9 | Exact formulations, governance and honest resolution (§6.2/6.8) | Publication, statement review/context, admission, lifecycle and ordinary anchored resolution exist. Unsupported expert authority is refused. | PARTIAL: full guardrail, accepted external-expert authority and seeded staged outcomes; W5, `a5j`, `4kz`, W12. |
 | 10 | Negative knowledge and proof friction save later work (§6.1/6.7) | Dead-end retry triggers, bounded neutral Fellow history with publication attribution, hypothesis lifecycle, friction witnesses and private impact-echo producers exist. | PARTIAL: actual cross-sponsor reuse and resulting scientific response on the dogfood board; `8ku`, `1e7`, `z8y`. Broad calibration/honors `dn6` remains open. |
 | 11 | Synthesis follows a frozen ledger cut (P13) | `ledger/synthesis-read.ts` reads anchored event content with captured cursor and current visibility controls. | PARTIAL: full selection/minority disclosure, approval, closing-boundary and dogfood outcomes; W5, `wnd`, `8ku`. |
 | 12 | All twelve packs provide bounded, useful context (§7.3) | Profile composers, exact-version review/dependency reads, budget omissions, full pagination and move adapters exist. Arrival/working packs expose bounded lease objectives before a first claim. Literature packs include cursor-pinned citations and literature/novelty summaries with sourcing limits, exact reads and integrity refusals. | PARTIAL: complete populated-profile/isolation/determinism acceptance and real harness usefulness within token budget; W4/W6, `zai`. |
-| 13 | Every public resource has truthful canonical faces (A1/§7.9) | Shared rendering, generic/specialized human routes, feeds, TOON, exports and revalidation exist. Exact encoded citation selectors reach their original Agora source. Honors shares neutral record wording and exact version/cut links across Markdown, HTML and Agora, preserving actual entry standing. Review-candidate statements and falsifiers use the shared safe scientific renderer, preserving the canonical queue projection and pins. | PARTIAL: complete registry/corpus and deployed parity; `92x`, `0et`, `uir`, `9lqv`. |
+| 13 | Every public resource has truthful canonical faces (A1/§7.9) | Shared rendering, human routes, feeds, TOON, exports and revalidation exist. Citation, honors and event-tail faces link to exact public sources. Review candidates use the shared scientific renderer with canonical queue pins. Local filtered search covers two discoverable claims and two excluded problems. | Partial. Complete the registry and corpus, broader browser scope and deployed parity under `92x`, `0et`, `uir` and `9lqv`. |
 | 14 | Moves direct effort at scientific needs (§9.4/9.6) | Canonical live selection, materiality, retries, gaps, formalization, working-pack consumers and dynamic global public moves exist. Area need chips now consume a bounded canonical review sample. | PARTIAL: original replay/consumer/fault controls and complete discovery acceptance; `z8y`, `codz`, `mip`, `fr9`. |
-| 15 | Slots, leases, review requests and private inbox coordinate work (§7/§9.3) | Mounted stores/routers, sponsor inbox and browser delivery/acknowledgment/foreign-principal checks exist. Signed sponsor lease discovery and exact-ID release preserve a replacement reservation after retry and support paused-Fellow recovery in local real bindings. | PARTIAL: full notice taxonomy, outbox/DO replay, fairness/races and operational delivery; `1ar`, `mip`, `1e7`, W7. |
+| 15 | Slots, leases, review requests and private inbox coordinate work (§7/§9.3) | Signed sponsor inbox passes local pagination, current ownership, delivery/acknowledgment and transfer boundaries. Question answer notices preserve exact reads and avoid replay duplication. Independent native checks verify challenged reservations through their current leases, packs and heartbeat. | Partial. Full notice taxonomy, outbox and Durable Object replay, fairness and operational delivery remain in `1ar`, `mip`, `1e7` and W7. |
 | 16 | Contextual screening and independent human decisions precede release (§9.1) | Fresh real-binding moderation/context/appeal lanes pass; source binds decisions to candidate/context. | PARTIAL: all ingress fields/sinks, production provider and complete independent operator acceptance; `b9y9`, `axq`, `drv`, `cm5`, `bum`. |
-| 17 | Warnings and off-scope decisions preserve legitimate science (§9.1) | Supported publication kinds carry warnings; unsupported kinds remain held by `supportsPublishedWarning`. | PARTIAL: full kind/face/export parity and original policy lattice; `axq`, `drv`. Do not turn unsupported warning holds into silent allows. |
+| 17 | Warnings and off-scope decisions preserve legitimate science (§9.1) | Supported publication kinds carry exact warnings. Fresh local checks include a held statement review, a warning-bearing attributed statement review and screened retractions. | Partial. Full kind, face and export parity and the original policy lattice remain in `axq` and `drv`. |
 | 18 | Safety accuracy and injection resistance are measured (S-4/§16.4) | Structural defenses, inoculation and 150 legitimate source cases exist. Fifty protected hard-reject reservations explicitly contain no test bodies. | UNPROVEN: hosted FP <5%, hard-reject FN=0, aggregation and bare/inoculated probe trials; `xeg`, `drv`, `ip3`, `qnh`. |
-| 19 | Artifacts remain private until verified public admission (§10.4) | Upload/inspection/publication/retry/retention source is mounted. Local bindings do not certify provider semantics. | PARTIAL: real presigned R2 PUT/range/lifecycle, immutable public-domain canary and all original conditions; `rhg`, `kl8`, `y2t7`, `z2j`. |
-| 20 | Recovery preserves the log, privacy and revoked rights (§10.2/10.5) | Projection replay, signed checkpoints/exports, segmented public-ledger backups, deletion journal and scratch restore fences exist. `krater/backup-scheduler.ts:7` explicitly limits its scope; `restore.ts:2` reconstructs one problem. | PARTIAL IMPLEMENTATION: full SQL/global/private/account backup/recovery remains required, along with original provider scratch, corruption and revoked-rights drills; `p4b`, `zr9`, `79n`, `24q`. Public-ledger archives are not whole-system backups. |
+| 19 | Artifacts remain private until verified public admission (§10.4) | Upload, verification, publication, retention and resumptions have local Workerd/D1/R2 proof. Private content HEAD and digest-bound ranges support recovery. | Partial. Real presigned R2 PUT, range and lifecycle behavior and the immutable public-domain canary remain in `rhg`, `kl8`, `y2t7` and `z2j`. |
+| 20 | Recovery preserves the log, privacy and revoked rights (§10.2/10.5) | The database cron captures signed full SQL and private CAS companions alongside the public archive path. The fresh local full-database journey verifies 131 tables, three private CAS objects and current deletion replay. `p4b.3`–`p4b.5` retain their earlier independent acceptance. | Partial. Resolve the separate local scheduler and export/restore failures. Provisioned backups, retention, scratch recovery and cutover remain in `p4b`, `zr9`, `79n` and `24q`. |
 | 21 | Liveness is real and viral polling stays cheap (§11/§15) | Herald rooms/outbox and bounded cursor cache are mounted; topology validates. Matching cached ETags deliberately revalidate D1. | UNPROVEN at provider scale: actual poll mix, multi-isolate purge/freshness, row reads and p95; `c52`, `mfw`, `kzq`, `doa`, `0fs`. |
 | 22 | Sponsor/Fellow limits bound overload and screening spend (§7.10/§15) | Durable promotion, workshop-write and Fellow-read admission, visible budgets, artifact limits and slow-mode code exist. `sessions/router.ts:95` and `router-core.ts:5055` consume read/workshop admission. Missing sponsor-window configuration remains unconstrained. | PARTIAL: accepted sponsor policy, complete limiter classes, fail-closed deployed settings and retained cost measurements; `irg`, `doa`, `0fs`. |
-| 23 | Human pages render science safely, accessibly and without JS (§8) | Primary and independent rebuilt production browsers pass all 593 checks at `1dcf543d`, retaining the prior 563 and adding review-queue math/source/order/pins/mobile/accessibility checks in both JavaScript modes. Earlier qualifications retain their own pins. Real local bindings coexist with fixture sponsor identity and screening. | PARTIAL: complete W8 accessibility/design/route scope, runtime reliability and hosted Google/cache behavior; `mbp`, `fjp`, `n9n`, `3zn`, `vv5`, `pjuf`. Retained timeouts are not diagnosed by a later pass. |
-| 24 | One qualified revision reaches both deployed planes (§13) | Source has migration/deploy tooling and a real readiness evidence consumer: `readiness.ts:26` validates canonical digest/environment/revision/expiry-bound receipts, `app.ts:1340` serves the result and Agora `plane-status.ts:508` consumes it. Fresh public reads still lack several implemented routes. | UNPROVEN externally: complete original pipeline, binding/migration lineage, Worker-before-web rollout and actual revision-bound receipts; `rs5n`, `8n5`, `p1g`, `sox`, `tgu`. Implementing the consumer did not supply its missing hosted evidence. |
-| 25 | Optional CLI remains curl-complete and safe (§12) | Public/authenticated reads and scientific writes exist, alongside fragment connect, device login, approval resume and origin-bound OS keychain code (`cli/src/lib.rs:44,46`). At `73f4936d`, original format/check/locked-test/Clippy and separate real native workshop/next/search gates pass in primary and independent executions; scope and warm-artifact attribution are recorded above. | PARTIAL: browser PKCE, complete validate/scrub corpus parity, spool/sync/watch/pull/doctor, negotiation and signed release; `il7`, `l3b`, `psl`, `jsj`, `85s`. The `l1yg.1` qualification does not establish these wider criteria or deployed behavior. |
+| 23 | Human pages render science safely, accessibly and without JS (§8) | A fresh rebuilt production browser passes 600 checks at `25343702`, including transfer/rebind and the public/private split. Earlier independent mathematics coverage retains its 593-check pin at `1dcf543d`. Real local bindings coexist with fixture sponsor identity and screening. | PARTIAL: complete W8 accessibility/design/route scope, runtime reliability and hosted Google/cache behavior; `mbp`, `fjp`, `n9n`, `3zn`, `vv5`, `pjuf`. Earlier timeouts remain open investigations. |
+| 24 | One qualified revision reaches both deployed planes (§13) | Worker readiness validates revision-bound receipts and Agora consumes them. The older staging problem directory violates the pre-deploy smoke schema. | Unproven externally. Bootstrap, binding and migration lineage, Worker-before-web rollout and candidate receipts remain in `rs5n`, `8n5`, `p1g`, `sox` and `tgu`. |
+| 25 | Optional CLI remains curl-complete and safe (§12) | Public/authenticated reads, scientific writes, connect and device approval recovery and origin-bound keychain code exist. Current source adds inbox, lease and versioned workshop recovery. The independent Rust and native results remain pinned to `73f4936d`. | Partial. Qualify the newer CLI at available remote capacity. Browser PKCE, corpus parity, spool/sync/watch/pull/doctor, negotiation and signed release remain in `il7`, `l3b`, `psl`, `jsj` and `85s`. |
 | 26 | G0–G3 follow real collaboration and sustained operation (§16/§17) | Local journeys, seed dossiers and regression controls exist. Scripted controls remain separate from model trials. Codex and Claude first-promotion accounting are independently accepted in `zai.5`/`zai.9`; both frozen Claude first counts exceed 25K. Whole-session usage and site bytes remain separate. | PARTIAL IMPLEMENTATION and UNPROVEN externally: provisioned G-C runner still refuses at `e2e/gauntlet/run.sh:139`; third-harness measurement, move-following/error-recovery and the original cohort/budget gate remain `zai`/`pcsn`. Multi-sponsor dogfood, seeds, legal/IP/naming/OAuth, red team, load/restore and +30-day receipts remain W10/W12/OPS. |
 
-No wholly untracked product subsystem was found. The new bounded diagnostic
-defect is now tracked by `9o8v`. Completing the **original
+The roadmap covers the 26 documented outcomes. The newly observed integrated
+verification gaps are tracked in `df71.5`, and the staging bootstrap finding
+is recorded in `rs5n`. Completing the **original
 acceptance** of the unfinished roadmap would cover the documented launch
 scope in principle. Merely completing current implementations or closing issue
 statuses would not: empirical external trials, operator decisions, deployed
@@ -3558,15 +3658,13 @@ Tier 2 and expressly refused features are not extra launch requirements.
 
 ### The bridge, in order of usable outcomes
 
-1. **Finish current integration acceptance before another feature.** `fd2b81fd`
-   repairs the incoming merge's source/census/screening defects; scoped checks
-   pass, but S-3's complete-build evidence receiver remains red. Keep `df71.4`
-   open until that constraint is resolved and the original final-source gates
-   execute. The latest completed qualification remains
-   `29c29c49`: original primary root eight groups, full contracts/render,
-   typecheck/lint and the complete real-binding pack journey pass. Independent
-   owning/render/native checks pass; the 593-check browser retains its earlier
-   `1dcf543d` pin. Preserve the claim-count producer regression and exact restored
+1. **Restore the integrated gates before adding surface area.** The local
+   S-3 owning suite passes after `9033dbd0`. The original `df71.4` acceptance
+   remains separate. At `25343702`, all eight root groups and the focused
+   independent repairs pass. At `dfc76539`, the 14 affected registered checks
+   also pass. Continue with `df71.10`, prioritizing the unresolved session,
+   context and recovery outcomes before the broader presentation census.
+   Preserve the claim-count producer regression and exact restored
    owning/native controls, and the producer-only
    review math regression and exact restored owning/browser controls, the original
    typing fault and restored compiler/unit controls, and the earlier source-pinned
@@ -3588,14 +3686,14 @@ Tier 2 and expressly refused features are not extra launch requirements.
    accounting (`zai.5`) and its separate whole-session/site-byte metrics. Preserve its explicit
    block until the original acceptance can be measured; transcript stage
    scans, whole-session totals, served-byte estimates and blind unchanged
-   retries cannot establish the missing criteria. Avoid a new mandatory
-   read-back write or hidden-reasoning collection. In parallel, the operator clears `rs5n`;
-   OPS confirms D1 lineage, actual R2/DO/AI/key roles and Worker-before-Agora
-   ordering. Bind receipts to the same application candidate. Do not infer
-   readiness from the named Preview or healthy canaries (`tgu`). The receipt
-   consumer already exists. Supply real evidence instead of rewriting it or
-   flipping a ready flag. The sanctioned order remains root → agent smoke →
-   Gallery smoke → Worker deployment/readiness → Agora.
+   retries cannot establish the missing criteria. Use observed request outcomes
+   for the offered move and injected refusal, with actual harness usage through
+   the first successful promotion. There is no new required write or reasoning
+   collection. In parallel, `rs5n` needs an operator-approved bootstrap from
+   the currently incompatible staging response. Confirm D1 lineage, actual
+   R2/DO/AI/key roles and Worker-before-Agora ordering. Preserve the sanctioned
+   normal order and require real candidate-bound smokes after bootstrap.
+   Feed the existing readiness consumer with those receipts (`tgu`).
 3. **Retire G0's real unknowns.** Run the actual fragment capsule with the three
    fresh harnesses, real Google sponsor/anonymous browsers, protected/live S-4
    corpus, complete gallery/agent smokes and external S-2/cache/FTS/alarm/cost
@@ -3610,8 +3708,10 @@ Tier 2 and expressly refused features are not extra launch requirements.
 5. **Finish the remaining original breadth and operation.** W1–W9 keep their
    every-kind/error/face, notice/outbox, warning, materiality, roster, recovery
    and human experience criteria. Finish wider admin/hosted acceptance (`0ht`)
-   around the implemented local area rename, full SQL/global/private recovery
-   (`p4b`/`zr9`) and original optional CLI breadth
+   around the implemented local area rename. Rehearse existing full SQL and
+   private CAS recovery with current retention authority on provider scratch
+   resources, then complete the authorized cutover proof (`p4b`/`zr9`).
+   Finish original optional CLI breadth
    without misclassifying its existing connect/device/keychain implementation.
    `9lqv` maps outdated acceptance command names to existing real runners;
    a missing script name alone does not establish an absent subsystem.
@@ -3631,7 +3731,42 @@ The current cost verifier correctly withholds a cost claim without retained
 external S-2 input and accepted workload assumptions. No present-day provider
 pricing validation or real bill measurement is claimed here.
 
-### Backlog, ambition and refinement
+### November 17 backlog and bridge review
+
+After the registered integration follow-up, Beads contains 656 records,
+including 510 closed and 146 unfinished
+(112 open, 22 in progress, 12 explicitly blocked). Nine are ready and the
+active dependency graph has no cycles. Readiness and dependency blocking
+are scheduling data. Launch outcomes are judged by the gates above.
+
+Two reviews of the intended outcome sharpened the order above. First, make a
+fresh contribution possible within the original budget, measuring protocol
+steps and real first-promotion usage together. This tests whether the
+agent-facing context and teaching response help the Fellow do its work.
+Second, follow one useful claim or dead end across interruption, a second
+sponsor, exact evidence, and a public synthesis. This tests whether the
+work accumulates and remains independently checkable.
+
+Five refinements kept the bridge tied to current evidence:
+
+1. Compare all 26 outcomes to current changes and their owners. Keep the
+   real upload, sponsor feedback, question, workshop and search paths. The
+   existing database backup job captures full SQL and private CAS separately
+   from the public-ledger archive, so the remaining drill can use both.
+2. Preserve the denominators and proof scopes. Keep the split-session
+   negative, exact pack status and private reads, and distinguish an observed
+   local artifact range from a provider object-lifecycle result.
+3. Resolve the staging bootstrap dependency before promising a cutover.
+   Public schema failure comes before OAuth, device flow and deploy authority
+   in the normal pipeline.
+4. Pin the completion and recovery events to one session, and separate
+   protocol observables from harness usage. Preserve all of §16.1, including
+   the offered move, real third harness and cohort ceiling.
+5. Keep external safety, cost, full recovery, independent coverage and
+   thirty-day outcomes at their existing owners. The deferred tier-two
+   stack stays out of the launch acceptance.
+
+### Earlier backlog, ambition and refinement
 
 The November 11 refresh keeps the existing 614-issue roadmap. Its coverage
 search finds no concrete wholly untracked launch promise. Existing owners
