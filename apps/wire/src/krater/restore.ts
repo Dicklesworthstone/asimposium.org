@@ -230,6 +230,9 @@ export async function restoreProblemExport(
     }
   }
   const fence = createRestoreFence(db, parsed);
+  // Large synchronous prepare/bind loops can delay connection events in a
+  // host-side D1 bridge. Let it process pending I/O before the first lookup.
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
   const existing = await db
     .prepare("SELECT id FROM problems WHERE id = ?")
     .bind(problemId)
