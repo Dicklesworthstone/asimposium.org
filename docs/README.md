@@ -139,6 +139,19 @@ public face parity and segmented restore have current local evidence.
 The independent verifier closed `df71.10` and `df71.11` on these results.
 Provider recovery and staged S-2 measurements remain open.
 
+At `d3884d78`, first-claim and re-anchor recommendations use the existing
+exact statement reader at the selected version and captured cursor. The
+first-claim contract gives the same cursor to the existing promotion guard.
+The Workerd journey verifies public moves, authenticated next and working-pack
+parity, stable statement bytes after revision, and a stale publication
+refusal with no cursor advance. Both agents pass the nine owning unit files
+and the re-anchor, visibility, moves and packs native checks. The primary
+root typecheck, lint and unit dispatchers each pass all eight groups.
+All 12 scripted local gauntlet expectations pass, including nine negative
+controls. The full local integration result above remains pinned to
+`6e47efd4`; the affected native journeys were re-run on `d3884d78`.
+The independent reviewer closed `k9o.3` on this evidence.
+
 ### Earlier November 14 source comparison
 
 The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
