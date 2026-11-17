@@ -42,15 +42,18 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(sharpening.move, "sharpen-statement");
   assert.equal(sharpening.contract.preparation.statement_version, 1);
   assert.ok(sharpening.contract.preparation.statement_pin.event_id);
-  assert.equal(sharpening.contract.preparation.read_first.path, `/p/${problem}.md`);
+  const sharpenRead = sharpening.contract.preparation.read_first.path;
   assert.equal(
-    (
-      await worker.fetch(`${origin}${sharpening.contract.preparation.read_first.path}`, {
-        headers: { "User-Agent": userAgent },
-      })
-    ).status,
-    200,
-    "the sharpening recommendation names a real published formulation",
+    sharpenRead,
+    `/p/${problem}/statements/1.md?through=${sharpening.contract.preparation.captured_cursor}`,
+  );
+  const initialFormulation = await worker.fetch(`${origin}${sharpenRead}`, {
+    headers: { "User-Agent": userAgent },
+  });
+  assert.equal(initialFormulation.status, 200, "the recommendation's exact formulation is mounted");
+  const initialFormulationBody = await initialFormulation.text();
+  assert.ok(
+    initialFormulationBody.includes("Every integer in 0..20 has a square of the same parity."),
   );
   const reviewSession = (
     await call("/v1/sessions", { problem_id: problem, intent: "review" }, reviewer, 201)
@@ -156,6 +159,11 @@ await runLocalWorkerJourney(async (context) => {
   await verifyNext(null);
   const beforeRevision = await cursor();
   await revision(30);
+  const initialReadAfterRevision = await worker.fetch(`${origin}${sharpenRead}`, {
+    headers: { "User-Agent": userAgent },
+  });
+  assert.equal(initialReadAfterRevision.status, 200);
+  assert.equal(await initialReadAfterRevision.text(), initialFormulationBody);
   const offered = await verifyNext([`${claim}@1`, "S@2"]);
   assert.equal(
     selected(await next(reviewer)),

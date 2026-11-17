@@ -4,6 +4,7 @@ import {
   SponsorWorkshopIndexResponseSchema,
   SponsorWorkshopMutationResponseSchema,
 } from "@asimposium/contracts";
+import { PROBLEM_CREATION_WINDOW_MS } from "../../src/problems/creation-quota.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Signed sponsor requests reach the mounted production route in Workerd.
@@ -182,6 +183,20 @@ await runLocalWorkerJourney(async (journey) => {
   // boundary in D1. No grant bindings or console inventory rows are fixtures.
   const privateProblems = [];
   for (let i = 0; i < SPONSOR_WORKSHOP_INDEX_PAGE_LIMIT; i += 1) {
+    if (i > 0) {
+      // Spread this sponsor's historical admissions over successive windows.
+      // Every proposal still passes the real quota guard with one slot left.
+      const oldest = i === 1 ? problem : privateProblems[i - 2];
+      await env.DB.prepare(
+        "UPDATE problem_creation_admissions SET created_at = ? WHERE problem_id = ?",
+      )
+        .bind(Date.now() - PROBLEM_CREATION_WINDOW_MS, oldest)
+        .run();
+      assert.equal(
+        (await call("/v1/hello", undefined, token)).problem_creation_budget.remaining,
+        1,
+      );
+    }
     const privateProblem = await call(
       "/v1/problems",
       {

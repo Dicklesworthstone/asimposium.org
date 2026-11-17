@@ -468,16 +468,33 @@ await runLocalWorkerJourney(
     }
     const candidates = (path, text) => {
       if (path.endsWith(".md")) {
-        // Triage preserves the hello continuation before its move. Validate
-        // that one named block separately; every remaining JSON block must
-        // still pair with exactly one displayed move reference.
+        // Triage preserves the hello budgets and continuation before its move.
+        // Every remaining JSON block must still pair with one move reference.
+        const budgetBlocks = [
+          ...text.matchAll(/^## Read and write budgets\n\n```json\n([\s\S]*?)\n```\n/gm),
+        ];
         const actionBlocks = [...text.matchAll(/^## Next actions\n\n```json\n([\s\S]*?)\n```\n/gm)];
+        assert.ok(budgetBlocks.length <= 1, "at most one hello budget block");
         assert.ok(actionBlocks.length <= 1, "at most one hello continuation block");
         let moveText = text;
+        if (budgetBlocks.length === 1) {
+          assert.ok(path.includes("/triage"), "only triage carries the hello budgets");
+          const budgets = TriageResponseSchema.shape.hello
+            .pick({
+              read_budget: true,
+              workshop_budget: true,
+              promotion_budget: true,
+              problem_creation_budget: true,
+            })
+            .strict()
+            .parse(JSON.parse(budgetBlocks[0][1]));
+          assert.ok(Object.keys(budgets).length > 0);
+          moveText = moveText.replace(budgetBlocks[0][0], "");
+        }
         if (actionBlocks.length === 1) {
           assert.ok(path.includes("/triage"), "only triage carries the hello continuation");
           TriageResponseSchema.shape.hello.shape.next_actions.parse(JSON.parse(actionBlocks[0][1]));
-          moveText = text.replace(actionBlocks[0][0], "");
+          moveText = moveText.replace(actionBlocks[0][0], "");
         }
         const contracts = [...moveText.matchAll(/```json\n([\s\S]*?)\n```/g)].map((match) =>
           JSON.parse(match[1]),

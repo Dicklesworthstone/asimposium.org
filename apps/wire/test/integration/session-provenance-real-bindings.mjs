@@ -255,17 +255,37 @@ await runLocalWorkerJourney(
         );
         assert.equal(response.headers.get("cache-control"), "private, no-store");
         const pack = PackResponseSchema.parse(JSON.parse(raw));
-        assert.deepEqual(pack.provenance, { ...expected, declared: packDeclared });
-        assert.ok(
-          pack.omitted.some(
-            (item) =>
-              item.reason === "session_provenance_detail" &&
-              item.detail ===
-                `The declared tools note is available from the owning GET ${path} status read.`,
-          ),
-        );
+        if (pack.provenance === undefined) {
+          assert.equal(budget, 800, "a larger owner pack includes the captured provenance");
+          assert.deepEqual(
+            pack.omitted.filter((item) => item.reason.startsWith("session_provenance")),
+            [
+              {
+                reason: "session_provenance_budget",
+                detail: `Full captured snapshot: GET ${path}.`,
+              },
+            ],
+          );
+          const referenceId = profile === "full" ? "SYS-session-provenance" : "SYS-identity";
+          const identity = pack.items.find((item) => item.id === referenceId);
+          assert.ok(
+            identity?.body.includes(`Session terms pair SHA-256: ${documents.pair_digest}.`),
+          );
+          assert.ok(identity.body.includes(`Full self-declared identity and terms: GET ${path}.`));
+          assert.deepEqual((await status()).provenance, expected);
+        } else {
+          assert.deepEqual(pack.provenance, { ...expected, declared: packDeclared });
+          assert.ok(
+            pack.omitted.some(
+              (item) =>
+                item.reason === "session_provenance_detail" &&
+                item.detail ===
+                  `The declared tools note is available from the owning GET ${path} status read.`,
+            ),
+          );
+          assert.ok(!Object.hasOwn(pack.provenance.declared, "tools_note"));
+        }
         assert.ok(!raw.includes(canary));
-        assert.ok(!Object.hasOwn(pack.provenance.declared, "tools_note"));
         assert.ok(pack.tokens_estimate <= budget);
         assert.ok(
           Math.ceil(Buffer.byteLength(raw) / 4) <= budget,

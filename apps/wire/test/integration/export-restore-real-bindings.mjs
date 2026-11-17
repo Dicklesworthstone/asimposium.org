@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { SINGLE_TEAM_PROBLEM_NOTICE } from "@asimposium/contracts";
 import {
   verifyDeletionJournalOffline,
   verifyExportOffline,
@@ -576,9 +578,59 @@ await runLocalWorkerJourney(
     visibility = await visibilityRows();
     assert.deepEqual(visibility.scratch, visibility.primary);
     assert.equal(visibility.scratch.length, 2, "retry never creates another control version");
+    // A public-ledger archive restores historical evidence and controls. The
+    // private live roster is outside that archive; its announcement cannot
+    // be inherited by the scratch face.
+    const roster = await fixtures.compareRows(
+      "SELECT fellow_id FROM problem_memberships WHERE problem_id = ? ORDER BY fellow_id",
+      [second],
+    );
+    assert.ok(roster.primary.length > 0);
+    assert.deepEqual(roster.scratch, []);
+    const visibleJson = await fixtures.compareFaces(`/p/${second}.json`);
+    assert.equal(visibleJson.primary.status, 200);
+    assert.equal(visibleJson.scratch.status, 200);
+    const { fingerprint: primaryFingerprint, ...primaryProjection } = JSON.parse(
+      visibleJson.primary.body,
+    );
+    const { fingerprint: scratchFingerprint, ...scratchProjection } = JSON.parse(
+      visibleJson.scratch.body,
+    );
+    const rosterNotice = {
+      reason: "single_team",
+      detail: `Single-team problem: ${SINGLE_TEAM_PROBLEM_NOTICE}`,
+    };
+    assert.deepEqual(
+      primaryProjection.omitted.filter((item) => item.reason === rosterNotice.reason),
+      [rosterNotice],
+    );
+    assert.deepEqual(scratchProjection, {
+      ...primaryProjection,
+      omitted: primaryProjection.omitted.filter((item) => item.reason !== rosterNotice.reason),
+    });
+    assert.match(primaryFingerprint, /^fnv1a64:[0-9a-f]{16}$/);
+    assert.match(scratchFingerprint, /^fnv1a64:[0-9a-f]{16}$/);
+    assert.notEqual(scratchFingerprint, primaryFingerprint);
     const visibleFaces = await fixtures.compareFaces(`/p/${second}.md`);
     assert.equal(visibleFaces.primary.status, 200);
-    assert.deepEqual(visibleFaces.scratch, visibleFaces.primary);
+    assert.equal(visibleFaces.scratch.status, 200);
+    const noticeLine = `- ${rosterNotice.reason} — ${rosterNotice.detail}\n`;
+    const primaryTrailer = `omitted=${primaryProjection.omitted.length} fingerprint=${primaryFingerprint} -->`;
+    const scratchTrailer = `omitted=${scratchProjection.omitted.length} fingerprint=${scratchFingerprint} -->`;
+    assert.equal(visibleFaces.primary.body.split(noticeLine).length, 2);
+    assert.equal(visibleFaces.primary.body.split(primaryTrailer).length, 2);
+    assert.equal(
+      visibleFaces.scratch.body,
+      visibleFaces.primary.body.replace(noticeLine, "").replace(primaryTrailer, scratchTrailer),
+    );
+    for (const [format, faces] of [
+      ["json", visibleJson],
+      ["markdown", visibleFaces],
+    ]) {
+      for (const { body, etag } of [faces.primary, faces.scratch])
+        assert.equal(etag, `"${createHash("sha256").update(`${format}\n${body}`).digest("hex")}"`);
+      assert.notEqual(faces.primary.etag, faces.scratch.etag);
+    }
     assert.ok(!visibleFaces.scratch.body.includes(privateReason));
 
     console.log(

@@ -164,10 +164,12 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env, w
   // next daily sweep records failure and still archives the other problem;
   // it must never call that run complete or leak the old bytes into a new file.
   const redacted = await env.DB.prepare(
-    "SELECT id FROM events WHERE problem_id = ? ORDER BY seq LIMIT 1",
+    "SELECT id, type, object_version FROM events WHERE problem_id = ? ORDER BY seq LIMIT 1",
   )
     .bind(pending.id)
     .first();
+  assert.equal(redacted.type, "problem.admitted");
+  assert.equal(redacted.object_version, 1);
   await fixtures.redactPublicContent(redacted.id);
   const tomorrow = now + 24 * 60 * 60 * 1000;
   const nextDate = new Date(tomorrow).toISOString().slice(0, 10);
@@ -276,4 +278,14 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env, w
       boundary: "local Workerd/D1/R2; no cloud cron or bucket-lifecycle claim",
     }),
   );
+  return {
+    projectionParityExpect: {
+      // The retained formulation row was written by the redacted admission.
+      // The real projection report must match this single unreplayable row.
+      [pending.id]: {
+        status: "unreplayable",
+        drift: [`problem_statement_versions:orphan_row:${redacted.object_version}`],
+      },
+    },
+  };
 });

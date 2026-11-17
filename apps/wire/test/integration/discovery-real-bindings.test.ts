@@ -4,6 +4,8 @@ import { delimiter, resolve } from "node:path";
 const standaloneDiscoveryLanes = {
   "fellow-pagination": "fellow-pagination-real-bindings.mjs",
   "search-filters": "search-filters-real-bindings.mjs",
+  "statement-context": "statement-context-real-bindings.mjs",
+  "statement-review": "statement-review-real-bindings.mjs",
 } as const;
 
 test.each([
@@ -95,7 +97,7 @@ test.each([
                   : screenMode === "credential-liveness"
                     ? "claim-credential-liveness-real-bindings.mjs"
                     : screenMode === "statement-review" || screenMode === "statement-context"
-                      ? `${screenMode}-real-bindings.mjs`
+                      ? standaloneDiscoveryLanes[screenMode]
                       : screenMode === "unlisted"
                         ? "unlisted-real-bindings.mjs"
                         : screenMode === "governance"

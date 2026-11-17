@@ -66,8 +66,6 @@ const LANES = [
   "sponsor-inbox",
   "sponsor-workshop",
   "stale-route",
-  "statement-context",
-  "statement-review",
   "statement-revision-proposals",
   "statements",
   "synthesis",

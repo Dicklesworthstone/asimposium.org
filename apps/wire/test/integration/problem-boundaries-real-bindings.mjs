@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   PackResponseSchema,
   ProblemDetailSchema,
+  ProblemStatementAuthorSchema,
   ProblemStatementBoundariesSchema,
 } from "@asimposium/contracts";
 import { readPublishedProblemFormulation } from "../../src/ledger/problem-formulation-read.ts";
@@ -155,10 +156,11 @@ await runLocalWorkerJourney(
       ...second,
       scope: "Finite simple undirected trees, including the one-vertex tree.",
     };
+    const competingAuthor = ProblemStatementAuthorSchema.parse(secondPreview.scientific_author);
     const raceAt = new Date().toISOString();
     await env.DB.prepare(`INSERT INTO problem_statement_versions
-    (problem_id,version,statement,norm_hash,falsifier,motivation,scope,out_of_scope,success_criteria,steward_accepted_by,created_at)
-    VALUES(?,3,?,?,?,?,?,?,?,?,?)`)
+    (problem_id,version,statement,norm_hash,falsifier,motivation,scope,out_of_scope,success_criteria,steward_accepted_by,created_at,scientific_author_json)
+    VALUES(?,3,?,?,?,?,?,?,?,?,?,?)`)
       .bind(
         problem,
         formulation.statement,
@@ -170,6 +172,7 @@ await runLocalWorkerJourney(
         third.success_criteria,
         owner,
         raceAt,
+        JSON.stringify(competingAuthor),
       )
       .run();
     await fixtures.armRaceBeforeNextBatch(
@@ -206,6 +209,7 @@ await runLocalWorkerJourney(
     const admittedCursor = current.public_seq;
     const admitted = await readPublishedProblemFormulation(env.DB, problem, admittedCursor);
     assert.deepEqual(fields(admitted.problem), third);
+    assert.deepEqual(admitted.scientific_author, competingAuthor);
     const face = await call(`/p/${problem}.json`);
     const kinds = {
       scope: "problem-scope",
