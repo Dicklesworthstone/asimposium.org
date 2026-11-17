@@ -3,6 +3,7 @@ import {
   getMoveTemplate,
   type NextMoveCandidate,
 } from "@asimposium/contracts";
+import { statementVersionPath } from "@asimposium/contracts/statements";
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql } from "../krater/public-content.ts";
 import { PUBLIC_EVENT_CONTENT_MAX_BYTES } from "../ledger/citation-read-integrity.ts";
@@ -302,7 +303,9 @@ export async function selectReanchorMove(
             statement_pin: context.source.publication,
             read_first: {
               method: "GET",
-              path: `/p/${encodeURIComponent(problemId)}.md`,
+              path: statementVersionPath(problemId, context.head.current_statement_version, "md", {
+                through: cursor,
+              }),
             },
             additional_reads: [
               {

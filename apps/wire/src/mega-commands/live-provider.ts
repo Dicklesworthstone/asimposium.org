@@ -65,7 +65,7 @@ export interface LiveMovesDependencies extends LedgerMovesDependencies {
 }
 
 export const MOVE_MEMBERSHIP_SQL = `SELECT m.role, p.public_seq AS cursor, p.status AS status,
-    p.unlisted, p.admission_mode,
+    p.unlisted, p.admission_mode, p.current_statement_version,
     EXISTS (SELECT 1 FROM events e WHERE e.problem_id = p.id AND e.seq <= p.public_seq
       AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')) AS has_claims
   FROM problems p JOIN problem_memberships m ON m.problem_id = p.id AND m.fellow_id = ?
@@ -212,6 +212,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
         role: string;
         cursor: number;
         has_claims: number;
+        current_statement_version: number;
         status?: string;
         unlisted: number;
         admission_mode: string | null;
@@ -259,6 +260,8 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       !row ||
       !Number.isSafeInteger(row.cursor) ||
       row.cursor < 0 ||
+      !Number.isSafeInteger(row.current_statement_version) ||
+      row.current_statement_version < 1 ||
       (row.unlisted !== 0 && row.unlisted !== 1) ||
       (row.has_claims !== 0 && row.has_claims !== 1)
     )
@@ -386,7 +389,13 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       effectivePermissions.promote
     ) {
       const template = this.dependencies.firstClaimTemplate();
-      const first = firstClaimMove(problemId, row.cursor, template, LIVE_MOVES_BOUNDARY);
+      const first = firstClaimMove(
+        problemId,
+        row.cursor,
+        row.current_statement_version,
+        template,
+        LIVE_MOVES_BOUNDARY,
+      );
       if (first) allCandidates.push(first);
     } else if (row.has_claims > 0) {
       if (this.dependencies.deadEnds?.load) {
@@ -611,6 +620,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
         role: string;
         cursor: number;
         has_claims: number;
+        current_statement_version: number;
         status?: string;
         unlisted: number;
         admission_mode: string | null;
@@ -622,6 +632,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       current.status !== row.status ||
       current.unlisted !== row.unlisted ||
       current.admission_mode !== row.admission_mode ||
+      current.current_statement_version !== row.current_statement_version ||
       current.has_claims !== row.has_claims
     )
       throw new MoveSnapshotError("MOVES_CURSOR_CHANGED");

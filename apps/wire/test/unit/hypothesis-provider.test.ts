@@ -51,6 +51,7 @@ function fixture(
                     role: options.role ?? "contributor",
                     cursor: 50,
                     unlisted: 0,
+                    current_statement_version: 1,
                     has_claims: options.hasClaims ? 1 : 0,
                   };
             },

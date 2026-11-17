@@ -1,5 +1,6 @@
 import type { MoveTemplate, NextMoveCandidate } from "@asimposium/contracts";
 import type { ReviewQueueItem, ReviewQueueResponse } from "@asimposium/contracts/review-queue";
+import { statementVersionPath } from "@asimposium/contracts/statements";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { ReviewQueueSnapshot } from "../discovery/review-queue-admissions";
 import { rankReviewQueue } from "../discovery/review-queue-selection.ts";
@@ -38,6 +39,7 @@ export function reviewTargetKey(
 export function firstClaimMove(
   problemId: string,
   cursor: number,
+  statementVersion: number,
   template: MoveTemplate,
   boundary: string,
 ): NextMoveCandidate | null {
@@ -48,10 +50,15 @@ export function firstClaimMove(
     refs: [problemId],
     contract: {
       ...template,
+      prefilled_hints: { ...template.prefilled_hints, client_context_cursor: cursor },
       preparation: {
         problem_id: problemId,
         captured_cursor: cursor,
-        read_first: { method: "GET", path: `/p/${encodeURIComponent(problemId)}.md` },
+        statement_version: statementVersion,
+        read_first: {
+          method: "GET",
+          path: statementVersionPath(problemId, statementVersion, "md", { through: cursor }),
+        },
         open_session: {
           method: "POST",
           path: "/v1/sessions",
@@ -65,7 +72,7 @@ export function firstClaimMove(
           schema: "/schemas/sessions.v1/workshop_push_request.json",
           type: "claim-draft",
         },
-        note: "Read the latest problem formulation; it may have changed since selection. Reuse an owned session or open one. Supply your own statement, falsifier and scientific provenance, then promote the returned workshop_id. No public claim is created by this recommendation.",
+        note: "Read the exact published formulation first. Reuse an owned session or open one. Draft your statement and falsifier, then promote the returned workshop_id with the supplied client_context_cursor. If the formulation has changed, refresh the pack and reconsider your draft before promoting.",
       },
     },
     selection_boundary: boundary,

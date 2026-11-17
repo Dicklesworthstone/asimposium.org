@@ -32,7 +32,7 @@ const plainMove = (move: NextMoveCandidate["move"], problem = "P-DEMO"): NextMov
 function fixture() {
   const sql = new Database(":memory:");
   sql.exec(`CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, unlisted INTEGER, status TEXT,
-      admission_mode TEXT DEFAULT 'open', sponsor_id TEXT);
+      admission_mode TEXT DEFAULT 'open', sponsor_id TEXT, current_statement_version INTEGER DEFAULT 1);
     CREATE TABLE problem_memberships(problem_id TEXT,fellow_id TEXT,role TEXT);
     CREATE TABLE problem_stewards(problem_id TEXT, sponsor_id TEXT);
     CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,visibility TEXT,version INTEGER);

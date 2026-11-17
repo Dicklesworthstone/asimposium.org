@@ -248,7 +248,7 @@ test("re-anchor preserves a usable exact claim/statement recommendation without 
     });
     assert.deepEqual((move.contract.preparation as Record<string, unknown>).read_first, {
       method: "GET",
-      path: `/p/${PROBLEM}.md`,
+      path: `/p/${PROBLEM}/statements/2.md?through=${f.cursor()}`,
     });
     assert.ok(!JSON.stringify(move).includes(CANARY));
     assert.equal((await f.next(f.cursor(), "F-OTHER")).move, null);

@@ -76,6 +76,36 @@ await runLocalWorkerJourney(async (context) => {
   const cursor = async () =>
     (await env.DB.prepare("SELECT public_seq FROM problems WHERE id=?").bind(problem).first())
       .public_seq;
+  const readMarkdown = async (read) => {
+    const response = await worker.fetch(`${origin}${read.path}`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(response.status, 200, "the recommendation's exact source is mounted");
+    return response.text();
+  };
+  const firstClaim = (await next()).primary_move;
+  assert.equal(firstClaim.move, "state-claim");
+  const firstClaimCursor = await cursor();
+  const firstClaimRead = firstClaim.contract.preparation.read_first;
+  assert.deepEqual(firstClaimRead, {
+    method: "GET",
+    path: `/p/${problem}/statements/1.md?through=${firstClaimCursor}`,
+  });
+  assert.equal(firstClaim.contract.prefilled_hints.client_context_cursor, firstClaimCursor);
+  const firstClaimPack = PackResponseSchema.parse(
+    await call(`${path}/pack?profile=working&max_tokens=8000`, undefined, author),
+  );
+  const firstClaimItem = firstClaimPack.items.find((item) => item.id === "SYS-working-moves");
+  assert.ok(firstClaimItem);
+  assert.deepEqual(JSON.parse(firstClaimItem.body).primary_move, firstClaim);
+  assert.equal(firstClaimPack.cursor, firstClaimCursor);
+  const publicMove = (await call(`/p/${problem}/moves.json`)).primary_move;
+  assert.equal(publicMove.move, "state-claim");
+  assert.deepEqual(publicMove.contract, firstClaim.contract);
+  const firstClaimFormulation = await readMarkdown(firstClaimRead);
+  assert.ok(
+    firstClaimFormulation.includes("Every integer in 0..20 has a square of the same parity."),
+  );
   const reanchorState = (claimId) =>
     env.DB.prepare(`SELECT p.public_seq, p.current_statement_version,
       c.statement_version, c.statement_drift,
@@ -84,7 +114,7 @@ await runLocalWorkerJourney(async (context) => {
       FROM problems p JOIN claims c ON c.problem_id = p.id WHERE p.id = ? AND c.id = ?`)
       .bind(problem, claimId)
       .first();
-  const promote = async (statement) => {
+  const promote = async (statement, hints = {}) => {
     const draft = await call(
       `${path}/workshop`,
       { type: "claim-draft", title: "Finite parity claim", body_md: "Private scientific draft." },
@@ -99,12 +129,15 @@ await runLocalWorkerJourney(async (context) => {
         statement,
         falsifier: "A direct computation of the stated integer with opposite parity.",
         client_context_cursor: await cursor(),
+        ...hints,
       },
       author,
       201,
     );
   };
-  const claim = (await promote(`Zero squared is even. ${canary}`)).claim_id;
+  const claim = (
+    await promote(`Zero squared is even. ${canary}`, firstClaim.contract.prefilled_hints)
+  ).claim_id;
   const authorId = (
     await env.DB.prepare(
       "SELECT actor_fellow_id FROM events WHERE problem_id=? AND object_id=? AND type='claim.created'",
@@ -132,26 +165,26 @@ await runLocalWorkerJourney(async (context) => {
       assert.ok(!JSON.stringify(move).includes(canary));
       assert.ok(ClaimReanchorRequestSchema.safeParse(move.contract.prefilled_hints).success);
       assert.equal(move.contract.prefilled_hints.client_context_cursor, await cursor());
-      assert.equal(move.contract.preparation.read_first.path, `/p/${problem}.md`);
+      const { current_statement_version: version, captured_cursor: cut } =
+        move.contract.preparation;
+      assert.deepEqual(move.contract.preparation.read_first, {
+        method: "GET",
+        path: `/p/${problem}/statements/${version}.md?through=${cut}`,
+      });
       const currentFormulation = await call(`/v1/problems/${problem}`);
       assert.equal(
         currentFormulation.problem.current_statement_version,
         move.contract.preparation.current_statement_version,
         "the current formulation read matches the selected version before acting",
       );
-      for (const read of [
-        move.contract.preparation.read_first,
-        ...move.contract.preparation.additional_reads,
-      ]) {
-        const response = await worker.fetch(`${origin}${read.path}`, {
-          headers: { "User-Agent": userAgent },
-        });
-        assert.equal(
-          response.status,
-          200,
-          "every exact scientific source is a mounted public read",
-        );
-        assert.ok((await response.text()).length > 0);
+      assert.ok(
+        (await readMarkdown(move.contract.preparation.read_first)).includes(
+          currentFormulation.problem.statement,
+        ),
+        "the selected read serves the exact current formulation",
+      );
+      for (const read of move.contract.preparation.additional_reads) {
+        assert.ok((await readMarkdown(read)).length > 0);
       }
     }
     return move;
@@ -164,7 +197,35 @@ await runLocalWorkerJourney(async (context) => {
   });
   assert.equal(initialReadAfterRevision.status, 200);
   assert.equal(await initialReadAfterRevision.text(), initialFormulationBody);
+  assert.equal(await readMarkdown(firstClaimRead), firstClaimFormulation);
+  const oldDraft = await call(
+    `${path}/workshop`,
+    { type: "claim-draft", title: "An old cut", body_md: "The square of two is even." },
+    author,
+    201,
+  );
+  const beforeStalePromotion = await cursor();
+  const stalePromotion = await call(
+    `${path}/promote`,
+    {
+      ...firstClaim.contract.prefilled_hints,
+      workshop_id: oldDraft.workshop_id,
+      statement: "The square of two is even.",
+      falsifier: "Two squared is odd.",
+    },
+    author,
+    409,
+    "first-claim-old-formulation",
+  );
+  assert.equal(stalePromotion.code, "STATEMENT_REVISED_SINCE");
+  assert.equal(stalePromotion.client_context_cursor, firstClaimCursor);
+  assert.equal(
+    await cursor(),
+    beforeStalePromotion,
+    "stale first-claim promotion appends no event",
+  );
   const offered = await verifyNext([`${claim}@1`, "S@2"]);
+  const offeredFormulation = await readMarkdown(offered.contract.preparation.read_first);
   assert.equal(
     selected(await next(reviewer)),
     undefined,
@@ -214,6 +275,7 @@ await runLocalWorkerJourney(async (context) => {
 
   await revision(40);
   const later = await verifyNext([`${claim}@1`, "S@3"]);
+  assert.equal(await readMarkdown(offered.contract.preparation.read_first), offeredFormulation);
   assert.equal(later.contract.preparation.anchored_statement_version, 2);
   const beforeStaleRequest = await reanchorState(claim);
   assert.equal(beforeStaleRequest.statement_drift, 1);
@@ -358,6 +420,8 @@ await runLocalWorkerJourney(async (context) => {
         "real local Workerd/D1/R2; fixture identity and screening; no deployed or live-model proof",
       probes: [
         "verified-sharpening-formulation",
+        "exact-first-claim-with-stale-publication-refusal",
+        "retained-exact-formulation-after-later-revision",
         "executable-current-reanchor",
         "original-author-only",
         "exact-public-reads",

@@ -242,6 +242,7 @@ async function selectProblem(
       const move = firstClaimMove(
         head.id,
         head.cursor,
+        formulation.problem.current_statement_version,
         getMoveTemplate("state-claim"),
         PUBLIC_MOVES_BOUNDARY,
       );

@@ -79,7 +79,7 @@ function templateFor(move: "review" | "add-refuter"): MoveTemplate {
 function fixture(problems = ["P-DEMO"]) {
   const sqlite = new Database(":memory:");
   sqlite.exec(`CREATE TABLE problems(id TEXT, status TEXT, unlisted INTEGER, public_seq INTEGER,
-      admission_mode TEXT DEFAULT 'open', sponsor_id TEXT);
+      admission_mode TEXT DEFAULT 'open', sponsor_id TEXT, current_statement_version INTEGER DEFAULT 1);
     CREATE TABLE problem_memberships(problem_id TEXT, fellow_id TEXT, role TEXT);
     CREATE TABLE problem_stewards(problem_id TEXT, sponsor_id TEXT);
     CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
@@ -646,6 +646,7 @@ test("an empty active board gives a workshop-first claim move without scanning t
     assert.deepEqual(result.primaryMove?.refs, ["P-DEMO"]);
     assert.match(JSON.stringify(result.primaryMove?.contract), /workshop_first/);
     assert.match(JSON.stringify(result.primaryMove?.contract), /captured_cursor":0/);
+    assert.match(JSON.stringify(result.primaryMove?.contract), /statements\/1.md\?through=0/);
   } finally {
     f.sqlite.close();
   }
