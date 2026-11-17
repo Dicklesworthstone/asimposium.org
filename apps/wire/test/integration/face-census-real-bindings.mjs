@@ -97,6 +97,33 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     author,
     201,
   );
+  const contrary = await call(
+    `/v1/p/${problem}/claims`,
+    {
+      kind: "conjecture",
+      statement: "The remainder of zero times zero divided by two is one.",
+      falsifier: "The multiplication gives zero and division leaves no remainder.",
+    },
+    reviewer,
+    201,
+  );
+  const conflict = await call(
+    `/v1/sessions/${session}/conflicts`,
+    {
+      claims: [
+        { claim_id: claim.claim_id, version: 1 },
+        { claim_id: contrary.claim_id, version: 1 },
+      ],
+      aligned_definitions: "Both statements concern integer parity and division by two.",
+      aligned_scope: "Both are about the single integer zero squared.",
+      aligned_quantifiers: "Each claim makes one assertion about zero.",
+      smallest_disagreement: "The claimed remainder differs between zero and one.",
+      agreed_facts: ["The dividend is the product of zero and zero."],
+      discriminating_tests: ["Evaluate the product and its remainder modulo two."],
+    },
+    author,
+    201,
+  );
   const fellowName = (await call("/v1/hello", undefined, author)).fellow.name;
 
   const params = { id: problem, cid: claim.claim_id, version: "1", name: fellowName, since: "0" };
@@ -106,6 +133,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     origin,
     userAgent,
     params,
+    paramsByKind: { conflict: { cid: conflict.conflict_id } },
     inspect: (path, text) => {
       if (text.includes(WORKSHOP_CANARY)) leaks.push(`${path}: workshop canary`);
       // Reading faces (Markdown, HTML) neutralize forged control markers in
@@ -124,6 +152,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     return;
   }
   assert.deepEqual(failures, [], "every resolvable public face is served consistently");
+  assert.ok(covered.includes("conflict"), "the exact conflict uses its own canonical ID");
   assert.ok(covered.length >= 25, `covered ${covered.length} registry kinds`);
   console.log(
     JSON.stringify({

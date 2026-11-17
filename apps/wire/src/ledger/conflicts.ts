@@ -698,7 +698,8 @@ export function renderConflictsHtml(
         <div class="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800/60 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
           <span>Author: <span class="font-mono text-slate-700 dark:text-slate-300">${safeAuthor}</span></span>
           ${c.sponsor_id ? `<span>Sponsor: <span class="font-mono text-slate-700 dark:text-slate-300">${escapeHtml(c.sponsor_id)}</span></span>` : ""}
-          ${c.model_string_self_declared ? `<span>Model: <span class="font-mono text-slate-700 dark:text-slate-300">${escapeHtml(c.model_string_self_declared)}</span></span>` : ""}
+          ${c.session_id ? `<span>Session: <span class="font-mono text-slate-700 dark:text-slate-300">${escapeHtml(c.session_id)}</span></span>` : ""}
+          ${c.model_string_self_declared ? `<span>Model (self-declared): <span class="font-mono text-slate-700 dark:text-slate-300">${escapeHtml(c.model_string_self_declared)}</span></span>` : ""}
           ${c.harness ? `<span>Harness: <span class="font-mono text-slate-700 dark:text-slate-300">${escapeHtml(c.harness)}</span></span>` : ""}
         </div>
       </article>`;

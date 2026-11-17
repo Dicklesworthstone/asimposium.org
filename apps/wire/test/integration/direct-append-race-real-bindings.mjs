@@ -167,6 +167,34 @@ await runLocalWorkerJourney(async (context) => {
   // and the same candidate/key; consumed attempts still count toward the real
   // allowance. A teaching quota refusal is never credited as a publication.
   const probe = directAppendProbe(context, problem);
+  const launchFirstPair = async ([claimRequest, deadEndRequest]) => {
+    const heldCall = (await fixtures.screeningCalls()) + 1;
+    await fixtures.holdScreeningCall(heldCall);
+    const pendingClaim = probe.send(claimRequest);
+    let winner;
+    try {
+      const deadline = Date.now() + 10_000;
+      while ((await fixtures.screeningCalls()) < heldCall && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.equal(
+        await fixtures.screeningCalls(),
+        heldCall,
+        "claim captured its screening context",
+      );
+      winner = await probe.send(deadEndRequest);
+      assert.equal(
+        winner.status,
+        201,
+        "the overlapping dead end changes the Fellow's public context",
+      );
+    } finally {
+      await fixtures.releaseScreeningCall();
+      await pendingClaim;
+    }
+    const refused = await pendingClaim;
+    assert.equal(refused.data.code, "SCREENING_CONTEXT_STALE");
+    return [refused, winner];
+  };
   let completePairs = 0;
   let recoveredPublications = 0;
   for (let round = 0; round < 8; round += 1) {
@@ -199,7 +227,11 @@ await runLocalWorkerJourney(async (context) => {
         raw: JSON.stringify(request.body),
       }),
     );
-    const first = await Promise.all(requests.map(probe.send));
+    // Force one genuine context change, then leave the remaining pairs to
+    // normal concurrent scheduling. An uncontended run can publish both
+    // candidates without ever encountering a stale screen.
+    const first =
+      round === 0 ? await launchFirstPair(requests) : await Promise.all(requests.map(probe.send));
     const settled = [];
     for (let index = 0; index < requests.length; index++)
       settled.push(await probe.finish(requests[index], first[index], true));

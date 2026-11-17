@@ -718,7 +718,7 @@ test("HTTP list representations share strict snapshot navigation and conditional
       const response = await f.http(`/p/P-SYNTH/syntheses.${format}`);
       assert.equal(response.status, 200);
       const body = await response.text();
-      assert.match(body, /Publication snapshot #11/);
+      assert.match(body, /Publication snapshot cursor 11\b/);
       assert.match(body, /Older syntheses/);
       assert.notEqual(response.headers.get("etag"), etag);
     }
@@ -730,6 +730,12 @@ test("HTTP list representations share strict snapshot navigation and conditional
       [3, 2],
     );
     assert.equal(older.next_before, null);
+    const olderMarkdown = await f.http("/p/P-SYNTH/syntheses.md?through=11&before=4&limit=8");
+    assert.equal(olderMarkdown.status, 200);
+    assert.match(
+      await olderMarkdown.text(),
+      /Publication snapshot cursor 11\b[^\n]*before event #4/,
+    );
     f.hide("SYNTH-11");
     const changed = await f.http("/p/P-SYNTH/syntheses.json?through=11", {
       headers: { "if-none-match": etag },

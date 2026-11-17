@@ -230,6 +230,6 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, fixtures })
     3,
   );
   console.log(
-    JSON.stringify({ stage: "public-stewardship-current-authority-and-recovery", passed: true }),
+    JSON.stringify({ stage: "public-stewardship-current-authority-and-recovery", status: "pass" }),
   );
 });

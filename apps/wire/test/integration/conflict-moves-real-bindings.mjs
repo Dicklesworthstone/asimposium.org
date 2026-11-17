@@ -115,11 +115,20 @@ await runLocalWorkerJourney(async (context) => {
     const pack = PackResponseSchema.parse(
       await call(`${path}/pack?profile=working&max_tokens=8000`, undefined, author),
     );
-    const record = pack.items.find((item) => item.id === "SYS-working-moves");
-    assert.ok(record, "the working pack includes the canonical move record");
+    const canonical = await next();
+    const id = canonical.primary_move === null ? "SYS-working-moves-empty" : "SYS-working-moves";
+    const record = pack.items.find((item) => item.id === id);
+    assert.ok(
+      record,
+      "the working pack includes the canonical selection, including an empty result",
+    );
     const selected = JSON.parse(record.body);
     assert.equal(selected.captured_cursor, pack.cursor);
-    assert.deepEqual(normalization(selected), normalization(await next()));
+    if (canonical.primary_move === null) {
+      assert.equal(selected.primary_move, null);
+      assert.deepEqual(selected.alternatives, []);
+    }
+    assert.deepEqual(normalization(selected), normalization(canonical));
     return normalization(selected);
   };
 

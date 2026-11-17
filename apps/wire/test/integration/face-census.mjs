@@ -123,12 +123,21 @@ export const UNSERVED_ITEM_FACES = Object.freeze({
 });
 
 /** @returns {Promise<{ rows: object[], covered: string[], skipped: string[], lateUnserved: string[], failures: object[] }>} */
-export async function faceCensus({ worker, origin, userAgent, params, kinds, inspect }) {
-  const resolve = (pattern) => {
+export async function faceCensus({
+  worker,
+  origin,
+  userAgent,
+  params,
+  paramsByKind = {},
+  kinds,
+  inspect,
+}) {
+  const resolve = (pattern, kind) => {
     let unresolved = false;
     const url = pattern.replace(/:([a-zA-Z]+)/g, (_, name) => {
-      if (params[name] === undefined) unresolved = true;
-      return encodeURIComponent(params[name] ?? "");
+      const value = paramsByKind[kind]?.[name] ?? params[name];
+      if (value === undefined) unresolved = true;
+      return encodeURIComponent(value ?? "");
     });
     return unresolved ? null : url;
   };
@@ -146,7 +155,7 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds, ins
   const skipped = [];
   for (const entry of PUBLIC_RESOURCE_REGISTRY) {
     if (kinds !== undefined && !kinds.includes(entry.kind)) continue;
-    const base = resolve(entry.agent_markdown_url);
+    const base = resolve(entry.agent_markdown_url, entry.kind);
     if (base === null) {
       skipped.push(entry.kind);
       continue;
@@ -204,7 +213,9 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds, ins
     suffixes.sort((a, b) => (a === ".json" ? -1 : b === ".json" ? 1 : 0));
     for (const suffix of suffixes) {
       const path =
-        suffix === ".json" && entry.json_url ? resolve(entry.json_url) : withSuffix(base, suffix);
+        suffix === ".json" && entry.json_url
+          ? resolve(entry.json_url, entry.kind)
+          : withSuffix(base, suffix);
       const response = await fetchFace(path);
       const text = await response.text();
       // Lanes inspect every body, refusals included (privacy canaries, forged markers).

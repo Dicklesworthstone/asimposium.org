@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { ProblemGovernanceEventSchema } from "@asimposium/contracts";
 import { normHash } from "../../src/split/policy.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
@@ -9,6 +10,7 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env }) => {
   const owner = "usr_statement_context_owner";
   const author = await enroll("statement-context-author", owner);
+  const sourceFellow = (await call("/v1/hello", undefined, author)).fellow.fellow_id;
   const reviewer = await enroll("statement-context-reviewer", "usr_statement_context_reviewer");
   const created = await call(
     "/v1/problems",
@@ -119,9 +121,10 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
         objectId: problemId,
         objectVersion: version,
         createdAt,
-        payload: {
+        payload: ProblemGovernanceEventSchema.parse({
           action: "revise-statement",
           acting_principal: { type: "sponsor", id: owner },
+          source_fellow_id: sourceFellow,
           previous_statement_version: current.current_statement_version,
           previous_status: "active",
           problem: {
@@ -134,7 +137,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
             motivation,
             updated_at: createdAt,
           },
-        },
+        }),
       },
       "SELECT p.id, p.status, p.public_seq",
     );

@@ -1366,7 +1366,13 @@ export async function claimsJourney({
     versions: beforeRace.versions + 1,
   });
 
-  // Exact replay survives session close; a new session cannot adopt an old ID.
+  // The Fellow can publish their own saved revision after reopening the
+  // problem, with the new session attributed to the publication.
+  const savedForResume = await pushRevision({
+    ...raceReplacement,
+    base_version: 3,
+    statement: "A workshop gadget has three distinct labeled ports and a selected reference port.",
+  });
   await call(
     `${workshopAuthor.path}/close`,
     { handback: "Typed revision published; old versions remain available." },
@@ -1389,13 +1395,39 @@ export async function claimsJourney({
     201,
   );
   const foreignSession = await call(
-    `/v1/sessions/${nextSession.session_id}/revise`,
-    { workshop_id: raceDraft.workshop_id },
-    workshopAuthor.token,
+    `${nonAuthorFellow.path}/revise`,
+    { workshop_id: savedForResume.workshop_id },
+    nonAuthorFellow.token,
     404,
   );
   assert.equal(foreignSession.code, "WORKSHOP_OBJECT_NOT_FOUND");
   assert.deepEqual(await publicState(), afterClose);
+
+  const resumedRevision = await call(
+    `/v1/sessions/${nextSession.session_id}/revise`,
+    { workshop_id: savedForResume.workshop_id, expected_workshop_version: 1 },
+    workshopAuthor.token,
+    201,
+  );
+  assert.equal(resumedRevision.claim_id, workshopClaim.claim_id);
+  assert.equal(resumedRevision.version, 4);
+  assert.deepEqual(await publicState(), {
+    events: afterClose.events + 1,
+    cursor: afterClose.cursor + 1,
+    versions: afterClose.versions + 1,
+  });
+  const resumedAttribution = await env.DB.prepare(
+    "SELECT actor_session_id FROM events WHERE problem_id = ? AND seq = ?",
+  )
+    .bind(problem, resumedRevision.seq)
+    .first();
+  assert.equal(resumedAttribution.actor_session_id, nextSession.session_id);
+  const originalDraft = await env.DB.prepare(
+    "SELECT session_id FROM workshop_revisions WHERE workshop_id = ? AND version = 1",
+  )
+    .bind(savedForResume.workshop_id)
+    .first();
+  assert.equal(originalDraft.session_id, workshopAuthor.session.session_id);
 
   // Malformed stored content gets the current typed-selection refusal, with
   // no draft bytes in the response or generic-Markdown/paid-screen fallback.
@@ -1493,7 +1525,7 @@ export async function claimsJourney({
       "direct_vs_workshop_revision",
     ],
     typed_workshop_revision:
-      "private push, signed sponsor read, author publication, refusal parity, immutable history and closed-session replay",
+      "private push, signed sponsor read, author publication, refusal parity, immutable history, closed-session replay and resumed-session publication",
     dormant_promotion:
       "missing draft, screening refusal, batch rollback, commit, duplicate and exact replay",
     workshop_promotion_version:

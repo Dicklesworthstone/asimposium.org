@@ -96,7 +96,7 @@ export async function handleSynthesesList(
         limit: query.data.limit ?? SYNTHESES_LIST_DEFAULT_LIMIT,
       });
     const next = face.next_before === null ? null : path(face.next_before);
-    const position = `Publication snapshot #${face.cursor}; newest publications first${face.before === null ? "." : `, before event #${face.before}.`}`;
+    const position = `Publication snapshot cursor ${face.cursor}. Newest publications first${face.before === null ? "." : `, before event #${face.before}.`}`;
     const body =
       format === "json"
         ? JSON.stringify(face)
