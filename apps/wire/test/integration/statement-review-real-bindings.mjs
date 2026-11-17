@@ -707,11 +707,12 @@ await runLocalWorkerJourney(
       "OBJECT_VERSION_CONFLICT",
     );
     assert.deepEqual(await state(), terminal);
-    // Current controls also withhold earlier-version reviews. These local
-    // operator fixtures leave the ledger and its cursor unchanged, so an ETag
-    // derived only from the public head would incorrectly return the old bytes.
+    // Current controls also withhold earlier-version reviews. The global
+    // cursor invalidates polling while the review and its problem sequence
+    // stay stable through each control.
     const controlVersion = new Map();
     const reviewVisibility = async (target, visibility) => {
+      const before = await call("/cursor");
       const version = (controlVersion.get(target) ?? 0) + 1;
       controlVersion.set(target, version);
       await env.DB.prepare(`INSERT INTO content_controls
@@ -729,6 +730,7 @@ await runLocalWorkerJourney(
           new Date().toISOString(),
         )
         .run();
+      assert.equal(await call("/cursor"), before + 1);
     };
     const beforeControl = new Map();
     for (const suffix of ["json", "md"]) {
@@ -737,7 +739,8 @@ await runLocalWorkerJourney(
       assert.ok(bytes.includes(event.id));
       beforeControl.set(suffix, { bytes, etag: response.headers.get("etag") });
     }
-    for (const target of [`#${event.seq}`, `${id}@${event.object_version}`]) {
+    const visibilityTargets = [`#${event.seq}`, `${id}@${event.object_version}`];
+    for (const target of visibilityTargets) {
       await reviewVisibility(target, "hidden");
       for (const suffix of ["json", "md"]) {
         const previous = beforeControl.get(suffix);
@@ -762,7 +765,10 @@ await runLocalWorkerJourney(
         assert.equal(restored.headers.get("etag"), beforeControl.get(suffix).etag);
       }
     }
-    assert.deepEqual(await state(), terminal, "Visibility never rewrites the review or cursor");
+    assert.deepEqual(await state(), {
+      ...terminal,
+      cursor: terminal.cursor + 2 * visibilityTargets.length,
+    });
     // W2.6 (79n, pjkj): compare all verdicts, versions and reviewers while
     // their event payloads still exist, before projection-only legacy rows.
     const rebuilt = await assertProjectionsRebuild(env.DB, id);

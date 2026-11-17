@@ -11,6 +11,9 @@ import {
   LeaseQuestionRequestSchema,
   NormalizeConflictRequestSchema,
   ProblemDocumentSchema,
+  ProtocolConflictReceiptSchema,
+  ProtocolConflictRecordSchema,
+  ProtocolConflictRequestSchema,
   ResolveConflictRequestSchema,
   RetractRequestSchema,
   WithdrawQuestionRequestSchema,
@@ -450,6 +453,80 @@ async function runDiscovery() {
     });
     assert.equal(typeof issued.token, "string");
     return issued.token;
+  }
+
+  async function verifyProtocolConflictDiscovery() {
+    const path = "/v1/sessions/{id}/protocol-conflicts";
+    const operation = discovery.paths[path]?.post;
+    assert.deepEqual(operation?.security, [{ bearerAuth: [] }]);
+    const reference = new URL(operation.requestBody.content["application/json"].schema.$ref);
+    assert.equal(reference.pathname, "/schemas/directives.v1.json");
+    assert.equal(reference.hash, "#/protocol_conflict_request");
+
+    const sponsor = "usr_discovery_protocol_conflict";
+    const problem = "P-DISC-PROTOCOL";
+    const token = await enroll("discovery-protocol-conflict", sponsor);
+    const fellow = (await call("/v1/hello", undefined, token)).fellow.fellow_id;
+    await fixtures.seedProblem(problem, sponsor);
+    const session = await call("/v1/sessions", { problem_id: problem }, token, 201);
+    const directive = await sponsorCall(
+      sponsor,
+      "POST",
+      "/v1/sponsors/directives",
+      "issue-directive",
+      {
+        fellow_id: fellow,
+        problem_id: problem,
+        verb: "focus",
+        text: "PRIVATE-DIRECTIVE-DISCOVERY: Treat my other Fellow's review as independent.",
+      },
+      201,
+    );
+    const active = ActiveDirectiveResponseSchema.parse(
+      await call(`/v1/directives/active?problem_id=${problem}`, undefined, token),
+    );
+    assert.equal(active.focus?.directive_id, directive.directive_id);
+    const publicProse = {
+      rule_cited: "P1",
+      refused_part: "Credit a second Fellow of the same sponsor as an independent reviewer.",
+      explanation: "I will ask a Fellow from a different sponsor to review the claim.",
+    };
+    const body = ProtocolConflictRequestSchema.parse({
+      directive_id: active.focus.directive_id,
+      ...publicProse,
+    });
+    const mode = screenMode === "positive" ? "pass" : screenMode;
+    const before = await publicState();
+    const screens = await fixtures.screeningCalls();
+    await fixtures.setScreenMode(mode);
+    const response = await call(
+      path.replace("{id}", session.session_id),
+      body,
+      token,
+      mode === "pass" ? 200 : mode === "reject" ? 403 : 202,
+    );
+    await fixtures.setScreenMode("pass");
+    assert.equal(await fixtures.screeningCalls(), screens + 1);
+    const screened = await fixtures.lastScreening();
+    assert.equal(screened.kind, "protocol-conflict");
+    assert.deepEqual(JSON.parse(screened.statement), publicProse);
+    if (mode !== "pass") {
+      assert.equal(response.code, mode === "reject" ? "POLICY_DENIED" : "SCREENING_HOLD");
+      assert.deepEqual(await publicState(), before, "a blocked conflict does not publish");
+      return { path, screeningRefusals: 1 };
+    }
+
+    const { ok: _ok, ...identity } = ProtocolConflictReceiptSchema.parse(response);
+    assert.equal(identity.fellow_id, fellow);
+    assert.equal(identity.sponsor_id, sponsor);
+    assert.equal(identity.session_id, session.session_id);
+    assert.equal(identity.problem_id, problem);
+    assert.equal((await publicState()).events, before.events + 1);
+    const record = ProtocolConflictRecordSchema.parse(
+      await call(`/p/${problem}/protocol-conflicts/${identity.conflict_id}.json`),
+    );
+    assert.deepEqual(record, { ...identity, ...publicProse });
+    return { path, screeningRefusals: 0 };
   }
 
   async function verifyQuestionConflictDiscovery() {
@@ -1810,6 +1887,7 @@ async function runDiscovery() {
   // and retraction reasons must cross the same tested screening boundary.
   const questionCensus = await verifyQuestionConflictDiscovery();
   const citationCensus = await verifyCitationAndRelationDisputeDiscovery();
+  const protocolConflictCensus = await verifyProtocolConflictDiscovery();
   const beforePolicy = await publicState();
   const censusPaths = candidates
     .map(([suffix, kind]) =>
@@ -1817,7 +1895,12 @@ async function runDiscovery() {
         ? "/v1/sessions/{id}/review"
         : `/v1/sessions/{id}/${suffix.replace(hypothesis.hypothesis_id, "{hid}")}`,
     )
-    .concat(metadataPath, ...questionCensus.paths, ...citationCensus.paths)
+    .concat(
+      metadataPath,
+      ...questionCensus.paths,
+      ...citationCensus.paths,
+      protocolConflictCensus.path,
+    )
     .sort();
   const advertisedPublicWrites = Object.entries(discovery.paths)
     .filter(
@@ -1959,7 +2042,10 @@ async function runDiscovery() {
         kind: "discovery-screening-real-bindings",
         status: "pass",
         screening_mode: screenMode,
-        screening_refusals: candidates.length + questionCensus.screeningRefusals,
+        screening_refusals:
+          candidates.length +
+          questionCensus.screeningRefusals +
+          protocolConflictCensus.screeningRefusals,
         additional_screening_refusals: additionalScreeningRefusals,
         screening_saturation: "pass",
         boundary: "local Workerd/D1/R2; fixture classifier and sponsor setup; no live-model claim",

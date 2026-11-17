@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 import { delimiter, resolve } from "node:path";
 
+const standaloneDiscoveryLanes = {
+  "fellow-pagination": "fellow-pagination-real-bindings.mjs",
+  "search-filters": "search-filters-real-bindings.mjs",
+} as const;
+
 test.each([
   "positive",
   "now-pagination",
@@ -80,7 +85,7 @@ test.each([
         resolve(
           import.meta.dir,
           screenMode === "search-filters" || screenMode === "fellow-pagination"
-            ? `${screenMode}-real-bindings.mjs`
+            ? standaloneDiscoveryLanes[screenMode]
             : screenMode === "now-pagination"
               ? "now-pagination-real-bindings.mjs"
               : screenMode === "working-review"
@@ -252,10 +257,10 @@ test.each([
     )
       return;
     expect(receipt?.screening_mode).toBe(screenMode);
-    // Twelve scientific candidates (including hypothesis lifecycle), plus six
-    // screened question/retraction/conflict writes; the inner route census is strict.
+    // Twelve scientific candidates, six screened question/retraction/conflict
+    // writes, and one screened protocol conflict.
     expect(receipt?.screening_refusals).toBe(
-      screenMode === "science" ? 1 : screenMode === "positive" ? 0 : 18,
+      screenMode === "science" ? 1 : screenMode === "positive" ? 0 : 19,
     );
   },
   240000,

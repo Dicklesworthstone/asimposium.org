@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { ProblemStatementReviewResponseSchema } from "@asimposium/contracts";
 import { ScreeningPublicationProvenanceSchema } from "../../../../packages/contracts/src/screening.ts";
 import { opsRecords, runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
@@ -347,8 +348,8 @@ await runLocalWorkerJourney(
     assert.equal(await fixtures.screeningCalls(), warningCalls + 1);
     assert.equal(await publicSeq(), warningSeq + 1);
 
-    // Problem-statement reviews share the classifier's kind. Their separate
-    // reader is not warning-enabled by the claim-review producer allowlist.
+    // Statement review publishes an allowed warning through its own face.
+    // A quarantine must still hold the review before any public event.
     const statementSession = (
       await call(
         "/v1/sessions",
@@ -360,21 +361,73 @@ await runLocalWorkerJourney(
         201,
       )
     ).session_id;
-    await fixtures.setScreenMode("allow-with-warning");
+    const statementReviewPath = `/v1/problems/${problem}/statement-review`;
+    const statementReviewBody = {
+      session_id: statementSession,
+      statement_version: 1,
+      verdict: "statement-clear",
+      basis: "The supplied statement uses the same finite domain throughout the argument.",
+    };
+    const statementFellow = (await call("/v1/hello", undefined, secondReviewer)).fellow.fellow_id;
+    const statementState = () =>
+      env.DB.prepare(
+        `SELECT (SELECT COUNT(*) FROM events WHERE problem_id=?) AS events,
+         (SELECT COUNT(*) FROM problem_statement_reviews WHERE problem_id=?) AS reviews`,
+      )
+        .bind(problem, problem)
+        .first();
+    const beforeStatement = await statementState();
+    await fixtures.setScreenMode("quarantine");
     const heldStatement = await call(
-      `/v1/problems/${problem}/statement-review`,
+      statementReviewPath,
       {
-        session_id: statementSession,
-        statement_version: 1,
-        verdict: "statement-clear",
-        basis: "A separate statement review still waits for its complete warning faces.",
+        ...statementReviewBody,
+        basis: "This independent review needs human resolution of a screening hold.",
       },
       secondReviewer,
       202,
     );
-    await fixtures.setScreenMode("pass");
     assert.equal(heldStatement.code, "SCREENING_HOLD");
     assert.equal(await publicSeq(), warningSeq + 1);
+    assert.deepEqual(await statementState(), beforeStatement);
+    assert.equal(await fixtures.screeningCalls(), warningCalls + 2);
+
+    await fixtures.setScreenMode("allow-with-warning");
+    const warnedStatement = ProblemStatementReviewResponseSchema.parse(
+      await call(statementReviewPath, statementReviewBody, secondReviewer, 200),
+    );
+    await fixtures.setScreenMode("pass");
+    assert.equal(warnedStatement.problem_id, problem);
+    assert.equal(warnedStatement.verdict, statementReviewBody.verdict);
+    const statementSeq = warningSeq + 2;
+    assert.equal(await publicSeq(), statementSeq);
+    assert.deepEqual(await statementState(), {
+      events: beforeStatement.events + 1,
+      reviews: beforeStatement.reviews + 1,
+    });
+    assert.equal(await fixtures.screeningCalls(), warningCalls + 3);
+    const statementReceipt =
+      await env.DB.prepare(`SELECT s.provenance_json, e.actor_fellow_id, e.actor_sponsor_id,
+        e.actor_session_id, content.payload_json FROM screening_publications s
+      JOIN events e ON e.id=s.event_id JOIN event_content content ON content.event_id=e.id
+      WHERE e.problem_id=? AND e.seq=? AND e.type='problem.statement-reviewed'`)
+        .bind(problem, statementSeq)
+        .first();
+    assert.equal(statementReceipt.actor_fellow_id, statementFellow);
+    assert.equal(statementReceipt.actor_sponsor_id, "usr_direct_reviewer_two");
+    assert.equal(statementReceipt.actor_session_id, statementSession);
+    const payload = JSON.parse(statementReceipt.payload_json);
+    assert.equal(payload.statement_version, statementReviewBody.statement_version);
+    assert.equal(payload.basis, statementReviewBody.basis);
+    assert.equal(payload.verdict, statementReviewBody.verdict);
+    assert.deepEqual(
+      ScreeningPublicationProvenanceSchema.parse(JSON.parse(statementReceipt.provenance_json))
+        .public_action,
+      warningNotice,
+    );
+    const statementFace = await call(`/p/${problem}.json`);
+    const statementItem = statementFace.items.find((item) => item.id === `SR-${statementSeq}`);
+    assert.deepEqual(statementItem?.screening_notice, warningNotice);
     assert.ok(
       !workerLogs()
         .map((log) => log.message)

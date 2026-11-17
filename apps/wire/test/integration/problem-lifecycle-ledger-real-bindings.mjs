@@ -670,8 +670,9 @@ await runLocalWorkerJourney(
       });
     }
     for (const [index, [kind, target]] of sourceControls.entries()) {
-      const setVisibility = (visibility, version) =>
-        env.DB.prepare(`INSERT INTO content_controls
+      const setVisibility = async (visibility, version) => {
+        const before = await call("/cursor");
+        await env.DB.prepare(`INSERT INTO content_controls
           (control_id, problem_id, target_kind, target_ref, visibility, source,
            reason_category, actor, reason, version, created_at)
           VALUES (?, ?, ?, ?, ?, 'operator', 'privacy', 'result-review-fixture',
@@ -686,6 +687,8 @@ await runLocalWorkerJourney(
             new Date().toISOString(),
           )
           .run();
+        assert.equal(await call("/cursor"), before + 1);
+      };
       await setVisibility("hidden", 1);
       for (const suffix of ["json", "md"]) {
         const response = await readResultFace(suffix, originalFaces.get(suffix).etag);
@@ -712,7 +715,10 @@ await runLocalWorkerJourney(
         assert.equal(response.headers.get("etag"), originalFaces.get(suffix).etag);
       }
     }
-    assert.deepEqual(await state(), reviewState);
+    assert.deepEqual(await state(), {
+      ...reviewState,
+      cursor: reviewState.cursor + 2 * sourceControls.length,
+    });
 
     // Fault after event insertion: SQLite must undo the complete status-only governance write.
     await env.DB.prepare(

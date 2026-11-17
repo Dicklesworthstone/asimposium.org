@@ -219,6 +219,17 @@ await runLocalWorkerJourney(
         id: publication.object_id,
         seq: publication.seq,
         version: 1,
+        review_feedback: {
+          basis: "first-readable-non-author-review-on-version",
+          through_seq: publication.seq - 1,
+          sample_limit: 128,
+          sampled_versions: 0,
+          unreviewed_versions: 0,
+          unmeasurable_versions: 0,
+          reviewed_versions: 0,
+          median_first_review_seconds: null,
+          omitted: [],
+        },
       },
     ]);
     assert.equal(
