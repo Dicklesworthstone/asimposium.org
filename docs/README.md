@@ -102,17 +102,42 @@ the repaired source. All eight typecheck and lint groups pass. The
 independent verifier closed the five bounded repairs, `df71.5` through
 `df71.9`. The earlier merge acceptance `df71.4` stays in progress.
 
-Fourteen other observed failure instances remain tracked in `df71.10`.
-They include the same statement-context case through both registries.
-The existing literal-name duplicate check misses two dynamically named
-entries. The same-Fellow workshop revision and the two context and recovery
-races need source-level
-diagnosis before changing any expected result. The recovery mismatches,
-move-pack, hide-sweep and face-census outcomes also retain their original
-assertions. The fresh full-database backup journey passes locally, including
-131 SQL tables, three recovered private CAS objects, and current control
-replay on quarantined scratch. The separate export/restore and scheduler
-failures and the provider drill remain open.
+The 14 remaining observations are tracked in `df71.10`. At `f4a41957`,
+the public syntheses list identifies its snapshot cursor and the conflict
+list identifies its publishing session in HTML. A populated local face
+census checks 103 faces across 27 resource kinds. Eight selected registered
+journeys pass in primary and independent runs. They cover same-Fellow
+workshop recovery across sessions, a different Fellow's refusal without
+public writes, and a controlled direct-append race that requires an exact
+stale-context refusal and same-key recovery in addition to natural concurrency.
+
+At `cf88d51c`, focused native checks pass for the statement registries,
+historical sharpening reads, attributed formulation review, compact-pack
+provenance, same-sponsor workshop pagination, the hide sweep, and backup
+scheduling and restore. The public-ledger restore recovers canonical content
+and visibility controls. The absent private roster changes only its public
+roster notice and the derived fingerprints and cache validators. The
+separate full-database backup journey passes locally on 131 SQL tables,
+three private CAS objects, and current deletion-control replay on quarantined
+scratch.
+
+At `cf88d51c`, the primary full dispatcher passes 352 of 353 local tests.
+The new failure is the segmented restore's first scratch-D1 lookup. The
+independent full dispatcher passes all 353 local tests and then reports the
+expected external S-2 block. The primary socket failure repeats in the
+standalone lane. A failure capture before harness cleanup records both
+Workerd children alive, pinpointing the local binding connection. At
+`6e47efd4`, the restore yields before the lookup after preparing the atomic
+batch. Both agents pass the segmented restore on 1,202 events and three
+segments. Removing that yield or substituting a microtask reproduces the
+socket failure.
+
+Both full dispatchers at `6e47efd4` pass all 353 local cases, then return
+exit 78 for the expected external S-2 block. The primary typecheck, lint and
+unit dispatchers pass all eight groups each. Session recovery, redaction,
+public face parity and segmented restore have current local evidence.
+The independent verifier closed `df71.10` and `df71.11` on these results.
+Provider recovery and staged S-2 measurements remain open.
 
 ### Earlier November 14 source comparison
 
@@ -3662,8 +3687,9 @@ Tier 2 and expressly refused features are not extra launch requirements.
    S-3 owning suite passes after `9033dbd0`. The original `df71.4` acceptance
    remains separate. At `25343702`, all eight root groups and the focused
    independent repairs pass. At `dfc76539`, the 14 affected registered checks
-   also pass. Continue with `df71.10`, prioritizing the unresolved session,
-   context and recovery outcomes before the broader presentation census.
+   also pass. At `6e47efd4`, both full dispatchers pass all 353 local cases,
+   including the `df71.10` repairs and the segmented restore under
+   `df71.11`. The expected external S-2 block is still reported.
    Preserve the claim-count producer regression and exact restored
    owning/native controls, and the producer-only
    review math regression and exact restored owning/browser controls, the original
