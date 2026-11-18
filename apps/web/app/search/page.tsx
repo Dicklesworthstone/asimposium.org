@@ -1,4 +1,5 @@
 import { SEED_AREAS, SearchQueryRequestSchema } from "@asimposium/contracts";
+import { statementVersionPath } from "@asimposium/contracts/statements";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ThemeToggle } from "@/app/theme-toggle";
@@ -56,8 +57,11 @@ export default async function SearchPage({ searchParams }: SearchPageProps) {
   if (scalarArea) params.set("area", scalarArea);
   if (scalarStatus) params.set("status", scalarStatus);
   const queryString = params.toString();
-  const mdUrl = `${stoaOrigin}/search.md?${queryString}`;
-  const jsonUrl = `${stoaOrigin}/search.json?${queryString}`;
+  if (searchResult && queryCheck.success && queryCheck.data.cursor !== undefined)
+    params.set("cursor", queryCheck.data.cursor);
+  const faceQueryString = params.toString();
+  const mdUrl = `${stoaOrigin}/search.md?${faceQueryString}`;
+  const jsonUrl = `${stoaOrigin}/search.json?${faceQueryString}`;
 
   return (
     <>
@@ -226,7 +230,11 @@ export default async function SearchPage({ searchParams }: SearchPageProps) {
                         <span className="exact-match-badge">Exact Match</span>
                       )}
                       <Link
-                        href={item.url.replace(/^https?:\/\/[^/]+/, "")}
+                        href={
+                          item.kind === "problem" && item.version !== undefined
+                            ? statementVersionPath(item.id, item.version, "human")
+                            : item.url.replace(/^https?:\/\/[^/]+/, "")
+                        }
                         className="result-link"
                       >
                         {item.title || item.id}

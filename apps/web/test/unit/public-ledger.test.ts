@@ -1733,7 +1733,7 @@ describe("SearchPage Server Component & stoaFetchSearch", () => {
       await SearchPage({ searchParams: Promise.resolve({ q: "riemann", kind: "claim", cursor }) }),
     );
     expect(new URL(urls[0] ?? "").searchParams.get("cursor")).toBe(cursor);
-    expect(html).toContain(`/search?q=riemann&amp;kind=claim&amp;cursor=${next}`);
+    expect(html).toContain(`/search?q=riemann&amp;kind=claim&amp;cursor=${next}"`);
     expect(html).toContain('rel="next"');
   });
 
@@ -1761,9 +1761,9 @@ describe("SearchPage Server Component & stoaFetchSearch", () => {
     expect(sent.searchParams.get("status")).toBe("active");
     expect(sent.searchParams.get("cursor")).toBe(cursor);
     const filters = "q=riemann&amp;kind=claim&amp;area=number-theory&amp;status=active";
-    expect(html).toContain(`/search?${filters}&amp;cursor=${next}`);
-    expect(html).toContain(`/search.md?${filters}`);
-    expect(html).toContain(`/search.json?${filters}`);
+    expect(html).toContain(`/search?${filters}&amp;cursor=${next}"`);
+    expect(html).toContain(`/search.md?${filters}&amp;cursor=${cursor}"`);
+    expect(html).toContain(`/search.json?${filters}&amp;cursor=${cursor}"`);
     expect(html).toContain('name="area"');
     expect(html).toContain('value="number-theory"');
     expect(html).toContain('value="active" selected=""');
@@ -1847,9 +1847,38 @@ describe("SearchPage Server Component & stoaFetchSearch", () => {
     expect(html).toContain("Found <strong>1</strong> match");
     expect(html).toContain("P-RIEMANN-01");
     expect(html).toContain("Exact Match");
+    expect(html).toContain('href="/p/P-RIEMANN-01"');
     expect(html).toContain("search.md");
     expect(html).toContain("search.json");
     expect(html).toContain("Deliberate Omissions");
+  });
+
+  test("SearchPage opens the archived formulation advertised by a statement match", async () => {
+    const problem = "P-RIEMANN-01";
+    setMockFetch(async () =>
+      Response.json({
+        ...MOCK_SEARCH_RESPONSE,
+        items: [
+          {
+            kind: "problem",
+            id: problem,
+            title: "Riemann hypothesis",
+            version: 2,
+            statement: "The published formulation at version two.",
+            snippet: "S@2 · The published formulation at version two.",
+            url: `https://asimposium.org/p/${problem}`,
+            read_url: `/p/${problem}/statements/2.md`,
+            match_type: "lexical_fts",
+            score_explanation: "current_published_statement_literal_match",
+          },
+        ],
+      }),
+    );
+    const html = renderToStaticMarkup(
+      await SearchPage({ searchParams: Promise.resolve({ q: "published formulation" }) }),
+    );
+    expect(html).toContain(`href="/p/${problem}/statements/2"`);
+    expect(html).toContain("S@2 · The published formulation at version two.");
   });
 
   test.each([

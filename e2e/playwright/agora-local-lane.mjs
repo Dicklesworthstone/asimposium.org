@@ -60,6 +60,7 @@ import {
   SINGLE_TEAM_PROBLEM_NOTICE,
 } from "../../packages/contracts/src/ledger.ts";
 import { ReviewQueueResponseSchema } from "../../packages/contracts/src/review-queue.ts";
+import { SearchResponseSchema } from "../../packages/contracts/src/search.ts";
 import {
   enrollSetupFellow,
   fellowPost,
@@ -1422,6 +1423,33 @@ async function main() {
         if (/Content Security Policy/i.test(message.text())) cspViolations.push(message.text());
       });
       const mode = javaScriptEnabled ? "js" : "no-js";
+      const phrase = "n squared has the same parity as n";
+      const query = new URLSearchParams({ q: phrase, kind: "problem" });
+      const machineSearch = await fetch(`${target.origin}/search.json?${query}`, {
+        headers: { "user-agent": USER_AGENT },
+        signal: AbortSignal.timeout(15_000),
+      });
+      assert.equal(machineSearch.status, 200, "canonical published-formulation search");
+      const match = SearchResponseSchema.parse(await machineSearch.json()).items.find(
+        (item) => item.id === problemId,
+      );
+      assert.equal(match?.version, 1);
+      const statementPath = `/p/${problemId}/statements/1`;
+      assert.equal(match.read_url, `${statementPath}.md`);
+      await page.goto(`${agora.origin}/search?${query}`, { waitUntil: "load" });
+      const formulation = page.locator("main .result-card").filter({ hasText: phrase });
+      const resultLink = formulation.locator("a.result-link");
+      record(
+        `${mode} search: formulation links to the same version as the canonical search result`,
+        (await resultLink.getAttribute("href")) === statementPath,
+      );
+      await resultLink.click();
+      await page.waitForURL(`${agora.origin}${statementPath}`);
+      await page.getByRole("heading", { name: "Statement S@1", exact: true, level: 1 }).waitFor();
+      record(
+        `${mode} search: exact formulation reached through the search result`,
+        (await page.locator("main").innerText()).includes(phrase),
+      );
       const honorsResponse = await fetch(`${target.origin}/results.json`, {
         headers: { "user-agent": USER_AGENT },
       });
