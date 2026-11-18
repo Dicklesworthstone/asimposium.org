@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import { ClaimFaceResponseSchema, PackResponseSchema } from "@asimposium/contracts";
+import { FormalRecordsResponseSchema } from "@asimposium/contracts/formal-records";
+import {
+  FRICTION_WORK_FORMAT,
+  readFrictionWork,
+} from "@asimposium/contracts/formalization-friction";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // W9.4 moves engine (beads asimposiumorg-z8y / asimposiumorg-codz) on real
@@ -1096,6 +1101,189 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(afterCheck.degraded, false);
   assert.ok(!moveNames(afterCheck).includes("add-refuter"), "the fulfilled recommendation retires");
 
+  const parityDraft = await call(
+    `/v1/sessions/${observerAuthorSession}/workshop`,
+    { type: "claim-draft", title: "Parity under addition", body_md: "Private parity conjecture." },
+    observerAuthor,
+    201,
+  );
+  const parityClaim = await call(
+    `/v1/sessions/${observerAuthorSession}/promote`,
+    {
+      workshop_id: parityDraft.workshop_id,
+      kind: "conjecture",
+      statement: "For every integer n from 0 through 8, n + 0 is even.",
+      falsifier: "An integer in the range whose sum with zero has remainder one modulo two.",
+    },
+    observerAuthor,
+    201,
+  );
+  const parityTarget = {
+    bears_on_kind: "claim",
+    bears_on_id: parityClaim.claim_id,
+    bears_on_version: 1,
+  };
+  const parityEvidence = {
+    ...parityTarget,
+    kind: "computation",
+    source: {
+      kind: "locator",
+      locator: `https://a.asimposium.org/p/${observerProblem}/claims/${parityClaim.claim_id}@1.json`,
+    },
+    mode: "confirmatory",
+  };
+  assert.equal((6 + 0) % 2, 0);
+  const evenGrounding = await call(
+    `/v1/sessions/${observerAuthorSession}/evidence`,
+    {
+      ...parityEvidence,
+      direction: "supports",
+      computation_domain_or_floor: "The single even input six.",
+      reproduction: { commands: ['node -p "(6 + 0) % 2"'], environment: "Node integer arithmetic" },
+      body_md: "Input six gives remainder zero. This check covers only that input.",
+    },
+    observerAuthor,
+    201,
+  );
+  assert.equal(evenGrounding.computed_class, "computation");
+  const witness = "Evaluate the odd input n = 7.";
+  const report = await call(
+    `/v1/sessions/${observerReviewSession}/friction`,
+    {
+      bears_on_id: parityTarget.bears_on_id,
+      bears_on_version: parityTarget.bears_on_version,
+      source: { kind: "model_memory" },
+      work: {
+        format: FRICTION_WORK_FORMAT,
+        blocker: "counterexample-scent",
+        toolchain: "Manual case split on integer parity",
+        blocked_obligation: "Derive even parity in the odd branch after adding zero.",
+        witness_seed: witness,
+        analysis: "The even input does not supply an argument for the odd branch.",
+      },
+    },
+    observerReviewer,
+    201,
+  );
+  const frictionNext = await call(`/v1/p/${observerProblem}/next`, undefined, observer);
+  assert.equal(frictionNext.degraded, false);
+  const frictionMove = [frictionNext.primary_move, ...frictionNext.alternatives].find(
+    (move) => move?.move === "add-refuter-from-friction",
+  );
+  assert.ok(frictionMove);
+  assert.deepEqual(frictionMove.refs, [
+    observerProblem,
+    `${parityClaim.claim_id}@1`,
+    report.evidence_id,
+  ]);
+  assert.ok(
+    !JSON.stringify(frictionMove).includes(witness),
+    "the witness stays in its public record",
+  );
+  const frictionPublic = await call(`/p/${observerProblem}/moves.json`);
+  const publicFrictionMove = [frictionPublic.primary_move, ...frictionPublic.alternatives].find(
+    (move) => move?.move === "add-refuter-from-friction",
+  );
+  assert.deepEqual(publicFrictionMove?.contract, frictionMove.contract);
+  const frictionPack = PackResponseSchema.parse(
+    await call(
+      `/v1/sessions/${observerSession}/pack?profile=working&max_tokens=8000`,
+      undefined,
+      observer,
+    ),
+  );
+  const packedFriction = JSON.parse(
+    frictionPack.items.find((item) => item.id === "SYS-working-moves").body,
+  );
+  assert.deepEqual(packedFriction.primary_move, frictionNext.primary_move);
+  assert.deepEqual(packedFriction.alternatives, frictionNext.alternatives);
+  const prep = frictionMove.contract.preparation;
+  const formalMarkdown = await worker.fetch(`${origin}${prep.read_first.path}`, {
+    headers: { "user-agent": userAgent },
+    signal: AbortSignal.timeout(15_000),
+  });
+  assert.equal(formalMarkdown.status, 200);
+  assert.ok((await formalMarkdown.text()).includes(witness));
+  const formal = FormalRecordsResponseSchema.parse(
+    await call(prep.read_first.path.replace(".md?", ".json?")),
+  );
+  assert.equal(formal.records.length, 1);
+  const reportRecord = formal.records[0];
+  assert.equal(reportRecord.publication.object_id, report.evidence_id);
+  assert.deepEqual(reportRecord.target, { claim_id: parityClaim.claim_id, version: 1 });
+  assert.equal(readFrictionWork(reportRecord.content.body_md)?.witness_seed, witness);
+  const scratchCanary = "PRIVATE-FRICTION-ODD-BRANCH-CHECK";
+  await call(
+    frictionMove.contract.request.path.replace("{id}", observerSession),
+    { ...frictionMove.contract.prefilled_hints, title: "Odd branch test", body_md: scratchCanary },
+    observer,
+    201,
+  );
+  const exactParityJson = prep.additional_reads.find((read) => read.path.includes(".json?"));
+  assert.ok(exactParityJson, "the friction move links the exact machine claim");
+  assert.deepEqual(exactParityJson, {
+    method: "GET",
+    path: `/p/${observerProblem}/claims/${parityClaim.claim_id}@1.json?through=${prep.captured_cursor}`,
+  });
+  const parity = ClaimFaceResponseSchema.parse(await call(exactParityJson.path));
+  const parityStatement = JSON.parse(
+    parity.items.find((item) => item.kind === "claim-detail").body,
+  );
+  const liveParityPath = exactParityJson.path.split("?")[0];
+  const parityBefore = ClaimFaceResponseSchema.parse(await call(liveParityPath));
+  assert.equal(parityBefore.claim_state.disposition, "open");
+  assert.equal(parityBefore.claim_state.recorded_refutation_attempts, 0);
+  assert.ok(!JSON.stringify(parityBefore).includes(scratchCanary));
+
+  assert.deepEqual(prep.publication_target_hints, parityTarget);
+  const publishParity = prep.publication_request.path.replace("{id}", observerSession);
+  const remainder = (7 + 0) % 2;
+  assert.equal(remainder, 1);
+  const oddEvidence = {
+    ...parityEvidence,
+    ...prep.publication_target_hints,
+    computation_domain_or_floor: "The witness proposes the single input seven.",
+    reproduction: { commands: ['node -p "(7 + 0) % 2"'], environment: "Node integer arithmetic" },
+    body_md: `Following friction report ${report.evidence_id}, the odd input seven gives remainder ${remainder}.`,
+  };
+  const oddGrounding = await call(
+    publishParity,
+    { ...oddEvidence, direction: "informs" },
+    observer,
+    201,
+  );
+  assert.equal(oddGrounding.computed_class, "computation");
+  const parityWithGrounding = ClaimFaceResponseSchema.parse(await call(liveParityPath));
+  assert.equal(parityWithGrounding.claim_state.disposition, "open");
+  assert.equal(parityWithGrounding.claim_state.recorded_refutation_attempts, 0);
+  const guide = prep.falsification_check;
+  const oddFace = ClaimFaceResponseSchema.parse(
+    await call(guide.evidence_read.path.replace("{evidence_id}", oddGrounding.evidence_id)),
+  );
+  const oddItem = oddFace.items.find((item) => item.id === oddGrounding.evidence_id);
+  const oddDigest = JSON.parse(oddItem.body).content_digest;
+  assert.deepEqual(guide.outcomes.fired, { direction: "refutes", result: "fired" });
+  await call(
+    publishParity,
+    {
+      ...oddEvidence,
+      direction: guide.outcomes.fired.direction,
+      falsification_check: {
+        target_digest: parityStatement.content_digest,
+        attempted_falsifier: parityStatement.falsifier,
+        capable_of_failure: "The integer remainder at the witness is one.",
+        result: guide.outcomes.fired.result,
+        evidence: [{ evidence_id: oddItem.id, digest: oddDigest }],
+      },
+    },
+    observer,
+    201,
+  );
+  const fired = ClaimFaceResponseSchema.parse(await call(liveParityPath));
+  assert.equal(fired.claim_state.recorded_refutation_attempts, 1);
+  assert.equal(fired.claim_state.disposition, "disputed");
+  assert.ok(!JSON.stringify(fired).includes(scratchCanary));
+
   console.log(
     JSON.stringify({
       stage: "moves-journey-passed",
@@ -1108,6 +1296,7 @@ await runLocalWorkerJourney(async (context) => {
       working_discrimination: true,
       current_counterevidence_moves: true,
       grounded_falsification_from_move: true,
+      friction_witness_followed_to_grounded_counterexample: true,
       redacted_counterevidence_excluded: true,
       move_contract_followed_to_elimination: true,
       process_only_window_focus: true,

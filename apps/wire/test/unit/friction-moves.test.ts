@@ -23,6 +23,15 @@ test("a typed witness produces pinned private investigation, not invented counte
     assert.equal(prep.target_pin.event_id, "EV-P-DEMO-1");
     assert.equal(prep.read_first.path, "/p/P-DEMO/formal.md?through=100&target=E-2");
     assert.equal(prep.publication_target_hints.direction, undefined);
+    assert.deepEqual(prep.additional_reads, [
+      { method: "GET", path: "/p/P-DEMO/claims/C-1@1.md?through=100" },
+      { method: "GET", path: "/p/P-DEMO/claims/C-1@1.json?through=100" },
+    ]);
+    assert.deepEqual(prep.falsification_check.evidence_read, {
+      method: "GET",
+      path: "/p/P-DEMO/evidence/{evidence_id}.json",
+    });
+    assert.equal(prep.publication_target_hints.mode, undefined);
     for (const sentinel of [
       "TOOLCHAIN-SENTINEL",
       "OBLIGATION-SENTINEL",

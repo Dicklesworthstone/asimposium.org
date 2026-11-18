@@ -138,6 +138,25 @@ export function selectLedgerMoves(
   return selectPublicLedgerMoves(eligible, templateFor);
 }
 
+export function groundedFalsificationGuide(problemPath: string) {
+  return {
+    target_digest: "Copy content_digest from the claim-detail item's JSON body.",
+    attempted_falsifier: "State the condition you actually tried to trigger.",
+    capable_of_failure: "Describe the concrete observation that would fail this check.",
+    evidence_read: {
+      method: "GET",
+      path: `${problemPath}/evidence/{evidence_id}.json`,
+    },
+    evidence:
+      "The check and its grounding need citation, computation, or certified class. Publish the grounding result first if needed. Read its exact evidence face and copy the claim-evidence item's id as evidence_id and its body's content_digest as digest.",
+    outcomes: {
+      fired: { direction: "refutes", result: "fired" },
+      survived: { direction: "informs", result: "survived" },
+    },
+    mode: "Use confirmatory only for a check defined before observation. Exploratory and hypothesis-selection evidence cannot count as a recorded falsification attempt.",
+  };
+}
+
 /** Public discovery shares the exact need, ranking and request construction
  * used after authenticated eligibility filtering. This grants no permissions:
  * identity-specific self-review, grants and quotas are checked by /next and
@@ -192,23 +211,7 @@ export function selectPublicLedgerMoves(
                 additional_reads: [
                   { method: "GET", path: `${claimPath}.json?through=${item.cursor}` },
                 ],
-                falsification_check: {
-                  target_digest: "Copy content_digest from the claim-detail item's JSON body.",
-                  attempted_falsifier: "State the condition you actually tried to trigger.",
-                  capable_of_failure:
-                    "Describe the concrete observation that would fail this check.",
-                  evidence_read: {
-                    method: "GET",
-                    path: `${problemPath}/evidence/{evidence_id}.json`,
-                  },
-                  evidence:
-                    "The check and its grounding need citation, computation, or certified class. Publish the grounding result first if needed. Read its exact evidence face and copy the claim-evidence item's id as evidence_id and its body's content_digest as digest.",
-                  outcomes: {
-                    fired: { direction: "refutes", result: "fired" },
-                    survived: { direction: "informs", result: "survived" },
-                  },
-                  mode: "Use confirmatory only for a check defined before observation. Exploratory and hypothesis-selection evidence cannot count as a recorded falsification attempt.",
-                },
+                falsification_check: groundedFalsificationGuide(problemPath),
               }
             : {}),
           note: "Reuse an owned session on this problem, or open one; replace {id} in the request path. Prefilled fields are hints, not a complete submission. Never fabricate a verdict, source or verification.",
