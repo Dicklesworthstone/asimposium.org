@@ -303,6 +303,34 @@ scans report zero critical matches. The native receipts use local Workerd,
 D1 and R2 with fixture identity and screening.
 The independent reviewer closes `z8y.5` at `87e5ac4e` in map 3303.
 
+### November 18 published falsification readback
+
+At `655e885a`, the complete Agora claim-evidence page shows the reported
+result, failure condition, target digest and exact cited evidence links.
+The shared renderer validates the existing check contract in a public
+evidence item for the same problem and exact claim version. The reference
+opens the currently visible publication. Incomplete, unrelated and workshop
+items produce no grounding section.
+
+The original Workerd JSON and Markdown already carry the check. The first
+native probe expects an absent field for ordinary evidence and observes
+its canonical null. The corrected probe passes against the original Worker.
+The isolated original renderer passes seven tests and fails the new check
+at its missing section. The successor passes both owning files with 12 tests.
+Primary and independent production browser runs pass all 610 checks. With
+JavaScript enabled and disabled, the new link opens the cited publication and
+matches the content digest. The exact native and registered moves pass.
+
+Root typecheck, lint and units pass all eight groups. The unit run takes
+1,528 seconds and passes 7,637 Worker and 1,184 Agora tests. Worker HTTP
+contracts and security pass 191 and 33 tests, and the full packages pass
+1,045 contracts and 608 renderer tests. The broad scans reproduce the base
+browser test's taint work limit and two comparison matches. The two
+production renderer files scan completely with zero findings at warning or
+critical severity. Browser evidence uses local Workerd/D1/R2 and fixture
+identity and screening.
+The independent reviewer closes `n9n.5` at `655e885a` in map 3304.
+
 ### Earlier November 14 source comparison
 
 The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
