@@ -225,6 +225,57 @@ Its code and test inputs are fixed from the start.
 The independent reviewer closes `r8w.5` on this evidence. The broader search
 workstream and hosted launch gates retain their original criteria.
 
+### November 18 grounded falsification and CLI watch
+
+At `7b898b22`, Add Refuter links the exact claim JSON at the captured cursor
+and shows how to read the ID and digest of published grounding evidence. The
+recommendation explains how to record an observed outcome and when a check
+qualifies as confirmatory. The Workerd journey follows public Markdown and
+JSON, authenticated Next and the working pack. A published bounded
+calculation leaves the attempt count at zero. A second submission records
+the surviving check with that calculation's digest, advances the count to
+one and retires the recommendation from a healthy Next response. The
+original producer fails the new guidance assertion. Observer permissions,
+assertion-only work and the writer cap remain covered.
+
+The first root run starts before the last candidate edits. Its Worker group
+uses the final `7b898b22` inputs and fails two tests. One expects the former
+prefilled mode. The other omits the newly advertised field from its example.
+The two-file test repair at `93253851` checks that the Fellow supplies the
+mode, verifies pre-observation guidance, adds a grounded computation to the
+example, and preserves the mounted-route, OpenAPI, Zod and JSON Schema checks.
+The successor passes all eight typecheck, lint and unit groups. The unit run
+takes 1,548 seconds and passes 7,637 Worker and 1,184 Agora tests. It also
+passes 191 Worker HTTP contracts, 33 Worker security tests, 1,045
+contract-package tests and 607 renderer tests. The independent direct journey
+and owning tests pass at the successor, along with the primary registered
+moves case. The working and staged scans for each change report zero
+critical matches.
+
+Pinned Cargo at `7b898b22` executes 112 tests on the configured remote worker
+in each agent's run. Worker receipts match all 1,005 tracked CLI and contract
+inputs. Formatting, locked check and denied-warning Clippy pass. The
+repository-root command includes the shared schemas omitted by an initial
+crate-directory invocation. All four HTTP tests that Cargo lists as ignored
+pass in their dedicated local journeys with the compiler-reported binary.
+Primary and independent watch runs verify four snapshot cases and live
+publication with a resumable cursor. In both runs the unchanged Rust reader
+accepts the original Workerd page, rejects the loopback copy with its footer
+removed and emits the resume hint, then accepts exact restoration. The
+loopback tests use local Workerd, D1, R2 and fixture identity and screening.
+
+The independent reviewer closes `z8y.4` at `93253851` in map 3301 and
+`l3b.12` at `7b898b22` in map 3302. The moves and CLI parent items retain
+their original criteria.
+
+Read-only checks at 18:29 UTC match the retained September capabilities bytes
+in production and staging, both at `0.1.0-draft`. Staging serves protocol
+Markdown and returns 404 for protocol JSON and OpenAPI. Both entries in its
+problem directory fail the current pre-deploy smoke schema. The configured
+Cloudflare connection supplies no identity. Operator deployment authority
+and a D1 lineage decision remain on `rs5n`, with the preview sequence on
+`sox` and the lineage gate on `8n5`.
+
 ### Earlier November 14 source comparison
 
 The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
