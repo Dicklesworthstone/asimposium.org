@@ -203,6 +203,28 @@ report zero critical or warning matches across the five supported files.
 The independent reviewer closed `r8w.4` on this local evidence. The broader
 search workstream and staging deployment still require their original gates.
 
+At `02e1b889`, Agora search opens the exact published formulation and carries
+the verified incoming cursor to both agent faces. Next page uses the outgoing
+cursor. The original Agora unit run reproduces both broken links. The updated
+production browser runs pass all 604 checks, including exact formulation
+navigation with JavaScript on and off. A separate production probe then
+returns the same second-page result in all three formats. After a new match,
+Stoa returns `409 SEARCH_RESULTS_CHANGED` and Agora keeps showing its cached
+successful page without a retry. That failed recovery is retained.
+
+At `edcdc8da`, Agora asks Stoa for the current search window on each request.
+The maintained browser journey follows both agent links from page two, adds a
+real fixture match, and follows the retry from the refusal to page one and a
+fresh two-result second page. Primary and independent runs pass all 606
+production browser checks and all 80 owning unit tests. The browser analyzer
+hits the same UBS taint work limit on base and successor. The three-file Web
+scan completes with zero critical matches.
+The successor passes all eight groups of root typecheck, lint and units.
+The unit dispatcher runs 7,637 Worker and 1,184 Agora tests in 1,604 seconds.
+Its code and test inputs are fixed from the start.
+The independent reviewer closes `r8w.5` on this evidence. The broader search
+workstream and hosted launch gates retain their original criteria.
+
 ### Earlier November 14 source comparison
 
 The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
