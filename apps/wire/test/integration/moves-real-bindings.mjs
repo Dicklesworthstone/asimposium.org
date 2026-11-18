@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { PackResponseSchema } from "@asimposium/contracts";
+import { ClaimFaceResponseSchema, PackResponseSchema } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // W9.4 moves engine (beads asimposiumorg-z8y / asimposiumorg-codz) on real
@@ -883,6 +883,31 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(observerNext.viewer.effective_permissions.evidence, true);
   assert.equal(observerNext.viewer.effective_permissions.dead_end, true);
   assert.equal(observerNext.primary_move?.move, "add-refuter");
+  const refuter = observerNext.primary_move.contract;
+  assert.ok(
+    refuter.required_fields.includes("falsification_check"),
+    "the move teaches the check that counts",
+  );
+  const { additional_reads: refuterReads, falsification_check: checkGuide } = refuter.preparation;
+  assert.equal(refuterReads[0].method, "GET");
+  const exactClaimJson = refuterReads[0].path;
+  assert.equal(
+    exactClaimJson,
+    `/p/${observerProblem}/claims/${observerClaim.claim_id}@1.json?through=${refuter.preparation.captured_cursor}`,
+  );
+  const publicNeeded = await call(`/p/${observerProblem}/moves.json`);
+  const publicRefuter = [publicNeeded.primary_move, ...publicNeeded.alternatives].find(
+    (candidate) => candidate?.move === "add-refuter",
+  );
+  assert.deepEqual(publicRefuter?.contract, refuter);
+  const publicRefuterMarkdown = await worker.fetch(`${origin}/p/${observerProblem}/moves.md`, {
+    headers: { "user-agent": userAgent },
+    signal: AbortSignal.timeout(15_000),
+  });
+  assert.equal(publicRefuterMarkdown.status, 200);
+  const refuterMarkdown = await publicRefuterMarkdown.text();
+  assert.ok(refuterMarkdown.includes(`](${exactClaimJson})`));
+  assert.ok(refuterMarkdown.includes(checkGuide.evidence_read.path));
   assert.ok(!moveNames(observerNext).includes("state-claim"));
   const observerTriage = await call("/v1/triage", undefined, observer);
   assert.deepEqual(observerTriage.move, observerNext.primary_move);
@@ -1005,6 +1030,72 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.equal(observerDenied.code, "ROSTER_FULL");
 
+  const exact = ClaimFaceResponseSchema.parse(await call(exactClaimJson));
+  const statement = JSON.parse(exact.items.find((item) => item.kind === "claim-detail").body);
+  assert.equal(statement.version, 1);
+  assert.equal(exact.claim_state.recorded_refutation_attempts, 0);
+  const currentClaimJson = exactClaimJson.split("?")[0];
+  const evidenceRoute = refuter.request.path.replace("{id}", observerSession);
+  const sum = 8 + 0;
+  assert.equal(sum, 8);
+  const calculation = {
+    ...refuter.prefilled_hints,
+    direction: "informs",
+    kind: "computation",
+    source: {
+      kind: "locator",
+      locator: `https://a.asimposium.org${currentClaimJson}`,
+      excerpt: statement.statement,
+    },
+    computation_domain_or_floor: "The single stated integer input 8.",
+    reproduction: {
+      commands: ['node -e "console.log(8 + 0)"'],
+      environment: "Node integer arithmetic",
+    },
+    mode: "confirmatory",
+    body_md: `The computed sum was ${sum}. The check would fail for any other value.`,
+  };
+  const grounding = await call(evidenceRoute, calculation, observer, 201);
+  assert.equal(grounding.computed_class, "computation");
+  const beforeCheck = ClaimFaceResponseSchema.parse(await call(currentClaimJson));
+  assert.equal(
+    beforeCheck.claim_state.recorded_refutation_attempts,
+    0,
+    "plain evidence does not count as a check",
+  );
+  const groundingPath = checkGuide.evidence_read.path.replace(
+    "{evidence_id}",
+    grounding.evidence_id,
+  );
+  const groundingFace = ClaimFaceResponseSchema.parse(await call(groundingPath));
+  const source = JSON.parse(
+    groundingFace.items.find((item) => item.id === grounding.evidence_id).body,
+  );
+  const outcome = checkGuide.outcomes.survived;
+  assert.deepEqual(outcome, { direction: "informs", result: "survived" });
+  await call(
+    evidenceRoute,
+    {
+      ...calculation,
+      direction: outcome.direction,
+      body_md: `The claim survived the attempt at n = 8. Published calculation ${grounding.evidence_id} records ${sum}.`,
+      falsification_check: {
+        target_digest: statement.content_digest,
+        attempted_falsifier: statement.falsifier,
+        capable_of_failure: "The sum differs from eight.",
+        result: outcome.result,
+        evidence: [{ evidence_id: grounding.evidence_id, digest: source.content_digest }],
+      },
+    },
+    observer,
+    201,
+  );
+  const checked = ClaimFaceResponseSchema.parse(await call(currentClaimJson));
+  assert.equal(checked.claim_state.recorded_refutation_attempts, 1);
+  const afterCheck = await call(`/v1/p/${observerProblem}/next`, undefined, observer);
+  assert.equal(afterCheck.degraded, false);
+  assert.ok(!moveNames(afterCheck).includes("add-refuter"), "the fulfilled recommendation retires");
+
   console.log(
     JSON.stringify({
       stage: "moves-journey-passed",
@@ -1016,6 +1107,7 @@ await runLocalWorkerJourney(async (context) => {
       working_pack_canonical_parity: true,
       working_discrimination: true,
       current_counterevidence_moves: true,
+      grounded_falsification_from_move: true,
       redacted_counterevidence_excluded: true,
       move_contract_followed_to_elimination: true,
       process_only_window_focus: true,

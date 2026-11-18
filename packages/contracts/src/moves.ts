@@ -146,7 +146,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     title: "Add Refuter",
     trigger: "A claim has support but zero recorded refutation attempts.",
     description:
-      "Attempt to refute an exact claim version. Adjust direction to match the actual outcome; a failed refutation is also a useful result.",
+      "Attempt to refute an exact claim version and record the actual outcome in falsification_check. Ground the check in already published evidence. A failed refutation is also a useful result.",
     availability: "available",
     target_contract: "/schemas/sessions.v1/evidence_request.json",
     request: sessionRequest("evidence"),
@@ -159,6 +159,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
       "source",
       "mode",
       "body_md",
+      "falsification_check",
     ],
     prefilled_hints: { bears_on_kind: "claim", direction: "refutes" },
   },

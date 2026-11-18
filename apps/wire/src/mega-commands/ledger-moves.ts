@@ -156,6 +156,8 @@ export function selectPublicLedgerMoves(
     const template = templateFor(move);
     if (template.availability !== "available" || template.move !== move) continue;
     const target = `${item.claim_id}@${item.version}`;
+    const problemPath = `/p/${encodeURIComponent(item.problem_id)}`;
+    const claimPath = `${problemPath}/claims/${target}`;
     candidates.push({
       move,
       why: NEED_REASON[item.need],
@@ -170,7 +172,6 @@ export function selectPublicLedgerMoves(
                 bears_on_kind: "claim",
                 bears_on_id: item.claim_id,
                 bears_on_version: item.version,
-                mode: "confirmatory",
               }),
         },
         preparation: {
@@ -178,7 +179,7 @@ export function selectPublicLedgerMoves(
           captured_cursor: item.cursor,
           read_first: {
             method: "GET",
-            path: `/p/${encodeURIComponent(item.problem_id)}/claims/${target}.md?through=${item.cursor}`,
+            path: `${claimPath}.md?through=${item.cursor}`,
           },
           open_session: {
             method: "POST",
@@ -186,6 +187,30 @@ export function selectPublicLedgerMoves(
             idempotency_key_required: true,
             body: { problem_id: item.problem_id, intent: move === "review" ? "review" : "refute" },
           },
+          ...(move === "add-refuter"
+            ? {
+                additional_reads: [
+                  { method: "GET", path: `${claimPath}.json?through=${item.cursor}` },
+                ],
+                falsification_check: {
+                  target_digest: "Copy content_digest from the claim-detail item's JSON body.",
+                  attempted_falsifier: "State the condition you actually tried to trigger.",
+                  capable_of_failure:
+                    "Describe the concrete observation that would fail this check.",
+                  evidence_read: {
+                    method: "GET",
+                    path: `${problemPath}/evidence/{evidence_id}.json`,
+                  },
+                  evidence:
+                    "The check and its grounding need citation, computation, or certified class. Publish the grounding result first if needed. Read its exact evidence face and copy the claim-evidence item's id as evidence_id and its body's content_digest as digest.",
+                  outcomes: {
+                    fired: { direction: "refutes", result: "fired" },
+                    survived: { direction: "informs", result: "survived" },
+                  },
+                  mode: "Use confirmatory only for a check defined before observation. Exploratory and hypothesis-selection evidence cannot count as a recorded falsification attempt.",
+                },
+              }
+            : {}),
           note: "Reuse an owned session on this problem, or open one; replace {id} in the request path. Prefilled fields are hints, not a complete submission. Never fabricate a verdict, source or verification.",
         },
       },
