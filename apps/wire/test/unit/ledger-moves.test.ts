@@ -172,8 +172,11 @@ test("authors may attempt falsification without manufacturing independent review
     bears_on_kind: "claim",
     bears_on_id: "C-1",
     bears_on_version: 2,
-    mode: "confirmatory",
   });
+  assert.match(
+    JSON.stringify(move?.contract.preparation),
+    /Use confirmatory only for a check defined before observation/,
+  );
   assert.match(move?.why ?? "", /actual outcome/);
 });
 test("cross-family work states the prerequisite without inventing the reviewer's family or tier", () => {

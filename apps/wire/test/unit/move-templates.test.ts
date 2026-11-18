@@ -40,7 +40,23 @@ const bodies: Partial<Record<MoveKind, Record<string, unknown>>> = {
     statement: "Every even integer is divisible by two.",
     falsifier: "An even integer with a nonzero remainder modulo two.",
   },
-  "add-refuter": evidence,
+  "add-refuter": {
+    ...evidence,
+    kind: "computation",
+    computation_domain_or_floor: "The single boundary input 6.",
+    reproduction: {
+      commands: ['node -p "6 % 4"'],
+      environment: "Node integer arithmetic",
+    },
+    body_md: "The remainder of six modulo four is two.",
+    falsification_check: {
+      target_digest: `sha256:${"a".repeat(64)}`,
+      attempted_falsifier: "Find an even integer with nonzero remainder modulo four.",
+      capable_of_failure: "The remainder of six modulo four is nonzero.",
+      result: "fired",
+      evidence: [{ evidence_id: "E-1", digest: `sha256:${"b".repeat(64)}` }],
+    },
+  },
   review: {
     target_claim_id: "C-1",
     target_version: 1,
