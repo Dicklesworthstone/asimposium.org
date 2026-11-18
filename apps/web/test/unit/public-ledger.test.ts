@@ -1527,9 +1527,34 @@ describe("ExplorePage Server Component", () => {
     const html = renderToStaticMarkup(element);
     expect(html).toContain("Explore Problems");
     expect(html).toContain("P-SP4D");
+    expect(html).toContain("Finite double-shuffle periods");
+    expect(html).toContain('href="/problems"');
     expect(html).toContain("Algebra");
     expect(html).toContain("Number Theory");
     expect(html).toContain("Topology &amp; Geometry");
+  });
+
+  test("ExplorePage links the verified continuation and preserves legacy problem IDs", async () => {
+    const [problem] = MOCK_PROBLEMS_INDEX.problems;
+    if (!problem) throw new Error("The synthetic index needs its test entry");
+    setMockFetch(async (url) => {
+      if (String(url).endsWith("/areas.json")) return Response.json(AREAS_INDEX);
+      return Response.json({
+        ...MOCK_PROBLEMS_INDEX,
+        problems: [
+          { ...problem, title: "Periods shorter than <b>seven</b>" },
+          { ...problem, id: "P-ZZ", title: null },
+        ],
+        next_after: "P-ZZ",
+      });
+    });
+    const html = renderToStaticMarkup(await ExplorePage());
+    expect(html).toContain("Public problems on this page (2)");
+    expect(html).toContain("Periods shorter than &lt;b&gt;seven&lt;/b&gt;");
+    expect(html).not.toContain("<b>seven</b>");
+    expect(html).toContain('href="/p/P-ZZ"');
+    expect(html).toContain("<code>P-ZZ</code>");
+    expect(html).toContain('href="/problems?after=P-ZZ"');
   });
 
   test("ExplorePage renders empty state when no problems exist", async () => {
@@ -1600,6 +1625,31 @@ describe("ExplorePage Server Component", () => {
     expect(html).toContain("/reviews.json");
     expect(html).toContain("/results.md");
     expect(html).toContain("/results.json");
+    for (const unavailable of ["areas", "problems", "both"] as const) {
+      setMockFetch(async (url) => {
+        const path = new URL(String(url)).pathname;
+        if (path === "/areas.json" && unavailable === "problems") return Response.json(AREAS_INDEX);
+        if (path === "/problems.json" && unavailable === "areas") {
+          return Response.json(MOCK_PROBLEMS_INDEX);
+        }
+        if (path === "/reviews.json") return Response.json(mockReviewQueue);
+        return new Response("private upstream diagnostics", { status: 503 });
+      });
+      const partial = renderToStaticMarkup(await ExplorePage());
+      expect(partial).toContain("P-SP4D / C-1@1");
+      expect(partial).not.toContain("private upstream diagnostics");
+      expect(partial).not.toContain("No problems currently on the public ledger");
+      if (unavailable !== "problems") {
+        expect(partial).toContain("Scientific areas are temporarily unavailable.");
+      } else {
+        expect(partial).toContain("Number Theory");
+      }
+      if (unavailable !== "areas") {
+        expect(partial).toContain("The public problem index is temporarily unavailable.");
+      } else {
+        expect(partial).toContain("Finite double-shuffle periods");
+      }
+    }
   });
 
   test("ExplorePage retains screening context and safely renders review mathematics", async () => {

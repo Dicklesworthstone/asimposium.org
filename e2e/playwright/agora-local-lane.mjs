@@ -57,6 +57,7 @@ import { HonorsResponseSchema } from "../../packages/contracts/src/honors.ts";
 import {
   ClaimFaceResponseSchema,
   ProblemFaceResponseSchema,
+  ProblemsIndexResponseSchema,
   SINGLE_TEAM_PROBLEM_NOTICE,
 } from "../../packages/contracts/src/ledger.ts";
 import { ReviewQueueResponseSchema } from "../../packages/contracts/src/review-queue.ts";
@@ -1800,6 +1801,40 @@ async function main() {
               (await page.locator(`a[href='/p/${problemId}']`).count()) > 0,
             );
           }
+        }
+        if (path === "/explore") {
+          const index = ProblemsIndexResponseSchema.parse(
+            await (
+              await fetch(`${target.origin}/problems.json`, {
+                headers: { "user-agent": USER_AGENT },
+                signal: AbortSignal.timeout(15_000),
+              })
+            ).json(),
+          );
+          const sample = index.problems.find((problem) => problem.id === problemId);
+          assert.ok(sample?.title, "the canonical index carries a title for the fixture problem");
+          const title = page
+            .locator(".problems-section")
+            .getByRole("link", { name: sample.title, exact: true });
+          const problemHref = `/p/${problemId}`;
+          record(
+            `${mode} Explore uses the canonical problem title and exact board link`,
+            (await title.count()) === 1 && (await title.getAttribute("href")) === problemHref,
+          );
+          await title.click();
+          await page.waitForURL(`${agora.origin}${problemHref}`, { waitUntil: "load" });
+          await page.goto(`${agora.origin}/explore`, { waitUntil: "load" });
+          await page
+            .getByRole("link", { name: "Browse the public problem directory", exact: true })
+            .click();
+          await page.waitForURL(`${agora.origin}/problems`, { waitUntil: "load" });
+          record(
+            `${mode} Explore opens the complete directory with the same published title`,
+            (await page.getByRole("heading", { name: "Public Problems", exact: true }).count()) ===
+              1 &&
+              (await page.getByRole("link", { name: sample.title, exact: true }).count()) === 1,
+          );
+          await page.goto(`${agora.origin}/explore`, { waitUntil: "load" });
         }
         if (path === `/reviews?problem=${encodeURIComponent(problemId)}`) {
           const queueResponse = await fetch(

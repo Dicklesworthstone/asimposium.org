@@ -1,4 +1,5 @@
 import { REVIEW_QUEUE_NEED_TEXT } from "@asimposium/contracts/review-queue";
+import { neutralizeUntrustedBody } from "@asimposium/render";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ThemeToggle } from "@/app/theme-toggle";
@@ -25,12 +26,17 @@ export default async function ExplorePage() {
     stoaFetchReviewQueue(),
   ]);
 
-  if (areasIndex.state !== "ok" || problemsIndex.state !== "ok") {
+  const available = [areasIndex, problemsIndex, reviewQueueResult].find(
+    (result) => result.state === "ok",
+  );
+  if (available === undefined) {
     return <PublicReadUnavailable title="Explore Problems & Areas" retryPath="/explore" />;
   }
-  const { problems } = problemsIndex.data;
-  const { areas } = areasIndex.data;
-  const stoaOrigin = areasIndex.origin;
+  const problemPage = problemsIndex.state === "ok" ? problemsIndex.data : null;
+  const problems = problemPage?.problems ?? [];
+  const nextAfter = problemPage?.next_after;
+  const areas = areasIndex.state === "ok" ? areasIndex.data : null;
+  const stoaOrigin = available.origin;
   const areasMdUrl = `${stoaOrigin}/areas.md`;
   const areasJsonUrl = `${stoaOrigin}/areas.json`;
   const problemsMdUrl = `${stoaOrigin}/problems.md`;
@@ -70,66 +76,82 @@ export default async function ExplorePage() {
             <span className="gr" aria-hidden="true">
               α
             </span>
-            Scientific areas ({areasIndex.data.total_areas})
+            Scientific areas{areas !== null && ` (${areas.total_areas})`}
           </h2>
-          <p className="quiet">
-            Core mathematical and physical sciences. Click an area to view problems, open claims,
-            and targeted falsifiers.
-          </p>
-          <div className="areas-taxonomy-grid">
-            {areas.map((area) => (
-              <article key={area.slug} className="area-taxonomy-card">
-                <header className="area-card-header">
-                  <h3>
-                    <Link href={`/area/${encodeURIComponent(area.slug)}`}>{area.label}</Link>
-                  </h3>
-                  <span className="problem-count-badge">
-                    {area.problem_count === null
-                      ? "Assignments unavailable"
-                      : `${area.problem_count} ${area.problem_count === 1 ? "problem" : "problems"}`}
-                  </span>
-                </header>
-                <p className="area-card-description">{area.description}</p>
-                {area.label_change !== undefined ? (
-                  <p className="quiet">
-                    Label change: <code>{area.label_change.event_id}</code> ·{" "}
-                    <time dateTime={area.label_change.renamed_at}>
-                      {area.label_change.renamed_at}
-                    </time>{" "}
-                    · slug unchanged.
-                  </p>
-                ) : null}
-                {area.active_needs.length > 0 && (
-                  <div className="need-chips-row" role="group" aria-label="Active scientific needs">
-                    {area.active_needs.map((need) => (
-                      <span key={need} className={`need-chip need-${need}`}>
-                        {need}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </article>
-            ))}
-          </div>
-          {areasIndex.data.omitted.length > 0 && (
+          {areas === null ? (
+            <p className="quiet" role="status">
+              Scientific areas are temporarily unavailable.
+            </p>
+          ) : (
+            <p className="quiet">
+              Core mathematical and physical sciences. Click an area to view problems, open claims,
+              and targeted falsifiers.
+            </p>
+          )}
+          {areas !== null && areas.areas.length > 0 && (
+            <div className="areas-taxonomy-grid">
+              {areas.areas.map((area) => (
+                <article key={area.slug} className="area-taxonomy-card">
+                  <header className="area-card-header">
+                    <h3>
+                      <Link href={`/area/${encodeURIComponent(area.slug)}`}>{area.label}</Link>
+                    </h3>
+                    <span className="problem-count-badge">
+                      {area.problem_count === null
+                        ? "Assignments unavailable"
+                        : `${area.problem_count} ${area.problem_count === 1 ? "problem" : "problems"}`}
+                    </span>
+                  </header>
+                  <p className="area-card-description">{area.description}</p>
+                  {area.label_change !== undefined ? (
+                    <p className="quiet">
+                      Label change: <code>{area.label_change.event_id}</code> ·{" "}
+                      <time dateTime={area.label_change.renamed_at}>
+                        {area.label_change.renamed_at}
+                      </time>{" "}
+                      · slug unchanged.
+                    </p>
+                  ) : null}
+                  {area.active_needs.length > 0 && (
+                    <div
+                      className="need-chips-row"
+                      role="group"
+                      aria-label="Active scientific needs"
+                    >
+                      {area.active_needs.map((need) => (
+                        <span key={need} className={`need-chip need-${need}`}>
+                          {need}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </article>
+              ))}
+            </div>
+          )}
+          {areas !== null && areas.omitted.length > 0 && (
             <ul className="quiet" aria-label="Area listing limits">
-              {areasIndex.data.omitted.map((item) => (
+              {areas.omitted.map((item) => (
                 <li key={item}>{item}</li>
               ))}
             </ul>
           )}
         </section>
 
-        {/* Section β: All Public Problems */}
+        {/* Section β: Public Problems */}
         <section className="problems-section" aria-labelledby="problems-heading">
           <h2 id="problems-heading">
             <span className="gr" aria-hidden="true">
               β
             </span>
-            Public problems ({problems.length})
+            Public problems{problemPage !== null && ` on this page (${problems.length})`}
           </h2>
 
-          {problems.length === 0 ? (
+          {problemPage === null ? (
+            <p className="quiet" role="status">
+              The public problem index is temporarily unavailable.
+            </p>
+          ) : problems.length === 0 ? (
             <div className="empty-state" role="status">
               <p>
                 <strong>No problems currently on the public ledger.</strong>
@@ -149,10 +171,20 @@ export default async function ExplorePage() {
               {problems.map((prob) => (
                 <li key={prob.id} className="problem-card">
                   <header>
-                    <Link href={`/p/${encodeURIComponent(prob.id)}`} className="problem-link">
-                      <code>{prob.id}</code>
+                    <Link
+                      href={`/p/${encodeURIComponent(prob.id)}`}
+                      className="problem-link"
+                      style={{ overflowWrap: "anywhere" }}
+                    >
+                      {prob.title === null ? (
+                        <code>{prob.id}</code>
+                      ) : (
+                        neutralizeUntrustedBody(prob.title).text
+                      )}
                     </Link>
-                    <span className="quiet"> · seq {prob.public_seq}</span>
+                    <span className="quiet">
+                      {prob.title !== null && ` · ${prob.id}`} · seq {prob.public_seq}
+                    </span>
                   </header>
                   <p className="quiet" suppressHydrationWarning>
                     Opened:{" "}
@@ -171,6 +203,18 @@ export default async function ExplorePage() {
                 </li>
               ))}
             </ul>
+          )}
+          {problemPage !== null && (
+            <nav aria-label="Problem directory" className="card-footer-row">
+              <Link href="/problems" prefetch={false}>
+                Browse the public problem directory
+              </Link>
+              {nextAfter !== undefined && (
+                <Link href={`/problems?after=${encodeURIComponent(nextAfter)}`} prefetch={false}>
+                  Continue to more problems →
+                </Link>
+              )}
+            </nav>
           )}
         </section>
 
