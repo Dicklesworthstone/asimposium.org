@@ -5057,6 +5057,11 @@
                 "minLength": 1,
                 "maxLength": 512
               },
+              "read_url": {
+                "type": "string",
+                "maxLength": 512,
+                "pattern": "^\\/(?:p|fellows)\\/[A-Za-z0-9_@%/-]+\\.md$"
+              },
               "title": {
                 "type": [
                   "string",

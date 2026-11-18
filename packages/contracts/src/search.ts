@@ -87,6 +87,11 @@ export const SearchResultItemSchema = z
     kind: SearchMatchKindSchema,
     id: z.string().min(1).max(128),
     url: z.string().min(1).max(512),
+    read_url: z
+      .string()
+      .max(512)
+      .regex(/^\/(?:p|fellows)\/[A-Za-z0-9_@%/-]+\.md$/)
+      .optional(),
     title: z.string().nullable().optional(),
     statement: z.string().nullable().optional(),
     screening_notice: ScreeningPublicationNoticeSchema.optional(),

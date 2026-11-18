@@ -12,6 +12,7 @@ import {
   type SearchResultItem,
 } from "@asimposium/contracts";
 import { SEARCH_WINDOW_MAX, searchQueryString } from "@asimposium/contracts/search-pagination";
+import { statementVersionPath } from "@asimposium/contracts/statements";
 import type { Env } from "../env";
 import {
   hiddenByContentControlSql,
@@ -423,7 +424,13 @@ export async function executeSearch(
     q: request.q,
     source_cursor: sourceCursor,
     total_matches: windowMatches,
-    items,
+    items: items.map((item) => ({
+      ...item,
+      read_url:
+        item.kind === "problem" && item.version !== undefined
+          ? statementVersionPath(item.id, item.version, "md")
+          : `${new URL(item.url).pathname}.md`,
+    })),
     ...(nextCursor === null ? {} : { cursor: nextCursor }),
     omitted: omissions,
     next_actions: nextActions,

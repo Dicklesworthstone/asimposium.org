@@ -1,12 +1,21 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { ProblemCodeSchema, SearchResponseSchema } from "@asimposium/contracts";
+import { StatementResponseSchema } from "@asimposium/contracts/statements";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Production proposal, publication, review and promotion routes on Workerd/D1.
 // Enrollment approval and benign screening are explicit local harness fixtures;
 // this lane does not assert staging, Google authentication or provider screening.
-async function searchFiltersJourney({ call, enroll, sponsorCall, worker, origin, userAgent }) {
+async function searchFiltersJourney({
+  call,
+  enroll,
+  sponsorCall,
+  reviseStatement,
+  worker,
+  origin,
+  userAgent,
+}) {
   // Each attempt owns distinct identities and formulations. An interrupted
   // local run must not consume this attempt's creation quota or satisfy its
   // result assertions, and deliberate duplicate proposals remain refused.
@@ -239,12 +248,68 @@ async function searchFiltersJourney({ call, enroll, sponsorCall, worker, origin,
   assert.equal(stale.status, 409);
   assert.equal((await stale.json()).code, "SEARCH_RESULTS_CHANGED");
   assert.equal((await search({ ...query, q: pinned })).items.length, 0);
-  assert.equal((await search({ ...query, q: pinned, status: "retired" })).items[0]?.id, claims[0]);
+  const exactClaim = (await search({ ...query, q: pinned, status: "retired" })).items[0];
+  assert.equal(exactClaim?.id, claims[0]);
+  const exactProblem = (await search({ q: active, kind: "problem" })).items[0];
+  const fellow = (await search(fellowQuery)).items[0];
+
+  const follow = async (item, expected) => {
+    assert.equal(item.read_url, expected, "Search JSON advertises a same-origin Stoa reader");
+    assert.equal(item.url, `https://asimposium.org${expected.replace(/\.md$/, "")}`);
+    const response = await read(item.read_url);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type"), /^text\/markdown\b/);
+    assert.ok(response.headers.get("etag"));
+    return response.text();
+  };
+  await follow(exactProblem, `/p/${active}.md`);
+  await follow(exactClaim, `/p/${active}/claims/${claims[0]}@1.md`);
+  await follow(fellow, `/fellows/${fellow.id}.md`);
+  const lexicalClaim = first.items[0];
+  await follow(lexicalClaim, `/p/${active}/claims/${lexicalClaim.id}.md`);
+  assert.ok(text.includes(`](${lexicalClaim.read_url})`));
+
+  const formulationQuery = { q: "incidence matrix", kind: "problem", area: "algebra" };
+  const formulation = (await search(formulationQuery)).items.find((item) => item.id === sharpening);
+  assert.equal(formulation?.version, 1);
+  assert.equal(formulation.read_url, `/p/${sharpening}/statements/1.md`);
+  assert.equal(formulation.url, `https://asimposium.org/p/${sharpening}`);
+  const formulationMarkdown = await read(path(formulationQuery, "md"));
+  assert.equal(formulationMarkdown.status, 200);
+  assert.ok((await formulationMarkdown.text()).includes(`](${formulation.read_url})`));
+  const original = await read(formulation.read_url);
+  assert.equal(original.status, 200);
+  assert.ok((await original.text()).includes(formulation.statement));
+  const statementJson = formulation.read_url.replace(/\.md$/, ".json");
+  const originalJson = await read(statementJson);
+  assert.equal(originalJson.status, 200);
+  const published = StatementResponseSchema.parse(await originalJson.json());
+  assert.equal(published.statement.version, 1);
+  assert.equal(published.statement.statement, formulation.statement);
+  await reviseStatement(sharpening, sponsor, author, {
+    statement: `For finite paths in ${term}, the oriented incidence matrix with n edges has rank n.`,
+    falsifier: "An oriented finite path whose incidence matrix rank differs from its edge count.",
+    motivation: "State the orientation convention so a second reader can reproduce the rank.",
+  });
+  const revised = (await search(formulationQuery)).items.find((item) => item.id === sharpening);
+  assert.equal(revised?.read_url, `/p/${sharpening}/statements/2.md`);
+  assert.notEqual(revised.statement, formulation.statement);
+  const historical = await read(formulation.read_url);
+  assert.equal(historical.status, 200);
+  const historicalMarkdown = await historical.text();
+  assert.ok(historicalMarkdown.includes(formulation.statement));
+  assert.ok(!historicalMarkdown.includes(revised.statement));
+  const historicalJson = await read(statementJson);
+  assert.equal(historicalJson.status, 200);
+  const later = StatementResponseSchema.parse(await historicalJson.json());
+  assert.ok(later.cursor > published.cursor);
+  assert.deepEqual(later.statement, published.statement);
   return {
     kind: "search-filters-real-bindings",
     status: "pass",
     claims: claims.length,
     undiscoverable_problems_checked: 2,
+    result_readers_checked: 5,
   };
 }
 

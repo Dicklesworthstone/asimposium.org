@@ -60,7 +60,7 @@ export function renderSearchMarkdown(response: SearchResponse): string {
 function renderSearchResultItemMarkdown(item: SearchResultItem): string {
   const titlePart = item.title ? ` — ${safeInlineProse(item.title)}` : "";
   const matchBadge = item.match_type === "exact_reference" ? " (exact reference)" : "";
-  const header = `- **[${safeCodeSpan(item.id)}](${item.url})** [${item.kind}]${matchBadge}${titlePart}`;
+  const header = `- **[${safeCodeSpan(item.id)}](${item.read_url ?? item.url})** [${item.kind}]${matchBadge}${titlePart}`;
   const snippetLine = `  > ${safeInlineProse(item.snippet)}`;
   return `${header}\n${snippetLine}${item.screening_notice === undefined ? "" : `\n  **Screening notice:** ${screeningNoticeText(item.screening_notice)}`}`;
 }

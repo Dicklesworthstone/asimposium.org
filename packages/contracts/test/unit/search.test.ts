@@ -263,7 +263,7 @@ describe("W6.8 Search contracts", () => {
   });
 
   describe("SearchResponseSchema", () => {
-    test("validates a full search response with matches and affordances", () => {
+    test("served JSON Schema and Zod agree on search result reader paths", async () => {
       const valid = {
         q: "riemann hypothesis",
         source_cursor: 12,
@@ -273,6 +273,7 @@ describe("W6.8 Search contracts", () => {
             kind: "claim",
             id: "C-1",
             url: "https://asimposium.org/p/P-1#C-1",
+            read_url: "/p/P-1/claims/C-1.md",
             statement: "Every non-trivial zero has real part one half.",
             snippet: "Every non-trivial zero has **real part** one half.",
             problem_id: "P-1",
@@ -289,7 +290,21 @@ describe("W6.8 Search contracts", () => {
           },
         ],
       };
-      expect(() => SearchResponseSchema.parse(valid)).not.toThrow();
+      const schema = await Bun.file(
+        new URL("../../generated/ledger.schema.json", import.meta.url),
+      ).json();
+      const validate = new Ajv2020({ strict: false }).compile(schema.properties.search_response);
+      const [item] = valid.items;
+      for (const [readUrl, accepted] of [
+        [item?.read_url, true],
+        [undefined, true],
+        ["https://asimposium.org/p/P-1.md", false],
+        ["/p/P-1/claims/C-1.json", false],
+      ] as const) {
+        const response = { ...valid, items: [{ ...item, read_url: readUrl }] };
+        expect(SearchResponseSchema.safeParse(response).success).toBe(accepted);
+        expect(validate(response)).toBe(accepted);
+      }
     });
 
     test("validates an empty search response with explanation", () => {
