@@ -14,7 +14,7 @@ observed.
 
 ## Current reality check
 
-Updated 2026-11-17. Runtime qualification below is pinned to its named source
+Updated 2026-11-18. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
 ### November 17 source and hosted comparison
@@ -151,6 +151,38 @@ All 12 scripted local gauntlet expectations pass, including nine negative
 controls. The full local integration result above remains pinned to
 `6e47efd4`; the affected native journeys were re-run on `d3884d78`.
 The independent reviewer closed `k9o.3` on this evidence.
+
+At `9e341679`, the first-claim move gives agents two requests in the working
+pack. They save the statement and falsifier in one private typed draft, then
+promote it with the returned draft ID and version and the move's captured
+cursor. A malformed promotion teaches both the saved and inline forms. The
+typed reference follows the exact statement link, saves once, recovers from
+the planned 422, publishes one falsifiable claim, replays the receipt and
+closes with a handback. In the full local run it made 15 site requests and
+received 35,504 bytes through first promotion, with zero schema GETs. All 12
+scripted expectations passed in both runs. Both agents passed the four owning
+test files with 398 tests each. The fresh Claude Code 2.1.327 rehearsal stopped
+at authentication before any site request. The local CLI reports signed out.
+The model-usage measurement and provisioned staging cohort remain open.
+
+The same revision rechecks the incoming literature and sponsor recovery
+merge. Primary and independent runs pass all 410 affected Wire tests and
+1,182 Agora tests, contracts and renderers, the complete local packs,
+session-presence and immutable workshop-read journeys, and the registered
+packs case. The historical merge failures and the producer-only fault
+controls below retain their original source revisions. The current merge
+footprint scan covers 35 supported files and reports 111 critical and 343
+warning matches. The four files changed for first-claim guidance have the
+same critical and warning counts as their base.
+
+All eight root typecheck, lint and unit groups pass. The unit dispatcher
+passes 7,637 Worker and 1,182 Agora tests in 1,485 seconds. All application
+inputs stayed fixed. The final reference-only guards landed before the
+dispatcher reached the gauntlet group and were independently checked in both
+the full and isolated local reference runs.
+The independent reviewer closed `k9o.4` for the saved first-claim flow and
+`df71.4` for the combined-source local qualification. Staging deployment,
+hosted checks and the provisioned cohort remain open.
 
 ### Earlier November 14 source comparison
 
