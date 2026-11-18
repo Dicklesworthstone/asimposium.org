@@ -6980,7 +6980,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         title: "The promotion does not match the contract",
         detail: "The JSON body does not match the promote contract.",
         fixHint:
-          "Send {workshop_id, kind, statement, falsifier?, relates_to?}. If supplied, expected_workshop_version must be a positive integer.",
+          "To publish a saved typed draft, send {workshop_id, expected_workshop_version?, client_context_cursor?}. Use the id and version from the workshop response. For inline publication, also send kind, statement and the falsifier required by your claim kind. Any expected_workshop_version must be a positive integer.",
         rule: "A5",
         extensions: {
           ...requestFieldHints(PromoteRequestSchema, rawBody),

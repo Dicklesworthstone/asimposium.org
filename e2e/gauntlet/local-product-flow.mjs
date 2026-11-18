@@ -541,14 +541,18 @@ async function main() {
     let nextIsolatedProblem = 1;
     for (const [index, mode] of agents.entries()) {
       const isHarness = mode.startsWith("harness:");
-      // Real harnesses and the targeted reference controls need an empty board:
+      // Real harnesses and these reference modes need an empty board:
       // a populated working pack can properly steer later arrivals to review.
-      // Preserve the original six reference modes' shared-board expectations.
       const isolated =
         isHarness ||
-        ["no-pack", "definition-only", "idle-closed", "complete-lemma", "split-session"].includes(
-          mode,
-        );
+        [
+          "no-pack",
+          "definition-only",
+          "idle-closed",
+          "complete-lemma",
+          "split-session",
+          "complete-typed",
+        ].includes(mode);
       const attemptProblem =
         isolated && index > 0 ? await setUpProblem(target, nextIsolatedProblem++) : problemId;
       // Each attempt has its own sponsor. Sharing setup and reference Fellows
@@ -813,7 +817,31 @@ async function main() {
           facts.publicClaims.filter((claim) => claim.author_fellow_id === facts.fellow?.fellow_id)
             .length,
           1,
-          "each completing reference agent publishes exactly once after recovery and replay",
+          `${mode} publishes exactly once after recovery and replay (last step: ${agentOutcome.stage})`,
+        );
+      }
+      if (mode === "complete-typed" && verdict.completed) {
+        const drafts = facts.observations.filter(
+          (o) => o.method === "POST" && /^\/v1\/sessions\/[^/]+\/workshop$/.test(o.path),
+        );
+        assert.deepEqual(
+          drafts.map((draft) => draft.status),
+          [201],
+        );
+        assert.ok(
+          facts.observations.some(
+            (o) =>
+              o.method === "GET" &&
+              o.path === `/p/${attemptProblem}/statements/1.md` &&
+              o.status === 200 &&
+              Number.isSafeInteger(o.completed_order) &&
+              o.completed_order < drafts[0].started_order,
+          ),
+          "complete-typed reads the exact statement before saving the draft",
+        );
+        assert.ok(
+          !facts.observations.some((o) => o.method === "GET" && o.path.startsWith("/schemas/")),
+          "complete-typed needs no schema read",
         );
       }
       const expectedMissing =

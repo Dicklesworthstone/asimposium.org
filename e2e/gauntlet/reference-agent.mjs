@@ -144,6 +144,7 @@ export async function runReferenceAgent(
   let workshopUrl;
   let promoteUrl;
   let closeUrl;
+  let typedPreparation;
   if (mode === "no-pack" || mode === "late-pack") {
     // Deliberately incomplete control: use the documented promotion route,
     // without fabricating a pack response or making a pack request.
@@ -156,18 +157,47 @@ export async function runReferenceAgent(
     workshopUrl = served(packActions, "/workshop");
     promoteUrl = served(packActions, "/promote");
     closeUrl = served(packActions, "/close") ?? served(sessionActions, "/close");
+    if (mode === "complete-typed") {
+      const moves = pack.body.items?.find((item) => item.id === "SYS-working-moves");
+      let move;
+      try {
+        move = JSON.parse(moves?.body ?? "{}")?.primary_move;
+      } catch {
+        return { stage: "typed-draft-offer", ok: false };
+      }
+      const promotionPath = move?.contract?.request?.path;
+      typedPreparation = move?.contract?.preparation;
+      if (
+        move?.move !== "state-claim" ||
+        !typedPreparation?.workshop_first?.body_example ||
+        !typedPreparation.saved_promotion_example ||
+        !typedPreparation.read_first?.path ||
+        !promotionPath
+      )
+        return { stage: "typed-draft-offer", ok: false };
+      const { read_first: read, workshop_first: workshop } = typedPreparation;
+      const formulation = await request(read.method, read.path);
+      if (formulation.status !== 200) return { stage: "exact-formulation", ok: false };
+      workshopUrl = workshop.path.replace("{id}", session.body.session_id);
+      promoteUrl = promotionPath.replace("{id}", session.body.session_id);
+    }
   }
   if (!workshopUrl || !promoteUrl || !closeUrl) return { stage: "pack", ok: false };
 
-  // 6. Private draft, learning the body shape from the teaching refusal.
-  const probe = await request("POST", workshopUrl, {});
-  const example = probe.body.example ?? {};
-  // Distinct per attempt so near-duplicate refusal (P11) never masks the mode under test.
-  const statement =
-    mode === "definition-only"
+  // 6. Private draft. Complete-typed uses the served move; the other modes
+  // retain their original teaching-refusal check for the Workshop shape.
+  const example = typedPreparation
+    ? typedPreparation.workshop_first.body_example
+    : ((await request("POST", workshopUrl, {})).body.example ?? {});
+  // Shared-board attempts need distinct claims so P11 does not mask the intended mode.
+  const statement = typedPreparation
+    ? "At n = 1, n squared equals 1."
+    : mode === "definition-only"
       ? `The bounded parity sample at limit ${bound} means the integers n with 0 <= n <= ${bound}.`
       : `Every integer n with 0 <= n <= ${bound} has a square with the same parity as n.`;
-  const falsifier = `An integer n in 0..${bound} whose square has the opposite parity to n.`;
+  const falsifier = typedPreparation
+    ? "A calculation of 1 times 1 that gives a value other than 1."
+    : `An integer n in 0..${bound} whose square has the opposite parity to n.`;
   const publication = {
     kind:
       mode === "definition-only"
@@ -179,13 +209,20 @@ export async function runReferenceAgent(
     ...(mode === "no-falsifier" || mode === "definition-only" ? {} : { falsifier }),
     relates_to: [],
   };
-  const draft = await request("POST", workshopUrl, {
-    type: example.type ?? "claim-draft",
-    title: "Parity of squares on a bounded range",
-    body_md: `Draft. ${statement} Check: n and n*n share parity since n*n - n = n(n-1) is even.`,
-    relates_to: [],
-    ...(mode === "complete-typed" ? { publication } : {}),
-  });
+  const draftText = {
+    title: typedPreparation ? "Check the n = 1 case" : "Parity of squares on a bounded range",
+    body_md: typedPreparation
+      ? "At n = 1, multiplication gives 1 times 1 = 1."
+      : `Draft. ${statement} Check: n and n*n share parity since n*n - n = n(n-1) is even.`,
+  };
+  const draftBody = typedPreparation
+    ? {
+        ...example,
+        ...draftText,
+        publication: { ...example.publication, statement, falsifier },
+      }
+    : { type: example.type ?? "claim-draft", ...draftText, relates_to: [] };
+  const draft = await request("POST", workshopUrl, draftBody);
   if (draft.status !== 201 && draft.status !== 200) return { stage: "workshop", ok: false };
   const workshopId = draft.body.workshop_id;
 
@@ -206,10 +243,13 @@ export async function runReferenceAgent(
 
   if (mode !== "workshop-only") {
     // 7. Promote; recover from a teaching refusal by reading fix_hint/example.
-    const body = {
-      workshop_id: workshopId,
-      ...(mode === "complete-typed" ? {} : publication),
-    };
+    const body = typedPreparation
+      ? {
+          ...typedPreparation.saved_promotion_example,
+          workshop_id: workshopId,
+          expected_workshop_version: draft.body.version,
+        }
+      : { workshop_id: workshopId, ...publication };
     const promotionKey = `ref-promote-${enrollmentId}-${++key}`;
     let promoted = await request("POST", promoteUrl, body, promotionKey);
     for (
@@ -217,6 +257,8 @@ export async function runReferenceAgent(
       retry < 2 && promoted.status === 422 && promoted.body.code === "PROMOTE_BODY_INVALID";
       retry++
     ) {
+      if (typedPreparation && !promoted.body.fix_hint?.includes("saved typed draft"))
+        return { stage: "saved-promotion-refusal", ok: false };
       // Resend the intended payload and identity after the injected shape error.
       // no-falsifier deliberately keeps its P3 omission. Real harnesses are
       // measured on their own response to the teaching text.
@@ -246,7 +288,9 @@ export async function runReferenceAgent(
   if (mode === "skip-close" || mode === "idle-closed" || mode === "split-session")
     return { stage: "promote", ok: true };
   const closed = await request("POST", closeUrl, {
-    handback: "Promoted a bounded parity conjecture; an independent check of the range is next.",
+    handback: typedPreparation
+      ? "Published the saved check at n = 1. Other cases remain open."
+      : "Promoted a bounded parity conjecture; an independent check of the range is next.",
   });
   if (closed.status !== 200 && closed.status !== 201) return { stage: "close", ok: false };
   return { stage: "close", ok: true };
