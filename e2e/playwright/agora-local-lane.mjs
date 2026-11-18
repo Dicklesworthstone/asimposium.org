@@ -457,6 +457,38 @@ async function seed(target) {
   )?.event;
   assert.equal(sourceEvent?.object_id, counterexample.body.evidence_id);
   const statement = JSON.parse(disputed.items.find((item) => item.kind === "claim-detail").body);
+  const groundingDigest = `sha256:${sourceEvent.payload_sha256}`;
+  const failureCondition = "The square of the witness has remainder zero modulo two.";
+  const square = 2 * 2;
+  assert.equal(square % 2, 0);
+  const recordedCheck = await fellowPost(
+    target,
+    `/v1/sessions/${concessionSessionId}/evidence`,
+    {
+      bears_on_kind: "claim",
+      bears_on_id: falseClaim.body.claim_id,
+      bears_on_version: 1,
+      direction: "refutes",
+      kind: "computation",
+      mode: "confirmatory",
+      source: {
+        kind: "locator",
+        locator: `https://a.asimposium.org/p/${problemId}/evidence/${counterexample.body.evidence_id}.json`,
+      },
+      computation_domain_or_floor: "The single integer witness n = 2.",
+      reproduction: { commands: ['node -p "2 * 2"'], environment: "Node integer arithmetic" },
+      body_md: `The square at n = 2 is ${square}. It has remainder zero modulo two.`,
+      falsification_check: {
+        target_digest: statement.content_digest,
+        attempted_falsifier: statement.falsifier,
+        capable_of_failure: failureCondition,
+        result: "fired",
+        evidence: [{ evidence_id: counterexample.body.evidence_id, digest: groundingDigest }],
+      },
+    },
+    concessionAuthor.token,
+  );
+  assert.equal(recordedCheck.status, 201, "publish the grounded falsification check");
   const concession = await fellowPost(
     target,
     `/v1/sessions/${concessionSessionId}/retract`,
@@ -526,6 +558,12 @@ async function seed(target) {
     concessionEvidenceId: counterexample.body.evidence_id,
     concessionEvidenceFellowId: concessionAuthor.fellowId,
     concessionBasis: conceded.claim_state.status_basis,
+    groundedCheck: {
+      id: recordedCheck.body.evidence_id,
+      failureCondition,
+      targetDigest: statement.content_digest,
+      evidenceDigest: groundingDigest,
+    },
     hypothesisLifecycle,
   };
 }
@@ -1264,6 +1302,7 @@ async function main() {
       concessionEvidenceId,
       concessionEvidenceFellowId,
       concessionBasis,
+      groundedCheck,
       hypothesisLifecycle,
     } = await seed(target);
     const claimsList = await seedClaimsList(target);
@@ -2070,6 +2109,44 @@ async function main() {
         concessionEvidenceFellowId,
         "usr_agora_lane_concession",
       );
+      const originalClaimUrl = page.url();
+      const checkHref = `/r/p/${problemId}/evidence/${groundedCheck.id}`;
+      await page
+        .getByRole("link", {
+          name: `Read complete published evidence ${groundedCheck.id} →`,
+          exact: true,
+        })
+        .click();
+      await page.waitForURL(`${agora.origin}${checkHref}`, { waitUntil: "load" });
+      const checkPanel = page.locator(".asimp-falsification-check");
+      const groundLink = checkPanel.getByRole("link", { name: concessionEvidenceId, exact: true });
+      const groundingHref = `/r/p/${problemId}/evidence/${concessionEvidenceId}`;
+      const linked =
+        (await groundLink.count()) === 1 &&
+        (await groundLink.getAttribute("href")) === groundingHref;
+      const checkText = linked ? await checkPanel.innerText() : "";
+      record(
+        `${mode} grounded claim evidence presents the reported result, failure condition and exact source link`,
+        linked &&
+          checkText.includes("fired") &&
+          checkText.includes(groundedCheck.failureCondition) &&
+          checkText.includes(groundedCheck.targetDigest) &&
+          checkText.includes(groundedCheck.evidenceDigest),
+      );
+      let matchedPublishedDigest = false;
+      if (linked) {
+        await groundLink.click();
+        await page.waitForURL(`${agora.origin}${groundingHref}`, { waitUntil: "load" });
+        const body = await page
+          .locator(`.asimp-item[data-id="${concessionEvidenceId}"] > .asimp-item__body`)
+          .innerText();
+        matchedPublishedDigest = JSON.parse(body).content_digest === groundedCheck.evidenceDigest;
+      }
+      record(
+        `${mode} grounded claim evidence opens the cited publication with the same content digest`,
+        matchedPublishedDigest,
+      );
+      await page.goto(originalClaimUrl, { waitUntil: "load" });
       const why = page.locator("#why-this-status");
       const whyText = await why.innerText();
       record(

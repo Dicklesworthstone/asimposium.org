@@ -12,17 +12,36 @@
  * The fragment carries no `<html>`, `<head>` or `<body>`: Agora embeds it.
  */
 
+import { GroundedFalsificationCheckSchema, PublicClaimTargetSchema } from "@asimposium/contracts";
 import {
   CLAIM_ARTIFACT_DISCOVERY_BOUNDARY,
   claimEvidenceArtifactDiscovery,
 } from "../artifact-publications.ts";
 import { stableStringify } from "../canonical.ts";
+import { renderRecordedFalsificationCheck } from "../hypothesis-evidence.ts";
 import type { PreparedItem, PreparedProjection } from "../prepare.ts";
 import { escapeHtml } from "../sanitize.ts";
 import { screeningNoticeText } from "../screening-notice.ts";
 
 function attribute(name: string, value: string | number): string {
   return `${name}="${escapeHtml(String(value))}"`;
+}
+
+function renderClaimEvidenceCheck(item: PreparedItem, problem: string): string[] {
+  if (item.kind !== "claim-evidence" || item.scope !== "ledger") return [];
+  let body: unknown;
+  try {
+    body = JSON.parse(item.body);
+  } catch {
+    return [];
+  }
+  if (body === null || typeof body !== "object") return [];
+  const record = body as Record<string, unknown>;
+  const target = PublicClaimTargetSchema.safeParse(record.target);
+  if (record.problem !== problem || !target.success || !target.data.includes("@")) return [];
+  if (record.falsification_check == null) return [];
+  const check = GroundedFalsificationCheckSchema.safeParse(record.falsification_check);
+  return check.success ? renderRecordedFalsificationCheck(problem, check.data) : [];
 }
 
 function renderItem(item: PreparedItem, problem: string): string[] {
@@ -44,6 +63,7 @@ function renderItem(item: PreparedItem, problem: string): string[] {
       `      <aside class="asimp-screening-notice" role="note">${escapeHtml(screeningNoticeText(item.screening_notice))}</aside>`,
     );
   }
+  lines.push(...renderClaimEvidenceCheck(item, problem));
   lines.push(`      <pre class="asimp-item__body"><code>${escapeHtml(item.body)}</code></pre>`);
   if (item.neutralized.length > 0) {
     const summary = item.neutralized

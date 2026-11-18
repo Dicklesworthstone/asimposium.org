@@ -1261,20 +1261,23 @@ await runLocalWorkerJourney(async (context) => {
     await call(guide.evidence_read.path.replace("{evidence_id}", oddGrounding.evidence_id)),
   );
   const oddItem = oddFace.items.find((item) => item.id === oddGrounding.evidence_id);
-  const oddDigest = JSON.parse(oddItem.body).content_digest;
+  const oddRecord = JSON.parse(oddItem.body);
+  assert.equal(oddRecord.falsification_check, null);
+  const oddDigest = oddRecord.content_digest;
   assert.deepEqual(guide.outcomes.fired, { direction: "refutes", result: "fired" });
-  await call(
+  const firedCheck = {
+    target_digest: parityStatement.content_digest,
+    attempted_falsifier: parityStatement.falsifier,
+    capable_of_failure: "The integer remainder at the witness is one.",
+    result: guide.outcomes.fired.result,
+    evidence: [{ evidence_id: oddItem.id, digest: oddDigest }],
+  };
+  const firedReceipt = await call(
     publishParity,
     {
       ...oddEvidence,
       direction: guide.outcomes.fired.direction,
-      falsification_check: {
-        target_digest: parityStatement.content_digest,
-        attempted_falsifier: parityStatement.falsifier,
-        capable_of_failure: "The integer remainder at the witness is one.",
-        result: guide.outcomes.fired.result,
-        evidence: [{ evidence_id: oddItem.id, digest: oddDigest }],
-      },
+      falsification_check: firedCheck,
     },
     observer,
     201,
@@ -1283,6 +1286,21 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(fired.claim_state.recorded_refutation_attempts, 1);
   assert.equal(fired.claim_state.disposition, "disputed");
   assert.ok(!JSON.stringify(fired).includes(scratchCanary));
+  const firedPath = guide.evidence_read.path.replace("{evidence_id}", firedReceipt.evidence_id);
+  const exactFired = ClaimFaceResponseSchema.parse(await call(firedPath));
+  const readCheck = (face) =>
+    JSON.parse(face.items.find((item) => item.id === firedReceipt.evidence_id).body)
+      .falsification_check;
+  assert.deepEqual(readCheck(exactFired), firedCheck, "exact evidence retains the published check");
+  assert.deepEqual(readCheck(fired), firedCheck, "the claim face retains the same check");
+  const firedMarkdown = await worker.fetch(`${origin}${firedPath.replace(/\.json$/, ".md")}`, {
+    headers: { "user-agent": userAgent },
+    signal: AbortSignal.timeout(15_000),
+  });
+  assert.equal(firedMarkdown.status, 200);
+  const firedMarkdownBody = await firedMarkdown.text();
+  for (const value of [firedCheck.target_digest, oddItem.id, oddDigest])
+    assert.ok(firedMarkdownBody.includes(value));
 
   console.log(
     JSON.stringify({

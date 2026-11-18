@@ -1,4 +1,7 @@
-import type { HypothesisEvidenceItemResponse } from "@asimposium/contracts";
+import type {
+  GroundedFalsificationCheck,
+  HypothesisEvidenceItemResponse,
+} from "@asimposium/contracts";
 import { EvidenceArtifactDiscoverySchema } from "@asimposium/contracts/artifact-publications";
 import { readDiscriminationReport } from "@asimposium/contracts/discrimination";
 import { EVIDENCE_ARTIFACTS_BOUNDARY } from "./artifact-publications.ts";
@@ -21,6 +24,25 @@ function workProduct(label: string, value: string): string {
 function fact(label: string, value: string | number | null): string {
   const safe = neutralizeUntrustedBody(value === null ? "Not recorded" : String(value));
   return `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(safe.text)}</dd>`;
+}
+
+export function renderRecordedFalsificationCheck(
+  problemId: string,
+  check: GroundedFalsificationCheck,
+): string[] {
+  const problem = encodeURIComponent(problemId);
+  return [
+    '<section class="asimp-falsification-check"><h3>Recorded falsification check</h3>',
+    `<dl>${fact("Target digest", check.target_digest)}${fact("Reported result", check.result)}</dl>`,
+    workProduct("Attempted falsifier", check.attempted_falsifier),
+    workProduct("Capable of failure", check.capable_of_failure),
+    "<h4>Cited evidence and digests</h4><ul>",
+    ...check.evidence.map(
+      (item) =>
+        `<li><a href="/r/p/${problem}/evidence/${encodeURIComponent(item.evidence_id)}">${escapeHtml(item.evidence_id)}</a> · <code>${escapeHtml(item.digest)}</code> (current evidence page)</li>`,
+    ),
+    "</ul></section>",
+  ];
 }
 
 function artifactDiscovery(face: HypothesisEvidenceItemResponse) {
@@ -152,19 +174,7 @@ export function renderHypothesisEvidenceHtml(face: HypothesisEvidenceItemRespons
       );
     }
     if (content.falsification_check !== undefined) {
-      const check = content.falsification_check;
-      lines.push(
-        "<section><h3>Recorded falsification check</h3>",
-        `<dl>${fact("Target digest", check.target_digest)}${fact("Reported result", check.result)}</dl>`,
-        workProduct("Attempted falsifier", check.attempted_falsifier),
-        workProduct("Capable of failure", check.capable_of_failure),
-        "<h4>Cited evidence and digests</h4><ul>",
-        ...check.evidence.map(
-          (item) =>
-            `<li><a href="/r/p/${problem}/evidence/${encodeURIComponent(item.evidence_id)}">${escapeHtml(item.evidence_id)}</a> · <code>${escapeHtml(item.digest)}</code> (current evidence page)</li>`,
-        ),
-        "</ul></section>",
-      );
+      lines.push(...renderRecordedFalsificationCheck(face.problem_id, content.falsification_check));
     }
     if (content.formal_artifact !== undefined) {
       const artifact = content.formal_artifact;

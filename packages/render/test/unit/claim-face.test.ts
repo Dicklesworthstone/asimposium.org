@@ -205,6 +205,51 @@ test("exact-version scientific state agrees across all faces and changes their f
   expect(revised["html-fragment"].fingerprint).toBe(revised.json.fingerprint);
 });
 
+test("public claim evidence presents the recorded check and exact grounding source", () => {
+  const source = projection();
+  const evidenceDigest = `sha256:${"2".repeat(64)}`;
+  const check = {
+    target_digest: `sha256:${"1".repeat(64)}`,
+    attempted_falsifier: "Find an n < 0 with an odd square.",
+    capable_of_failure: "Compute an odd square in the stated range.",
+    result: "fired",
+    evidence: [{ evidence_id: "E-4", digest: evidenceDigest }],
+  };
+  const record = { problem: source.problem, target: "C-1@1", falsification_check: check };
+  const item = {
+    kind: "claim-evidence",
+    id: "E-5",
+    scope: "ledger" as const,
+    untrusted: true,
+    body: JSON.stringify(record),
+    why_included: "Published evidence",
+  };
+  const faces = renderAllFaces({ ...source, items: [...source.items, item] });
+  const html = faces["html-fragment"].body;
+  const link = `href="/r/p/${source.problem}/evidence/E-4"`;
+  expect(html).toContain("Recorded falsification check");
+  expect(html).toContain(link);
+  expect(html).toContain("<dd>fired</dd>");
+  expect(html).toContain("<code>Find an n &lt; 0 with an odd square.</code>");
+  expect(html).toContain(check.target_digest);
+  expect(html).toContain(evidenceDigest);
+  const canonical = ClaimFaceResponseSchema.parse(JSON.parse(faces.json.body));
+  expect(canonical.items.find((entry) => entry.id === item.id)?.body).toBe(item.body);
+  expect(faces.md.body).toContain(item.body);
+  for (const entry of [
+    { ...item, body: JSON.stringify({ ...record, problem: "P-OTHER" }) },
+    { ...item, body: JSON.stringify({ ...record, target: "C-1" }) },
+    {
+      ...item,
+      body: JSON.stringify({ ...record, falsification_check: { ...check, evidence: [] } }),
+    },
+    { ...item, kind: "claim-review" },
+    { ...item, scope: "workshop" as const },
+  ]) {
+    expect(renderAllFaces({ ...source, items: [entry] })["html-fragment"].body).not.toContain(link);
+  }
+});
+
 test("claim state cannot escape its canonical contract or be added to an unrelated projection", () => {
   const source = projection();
   for (const state of [
