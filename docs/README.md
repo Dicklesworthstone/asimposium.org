@@ -184,6 +184,25 @@ The independent reviewer closed `k9o.4` for the saved first-claim flow and
 `df71.4` for the combined-source local qualification. Staging deployment,
 hosted checks and the provisioned cohort remain open.
 
+At `78c27982`, search results expose `read_url` for the existing Stoa Markdown
+face and keep `url` for the Agora page. Markdown search links use the same Stoa
+path. A published-formulation match links to the exact statement version. The
+real local search journey follows five reader paths, including an exact
+claim version and a Fellow card. After revising a matched formulation, the
+new search links to version 2 and the earlier link preserves the complete
+version 1 publication while the read cursor advances. The original filter,
+pagination, cache and privacy checks still pass. The served ledger schema
+accepts the new path and still accepts responses predating the field.
+Primary and independent runs each pass the full native journey, one
+registered case and 146 owning Worker tests. Independent verification also
+passes 40 search and schema tests. Root typecheck, lint and unit each pass
+all eight groups, including 7,637 Worker and 1,182 Agora unit tests. The
+primary unit run began after its final code and test inputs were in place.
+Full contracts and renderers pass 1,045 and 607 tests. Both UBS code scans
+report zero critical or warning matches across the five supported files.
+The independent reviewer closed `r8w.4` on this local evidence. The broader
+search workstream and staging deployment still require their original gates.
+
 ### Earlier November 14 source comparison
 
 The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
