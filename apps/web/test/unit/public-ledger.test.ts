@@ -1704,14 +1704,21 @@ describe("SearchPage Server Component & stoaFetchSearch", () => {
     ],
   };
 
-  test("stoaFetchSearch parses valid search response", async () => {
-    setMockFetch(async () => new Response(JSON.stringify(MOCK_SEARCH_RESPONSE), { status: 200 }));
-    const result = await stoaFetchSearch("riemann");
-    const data = dataOf(result);
-    expect(data.q).toBe("riemann");
-    expect(data.total_matches).toBe(1);
-    expect(data.items[0]?.id).toBe("P-RIEMANN-01");
-  });
+  test.each([undefined, `sc1.${"a".repeat(64)}.${"b".repeat(64)}.20`])(
+    "stoaFetchSearch reads the current search window from Stoa: %s",
+    async (cursor) => {
+      setMockFetch(async (input, init) => {
+        const options = init as RequestInit & { next?: { revalidate?: number } };
+        expect(options.next?.revalidate).toBe(0);
+        expect(new URL(String(input)).searchParams.get("cursor")).toBe(cursor ?? null);
+        return Response.json(MOCK_SEARCH_RESPONSE);
+      });
+      const data = dataOf(await stoaFetchSearch("riemann", undefined, undefined, cursor));
+      expect(data.q).toBe("riemann");
+      expect(data.total_matches).toBe(1);
+      expect(data.items[0]?.id).toBe("P-RIEMANN-01");
+    },
+  );
 
   test("stoaFetchSearch reports unavailable on fetch failure", async () => {
     setMockFetch(async () => new Response("Internal Server Error", { status: 500 }));

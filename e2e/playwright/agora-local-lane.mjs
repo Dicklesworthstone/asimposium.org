@@ -60,7 +60,7 @@ import {
   SINGLE_TEAM_PROBLEM_NOTICE,
 } from "../../packages/contracts/src/ledger.ts";
 import { ReviewQueueResponseSchema } from "../../packages/contracts/src/review-queue.ts";
-import { SearchResponseSchema } from "../../packages/contracts/src/search.ts";
+import { SEARCH_LIMIT_DEFAULT, SearchResponseSchema } from "../../packages/contracts/src/search.ts";
 import {
   enrollSetupFellow,
   fellowPost,
@@ -1111,6 +1111,73 @@ async function stopAgora(child) {
     await exited;
   } finally {
     clearTimeout(deadline);
+  }
+}
+
+async function searchPaginationBrowsing({ browser, agora, target }) {
+  const q = "searchcursorprobe";
+  const query = new URLSearchParams({ q, kind: "fellow" });
+  const enroll = (index) =>
+    enrollSetupFellow(target, `usr_${q}_${index}`, `${q}-${index}`, ["review"]);
+  const read = (url) =>
+    fetch(url, {
+      headers: { "user-agent": USER_AGENT },
+      signal: AbortSignal.timeout(15_000),
+    });
+  for (let i = 1; i <= SEARCH_LIMIT_DEFAULT + 1; i += 1) await enroll(i);
+  const context = await browser.newContext({ javaScriptEnabled: false });
+  try {
+    const page = await context.newPage();
+    const cards = page.locator("main .result-card");
+    const next = page.locator("main a[rel=next]");
+    await page.goto(`${agora.origin}/search?${query}`, { waitUntil: "load" });
+    assert.equal(await cards.count(), SEARCH_LIMIT_DEFAULT);
+    await next.click();
+    const pageTwo = new URL(page.url());
+    assert.equal(pageTwo.searchParams.getAll("cursor").length, 1);
+    assert.equal(await cards.count(), 1);
+    const title = await cards.locator("a.result-link").innerText();
+    const machineLinks = {};
+    for (const format of ["json", "md"]) {
+      const href = await page
+        .getByRole("link", { name: `search.${format}`, exact: true })
+        .getAttribute("href");
+      const url = new URL(href);
+      assert.equal(url.origin, target.origin);
+      assert.equal(url.pathname, `/search.${format}`);
+      assert.deepEqual([...url.searchParams], [...pageTwo.searchParams]);
+      machineLinks[format] = url;
+    }
+    const json = await read(machineLinks.json);
+    const markdown = await read(machineLinks.md);
+    assert.equal(json.status, 200);
+    assert.equal(markdown.status, 200);
+    const second = SearchResponseSchema.parse(await json.json());
+    record(
+      "no-js search: both agent faces agree with the current second page",
+      second.items.length === 1 &&
+        second.items[0]?.title === title &&
+        (await markdown.text()).includes(title),
+    );
+
+    await enroll(SEARCH_LIMIT_DEFAULT + 2);
+    const stale = await read(machineLinks.json);
+    assert.equal(stale.status, 409);
+    assert.equal((await stale.json()).code, "SEARCH_RESULTS_CHANGED");
+    await page.reload({ waitUntil: "load" });
+    await page.getByRole("button", { name: "Try again", exact: true }).click();
+    assert.deepEqual([...new URL(page.url()).searchParams], [...query]);
+    assert.equal(await cards.count(), SEARCH_LIMIT_DEFAULT);
+    await next.click();
+    const resumed = new URL(page.url()).searchParams.getAll("cursor");
+    record(
+      "no-js search: a refused cursor restarts and delivers a fresh second page",
+      resumed.length === 1 &&
+        resumed[0] !== pageTwo.searchParams.get("cursor") &&
+        (await cards.count()) === 2,
+    );
+  } finally {
+    await context.close();
   }
 }
 
@@ -3418,6 +3485,7 @@ async function main() {
     const focused = await page.evaluate(() => document.activeElement?.textContent?.trim() ?? "");
     record("first Tab reaches the skip link", /skip/i.test(focused), focused);
     await context.close();
+    await searchPaginationBrowsing({ browser, agora, target });
   } finally {
     await browser?.close();
     await stopAgora(agora?.child);

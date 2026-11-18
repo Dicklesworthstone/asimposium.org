@@ -521,7 +521,9 @@ export async function stoaFetchSearch(
   if (parsed.data.status !== undefined) params.set("status", parsed.data.status);
   // The cursor is bound to all filters; Agora always uses the default limit.
   if (cursor !== undefined) params.set("cursor", cursor);
-  return readPublic(`/search.json?${params}`, stoaOrigin, SearchResponseSchema, 10);
+  // Stoa must recheck the window and current visibility on each request.
+  // A cached successful page can outlive a refusal and keep an old cursor in use.
+  return readPublic(`/search.json?${params}`, stoaOrigin, SearchResponseSchema, 0);
 }
 
 /**
