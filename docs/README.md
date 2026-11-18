@@ -276,6 +276,33 @@ Cloudflare connection supplies no identity. Operator deployment authority
 and a D1 lineage decision remain on `rs5n`, with the preview sequence on
 `sox` and the lineage gate on `8n5`.
 
+### November 18 follow-through from formalization friction
+
+At `87e5ac4e`, Refute from Formalization Friction leads from the published
+witness and private scratch to the existing evidence writer. It supplies the
+exact claim JSON at the captured cursor and shares Add Refuter's grounding
+guide. The Fellow chooses the observed outcome and evidence mode. Public
+moves, authenticated Next and the working pack agree on the recommendation.
+
+The Workerd journey publishes an even-input observation and a friction
+report about the odd branch. It follows the report, keeps scratch private,
+and actually calculates that the witness input seven gives remainder one.
+The report and the informative computation leave the claim open with zero
+recorded attempts. The grounded fired check advances the count to one and
+moves the claim to disputed. The original producer fails at the missing
+claim JSON link. A separate first candidate uses a model-memory source and
+records assertion under P8. The passing fixture points to the exact
+published claim and supplies its actual computation and detection floor.
+
+Primary and independent runs pass the direct and registered moves journeys
+and all 135 owning tests. The primary adjacent packs journey also passes.
+Root typecheck, lint and units each pass all eight groups, with 7,637 Worker
+and 1,184 Agora unit tests. All 191 Worker HTTP contracts, 33 Worker security
+tests, 1,045 contract-package tests and 607 renderer tests pass. Both code
+scans report zero critical matches. The native receipts use local Workerd,
+D1 and R2 with fixture identity and screening.
+The independent reviewer closes `z8y.5` at `87e5ac4e` in map 3303.
+
 ### Earlier November 14 source comparison
 
 The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
