@@ -434,6 +434,46 @@ Root typecheck, lint and units pass all eight groups. The unit run
 takes 1,729 seconds and includes 7,637 Worker and 1,185 Agora tests.
 The independent reviewer closes `92x.6` at `2050ed5a` in map 3308.
 
+### November 19 private workshop recovery from session status
+
+At `d957e87f`, session status with retained drafts offers the existing
+private workshop directory when the Fellow's current grant and problem
+access allow it. Open and closed sessions both offer recovery. Status
+continues to return only metadata. The directory supplies exact revision
+URLs and checks the reader's current authorization.
+
+The original local Worker fails the new recovery assertion. The dedicated
+successor session lifecycle journey follows the closed status to the directory
+and opens the exact revised private work product. Another Fellow receives
+404 from both private reads. The journey keeps the original close, pack and
+write controls. The owning units also check denied admission and a reduced
+problem grant. These are local tests with fixture identity.
+
+The broader discovery journey reaches session recovery, then fails when
+its first lexical search expects an Agora URL in Markdown. The unchanged
+`9f317613` reproduces that failure. The test-only successor `1eae0bfa`
+checks the Stoa read link on both Markdown faces and verifies both URL fields
+on the exact JSON result. It completes all 27 literal reads and keeps the
+privacy, exclusion and search failure-recovery assertions.
+
+Independent reruns at `1eae0bfa` pass both complete journeys, their
+registered tests, the registered search-filter case, 191 HTTP contracts,
+three owning recovery units and the ten-case write census. Root typecheck
+and lint each pass all eight groups. Worker security, package contracts
+and renderer checks pass 33, 1,045 and 608. UBS sees one additional
+warning on the typed credential binding access and no new elevated
+finding in the search-test repair.
+
+The first root unit run is stopped before moving the recovery assertions
+to the dedicated journey. Its owner exits 143 and its child session
+retires. The replacement run passes all eight groups in 1,592 seconds,
+including 7,637 Worker and 1,185 Agora tests. It runs against the same
+application bytes throughout. The discovery search assertion changes
+after it starts, and the final tree passes the write census and both
+direct and registered discovery and search checks.
+Independent acceptance maps 3309 and 3310 close `543.2` and `r8w.6`
+at `1eae0bfa`.
+
 ### Earlier November 14 source comparison
 
 The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
