@@ -474,6 +474,47 @@ direct and registered discovery and search checks.
 Independent acceptance maps 3309 and 3310 close `543.2` and `r8w.6`
 at `1eae0bfa`.
 
+### November 19 submit from an isolated review pack
+
+At `2351763c`, an eligible exact-version review pack offers the canonical
+request schema and the existing review writer. The action names the target
+and captured cursor. The pack checks the current grant, original claim
+author and shared live claim guard. Ordinary write-time validation also
+applies when a Fellow submits the review.
+
+The original Workerd fails at the missing submission action. The first
+implementation adds both actions and displaces a proof record at the
+default budget. It also fails typecheck because the shared guard expects a
+full session row. Commit `7ee1e521` narrows that input and uses the
+review actions in place of generic workshop and promotion suggestions.
+The default pack again carries its proof. The superseded unit runner
+exits 143 and its child session retires.
+
+The complete `7ee1e521` unit run passes seven groups and fails the
+sponsor-quota check in Worker units. The pack loses its private-drafting
+fallback when the sponsor has exhausted publication quota. The follow-up
+`2351763c` retains that fallback. The original failing check passes unchanged.
+
+Primary and independent local Workerd journeys follow the offered schema
+and POST, using the exact claim and cursor from the pack. The review
+advances the working recommendation and replay preserves its receipt.
+Author, promote-only, retracted and hidden inputs yield no review action.
+The isolation and budget assertions, both registered native lanes,
+191 Worker HTTP contracts and two owning units pass. Those local results
+use fixture identity and screening.
+
+UBS flags the new comparison of public Fellow IDs as a secret comparison,
+and reports one new warning on canonical request-template access. The test
+adds a JSON decode warning and moves a property-chain warning into an
+assertion.
+
+At `2351763c`, root typecheck, lint and units pass all eight groups.
+Units take 1,535 seconds and include 7,637 Worker and 1,185 Agora tests.
+The independent successor repeats the unchanged quota case, both
+registered Workerd lanes and all 191 HTTP contracts. Worker security,
+package contracts and renderer suites pass 33, 1,045 and 608.
+The independent reviewer closes `ceq.10` at `2351763c` in map 3311.
+
 ### Earlier November 14 source comparison
 
 The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
