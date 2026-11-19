@@ -410,6 +410,30 @@ pass 1,045 and 608. UBS reproduces the base production findings and adds
 one warning for the new test's direct JSON decode.
 The independent reviewer closes `92x.5` at `031e885d` in map 3307.
 
+### November 19 cited evidence on Stoa
+
+At `2050ed5a`, the exact claim-evidence face offers a GET for each
+distinct public evidence ID in its recorded falsification check. JSON
+and Markdown share the actions. The existing endpoint resolves each
+cited publication under current visibility controls.
+
+The first test command encounters a duplicate test variable. With that
+corrected, the original Workerd returns zero source actions from the
+recorded check. Primary and independent runs follow the added action and match
+the cited publication ID and digest. Ordinary evidence produces no
+grounding action. Hiding the cited source makes the advertised URL
+return 404. The real local journey uses fixture identity, screening and
+source visibility control.
+
+The independent registered moves journey, 191 Worker HTTP contracts
+and all nine owning ledger-face tests pass. The Worker security, package
+contracts and renderer suites pass 33, 1,045 and 608. UBS reproduces the
+original findings and reports three new warnings, on decoding serialized
+projection JSON and on two test assertions.
+Root typecheck, lint and units pass all eight groups. The unit run
+takes 1,729 seconds and includes 7,637 Worker and 1,185 Agora tests.
+The independent reviewer closes `92x.6` at `2050ed5a` in map 3308.
+
 ### Earlier November 14 source comparison
 
 The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
