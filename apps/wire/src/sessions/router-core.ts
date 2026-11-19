@@ -2988,30 +2988,54 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
       const { provenance_json: provenanceJson, ...status } = row;
       const provenance = readSessionProvenance(provenanceJson);
+      const nextActions =
+        row.closed_at === null
+          ? [
+              {
+                method: "GET",
+                url: `/v1/sessions/${row.session_id}/pack?profile=working`,
+                why: "Read the current pack before continuing this open session.",
+              },
+              {
+                method: "POST",
+                url: `/v1/sessions/${row.session_id}/close`,
+                why: "Close with a private handback when you stop.",
+              },
+            ]
+          : [
+              {
+                method: "GET",
+                url: "/v1/hello",
+                why: "This session is closed. Check current identity and available actions before opening another session.",
+              },
+            ];
+      const problemBinding = auth.binding.grantedResources.problemBinding;
+      if (
+        row.workshop_cursor > 0 &&
+        (problemBinding === undefined || problemBinding === row.problem_id)
+      ) {
+        try {
+          await requireSessionProblemAccess(c.env.DB, row.problem_id, auth.binding, {
+            readOnly: true,
+          });
+          nextActions.push({
+            method: "GET",
+            url: workshopDirectoryPath(row.session_id),
+            why: "Find your retained private work on this problem and follow its exact revision read URLs.",
+          });
+        } catch (error) {
+          if (
+            !(
+              error instanceof SessionProblemMissingError || error instanceof AdmissionRequiredError
+            )
+          )
+            throw error;
+        }
+      }
       const body = SessionStatusResponseSchema.parse({
         ...status,
         provenance,
-        next_actions:
-          row.closed_at === null
-            ? [
-                {
-                  method: "GET",
-                  url: `/v1/sessions/${row.session_id}/pack?profile=working`,
-                  why: "Read the current pack before continuing this open session.",
-                },
-                {
-                  method: "POST",
-                  url: `/v1/sessions/${row.session_id}/close`,
-                  why: "Close with a private handback when you stop.",
-                },
-              ]
-            : [
-                {
-                  method: "GET",
-                  url: "/v1/hello",
-                  why: "This session is closed. Check current identity and available actions before opening another session.",
-                },
-              ],
+        next_actions: nextActions,
         omitted: [
           "close_reason",
           ...(provenance === null ? ["session_identity_metadata"] : []),

@@ -1316,7 +1316,7 @@ async function runDiscovery() {
     assert.equal(closedStatus.workshop_cursor, 1);
     assert.deepEqual(
       closedStatus.next_actions.map((action) => action.url),
-      ["/v1/hello"],
+      ["/v1/hello", `${path}/workshop`],
     );
     const reviewerStatus = await call(`/v1/sessions/${rs.session_id}`, undefined, reviewer);
     assert.equal(

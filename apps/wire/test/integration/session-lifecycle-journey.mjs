@@ -9,6 +9,7 @@ import {
   WorkshopPushRequestSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
+import { WorkshopDirectoryResponseSchema } from "@asimposium/contracts/workshop-directory";
 
 /**
  * W4.1 Session Lifecycle Journey (bead asimposiumorg-zdz):
@@ -227,6 +228,10 @@ export async function sessionLifecycleJourney({ call, enroll, sponsorCall }) {
   assert.ok(typeof status1.public_cursor === "number");
   assert.ok(status1.next_actions.length > 0);
   assert.ok(status1.next_actions[0].url.includes(sessionId1));
+  const workshopPath = `/v1/sessions/${sessionId1}/workshop`;
+  const recoveryAction = (status) =>
+    status.next_actions.find(({ method, url }) => method === "GET" && url === workshopPath);
+  assert.equal(recoveryAction(status1), undefined, "an empty workshop offers no recovery");
   assert.ok(status1.omitted.includes("close_reason"));
   assert.ok(status1.omitted.includes("idle_enforcement"));
 
@@ -282,7 +287,7 @@ export async function sessionLifecycleJourney({ call, enroll, sponsorCall }) {
 
   // 7b. Fellow A pushes workshop object
   const push1 = await call(
-    `/v1/sessions/${sessionId1}/workshop`,
+    workshopPath,
     {
       type: "claim-draft",
       title: "Modular Cycle Investigation",
@@ -299,6 +304,7 @@ export async function sessionLifecycleJourney({ call, enroll, sponsorCall }) {
   // 7c. Session status confirms workshop_cursor has advanced
   const statusAfterPush = await call(`/v1/sessions/${sessionId1}`, undefined, fellowAToken, 200);
   assert.equal(statusAfterPush.workshop_cursor, 1);
+  assert.ok(recoveryAction(statusAfterPush), "open status links to its retained private work");
 
   // 7d. Public cursor did NOT advance (workshop pushes are private and do not move public cursor)
   const cursorAfter = await call("/cursor");
@@ -319,7 +325,6 @@ export async function sessionLifecycleJourney({ call, enroll, sponsorCall }) {
   assert.equal(crossWorkshop.code, "SESSION_NOT_FOUND");
 
   // 7f. A claim-shaped note teaches a lossless private save, never publication.
-  const workshopPath = `/v1/sessions/${sessionId1}/workshop`;
   const claimShapedNote = {
     type: "note",
     title: "An unfinished private argument",
@@ -442,6 +447,26 @@ export async function sessionLifecycleJourney({ call, enroll, sponsorCall }) {
   assert.ok(statusClosed.closed_at !== null);
   assert.ok(new Date(statusClosed.closed_at).getTime() > 0);
   assert.equal(statusClosed.next_actions[0].url, "/v1/hello");
+  const closedAction = recoveryAction(statusClosed);
+  assert.ok(closedAction, "the closed status links to the existing private directory");
+  const statusText = JSON.stringify(statusClosed);
+  assert.ok(!statusText.includes("PRIVATE_REVISION_CANARY"));
+  assert.ok(!statusText.includes("Completed initial modular cycle analysis"));
+  const directory = WorkshopDirectoryResponseSchema.parse(
+    await call(closedAction.url, undefined, fellowAToken, 200),
+  );
+  assert.equal(directory.session_id, sessionId1);
+  const entry = directory.items.find(({ workshop_id }) => workshop_id === noteDraft.workshop_id);
+  assert.ok(entry, "the directory returns the revised draft");
+  assert.equal(entry.version, revisedDraft.version);
+  const recovered = WorkshopObjectResponseSchema.parse(
+    await call(entry.read_url, undefined, fellowAToken, 200),
+  );
+  assert.equal(recovered.object.body_md, revisionRequest.body_md);
+  assert.equal(recovered.object.version, revisedDraft.version);
+  const denied = await call(closedAction.url, undefined, fellowBToken, 404);
+  assert.equal(denied.code, "WORKSHOP_NOT_FOUND");
+  await call(entry.read_url, undefined, fellowBToken, 404);
 
   // 8d. Writes to closed session refused with 409 SESSION_CLOSED
   const closedWorkshop = await call(

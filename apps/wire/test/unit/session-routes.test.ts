@@ -3758,18 +3758,39 @@ describe("session protocol routes", () => {
     expect(pushed.workshop_cursor).toBe(1);
     expect(pushed.public_cursor).toBe(0);
     expect(pushed.next_actions[0]?.url).toBe(`${path}/pack?profile=working`);
+    expect(pushed.next_actions).toContainEqual(
+      expect.objectContaining({ method: "GET", url: `${path}/workshop` }),
+    );
     await post(`${path}/close`, { handback: "PRIVATE-STATUS-CANARY", promote: [] });
     const closed = await status();
     expect(closed.closed_at).not.toBeNull();
-    expect(closed.next_actions).toMatchObject([{ method: "GET", url: "/v1/hello" }]);
+    expect(closed.next_actions).toMatchObject([
+      { method: "GET", url: "/v1/hello" },
+      { method: "GET", url: `${path}/workshop` },
+    ]);
     expect(closed.omitted).toContain("idle_enforcement");
     expect(closed.omitted).toContain("effective_permissions");
-    expect(reads.length).toBe(3);
+    const statusQueries = reads.filter((query) =>
+      query.includes("FROM sessions s JOIN problems p"),
+    );
+    expect(statusQueries).toHaveLength(3);
     for (const query of reads) {
       expect(query).not.toMatch(/\b(handback|body_md)\b|SELECT\s+\*/i);
+    }
+    for (const query of statusQueries) {
       expect(query).toContain("w.fellow_id = s.fellow_id");
       expect(query).toContain("s.fellow_id = ?");
     }
+    await f.db
+      .prepare("UPDATE problems SET admission_mode = 'invite-only' WHERE id = ?")
+      .bind(closed.problem_id)
+      .run();
+    await f.db
+      .prepare("DELETE FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?")
+      .bind(closed.problem_id, f.binding.fellowId)
+      .run();
+    expect((await status()).next_actions).toMatchObject([{ method: "GET", url: "/v1/hello" }]);
+    expect((await f.call(`${path}/workshop`)).status).toBe(404);
     const other = await addApprovedFellow(f, { suffix: "status-other", scopes: ["promote"] });
     const denied = await other.call(path);
     const absent = await other.call("/v1/sessions/S-00000000000000000000000000");
@@ -15225,6 +15246,10 @@ describe("committed promotion outbox nudge", () => {
       ...f.binding,
       grantedResources: { ...f.binding.grantedResources, problemBinding: "P-OTHER" },
     });
+    const reduced = SessionStatusResponseSchema.parse(
+      await (await f.call(`/v1/sessions/${session}`)).json(),
+    );
+    expect(reduced.next_actions).toMatchObject([{ method: "GET", url: "/v1/hello" }]);
     for (const path of [workshopDirectoryPath(session), pinned]) {
       const denied = await f.call(path);
       expect(denied.status).toBe(404);
