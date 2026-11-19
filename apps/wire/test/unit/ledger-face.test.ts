@@ -152,7 +152,7 @@ test("formulation fields share the untrusted renderer and whole-item byte budget
       const raw = await response.text();
       expect(new TextEncoder().encode(raw).length).toBeLessThanOrEqual(16_000);
       expect(raw).toContain("budget_exceeded");
-      expect(raw).toContain("/v1/problems/P-PATHS");
+      expect(raw).toContain("/p/P-PATHS/statements/2.json?through=2");
       if (suffix === "json") {
         const bounded = ProblemFaceResponseSchema.parse(JSON.parse(raw));
         for (const item of bounded.items.filter((item) => item.kind !== "problem-title")) {
