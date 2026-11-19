@@ -5111,7 +5111,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               },
             ]
           : []),
-        ...(reviewTemplate?.availability === "available" ||
+        ...((reviewTemplate?.availability === "available" && !promotionLimited) ||
         (auth.binding.grantedResources.eventBudget !== undefined &&
           authorizationEventsRecorded >= auth.binding.grantedResources.eventBudget)
           ? []
