@@ -8,6 +8,7 @@ import {
   FullPackPageSchema,
   type FullPackQuery,
   FullPackQuerySchema,
+  GroundedFalsificationCheckSchema,
   LedgerContractsSchema,
   ProblemFaceResponseSchema,
   ProblemFullResponseSchema,
@@ -176,6 +177,8 @@ function indexingHeaders(unlisted: boolean): Record<string, string> {
 }
 const PROBLEM_DIGEST_CANDIDATE_LIMIT = 200;
 const PROBLEM_DIGEST_TOKEN_BUDGET = 4_000;
+const LEDGER_ITEM_ID_SUFFIX = "[0-9A-HJKMNP-TV-Z]{1,78}";
+const PUBLIC_EVIDENCE_ID = new RegExp(`^E-${LEDGER_ITEM_ID_SUFFIX}$`);
 const PROBLEM_ROSTER_SOURCE_LIMIT = 128;
 const STATEMENT_REVIEW_LIMIT = 20;
 const PROBLEM_DIGEST_SELECT = `SELECT
@@ -1473,7 +1476,21 @@ async function loadClaimFace(
           : { kind: "unavailable" },
     ...(fold.novelty === undefined ? {} : { novelty: fold.novelty }),
   });
-  if (focus !== undefined && !section.candidates.some((item) => item.id === focus)) return null;
+  const focusedItem =
+    focus === undefined ? undefined : section.candidates.find((item) => item.id === focus);
+  if (focus !== undefined && focusedItem === undefined) return null;
+  // Claim-evidence candidates are JSON records serialized by the ledger projection.
+  const grounding =
+    focusedItem?.kind === "claim-evidence" && focusedItem.scope === "ledger"
+      ? GroundedFalsificationCheckSchema.safeParse(JSON.parse(focusedItem.body).falsification_check)
+      : undefined;
+  const citedEvidence = new Set(
+    grounding?.success
+      ? grounding.data.evidence
+          .map(({ evidence_id }) => evidence_id)
+          .filter((id) => PUBLIC_EVIDENCE_ID.test(id))
+      : [],
+  );
   const projection: Projection = {
     schema: "asimposium.claim-face.v1",
     kind: "claim-face",
@@ -1525,6 +1542,11 @@ async function loadClaimFace(
         : []),
     ],
     next_actions: [
+      ...Array.from(citedEvidence, (evidenceId) => ({
+        method: "GET" as const,
+        url: `/p/${encodeURIComponent(problemId)}/evidence/${evidenceId}.json`,
+        why: "Read this cited evidence publication and compare its content_digest to the recorded check.",
+      })),
       ...section.candidates
         .filter((item) => item.kind === "claim-dependency")
         .map((item) => ({
@@ -1958,7 +1980,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   ] as const) {
     app.on(["GET", "HEAD"], `/p/:id/${segment}/:target`, async (c) => {
       const problemId = c.req.param("id");
-      const matched = new RegExp(`^(${prefix}-[0-9A-HJKMNP-TV-Z]{1,78})\\.(md|json)$`).exec(
+      const matched = new RegExp(`^(${prefix}-${LEDGER_ITEM_ID_SUFFIX})\\.(md|json)$`).exec(
         c.req.param("target"),
       );
       const pinned =

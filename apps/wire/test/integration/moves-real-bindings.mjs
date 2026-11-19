@@ -1263,6 +1263,10 @@ await runLocalWorkerJourney(async (context) => {
   const oddItem = oddFace.items.find((item) => item.id === oddGrounding.evidence_id);
   const oddRecord = JSON.parse(oddItem.body);
   assert.equal(oddRecord.falsification_check, null);
+  assert.ok(
+    oddFace.next_actions.every(({ url }) => !url.includes("/evidence/")),
+    "ordinary evidence offers no falsification source action",
+  );
   const oddDigest = oddRecord.content_digest;
   assert.deepEqual(guide.outcomes.fired, { direction: "refutes", result: "fired" });
   const firedCheck = {
@@ -1293,6 +1297,18 @@ await runLocalWorkerJourney(async (context) => {
       .falsification_check;
   assert.deepEqual(readCheck(exactFired), firedCheck, "exact evidence retains the published check");
   assert.deepEqual(readCheck(fired), firedCheck, "the claim face retains the same check");
+  const citedEvidencePath = guide.evidence_read.path.replace("{evidence_id}", oddItem.id);
+  const sourceActions = exactFired.next_actions.filter(({ url }) => url.includes("/evidence/"));
+  assert.deepEqual(
+    sourceActions.map(({ method, url }) => ({ method, url })),
+    [{ method: "GET", url: citedEvidencePath }],
+    "the exact record links to the cited publication on the same problem",
+  );
+  const [readSource] = sourceActions;
+  const linkedFace = ClaimFaceResponseSchema.parse(await call(readSource.url));
+  const linkedEvidence = linkedFace.items.find(({ id }) => id === oddItem.id);
+  assert.ok(linkedEvidence);
+  assert.equal(JSON.parse(linkedEvidence.body).content_digest, oddDigest);
   const firedMarkdown = await worker.fetch(`${origin}${firedPath.replace(/\.json$/, ".md")}`, {
     headers: { "user-agent": userAgent },
     signal: AbortSignal.timeout(15_000),
@@ -1301,6 +1317,18 @@ await runLocalWorkerJourney(async (context) => {
   const firedMarkdownBody = await firedMarkdown.text();
   for (const value of [firedCheck.target_digest, oddItem.id, oddDigest])
     assert.ok(firedMarkdownBody.includes(value));
+  assert.ok(
+    firedMarkdownBody
+      .split("## Next actions (server-authored)")[1]
+      ?.includes(`\`GET ${readSource.url}\``),
+    "Markdown advertises the same source read as JSON",
+  );
+  await fixtures.setArtifactSourceVisibility(observerProblem, oddItem.id, "hidden");
+  try {
+    await call(readSource.url, undefined, undefined, 404);
+  } finally {
+    await fixtures.setArtifactSourceVisibility(observerProblem, oddItem.id, "visible");
+  }
 
   console.log(
     JSON.stringify({
@@ -1315,6 +1343,7 @@ await runLocalWorkerJourney(async (context) => {
       current_counterevidence_moves: true,
       grounded_falsification_from_move: true,
       friction_witness_followed_to_grounded_counterexample: true,
+      grounded_falsification_source_action_matched_digest: true,
       redacted_counterevidence_excluded: true,
       move_contract_followed_to_elimination: true,
       process_only_window_focus: true,
