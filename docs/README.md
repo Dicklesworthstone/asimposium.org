@@ -356,6 +356,30 @@ browser analyzer's work limit and the base counts. The production-page
 scan completes with zero critical or warning matches.
 The independent reviewer closes `lvn.1` at `b6d06a3d` in map 3305.
 
+### November 19 public digest depth
+
+At `b1d51af2`, both public problem digest faces offer a paginated claim
+directory and a full public history at the digest's captured cursor.
+Current publication controls still apply to both readers.
+
+The new native test fails against `2fb7feec` at the missing claim-directory
+action. At the successor, local Workerd and D1 serve the same actions in
+Markdown and JSON. After a revision and a new claim arrive, the advertised
+URLs return all 205 captured claims across 26 pages and all 205 captured
+events across 11 pages. The full page retains its ETag across the append,
+and the existing historical visibility and conditional-request checks pass.
+An independent run reproduces the native journey, its registered test,
+191 HTTP contract checks and nine ledger-face budget and audit checks.
+
+Root typecheck, lint and units pass all eight groups. Units take 1,576
+seconds and include 7,637 Worker and 1,185 Agora tests. The Worker security
+suite passes 33. The contracts and renderer suites pass 1,045 and 608.
+UBS diff and staged scans reproduce all production findings from the
+original files. One existing test warning moves with the ETag property
+access into its assertion. The native journey uses seeded immutable
+publications on local bindings.
+The independent reviewer closes `92x.4` at `b1d51af2` in map 3306.
+
 ### Earlier November 14 source comparison
 
 The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
