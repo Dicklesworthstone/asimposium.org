@@ -26,6 +26,7 @@ import {
   GapFileRequestSchema,
   GapTransitionRequestSchema,
   generateReviewRubricsDocument,
+  getMoveTemplate,
   HypothesisKillRequestSchema,
   HypothesisKillResponseSchema,
   HypothesisLifecycleRequestSchema,
@@ -4861,6 +4862,39 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         usage: authorizationUsage,
         now: authorizationObservedAt,
       }).decision === "allow";
+    let targetedReview = false;
+    if (
+      reviewAllowed &&
+      profile === "review" &&
+      targetParam !== null &&
+      targetSection.candidates.some(({ kind }) => kind === "claim-detail")
+    ) {
+      const [claimId, version] = targetParam.split("@") as [string, string];
+      const target = await db
+        .prepare(
+          `SELECT e.actor_fellow_id, (SELECT MAX(v.version) FROM claim_versions v
+             WHERE v.problem_id = e.problem_id AND v.claim_id = e.object_id) AS head_version
+           FROM events e WHERE e.problem_id = ? AND e.object_id = ? AND e.seq <= ?
+             AND e.object_kind = 'claim' AND e.type = 'claim.created' AND e.object_version = 1
+             AND e.actor_fellow_id IS NOT NULL AND e.actor_sponsor_id IS NOT NULL
+             AND e.model_string_self_declared IS NOT NULL AND e.harness IS NOT NULL
+           ORDER BY e.seq LIMIT 1`,
+        )
+        .bind(session.problem_id, claimId, cursor)
+        .first<{ actor_fellow_id: string; head_version: number | null }>();
+      targetedReview =
+        target !== null &&
+        target.head_version !== null &&
+        target.actor_fellow_id !== auth.binding.fellowId &&
+        (await claimTargetGuard(
+          { db, session },
+          claimId,
+          Number(version),
+          target.head_version,
+          true,
+        ).isLive());
+    }
+    const reviewTemplate = targetedReview ? getMoveTemplate("review") : undefined;
     if (
       protocolConflictAvailable &&
       !promotionLimited &&
@@ -4927,9 +4961,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         : { candidates: [], omitted: [], primaryMove: null, degraded: false };
     candidates.push(...workingMoves.candidates);
     if (
-      reviewAllowed &&
-      workingMoves.primaryMove !== null &&
-      isStatementReviewMove(workingMoves.primaryMove)
+      reviewTemplate?.availability === "available" ||
+      (reviewAllowed &&
+        workingMoves.primaryMove !== null &&
+        isStatementReviewMove(workingMoves.primaryMove))
     )
       actionPermissions.push("review:write");
     const firstReviewTarget =
@@ -4969,6 +5004,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // wqlf: an exhausted grant-wide event budget makes both write
       // affordances unusable, so the pack must not advertise them.
       action_candidates: [
+        ...(reviewTemplate?.availability === "available"
+          ? [
+              {
+                method: "GET" as const,
+                url: reviewTemplate.target_contract,
+                why: "Read the review request schema before submitting your checks.",
+                public_read: true,
+              },
+              {
+                method: reviewTemplate.request.method,
+                url: reviewTemplate.request.path.replace("{id}", session.session_id),
+                why: `Submit your own review of ${targetParam} with client_context_cursor ${cursor} and an Idempotency-Key.`,
+                public_read: false,
+                requires: ["review:write"],
+              },
+            ]
+          : []),
         ...orientation.actions,
         ...directiveContext.actions,
         ...(workingMoves.primaryMove !== null && isStatementReviewMove(workingMoves.primaryMove)
@@ -5059,8 +5111,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               },
             ]
           : []),
-        ...(auth.binding.grantedResources.eventBudget !== undefined &&
-        authorizationEventsRecorded >= auth.binding.grantedResources.eventBudget
+        ...(reviewTemplate?.availability === "available" ||
+        (auth.binding.grantedResources.eventBudget !== undefined &&
+          authorizationEventsRecorded >= auth.binding.grantedResources.eventBudget)
           ? []
           : promotionLimited
             ? [
@@ -10608,7 +10661,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   }
 
   function claimTargetGuard(
-    input: SimpleCreateInput,
+    input: { db: Env["DB"]; session: Pick<SessionRow, "problem_id"> },
     claimId: string,
     targetVersion: number,
     observedHeadVersion: number,

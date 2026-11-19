@@ -144,11 +144,23 @@ await runLocalWorkerJourney(
     );
     assert.ok(action, "working pack directs the Fellow to the isolated exact-version read");
     const isolated = PackResponseSchema.parse(await call(action.url, undefined, reviewer));
-    assert.ok(
-      isolated.items.some((item) => item.kind === "claim-detail" && item.id === firstTarget),
+    const selectedClaim = isolated.items.find(
+      (item) => item.kind === "claim-detail" && item.id === firstTarget,
     );
+    assert.ok(selectedClaim);
     assert.ok(!isolated.items.some((item) => item.scope === "workshop" || item.kind === "move"));
     assert.ok(!JSON.stringify(isolated).includes(privateCanary));
+    const submit = isolated.next_actions.find(
+      ({ method, url }) => method === "POST" && url === `${rp}/review`,
+    );
+    assert.ok(submit, "the isolated pack itself offers the canonical review write");
+    const schemaAction = isolated.next_actions.find(
+      ({ method, url }) => method === "GET" && url === canonical.target_contract,
+    );
+    assert.ok(schemaAction, "the isolated pack links the review request schema");
+    const requestSchema = await call(schemaAction.url);
+    assert.ok(requestSchema.required.includes("target_claim_id"));
+    assert.ok(requestSchema.required.includes("target_version"));
     const budgets = [800, 1500, 2500, 4000, 8000];
     for (const budget of budgets) {
       let pack = await getWorking(budget);
@@ -209,21 +221,50 @@ await runLocalWorkerJourney(
         .some((move) => move?.move === "review"),
       "author cannot receive a self-review recommendation",
     );
+    const readTarget = async (sessionPath, token, target) =>
+      PackResponseSchema.parse(
+        await call(
+          `${sessionPath}/pack?profile=review&target=${encodeURIComponent(target)}&max_tokens=8000`,
+          undefined,
+          token,
+        ),
+      );
+    const assertsNoReviewWrite = (pack) =>
+      assert.ok(
+        pack.next_actions.every(({ method, url }) => method !== "POST" || !url.endsWith("/review")),
+      );
+    assertsNoReviewWrite(await readTarget(ap, author, firstTarget));
+    const nonReviewer = await enroll("working-review-promoter", reviewerSponsor, {
+      requested_scopes: ["promote"],
+    });
+    const nonReviewerSession = await call(
+      "/v1/sessions",
+      { problem_id: problem, intent: "explore" },
+      nonReviewer,
+      201,
+    );
+    assertsNoReviewWrite(
+      await readTarget(`/v1/sessions/${nonReviewerSession.session_id}`, nonReviewer, firstTarget),
+    );
     const cut = first.cursor;
     const at = async (cursor) =>
       JSON.parse(
         await fixtures.reviewQueueAt(problem, cursor, reviewerCard.fellow_id, reviewerSponsor),
       );
     const oldQueue = await at(cut);
+    const { claim_id, version } = JSON.parse(selectedClaim.body);
     const reviewBody = ReviewRequestSchema.parse({
-      ...prefilled_hints,
+      target_claim_id: claim_id,
+      target_version: version,
+      client_context_cursor: isolated.cursor,
       verdict: "inform",
       basis: "Checked the identity zero equals twice zero in integer arithmetic.",
       capable_of_failure: "A mismatch in integer arithmetic would invalidate this check.",
       body_md:
         "This review reports a bounded arithmetic check, not a general theorem certification.",
     });
-    const reviewPath = canonical.request.path.replace("{id}", reviewSession.session_id);
+    const reviewPath = submit.url;
+    assert.equal(reviewPath, canonical.request.path.replace("{id}", reviewSession.session_id));
     const receipt = await call(reviewPath, reviewBody, reviewer, 201, "working-review-submit");
     const second = await getWorking();
     assert.deepEqual(
@@ -257,6 +298,7 @@ await runLocalWorkerJourney(
       "retraction removes the target",
     );
     assert.deepEqual(await at(cut), oldQueue, "retraction retains historical queue visibility");
+    assertsNoReviewWrite(await readTarget(rp, reviewer, `${records[1].claim_id}@1`));
     assert.ok(
       !JSON.stringify(moveOf(third)).includes("fabricated verdict"),
       "claim prose never becomes a trusted move instruction",
@@ -284,6 +326,7 @@ await runLocalWorkerJourney(
     assert.ok(event);
     await fixtures.redactPublicContent(event.id);
     const afterRedaction = await getWorking();
+    assertsNoReviewWrite(await readTarget(rp, reviewer, `${records[2].claim_id}@1`));
     assert.deepEqual(moveOf(afterRedaction).refs, [problem, `${records[0].claim_id}@2`]);
     assert.ok(!JSON.stringify(afterRedaction).includes("fabricated verdict"));
     assert.ok(
