@@ -380,6 +380,36 @@ access into its assertion. The native journey uses seeded immutable
 publications on local bindings.
 The independent reviewer closes `92x.4` at `b1d51af2` in map 3306.
 
+### November 19 exact detail links from public digests
+
+At `9ca0ec25`, individual claim links resolve at the digest cursor and
+the formulation link addresses its exact published version at that cursor.
+Both Markdown and JSON expose the same actions.
+
+The original Workerd links open claim version 2 and formulation version 7
+after revisions, from digests that showed versions 1 and 2 respectively.
+The corrected actions return the earlier publication text and versions.
+Direct head reads return the newer versions. Both real local Workerd
+journeys pass independently, along with 191 HTTP contracts. The claims
+journey seeds immutable publications. The formulation journey exercises
+mounted writes with fixture identity and screening.
+
+An initial new contract assertion also matched historical locators in the
+full export. Its correction tests the new action on both digest faces and
+keeps the full export's original disclosure checks. Independent review then
+finds a separate oversized-digest test expecting the former live URL.
+That exact run fails one of nine tests. The interrupted root run exits
+143 and retires its owned session. The successor `031e885d` changes only
+that assertion. Independent reexecution passes all nine ledger-face tests
+and both registered native journeys.
+
+Root typecheck, lint and units at `031e885d` each pass all eight groups.
+Units take 1,595 seconds and include 7,637 Worker and 1,185 Agora tests.
+Worker security passes 33 cases. The package contracts and renderer suites
+pass 1,045 and 608. UBS reproduces the base production findings and adds
+one warning for the new test's direct JSON decode.
+The independent reviewer closes `92x.5` at `031e885d` in map 3307.
+
 ### Earlier November 14 source comparison
 
 The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
