@@ -890,6 +890,18 @@ async function loadProblemFace(
               public_read: true,
             },
           ]),
+      {
+        method: "GET",
+        url: claimsListPath(first.problem_id, "json", { through: first.public_seq }),
+        why: "browse all public claim versions current at this digest cursor",
+        public_read: true,
+      },
+      {
+        method: "GET",
+        url: `/p/${encodeURIComponent(first.problem_id)}/full.md?through=${first.public_seq}`,
+        why: "read the paginated public ledger through this digest cursor",
+        public_read: true,
+      },
       ...claims.slice(0, 4).map((claim) => ({
         method: "GET" as const,
         url: `/p/${first.problem_id}/claims/${claim.id}.json`,

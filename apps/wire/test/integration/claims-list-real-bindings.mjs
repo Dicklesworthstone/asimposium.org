@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { ContractProblemSchema, FullPackPageSchema } from "@asimposium/contracts";
+import {
+  ContractProblemSchema,
+  FullPackPageSchema,
+  ProblemFaceResponseSchema,
+} from "@asimposium/contracts";
 import { ClaimsListResponseSchema } from "@asimposium/contracts/claims-list";
 import { parseClaimsListToon } from "@asimposium/render/claims-list";
 import { ensureProblem, writeLedgerEvent } from "../../src/krater/krater.ts";
@@ -57,6 +61,24 @@ async function claimsListJourney({ call, worker, env, origin, userAgent }) {
   for (let number = 1; number <= 205; number++) {
     await appendClaimsListFixture(env.DB, problem, number);
   }
+  const digest = ProblemFaceResponseSchema.parse(await call(`/p/${problem}.json`));
+  assert.equal(digest.cursor, 205);
+  const claimDirectory = `/p/${problem}/claims.json?through=${digest.cursor}`;
+  const firstFullPath = `/p/${problem}/full.md?through=${digest.cursor}`;
+  const markdownDigest = await worker.fetch(`${origin}/p/${problem}.md`, {
+    headers: { "User-Agent": userAgent },
+  });
+  assert.equal(markdownDigest.status, 200);
+  const markdownActions = (await markdownDigest.text()).split(
+    "## Next actions (server-authored)",
+  )[1];
+  for (const path of [claimDirectory, firstFullPath]) {
+    assert.ok(
+      digest.next_actions.some(({ method, url }) => method === "GET" && url === path),
+      `The public JSON digest links to ${path}`,
+    );
+    assert.ok(markdownActions?.includes(`\`GET ${path}\``), `Markdown offers the same GET ${path}`);
+  }
   const list = async (query = "") =>
     ClaimsListResponseSchema.parse(await call(`/p/${problem}/claims.json${query}`));
   const toon = async (query = "") => {
@@ -93,22 +115,23 @@ async function claimsListJourney({ call, worker, env, origin, userAgent }) {
     }
     return { ...page, response, body, next };
   };
-  const first = await list();
-  assert.deepEqual((await toon()).face, first);
-  assert.equal(first.cursor, 205);
+  const fullEtag = (await full(firstFullPath)).response.headers.get("etag");
+  assert.ok(fullEtag);
+
+  // The advertised reads retain the digest cursor after the public head advances.
+  await appendClaimsListFixture(env.DB, problem, 1, 2);
+  await appendClaimsListFixture(env.DB, problem, 206);
+  const first = ClaimsListResponseSchema.parse(await call(claimDirectory));
+  assert.deepEqual((await toon(`?through=${digest.cursor}`)).face, first);
+  assert.equal(first.cursor, digest.cursor);
   assert.equal(first.count, 8);
   assert.equal(first.next_after, 8);
-  const firstFullPath = `/p/${problem}/full.md?through=${first.cursor}&after=0`;
   const firstFull = await full(firstFullPath);
   assert.equal(firstFull.control.through, first.cursor);
   assert.ok(firstFull.control.records > 0);
   assert.equal(firstFull.control.has_more, true);
-  const fullEtag = firstFull.response.headers.get("etag");
-  assert.ok(fullEtag);
+  assert.equal(firstFull.response.headers.get("etag"), fullEtag);
 
-  // A later mutable head cannot reorder or replace the captured publications.
-  await appendClaimsListFixture(env.DB, problem, 1, 2);
-  await appendClaimsListFixture(env.DB, problem, 206);
   const seen = [...first.claims];
   let after = first.next_after;
   let pages = 1;
