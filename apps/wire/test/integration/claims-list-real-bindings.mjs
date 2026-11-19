@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  ClaimFaceResponseSchema,
   ContractProblemSchema,
   FullPackPageSchema,
   ProblemFaceResponseSchema,
@@ -65,6 +66,11 @@ async function claimsListJourney({ call, worker, env, origin, userAgent }) {
   assert.equal(digest.cursor, 205);
   const claimDirectory = `/p/${problem}/claims.json?through=${digest.cursor}`;
   const firstFullPath = `/p/${problem}/full.md?through=${digest.cursor}`;
+  const latestClaimPath = `/p/${problem}/claims/C-1.json`;
+  const claimAction = digest.next_actions.find(
+    ({ url }) => new URL(url, origin).pathname === latestClaimPath,
+  );
+  assert.equal(claimAction?.method, "GET");
   const markdownDigest = await worker.fetch(`${origin}/p/${problem}.md`, {
     headers: { "User-Agent": userAgent },
   });
@@ -121,6 +127,18 @@ async function claimsListJourney({ call, worker, env, origin, userAgent }) {
   // The advertised reads retain the digest cursor after the public head advances.
   await appendClaimsListFixture(env.DB, problem, 1, 2);
   await appendClaimsListFixture(env.DB, problem, 206);
+  const capturedClaim = ClaimFaceResponseSchema.parse(await call(claimAction.url));
+  assert.equal(capturedClaim.claim_state.version, 1, "The digest's claim link keeps version one");
+  assert.equal(capturedClaim.cursor, digest.cursor);
+  assert.equal(
+    JSON.parse(capturedClaim.items.find(({ kind }) => kind === "claim-detail")?.body ?? "null")
+      ?.statement,
+    "Let the fixture path 1 have 1 distinguished endpoints.",
+  );
+  assert.equal(claimAction.url, `${latestClaimPath}?through=${digest.cursor}`);
+  assert.ok(markdownActions?.includes(`\`GET ${claimAction.url}\``));
+  const currentClaim = ClaimFaceResponseSchema.parse(await call(latestClaimPath));
+  assert.equal(currentClaim.claim_state.version, 2);
   const first = ClaimsListResponseSchema.parse(await call(claimDirectory));
   assert.deepEqual((await toon(`?through=${digest.cursor}`)).face, first);
   assert.equal(first.cursor, digest.cursor);

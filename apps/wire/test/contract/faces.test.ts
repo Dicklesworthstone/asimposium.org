@@ -2907,8 +2907,11 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
       ).run(enlarged.payloadJson, enlarged.digest);
       const bounded = ProblemFaceResponseSchema.parse(await (await read(".json")).json());
       expect(bounded.omitted.some((entry) => entry.reason === "budget_exceeded")).toBe(true);
-      expect(bounded.next_actions.some((action) => action.url === "/v1/problems/P-TEST")).toBe(
-        true,
+      expect(bounded.next_actions).toContainEqual(
+        expect.objectContaining({
+          method: "GET",
+          url: `/p/P-TEST/statements/2.json?through=${bounded.cursor}`,
+        }),
       );
       for (const [kind, field] of [
         ["problem-statement", "statement"],
@@ -2977,6 +2980,7 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
           expect(body).not.toContain("PROJECTION-ONLY-CANARY");
           expect(body).not.toContain("CURRENT-WITHDRAWN-SOURCE-CANARY");
           expect(body).not.toContain("/v1/problems/P-TEST");
+          if (suffix !== "/full.md") expect(body).not.toContain("/p/P-TEST/statements/");
           if (suffix === ".json") {
             const face = ProblemFaceResponseSchema.parse(JSON.parse(body));
             expect(face.items.some((item) => item.kind.startsWith("problem-"))).toBe(false);

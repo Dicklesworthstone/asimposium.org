@@ -33,6 +33,7 @@ import {
   claimsListPath,
 } from "@asimposium/contracts/claims-list";
 import { FormalRecordsQuerySchema } from "@asimposium/contracts/formal-records";
+import { statementVersionPath } from "@asimposium/contracts/statements";
 import {
   type ComposedPack,
   composePack,
@@ -885,8 +886,13 @@ async function loadProblemFace(
         : [
             {
               method: "GET" as const,
-              url: `/v1/problems/${first.problem_id}`,
-              why: "the complete current formulation, including fields omitted by the digest budget",
+              url: statementVersionPath(
+                first.problem_id,
+                formulation.current_statement_version,
+                "json",
+                { through: first.public_seq },
+              ),
+              why: "the full formulation at this digest cursor, including fields omitted by the budget",
               public_read: true,
             },
           ]),
@@ -904,8 +910,8 @@ async function loadProblemFace(
       },
       ...claims.slice(0, 4).map((claim) => ({
         method: "GET" as const,
-        url: `/p/${first.problem_id}/claims/${claim.id}.json`,
-        why: "statement, computed standing, evidence and reviews for this claim",
+        url: `/p/${encodeURIComponent(first.problem_id)}/claims/${claim.id}.json?through=${first.public_seq}`,
+        why: "statement, computed standing, evidence and reviews through this digest cursor",
         public_read: true,
       })),
       {

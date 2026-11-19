@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { ProblemFaceResponseSchema } from "@asimposium/contracts";
 import {
   StatementHistoryResponseSchema,
   StatementResponseSchema,
@@ -88,6 +89,20 @@ await runLocalWorkerJourney(
     assert.deepEqual(admitted.statement.acting_principal, { type: "sponsor", id: owner });
     assert.equal(admitted.statement.publication.seq, admitted.cursor);
     await call(`/p/${problem}/statements/1.json`, undefined, undefined, 404);
+    const digest = ProblemFaceResponseSchema.parse(await call(`/p/${problem}.json`));
+    assert.equal(digest.cursor, admitted.cursor);
+    const latestFormulationPath = `/v1/problems/${problem}`;
+    const priorFormulationPath = `/p/${problem}/statements/2.json`;
+    const formulationAction = digest.next_actions.find(({ url }) => {
+      const { pathname } = new URL(url, origin);
+      return pathname === latestFormulationPath || pathname === priorFormulationPath;
+    });
+    assert.equal(formulationAction?.method, "GET");
+    const markdownDigest = await read(`/p/${problem}.md`);
+    assert.equal(markdownDigest.status, 200);
+    const markdownActions = (await markdownDigest.text()).split(
+      "## Next actions (server-authored)",
+    )[1];
 
     for (let version = 3; version <= 7; version++) {
       const revision = await govern({
@@ -98,6 +113,16 @@ await runLocalWorkerJourney(
       });
       assert.equal(revision.problem.current_statement_version, version);
     }
+    const linked = await call(formulationAction.url);
+    assert.equal(
+      linked.problem?.current_statement_version ?? linked.statement?.version,
+      2,
+      "The digest's formulation link keeps version two",
+    );
+    assert.deepEqual(StatementResponseSchema.parse(linked), admitted);
+    assert.equal(formulationAction.url, `${priorFormulationPath}?through=${digest.cursor}`);
+    assert.ok(markdownActions?.includes(`\`GET ${formulationAction.url}\``));
+    assert.equal((await call(latestFormulationPath)).problem.current_statement_version, 7);
     const first = await history();
     assert.deepEqual(
       first.statements.map((item) => item.version),
