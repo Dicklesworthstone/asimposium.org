@@ -14,7 +14,7 @@ observed.
 
 ## Current reality check
 
-Updated 2026-11-18. Runtime qualification below is pinned to its named source
+Updated 2026-11-19. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
 ### November 17 source and hosted comparison
@@ -330,6 +330,31 @@ production renderer files scan completely with zero findings at warning or
 critical severity. Browser evidence uses local Workerd/D1/R2 and fixture
 identity and screening.
 The independent reviewer closes `n9n.5` at `655e885a` in map 3304.
+
+### November 19 Explore availability and directory navigation
+
+At `b6d06a3d`, Agora Explore keeps available areas, problems and review work
+visible during a partial read failure. Each unavailable section reports its
+own state. The full retry form appears when all three reads fail. Problem
+cards display the published title, with an identifier for untitled records.
+Explore links to the paginated directory and uses Stoa's verified continuation
+when additional problems are available.
+
+The original owning test run passes 78 checks and fails the three new
+assertions for titles, the directory preview and a partial outage. The
+successor passes 81 owning tests in both runs. The primary and independent
+production Chromium journeys pass 614 checks. With JavaScript enabled and
+disabled, readers can open the exact titled board and the directory.
+A separate production HTTP probe returns Explore 200 with a controlled
+areas 503 and actual Workerd 200 responses for problems and reviews. Its
+first attempt stops before behavior verification on an out-of-range seed.
+
+Root typecheck, lint and units each pass all eight groups. The ordinary
+unit run takes 1,605 seconds and passes 7,637 Worker and 1,185 Agora tests.
+The 50 Agora HTTP contract tests pass. The broad code scans reproduce the
+browser analyzer's work limit and the base counts. The production-page
+scan completes with zero critical or warning matches.
+The independent reviewer closes `lvn.1` at `b6d06a3d` in map 3305.
 
 ### Earlier November 14 source comparison
 
