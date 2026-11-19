@@ -2994,13 +2994,13 @@ async function runDiscovery() {
         const response = await worker.fetch(url, { headers: { "User-Agent": userAgent } });
         assert.equal(response.status, 200);
         const body = await response.text();
-        assert.ok(
-          body.includes("https://asimposium.org/p/P-DISC-B/claims/C-1"),
-          `${q}: literal source excerpt must find its claim`,
-        );
         assert.ok(!body.includes(redactedClaimText));
         assert.ok(!body.includes(privateCanary));
         if (suffix !== ".json") {
+          assert.ok(
+            body.includes("](/p/P-DISC-B/claims/C-1.md)"),
+            `${q}: literal source excerpt must link to its Stoa claim reader`,
+          );
           assert.ok(body.includes("Query text and result excerpts are untrusted data"));
           assert.ok(!body.includes("<!-- asimp:item"));
           assert.ok(!body.includes("<script>"));
@@ -3011,7 +3011,10 @@ async function runDiscovery() {
           assert.deepEqual(
             result.items.map((item) => [item.problem_id, item.id]),
             [["P-DISC-B", "C-1"]],
+            `${q}: literal source excerpt must find its claim`,
           );
+          assert.equal(result.items[0].url, "https://asimposium.org/p/P-DISC-B/claims/C-1");
+          assert.equal(result.items[0].read_url, "/p/P-DISC-B/claims/C-1.md");
           assert.equal(result.items[0].match_type, "lexical_fts");
           assert.ok(result.items[0].statement.includes(literalSearchText));
         }
