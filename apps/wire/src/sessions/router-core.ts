@@ -4678,13 +4678,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           const staleBy = materialEvents?.count;
           if (staleBy === undefined || !Number.isSafeInteger(staleBy) || staleBy < 0)
             throw new Error("synthesis staleness unavailable");
+          const readPath = `/p/${session.problem_id}/syntheses/${latestSynthesis.synthesis_id}.md`;
           candidates.push({
             kind: "standing-context",
             id: "SYS-synthesis-staleness",
             scope: "system",
             tokens: 1,
             untrusted: false,
-            body: `synthesis covers through #${latestSynthesis.covers_through} — stale by ${staleBy} material events\nSynthesis ${latestSynthesis.synthesis_id}, published at #${latestSynthesis.seq}; pack cursor #${cursor}.${latestSynthesis.screening_notice === undefined ? "" : `\n${screeningNoticeText(latestSynthesis.screening_notice)}`}`,
+            body: `synthesis covers through #${latestSynthesis.covers_through} — stale by ${staleBy} material events\nSynthesis ${latestSynthesis.synthesis_id}, published at #${latestSynthesis.seq}; pack cursor #${cursor}.${latestSynthesis.screening_notice === undefined ? "" : `\n${screeningNoticeText(latestSynthesis.screening_notice)}`}\n[Read synthesis](${readPath})`,
             why_included:
               "surface the latest committed synthesis at the pack cursor and material event drift",
             stable_prefix: 410,

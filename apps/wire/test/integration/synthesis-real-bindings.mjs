@@ -279,6 +279,7 @@ await runLocalWorkerJourney(
     assert.equal(synthRows[1].synthesis_id, synth2.synthesis_id);
     assert.equal(synthRows[1].dropped_single_author_count, 1);
 
+    const synth2ReadPath = `/p/${problemId}/syntheses/${synth2.synthesis_id}.md`;
     const assertSynthesisDrift = async (expected) => {
       const exact = SingleSynthesisResponseSchema.parse(
         await call(`/p/${problemId}/syntheses/${synth2.synthesis_id}.json`),
@@ -296,10 +297,23 @@ await runLocalWorkerJourney(
             200,
           ),
         );
+        const staleness = pack.items.find((item) => item.id === "SYS-synthesis-staleness");
+        const readLink = staleness?.body.match(/^\[Read synthesis\]\((\/p\/[^\n)]+)\)$/m)?.[1];
         assert.equal(
-          pack.items.find((item) => item.id === "SYS-synthesis-staleness")?.body,
-          `synthesis covers through #${synth2.covers_through} — stale by ${expected} material events\nSynthesis ${synth2.synthesis_id}, published at #${synth2.sequence}; pack cursor #${pack.cursor}.`,
+          readLink,
+          synth2ReadPath,
+          `${profile} links directly to the synthesis it assessed`,
         );
+        assert.equal(
+          staleness.body,
+          `synthesis covers through #${synth2.covers_through} — stale by ${expected} material events\nSynthesis ${synth2.synthesis_id}, published at #${synth2.sequence}; pack cursor #${pack.cursor}.\n[Read synthesis](${readLink})`,
+        );
+        const response = await worker.fetch(`${origin}${readLink}`, {
+          headers: { "User-Agent": userAgent },
+        });
+        assert.equal(response.status, 200);
+        assert.match(response.headers.get("content-type"), /^text\/markdown\b/);
+        assert.ok((await response.text()).includes(exact.synthesis.body_md));
       }
     };
     await assertSynthesisDrift(0);
@@ -782,7 +796,7 @@ await runLocalWorkerJourney(
     );
     assert.equal(
       stalenessItem.body,
-      `synthesis covers through #${latest.covers_through} — stale by ${exactLatest.staleness.material_events_since} material events\nSynthesis ${latest.synthesis_id}, published at #${latest.seq}; pack cursor #${fullOrient.cursor}.`,
+      `synthesis covers through #${latest.covers_through} — stale by ${exactLatest.staleness.material_events_since} material events\nSynthesis ${latest.synthesis_id}, published at #${latest.seq}; pack cursor #${fullOrient.cursor}.\n[Read synthesis](/p/${problemId}/syntheses/${latest.synthesis_id}.md)`,
     );
 
     // 12. Minority finding coverage: hypotheses and dead ends
@@ -1045,6 +1059,7 @@ await runLocalWorkerJourney(
         warningFaces.push({ url, etag });
       }
     }
+    const warnedReadPath = `/p/${problemId}/syntheses/${warned.synthesis_id}.md`;
     for (const profile of ["orient", "working"]) {
       const pack = PackResponseSchema.parse(
         await call(
@@ -1055,8 +1070,14 @@ await runLocalWorkerJourney(
       );
       const latest = pack.items.find((item) => item.id === "SYS-synthesis-staleness");
       assert.ok(latest?.body.includes(warned.synthesis_id));
+      assert.ok(latest.body.includes(`[Read synthesis](${warnedReadPath})`));
       assert.ok(latest.body.includes(warningText));
     }
+    const oldSynthesis = await worker.fetch(`${origin}${synth2ReadPath}`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(oldSynthesis.status, 200);
+    assert.ok((await oldSynthesis.text()).includes("## State of the Problem v2"));
     const fullWarningPack = PackResponseSchema.parse(
       await call(
         `/v1/sessions/${retainedSession.session_id}/pack?profile=full&max_tokens=8000&after=${warned.sequence - 1}&through=${warned.sequence}`,
@@ -1110,6 +1131,26 @@ await runLocalWorkerJourney(
         .run();
     }
     await controlWarnedSynthesis("hidden", 1);
+    const hiddenSynthesis = await worker.fetch(`${origin}${warnedReadPath}`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(hiddenSynthesis.status, 404);
+    for (const profile of ["orient", "working"]) {
+      const pack = PackResponseSchema.parse(
+        await call(
+          `/v1/sessions/${retainedSession.session_id}/pack?profile=${profile}&max_tokens=8000`,
+          undefined,
+          retainedWriter,
+        ),
+      );
+      assert.ok(!pack.items.some((item) => item.id === "SYS-synthesis-staleness"));
+      assert.ok(!JSON.stringify(pack).includes(warnedReadPath));
+      assert.ok(
+        pack.omitted.some(
+          (item) => item.reason === "content_unavailable" && item.detail === "synthesis-staleness",
+        ),
+      );
+    }
     for (const face of warningFaces) {
       const response = await worker.fetch(face.url, {
         headers: { "User-Agent": userAgent, "If-None-Match": face.etag },
