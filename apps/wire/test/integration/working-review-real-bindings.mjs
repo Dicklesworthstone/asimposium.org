@@ -338,6 +338,8 @@ await runLocalWorkerJourney(
     // record to the same current claim version. Default faces stay bounded;
     // known exact item URLs must still reach the twenty-first work product.
     const exactRecords = [];
+    const revisedTarget = `${records[0].claim_id}@${revised.version}`;
+    const claimPackPath = `${rp}/pack?profile=claim&target=${revisedTarget}&max_tokens=8000`;
     for (let index = 0; index < 21; index++) {
       const token = await enroll(`exact-item-reader-${index}`, `usr_exact_item_reader_${index}`);
       const session = await call(
@@ -376,6 +378,51 @@ await runLocalWorkerJourney(
         201,
       );
       exactRecords.push({ review, evidence });
+      if (index === 0) {
+        const paths = [
+          ["claim-review", review.review_id, `/p/${problem}/reviews/${review.review_id}.json`],
+          [
+            "claim-evidence",
+            evidence.evidence_id,
+            `/p/${problem}/evidence/${evidence.evidence_id}.json`,
+          ],
+        ];
+        const packs = [
+          PackResponseSchema.parse(await call(claimPackPath, undefined, reviewer)),
+          await readTarget(rp, reviewer, revisedTarget),
+        ];
+        for (const pack of packs) {
+          assert.ok(pack.tokens_estimate <= 8000);
+          assert.ok(!JSON.stringify(pack).includes(privateCanary));
+          for (const [kind, id, path] of paths) {
+            const item = pack.items.find((item) => item.kind === kind && item.id === id);
+            assert.ok(item, `${pack.profile}: publication ${id} is in the pack`);
+            assert.equal(item.scope, "ledger");
+            assert.equal(item.untrusted, true);
+            const record = JSON.parse(item.body);
+            assert.equal(
+              record.read_url,
+              path,
+              `${pack.profile}: exact publication URL for ${kind}`,
+            );
+            assert.match(record.content_digest, /^sha256:[a-f0-9]{64}$/);
+            assert.equal(record.target, revisedTarget);
+            const face = ClaimFaceResponseSchema.parse(await call(record.read_url));
+            const exact = face.items.find((item) => item.kind === kind && item.id === id);
+            assert.ok(exact, "advertised reader returns the same record ID");
+            const published = JSON.parse(exact.body);
+            for (const field of ["target", "event", "seq", "content_digest", "body_md"]) {
+              assert.ok(record[field] !== undefined, field);
+              assert.deepEqual(published[field], record[field], field);
+            }
+            assert.ok(!JSON.stringify(face).includes(privateCanary));
+          }
+        }
+        assert.deepEqual(await readTarget(rp, reviewer, revisedTarget), packs[1]);
+        console.log(
+          JSON.stringify({ stage: "target-pack-exact-publications", profiles: 2, items: 2 }),
+        );
+      }
       console.log(JSON.stringify({ stage: "exact-item-http-publication", fellow: index + 1 }));
     }
     const last = exactRecords.at(-1);
@@ -393,6 +440,9 @@ await runLocalWorkerJourney(
         ids,
         exactRecords.slice(0, ids.length).map((record) => record[field][idField]),
       );
+      const first = ordinary.items.find((item) => item.kind === kind);
+      const segment = field === "review" ? "reviews" : "evidence";
+      assert.equal(JSON.parse(first.body).read_url, `/p/${problem}/${segment}/${first.id}.json`);
       if (ids.length < 20)
         assert.ok(ordinary.omitted.some((item) => item.reason === "budget_exceeded"));
     }
@@ -483,22 +533,43 @@ await runLocalWorkerJourney(
     await env.DB.prepare("UPDATE problems SET status = 'active', unlisted = 0 WHERE id = ?")
       .bind(problem)
       .run();
-    for (const [table, column, id, path] of [
-      ["reviews", "review_id", last.review.review_id, exactPaths[0]],
-      ["evidence", "evidence_id", last.evidence.evidence_id, exactPaths[1]],
+    const firstPublications = exactRecords[0];
+    for (const { review, evidence } of [firstPublications, last]) {
+      for (const [table, column, id] of [
+        ["reviews", "review_id", review.review_id],
+        ["evidence", "evidence_id", evidence.evidence_id],
+      ]) {
+        const path = `/p/${problem}/${table}/${id}.json`;
+        const oldEtag = (await rawPublic(path)).headers.get("etag");
+        assert.ok(oldEtag);
+        const event = await env.DB.prepare(
+          `SELECT source_event_id AS id FROM ${table} WHERE problem_id = ? AND ${column} = ?`,
+        )
+          .bind(problem, id)
+          .first();
+        assert.ok(event);
+        await fixtures.redactPublicContent(event.id);
+        assert.equal(
+          (await rawPublic(path, { headers: { "If-None-Match": oldEtag } })).status,
+          404,
+        );
+        const head = await rawPublic(path, { method: "HEAD" });
+        assert.equal(head.status, 404);
+        assert.equal(await head.text(), "");
+      }
+    }
+    for (const pack of [
+      PackResponseSchema.parse(await call(claimPackPath, undefined, reviewer)),
+      await readTarget(rp, reviewer, revisedTarget),
     ]) {
-      const oldEtag = (await rawPublic(path)).headers.get("etag");
-      const event = await env.DB.prepare(
-        `SELECT source_event_id AS id FROM ${table} WHERE problem_id = ? AND ${column} = ?`,
-      )
-        .bind(problem, id)
-        .first();
-      assert.ok(event);
-      await fixtures.redactPublicContent(event.id);
-      assert.equal((await rawPublic(path, { headers: { "If-None-Match": oldEtag } })).status, 404);
-      const head = await rawPublic(path, { method: "HEAD" });
-      assert.equal(head.status, 404);
-      assert.equal(await head.text(), "");
+      for (const id of [
+        firstPublications.review.review_id,
+        firstPublications.evidence.evidence_id,
+      ]) {
+        assert.ok(!pack.items.some((item) => item.id === id));
+      }
+      assert.ok(!JSON.stringify(pack).includes("EXACT_REVIEW_WORK_PRODUCT_0:"));
+      assert.ok(!JSON.stringify(pack).includes("EXACT_EVIDENCE_WORK_PRODUCT_0:"));
     }
     console.log(
       JSON.stringify({

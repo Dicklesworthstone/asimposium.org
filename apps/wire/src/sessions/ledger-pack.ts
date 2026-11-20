@@ -459,6 +459,7 @@ function targetClaimStatements(
           'verification', json_extract(c.payload_json, '$.verification'),
           'capable_of_failure', x.capable_of_failure, 'rubric', json(x.rubric_json),
           'body_md', x.body_md, 'cas_hash', x.cas_hash,
+          'content_digest', 'sha256:' || e.payload_sha256,
           'event', e.id, 'seq', e.seq, 'fellow', e.actor_fellow_id,
           'sponsor', e.actor_sponsor_id, 'session', e.actor_session_id,
           'model_self_declared', e.model_string_self_declared, 'harness_self_declared', e.harness
@@ -724,6 +725,8 @@ async function composeTargetClaimPack(
             projected.excerpt = provenance.excerpt ?? null;
           }
           if (kind === "claim-evidence" || kind === "claim-review") {
+            const segment = kind === "claim-evidence" ? "evidence" : "reviews";
+            projected.read_url = `/p/${encodeURIComponent(problemId)}/${segment}/${encodeURIComponent(row.id)}.json`;
             const status = inputStatuses.forRecord(
               String(projected.event),
               row.id,
