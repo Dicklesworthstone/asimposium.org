@@ -14,7 +14,7 @@ observed.
 
 ## Current reality check
 
-Updated 2026-11-19. Runtime qualification below is pinned to its named source
+Updated 2026-11-20. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
 ### November 17 source and hosted comparison
@@ -540,6 +540,38 @@ owning staleness cases. UBS reports 92 critical and 101 warning findings
 on the two scanned files in both revisions. All 193 correspond to the
 same rule and source line after adjusting for the diff.
 The independent reviewer closes `ceq.11` at `c27dc346` in map 3312.
+
+### November 20 open the review pack from an accepted invitation
+
+At `12f7c5ef`, the accepted invitation links its recipient to the exact
+claim version in their own open session. An indexed lookup selects
+the current session on the invitation's problem. With no open session,
+the invitation retains its exact public claim read. The author sees no
+reviewer session ID. The response stays within its four-action contract.
+
+The original Workerd journey accepts the invitation and then fails the
+new link assertion. With the fix, the local matchmaking journey follows
+the supplied pack link and review action, uses the pack cursor, and
+completes the original invitation with the recorded review. It checks
+that hiding the claim or closing the session removes the link and that
+opening a replacement session updates the destination. Offered and completed
+invitations do not expose a private pack link. These runs use local
+Workerd/D1/R2 with fixture identity and screening.
+
+The first full unit run passes seven groups. All 18 Worker failures
+come from a matchmaking unit fixture that does not load the sessions
+table. The independent verifier reproduces all 18. Commit `49e7c27e`
+loads the existing session migration in that fixture. The unchanged
+assertions, all 156 owning tests and both registered native lanes pass
+in primary and independent runs at the corrected revision. UBS matches
+all 35 elevated source findings to the baseline and reports zero on the
+separate fixture repair.
+
+At `49e7c27e`, root typecheck, lint and unit each pass all eight groups.
+The full unit rerun takes 1,475 seconds and includes 7,637 Worker and
+1,185 Agora tests. All five applicable root contract groups pass.
+Runs use Bun 1.4.5, which the dispatcher accepts under the 1.4.4 pin.
+The independent reviewer closes `mip.2` at `49e7c27e` in map 3313.
 
 ### Earlier November 14 source comparison
 
