@@ -136,6 +136,46 @@ await runLocalWorkerJourney(
       const result = await call(`/v1/p/${problem}/next`, undefined, author);
       return [result.primary_move, ...result.alternatives];
     };
+    const preparedRoutes = async (move, expectedIds) => {
+      assert.ok(move, "the selected scientific move exists");
+      const prep = move.contract.preparation;
+      const reads = [prep.read_first, ...prep.additional_reads];
+      assert.deepEqual(
+        prep.hypothesis_pins.map((pin) => pin.hypothesis_id),
+        expectedIds,
+      );
+      assert.equal(reads.length, expectedIds.length);
+      const snapshots = [];
+      for (let index = 0; index < reads.length; index++) {
+        const action = reads[index];
+        const pin = prep.hypothesis_pins[index];
+        assert.equal(action.method, "GET");
+        assert.equal(
+          action.path,
+          `/p/${problem}/hypotheses/${pin.hypothesis_id}.md?through=${prep.captured_cursor}`,
+          "preparation reads one exact route, not a page of neighboring work",
+        );
+        const rendered = await worker.fetch(`${origin}${action.path}`, {
+          headers: { "User-Agent": userAgent },
+        });
+        assert.equal(rendered.status, 200);
+        const markdown = await rendered.text();
+        const jsonPath = action.path.replace(".md?", ".json?");
+        const snapshot = HypothesesResponseSchema.parse(await call(jsonPath));
+        assert.equal(snapshot.cursor, prep.captured_cursor);
+        assert.equal(snapshot.next_after, null);
+        assert.deepEqual(snapshot.omitted, []);
+        assert.equal(snapshot.hypotheses.length, 1);
+        const route = snapshot.hypotheses[0];
+        assert.equal(route.hypothesis_id, pin.hypothesis_id);
+        assert.equal(route.publication.event_id, pin.event_id);
+        assert.equal(route.publication.seq, pin.seq);
+        assert.equal(route.publication.payload_sha256, pin.payload_sha256);
+        assert.ok(markdown.includes(route.content.route));
+        snapshots.push({ jsonPath, snapshot });
+      }
+      return snapshots;
+    };
     const count = async (sql, ...values) =>
       (
         await env.DB.prepare(sql)
@@ -171,8 +211,10 @@ await runLocalWorkerJourney(
     const second = await create("competing");
     const initial = await face(first);
     const original = initial.hypotheses[0];
+    const thirdAlternative = (await next()).find((move) => move.move === "third-alternative");
+    const originalMoveSources = await preparedRoutes(thirdAlternative, [first, second]);
     assert.ok(
-      (await next()).some((move) => move.move === "third-alternative" && move.refs.includes(first)),
+      thirdAlternative.refs.includes(first),
       "two active routes offer a concrete third-alternative move",
     );
     const unauthorized = await change(
@@ -210,6 +252,13 @@ await runLocalWorkerJourney(
       "accepted replay preserves exact receipt",
     );
     assert.equal((await read(first)).status, "deferred");
+    for (const source of originalMoveSources) {
+      assert.deepEqual(
+        HypothesesResponseSchema.parse(await call(source.jsonPath)),
+        source.snapshot,
+        "later lifecycle changes do not rewrite the advertised preparation snapshot",
+      );
+    }
     assert.ok(
       (await next()).every((move) => !move.refs.includes(first)),
       "a deferred route leaves live recommendations",
@@ -278,6 +327,23 @@ await runLocalWorkerJourney(
     assert.equal((await read(first)).last_event.event_id, resumed.event_id);
 
     const successor = await create("narrower boundary");
+    const discriminate = (await next()).find((move) => move.move === "discriminate");
+    const discriminationSources = await preparedRoutes(discriminate, [first, second, successor]);
+    await fixtures.setArtifactSourceVisibility(problem, first, "hidden");
+    try {
+      const withheld = HypothesesResponseSchema.parse(
+        await call(discriminationSources[0].jsonPath),
+      );
+      assert.equal(withheld.hypotheses[0].content, null);
+      assert.ok(withheld.omitted.includes("content_unavailable"));
+      assert.ok(!JSON.stringify(withheld).includes(original.content.route));
+    } finally {
+      await fixtures.setArtifactSourceVisibility(problem, first, "visible");
+    }
+    assert.deepEqual(
+      HypothesesResponseSchema.parse(await call(discriminationSources[0].jsonPath)),
+      discriminationSources[0].snapshot,
+    );
     const narrowed = HypothesisLifecycleResponseSchema.parse(
       await change(
         first,
@@ -731,6 +797,8 @@ await runLocalWorkerJourney(
           "immutable statements",
           "frozen reads",
           "live recommendations",
+          "exact bounded hypothesis preparation reads",
+          "preparation snapshots retain current content controls",
           "exact replay",
           "generic leases preserve scientific history",
           "lifecycle after acquired, released and challenged leases",

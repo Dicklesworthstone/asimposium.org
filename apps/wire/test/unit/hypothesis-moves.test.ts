@@ -32,7 +32,7 @@ function result(count = 2): any {
     },
   };
 }
-test("exactly two routes produce a typed third alternative with source pins and separate read pages", () => {
+test("exactly two routes produce a typed third alternative with exact source reads", () => {
   const selected = selectThirdAlternative("P-DEMO", 50, result(), template);
   assert.equal(selected.degraded, false);
   assert.ok(selected.move);
@@ -40,8 +40,8 @@ test("exactly two routes produce a typed third alternative with source pins and 
   assert.deepEqual(selected.move.refs, ["P-DEMO", "H-1", "H-2"]);
   assert.equal((selected.move.contract.prefilled_hints as any).origin, "third-alternative");
   const prep = selected.move.contract.preparation as any;
-  assert.equal(prep.read_first.path, "/p/P-DEMO/hypotheses.md?through=50&after=0");
-  assert.equal(prep.additional_reads[0].path, "/p/P-DEMO/hypotheses.md?through=50&after=20");
+  assert.equal(prep.read_first.path, "/p/P-DEMO/hypotheses/H-1.md?through=50");
+  assert.equal(prep.additional_reads[0].path, "/p/P-DEMO/hypotheses/H-2.md?through=50");
   assert.equal(prep.hypothesis_pins[1].event_id, "EV-2");
   assert.ok(!JSON.stringify(selected).includes("evil"));
   assert.ok(!JSON.stringify(selected).includes("Untrusted route"));

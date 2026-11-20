@@ -1,7 +1,7 @@
 import type { MoveTemplate, NextMoveCandidate } from "@asimposium/contracts";
 import type { HypothesesResponse, PublicHypothesis } from "@asimposium/contracts/hypotheses";
 import type { D1Database } from "@cloudflare/workers-types";
-import { hypothesisPath } from "../ledger/hypotheses-face";
+import { hypothesisItemPath } from "../ledger/hypotheses-face";
 
 export interface HypothesisMoveSource {
   load(
@@ -89,7 +89,7 @@ export function selectThirdAlternative(
   }
   const read = (item: typeof first) => ({
     method: "GET" as const,
-    path: hypothesisPath(problemId, "md", cursor, item.publication.seq - 1),
+    path: hypothesisItemPath(problemId, item.hypothesis_id, "md", cursor),
   });
   return {
     degraded: false,
@@ -103,8 +103,8 @@ export function selectThirdAlternative(
         preparation: {
           problem_id: problemId,
           captured_cursor: cursor,
-          // Each original admission may be separated by many killed routes.
-          // Start each page immediately before its admission, not at page one.
+          // Read only the selected routes, even when their original admissions
+          // are separated by many killed or unrelated hypotheses.
           read_first: read(first),
           additional_reads: [read(second)],
           hypothesis_pins: [first, second].map((item) => ({

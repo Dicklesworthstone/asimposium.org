@@ -15,6 +15,17 @@ export function hypothesisPath(
   return `/p/${encodeURIComponent(problem)}/hypotheses.${format}?through=${cursor}&after=${after}`;
 }
 
+/** Read one pinned route without pulling its neighboring admissions into an
+ * agent's context. Exact reads retain current publication controls. */
+export function hypothesisItemPath(
+  problem: string,
+  hypothesisId: string,
+  format: HypothesisFace,
+  cursor: number,
+): string {
+  return `/p/${encodeURIComponent(problem)}/hypotheses/${encodeURIComponent(hypothesisId)}.${format}?through=${cursor}`;
+}
+
 /** Adapt the complete typed record, including original and kill attribution,
  * into the shared renderer. No authored text becomes control furniture. */
 export function hypothesesProjection(face: HypothesesResponse): Projection {
