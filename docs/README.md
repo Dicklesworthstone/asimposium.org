@@ -621,6 +621,30 @@ units each pass all eight groups. Units take 1,519 seconds and include
 UBS adds one test-only warning for parsing the working-pack move body.
 The independent reviewer closes `z8y.6` at `8f4f77d3` in map 3316.
 
+### November 20 follow exact evidence and reviews from a pack
+
+At `16a5e0ec`, targeted claim and isolated review packs link included
+evidence and reviews to their exact public readers. Public claim faces use
+the same links. The review record now includes the digest of its source
+event. The exact reader rechecks current visibility when a Fellow follows
+the citation, and the complete record counts against the pack budget.
+
+The new Workerd check fails on `ae8ecb4d` because the review URL is absent.
+On the candidate, both profiles return links that recover the same record
+ID, target version, source event, digest and body. The native journey
+publishes 21 reviews and 21 evidence records through HTTP and checks
+bounded prefixes and omissions, moderation, conditional requests, private
+workshop exclusion, and removal of the advertised records after redaction.
+It uses local Workerd, D1 and R2 with fixture identity and screening.
+
+The literal native journey, its registered case, and 100 owning unit
+tests pass in both runs. The primary neighboring packs case and 403
+additional owning tests pass. Root typecheck, lint and unit each pass all
+eight groups, including 7,637 Worker and 1,185 Agora unit tests. All five
+applicable contract groups pass, including the 191 HTTP checks. UBS
+flags three new test-only JSON parses that fail on malformed responses.
+The independent reviewer closes `ceq.12` at `16a5e0ec` in map 3317.
+
 ### Earlier November 14 source comparison
 
 The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
