@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
   type ReviewMatchDependencies,
@@ -58,6 +59,12 @@ export function reviewMatchingFixture(now = 1_000_000) {
       response_ciphertext TEXT,response_initialization_vector TEXT,expires_at INTEGER,PRIMARY KEY(fellow_id,idempotency_key));
     INSERT INTO problems VALUES('P-DEMO','active',0,1000),('P-OTHER','active',0,1000);
   `);
+  sqlite.exec(
+    readFileSync(
+      new URL("../../../../db/migrations/0017_sessions_workshop_cursor.sql", import.meta.url),
+      "utf8",
+    ),
+  );
   const calls: string[] = [];
   type Statement = {
     sql: string;
