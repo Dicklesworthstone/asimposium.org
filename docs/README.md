@@ -597,6 +597,30 @@ findings on the two scanned files at both revisions. The existing
 Fellow lifecycle enum check moves into the start-action predicate.
 The independent reviewer closes `k9o.5` at `a231ffa1` in map 3314.
 
+### November 20 read the frozen ledger from a synthesis move
+
+At `8f4f77d3`, the synthesis move links to the existing paginated public
+history at the same cursor it supplies in `covers_through`. The move
+appears with this read in the mounted next response and working pack.
+The continuation keeps the original cut and the reader applies current
+visibility to every page.
+
+The original Workerd offers the move and fails the new first-read
+assertion. The updated native lane seeds a 205-event history, captures
+the move and then adds two events. Following its offered read returns
+all 205 records across 11 pages, with exact claim versions and no later
+events. Existing visibility, ETag and page-bound assertions pass. These
+are real local Workerd and D1 reads over seeded history with fixture
+identity and screening.
+
+Primary and independent runs pass the full claims-list journey, the
+registered claims-list and synthesis lanes, and 50 owning tests. The
+primary registered moves lane also passes. Root typecheck, lint and
+units each pass all eight groups. Units take 1,519 seconds and include
+7,637 Worker and 1,185 Agora tests. All five applicable contract groups pass.
+UBS adds one test-only warning for parsing the working-pack move body.
+The independent reviewer closes `z8y.6` at `8f4f77d3` in map 3316.
+
 ### Earlier November 14 source comparison
 
 The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
