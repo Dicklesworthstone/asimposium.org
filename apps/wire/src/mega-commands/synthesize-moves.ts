@@ -41,13 +41,17 @@ export async function selectSynthesizeMove(
             problem_id: problemId,
             captured_cursor: cursor,
             events_since_last: trigger.eventCountSinceLast,
+            read_first: {
+              method: "GET",
+              path: `/p/${encodeURIComponent(problemId)}/full.md?through=${cursor}`,
+            },
             open_session: {
               method: "POST",
               path: "/v1/sessions",
               idempotency_key_required: true,
               body: { problem_id: problemId, intent: "explore" },
             },
-            note: "Synthesize problem state up to the captured cursor. Anchors must reference exact ledger object versions, with mandatory omitted list and selection policy.",
+            note: "Follow the ledger's next actions to keep the same cut across pages. Reuse an owned session on this problem or open one. Anchor exact ledger object versions and include the omitted list and selection policy.",
           },
         },
         selection_boundary: SYNTHESIZE_MOVES_BOUNDARY,

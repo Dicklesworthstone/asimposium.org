@@ -3,7 +3,9 @@ import {
   ClaimFaceResponseSchema,
   ContractProblemSchema,
   FullPackPageSchema,
+  PackResponseSchema,
   ProblemFaceResponseSchema,
+  ProblemNextResponseSchema,
 } from "@asimposium/contracts";
 import { ClaimsListResponseSchema } from "@asimposium/contracts/claims-list";
 import { parseClaimsListToon } from "@asimposium/render/claims-list";
@@ -52,7 +54,7 @@ function publicFullPage(body) {
   return { control, records };
 }
 
-async function claimsListJourney({ call, worker, env, origin, userAgent }) {
+async function claimsListJourney({ call, enroll, worker, env, origin, userAgent }) {
   await ensureProblem(env.DB, problem, "2026-10-27T12:00:00.000Z");
   await env.DB.prepare(
     "UPDATE problems SET title='Claims pagination fixture',status='active' WHERE id=?",
@@ -85,6 +87,46 @@ async function claimsListJourney({ call, worker, env, origin, userAgent }) {
     );
     assert.ok(markdownActions?.includes(`\`GET ${path}\``), `Markdown offers the same GET ${path}`);
   }
+
+  const synthesizer = await enroll("claims-page-synthesizer", "usr_claim_pages", {
+    requested_scopes: ["promote"],
+  });
+  const synthesisSession = await call(
+    "/v1/sessions",
+    { problem_id: problem, intent: "explore" },
+    synthesizer,
+    201,
+  );
+  const recommended = ProblemNextResponseSchema.parse(
+    await call(`/v1/p/${problem}/next`, undefined, synthesizer),
+  );
+  const synthesisMove = [recommended.primary_move, ...recommended.alternatives].find(
+    (move) => move?.move === "synthesize",
+  );
+  assert.ok(synthesisMove, "the production selector offers synthesis on the larger ledger");
+  const synthesisRead = synthesisMove.contract.preparation.read_first;
+  assert.deepEqual(
+    synthesisRead,
+    { method: "GET", path: firstFullPath },
+    "synthesis offers a public history reader at its own cut",
+  );
+  assert.equal(synthesisMove.contract.preparation.captured_cursor, digest.cursor);
+  assert.equal(synthesisMove.contract.prefilled_hints.covers_through, digest.cursor);
+  const working = PackResponseSchema.parse(
+    await call(
+      `/v1/sessions/${synthesisSession.session_id}/pack?profile=working&max_tokens=8000`,
+      undefined,
+      synthesizer,
+    ),
+  );
+  const workingMoves = working.items.find((item) => item.id === "SYS-working-moves");
+  assert.ok(workingMoves);
+  const selected = JSON.parse(workingMoves.body);
+  const workingSynthesis = [selected.primary_move, ...selected.alternatives].find(
+    (move) => move?.move === "synthesize",
+  );
+  assert.deepEqual(workingSynthesis?.contract.preparation.read_first, synthesisRead);
+  assert.equal(working.cursor, digest.cursor);
   const list = async (query = "") =>
     ClaimsListResponseSchema.parse(await call(`/p/${problem}/claims.json${query}`));
   const toon = async (query = "") => {
@@ -144,7 +186,7 @@ async function claimsListJourney({ call, worker, env, origin, userAgent }) {
   assert.equal(first.cursor, digest.cursor);
   assert.equal(first.count, 8);
   assert.equal(first.next_after, 8);
-  const firstFull = await full(firstFullPath);
+  const firstFull = await full(synthesisRead.path);
   assert.equal(firstFull.control.through, first.cursor);
   assert.ok(firstFull.control.records > 0);
   assert.equal(firstFull.control.has_more, true);
