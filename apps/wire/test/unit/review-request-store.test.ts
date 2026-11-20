@@ -72,12 +72,11 @@ async function fixture() {
     CREATE TABLE scientific_withdrawals(source_event_id TEXT);
     CREATE TABLE fellow_inbox_notices(id TEXT PRIMARY KEY,fellow_id TEXT,problem_id TEXT,notice_type TEXT,seq INTEGER,title TEXT,detail TEXT,target_id TEXT,created_at INTEGER,expires_at INTEGER,acknowledged_at INTEGER);
     INSERT INTO problems VALUES('P-DEMO',1,'active',0);`);
-  sql.run(
-    readFileSync(
-      new URL("../../../../db/migrations/0065_review_requests.sql", import.meta.url),
-      "utf8",
-    ),
-  );
+  for (const migration of ["0017_sessions_workshop_cursor.sql", "0065_review_requests.sql"]) {
+    sql.run(
+      readFileSync(new URL(`../../../../db/migrations/${migration}`, import.meta.url), "utf8"),
+    );
+  }
   function fellow(id: string, sponsor: string, credential: string) {
     sql
       .query(

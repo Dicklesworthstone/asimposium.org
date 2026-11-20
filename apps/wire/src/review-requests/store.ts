@@ -27,6 +27,7 @@ export interface RequestRecord extends ReviewRequestReceipt {
   author_sponsor_id: string;
   reviewer_sponsor_id: string;
   target_json: string | null;
+  reviewer_session_id: string | null;
 }
 export interface RequestCommand {
   receipt: ReviewRequestReceipt;
@@ -67,7 +68,12 @@ SELECT r.*, last.version, last.action, last.occurred_at AS updated_at,
       AND re.type = 'object.retracted' AND re.actor_fellow_id = r.author_id
       WHERE ret.problem_id = r.problem_id AND ret.target_object IN (r.claim_id, r.claim_id || '@' || r.claim_version)
         AND re.seq <= p.public_seq)
-    THEN ec.payload_json END AS target_json
+    THEN ec.payload_json END AS target_json,
+  CASE WHEN json_extract(j,'$.history') = 0 AND last.action = 'accept'
+    AND r.reviewer_id = json_extract(j,'$.fellow')
+    THEN (SELECT s.session_id FROM sessions s
+      WHERE s.fellow_id = r.reviewer_id AND s.problem_id = r.problem_id AND s.closed_at IS NULL)
+    END AS reviewer_session_id
   FROM input, review_requests r
   JOIN review_request_events last ON last.request_id = r.request_id
     AND last.version = (SELECT MAX(version) FROM review_request_events WHERE request_id = r.request_id)
@@ -129,6 +135,7 @@ export function requestReceipt(row: RequestRecord): ReviewRequestReceipt {
     author_sponsor_id: _author,
     reviewer_sponsor_id: _reviewer,
     target_json: _target,
+    reviewer_session_id: _session,
     ...receipt
   } = row;
   return receipt;

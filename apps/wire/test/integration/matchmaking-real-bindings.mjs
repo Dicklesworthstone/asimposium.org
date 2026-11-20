@@ -229,7 +229,12 @@ await runLocalWorkerJourney(
         assert.equal(response.status, 200);
         assert.equal(response.headers.get("cache-control"), "private, no-store");
         assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow");
-        await response.arrayBuffer();
+        const offered = await response.json();
+        const reviewPackAction = (view) =>
+          view.next_actions.find(
+            ({ method, url }) => method === "GET" && url.includes("/pack?profile=review&"),
+          );
+        assert.equal(reviewPackAction(offered), undefined);
 
         const privateCanary = "PRIVATE_AUTHOR_REVIEW_ISOLATION_CANARY";
         await call(
@@ -266,6 +271,7 @@ await runLocalWorkerJourney(
         const hidden = await call(requestPath, undefined, eligible);
         assert.equal(hidden.effective_status, "target-unavailable");
         assert.ok(!hidden.next_actions.some((action) => action.url.includes("/claims/")));
+        assert.equal(reviewPackAction(hidden), undefined);
         await call(
           `${requestPath}/respond`,
           { action: "accept", expected_version: 1 },
@@ -286,17 +292,60 @@ await runLocalWorkerJourney(
           "unlisted-accept",
         );
         assert.equal(accepted.status, "accepted");
-        const isolatedPack = await call(
+        const acceptedView = await call(requestPath, undefined, eligible);
+        assert.equal(
+          reviewPackAction(acceptedView)?.url,
           `/v1/sessions/${reviewSession}/pack?profile=review&target=${nextTarget}@1&max_tokens=8000`,
-          undefined,
-          eligible,
+          "the accepted invitation leads to the invited Fellow's exact review pack",
         );
+        const authorView = await call(requestPath, undefined, author);
+        assert.equal(reviewPackAction(authorView), undefined);
+        assert.ok(!JSON.stringify(authorView).includes(reviewSession));
+        await controlTarget("hide");
+        const hiddenAccepted = await call(requestPath, undefined, eligible);
+        assert.equal(hiddenAccepted.effective_status, "target-unavailable");
+        assert.equal(reviewPackAction(hiddenAccepted), undefined);
+        await controlTarget("restore");
+        await call(
+          `/v1/sessions/${reviewSession}/close`,
+          { handback: "Finished initial formulation review." },
+          eligible,
+          201,
+        );
+        const withoutOpenSession = await call(requestPath, undefined, eligible);
+        assert.equal(reviewPackAction(withoutOpenSession), undefined);
+        assert.ok(
+          withoutOpenSession.next_actions.some(
+            ({ url }) => url === `/p/${problem}/claims/${nextTarget}@1.md`,
+          ),
+          "the exact public reader is still available without a session",
+        );
+        const currentReviewSession = (
+          await call("/v1/sessions", { problem_id: problem, intent: "review" }, eligible, 201)
+        ).session_id;
+        const invitations = await call(path, undefined, eligible);
+        const updatedView = invitations.requests.find(
+          (item) => item.request_id === invitation.request_id,
+        );
+        assert.ok(updatedView);
+        const openPack = reviewPackAction(updatedView);
+        assert.equal(
+          openPack?.url,
+          `/v1/sessions/${currentReviewSession}/pack?profile=review&target=${nextTarget}@1&max_tokens=8000`,
+          "the list offers the current owned session rather than the closed session",
+        );
+        const isolatedPack = await call(openPack.url, undefined, eligible);
         assert.ok(!JSON.stringify(isolatedPack).includes(privateCanary));
+        const submitReview = isolatedPack.next_actions.find(
+          ({ method, url }) => method === "POST" && url.endsWith("/review"),
+        );
+        assert.equal(submitReview?.url, `/v1/sessions/${currentReviewSession}/review`);
         const review = await call(
-          `/v1/sessions/${reviewSession}/review`,
+          submitReview.url,
           {
             target_claim_id: nextTarget,
             target_version: 1,
+            client_context_cursor: isolatedPack.cursor,
             verdict: "cannot-verify",
             basis:
               "The scoped review considered this exact statement but does not establish a full proof.",
@@ -329,6 +378,7 @@ await runLocalWorkerJourney(
           "unlisted-complete",
         );
         assert.equal(completed.status, "completed");
+        assert.equal(reviewPackAction(await call(requestPath, undefined, eligible)), undefined);
         const committedReview = await env.DB.prepare(
           "SELECT source_event_id FROM reviews WHERE problem_id=? AND review_id=?",
         )

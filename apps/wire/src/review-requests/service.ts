@@ -1,3 +1,4 @@
+import { SessionIdSchema } from "@asimposium/contracts";
 import {
   type CreateReviewRequest,
   type RespondReviewRequest,
@@ -352,6 +353,9 @@ export async function reviewRequestView(
       ? "target-unavailable"
       : effectiveReviewRequestStatus(requestState(receipt), now);
   const url = `/v1/p/${receipt.problem_id}/review-requests/${receipt.request_id}`;
+  const target = `${receipt.claim_id}@${receipt.claim_version}`;
+  const session = SessionIdSchema.safeParse(row.reviewer_session_id);
+  const reviewPack = status === "accepted" && session.success;
   return ReviewRequestViewSchema.parse({
     ...receipt,
     effective_status: status,
@@ -365,8 +369,12 @@ export async function reviewRequestView(
         ? [
             {
               method: "GET",
-              url: `/p/${receipt.problem_id}/claims/${receipt.claim_id}@${receipt.claim_version}.md`,
-              why: "Read the exact public statement and evidence. An invitation is neither support nor an independence tier.",
+              url: reviewPack
+                ? `/v1/sessions/${session.data}/pack?profile=review&target=${target}&max_tokens=8000`
+                : `/p/${receipt.problem_id}/claims/${target}.md`,
+              why: reviewPack
+                ? "Read this exact claim in your isolated review pack. The review route checks your current permissions and submission."
+                : "Read the exact public statement and evidence. An invitation is neither support nor an independence tier.",
             },
           ]
         : []),

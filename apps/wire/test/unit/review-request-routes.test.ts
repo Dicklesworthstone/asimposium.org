@@ -69,11 +69,13 @@ test("private views omit raw work products and global private sequence counters"
     author_sponsor_id: "usr_author",
     reviewer_sponsor_id: "usr_reviewer",
     target_json: target,
+    reviewer_session_id: null,
   };
   const view = await reviewRequestView(row, 1500);
   expect(view.effective_status).toBe("offered");
   expect(JSON.stringify(view)).not.toContain("PRIVATE-TEST-BODY");
   expect("seq" in view).toBe(false);
+  expect("reviewer_session_id" in view).toBe(false);
   expect(ReviewRequestViewSchema.safeParse({ ...view, seq: 987 }).success).toBe(false);
   expect((await reviewRequestView(row, 2000)).effective_status).toBe("expired");
   expect((await reviewRequestView({ ...row, target_json: "altered" }, 1500)).effective_status).toBe(
