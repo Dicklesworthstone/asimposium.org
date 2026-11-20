@@ -80,7 +80,7 @@ test("all source pins survive the added publication guidance", () => {
     value.hypothesis_pins.map((p: any) => p.hypothesis_id),
     ["H-1", "H-2", "H-3"],
   );
-  assert.equal(value.read_first.path, "/p/P-TEST/hypotheses.md?through=3&after=0");
+  assert.equal(value.read_first.path, "/p/P-TEST/hypotheses/H-1.md?through=3");
   assert.equal(value.additional_reads.length, 2);
 });
 test("trusted guidance never copies the hypotheses' authored prose", () => {

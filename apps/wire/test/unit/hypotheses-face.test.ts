@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { HypothesesResponse } from "@asimposium/contracts/hypotheses";
 import {
   hypothesesProjection,
+  hypothesisItemPath,
   hypothesisPath,
   hypothesisResponse,
 } from "../../src/ledger/hypotheses-face";
@@ -17,6 +18,10 @@ const face = {
 } as unknown as HypothesesResponse;
 test("canonical and next links preserve problem, representation and captured cut", async () => {
   assert.equal(hypothesisPath("P-DEMO", "md", 42, 8), "/p/P-DEMO/hypotheses.md?through=42&after=8");
+  assert.equal(
+    hypothesisItemPath("P-DEMO", "H-12", "json", 42),
+    "/p/P-DEMO/hypotheses/H-12.json?through=42",
+  );
   const res = await hypothesisResponse(
     new Request("https://a.asimposium.org/p/P-DEMO/hypotheses.json"),
     "{}",

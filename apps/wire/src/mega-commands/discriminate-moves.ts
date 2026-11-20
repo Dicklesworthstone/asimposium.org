@@ -2,6 +2,7 @@ import type { MoveTemplate, NextMoveCandidate } from "@asimposium/contracts";
 import type { HypothesesResponse } from "@asimposium/contracts/hypotheses";
 import type { D1Database } from "@cloudflare/workers-types";
 import { hiddenByContentControlSql } from "../krater/public-content.ts";
+import { hypothesisItemPath } from "../ledger/hypotheses-face.ts";
 import { isReadableActiveHypothesis } from "./hypothesis-moves.ts";
 
 export const DISCRIMINATE_BOUNDARY =
@@ -116,11 +117,11 @@ export function composeDiscriminateMove(
     seq: publication.seq,
     payload_sha256: publication.payload_sha256,
   }));
-  // Admissions can be separated by hundreds of killed routes. Each link starts
-  // immediately before its exact publication rather than assuming page one.
+  // Exact reads keep neighboring admissions out of each preparation read.
+  // The separate continuation below still exposes the rest of a partial sample.
   const reads = pins.map((pin) => ({
     method: "GET" as const,
-    path: `/p/${encodeURIComponent(problemId)}/hypotheses.md?through=${cursor}&after=${pin.seq - 1}`,
+    path: hypothesisItemPath(problemId, pin.hypothesis_id, "md", cursor),
   }));
   return {
     degraded: face.next_after !== null,

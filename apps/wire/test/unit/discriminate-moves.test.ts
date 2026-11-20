@@ -87,7 +87,7 @@ test("a known unlisted problem retains the same pinned discrimination work", () 
   assert.deepEqual(select(unlisted), select(fixture()));
 });
 
-test("each source read reaches the exact admission even after a long killed-route history", () => {
+test("each source read selects one exact route even after a long killed-route history", () => {
   const prep = select(fixture()).move?.contract.preparation as {
     read_first: { path: string };
     additional_reads: { path: string }[];
@@ -97,9 +97,9 @@ test("each source read reaches the exact admission even after a long killed-rout
   assert.deepEqual(
     [prep.read_first, ...prep.additional_reads].map((read) => read.path),
     [
-      "/p/P-TEST/hypotheses.md?through=200&after=1",
-      "/p/P-TEST/hypotheses.md?through=200&after=89",
-      "/p/P-TEST/hypotheses.md?through=200&after=149",
+      "/p/P-TEST/hypotheses/H-1.md?through=200",
+      "/p/P-TEST/hypotheses/H-2.md?through=200",
+      "/p/P-TEST/hypotheses/H-3.md?through=200",
     ],
   );
   assert.deepEqual(

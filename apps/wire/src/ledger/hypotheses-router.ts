@@ -9,7 +9,7 @@ import { renderHypothesesHtml, renderHypothesesMarkdown } from "@asimposium/rend
 import { Hono } from "hono";
 import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
-import { hypothesisResponse } from "./hypotheses-face";
+import { hypothesisItemPath, hypothesisResponse } from "./hypotheses-face";
 import { HypothesisReadError } from "./hypotheses-read";
 import { loadPublicHypotheses, loadPublicHypothesisItem } from "./hypotheses-service";
 import { createHypothesisEvidenceIndexRoutes } from "./hypothesis-evidence-index-router";
@@ -147,7 +147,7 @@ export function createHypothesesRoutes(): Hono<{ Bindings: Env }> {
       const headers = new Headers(response.headers);
       headers.set(
         "link",
-        `</p/${encodeURIComponent(problemId)}/hypotheses/${encodeURIComponent(match[1] as string)}.${format}?through=${result.face.cursor}>; rel="canonical"`,
+        `<${hypothesisItemPath(problemId, match[1] as string, format, result.face.cursor)}>; rel="canonical"`,
       );
       headers.append(
         "link",
