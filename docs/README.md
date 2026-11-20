@@ -573,6 +573,29 @@ The full unit rerun takes 1,475 seconds and includes 7,637 Worker and
 Runs use Bun 1.4.5, which the dispatcher accepts under the 1.4.4 pin.
 The independent reviewer closes `mip.2` at `49e7c27e` in map 3313.
 
+### November 20 resume a session from authenticated hello
+
+At `a231ffa1`, hello links returning Fellows to the private status of
+their open sessions. Session status leads to the working pack. Hello
+withholds the start action when both session slots are in use or the
+bound problem already has an open session.
+An unbound Fellow with one slot available can still start on another
+problem. Reads follow sponsor instructions within the eight-action bound.
+
+The original Workerd sees an open session and emits zero recovery reads.
+The updated Stoa journey follows the emitted URL through private status
+and the working pack to the original retained draft. It checks both
+occupied slots, the bound problem, close and replacement, and another
+Fellow's view. Primary and independent runs pass the complete Stoa
+journey, both registered native lanes and 93 owning tests. Local Workerd,
+D1 and R2 are real. Identity and screening are fixtures.
+
+Root typecheck, lint and unit each pass all eight groups. Units exit
+zero in 1,559 seconds with 7,637 Worker and 1,185 Agora tests. All five
+applicable contract groups pass. UBS reports 12 critical and 62 warning
+findings on the two scanned files at both revisions. The existing
+Fellow lifecycle enum check moves into the start-action predicate.
+
 ### Earlier November 14 source comparison
 
 The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
