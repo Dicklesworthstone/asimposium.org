@@ -515,6 +515,32 @@ registered Workerd lanes and all 191 HTTP contracts. Worker security,
 package contracts and renderer suites pass 33, 1,045 and 608.
 The independent reviewer closes `ceq.10` at `2351763c` in map 3311.
 
+### November 20 read the exact synthesis from a session pack
+
+At `c27dc346`, the orient and working packs include a Markdown link in the
+budgeted synthesis staleness entry. The link identifies the immutable
+publication selected at the pack cursor. The exact reader serves that
+publication with staleness calculated at read time.
+
+The original Worker fails the new link assertion after starting local
+Workerd and migrating D1. Primary and independent candidate runs follow
+the link anonymously from both profiles and check the published body,
+changing material counts, and the original budget behavior. The earlier
+link still works after a subsequent publication. A warning remains
+visible while its source is public. The real D1 hide control makes the
+saved link return 404 and both packs omit the staleness entry with
+`content_unavailable`. Local runs use fixture identity and screening.
+
+Root typecheck, lint and unit each pass all eight groups. The unit run
+exits zero in 1,726 seconds and includes 7,637 Worker and 1,185 Agora
+tests. All five applicable root contract groups, 322 owning session
+tests, 608 renderer tests and 33 Worker security tests pass. The
+independent run also passes the registered synthesis lane and all five
+owning staleness cases. UBS reports 92 critical and 101 warning findings
+on the two scanned files in both revisions. All 193 correspond to the
+same rule and source line after adjusting for the diff.
+The independent reviewer closes `ceq.11` at `c27dc346` in map 3312.
+
 ### Earlier November 14 source comparison
 
 The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
