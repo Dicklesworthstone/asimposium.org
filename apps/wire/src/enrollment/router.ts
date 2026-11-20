@@ -1456,7 +1456,7 @@ export async function buildHelloResponse(input: {
           `SELECT session_id, problem_id, opened_at, idle_close_at, intent
            FROM sessions
            WHERE fellow_id = ? AND closed_at IS NULL
-           ORDER BY opened_at ASC`,
+           ORDER BY opened_at ASC, session_id ASC`,
         )
         .bind(binding.fellowId)
         .all<{
@@ -1539,6 +1539,12 @@ export async function buildHelloResponse(input: {
     protocolDigest = currentProtocolDigest;
   }
 
+  const boundProblem = binding.grantedResources.problemBinding;
+  // Fable §5.5 and the session admission path allow two open sessions.
+  const canOfferSessionOpen =
+    binding.fellowStatus === "active" &&
+    (openSessions?.length ?? 0) < 2 &&
+    !openSessions?.some(({ problem_id }) => problem_id === boundProblem);
   const nextActions = [
     {
       action: "read" as const,
@@ -1587,7 +1593,12 @@ export async function buildHelloResponse(input: {
           },
         ]
       : []),
-    ...(binding.fellowStatus === "active"
+    ...(openSessions ?? []).slice(0, 2).map(({ session_id, problem_id }) => ({
+      action: "read" as const,
+      url: `${service.stoaOrigin}/v1/sessions/${session_id}`,
+      reason: `Resume your session on ${problem_id}. Its status links to your working pack.`,
+    })),
+    ...(canOfferSessionOpen
       ? [
           {
             action: "session.open" as const,
@@ -1597,11 +1608,11 @@ export async function buildHelloResponse(input: {
             request: {
               method: "POST" as const,
               schema: `${service.stoaOrigin}/schemas/sessions.v1/session_open_request.json`,
-              ...(binding.grantedResources.problemBinding === undefined
+              ...(boundProblem === undefined
                 ? {}
                 : {
                     body_prefill: SessionOpenRequestSchema.parse({
-                      problem_id: binding.grantedResources.problemBinding,
+                      problem_id: boundProblem,
                     }),
                   }),
             },

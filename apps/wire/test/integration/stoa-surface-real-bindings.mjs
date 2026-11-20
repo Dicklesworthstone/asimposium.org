@@ -17,6 +17,7 @@ import { EventTailResponseSchema } from "../../../../packages/contracts/src/even
 import { ProblemDocumentSchema } from "../../../../packages/contracts/src/problem.ts";
 import {
   CursorResponseSchema,
+  PackResponseSchema,
   SessionOpenRequestSchema,
   SessionOpenResponseSchema,
   SessionStatusResponseSchema,
@@ -1059,10 +1060,30 @@ await runLocalWorkerJourney(
     );
 
     // --- Unassigned and multi-problem Fellows (bbx), following next_actions. ---
+    const sessionReads = (hello) =>
+      hello.next_actions.filter(
+        ({ action, url }) =>
+          action === "read" && /^\/v1\/sessions\/S-[A-Z0-9]{26}$/.test(new URL(url).pathname),
+      );
+    const startAction = (hello) =>
+      hello.next_actions.find(({ action }) => action === "session.open");
+    async function readHelloSession(action, token) {
+      assert.ok(action, "hello offers the owned session status read");
+      assert.equal(new URL(action.url).origin, origin);
+      assert.equal(action.request, undefined, "recovery starts with a read");
+      const response = await worker.fetch(action.url, {
+        headers: { "User-Agent": userAgent, authorization: `Bearer ${token}` },
+      });
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("cache-control"), "private, no-store");
+      return SessionStatusResponseSchema.parse(await response.json());
+    }
+
     const loner = await enroll("stoa-surface-loner", "usr_stoa_loner");
     const lonerHello = await call("/v1/hello", undefined, loner);
     assert.deepEqual(lonerHello.assignments, [], "an unassigned Fellow has no assignments");
     assert.deepEqual(lonerHello.open_sessions, [], "an unassigned Fellow has no sessions");
+    assert.deepEqual(sessionReads(lonerHello), []);
     const lonerTriage = TriageResponseSchema.parse(await call("/v1/triage", undefined, loner));
     assert.equal(lonerTriage.move, null, "triage invents no move without assignments");
     const lonerNext = ProblemNextResponseSchema.parse(
@@ -1110,7 +1131,14 @@ await runLocalWorkerJourney(
       actionsFollowed.push(action.action);
     }
     assert.ok(actionsFollowed.includes("session.open") && actionsFollowed.includes("protocol.ack"));
-    assert.equal((await call("/v1/hello", undefined, loner)).protocol_acknowledged, true);
+    const singleHello = await call("/v1/hello", undefined, loner);
+    assert.equal(singleHello.protocol_acknowledged, true);
+    assert.ok(startAction(singleHello), "one unbound session leaves a slot for another problem");
+    assert.equal(sessionReads(singleHello).length, 1);
+    const singleStatus = await readHelloSession(sessionReads(singleHello)[0], loner);
+    assert.equal(singleStatus.session_id, singleHello.open_sessions[0].session_id);
+    assert.equal(singleStatus.problem_id, problem);
+    assert.equal(singleStatus.closed_at, null);
     const joinedNext = ProblemNextResponseSchema.parse(
       await call(`/v1/p/${problem}/next`, undefined, loner),
     );
@@ -1146,6 +1174,17 @@ await runLocalWorkerJourney(
       "a multi-problem Fellow sees every assignment",
     );
     assert.equal(multiHello.open_sessions.length, 2);
+    assert.equal(startAction(multiHello), undefined, "two occupied slots suppress session.open");
+    assert.deepEqual(
+      sessionReads(multiHello).map(({ url }) => new URL(url).pathname),
+      multiHello.open_sessions.map(({ session_id }) => `/v1/sessions/${session_id}`),
+    );
+    assert.ok(multiHello.next_actions.length <= 8);
+    const otherHello = await call("/v1/hello", undefined, author);
+    assert.ok(
+      sessionReads(multiHello).every(({ url }) => !JSON.stringify(otherHello).includes(url)),
+      "another Fellow never receives these private status actions",
+    );
     for (const id of [problem, otherProblem]) {
       const perProblem = ProblemNextResponseSchema.parse(
         await call(`/v1/p/${id}/next`, undefined, loner),
@@ -1421,13 +1460,18 @@ await runLocalWorkerJourney(
       await call(openUrl.pathname, { problem_id: problem, intent: "explore" }, idler, 201)
     ).session_id;
     assert.notEqual(resumedSession, idleSession);
-    const workingAction = SessionStatusResponseSchema.parse(
-      await call(`/v1/sessions/${resumedSession}`, undefined, idler),
-    ).next_actions.find(
+    const afterReopen = await call("/v1/hello", undefined, idler);
+    assert.deepEqual(
+      sessionReads(afterReopen).map(({ url }) => new URL(url).pathname),
+      [`/v1/sessions/${resumedSession}`],
+      "hello offers the replacement session and leaves out the closed one",
+    );
+    const reopenedStatus = await readHelloSession(sessionReads(afterReopen)[0], idler);
+    const workingAction = reopenedStatus.next_actions.find(
       (action) => action.method === "GET" && action.url.endsWith("?profile=working"),
     );
     assert.ok(workingAction, "the new session offers its working pack");
-    const recoveryPack = await call(workingAction.url, undefined, idler);
+    const recoveryPack = PackResponseSchema.parse(await call(workingAction.url, undefined, idler));
     const preservedHead = recoveryPack.items.find((item) => item.kind === "workshop-head");
     assert.ok(preservedHead, "the working pack discovers the retained draft");
     assert.equal(preservedHead.scope, "workshop");
@@ -1628,7 +1672,20 @@ await runLocalWorkerJourney(
       }
     }
     assert.ok(advertisedSession, "the advertised session action actually opens a session");
-    assert.equal((await call("/v1/hello", undefined, bound)).protocol_acknowledged, true);
+    const boundReturning = await call("/v1/hello", undefined, bound);
+    assert.equal(boundReturning.protocol_acknowledged, true);
+    assert.equal(startAction(boundReturning), undefined, "the bound problem already has a session");
+    assert.equal(sessionReads(boundReturning).length, 1);
+    const boundStatus = await readHelloSession(sessionReads(boundReturning)[0], bound);
+    assert.equal(boundStatus.session_id, advertisedSession.session_id);
+    const boundClose = boundStatus.next_actions.find(
+      ({ method, url }) => method === "POST" && url.endsWith("/close"),
+    );
+    assert.ok(boundClose);
+    await call(boundClose.url, { handback: "Finished this session." }, bound, 201);
+    const boundClosed = await call("/v1/hello", undefined, bound);
+    assert.deepEqual(sessionReads(boundClosed), []);
+    assert.equal(startAction(boundClosed)?.request.body_prefill.problem_id, problem);
     const unboundAction = lonerHello.next_actions.find(
       (action) => action.action === "session.open",
     );
