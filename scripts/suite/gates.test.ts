@@ -30,6 +30,11 @@ const GATES = join(REPO_ROOT, "scripts", "gates.sh");
 const SCRATCH = mkdtempSync(join(tmpdir(), "asimposium-gates-test-"));
 const BIN = join(SCRATCH, "bin");
 const LOG = join(SCRATCH, "commands.tsv");
+const EXPECTED_CARGO_COMMANDS = [
+  "cargo\tfmt\t--manifest-path\tcli/Cargo.toml\t--check",
+  "cargo\tclippy\t--locked\t--manifest-path\tcli/Cargo.toml\t--all-targets\t--\t-D\twarnings",
+  "cargo\ttest\t--locked\t--manifest-path\tcli/Cargo.toml",
+] as const;
 
 mkdirSync(BIN, { mode: 0o700 });
 
@@ -48,6 +53,10 @@ if [ '${name}' = 'bun' ] && [ "\${1:-}" = 'run' ] && [ "\${2:-}" = 'check' ]; th
   exit "\${ASIMPOSIUM_GATES_TEST_CHECK_STATUS:-0}"
 fi
 if [ '${name}' = 'cargo' ]; then
+  if [[ ! -f cli/Cargo.toml || ! -d packages/contracts ]]; then
+    printf 'cargo must run from the repository root\\n' >&2
+    exit 91
+  fi
   case "\${ASIMPOSIUM_GATES_TEST_CARGO_MODE:-pass}" in
     rch-refusal)
       printf '[RCH] remote required; refusing local fallback (all workers failed preflight checks) — retryable\\n' >&2
@@ -161,7 +170,7 @@ describe("provider-neutral full gate", () => {
     expect(run.commands).toEqual([
       "bun\tinstall\t--frozen-lockfile",
       "bun\trun\tcheck",
-      "cargo\ttest",
+      ...EXPECTED_CARGO_COMMANDS,
     ]);
     expect(run.stdout).toContain("=== gate: migration-pin parity ===");
     expect(run.stdout).toContain("=== gate: problem-corpus parity ===");
@@ -259,7 +268,7 @@ describe("cargo gate classification", () => {
     expect(run.signal).toBeNull();
     expect(run.status).toBe(0);
     expect(run.stderr).toBe("");
-    expect(run.commands).toEqual(["cargo\ttest"]);
+    expect(run.commands).toEqual(EXPECTED_CARGO_COMMANDS);
     expect(run.stdout).toContain("=== gate: asimp cargo tests ===");
     expect(run.stdout).toContain("=== all selected gates passed ===");
   });
@@ -269,6 +278,7 @@ describe("cargo gate classification", () => {
 
     expect(run.signal).toBeNull();
     expect(run.status).toBe(1);
+    expect(run.commands).toEqual(EXPECTED_CARGO_COMMANDS.slice(0, 1));
     expect(run.stderr).toContain("error: test failure in cli crate");
     expect(run.stderr).not.toContain("CARGO_GATE_UNAVAILABLE");
     expect(run.stdout).not.toContain("=== all selected gates passed ===");
@@ -279,6 +289,7 @@ describe("cargo gate classification", () => {
 
     expect(run.signal).toBeNull();
     expect(run.status).toBe(78);
+    expect(run.commands).toEqual(EXPECTED_CARGO_COMMANDS.slice(0, 1));
     expect(run.stderr).toContain("[RCH] remote required; refusing local fallback");
     expect(run.stderr).toContain("blocked: cargo is unavailable (CARGO_GATE_UNAVAILABLE)");
     expect(run.stdout).not.toContain("=== all selected gates passed ===");
@@ -290,7 +301,7 @@ describe("cargo gate classification", () => {
     expect(run.signal).toBeNull();
     expect(run.status).toBe(78);
     expect(run.stderr).toContain("blocked: cargo is unavailable (CARGO_GATE_UNAVAILABLE)");
-    expect(run.commands).not.toContain("cargo\ttest");
+    expect(run.commands).toEqual([]);
     expect(run.stdout).not.toContain("=== all selected gates passed ===");
   });
 
@@ -299,6 +310,7 @@ describe("cargo gate classification", () => {
 
     expect(run.signal).toBeNull();
     expect(run.status).toBe(1);
+    expect(run.commands).toEqual(EXPECTED_CARGO_COMMANDS.slice(0, 1));
     expect(run.stdout).toContain("[RCH] remote required; refusing local fallback");
     expect(run.stderr).toContain("test result: FAILED");
     expect(run.stderr).not.toContain("CARGO_GATE_UNAVAILABLE");

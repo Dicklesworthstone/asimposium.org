@@ -717,8 +717,8 @@ export const PLANTS = [
     id: "late-producer-face-missing",
     bead: "92x",
     file: "apps/wire/src/app.ts",
-    find: 'app.on(["GET", "HEAD"], "/stats.json", (c) =>',
-    replace: 'app.on(["GET", "HEAD"], "/stats-planted.json", (c) =>',
+    find: 'app.on(["GET", "HEAD"], "/stats.json", async (c) =>',
+    replace: 'app.on(["GET", "HEAD"], "/stats-planted.json", async (c) =>',
     command: LANE("face-census"),
   },
   {

@@ -158,8 +158,12 @@ async function snapshot(
   return { body, headers, observedAt, generation };
 }
 
+function snapshotHeaders(value: Snapshot): Headers {
+  return new Headers(value.headers.map<[string, string]>(([name, field]) => [name, field]));
+}
+
 function asResponse(value: Snapshot, request: Request, now: number): Response {
-  const headers = new Headers(value.headers.map(([name, field]) => [name, field]));
+  const headers = snapshotHeaders(value);
   // Round age upward, so a response near expiry never gains another second
   // of browser freshness. Cache entries also have an absolute five-second cap.
   headers.set("age", String(Math.max(0, Math.ceil((now - value.observedAt) / 1_000))));
@@ -276,7 +280,7 @@ export function createPublicCursorCache(
               age < PUBLIC_CURSOR_CACHE_MAX_AGE_MS &&
               !cursorEtagMatches(
                 request.headers.get("if-none-match"),
-                new Headers(value.headers.map(([k, v]) => [k, v])).get("etag") ?? "",
+                snapshotHeaders(value).get("etag") ?? "",
               )
             ) {
               return asResponse(value, request, now());
@@ -304,7 +308,7 @@ export function createPublicCursorCache(
             state.generation === readGeneration &&
             now() - observedAt < PUBLIC_CURSOR_CACHE_MAX_AGE_MS
           ) {
-            const storedHeaders = new Headers(value.headers.map(([key, field]) => [key, field]));
+            const storedHeaders = snapshotHeaders(value);
             storedHeaders.set(OBSERVED_AT, String(observedAt));
             storedHeaders.set(GENERATION, String(readGeneration));
             try {
