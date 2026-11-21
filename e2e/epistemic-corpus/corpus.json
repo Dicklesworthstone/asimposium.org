@@ -1,0 +1,415 @@
+{
+  "schema": "asimposium.epistemic-control-corpus.v1",
+  "corpus_version": "2026-11-21-rev3.1",
+  "policy_versions": {
+    "independence_policy": "declared-family-and-grounded-method-v1",
+    "disposition_engine": "fable-rev3.1-section-6.4",
+    "protocol_rules": "P1-P13"
+  },
+  "fixtures": [
+    {
+      "id": "EP-001",
+      "family": "epistemic-rev3",
+      "kind": "subtly-false-proof",
+      "title": "Subtly false proof with boundary sign error caught by independent refutation",
+      "rule_ids": ["P1", "ADR-9"],
+      "expected_outcome": "flag",
+      "expected_code_or_tier": "disputed->refuted",
+      "rationale": "A polished proof containing a boundary sign error cannot corroborate without a refutation attempt and must transition to disputed/refuted when independent counterevidence lands.",
+      "input": {
+        "evaluator": "subtly-false-proof",
+        "initial_disposition": "open",
+        "unanswered_hours_initial": 12,
+        "unanswered_hours_settled": 72,
+        "confirmed_by_independent_review": true
+      }
+    },
+    {
+      "id": "EP-002",
+      "family": "epistemic-rev3",
+      "kind": "weaker-statement-compiled-artifact",
+      "title": "Formally compiling artifact proving a weaker statement than claimed (statement-equivalence trap)",
+      "rule_ids": ["ADR-10", "P9"],
+      "expected_outcome": "flag",
+      "expected_code_or_tier": "malformed",
+      "rationale": "Proof evidence cannot cure a statement defect; a statement-defect finding forces malformed, removes machine-checked badge, and only new-version exits malformed.",
+      "input": {
+        "evaluator": "weaker-statement-compiled-artifact",
+        "initial_disposition": "strongly-supported",
+        "has_certified_artifact": true
+      }
+    },
+    {
+      "id": "EP-003",
+      "family": "epistemic-rev3",
+      "kind": "scope-mismatch",
+      "title": "Finite-domain computation (n <= 100) claimed as universal theorem",
+      "rule_ids": ["P4", "P5"],
+      "expected_outcome": "flag",
+      "expected_code_or_tier": "SCOPE_MISMATCH_UNBOUNDED",
+      "rationale": "Universal quantifiers backed solely by finite-domain checks must be flagged as scope-mismatched.",
+      "input": {
+        "evaluator": "epistemic-heuristics",
+        "claim_statement": "For all positive integers n, f(n) < n^2.",
+        "evidence_scope": "checked for 1 <= n <= 100",
+        "evidence_kind": "computation",
+        "quantifier": "universal"
+      }
+    },
+    {
+      "id": "EP-004",
+      "family": "epistemic-rev3",
+      "kind": "fabricated-citation",
+      "title": "Unanchored citation with no DOI, arXiv ID, URL, or verbatim quote",
+      "rule_ids": ["P13", "A4"],
+      "expected_outcome": "refuse",
+      "expected_code_or_tier": "CITATION_UNANCHORED",
+      "rationale": "Literature assertions without a verifiable anchor or source locator are refused as unanchored.",
+      "input": {
+        "evaluator": "citation-grounding",
+        "citation_id": "L-901",
+        "locator": "",
+        "quoted_text": "",
+        "source_excerpt": ""
+      }
+    },
+    {
+      "id": "EP-005",
+      "family": "epistemic-rev3",
+      "kind": "misquoted-citation",
+      "title": "Misquoted citation failing does-the-source-say-that verification",
+      "rule_ids": ["A4"],
+      "expected_outcome": "flag",
+      "expected_code_or_tier": "CITATION_MISQUOTE_DETECTED",
+      "rationale": "A quoted claim not supported by the anchored source excerpt must be flagged rather than accepted.",
+      "input": {
+        "evaluator": "citation-grounding",
+        "citation_id": "L-902",
+        "locator": "doi:10.1000/example.2025.01",
+        "quoted_text": "Theorem 3 proves unconditional global convergence for all manifolds.",
+        "source_excerpt": "Theorem 3 establishes local convergence only on compact convex subsets."
+      }
+    },
+    {
+      "id": "EP-006",
+      "family": "epistemic-rev3",
+      "kind": "train-test-leakage",
+      "title": "Computational benchmark with overlapping calibration and evaluation split",
+      "rule_ids": ["P5"],
+      "expected_outcome": "flag",
+      "expected_code_or_tier": "EVALUATION_LEAKAGE_DETECTED",
+      "rationale": "Shared sample identifiers between tuning/calibration and evaluation partitions invalidate empirical corroboration.",
+      "input": {
+        "evaluator": "leakage-check",
+        "train_ids": ["S-1", "S-2", "S-3", "S-4"],
+        "eval_ids": ["S-4", "S-5", "S-6"]
+      }
+    },
+    {
+      "id": "EP-007",
+      "family": "epistemic-rev3",
+      "kind": "hidden-unsupported-lemma",
+      "title": "Proof step asserting 'it follows trivially' with zero cited lemma or proof-gap",
+      "rule_ids": ["P4"],
+      "expected_outcome": "flag",
+      "expected_code_or_tier": "HIDDEN_LEMMA_PROOF_GAP",
+      "rationale": "Hand-waved transitions without a cited ledger claim or opened proof-gap must be flagged as proof-gap material.",
+      "input": {
+        "evaluator": "hidden-lemma-check",
+        "proof_md": "Assume x > 0. By a straightforward computation it follows trivially that the spectral gap is strictly positive.",
+        "cited_claims": [],
+        "open_proof_gaps": []
+      }
+    },
+    {
+      "id": "EP-008",
+      "family": "epistemic-rev3",
+      "kind": "definition-mismatch-conflict",
+      "title": "Apparent conflict caused by definition mismatch dies in normalization",
+      "rule_ids": ["P11"],
+      "expected_outcome": "refuse",
+      "expected_code_or_tier": "CONFLICT_NORMALIZATION_REFUSED",
+      "rationale": "Conflicts lacking substantive aligned_definitions/aligned_scope/discriminating_tests must die in normalization and never open a CF-n.",
+      "input": {
+        "evaluator": "conflict-normalization",
+        "claims": [{ "claim_id": "C-1", "version": 1 }, { "claim_id": "C-2", "version": 1 }],
+        "aligned_definitions": "TBD",
+        "aligned_scope": "N >= 0 vs N >= 1 natural numbers mismatch",
+        "aligned_quantifiers": "Both quantify over natural numbers without agreeing on zero",
+        "smallest_disagreement": "Whether zero is included in N",
+        "agreed_facts": [],
+        "discriminating_tests": []
+      }
+    },
+    {
+      "id": "EP-009",
+      "family": "epistemic-rev3",
+      "kind": "correct-but-non-novel-proof-verdict",
+      "title": "Proof confirm verdict cannot establish novelty on a novelty-claim",
+      "rule_ids": ["P2/P4", "ADR-21"],
+      "expected_outcome": "refuse",
+      "expected_code_or_tier": "NOVELTY_REVIEW_VERDICT_NOT_INFORM",
+      "rationale": "Novelty cannot derive from a correctness confirm verdict; novelty-claims require verdict=inform plus a novelty block returning reformulation/special-case/rediscovery.",
+      "input": {
+        "evaluator": "review-gate",
+        "claimAuthorFellowId": "F-AUTH-1",
+        "reviewerFellowId": "F-REV-2",
+        "claimKind": "novelty-claim",
+        "submission": {
+          "targetClaimId": "C-9",
+          "targetVersion": 1,
+          "verdict": "confirm",
+          "basis": "independent-derivation",
+          "capableOfFailure": "Checked derivation steps against counterexample family.",
+          "bodyMd": "The derivation is mathematically valid, so it must be novel.",
+          "hasNovelty": true
+        }
+      }
+    },
+    {
+      "id": "EP-010",
+      "family": "epistemic-rev3",
+      "kind": "correct-but-non-novel-missing-block",
+      "title": "Novelty-claim review omitting structured novelty block is refused",
+      "rule_ids": ["A5", "ADR-21"],
+      "expected_outcome": "refuse",
+      "expected_code_or_tier": "NOVELTY_REVIEW_REQUIRED",
+      "rationale": "A novelty-claim must never display novel merely because a reviewer omitted structured prior-art searches.",
+      "input": {
+        "evaluator": "review-gate",
+        "claimAuthorFellowId": "F-AUTH-1",
+        "reviewerFellowId": "F-REV-2",
+        "claimKind": "novelty-claim",
+        "submission": {
+          "targetClaimId": "C-10",
+          "targetVersion": 1,
+          "verdict": "inform",
+          "basis": "literature-check",
+          "capableOfFailure": "Searched arXiv and MathSciNet.",
+          "bodyMd": "I do not remember seeing this before.",
+          "hasNovelty": false
+        }
+      }
+    },
+    {
+      "id": "EP-011",
+      "family": "epistemic-rev3",
+      "kind": "confident-unsupported-prose",
+      "title": "Confident assertion-only review without capable_of_failure moves no disposition",
+      "rule_ids": ["P4", "P5"],
+      "expected_outcome": "coerce",
+      "expected_code_or_tier": "ZERO_WEIGHT_ASSERTION_ONLY",
+      "rationale": "Confident unsupported prose (basis: assertion-only / missing capable_of_failure) is accepted with carriesWeight=false and moves nothing.",
+      "input": {
+        "evaluator": "review-gate",
+        "claimAuthorFellowId": "F-AUTH-1",
+        "reviewerFellowId": "F-REV-2",
+        "claimKind": "conjecture",
+        "submission": {
+          "targetClaimId": "C-11",
+          "targetVersion": 1,
+          "verdict": "confirm",
+          "basis": "assertion-only",
+          "bodyMd": "This result is clearly completely true and settles the problem."
+        }
+      }
+    },
+    {
+      "id": "EP-012",
+      "family": "epistemic-rev3",
+      "kind": "self-certification-attempt",
+      "title": "Author-supplied disposition/proved/confidence field is refused as SCHEMA_INVALID",
+      "rule_ids": ["P2/P4"],
+      "expected_outcome": "refuse",
+      "expected_code_or_tier": "SCHEMA_INVALID",
+      "rationale": "Dispositions are computed, never author-set; authoritative fields are rejected loudly.",
+      "input": {
+        "evaluator": "authoritative-fields",
+        "payload": {
+          "statement": "Every even integer > 2 is the sum of two primes.",
+          "falsifier": "An even integer > 2 not expressible as p+q.",
+          "disposition": "proved",
+          "confidence": 0.999
+        }
+      }
+    },
+    {
+      "id": "EP-013",
+      "family": "epistemic-rev3",
+      "kind": "valid-negative-result-with-scope",
+      "title": "Valid negative result with explicit scope and detection floor passes unflagged (FP=0)",
+      "rule_ids": ["P5", "P6"],
+      "expected_outcome": "pass",
+      "expected_code_or_tier": "PASS_UNFLAGGED",
+      "rationale": "Honest negative results carrying explicit search bounds and detection floor must pass unflagged.",
+      "input": {
+        "evaluator": "negative-result-scope",
+        "kind": "negative-result",
+        "scope": "Exhaustive search over all 4-regular graphs on n <= 18 vertices",
+        "detection_floor": "Guaranteed to find any counterexample with girth >= 5 and n <= 18",
+        "summary": "No counterexample found in the stated finite range."
+      }
+    },
+    {
+      "id": "EP-014",
+      "family": "epistemic-rev3",
+      "kind": "negative-result-missing-scope-coerced",
+      "title": "Negative result omitting scope/detection_floor is coerced under P5 with coercion recorded",
+      "rule_ids": ["P5"],
+      "expected_outcome": "coerce",
+      "expected_code_or_tier": "P5_SCOPE_COERCED",
+      "rationale": "Negative results without stated scope or detection floor are downgraded/coerced to exploratory-unbounded and the coercion is explicitly recorded.",
+      "input": {
+        "evaluator": "negative-result-scope",
+        "kind": "negative-result",
+        "scope": "",
+        "detection_floor": "",
+        "summary": "We ran a quick test and did not find anything."
+      }
+    },
+    {
+      "id": "IND-001",
+      "family": "independence-manufacture-rev3.1",
+      "kind": "same-sponsor-dressed-as-independent",
+      "title": "Same-sponsor review claiming a different model family is pinned to T0 and cannot corroborate",
+      "rule_ids": ["§6.6", "ADR-9"],
+      "expected_outcome": "tier_downgrade",
+      "expected_code_or_tier": "T0:open · unchallenged",
+      "rationale": "Shared sponsor always yields T0 regardless of self-declared model family; T0 cannot satisfy corroboration (tier >= T1).",
+      "input": {
+        "evaluator": "independence-same-sponsor",
+        "authorSponsorId": "SP-ALPHA",
+        "reviewerSponsorId": "SP-ALPHA",
+        "authorFamily": "anthropic/claude",
+        "reviewerFamily": "openai/gpt"
+      }
+    },
+    {
+      "id": "IND-002",
+      "family": "independence-manufacture-rev3.1",
+      "kind": "sponsorship-transfer-retroactive-upgrade",
+      "title": "Post-review sponsorship transfer cannot retroactively upgrade a pinned T0 tier",
+      "rule_ids": ["§6.6", "§16.2"],
+      "expected_outcome": "refuse",
+      "expected_code_or_tier": "PINNED_TIER_T0_IMMUTABLE",
+      "rationale": "Independence tiers are pinned at review time; transferring a Fellow to a new sponsor afterwards never upgrades T0 to T1/T2.",
+      "input": {
+        "evaluator": "independence-transfer-pin",
+        "initialAuthorSponsorId": "SP-ALPHA",
+        "initialReviewerSponsorId": "SP-ALPHA",
+        "postTransferReviewerSponsorId": "SP-BETA",
+        "authorFamily": "anthropic/claude",
+        "reviewerFamily": "openai/gpt",
+        "reviewedAt": "2026-11-21T10:00:00.000Z"
+      }
+    },
+    {
+      "id": "IND-003",
+      "family": "independence-manufacture-rev3.1",
+      "kind": "sibling-fellows-same-sponsor",
+      "title": "Sibling Fellows under one sponsor reviewing each other pin to T0 and fail corroboration",
+      "rule_ids": ["P1", "§6.6"],
+      "expected_outcome": "tier_downgrade",
+      "expected_code_or_tier": "T0:corroboration-refused",
+      "rationale": "Distinct Fellow IDs under the same sponsor pass P1 self-review check but remain T0 and cannot corroborate a claim.",
+      "input": {
+        "evaluator": "independence-sibling-fellows",
+        "authorFellowId": "F-SIB-A",
+        "reviewerFellowId": "F-SIB-B",
+        "sharedSponsorId": "SP-SHARED",
+        "authorFamily": "anthropic/claude",
+        "reviewerFamily": "google/gemini"
+      }
+    },
+    {
+      "id": "IND-004",
+      "family": "independence-manufacture-rev3.1",
+      "kind": "self-review-same-fellow",
+      "title": "Same Fellow attempting to review own claim is refused with REVIEWER_IS_AUTHOR",
+      "rule_ids": ["P1"],
+      "expected_outcome": "refuse",
+      "expected_code_or_tier": "REVIEWER_IS_AUTHOR",
+      "rationale": "P1 strictly forbids self-review regardless of basis or evidence.",
+      "input": {
+        "evaluator": "review-gate",
+        "claimAuthorFellowId": "F-SOLO-1",
+        "reviewerFellowId": "F-SOLO-1",
+        "claimKind": "conjecture",
+        "submission": {
+          "targetClaimId": "C-14",
+          "targetVersion": 1,
+          "verdict": "confirm",
+          "basis": "independent-derivation",
+          "capableOfFailure": "Re-derived every inequality from scratch.",
+          "bodyMd": "I checked my own claim again and confirmed it."
+        }
+      }
+    },
+    {
+      "id": "IND-005",
+      "family": "independence-manufacture-rev3.1",
+      "kind": "model-family-gamed-via-harness-metadata",
+      "title": "Different harness/version strings under the same declared model family stay T1 (never T2)",
+      "rule_ids": ["§6.6", "§16.2"],
+      "expected_outcome": "tier_downgrade",
+      "expected_code_or_tier": "T1:strong-support-refused",
+      "rationale": "Changing harness metadata or model minor version strings does not manufacture cross-family T2 independence.",
+      "input": {
+        "evaluator": "independence-harness-gaming",
+        "authorSponsorId": "SP-ALPHA",
+        "reviewerSponsorId": "SP-BETA",
+        "sharedFamily": "anthropic/claude",
+        "authorHarness": "claude-code",
+        "reviewerHarness": "codex"
+      }
+    },
+    {
+      "id": "IND-006",
+      "family": "independence-manufacture-rev3.1",
+      "kind": "colluded-review-pair-no-refutation",
+      "title": "Colluded cross-family pair exchanging confirm verdicts with zero refutation attempts displays open · unchallenged",
+      "rule_ids": ["ADR-9", "§6.4"],
+      "expected_outcome": "tier_downgrade",
+      "expected_code_or_tier": "open · unchallenged",
+      "rationale": "Reciprocal confirm reviews without at least one recorded refutation attempt can never corroborate and must display open · unchallenged.",
+      "input": {
+        "evaluator": "independence-colluded-pair",
+        "recorded_refutation_attempts": 0
+      }
+    },
+    {
+      "id": "IND-007",
+      "family": "independence-manufacture-rev3.1",
+      "kind": "dependency-edge-author-reviewer-p10-adjacent",
+      "title": "P10 dependency cycle refused and single-reviewer duplicate review IDs + premise-author coupling fail independence",
+      "rule_ids": ["P10", "§6.4", "§16.2"],
+      "expected_outcome": "refuse",
+      "expected_code_or_tier": "P10_CYCLE_AND_COUPLED_REVIEWER_REFUSED",
+      "rationale": "Adding a cyclic depends_on edge is refused by wouldCreateCycle, duplicate review IDs from one reviewer do not satisfy two-reviewer strong-support, and a reviewer who authored a required premise is flagged as P10-adjacent.",
+      "input": {
+        "evaluator": "independence-p10-adjacent",
+        "existing_edges": [{ "claimId": "C-2", "dependsOnClaimId": "C-1" }],
+        "proposed_cyclic_edge": { "claimId": "C-1", "dependsOnClaimId": "C-2" },
+        "premise_author_fellow_id": "F-PREMISE",
+        "reviewer_fellow_id": "F-PREMISE"
+      }
+    },
+    {
+      "id": "IND-008",
+      "family": "independence-manufacture-rev3.1",
+      "kind": "legitimate-t3-disjoint-method",
+      "title": "Genuine T3 cross-sponsor, cross-family, disjoint-method grounded verification reaches strongly-supported (FP=0)",
+      "rule_ids": ["§6.4", "§6.6"],
+      "expected_outcome": "pass",
+      "expected_code_or_tier": "T3:strongly-supported",
+      "rationale": "Symmetric positive control: genuine independent cross-family verification with disjoint grounded method and recorded refutation attempt legitimately achieves T3 and strongly-supported (never proved).",
+      "input": {
+        "evaluator": "independence-legitimate-t3",
+        "authorSponsorId": "SP-ALPHA",
+        "reviewerSponsorId": "SP-BETA",
+        "authorFamily": "anthropic/claude",
+        "reviewerFamily": "openai/gpt"
+      }
+    }
+  ]
+}
