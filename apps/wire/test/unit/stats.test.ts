@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setSystemTime, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -229,6 +229,49 @@ describe("Measured /stats.{json,md} face (asimposiumorg-rc-stats-runbooks-cost-m
       expect(md).not.toContain("usr_alpha");
       expect(renderPlatformStatsMarkdown(parsed)).toContain("# Platform statistics");
     } finally {
+      sql.close();
+    }
+  });
+
+  test("both faces revalidate unchanged metrics across measurement times and refresh changed data", async () => {
+    const sql = seedStatsDb();
+    try {
+      const app = createApp();
+      const env = { DB: sqliteAsD1(sql) } as unknown as Env;
+      const requestFace = (format: string, init?: RequestInit) =>
+        app.fetch(new Request(`https://a.asimposium.org/stats.${format}`, init), env);
+      const etags = new Map<string, string>();
+      setSystemTime(new Date("2026-11-21T12:00:00.000Z"));
+      for (const format of ["json", "md"]) {
+        const response = await requestFace(format);
+        const etag = response.headers.get("etag") ?? "";
+        expect(etag).toMatch(/^W\/"[a-f0-9]{64}"$/);
+        etags.set(format, etag);
+        expect(await response.text()).toContain("2026-11-21T12:00:00.000Z");
+      }
+      expect(etags.get("json")).not.toBe(etags.get("md"));
+
+      setSystemTime(new Date("2026-11-21T12:02:00.000Z"));
+      for (const [format, etag] of etags) {
+        const head = await requestFace(format, { method: "HEAD" });
+        expect(head.status).toBe(200);
+        expect(head.headers.get("etag")).toBe(etag);
+        expect(await head.text()).toBe("");
+        const fresh = await requestFace(format);
+        expect(await fresh.text()).toContain("2026-11-21T12:02:00.000Z");
+        const cached = await requestFace(format, { headers: { "if-none-match": etag } });
+        expect(cached.status).toBe(304);
+        expect(await cached.text()).toBe("");
+      }
+
+      sql.exec("UPDATE screening_cases SET state = 'released' WHERE case_id = 'QC-1'");
+      for (const [format, etag] of etags) {
+        const updated = await requestFace(format, { headers: { "if-none-match": etag } });
+        expect(updated.status).toBe(200);
+        expect(updated.headers.get("etag")).not.toBe(etag);
+      }
+    } finally {
+      setSystemTime();
       sql.close();
     }
   });

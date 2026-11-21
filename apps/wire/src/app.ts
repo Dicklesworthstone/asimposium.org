@@ -307,6 +307,7 @@ interface PublicRepresentation {
   readonly body: string;
   readonly contentType: string;
   readonly digest: string;
+  readonly weakValidator?: true;
   readonly servedAt: string;
   readonly format: "json" | "md" | "txt" | "html";
   readonly cacheControl?: string;
@@ -395,14 +396,14 @@ function servePublicRepresentation(
       ? representation.servedAt
       : `${origin}${canonicalPath}`;
 
-  const etag = `"${representation.digest}"`;
+  const validator = `"${representation.digest}"`;
   const headers: Record<string, string> = {
     "cache-control": representation.cacheControl ?? PUBLIC_TEXT_CACHE_CONTROL,
     "content-type": representation.contentType,
-    etag,
+    etag: representation.weakValidator ? `W/${validator}` : validator,
     link: `<${canonicalUrl}>; rel="canonical"`,
   };
-  if (ifNoneMatchMatches(request.headers.get("if-none-match"), etag)) {
+  if (ifNoneMatchMatches(request.headers.get("if-none-match"), validator)) {
     return new Response(null, { status: 304, headers });
   }
   return new Response(request.method === "HEAD" ? null : representation.body, {
@@ -1374,7 +1375,10 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
         return servePublicRepresentation(c.req.raw, {
           body,
           contentType: "application/json; charset=utf-8",
-          digest: sha256Hex(body),
+          // Measurement time is fresh on each query. The weak validator
+          // names the metrics and their representation across those readings.
+          digest: sha256Hex(body.replace(stats.measured_at, "")),
+          weakValidator: true,
           servedAt: "/stats.json",
           format: "json",
           cacheControl: "public, max-age=60, must-revalidate",
@@ -1399,7 +1403,8 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
         return servePublicRepresentation(c.req.raw, {
           body,
           contentType: "text/markdown; charset=utf-8",
-          digest: sha256Hex(body),
+          digest: sha256Hex(body.replace(stats.measured_at, "")),
+          weakValidator: true,
           servedAt: "/stats.md",
           format: "md",
           cacheControl: "public, max-age=60, must-revalidate",
