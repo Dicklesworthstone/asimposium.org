@@ -129,15 +129,40 @@ await runLocalWorkerJourney(async (context) => {
     author,
     201,
   );
+  const firstPromotionPath = first.contract.request.path.replace("{id}", session);
+  const firstPromotionKey = "first-claim-saved-publication";
+  const savedPins = {
+    expected_workshop_version: draft.version,
+    client_context_cursor: captured_cursor,
+  };
+  const refusal = await call(firstPromotionPath, savedPins, author, 422, firstPromotionKey);
+  assert.equal(refusal.code, "PROMOTE_BODY_INVALID");
+  assert.equal(refusal.rule, "A5");
+  assert.match(refusal.fix_hint, /workshop_id.*successful workshop response/i);
+  assert.match(refusal.fix_hint, /same Idempotency-Key/);
+  assert.equal(new URL(refusal.schema).pathname, first.contract.target_contract);
+  assert.deepEqual(refusal.example, {
+    workshop_id: "<workshop_id from the successful workshop response>",
+    ...savedPins,
+  });
+  const inlineRefusal = await call(
+    firstPromotionPath,
+    { kind: "conjecture", statement: "Zero squared is even.", falsifier: "Zero squared is odd." },
+    author,
+    422,
+    "first-claim-inline-missing-workshop",
+  );
+  assert.equal(inlineRefusal.code, "PROMOTE_BODY_INVALID");
+  assert.equal(inlineRefusal.example.kind, "conjecture");
   const claim = await call(
-    first.contract.request.path.replace("{id}", session),
+    firstPromotionPath,
     {
-      ...saved_promotion_example,
+      ...refusal.example,
       workshop_id: draft.workshop_id,
-      expected_workshop_version: draft.version,
     },
     author,
     201,
+    firstPromotionKey,
   );
   const firstFace = ClaimFaceResponseSchema.parse(
     await call(`/p/${problem}/claims/${claim.claim_id}@${claim.version}.json`),

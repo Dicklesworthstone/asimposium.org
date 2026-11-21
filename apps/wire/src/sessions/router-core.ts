@@ -106,6 +106,7 @@ import {
   WorkshopObjectResponseSchema,
   type WorkshopPublicationDraft,
   WorkshopPublicationDraftSchema,
+  WorkshopPublicationRequestSchema,
   type WorkshopPushRequest,
   WorkshopPushRequestSchema,
   WorkshopPushResponseSchema,
@@ -415,6 +416,9 @@ const DEFAULT_PACK_TOKENS: Readonly<Record<PackProfile, number>> = {
   "claim-graph": 2000,
   full: 8000,
 };
+const SavedPublicationPinsSchema = WorkshopPublicationRequestSchema.omit({
+  workshop_id: true,
+}).required({ expected_workshop_version: true });
 /** One extra row distinguishes a complete candidate set from a bounded prefix. */
 const PACK_CLAIM_CANDIDATE_LIMIT = 128;
 const PACK_LEASE_CANDIDATE_LIMIT = 20;
@@ -7052,6 +7056,25 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     const submitted = PromoteRequestSchema.safeParse(rawBody);
     if (!submitted.success) {
+      const savedDraft = SavedPublicationPinsSchema.safeParse(rawBody);
+      if (savedDraft.success) {
+        return validatedProblem({
+          status: 422,
+          code: "PROMOTE_BODY_INVALID",
+          title: "The saved draft selection is missing its workshop ID",
+          detail: "The request contains the revision pins for a saved typed draft.",
+          fixHint:
+            "Copy workshop_id from the successful workshop response into the example. Resubmit the saved typed draft selection to the same URL with the same Idempotency-Key. Keep the pinned version and cursor.",
+          rule: "A5",
+          extensions: {
+            schema: SESSIONS_SCHEMA_URI,
+            example: {
+              workshop_id: "<workshop_id from the successful workshop response>",
+              ...savedDraft.data,
+            },
+          },
+        });
+      }
       return validatedProblem({
         status: 422,
         code: "PROMOTE_BODY_INVALID",
