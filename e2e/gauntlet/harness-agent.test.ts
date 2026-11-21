@@ -149,23 +149,17 @@ process.stdin.on("end",()=>{
     expect(HARNESSES.codex.argv(paste)).toContain("--ignore-user-config");
   });
 
-  test.each(["gemini", "grok"] as const)(
-    "%s refuses an unverified persistence boundary before spawning",
-    async (harness) => {
-      let spawned = false;
-      const run = await runHarnessAgent(harness, joinUrl, {
-        spawnProcess: () => {
-          spawned = true;
-          throw new Error("a privacy-unavailable harness must not spawn");
-        },
-      });
-      expect(spawned).toBe(false);
-      expect(run.unavailable).toBe("privacy-prerequisite");
-      expect(run.exitCode).toBeNull();
-      expect(run.tokens).toBeNull();
-      expect(run.transcriptBytes).toBe(0);
-    },
-  );
+  test("Grok refuses an unverified persistence boundary before spawning", async () => {
+    const run = await runHarnessAgent("grok", joinUrl, {
+      spawnProcess: () => {
+        throw new Error("a privacy-unavailable harness must not spawn");
+      },
+    });
+    expect(run.unavailable).toBe("privacy-prerequisite");
+    expect(run.exitCode).toBeNull();
+    expect(run.tokens).toBeNull();
+    expect(run.transcriptBytes).toBe(0);
+  });
 
   test("a missing CLI is an unavailable prerequisite, with no claimed model work", async () => {
     const run = await runHarnessAgent("codex", joinUrl, {
@@ -229,6 +223,34 @@ process.stdin.on("end",()=>{
 });
 
 describe("the real runner uses the existing complete usage accounting", () => {
+  test("Gemini reconciles cache-inclusive totals across models without accepting partial stats", () => {
+    const model = {
+      api: { totalRequests: 2, totalErrors: 0 },
+      tokens: { input: 12, prompt: 20, candidates: 4, total: 28, cached: 8, thoughts: 3, tool: 1 },
+    };
+    const terminal = (models: unknown) =>
+      JSON.stringify({ response: "synthetic-private-agent-output", stats: { models } });
+    const twoModels = terminal({ primary: model, secondary: model });
+    expect(HARNESSES.gemini.tokens(twoModels)).toBe(56);
+    expect(harnessUsageDetails("gemini", twoModels)).toEqual({
+      scope: "whole_session",
+      totalTokens: 56,
+      cachedInputTokens: 16,
+      uncachedTokens: 40,
+      requests: 4,
+    });
+    const invalid = [
+      { ...model, tokens: { ...model.tokens, cached: 21 } },
+      { ...model, tokens: { ...model.tokens, thoughts: undefined } },
+      { ...model, tokens: { ...model.tokens, total: 27 } },
+      { ...model, api: { ...model.api, totalErrors: 1 } },
+      { ...model, api: { ...model.api, totalRequests: Number.MAX_SAFE_INTEGER } },
+    ];
+    for (const unknown of invalid) {
+      expect(HARNESSES.gemini.tokens(terminal({ primary: model, secondary: unknown }))).toBeNull();
+    }
+  });
+
   test("Codex adds every completed turn instead of keeping the last one", () => {
     const turn = (input: number, output: number) =>
       JSON.stringify({

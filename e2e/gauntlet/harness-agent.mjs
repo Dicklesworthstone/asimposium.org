@@ -20,6 +20,7 @@ import { mkdtempSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { GEMINI_SANDBOX_ENTERED, geminiSandboxLaunch } from "./gemini-sandbox.mjs";
 import {
   claudeUsageToFirstPromotion,
   parseClaudeCodeUsage,
@@ -146,9 +147,8 @@ export const HARNESSES = {
   },
   gemini: {
     binary: "gemini",
-    // The installed recorder unconditionally persists messages and thoughts.
-    // No documented recording-disable control is available on this version.
-    privacyUnavailable: true,
+    // Gemini records its conversation even headless. runHarnessAgent always
+    // uses the isolated launcher for this adapter.
     argv: () => [
       "-p",
       "Follow the sponsor paste on stdin.",
@@ -157,17 +157,16 @@ export const HARNESSES = {
       "-o",
       "json",
     ],
-    tokens: (stdout) => {
+    tokens: (stdout) => geminiUsage(stdout)?.totalTokens ?? null,
+    unavailable: (stdout, stderr) => {
+      let errorMessage = "";
       try {
-        const models = JSON.parse(stdout).stats?.models ?? {};
-        let total = 0;
-        for (const model of Object.values(models)) total += model.tokens?.total ?? 0;
-        return total || null;
+        errorMessage = JSON.parse(stdout).error?.message ?? "";
       } catch {
-        return null;
+        /* No structured error; use the bounded diagnostic stderr. */
       }
+      return classifyUnavailable(`${errorMessage}\n${stderr}`);
     },
-    unavailable: (_stdout, stderr) => classifyUnavailable(stderr),
   },
   // Grok Build 1.0.x headless mode. It reports a start failure (e.g. not signed
   // in) as a JSON error object on stdout and still exits 0.
@@ -201,6 +200,46 @@ export const HARNESSES = {
     },
   },
 };
+
+function geminiUsage(stdout) {
+  let models;
+  try {
+    const result = JSON.parse(stdout);
+    if (result.error) return null;
+    models = result.stats?.models;
+  } catch {
+    return null;
+  }
+  if (!models || typeof models !== "object" || Array.isArray(models)) return null;
+  let totalTokens = 0;
+  let cachedInputTokens = 0;
+  let requests = 0;
+  const count = (value) => Number.isSafeInteger(value) && value >= 0;
+  for (const model of Object.values(models)) {
+    const { input, prompt, candidates, total, cached, thoughts, tool } = model?.tokens ?? {};
+    const { totalRequests, totalErrors } = model?.api ?? {};
+    if (
+      ![input, prompt, candidates, total, cached, thoughts, tool, totalRequests].every(count) ||
+      totalErrors !== 0 ||
+      prompt - cached !== input ||
+      prompt + candidates + thoughts + tool !== total ||
+      (totalRequests === 0) !== (total === 0)
+    ) {
+      return null;
+    }
+    totalTokens += total;
+    cachedInputTokens += cached;
+    requests += totalRequests;
+  }
+  if (totalTokens <= 0 || ![totalTokens, cachedInputTokens, requests].every(count)) return null;
+  return {
+    scope: "whole_session",
+    totalTokens,
+    cachedInputTokens,
+    uncachedTokens: totalTokens - cachedInputTokens,
+    requests,
+  };
+}
 
 /** Only fixed route templates leave the real-harness measurement. Arbitrary
  * paths can contain a misplaced credential or scientific text. */
@@ -248,6 +287,7 @@ export function harnessUsageDetails(harness, stdout) {
     const { sessionId: _sessionId, ...counts } = usage;
     return { scope: "whole_session", ...counts };
   }
+  if (harness === "gemini") return geminiUsage(stdout);
   return null;
 }
 
@@ -417,7 +457,9 @@ export async function runHarnessAgent(
 ) {
   const spec = HARNESSES[harness];
   if (!spec) throw new Error(`unknown harness ${harness}`);
-  if (spec.privacyUnavailable) {
+  const sandbox = harness === "gemini" ? geminiSandboxLaunch(spec.argv()) : null;
+  const prerequisite = spec.privacyUnavailable ? "privacy-prerequisite" : sandbox?.unavailable;
+  if (prerequisite) {
     const emptyDigest = createHash("sha256").digest("hex");
     return {
       harness,
@@ -432,13 +474,15 @@ export async function runHarnessAgent(
       stdinWriteFailed: false,
       tokens: null,
       tokenUsage: null,
-      unavailable: "privacy-prerequisite",
+      unavailable: prerequisite,
     };
   }
-  const cwd = mkdtempSync(join(tmpdir(), `asimp-gauntlet-${harness}-`));
-  const env = {};
-  for (const name of ENV_ALLOWLIST)
-    if (process.env[name] !== undefined) env[name] = process.env[name];
+  const cwd = sandbox ? "/" : mkdtempSync(join(tmpdir(), `asimp-gauntlet-${harness}-`));
+  const env = sandbox?.env ?? {};
+  if (!sandbox) {
+    for (const name of ENV_ALLOWLIST)
+      if (process.env[name] !== undefined) env[name] = process.env[name];
+  }
   const started = Date.now();
   const measure =
     (harness === "codex" || harness === "claude-code") && typeof firstPromotionAt === "function";
@@ -448,6 +492,7 @@ export async function runHarnessAgent(
   return await new Promise((resolve) => {
     let stdout = "";
     let stderrTail = "";
+    let sandboxDiagnostic = "";
     let transcriptBytes = 0;
     let retainedBytes = 0;
     let stderrBytes = 0;
@@ -458,9 +503,9 @@ export async function runHarnessAgent(
     let finished = false;
     let stdinWriteFailed = false;
     let binaryUnavailable = false;
-    const argv = spec.argv(sponsorPasteBlock(joinUrl));
+    const argv = sandbox?.argv ?? spec.argv(sponsorPasteBlock(joinUrl));
     if (collector?.argv) argv.splice(argv.length - 1, 0, ...collector.argv);
-    const child = spawnProcess(spec.binary, argv, {
+    const child = spawnProcess(sandbox?.binary ?? spec.binary, argv, {
       cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -473,6 +518,9 @@ export async function runHarnessAgent(
       retainedBytes += retained.length;
     });
     child.stderr?.on("data", (chunk) => {
+      if (sandbox && sandboxDiagnostic.length < 1024) {
+        sandboxDiagnostic += chunk.subarray(0, 1024 - sandboxDiagnostic.length).toString("utf8");
+      }
       stderrBytes += chunk.length;
       stderrHash.update(chunk);
       stderrTail = (stderrTail + chunk.toString("utf8")).slice(-400);
@@ -495,13 +543,18 @@ export async function runHarnessAgent(
       clearTimeout(timer);
       const digest = transcriptHash.digest("hex");
       const transcriptTruncated = transcriptBytes > retainedBytes;
-      const tokens = transcriptTruncated ? null : spec.tokens(stdout);
-      const tokenUsage = transcriptTruncated ? null : harnessUsageDetails(harness, stdout);
+      const sandboxEntered =
+        !sandbox || sandboxDiagnostic.split("\n").includes(GEMINI_SANDBOX_ENTERED);
+      const hasUsage = !transcriptTruncated && sandboxEntered;
+      const tokens = hasUsage ? spec.tokens(stdout) : null;
+      const tokenUsage = hasUsage ? harnessUsageDetails(harness, stdout) : null;
       const unavailable = binaryUnavailable
         ? "binary-unavailable"
-        : exitCode === 0 && !spec.reportsStartFailureOnSuccess
-          ? null
-          : spec.unavailable(stdout, stderrTail);
+        : !sandboxEntered
+          ? "privacy-prerequisite"
+          : exitCode === 0 && !spec.reportsStartFailureOnSuccess
+            ? null
+            : spec.unavailable(stdout, stderrTail);
       await collector?.close();
       let firstPromotionTokenUsage = null;
       if (collector && !transcriptTruncated) {

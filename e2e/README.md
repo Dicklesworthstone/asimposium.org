@@ -65,6 +65,18 @@ Current scope:
   No current path can emit an acceptance pass until those results come from
   authoritative product and harness evidence.
 
+For the local third-harness rehearsal, provision a dedicated `GEMINI_API_KEY`
+in the runner's environment and run `bash e2e/gauntlet/run.sh --target local
+--agents harness:gemini`. The Linux runner needs Bubblewrap, a systemd user
+manager with cgroup-v2 swap control, `/usr/bin/node` (20 or later), and the
+bundled `@google/gemini-cli` package. Bun and system-wide npm installs are
+detected. Set `ASIMPOSIUM_GAUNTLET_GEMINI_PACKAGE` to the absolute package
+directory for another install. The runner uses a fresh private tmpfs for
+Gemini's home, working files, temporary files and session state. It reports
+missing authentication or privacy prerequisites as blocked (exit 78).
+The runner can reconcile Gemini's whole-session counters. First-promotion
+usage remains unknown without a validated request-level boundary.
+
 All runners accept `--self-test`. The smoke, Gauntlet, Playwright, and device-enrollment entry
 points require explicit HTTPS origins through `ASIMPOSIUM_STAGING_AGENT_BASE_URL` and, where
 applicable, `ASIMPOSIUM_STAGING_AGORA_BASE_URL`; S-6 uses the two `ASIMP_S6_*_URL` inputs named
