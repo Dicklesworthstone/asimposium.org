@@ -312,6 +312,7 @@ import {
   sessionPackProvenanceReference,
   snapshotSessionProvenance,
 } from "./provenance";
+import { accountQuestionPackOmissions, readQuestionPack } from "./questions-pack.ts";
 import {
   checkAndReserveQuota,
   checkAndReserveQuotaBatch,
@@ -4116,6 +4117,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           });
         }
         composed = accountSponsorDirectiveOmissions(input, composed);
+        // Question omission adds at most one bounded marker; it can displace
+        // instructions, whose own fixed-point accounting must run once more.
+        composed = accountQuestionPackOmissions(input, composed);
+        composed = accountSponsorDirectiveOmissions(input, composed);
         const prefixOmitted = input.candidates.some(
           (item) =>
             (item.id === "SYS-inoculation" ||
@@ -4376,6 +4381,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ? await readOrientationPack(db, session.problem_id, cursor, since)
         : { candidates: [], omitted: [], actions: [] };
     candidates.push(...orientation.candidates);
+    const questions =
+      profile === "orient" || profile === "working"
+        ? await readQuestionPack(db, session.problem_id, cursor)
+        : { candidates: [], omitted: [], actions: [] };
+    candidates.push(...questions.candidates);
 
     const targetSection =
       targetParam === null
@@ -5000,6 +5010,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...orientation.omitted
           .filter((item) => item.reason.endsWith("_unavailable"))
           .map((item) => item.reason),
+        ...questions.omitted
+          .filter((item) => item.reason.endsWith("_unavailable"))
+          .map((item) => item.reason),
       ],
       candidates,
       // wqlf: an exhausted grant-wide event budget makes both write
@@ -5023,6 +5036,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ]
           : []),
         ...orientation.actions,
+        ...questions.actions,
         ...directiveContext.actions,
         ...(workingMoves.primaryMove !== null && isStatementReviewMove(workingMoves.primaryMove)
           ? [
@@ -5145,6 +5159,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       ],
       omitted: [
         ...orientation.omitted,
+        ...questions.omitted,
         ...targetSection.omitted,
         ...deadEndSection.omitted,
         ...(claimContentUnavailable ? [{ reason: "content_unavailable", detail: "claims" }] : []),

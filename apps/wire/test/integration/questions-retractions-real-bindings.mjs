@@ -261,6 +261,91 @@ await runLocalWorkerJourney(async (context) => {
   );
   const sessionIdB = sessionB.session_id;
 
+  // A new collaborator finds public help in its ordinary context, even when
+  // no question directly addresses it. This uses the mounted pack route and
+  // actual question publication, not an independently seeded pack fixture.
+  const collaboratorPack = (profile = "working", budget) =>
+    call(
+      `/v1/sessions/${sessionIdB}/pack?profile=${profile}${budget === undefined ? "" : `&max_tokens=${budget}`}`,
+      undefined,
+      reviewerB,
+    );
+  let arrivalQuestionSource;
+  for (const profile of ["orient", "working"]) {
+    const arrival = await collaboratorPack(profile, profile === "orient" ? 8000 : undefined);
+    const request = arrival.items.find((item) => item.kind === "research-question");
+    assert.ok(request, `${profile} exposes unanswered public help to a new collaborator`);
+    assert.equal(request.id, question1Id);
+    assert.equal(request.scope, "ledger");
+    assert.equal(request.untrusted, true);
+    assert.deepEqual(request.screening_notice, questionWarning);
+    const content = JSON.parse(request.body);
+    assert.equal(content.status, "open");
+    assert.equal(content.author_fellow_id, fellowIdA);
+    assert.equal(content.sponsor_id, sponsorA);
+    assert.equal(content.session_id, sessionIdA);
+    assert.equal(content.screening_notice, undefined);
+    assert.equal(content.cursor, arrival.cursor);
+    assert.equal(
+      content.source,
+      `/p/${problemId}/questions.md?through=${arrival.cursor}&target=${question1Id}`,
+    );
+    assert.ok(
+      arrival.next_actions.some(
+        (action) => action.method === "GET" && action.url === content.source,
+      ),
+    );
+    const exact = await worker.fetch(`${origin}${content.source}`);
+    assert.equal(exact.status, 200);
+    assert.ok((await exact.text()).includes("Is there a known non-archimedean metric"));
+    assert.ok(
+      !JSON.stringify(arrival).includes("Preliminary analysis of modular residue bounding."),
+      "another Fellow's workshop never enters a question pack",
+    );
+    arrivalQuestionSource = content.source;
+  }
+  const isolatedReview = await call(
+    `/v1/sessions/${sessionIdB}/pack?profile=review&target=${claim1Id}@1&max_tokens=8000`,
+    undefined,
+    reviewerB,
+  );
+  assert.ok(
+    !isolatedReview.items.some((item) => item.kind === "research-question"),
+    "public questions do not become author narrative in an isolated review",
+  );
+  const questionPackControl = (action) =>
+    operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+      target_id: `${problemId}/${question1Id}`,
+      target_kind: "question",
+      action,
+      reason: "Verify arrival packs obey current question visibility.",
+    });
+  await questionPackControl("hide");
+  const hiddenQuestionPack = await collaboratorPack();
+  assert.ok(!hiddenQuestionPack.items.some((item) => item.id === question1Id));
+  assert.ok(
+    !JSON.stringify(hiddenQuestionPack).includes("Is there a known non-archimedean metric"),
+  );
+  assert.ok(
+    hiddenQuestionPack.omitted.some((item) => item.detail?.startsWith("public-questions:")),
+    "withheld source does not become an empty help queue",
+  );
+  assert.equal(
+    (await worker.fetch(`${origin}${arrivalQuestionSource}`)).status,
+    404,
+    "old read links still enforce current controls",
+  );
+  await questionPackControl("restore");
+  assert.ok((await collaboratorPack()).items.some((item) => item.id === question1Id));
+  const smallQuestionPack = await collaboratorPack("working", 800);
+  if (!smallQuestionPack.items.some((item) => item.id === question1Id))
+    assert.ok(
+      smallQuestionPack.omitted.some(
+        (item) => item.reason === "budget_exceeded" && item.detail?.startsWith("public-questions:"),
+      ),
+      "a budgeted-out question is explicitly omitted",
+    );
+
   await assertRacedWriteLeavesNoTrace({
     env,
     fixtures,
@@ -292,6 +377,11 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(leaseRes.ok, true);
   assert.equal(leaseRes.question_id, question1Id);
   assert.ok(leaseRes.leased_until);
+  const leasedQuestionPack = await collaboratorPack();
+  const leasedQuestion = leasedQuestionPack.items.find((item) => item.id === question1Id);
+  assert.ok(leasedQuestion, "an unanswered leased question remains useful public context");
+  assert.equal(JSON.parse(leasedQuestion.body).status, "leased");
+  assert.ok(leasedQuestion.why_included.includes("not current availability"));
 
   // Idempotent replay of lease (200)
   const replayLease = await call(
@@ -389,6 +479,16 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(answerRes.ok, true);
   assert.equal(answerRes.question_id, question1Id);
   assert.equal(answerRes.resolved_by_object, `${claim1Id}@1`);
+  assert.ok(
+    !(await collaboratorPack()).items.some((item) => item.id === question1Id),
+    "answered work leaves the current unanswered-question context",
+  );
+  const earlierQuestion = await worker.fetch(`${origin}${arrivalQuestionSource}`);
+  assert.equal(earlierQuestion.status, 200);
+  assert.ok(
+    (await earlierQuestion.text()).includes("**Status**: open"),
+    "an answer cannot rewrite the earlier captured question state",
+  );
 
   // Idempotent replay of answer (200)
   const replayAnswer = await call(
@@ -534,6 +634,10 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.equal(withdrawRes.ok, true);
   assert.equal(withdrawRes.question_id, question2Id);
+  assert.ok(
+    !(await collaboratorPack()).items.some((item) => item.id === question2Id),
+    "withdrawn questions leave arrival context while their public history remains readable",
+  );
 
   // Idempotent replay of withdrawal (200)
   const replayWithdraw = await call(
@@ -1563,6 +1667,8 @@ await runLocalWorkerJourney(async (context) => {
       leasing_and_answering_verified: true,
       private_answer_inbox_delivery_verified: true,
       private_question_request_inbox_delivery_verified: true,
+      unanswered_question_arrival_packs_verified: true,
+      question_pack_visibility_budget_and_review_isolation_verified: true,
       answer_inbox_exact_reads_and_visibility_verified: true,
       self_answer_and_replay_do_not_duplicate_inbox_verified: true,
       self_corrected_vs_externally_refuted_verified: true,
