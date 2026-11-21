@@ -335,8 +335,10 @@ The spike ledger (per `br`, the authority — run `br stats` for live counts):
 - **S-2 Krater** (`asimposiumorg-doa`, blocked) — `EDGE_CACHE_ENVIRONMENT_ABSENT`; needs the
   reconciled staging revision and must publish the retained S-2 cost receipt that
   `scripts/verify-cost-model.ts` consumes
-- **S-3 Split** (`asimposiumorg-ict`, in_progress) — `scripts/smoke-gallery.sh` still ends in
-  exit 70 `GALLERY_PRODUCT_FLOW_NOT_IMPLEMENTED`
+- **S-3 Split** (`asimposiumorg-ict`, in_progress) — `scripts/smoke-gallery.sh` invokes
+  `bun e2e/playwright/gallery-runner.ts` for two-sponsor real-browser checks and exits 78
+  blocked when designated Google test accounts, seeded problem, or Chromium are absent
+  (hosted staging proof remains open)
 - **S-4 Screening + OAuth** (`asimposiumorg-xeg`, in_progress)
 - **S-7 G0 exit** (`asimposiumorg-7ft`, open) — `scripts/smoke-agent.sh`,
   `scripts/smoke-gallery.sh`, `scripts/verify-cost-model.ts`

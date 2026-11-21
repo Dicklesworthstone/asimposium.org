@@ -16,15 +16,27 @@ Current scope:
   no credential it exits blocked rather than skipping the loop. It captures
   and unsets the credential before starting a child process, validates the
   canonical token grammar, and passes the Authorization header to curl over
-  stdin rather than argv or inherited environment. The gallery smoke still
-  stops after anonymous boundary probes because its authenticated
-  sponsor/private-versus-public comparison is not implemented. The anonymous
+  stdin rather than argv or inherited environment. `scripts/smoke-gallery.sh`
+  runs the anonymous public preflight and then invokes
+  `bun e2e/playwright/gallery-runner.ts` with two designated Google test sponsor
+  accounts (mint/claim/approve, session/pack/private workshop push, and
+  owner/other-sponsor/anonymous privacy checks), blocking honestly at exit 78
+  when accounts, seeded problem, or Chromium are absent (no hosted staging pass
+  is claimed until run against reconciled staging). The anonymous
   agent smoke requires `/problems.json` to return exact status 200, canonical
   `application/json; charset=utf-8`, and the generated closed contract; it also
   validates the sponsor route's exact 401 `UNAUTHORIZED` problem face, but it does not claim byte-level workshop
   privacy without a seeded private canary and its paired public observation.
-- `run-playwright.sh` runs the non-mock public-surface checks when Playwright
-  and explicit HTTPS staging origins are available.
+  `scripts/smoke-agent.sh` accepts `ASIMPOSIUM_SMOKE_PROBLEM_ID` (defaulting to
+  `P-4DSP`, validated against the canonical problem-ID grammar).
+- `run-playwright.sh` runs the real Chromium staging suite (JS on and JS off,
+  strict Fable §14 CSP nonce, KaTeX math, Rule A4 honesty, 1200×630 PNG OG image
+  decoding, anonymous cache-leak checks, and authenticated sponsor `/console`,
+  workshop, and `/admin` boundary checks when `ASIMPOSIUM_STAGING_SPONSOR_STORAGE_STATE`
+  is supplied; exits 78 `PLAYWRIGHT_SPONSOR_STORAGE_STATE_ABSENT` when absent
+  rather than claiming full product flows passed). It refuses production origins
+  fail-closed and supports `--local-rehearsal` for local loopback rehearsal with
+  a distinct non-staging diagnostic code.
 - `../scripts/e2e-device-enrollment.sh` is the W3.5 mock-free product runner:
   an unaffiliated curl client starts and polls the proposal-carrying device
   flow, while Chromium uses a real, recently authenticated Auth.js storage

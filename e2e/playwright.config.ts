@@ -1,7 +1,7 @@
-import { defineConfig } from "@playwright/test";
 import { lstatSync, realpathSync, statSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { defineConfig } from "@playwright/test";
 
 if (process.env.ASIMPOSIUM_PLAYWRIGHT_ENTRY !== "1") {
   throw new Error(
@@ -19,11 +19,7 @@ const leaseIdentity = process.env.ASIMPOSIUM_PLAYWRIGHT_LEASE_IDENTITY;
 const directDirectoryIdentity = (path: string): string | undefined => {
   try {
     const stat = lstatSync(path, { bigint: true });
-    if (
-      !stat.isDirectory() ||
-      stat.isSymbolicLink() ||
-      realpathSync(path) !== path
-    ) {
+    if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(path) !== path) {
       return undefined;
     }
     return `${stat.dev}:${stat.ino}`;
@@ -59,9 +55,7 @@ if (physicalDirectory(claimedRepositoryRoot) !== expectedRepositoryRoot) {
   throw new Error("The Playwright entry point must bind this exact repository root.");
 }
 if (runId === undefined || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(runId)) {
-  throw new Error(
-    "The Playwright entry point must provide one freshly claimed run id.",
-  );
+  throw new Error("The Playwright entry point must provide one freshly claimed run id.");
 }
 
 const artifactRoot = join(expectedRepositoryRoot, "e2e", "artifacts");
@@ -98,12 +92,21 @@ if (
 }
 
 const artifactDirectory = join(runDirectory, "playwright");
-if (anyNodeExists(artifactDirectory)) {
+const isPlaywrightWorker = process.env.TEST_WORKER_INDEX !== undefined;
+if (!isPlaywrightWorker && anyNodeExists(artifactDirectory)) {
   throw new Error("The Playwright output child already exists; a fresh claim is required.");
+}
+if (
+  isPlaywrightWorker &&
+  anyNodeExists(artifactDirectory) &&
+  directDirectoryIdentity(artifactDirectory) === undefined
+) {
+  throw new Error("The Playwright output child is not a real directory.");
 }
 
 export default defineConfig({
   testDir: "./playwright",
+  testMatch: /.*\.spec\.ts$/,
   timeout: 20_000,
   forbidOnly: true,
   retries: 0,
@@ -112,5 +115,11 @@ export default defineConfig({
   use: {
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
+    launchOptions: {
+      args: ["--disable-dev-shm-usage"],
+      ...(process.env.ASIMPOSIUM_CHROMIUM_EXECUTABLE
+        ? { executablePath: process.env.ASIMPOSIUM_CHROMIUM_EXECUTABLE }
+        : {}),
+    },
   },
 });

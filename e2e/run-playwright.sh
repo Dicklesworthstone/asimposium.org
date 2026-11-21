@@ -14,6 +14,8 @@ reproduce="bash e2e/run-playwright.sh"
 started_ms="$(e2e_now_ms)"
 self_test=0
 write_artifacts=0
+local_rehearsal=0
+anonymous_only=0
 explicit_run_id=""
 
 while [[ "$#" -gt 0 ]]; do
@@ -23,6 +25,12 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --write-artifacts)
       write_artifacts=1
+      ;;
+    --local-rehearsal)
+      local_rehearsal=1
+      ;;
+    --anonymous-only)
+      anonymous_only=1
       ;;
     --run-id)
       [[ "$#" -ge 2 ]] || {
@@ -60,8 +68,28 @@ run_id="$(e2e_resolve_run_id "$suite" "$explicit_run_id")" || {
   e2e_emit_diagnostic "$suite" "$started_ms" "fail" "RUN_ID_INVALID" "$reproduce"
   exit 64
 }
+
+validate_loopback_origin() {
+  local variable_name="$1"
+  local origin="${!variable_name:-}"
+  [[ -n "$origin" ]] || return 2
+  [[ "$origin" =~ ^https?://(127\.0\.0\.1|localhost):[1-9][0-9]{0,4}$ ]] || return 1
+}
+
 for origin_variable in ASIMPOSIUM_STAGING_AGENT_BASE_URL ASIMPOSIUM_STAGING_AGORA_BASE_URL; do
-  if e2e_validate_staging_origin "$origin_variable"; then
+  if [[ "$local_rehearsal" -eq 1 ]]; then
+    if validate_loopback_origin "$origin_variable"; then
+      :
+    else
+      origin_status=$?
+      case "$origin_status" in
+        2) code="STAGING_SURFACE_BASE_URL_MISSING" ;;
+        *) code="STAGING_SURFACE_BASE_URL_INVALID" ;;
+      esac
+      e2e_emit_diagnostic "$suite" "$started_ms" "blocked" "$code" "$reproduce"
+      exit 78
+    fi
+  elif e2e_validate_staging_origin "$origin_variable"; then
     :
   else
     origin_status=$?
@@ -73,6 +101,14 @@ for origin_variable in ASIMPOSIUM_STAGING_AGENT_BASE_URL ASIMPOSIUM_STAGING_AGOR
     exit 78
   fi
 done
+
+sponsor_storage_state="${ASIMPOSIUM_STAGING_SPONSOR_STORAGE_STATE:-}"
+if [[ -n "$sponsor_storage_state" ]]; then
+  if [[ -L "$sponsor_storage_state" || ! -f "$sponsor_storage_state" || ! -r "$sponsor_storage_state" ]]; then
+    e2e_emit_diagnostic "$suite" "$started_ms" "blocked" "PLAYWRIGHT_SPONSOR_STORAGE_STATE_INVALID" "$reproduce"
+    exit 78
+  fi
+fi
 
 if ! command -v node >/dev/null 2>&1; then
   e2e_emit_diagnostic "$suite" "$started_ms" "blocked" "PLAYWRIGHT_NODE_UNAVAILABLE" "$reproduce"
@@ -102,8 +138,10 @@ playwright_node="$(e2e_select_node_runtime)" || {
 }
 
 cd "$repository_root/e2e"
+unset TEST_WORKER_INDEX
 set +e
 ASIMPOSIUM_PLAYWRIGHT_ENTRY=1 \
+  ASIMPOSIUM_PLAYWRIGHT_LOOPBACK_REHEARSAL="$local_rehearsal" \
   ASIMPOSIUM_PLAYWRIGHT_REPOSITORY_ROOT="$repository_root" \
   ASIMPOSIUM_PLAYWRIGHT_RUN_ID="$run_id" \
   ASIMPOSIUM_PLAYWRIGHT_ARTIFACT_ROOT_IDENTITY="$ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY" \
@@ -119,4 +157,23 @@ if [[ "$playwright_status" -ne 0 ]]; then
   exit "$playwright_status"
 fi
 
-e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "PLAYWRIGHT_ENTRY_SURFACES_GREEN_PRODUCT_FLOWS_NOT_CLAIMED" "$reproduce"
+if [[ -z "$sponsor_storage_state" && "$anonymous_only" -eq 0 ]]; then
+  if [[ "$local_rehearsal" -eq 1 ]]; then
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "PLAYWRIGHT_LOOPBACK_REHEARSAL_SPONSOR_BLOCKED" "$reproduce"
+  else
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "PLAYWRIGHT_SPONSOR_STORAGE_STATE_ABSENT" "$reproduce"
+  fi
+  exit 78
+fi
+
+if [[ "$local_rehearsal" -eq 1 ]]; then
+  if [[ "$anonymous_only" -eq 1 ]]; then
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "PLAYWRIGHT_LOOPBACK_REHEARSAL_ANONYMOUS_PASS" "$reproduce"
+  else
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "PLAYWRIGHT_LOOPBACK_REHEARSAL_PASS" "$reproduce"
+  fi
+elif [[ "$anonymous_only" -eq 1 ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "PLAYWRIGHT_STAGING_ANONYMOUS_SURFACES_PASS" "$reproduce"
+else
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "PLAYWRIGHT_STAGING_PRODUCT_FLOWS_PASS" "$reproduce"
+fi

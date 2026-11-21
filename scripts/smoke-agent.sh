@@ -7,6 +7,7 @@ set +x
 # curl calls later receive it over stdin, never through argv or environment.
 smoke_fellow_token="${ASIMPOSIUM_SMOKE_FELLOW_TOKEN:-}"
 unset ASIMPOSIUM_SMOKE_FELLOW_TOKEN
+smoke_problem_id="${ASIMPOSIUM_SMOKE_PROBLEM_ID:-P-4DSP}"
 
 # smoke-agent — G0 agent-surface smoke gate (asimposiumorg-7ft).
 #
@@ -498,6 +499,11 @@ if [[ -n "$smoke_fellow_token" ]] && ! e2e_validate_fellow_token "$smoke_fellow_
   exit 90
 fi
 
+if [[ ! "$smoke_problem_id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ || "$smoke_problem_id" == *"--"* ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_SMOKE_PROBLEM_ID_INVALID" "$reproduce"
+  exit 91
+fi
+
 handbook_status=0
 smoke_agent_probe_with_rate_limit "$ASIMPOSIUM_STAGING_AGENT_BASE_URL" "/" || handbook_status=$?
 if (( handbook_status != 0 )); then
@@ -707,8 +713,8 @@ smoke_loop() {
   fi
 }
 
-# Stage: session open on the smoke problem.
-loop_open="$(smoke_loop POST /v1/sessions '{"problem_id":"P-4DSP","intent":"explore"}' open)" || loop_open=""
+# Stage: session open on the smoke problem (parameterized via ASIMPOSIUM_SMOKE_PROBLEM_ID, default P-4DSP).
+loop_open="$(smoke_loop POST /v1/sessions "{\"problem_id\":\"$smoke_problem_id\",\"intent\":\"explore\"}" open)" || loop_open=""
 loop_open_status="${loop_open##*$'\n'}"
 loop_open_body="${loop_open%$'\n'*}"
 if [[ "$loop_open_status" != "201" && "$loop_open_status" != "200" ]]; then
