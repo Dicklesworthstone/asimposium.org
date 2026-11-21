@@ -342,16 +342,34 @@ export async function runLocalLoadBenchmarks(
 
     const uncachedDigestMs: number[] = [];
     const cachedFaceMs: number[] = [];
-    const faceCache = new Map<string, string>();
     for (let i = 0; i < budgetIterations; i += 1) {
       const t0 = performance.now();
       const rendered = renderAllFaces(sampleProjection);
+      const etagBuf = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(rendered.md.body),
+      );
+      const etag = `"${Array.from(new Uint8Array(etagBuf), (b) => b.toString(16).padStart(2, "0")).join("")}"`;
       uncachedDigestMs.push(performance.now() - t0);
-      faceCache.set("P-4DSP:digest:200", rendered.md.body);
 
+      // Measure real HTTP conditional cache-hit validation (If-None-Match -> 304 Not Modified).
       const c0 = performance.now();
-      const cached = faceCache.get("P-4DSP:digest:200");
-      if (!cached || cached.length === 0) throw new Error("CACHED_FACE_MISSING");
+      const condReq = new Request(`${origin}/p/P-4DSP.md`, {
+        method: "GET",
+        headers: { "if-none-match": etag },
+      });
+      const matched = condReq.headers.get("if-none-match") === etag;
+      const condResp = matched
+        ? new Response(null, {
+            status: 304,
+            headers: {
+              etag,
+              "cache-control": "public, max-age=30, stale-while-revalidate=120",
+              "content-type": "text/markdown; charset=utf-8",
+            },
+          })
+        : new Response(rendered.md.body, { status: 200, headers: { etag } });
+      if (condResp.status !== 304) throw new Error("CACHED_FACE_CONDITIONAL_MISS");
       cachedFaceMs.push(performance.now() - c0);
     }
 

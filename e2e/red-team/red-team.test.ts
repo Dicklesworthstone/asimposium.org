@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -6,9 +7,17 @@ import {
   containsCredentialShape,
   redactCredentials,
 } from "@asimposium/contracts/diagnostic-safety";
+import type { D1Database } from "@cloudflare/workers-types";
+import {
+  EnrollmentError,
+  EnrollmentService,
+  enrollmentReplayProtectorFromBase64Url,
+  InMemoryEnrollmentStore,
+} from "../../apps/wire/src/enrollment/service.ts";
 import { scanFieldForCredentials } from "../../apps/wire/src/screening/credential-scan.ts";
 import { S4_THRESHOLDS } from "../../apps/wire/src/screening/types.ts";
 import {
+  checkAndReserveQuota,
   DEFAULT_SPONSOR_PROMOTION_RATE_LIMIT_PER_HOUR,
   PROMOTION_RATE_LIMIT_PER_HOUR,
   parseSponsorLimit,
@@ -206,63 +215,122 @@ describe("W10.6 Red team 5-pass permanent regression suite (asimposiumorg-ip3)",
     }
   });
 
-  test("PASS 4 — ECONOMICS: multi-Fellow sponsor cannot evade per-sponsor hourly promotion cap", async () => {
+  test("PASS 4 — ECONOMICS: multi-Fellow sponsor cannot evade per-sponsor hourly promotion cap (real checkAndReserveQuota SQL)", async () => {
     expect(PROMOTION_RATE_LIMIT_PER_HOUR).toBe(20);
     expect(DEFAULT_SPONSOR_PROMOTION_RATE_LIMIT_PER_HOUR).toBe(60);
     expect(parseSponsorLimit(undefined)).toBe(60);
 
-    // 4 sibling Fellows under one sponsor each try to consume their 20/hr Fellow cap (= 80 total).
-    // Sponsor cap (60/hr) MUST stop them strictly before 80.
-    const sponsorCap = DEFAULT_SPONSOR_PROMOTION_RATE_LIMIT_PER_HOUR;
-    const fellowCap = PROMOTION_RATE_LIMIT_PER_HOUR;
-    const fellowCounts = new Map<string, number>();
-    let sponsorCount = 0;
-    let admitted = 0;
-    let refusedBySponsorCap = 0;
+    // Real SQLite database carrying exact migrations 0044 & 0108 schemas so
+    // the real production `checkAndReserveQuota` SQL executes end-to-end.
+    const sqlite = new Database(":memory:");
+    try {
+      sqlite.exec(`
+        CREATE TABLE problems (id TEXT PRIMARY KEY);
+        INSERT INTO problems (id) VALUES ('P-4DSP');
+        CREATE TABLE public_write_attempt_reservations (
+          reservation_id TEXT PRIMARY KEY NOT NULL,
+          fellow_id TEXT NOT NULL,
+          problem_id TEXT NOT NULL,
+          sponsor_id TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          route TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL,
+          request_digest TEXT NOT NULL,
+          reserved_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL,
+          settled_at INTEGER,
+          sponsor_limit INTEGER,
+          status TEXT NOT NULL
+        );
+        CREATE TABLE problem_slow_mode_current (
+          problem_id TEXT PRIMARY KEY,
+          event_id TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          action TEXT NOT NULL,
+          limit_per_hour INTEGER,
+          expires_at INTEGER,
+          reason TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+      `);
+      const makeStmt = (sql: string, bound: unknown[] = []) => ({
+        bind(...values: unknown[]) {
+          return makeStmt(sql, values);
+        },
+        async first<T>(col?: string): Promise<T | null> {
+          const row =
+            (sqlite.query(sql).get(...(bound as never[])) as Record<string, unknown> | null) ??
+            null;
+          if (!row) return null;
+          return (col !== undefined ? row[col] : row) as T;
+        },
+        async all<T>() {
+          const results = sqlite.query(sql).all(...(bound as never[])) as T[];
+          return { success: true, results, meta: {} };
+        },
+        async run() {
+          const res = sqlite.query(sql).run(...(bound as never[]));
+          return { success: true, results: [], meta: { changes: res.changes } };
+        },
+      });
+      const db = { prepare: (sql: string) => makeStmt(sql) } as unknown as D1Database;
 
-    for (const fellow of ["F-1", "F-2", "F-3", "F-4"]) {
-      for (let attempt = 0; attempt < fellowCap; attempt++) {
-        const fc = fellowCounts.get(fellow) ?? 0;
-        if (fc >= fellowCap) continue;
-        if (sponsorCount >= sponsorCap) {
-          refusedBySponsorCap += 1;
-          continue;
+      // 4 sibling Fellows under one sponsor each try to consume their 20/hr Fellow cap (= 80 total).
+      // Production `checkAndReserveQuota` with default sponsorLimit (60/hr) MUST admit 60 and refuse 20.
+      const baseNow = 1_763_760_000_000;
+      let admitted = 0;
+      let refusedBySponsorCap = 0;
+      let lastRefusalDimension = "";
+      let attemptSeq = 0;
+
+      for (const fellow of ["F-1", "F-2", "F-3", "F-4"]) {
+        for (let attempt = 0; attempt < PROMOTION_RATE_LIMIT_PER_HOUR; attempt++) {
+          attemptSeq += 1;
+          const res = await checkAndReserveQuota(db, {
+            fellowId: fellow,
+            problemId: "P-4DSP",
+            sponsorId: "usr_flood_sponsor",
+            sessionId: `S-${fellow}`,
+            route: "/v1/sessions/:id/promote",
+            idempotencyKey: `ik-${fellow}-${attempt}`,
+            requestDigest: `sha256:req-${attemptSeq}`,
+            now: baseNow + attemptSeq * 100,
+            sponsorLimit: undefined,
+          });
+          if (res.allowed) {
+            admitted += 1;
+          } else if (res.reason === "RATE_LIMITED" && res.dimension === "sponsor") {
+            refusedBySponsorCap += 1;
+            lastRefusalDimension = res.dimension;
+            const refusalResp = promotionRateLimitedProblem({
+              dimension: res.dimension,
+              retryAfterSeconds: res.retryAfterSeconds,
+              budget: res.budget,
+            });
+            expect(refusalResp.status).toBe(429);
+            if (refusedBySponsorCap === 1) {
+              const body = (await refusalResp.json()) as {
+                code: string;
+                limit: number;
+                remaining: number;
+              };
+              expect(body.code).toBe("PROMOTION_RATE_LIMITED");
+              expect(body.limit).toBe(DEFAULT_SPONSOR_PROMOTION_RATE_LIMIT_PER_HOUR);
+              expect(body.remaining).toBe(0);
+            }
+          }
         }
-        fellowCounts.set(fellow, fc + 1);
-        sponsorCount += 1;
-        admitted += 1;
       }
+
+      expect(admitted).toBe(60);
+      expect(refusedBySponsorCap).toBe(20);
+      expect(lastRefusalDimension).toBe("sponsor");
+    } finally {
+      sqlite.close();
     }
-
-    expect(admitted).toBe(60);
-    expect(refusedBySponsorCap).toBe(20);
-
-    const refusalResp = promotionRateLimitedProblem({
-      dimension: "sponsor",
-      retryAfterSeconds: 1800,
-      budget: {
-        limit: fellowCap,
-        remaining: fellowCap,
-        window_seconds: 3600,
-        sponsor_limit: sponsorCap,
-        sponsor_remaining: 0,
-        reset_at: "2026-11-21T23:00:00.000Z",
-      },
-    });
-    expect(refusalResp.status).toBe(429);
-    const body = (await refusalResp.json()) as {
-      code: string;
-      limit: number;
-      remaining: number;
-      retry_after_seconds: number;
-    };
-    expect(body.code).toBe("PROMOTION_RATE_LIMITED");
-    expect(body.limit).toBe(60);
-    expect(body.remaining).toBe(0);
-    expect(body.retry_after_seconds).toBe(1800);
   });
 
-  test("PASS 5 — AUTH: prefix-identifiable tokens caught by secret scanners, join-code replay and principal confusion refused", () => {
+  test("PASS 5 — AUTH: prefix-identifiable tokens caught by secret scanners, real EnrollmentService single-use replay & principal confusion refused", async () => {
     const bearer = ["asimp", "ag", "RedTeamScannerCanaryToken0001"].join("_");
     const joinFrag = `#${["v1", "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-ABCD"].join(".")}`;
     const flowCode = ["flow_v1", "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-ABCD"].join(".");
@@ -280,15 +348,52 @@ describe("W10.6 Red team 5-pass permanent regression suite (asimposiumorg-ip3)",
       ).length,
     ).toBeGreaterThan(0);
 
-    // Single-use enrollment secret hash consumption refuses replay with PAIRING_INVALID.
-    const consumedSecrets = new Set<string>();
-    const exchangeOnce = (secretHash: string) => {
-      if (consumedSecrets.has(secretHash)) return "PAIRING_INVALID";
-      consumedSecrets.add(secretHash);
-      return "PROPOSAL_CREATED";
-    };
-    expect(exchangeOnce("sha256:enrollment-1")).toBe("PROPOSAL_CREATED");
-    expect(exchangeOnce("sha256:enrollment-1")).toBe("PAIRING_INVALID");
+    // Real production EnrollmentService single-use enrollment exchange refuses replay with PAIRING_INVALID.
+    const replayKey = Buffer.from(Array.from({ length: 32 }, (_, i) => i + 1)).toString(
+      "base64url",
+    );
+    const service = new EnrollmentService({
+      stoaOrigin: "https://a.asimposium.org",
+      agoraOrigin: "https://asimposium.org",
+      store: new InMemoryEnrollmentStore(),
+      replayProtector: enrollmentReplayProtectorFromBase64Url(replayKey),
+    });
+    const sponsor = { type: "sponsor" as const, sponsorId: "usr_redteam_sponsor" };
+    await service.bootstrapSponsor(sponsor);
+    const minted = await service.mint(
+      sponsor,
+      { requested_scopes: ["review"] },
+      { idempotencyKey: "rt-mint-1" },
+    );
+    const firstClaim = await service.claim(
+      {
+        enrollment_id: minted.enrollmentId,
+        secret: minted.secret,
+        name: "rt-fellow-one",
+        model: "test-model",
+        harness: "red-team",
+      },
+      { idempotencyKey: "rt-claim-1" },
+    );
+    expect(firstClaim.flowHandle.startsWith("flow_v1.")).toBe(true);
+
+    let replayError: unknown = null;
+    try {
+      await service.claim(
+        {
+          enrollment_id: minted.enrollmentId,
+          secret: minted.secret,
+          name: "rt-fellow-two",
+          model: "test-model",
+          harness: "red-team",
+        },
+        { idempotencyKey: "rt-claim-2" },
+      );
+    } catch (err) {
+      replayError = err;
+    }
+    expect(replayError).toBeInstanceOf(EnrollmentError);
+    expect((replayError as EnrollmentError).code).toBe("PAIRING_INVALID");
 
     // Principal confusion emits canonical WRONG_PRINCIPAL opaque refusal.
     const wrongPrincipal = OpaqueProblemSchema.safeParse({

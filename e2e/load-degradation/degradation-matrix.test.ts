@@ -14,8 +14,15 @@
 
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
+import type { R2Bucket } from "@cloudflare/workers-types";
 import { publicCursorResponse } from "../../apps/wire/src/herald/public-cursor.ts";
 import { createPublicCursorCache } from "../../apps/wire/src/herald/public-cursor-cache.ts";
+import { type HeraldRuntimeEnv, heraldRoomFetch } from "../../apps/wire/src/herald/runtime.ts";
+import {
+  type ArtifactRuntimeEnv,
+  artifactFetch,
+} from "../../apps/wire/src/krater/artifact-runtime.ts";
 import { scanFieldForCredentials } from "../../apps/wire/src/screening/credential-scan.ts";
 import {
   screenContextuallyWithProvider,
@@ -191,6 +198,27 @@ describe("W10.7 Load tests, performance budgets, degradation-table fault injecti
       const { db } = createCountingSqliteD1(sqlite);
       const env = { DB: db, STOA_ORIGIN: "https://a.asimposium.org" };
 
+      // Real production `heraldRoomFetch` with faulting HERALD_ROOMS DO binding fails closed 503
+      // while GET /cursor remains live on the same DB!
+      const faultingHeraldEnv = {
+        DB: db,
+        STOA_ORIGIN: "https://a.asimposium.org",
+        HERALD_ROOMS: {
+          idFromName() {
+            throw new Error("HERALD_DO_UNAVAILABLE");
+          },
+          get() {
+            throw new Error("HERALD_DO_UNAVAILABLE");
+          },
+        },
+      } as unknown as HeraldRuntimeEnv;
+      const roomResp = await heraldRoomFetch(
+        new Request("https://a.asimposium.org/v1/workshop-room?fellow=F-1&problem=P-4DSP"),
+        faultingHeraldEnv,
+        () => new Response("fallback", { status: 200 }),
+      );
+      expect(roomResp.status).toBe(503);
+
       // Even if DO room fails (503) AND Cache API throws, GET /cursor still serves authoritative 42!
       const brokenCache = createPublicCursorCache({
         cache: async () => {
@@ -240,7 +268,7 @@ describe("W10.7 Load tests, performance budgets, degradation-table fault injecti
     }
   });
 
-  test("(C.3) & (C.4) & (C.5) DEGRADATION — R2 DOWN, FTS WEDGED, AND OAUTH DOWN", () => {
+  test("(C.3) & (C.4) & (C.5) DEGRADATION — R2 DOWN (real artifactFetch), FTS WEDGED, AND OAUTH DOWN", async () => {
     const sqlite = new Database(":memory:");
     try {
       sqlite.exec(`
@@ -253,11 +281,35 @@ describe("W10.7 Load tests, performance budgets, degradation-table fault injecti
         INSERT INTO claims (id, problem_id, statement) VALUES ('C-1', 'P-4DSP', 'Every 4-regular expander has bounded diameter.');
         INSERT INTO public_claim_fts (id, statement) VALUES ('C-1', 'Every 4-regular expander has bounded diameter.');
       `);
+      const { db } = createCountingSqliteD1(sqlite);
 
-      // (C.3) R2 DOWN: text ledger write commits durably while artifact upload stays pending/503
-      const r2Put = () => {
-        throw new Error("R2_BUCKET_UNAVAILABLE_503");
-      };
+      // (C.3) R2 DOWN: real `artifactFetch` fails closed 503 when R2/artifact config is unavailable
+      // while text ledger writes commit durably to SQLite without rolling back.
+      const faultingR2 = {
+        async put() {
+          throw new Error("R2_BUCKET_UNAVAILABLE_503");
+        },
+        async get() {
+          throw new Error("R2_BUCKET_UNAVAILABLE_503");
+        },
+      } as unknown as R2Bucket;
+      const artResp = await artifactFetch(
+        new Request("https://a.asimposium.org/v1/artifacts", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ problem_id: "P-4DSP" }),
+        }),
+        {
+          DB: db,
+          ARTIFACTS: faultingR2,
+          STOA_ORIGIN: "https://a.asimposium.org",
+          AGORA_ORIGIN: "https://asimposium.org",
+          ENROLLMENT_REPLAY_KEY: "not-configured-r2-outage",
+        } as unknown as ArtifactRuntimeEnv,
+        () => new Response("unexpected-next", { status: 200 }),
+      );
+      expect(artResp.status).toBe(503);
+
       const commitTextAndQueueUpload = sqlite.transaction(() => {
         sqlite
           .query("INSERT INTO claims (id, problem_id, statement) VALUES (?, ?, ?)")
@@ -268,7 +320,7 @@ describe("W10.7 Load tests, performance budgets, degradation-table fault injecti
 
       let uploadStatus: "uploaded" | "pending-r2-retry" = "uploaded";
       try {
-        r2Put();
+        await faultingR2.put("cas/sha256/00", "bytes");
       } catch (err) {
         uploadStatus = "pending-r2-retry";
         sqlite
@@ -455,8 +507,9 @@ describe("W10.7 Load tests, performance budgets, degradation-table fault injecti
   });
 
   test("LIVE STAGING RUNNER FAILS CLOSED (exit 78) WITHOUT --base-url", () => {
-    const proc = Bun.spawnSync(["bun", "e2e/load-degradation/load-budget-runner.ts", "--live"], {
-      cwd: process.cwd(),
+    const runnerPath = join(import.meta.dir, "load-budget-runner.ts");
+    const proc = Bun.spawnSync(["bun", runnerPath, "--live"], {
+      cwd: import.meta.dir,
       stdout: "pipe",
       stderr: "pipe",
     });

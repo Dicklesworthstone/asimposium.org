@@ -17,14 +17,25 @@ describe("W12.3 The Instrument & W12.8 Launch Gates G1/G2/G3 (asimposiumorg-8ku,
     expect(check.ok).toBe(true);
   });
 
-  test("G1/G2/G3 scorecard has zero missing local proof artifacts AND honestly stays blocked on open operator/hosted gates", () => {
+  test("G1/G2/G3 scorecard passes all live executable local checks AND honestly stays blocked on open operator/hosted gates", async () => {
     for (const gate of ["G1", "G2", "G3"] as const) {
-      const report = evaluateLaunchGate(gate);
+      const report = await evaluateLaunchGate(gate);
       expect(report.missing_local_artifacts, `Missing local artifacts for ${gate}`).toEqual([]);
+      expect(report.failed_live_checks, `Failed live checks for ${gate}`).toEqual([]);
       // Honesty invariant: local proofs NEVER falsely mark G1/G2/G3 ready while hosted/operator gates remain open.
       expect(report.ready_to_open_gate).toBe(false);
       expect(report.open_hosted_or_operator_blockers.length).toBeGreaterThan(0);
     }
+
+    const g2 = await evaluateLaunchGate("G2");
+    expect(g2.live_checks.map((c) => c.id)).toEqual([
+      "LIVE-R12-RULES-CAP",
+      "LIVE-APEX-STATIC-DRIFT",
+      "LIVE-S4-CORPUS-SHAPE",
+    ]);
+    expect(g2.open_hosted_or_operator_blockers.some((b) => b.includes("LIVE-S4-READINESS"))).toBe(
+      true,
+    );
 
     // CLI fails closed with exit 78 when hosted/operator blockers remain
     const proc = Bun.spawnSync(["bun", "scripts/launch-gates-scorecard.ts", "--gate", "G1"], {

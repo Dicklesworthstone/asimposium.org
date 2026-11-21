@@ -14,10 +14,17 @@
  *  - Boundary check: OG invalidation & synthesis staleness are outbox consumers, never crons.
  */
 
+import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import {
+  BACKUP_LEASE_MS,
+  BACKUP_RUN_KEY,
+  runScheduledBackup,
+} from "../apps/wire/src/krater/backup-scheduler.ts";
+import { checkpointSigningKey } from "../apps/wire/src/krater/checkpoint-signing.ts";
 import { KraterRestoreRefusedError } from "../apps/wire/src/krater/restore.ts";
 import { containsNeverLogMaterial } from "./lib/ops-audit.ts";
 import {
@@ -310,6 +317,165 @@ describe("OPS.6 Crons & Scheduled Operations (asimposiumorg-zr9)", () => {
       reason: "Quarterly Q4 restore verification after migration 0150",
     });
     expect(rerun.approved).toBe(true);
+  });
+
+  test("real W2.8 runScheduledBackup fault injection: disabled without key, single-flight busy, clock regression, corrupt control JSON, and ETag CAS contention", async () => {
+    const sqlite = new Database(":memory:");
+    try {
+      sqlite.exec(`
+        CREATE TABLE problems (
+          id TEXT PRIMARY KEY,
+          title TEXT,
+          status TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          public_seq INTEGER NOT NULL,
+          chain_digest TEXT NOT NULL
+        );
+      `);
+      const makeStmt = (sql: string, bound: unknown[] = []) => ({
+        bind(...values: unknown[]) {
+          return makeStmt(sql, values);
+        },
+        async first<T>() {
+          return (sqlite.query(sql).get(...(bound as never[])) as T | null) ?? null;
+        },
+        async all<T>() {
+          return { success: true, results: sqlite.query(sql).all(...(bound as never[])) as T[] };
+        },
+        async run() {
+          sqlite.query(sql).run(...(bound as never[]));
+          return { success: true, results: [] };
+        },
+      });
+      type BackupEnv = Parameters<typeof runScheduledBackup>[0];
+      const db = { prepare: (sql: string) => makeStmt(sql) } as unknown as BackupEnv["DB"];
+
+      const objects = new Map<string, { body: string; etag: string }>();
+      let forceCasConflict = false;
+      const bucket = {
+        async get(key: string) {
+          const item = objects.get(key);
+          if (!item) return null;
+          return {
+            size: Buffer.byteLength(item.body),
+            etag: item.etag,
+            async json() {
+              return JSON.parse(item.body);
+            },
+          };
+        },
+        async put(
+          key: string,
+          value: string,
+          opts?: { onlyIf?: { etagMatches?: string; etagDoesNotMatch?: string } },
+        ) {
+          if (forceCasConflict) return null;
+          const existing = objects.get(key);
+          if (opts?.onlyIf?.etagDoesNotMatch === "*" && existing) return null;
+          if (
+            opts?.onlyIf?.etagMatches !== undefined &&
+            existing?.etag !== opts.onlyIf.etagMatches
+          ) {
+            return null;
+          }
+          const etag = createHash("sha256").update(value).digest("hex").slice(0, 16);
+          objects.set(key, { body: value, etag });
+          return { key, etag };
+        },
+      } as unknown as BackupEnv["ARTIFACTS"];
+
+      const seedHex = "22".repeat(32);
+      const signingKeyJson = JSON.stringify({ kid: "ops6-test-k1", seedHex });
+      const parsedSigner = await checkpointSigningKey(signingKeyJson);
+      if (!parsedSigner) throw new Error("failed to derive test Ed25519 signing key");
+      const verifyKeysJson = JSON.stringify([
+        { kid: parsedSigner.kid, publicKeyHex: parsedSigner.publicKeyHex },
+      ]);
+
+      const t0 = Date.parse("2026-11-21T03:00:00Z");
+
+      // 1. Missing signing key -> explicit disabled status (never crashes or claims success)
+      const disabled = await runScheduledBackup({ DB: db, ARTIFACTS: bucket }, t0);
+      expect(disabled).toEqual({
+        enabled: false,
+        status: "disabled",
+        reason: "signing_key_missing",
+      });
+
+      // 2. Active non-expired lease in R2 -> returns single-flight `busy`
+      const activeLeaseState = {
+        version: 1,
+        date: "2026-11-21",
+        startedAt: "2026-11-21T03:00:00.000Z",
+        upper: null,
+        after: null,
+        pending: null,
+        status: "running",
+        written: 0,
+        empty: 0,
+        failed: 0,
+        lease: { owner: "00000000-0000-4000-8000-000000000001", expiresAt: t0 + BACKUP_LEASE_MS },
+        reportKey: null,
+      };
+      objects.set(BACKUP_RUN_KEY, { body: JSON.stringify(activeLeaseState), etag: "etag-1" });
+      const busyRes = await runScheduledBackup(
+        {
+          DB: db,
+          ARTIFACTS: bucket,
+          CHECKPOINT_SIGNING_KEY: signingKeyJson,
+          CHECKPOINT_VERIFY_KEYS: verifyKeysJson,
+        },
+        t0 + 1_000,
+      );
+      expect(busyRes.enabled).toBe(true);
+      if (busyRes.enabled) expect(busyRes.status).toBe("busy");
+
+      // 3. Clock regression -> throws BACKUP_CLOCK_REGRESSED
+      const expiredYesterday = { ...activeLeaseState, lease: null };
+      objects.set(BACKUP_RUN_KEY, { body: JSON.stringify(expiredYesterday), etag: "etag-2" });
+      await expect(
+        runScheduledBackup(
+          {
+            DB: db,
+            ARTIFACTS: bucket,
+            CHECKPOINT_SIGNING_KEY: signingKeyJson,
+            CHECKPOINT_VERIFY_KEYS: verifyKeysJson,
+          },
+          Date.parse("2026-11-20T03:00:00Z"),
+        ),
+      ).rejects.toThrow("BACKUP_CLOCK_REGRESSED");
+
+      // 4. ETag CAS race on lease acquisition -> cleanly returns busy without crashing
+      forceCasConflict = true;
+      const casBusy = await runScheduledBackup(
+        {
+          DB: db,
+          ARTIFACTS: bucket,
+          CHECKPOINT_SIGNING_KEY: signingKeyJson,
+          CHECKPOINT_VERIFY_KEYS: verifyKeysJson,
+        },
+        t0 + BACKUP_LEASE_MS + 5_000,
+      );
+      expect(casBusy.enabled).toBe(true);
+      if (casBusy.enabled) expect(casBusy.status).toBe("busy");
+      forceCasConflict = false;
+
+      // 5. Corrupt control state in R2 -> fails closed BACKUP_RUN_STATE_INVALID
+      objects.set(BACKUP_RUN_KEY, { body: JSON.stringify({ broken: true }), etag: "etag-bad" });
+      await expect(
+        runScheduledBackup(
+          {
+            DB: db,
+            ARTIFACTS: bucket,
+            CHECKPOINT_SIGNING_KEY: signingKeyJson,
+            CHECKPOINT_VERIFY_KEYS: verifyKeysJson,
+          },
+          t0 + BACKUP_LEASE_MS + 10_000,
+        ),
+      ).rejects.toThrow("BACKUP_RUN_STATE_INVALID");
+    } finally {
+      sqlite.close();
+    }
   });
 
   test("infra boundary document declares OG invalidation and synthesis staleness as outbox consumers, never polling crons", () => {

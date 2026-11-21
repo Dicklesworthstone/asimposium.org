@@ -14,6 +14,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { createS4Corpus, inspectS4ManifestReadiness } from "../e2e/screening/s4-corpus.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 
@@ -245,6 +246,12 @@ export const LAUNCH_GATE_CRITERIA: readonly LaunchGateCriterion[] = [
   },
 ];
 
+export interface LiveCheckOutcome {
+  readonly id: string;
+  readonly pass: boolean;
+  readonly detail: string;
+}
+
 export interface GateEvaluationReport {
   readonly schema: "asimposium.launch-gates-scorecard.v1";
   readonly evaluated_at: string;
@@ -252,14 +259,91 @@ export interface GateEvaluationReport {
   readonly oq1_decision: Oq1Decision;
   readonly ready_to_open_gate: boolean;
   readonly missing_local_artifacts: readonly string[];
+  readonly live_checks: readonly LiveCheckOutcome[];
+  readonly failed_live_checks: readonly string[];
   readonly open_hosted_or_operator_blockers: readonly string[];
   readonly criteria: readonly LaunchGateCriterion[];
 }
 
-export function evaluateLaunchGate(
+async function runLiveLocalChecks(gate: LaunchGateId): Promise<{
+  readonly liveChecks: LiveCheckOutcome[];
+  readonly dynamicBlockers: string[];
+}> {
+  const liveChecks: LiveCheckOutcome[] = [];
+  const dynamicBlockers: string[] = [];
+
+  if (gate === "G1") {
+    const inst = verifyTheInstrumentSeed();
+    liveChecks.push({
+      id: "LIVE-INSTRUMENT-SEED",
+      pass: inst.ok,
+      detail: inst.ok
+        ? "The Instrument manifest valid and all 12 defect-to-regression targets exist"
+        : `Invalid Instrument manifest: ${inst.missing_regression_targets.join(", ")}`,
+    });
+  }
+
+  if (gate === "G2") {
+    // 1. Live R-12 rules word count check
+    const proto = readFileSync(join(REPO_ROOT, "packages/protocol/assets/protocol.md"), "utf8");
+    const rulesIdx = proto.indexOf("## Rules");
+    const rest = rulesIdx >= 0 ? proto.slice(rulesIdx) : "";
+    const nextSec = rest.indexOf("\n## ", 1);
+    const rulesText = nextSec === -1 ? rest : rest.slice(0, nextSec);
+    const rulesWords = rulesText.trim().split(/\s+/).filter(Boolean).length;
+    liveChecks.push({
+      id: "LIVE-R12-RULES-CAP",
+      pass: rulesIdx >= 0 && rulesWords > 200 && rulesWords <= 1_000,
+      detail: `protocol.md ## Rules word count = ${rulesWords} (ceiling 1000)`,
+    });
+
+    // 2. Live apex static copy drift check against packages/protocol/assets/*
+    const pairs: readonly [string, string][] = [
+      ["apps/web/public/AGENTS.md", "packages/protocol/assets/handbook.md"],
+      ["apps/web/public/llms.txt", "packages/protocol/assets/llms.txt"],
+      ["apps/web/public/skill.md", "packages/protocol/assets/skill.md"],
+      ["apps/web/public/capsule.md", "packages/protocol/assets/capsule.md"],
+      ["apps/web/public/protocol.md", "packages/protocol/assets/protocol.md"],
+      ["apps/web/public/policy.md", "packages/protocol/assets/policy.md"],
+      ["apps/web/public/inoculation.md", "packages/protocol/assets/inoculation.md"],
+    ];
+    const drifted = pairs
+      .filter(
+        ([apex, protoRel]) =>
+          !existsSync(join(REPO_ROOT, apex)) ||
+          readFileSync(join(REPO_ROOT, apex), "utf8") !==
+            readFileSync(join(REPO_ROOT, protoRel), "utf8"),
+      )
+      .map(([apex]) => apex);
+    liveChecks.push({
+      id: "LIVE-APEX-STATIC-DRIFT",
+      pass: drifted.length === 0,
+      detail:
+        drifted.length === 0
+          ? "All 7 apex static copies match packages/protocol/assets/* byte-for-byte"
+          : `Drifted apex copies: ${drifted.join(", ")}`,
+    });
+
+    // 3. Live S-4 split corpus readiness check (dynamically detects Tier-B unavailability)
+    const corpus = await createS4Corpus();
+    const readiness = inspectS4ManifestReadiness(corpus);
+    liveChecks.push({
+      id: "LIVE-S4-CORPUS-SHAPE",
+      pass: corpus.length === 200,
+      detail: `S-4 corpus loaded (${corpus.length} entries), live readiness=${readiness.status}`,
+    });
+    if (readiness.status !== "ready") {
+      dynamicBlockers.push(`LIVE-S4-READINESS: ${readiness.blockers.join(",")}`);
+    }
+  }
+
+  return { liveChecks, dynamicBlockers };
+}
+
+export async function evaluateLaunchGate(
   gate: LaunchGateId,
   oq1Decision: Oq1Decision = "undecided-pending-g1-dogfood-signal",
-): GateEvaluationReport {
+): Promise<GateEvaluationReport> {
   const criteria = LAUNCH_GATE_CRITERIA.filter((c) => c.gate === gate);
   const missingLocal: string[] = [];
   const openBlockers: string[] = [];
@@ -275,6 +359,10 @@ export function evaluateLaunchGate(
     }
   }
 
+  const { liveChecks, dynamicBlockers } = await runLiveLocalChecks(gate);
+  openBlockers.push(...dynamicBlockers);
+  const failedLive = liveChecks.filter((c) => !c.pass).map((c) => `${c.id}: ${c.detail}`);
+
   if (gate === "G2" && oq1Decision === "undecided-pending-g1-dogfood-signal") {
     openBlockers.push("G2-OQ1: OQ-1 admission posture must be decided from G1 dogfood signal");
   }
@@ -284,8 +372,11 @@ export function evaluateLaunchGate(
     evaluated_at: new Date().toISOString(),
     gate,
     oq1_decision: oq1Decision,
-    ready_to_open_gate: missingLocal.length === 0 && openBlockers.length === 0,
+    ready_to_open_gate:
+      missingLocal.length === 0 && failedLive.length === 0 && openBlockers.length === 0,
     missing_local_artifacts: missingLocal,
+    live_checks: liveChecks,
+    failed_live_checks: failedLive,
     open_hosted_or_operator_blockers: openBlockers,
     criteria,
   };
@@ -336,9 +427,11 @@ async function main(): Promise<void> {
       }
     }
   }
-  const report = evaluateLaunchGate(gate);
+  const report = await evaluateLaunchGate(gate);
   console.log(JSON.stringify(report, null, 2));
-  if (report.missing_local_artifacts.length > 0) process.exit(1);
+  if (report.missing_local_artifacts.length > 0 || report.failed_live_checks.length > 0) {
+    process.exit(1);
+  }
   if (!report.ready_to_open_gate) process.exit(78);
 }
 

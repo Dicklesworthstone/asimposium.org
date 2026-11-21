@@ -23,8 +23,8 @@ Properties:
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
-import io
 import json
 import os
 import stat
@@ -61,7 +61,7 @@ def open_dir_nofollow(path: str, dir_fd: int | None = None) -> int:
     try:
         fd = os.open(path, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=dir_fd)
     except OSError as exc:
-        if exc.errno in (40, 20):  # ELOOP or ENOTDIR
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
             raise ArchivalError("SYMLINK_TRAVERSAL_REFUSED", "Refused symlink or non-directory traversal.", 1) from exc
         raise ArchivalError("PATH_OPEN_FAILED", f"Could not open directory safely: errno={exc.errno}", 78) from exc
     st = os.fstat(fd)
@@ -175,7 +175,6 @@ def walk_run_dir(
                 if file_st.st_dev != st.st_dev or file_st.st_ino != st.st_ino:
                     raise ArchivalError("FILESYSTEM_DRIFT_DETECTED", "File inode changed during open.", 1)
                 hasher = hashlib.sha256()
-                chunks: list[bytes] = []
                 total = 0
                 while True:
                     chunk = os.read(file_fd, 65536)
@@ -183,20 +182,28 @@ def walk_run_dir(
                         break
                     hasher.update(chunk)
                     total += len(chunk)
-                    if tar is not None:
-                        chunks.append(chunk)
                 digest = hasher.hexdigest()
                 file_hashes[rel_path] = digest
                 stats["file_count"] += 1
                 stats["total_bytes"] += total
                 if tar is not None:
-                    data = b"".join(chunks)
-                    info = tarfile.TarInfo(name=rel_path)
-                    info.type = tarfile.REGTYPE
-                    info.size = len(data)
-                    info.mode = 0o644
-                    info.mtime = int(file_st.st_mtime)
-                    tar.addfile(info, io.BytesIO(data))
+                    # Stream directly from the already-verified O_NOFOLLOW file descriptor
+                    # in O(1) RAM instead of buffering full artifact files in memory.
+                    if total != file_st.st_size:
+                        raise ArchivalError(
+                            "FILESYSTEM_DRIFT_DETECTED",
+                            f"File size changed while reading {rel_path}.",
+                            1,
+                        )
+                    os.lseek(file_fd, 0, os.SEEK_SET)
+                    dup_fd = os.dup(file_fd)
+                    with os.fdopen(dup_fd, "rb", buffering=65536) as stream:
+                        info = tarfile.TarInfo(name=rel_path)
+                        info.type = tarfile.REGTYPE
+                        info.size = total
+                        info.mode = 0o644
+                        info.mtime = int(file_st.st_mtime)
+                        tar.addfile(info, stream)
             finally:
                 os.close(file_fd)
         else:
