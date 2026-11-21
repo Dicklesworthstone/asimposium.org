@@ -100,24 +100,52 @@ await runLocalWorkerJourney(async (context) => {
     );
     return { pack, selected };
   };
-  assert.equal((await working(author, session)).selected.primary_move.move, "state-claim");
+  const first = (await working(author, session)).selected.primary_move;
+  assert.equal(first.move, "state-claim");
+  const { captured_cursor, workshop_first, saved_promotion_example } = first.contract.preparation;
+  assert.equal(workshop_first.schema, "/schemas/sessions.v1/first_claim_draft_request.json");
+  const draftSchema = await call(workshop_first.schema);
+  assert.deepEqual(draftSchema.required, ["title", "body_md", "type", "publication"]);
+  assert.deepEqual(draftSchema.properties.publication.required, ["kind", "statement", "falsifier"]);
+  assert.equal(draftSchema.properties.publication.properties.kind.const, "conjecture");
+  assert.ok(Buffer.byteLength(JSON.stringify(draftSchema)) < 2500);
+  assert.deepEqual(first.contract.required_fields, Object.keys(saved_promotion_example));
+  assert.deepEqual(first.contract.prefilled_hints, { client_context_cursor: captured_cursor });
+  assert.ok(typeof saved_promotion_example.client_context_cursor === "number");
+  assert.equal(saved_promotion_example.client_context_cursor, captured_cursor);
+  const privateNotes = "FIRST_CLAIM_PRIVATE_WORKSHOP_CANARY";
   const draft = await call(
-    `/v1/sessions/${session}/workshop`,
-    { type: "claim-draft", title: "Draft", body_md: "Private." },
-    author,
-    201,
-  );
-  const claim = await call(
-    `/v1/sessions/${session}/promote`,
+    workshop_first.path.replace("{id}", session),
     {
-      workshop_id: draft.workshop_id,
-      kind: "conjecture",
-      statement: "Zero squared is even.",
-      falsifier: "Zero squared is odd.",
+      ...workshop_first.body_example,
+      title: "Draft",
+      body_md: privateNotes,
+      publication: {
+        ...workshop_first.body_example.publication,
+        statement: "Zero squared is even.",
+        falsifier: "Zero squared is odd.",
+      },
     },
     author,
     201,
   );
+  const claim = await call(
+    first.contract.request.path.replace("{id}", session),
+    {
+      ...saved_promotion_example,
+      workshop_id: draft.workshop_id,
+      expected_workshop_version: draft.version,
+    },
+    author,
+    201,
+  );
+  const firstFace = ClaimFaceResponseSchema.parse(
+    await call(`/p/${problem}/claims/${claim.claim_id}@${claim.version}.json`),
+  );
+  const firstDetail = firstFace.items.find((item) => item.kind === "claim-detail");
+  assert.ok(firstDetail);
+  assert.equal(JSON.parse(firstDetail.body).statement, "Zero squared is even.");
+  assert.ok(!JSON.stringify(firstFace).includes(privateNotes));
 
   // A non-author is sent to review the unreviewed claim first.
   const forOther = await next(other);

@@ -675,6 +675,18 @@ export const WorkshopCreateRequestSchema = z
   .strict();
 export type WorkshopCreateRequest = z.infer<typeof WorkshopCreateRequestSchema>;
 
+/** The recommended first-claim example, a subset of the workshop create request. */
+const FirstClaimDraftRequestSchema = WorkshopCreateRequestSchema.pick({
+  title: true,
+  body_md: true,
+}).extend({
+  type: z.literal("claim-draft"),
+  publication: ClaimPublicationDraftSchema.pick({ kind: true, statement: true }).extend({
+    kind: z.literal("conjecture"),
+    falsifier: ClaimPublicationDraftSchema.shape.falsifier.unwrap(),
+  }),
+});
+
 export const WorkshopReviseActionSchema = z.enum(["edit", "keep", "archive", "discard"]);
 export type WorkshopReviseAction = z.infer<typeof WorkshopReviseActionSchema>;
 
@@ -1776,6 +1788,7 @@ export const SessionsContractsSchema = z
     full_pack_query: FullPackQuerySchema,
     full_pack_page: FullPackPageSchema,
     workshop_push_request: WorkshopPushRequestSchema,
+    first_claim_draft_request: FirstClaimDraftRequestSchema,
     workshop_push_response: WorkshopPushResponseSchema,
     workshop_object_response: WorkshopObjectResponseSchema,
     sponsor_workshop_request: SponsorWorkshopRequestSchema,

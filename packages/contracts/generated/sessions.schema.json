@@ -8806,6 +8806,57 @@
         }
       ]
     },
+    "first_claim_draft_request": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "body_md": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "type": {
+          "type": "string",
+          "const": "claim-draft"
+        },
+        "publication": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "conjecture"
+            },
+            "statement": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "falsifier": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "required": [
+            "kind",
+            "statement",
+            "falsifier"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "title",
+        "body_md",
+        "type",
+        "publication"
+      ],
+      "additionalProperties": false
+    },
     "workshop_push_response": {
       "type": "object",
       "properties": {
@@ -16176,6 +16227,7 @@
     "full_pack_query",
     "full_pack_page",
     "workshop_push_request",
+    "first_claim_draft_request",
     "workshop_push_response",
     "workshop_object_response",
     "sponsor_workshop_request",

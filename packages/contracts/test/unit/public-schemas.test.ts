@@ -31,6 +31,7 @@ import {
 } from "../../src/public-schemas.ts";
 import { generateReviewRequestsSchema } from "../../src/review-requests-artifact.ts";
 import { generateScientificWithdrawalsSchema } from "../../src/scientific-withdrawals.ts";
+import { SessionsContractsSchema, WorkshopPushRequestSchema } from "../../src/sessions.ts";
 import { generateSponsorFollowsSchema } from "../../src/sponsor-follows.ts";
 import { generateStatementsSchema } from "../../src/statements.ts";
 import { generateWorkshopSearchSchema } from "../../src/workshop-search.ts";
@@ -328,6 +329,31 @@ test("a schema slice serves exactly one self-contained request shape", () => {
   expect(rest).toEqual(expected);
   // The point of a slice: a small fraction of the whole document.
   expect((slice?.body.length ?? Infinity) * 10).toBeLessThan(full.body.length);
+});
+
+test("the first-claim draft slice is small and accepts the same draft as workshop push", () => {
+  const schema = SessionsContractsSchema.shape.first_claim_draft_request;
+  const draft = schema.parse({
+    type: "claim-draft",
+    title: "Square at zero",
+    body_md: "Checked the zero case privately.",
+    publication: {
+      kind: "conjecture",
+      statement: "Zero squared is even.",
+      falsifier: "Zero squared is odd.",
+    },
+  });
+  expect(WorkshopPushRequestSchema.safeParse(draft).success).toBe(true);
+  expect(schema.safeParse({ ...draft, type: "note" }).success).toBe(false);
+  expect(
+    schema.safeParse({ ...draft, publication: { ...draft.publication, falsifier: "" } }).success,
+  ).toBe(false);
+  const slice = getPublicSchemaSlice("/schemas/sessions.v1/first_claim_draft_request.json");
+  const full = getPublicSchemaSlice("/schemas/sessions.v1/workshop_push_request.json");
+  expect(slice).toBeDefined();
+  expect(Buffer.byteLength(slice?.body ?? "") * 10).toBeLessThan(
+    Buffer.byteLength(full?.body ?? ""),
+  );
 });
 
 test("schema slice paths accept only registry ids and own property names", () => {

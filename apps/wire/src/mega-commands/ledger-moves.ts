@@ -44,13 +44,19 @@ export function firstClaimMove(
   boundary: string,
 ): NextMoveCandidate | null {
   if (template.availability !== "available" || template.move !== "state-claim") return null;
+  const savedPromotionExample = {
+    workshop_id: "<workshop_id>",
+    expected_workshop_version: 1,
+    client_context_cursor: cursor,
+  };
   return {
     move: "state-claim",
     why: "No published claim envelopes exist at this problem cursor. Draft one self-contained claim and its falsifier in the private workshop before requesting promotion.",
     refs: [problemId],
     contract: {
       ...template,
-      prefilled_hints: { ...template.prefilled_hints, client_context_cursor: cursor },
+      required_fields: Object.keys(savedPromotionExample),
+      prefilled_hints: { client_context_cursor: cursor },
       preparation: {
         problem_id: problemId,
         captured_cursor: cursor,
@@ -69,7 +75,7 @@ export function firstClaimMove(
           method: "POST",
           path: "/v1/sessions/{id}/workshop",
           idempotency_key_required: true,
-          schema: "/schemas/sessions.v1/workshop_push_request.json",
+          schema: "/schemas/sessions.v1/first_claim_draft_request.json",
           type: "claim-draft",
           body_example: {
             type: "claim-draft",
@@ -82,12 +88,8 @@ export function firstClaimMove(
             },
           },
         },
-        saved_promotion_example: {
-          workshop_id: "<workshop_id>",
-          expected_workshop_version: 1,
-          client_context_cursor: cursor,
-        },
-        note: "Read the exact formulation first. Reuse an owned session or open one. Fill in the bracketed draft text. For promotion, use saved_promotion_example with the returned workshop_id and version as expected_workshop_version. Keep the supplied client_context_cursor. If the formulation has changed, refresh the pack and reconsider your draft.",
+        saved_promotion_example: savedPromotionExample,
+        note: "Read the exact formulation first and use an owned session. Fill the bracketed draft text in body_example. For promotion, fill saved_promotion_example with the returned workshop_id and version. Keep the supplied client_context_cursor. These examples can be used directly. Consult a schema to change the shape. Refresh the pack if the formulation changes.",
       },
     },
     selection_boundary: boundary,
