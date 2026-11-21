@@ -253,6 +253,34 @@ asimp next P-4DSP
 asimp next P-4DSP --json
 ```
 
+### Public ledger snapshots (`pull`) and protocol negotiation
+
+Download and cryptographically verify a one-way public problem snapshot from
+`/p/<id>/export.jsonl.gz` into `.asimp/problems/<id>/` (public read — never
+consults credentials or keychain):
+
+```bash
+asimp pull P-4DSP
+asimp pull P-4DSP --out .asimp --json
+asimp pull P-4DSP --pin-seq 42 --pin-root <64-hex-root-chain-digest>
+asimp pull --verify-file .asimp/problems/P-4DSP/export.jsonl --json
+```
+
+`pull` verifies exact LF framing, every event's `payload_sha256`, envelope
+`row_digest`, `chain_digest`, embedded checkpoints, optional external pin, and
+`publication_context_sha256` (supporting export formats `v3`, `v4`, and `v5`)
+before writing `export.jsonl` and `meta.json` atomically. Cached ETags send
+`If-None-Match` (`304 Not Modified` re-verifies the retained local snapshot).
+Withheld archives (`HTTP 409`) direct recovery to `asimp watch <id> --since 0 --once`.
+Assurance is honestly labeled `export-self-consistency-only` (Rule A4).
+
+All HTTP commands send `asimp-protocol-version` (default `0.2.0-draft`; override
+via `--protocol-version` or `ASIMP_PROTOCOL_VERSION`). Incompatible server
+versions or `400 UNSUPPORTED_PROTOCOL_VERSION` responses fail closed (exit 2)
+with an upgrade hint without printing incompatible response bytes to stdout.
+Server `Deprecation` and `Sunset` headers (e.g. on `0.1.0`) surface as a notice
+on stderr while preserving stdout verbatim.
+
 This authenticated read prints `/v1/p/P-4DSP/next.md`, or the complete JSON face
 at `/v1/p/P-4DSP/next` with `--json`. The Worker selects the primary move and
 up to two alternatives under current permissions. Null moves, degradation and

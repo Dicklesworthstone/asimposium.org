@@ -11,6 +11,8 @@ pub mod canonical_json;
 pub mod coordination;
 mod credentials;
 mod enrollment;
+pub mod protocol;
+pub mod pull;
 pub mod scrub;
 mod session_reads;
 pub mod validate;
@@ -39,6 +41,10 @@ pub struct Cli {
     /// Local keychain identity; credentials are also bound to the exact agent origin.
     #[arg(long, global = true, default_value = "default", value_name = "LABEL")]
     pub identity: String,
+
+    /// Wire protocol version header (`asimp-protocol-version`; default: ASIMP_PROTOCOL_VERSION or 0.2.0-draft).
+    #[arg(long, global = true, value_name = "VERSION")]
+    pub protocol_version: Option<String>,
 
     #[command(subcommand)]
     pub command: Command,
@@ -152,6 +158,14 @@ pub enum Command {
         /// Dependency claim reference; the Worker checks existence and cycles.
         #[arg(long, requires = "workshop", conflicts_with = "file")]
         depends_on: Vec<String>,
+        /// Optional optimistic concurrency pin for the workshop object revision.
+        #[arg(
+            long,
+            requires = "workshop",
+            conflicts_with = "file",
+            value_name = "VERSION"
+        )]
+        expected_workshop_version: Option<u64>,
         /// Complete PromoteRequest JSON file, instead of direct claim arguments.
         #[arg(long, required_unless_present = "workshop", value_name = "JSON_FILE")]
         file: Option<std::path::PathBuf>,
@@ -226,10 +240,12 @@ pub enum Command {
     },
     /// GET an origin-relative path and print the body verbatim.
     Get { path: String },
+    /// Download and verify a one-way public ledger snapshot (`/p/<id>/export.jsonl.gz`) into `.asimp/`.
+    Pull(Box<pull::PullArgs>),
     /// Validate a JSON payload offline against the bundled @asimposium/contracts schemas.
-    Validate(validate::ValidateArgs),
+    Validate(Box<validate::ValidateArgs>),
     /// Scan a file or stdin offline for P7 credentials and artifact personal addresses.
-    Scrub(scrub::ScrubArgs),
+    Scrub(Box<scrub::ScrubArgs>),
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -387,6 +403,7 @@ enum WriteBody<'a> {
         falsifier: Option<&'a str>,
         relates_to: &'a [String],
         depends_on: &'a [String],
+        expected_workshop_version: Option<u64>,
     },
     Workshop {
         path: &'a std::path::Path,
@@ -567,6 +584,7 @@ impl Command {
                 falsifier,
                 relates_to,
                 depends_on,
+                expected_workshop_version,
                 file,
                 options,
             } => Some(WriteRequest {
@@ -583,6 +601,7 @@ impl Command {
                         falsifier: falsifier.as_deref(),
                         relates_to,
                         depends_on,
+                        expected_workshop_version: *expected_workshop_version,
                     },
                 },
             }),
@@ -636,10 +655,18 @@ pub fn run_cli(cli: &Cli) -> CliOutput {
     if matches!(cli.command, Command::Scrub(_)) {
         return scrub::run(cli);
     }
+    if matches!(cli.command, Command::Pull(_)) {
+        return pull::run(cli);
+    }
+    let protocol_version = match protocol::resolve_protocol_version(cli.protocol_version.as_ref()) {
+        Ok(version) => version,
+        Err(message) => return input_error(&message),
+    };
     if matches!(cli.command, Command::Watch(_)) {
+        let proto = protocol_version.clone();
         return watch::run_with_io(
             cli,
-            fetch_text,
+            |url| fetch_text_with_protocol_only(url, None, &proto),
             &mut std::io::stdout().lock(),
             std::thread::sleep,
         );
@@ -701,18 +728,40 @@ pub fn run_cli(cli: &Cli) -> CliOutput {
         }
     };
     if cli.command.write_request().is_some() {
-        return run_cli_write(cli, read_request_file, |url, key, body| {
+        let mut deprecation_stderr = String::new();
+        let mut output = run_cli_write(cli, read_request_file, |url, key, body| {
             let token = token.as_deref().ok_or(FetchError::Network)?;
             let agent = agent();
             let url = url.to_owned();
             let token = token.to_owned();
             let key = key.to_owned();
-            run_with_deadline(READ_TIMEOUT, move || {
-                request_text_with_agent(&agent, &url, Some(&token), Some((&key, &body)))
-            })
+            let proto = protocol_version.clone();
+            let (fetched, notice) = run_with_deadline_protocol(READ_TIMEOUT, move || {
+                request_text_with_protocol(&agent, &url, Some(&token), &proto, Some((&key, &body)))
+            })?;
+            if let Some(notice) = notice {
+                deprecation_stderr.push_str(&notice.render_stderr());
+            }
+            Ok(fetched)
         });
+        if !deprecation_stderr.is_empty() {
+            output.stderr = format!("{deprecation_stderr}{}", output.stderr);
+        }
+        return output;
     }
-    run_cli_with_fetch(cli, |url| fetch_text_authenticated(url, token.as_deref()))
+    let mut deprecation_stderr = String::new();
+    let mut output = run_cli_with_fetch(cli, |url| {
+        let (fetched, notice) =
+            fetch_text_authenticated_with_protocol(url, token.as_deref(), &protocol_version)?;
+        if let Some(notice) = notice {
+            deprecation_stderr.push_str(&notice.render_stderr());
+        }
+        Ok(fetched)
+    });
+    if !deprecation_stderr.is_empty() {
+        output.stderr = format!("{deprecation_stderr}{}", output.stderr);
+    }
+    output
 }
 
 const MAX_REQUEST_BYTES: u64 = 512 * 1024;
@@ -733,13 +782,23 @@ impl WriteBody<'_> {
                 falsifier,
                 relates_to,
                 depends_on,
+                expected_workshop_version,
             } => {
+                if expected_workshop_version.is_some_and(|v| v == 0 || v > 9_007_199_254_740_991) {
+                    return Err(
+                        "--expected-workshop-version must be a positive safe integer from a workshop read."
+                            .to_owned(),
+                    );
+                }
                 let mut value = serde_json::json!({
                     "workshop_id": workshop, "kind": kind, "statement": statement,
                     "relates_to": relates_to, "depends_on": depends_on,
                 });
                 if let Some(falsifier) = falsifier {
                     value["falsifier"] = serde_json::json!(falsifier);
+                }
+                if let Some(version) = expected_workshop_version {
+                    value["expected_workshop_version"] = serde_json::json!(version);
                 }
                 value
             }
@@ -969,6 +1028,11 @@ fn run_cli_write(
                 stderr: format!("asimp: {write_label} returned HTTP {status}\n{hint}"),
             }
         }
+        Err(FetchError::ProtocolMismatch(mismatch)) => CliOutput {
+            exit_code: 2,
+            stdout: String::new(),
+            stderr: mismatch.render_stderr(),
+        },
         Err(_) => CliOutput {
             exit_code: 2,
             stdout: String::new(),
@@ -1098,6 +1162,8 @@ pub enum FetchError {
     BodyTooLarge {
         limit_bytes: u64,
     },
+    /// The server advertised or required a protocol version incompatible with this build.
+    ProtocolMismatch(protocol::ProtocolMismatch),
     Network,
     InvalidUtf8,
 }
@@ -1148,6 +1214,7 @@ fn read_capped_at(reader: impl Read, max_body_bytes: u64) -> Result<String, Fetc
 
 /// GET one full URL, bounding the response body. The configured agent disables
 /// redirects: an origin-pinned face may not move the reader somewhere else.
+#[cfg(test)]
 fn fetch_text_with_agent(
     agent: &Agent,
     url: &str,
@@ -1156,17 +1223,30 @@ fn fetch_text_with_agent(
     request_text_with_agent(agent, url, token, None)
 }
 
+#[cfg(test)]
 fn request_text_with_agent(
     agent: &Agent,
     url: &str,
     token: Option<&str>,
     write: Option<(&str, &str)>,
 ) -> Result<Fetched, FetchError> {
+    request_text_with_protocol(agent, url, token, protocol::DEFAULT_PROTOCOL_VERSION, write)
+        .map(|(fetched, _)| fetched)
+}
+
+fn request_text_with_protocol(
+    agent: &Agent,
+    url: &str,
+    token: Option<&str>,
+    protocol_version: &str,
+    write: Option<(&str, &str)>,
+) -> Result<(Fetched, Option<protocol::DeprecationNotice>), FetchError> {
     let mut request = if write.is_some() {
         agent.post(url)
     } else {
         agent.get(url)
     };
+    request = request.set(protocol::PROTOCOL_VERSION_HEADER, protocol_version);
     if let Some(token) = token {
         request = request.set("authorization", &format!("Bearer {token}"));
     }
@@ -1178,7 +1258,19 @@ fn request_text_with_agent(
         None => request.call(),
     }
     .map_err(|error| match error {
-        ureq::Error::Status(code, _) => FetchError::Status(code),
+        ureq::Error::Status(code, resp) => {
+            if code == 400 {
+                let mut buf = Vec::new();
+                let _ = resp.into_reader().take(16 * 1024).read_to_end(&mut buf);
+                let text = std::str::from_utf8(&buf).ok();
+                if let Some(mismatch) =
+                    protocol::parse_unsupported_version_problem(protocol_version, code, text)
+                {
+                    return FetchError::ProtocolMismatch(mismatch);
+                }
+            }
+            FetchError::Status(code)
+        }
         _ => FetchError::Network,
     })?;
 
@@ -1186,8 +1278,16 @@ fn request_text_with_agent(
     if !(200..300).contains(&status) {
         return Err(FetchError::Status(status));
     }
+    let deprecation = protocol::inspect_success_headers(
+        protocol_version,
+        response.header(protocol::PROTOCOL_VERSION_HEADER),
+        response.header("deprecation"),
+        response.header("sunset"),
+        response.header("link"),
+    )
+    .map_err(FetchError::ProtocolMismatch)?;
     let body = read_capped(response.into_reader())?;
-    Ok(Fetched { status, body })
+    Ok((Fetched { status, body }, deprecation))
 }
 
 /// Bound the entire blocking ureq operation, including DNS resolution.
@@ -1198,6 +1298,7 @@ fn request_text_with_agent(
 /// an actual caller-visible deadline. On timeout no worker-owned response
 /// bytes cross the channel; the CLI reports the typed network failure and
 /// exits, which retires any still-blocked resolver thread with the process.
+#[cfg(test)]
 fn fetch_text_with_deadline(
     agent: Agent,
     url: String,
@@ -1213,6 +1314,22 @@ fn run_with_deadline(
     timeout: std::time::Duration,
     operation: impl FnOnce() -> Result<Fetched, FetchError> + Send + 'static,
 ) -> Result<Fetched, FetchError> {
+    run_with_deadline_generic(timeout, operation)
+}
+
+fn run_with_deadline_protocol(
+    timeout: std::time::Duration,
+    operation: impl FnOnce() -> Result<(Fetched, Option<protocol::DeprecationNotice>), FetchError>
+    + Send
+    + 'static,
+) -> Result<(Fetched, Option<protocol::DeprecationNotice>), FetchError> {
+    run_with_deadline_generic(timeout, operation)
+}
+
+fn run_with_deadline_generic<T: Send + 'static>(
+    timeout: std::time::Duration,
+    operation: impl FnOnce() -> Result<T, FetchError> + Send + 'static,
+) -> Result<T, FetchError> {
     let started = std::time::Instant::now();
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let worker = std::thread::Builder::new()
@@ -1246,14 +1363,30 @@ pub fn fetch_text(url: &str) -> Result<Fetched, FetchError> {
 }
 
 fn fetch_text_authenticated(url: &str, token: Option<&str>) -> Result<Fetched, FetchError> {
+    fetch_text_with_protocol_only(url, token, protocol::DEFAULT_PROTOCOL_VERSION)
+}
+
+fn fetch_text_with_protocol_only(
+    url: &str,
+    token: Option<&str>,
+    protocol_version: &str,
+) -> Result<Fetched, FetchError> {
+    fetch_text_authenticated_with_protocol(url, token, protocol_version).map(|(fetched, _)| fetched)
+}
+
+fn fetch_text_authenticated_with_protocol(
+    url: &str,
+    token: Option<&str>,
+    protocol_version: &str,
+) -> Result<(Fetched, Option<protocol::DeprecationNotice>), FetchError> {
     let started = std::time::Instant::now();
     let agent = agent();
-    fetch_text_with_deadline(
-        agent,
-        url.to_string(),
-        READ_TIMEOUT.saturating_sub(started.elapsed()),
-        token.map(str::to_owned),
-    )
+    let url = url.to_string();
+    let token = token.map(str::to_owned);
+    let proto = protocol_version.to_owned();
+    run_with_deadline_protocol(READ_TIMEOUT.saturating_sub(started.elapsed()), move || {
+        request_text_with_protocol(&agent, &url, token.as_deref(), &proto, None)
+    })
 }
 
 /// The path for a `problems` invocation.
@@ -1403,10 +1536,26 @@ pub fn run_cli_with_fetch(
         ""
     };
     match fetch(&url) {
-        Ok(fetched) => CliOutput {
-            exit_code: 0,
-            stdout: fetched.body,
-            stderr: String::new(),
+        Ok(fetched) => {
+            if matches!(&cli.command, Command::Capabilities { .. })
+                && let Err(mismatch) = protocol::check_capabilities_compatibility(&fetched.body)
+            {
+                return CliOutput {
+                    exit_code: 2,
+                    stdout: String::new(),
+                    stderr: mismatch.render_stderr(),
+                };
+            }
+            CliOutput {
+                exit_code: 0,
+                stdout: fetched.body,
+                stderr: String::new(),
+            }
+        }
+        Err(FetchError::ProtocolMismatch(mismatch)) => CliOutput {
+            exit_code: 2,
+            stdout: String::new(),
+            stderr: mismatch.render_stderr(),
         },
         Err(FetchError::Status(status)) => {
             let hint = if matches!(&cli.command, Command::Search { .. }) {
@@ -1923,6 +2072,7 @@ mod tests {
             falsifier: promote["falsifier"].as_str(),
             relates_to: &refs,
             depends_on: &[],
+            expected_workshop_version: None,
         }
         .encode(|_| panic!("typed promote read a file"))
         .unwrap();
@@ -2755,6 +2905,7 @@ mod tests {
             let cli = Cli {
                 origin: Some("https://example.test".to_string()),
                 identity: "default".to_string(),
+                protocol_version: None,
                 command,
             };
             let oversized = vec![b'x'; MAX_BODY_BYTES as usize + 1];
@@ -3491,6 +3642,168 @@ mod tests {
         assert_eq!(output.exit_code, 2);
         assert!(output.stdout.is_empty());
         assert!(!output.stderr.contains("QUERY_CANARY_7f2"));
+    }
+
+    #[test]
+    fn promote_encodes_expected_workshop_version_and_rejects_zero() {
+        let cli = Cli::try_parse_from([
+            "asimp",
+            "--origin",
+            "https://example.test",
+            "promote",
+            "S-123",
+            "W-abcdefghijklmnopqrstuvwxyz",
+            "--kind",
+            "definition",
+            "--statement",
+            "An even integer is divisible by two.",
+            "--expected-workshop-version",
+            "3",
+            "--idempotency-key",
+            "prom-v3",
+        ])
+        .unwrap();
+        let out = run_cli_write(
+            &cli,
+            |_| panic!("inline promote read a file"),
+            |url, key, body| {
+                assert_eq!(url, "https://example.test/v1/sessions/S-123/promote");
+                assert_eq!(key, "prom-v3");
+                let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(parsed["expected_workshop_version"], 3);
+                Ok(Fetched {
+                    status: 200,
+                    body: r#"{"ok":true}"#.to_owned(),
+                })
+            },
+        );
+        assert_eq!(out.exit_code, 0);
+
+        let zero = Cli::try_parse_from([
+            "asimp",
+            "--origin",
+            "https://example.test",
+            "promote",
+            "S-123",
+            "W-abcdefghijklmnopqrstuvwxyz",
+            "--kind",
+            "definition",
+            "--statement",
+            "An even integer is divisible by two.",
+            "--expected-workshop-version",
+            "0",
+            "--idempotency-key",
+            "prom-v0",
+        ])
+        .unwrap();
+        let out_zero = run_cli_write(&zero, |_| unreachable!(), |_, _, _| unreachable!());
+        assert_eq!(out_zero.exit_code, 2);
+        assert!(out_zero.stderr.contains("--expected-workshop-version"));
+    }
+
+    #[test]
+    fn http_protocol_negotiation_sends_header_surfaces_deprecation_and_refuses_mismatch() {
+        use std::io::Write;
+        use std::net::TcpListener;
+
+        // 1. 0.1.0 request receives Deprecation + Sunset headers; body survives and notice surfaces.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut req_buf = [0u8; 2048];
+            let n = stream.read(&mut req_buf).unwrap();
+            let req = String::from_utf8_lossy(&req_buf[..n]).to_ascii_lowercase();
+            assert!(
+                req.contains("asimp-protocol-version: 0.1.0\r\n"),
+                "missing protocol header: {req}"
+            );
+            let resp = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: application/json\r\n",
+                "asimp-protocol-version: 0.1.0\r\n",
+                "deprecation: @1735689600\r\n",
+                "sunset: Wed, 31 Dec 2026 23:59:59 GMT\r\n",
+                "link: <https://a.asimposium.org/protocol.md>; rel=\"sunset\"; type=\"text/markdown\"\r\n",
+                "Content-Length: 11\r\n\r\n",
+                "{\"ok\":true}"
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+        });
+        let (fetched, notice) = request_text_with_protocol(
+            &agent_with_timeout(std::time::Duration::from_secs(2)),
+            &format!("http://{addr}/capabilities"),
+            None,
+            "0.1.0",
+            None,
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(fetched.body, "{\"ok\":true}");
+        let notice = notice.expect("deprecation notice expected for 0.1.0");
+        assert!(notice.render_stderr().contains("@1735689600"));
+        assert!(
+            notice
+                .render_stderr()
+                .contains("Wed, 31 Dec 2026 23:59:59 GMT")
+        );
+
+        // 2. Server advertising future major version 2.0.0 is refused before returning body.
+        let listener2 = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        let server2 = std::thread::spawn(move || {
+            let (mut stream, _) = listener2.accept().unwrap();
+            let mut req_buf = [0u8; 2048];
+            let _ = stream.read(&mut req_buf);
+            let resp = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "asimp-protocol-version: 2.0.0\r\n",
+                "Content-Length: 19\r\n\r\n",
+                "{\"breaking\":\"data\"}"
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+        });
+        let err = request_text_with_protocol(
+            &agent_with_timeout(std::time::Duration::from_secs(2)),
+            &format!("http://{addr2}/capabilities"),
+            None,
+            "0.2.0-draft",
+            None,
+        )
+        .unwrap_err();
+        server2.join().unwrap();
+        assert!(matches!(err, FetchError::ProtocolMismatch(_)));
+
+        // 3. 400 UNSUPPORTED_PROTOCOL_VERSION surfaces server's supported_versions safely.
+        let listener3 = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr3 = listener3.local_addr().unwrap();
+        let server3 = std::thread::spawn(move || {
+            let (mut stream, _) = listener3.accept().unwrap();
+            let mut req_buf = [0u8; 2048];
+            let _ = stream.read(&mut req_buf);
+            let body = r#"{"code":"UNSUPPORTED_PROTOCOL_VERSION","supported_versions":["0.3.0"]}"#;
+            let resp = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/problem+json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+        });
+        let err3 = request_text_with_protocol(
+            &agent_with_timeout(std::time::Duration::from_secs(2)),
+            &format!("http://{addr3}/capabilities"),
+            None,
+            "0.2.0-draft",
+            None,
+        )
+        .unwrap_err();
+        server3.join().unwrap();
+        match err3 {
+            FetchError::ProtocolMismatch(m) => {
+                assert_eq!(m.supported_by_server, vec!["0.3.0"]);
+            }
+            other => panic!("expected ProtocolMismatch, got {other:?}"),
+        }
     }
 }
 

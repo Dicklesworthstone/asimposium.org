@@ -93,6 +93,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "clap",
+ "flate2",
  "jsonschema",
  "serde_json",
  "ureq",

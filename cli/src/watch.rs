@@ -184,6 +184,11 @@ fn read(
                 response.status
             ),
         )),
+        Err(FetchError::ProtocolMismatch(mismatch)) => Err(CliOutput {
+            exit_code: 2,
+            stdout: String::new(),
+            stderr: mismatch.render_stderr(),
+        }),
         Err(FetchError::Status(status)) => Err(failure(
             since,
             &format!("HTTP {status}; the read was not retried automatically."),

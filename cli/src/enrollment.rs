@@ -563,6 +563,13 @@ fn failure(message: &str) -> CliOutput {
     crate::input_error(message)
 }
 fn transport_failure(error: FetchError) -> CliOutput {
+    if let FetchError::ProtocolMismatch(mismatch) = error {
+        return CliOutput {
+            exit_code: 2,
+            stdout: String::new(),
+            stderr: mismatch.render_stderr(),
+        };
+    }
     let message = match error {
         FetchError::Status(status) => format!("Enrollment returned HTTP {status}. {RECOVERY}"),
         _ => format!(
