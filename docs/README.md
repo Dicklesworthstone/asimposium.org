@@ -14,7 +14,7 @@ observed.
 
 ## Current reality check
 
-Updated 2026-11-20. Runtime qualification below is pinned to its named source
+Updated 2026-11-21. Runtime qualification below is pinned to its named source
 revision; later documentation and tracker commits do not imply another test run.
 
 ### November 17 source and hosted comparison
@@ -644,6 +644,58 @@ eight groups, including 7,637 Worker and 1,185 Agora unit tests. All five
 applicable contract groups pass, including the 191 HTTP checks. UBS
 flags three new test-only JSON parses that fail on malformed responses.
 The independent reviewer closes `ceq.12` at `16a5e0ec` in map 3317.
+
+### November 21 finish an accepted invitation after session close
+
+The recipient of an accepted invitation can recover an already-published
+review from the invitation detail after closing the work session. The
+detail offers the exact public publication event and the completion body
+for the existing writer. Completing links that event and leaves the
+public review count and cursor unchanged.
+
+The original `5e759c73` Workerd journey publishes the review and closes
+the session before failing at the missing recovery action. The initial
+`b24319a4` fix works for a short review. An isolated control finds that a
+review of about 20 KiB still fits the completion gate while its standalone
+body reader returns 404. At `8233e182`, recovery uses a frozen page
+containing the exact ledger event, so that review can be linked with the
+existing limits. The separate body-reader defect remains open as `92x.7`.
+The native journey exercises author exclusion, current claim and review
+controls, session close, the supplied completion and same-key replay.
+
+Primary and independent runs at the combined source `dba12756` pass the
+full matchmaking journey, three registered journeys and 240 owning
+review checks. The native journeys use local Workerd, D1 and R2 with
+fixture identity and screening. The independent reviewer closes
+`mip.3` at `dba12756` in map 3331.
+
+### November 21 validate current capabilities in staging readiness
+
+The old readiness parser exits 1 with no schema paths when a local
+Workerd advertises the staging origin, version `0.2.0-draft` and 252
+operations. At `dba12756`, the stage validates the document against the
+same generator that serves it and the canonical readiness status schema.
+It uses the public registry for schema paths and retains provider
+attestation and the existing stage order.
+
+Primary and independent Stoa runs pipe the actual Workerd bytes through
+the shell stage's Bun code, check the recorded digest and all 43 mounted
+schema IDs, and reject legacy, missing-field and wrong-origin controls.
+Both runs pass the 23 pipeline orchestration cases. Root typecheck,
+lint and unit pass all eight groups, with 7,637 Worker and 1,185 Agora
+unit tests. The Worker and pipeline inputs stay exact. Concurrent Agora
+edits begin after its unit group and the later CLI commit has separate
+scope. All five applicable contract groups pass, with 191 HTTP cases.
+UBS reports partial command-taint coverage on the new native test.
+An additional discovery run passes all 20 tests at the frozen revision.
+The shared-worktree run after root completion reports one golden failure
+after a concurrent `llms.txt` edit changes the served digest.
+
+`rc-ci-worker-readiness-caps-mbdj` stays in progress for staging
+bootstrap and candidate-bound deployed smokes. The separate binding
+audit confirms that all three static config checks pass while the
+tracked production deploy file omits AI and the Herald room binding.
+That evidence stays on `rc-wrangler-deploy-bindings-k9mc`.
 
 ### Earlier November 14 source comparison
 
