@@ -28,6 +28,7 @@ import {
 } from "@asimposium/protocol";
 import { renderPublicMovesHtml, renderPublicMovesMarkdown } from "@asimposium/render";
 import { type ExecutionContext, Hono } from "hono";
+import { renderPlatformStatsMarkdown } from "../../../packages/render/src/stats.ts";
 import { authenticateServiceEnvelopeRequest } from "./auth/http";
 import {
   KeyringConfigError,
@@ -93,6 +94,7 @@ import {
 } from "./sessions/problem-membership-admission.ts";
 import { createSessionRouter, type PromotionScreener } from "./sessions/router";
 import { createSponsorWorkshopSearchRouter } from "./sessions/sponsor-workshop-search";
+import { loadPlatformStats } from "./stats/service.ts";
 
 /**
  * The Stoa application.
@@ -1364,24 +1366,56 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       headers: { location: `/stats.md${url.search}`, "cache-control": "public, max-age=300" },
     });
   });
-  app.on(["GET", "HEAD"], "/stats.json", (c) =>
-    servePublicRepresentation(c.req.raw, {
+  app.on(["GET", "HEAD"], "/stats.json", async (c) => {
+    if (c.env?.DB !== undefined) {
+      try {
+        const stats = await loadPlatformStats(c.env.DB);
+        const body = `${JSON.stringify(stats, null, 2)}\n`;
+        return servePublicRepresentation(c.req.raw, {
+          body,
+          contentType: "application/json; charset=utf-8",
+          digest: sha256Hex(body),
+          servedAt: "/stats.json",
+          format: "json",
+          cacheControl: "public, max-age=60, must-revalidate",
+        });
+      } catch {
+        // Stateless test stubs or uninitialized D1 fall back honestly to not_produced.
+      }
+    }
+    return servePublicRepresentation(c.req.raw, {
       body: STATS_DEGRADED_JSON_BODY,
       contentType: "application/json; charset=utf-8",
       digest: sha256Hex(STATS_DEGRADED_JSON_BODY),
       servedAt: "/stats.json",
       format: "json",
-    }),
-  );
-  app.on(["GET", "HEAD"], "/stats.md", (c) =>
-    servePublicRepresentation(c.req.raw, {
+    });
+  });
+  app.on(["GET", "HEAD"], "/stats.md", async (c) => {
+    if (c.env?.DB !== undefined) {
+      try {
+        const stats = await loadPlatformStats(c.env.DB);
+        const body = renderPlatformStatsMarkdown(stats);
+        return servePublicRepresentation(c.req.raw, {
+          body,
+          contentType: "text/markdown; charset=utf-8",
+          digest: sha256Hex(body),
+          servedAt: "/stats.md",
+          format: "md",
+          cacheControl: "public, max-age=60, must-revalidate",
+        });
+      } catch {
+        // Stateless test stubs or uninitialized D1 fall back honestly to not_produced.
+      }
+    }
+    return servePublicRepresentation(c.req.raw, {
       body: STATS_DEGRADED_MD_BODY,
       contentType: "text/markdown; charset=utf-8",
       digest: sha256Hex(STATS_DEGRADED_MD_BODY),
       servedAt: "/stats.md",
       format: "md",
-    }),
-  );
+    });
+  });
 
   for (const path of ["/rubrics", "/rubrics.json"] as const) {
     app.on(["GET", "HEAD"], path, (c) =>

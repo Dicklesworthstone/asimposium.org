@@ -23,10 +23,14 @@ import {
   buildCostVerifierDiagnostic,
   COST_MODEL_PINNED_SOURCES,
   calculateFableWorkload,
+  computeStagingS2ReceiptChecksum,
   costModelSourceDiscrepancies,
   costModelSourceResolutions,
   createReceiptReader,
   DISCREPANCY_NO_CLAIM,
+  evaluateStagingS2CostReceipt,
+  FABLE_SECTION_15_BUDGETS,
+  FABLE_SECTION_15_RECONCILIATION_NOTES,
   FABLE_WORKED_EXAMPLE,
   FABLE_WORKED_EXAMPLE_ASSUMPTIONS,
   type FableWorkedExampleInput,
@@ -36,6 +40,7 @@ import {
   type ReceiptFileSystem,
   receiptDigest,
   runCostVerifierCli,
+  runStagingS2ReceiptCli,
   S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
   S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES,
   S2_COST_EVIDENCE_MANIFEST_VERSION,
@@ -55,6 +60,7 @@ import {
   S2_SUCCESSFUL_BATCH_SCOPE,
   S2_WRITE_CLAIM_SCOPE,
   type S2CostMeasurementReceipt,
+  VERIFIED_COST_MODEL_SOURCES,
   verifyCostModel,
   writeDiagnosticLine,
 } from "./verify-cost-model.ts";
@@ -2046,4 +2052,123 @@ describe("S7 cost verifier", () => {
       // transport regression.
     }, 300_000);
   }
+});
+
+describe("staging --s2-receipt budget evaluation and reconciled primary sources (asimposiumorg-rc-stats-runbooks-cost-model-w4tz)", () => {
+  function validStagingReceipt(overrides: Record<string, unknown> = {}): Uint8Array {
+    const base = {
+      schema_version: "s2-staging-cost-receipt-v1" as const,
+      run_id: "s2-staging-budget-test",
+      environment: "staging" as const,
+      measured_at: "2026-11-21T05:00:00.000Z",
+      measured_p95_ms: {
+        cursor: 18,
+        cached_face_ttfb: 120,
+        uncached_digest: 410,
+        pack_composition: 290,
+        delta_200: 210,
+        write_commit: 480,
+      },
+      edge_cache_hit_ratio: 0.94,
+      projected_monthly_cost_usd: 830.84,
+      d1_rows_read_per_write: 12,
+      d1_rows_written_per_write: 8,
+      ...overrides,
+    };
+    const checksum_sha256 = computeStagingS2ReceiptChecksum(
+      base as Parameters<typeof computeStagingS2ReceiptChecksum>[0],
+    );
+    return new TextEncoder().encode(JSON.stringify({ ...base, checksum_sha256 }));
+  }
+
+  test("reconciled primary Cloudflare Cache API citation verifies cleanly and documents all 4 §15 ambiguities", () => {
+    expect(pinnedSourcesFullyVerified(VERIFIED_COST_MODEL_SOURCES)).toBe(true);
+    expect(
+      VERIFIED_COST_MODEL_SOURCES.some(
+        (s) => s.url === "https://developers.cloudflare.com/workers/runtime-apis/cache/",
+      ),
+    ).toBe(true);
+    expect(
+      FABLE_SECTION_15_RECONCILIATION_NOTES.requires_operator_signoff_to_edit_fable_section_15,
+    ).toBe(true);
+    expect(FABLE_SECTION_15_RECONCILIATION_NOTES.entries.map((e) => e.code)).toEqual([
+      "FABLE_TABLE_SCENARIO_MISMATCH",
+      "FABLE_DUTY_CYCLE_MISMATCH",
+      "FABLE_STORM_ROOM_UNRESOLVED",
+      "FABLE_ROUNDED_DISPLAY_BASE_LOAD_MISMATCH",
+    ]);
+  });
+
+  test("(a) no receipt exits 78 S2_COST_MEASUREMENT_UNAVAILABLE; (b) valid within-budget --s2-receipt exits 0 COST_MODEL_PASS; (c) over-budget or corrupted exits 1", async () => {
+    // (a) No receipt -> blocked exit 78
+    const absent = evaluateStagingS2CostReceipt(undefined);
+    expect(absent.exit_code).toBe(78);
+    expect(absent.code).toBe("S2_COST_MEASUREMENT_UNAVAILABLE");
+
+    // (b) Synthetic valid within-budget staging receipt -> exit 0 COST_MODEL_PASS
+    const dir = mkdtempSync(join(tmpdir(), "s2-staging-cost-"));
+    const goodPath = join(dir, "good-s2-receipt.json");
+    writeFileSync(goodPath, validStagingReceipt(), { mode: 0o600 });
+    const passCli = await runStandaloneCli(["--s2-receipt", goodPath]);
+    expect(passCli.exitCode).toBe(0);
+    expect(passCli.stderr).toBe("");
+    expect(parseJsonOutput(passCli)).toMatchObject({
+      status: "pass",
+      code: "COST_MODEL_PASS",
+      exit_code: 0,
+      budget_breaches: [],
+      pinned_sources_fully_verified: true,
+    });
+
+    // (c1) Over-budget staging receipt -> exit 1 COST_MODEL_EXCEEDED
+    const overBudgetPath = join(dir, "over-budget-s2-receipt.json");
+    writeFileSync(
+      overBudgetPath,
+      validStagingReceipt({
+        projected_monthly_cost_usd: FABLE_SECTION_15_BUDGETS.monthly_cost_usd_max + 250,
+        measured_p95_ms: {
+          cursor: 75,
+          cached_face_ttfb: 120,
+          uncached_digest: 410,
+          pack_composition: 290,
+          delta_200: 210,
+          write_commit: 480,
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const overCli = await runStandaloneCli(["--s2-receipt", overBudgetPath]);
+    expect(overCli.exitCode).toBe(1);
+    expect(parseJsonOutput(overCli)).toMatchObject({
+      status: "fail",
+      code: "COST_MODEL_EXCEEDED",
+      exit_code: 1,
+    });
+    expect((parseJsonOutput(overCli) as { budget_breaches: string[] }).budget_breaches).toContain(
+      "MONTHLY_COST_CEILING_EXCEEDED",
+    );
+    expect((parseJsonOutput(overCli) as { budget_breaches: string[] }).budget_breaches).toContain(
+      "CURSOR_P95_EXCEEDED",
+    );
+
+    // (c2) Corrupted / tampered staging receipt -> exit 1 RECEIPT_INVALID
+    const badPath = join(dir, "tampered-s2-receipt.json");
+    const tampered = JSON.parse(new TextDecoder().decode(validStagingReceipt())) as Record<
+      string,
+      unknown
+    >;
+    tampered.projected_monthly_cost_usd = 12;
+    writeFileSync(badPath, JSON.stringify(tampered), { mode: 0o600 });
+    const badCli = await runStandaloneCli(["--s2-receipt", badPath]);
+    expect(badCli.exitCode).toBe(1);
+    expect(parseJsonOutput(badCli)).toMatchObject({
+      status: "fail",
+      code: "RECEIPT_INVALID",
+      exit_code: 1,
+      budget_breaches: ["CHECKSUM_MISMATCH"],
+    });
+
+    // (d) Direct helper returns null when legacy args are passed
+    expect(runStagingS2ReceiptCli(["--receipt", "/tmp/x"])).toBeNull();
+  });
 });

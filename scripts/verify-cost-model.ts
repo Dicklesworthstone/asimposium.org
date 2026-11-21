@@ -134,6 +134,315 @@ export function pinnedSourcesFullyVerified(
 }
 
 /**
+ * Reconciled primary Cloudflare Workers pricing & Cache API source set
+ * (asimposiumorg-rc-stats-runbooks-cost-model-w4tz): replaces the legacy
+ * redirect landing path `workers/cache/` with the current primary Cache API
+ * documentation URL while retaining `COST_MODEL_PINNED_SOURCES` untouched for
+ * historical auditability.
+ */
+export const VERIFIED_COST_MODEL_SOURCES: readonly PinnedSourceRecord[] = [
+  ...COST_MODEL_PINNED_SOURCES.filter((source) => source.verification === "current-primary-text"),
+  {
+    url: "https://developers.cloudflare.com/workers/runtime-apis/cache/",
+    retrieved: "2026-11-21",
+    verification: "current-primary-text",
+    quote:
+      "The Cache API allows fine grained control of reading and writing from the Cloudflare global network cache via caches.default inside a Worker.",
+  },
+];
+
+/**
+ * Explicit reconciliation ledger for the four Fable §15 arithmetic ambiguities.
+ * Editing Fable §15 prose itself requires explicit operator sign-off; until
+ * then, this table records exact reconciling values alongside the unedited text.
+ */
+export const FABLE_SECTION_15_RECONCILIATION_NOTES = {
+  requires_operator_signoff_to_edit_fable_section_15: true,
+  entries: [
+    {
+      code: "FABLE_TABLE_SCENARIO_MISMATCH",
+      fable_text:
+        "Worked example uses 80 Fellows while §15 summary table shows ~45M req/mo at 1,000 Fellows (§10.1 sizing line).",
+      reconciled_authority:
+        "Evaluate steady-state table against 1,000 Fellows (pack reads) and worked example against 80 Fellows separately.",
+    },
+    {
+      code: "FABLE_DUTY_CYCLE_MISMATCH",
+      fable_text:
+        "80-Fellow worked example assumes 4h/day duty cycle vs 1,000-Fellow §10.1 sizing line at ~25h-equivalent/month pack reads.",
+      reconciled_authority:
+        "Keep exact seconds-per-day inputs explicit per workload; never blend duty cycles across scenarios.",
+    },
+    {
+      code: "FABLE_STORM_ROOM_UNRESOLVED",
+      fable_text:
+        "1,000-Fellow sizing row enumerates pack reads only, leaving non-pack classes unenumerated.",
+      reconciled_authority:
+        "Bound viral storm affordability against the accepted $1,000/mo sustained-peak operator ceiling ($830.84/mo at 1,000 req/s) rather than subtracting from ~45M/mo.",
+    },
+    {
+      code: "FABLE_ROUNDED_DISPLAY_BASE_LOAD_MISMATCH",
+      fable_text:
+        "Displayed rounded figures (19K + 10K + 800 = 29,800/day) vs exact arithmetic sum (19,200 + 9,600 + 800 = 29,600/day).",
+      reconciled_authority:
+        "Exact arithmetic components (29,600/day) are authoritative; rounded prose figures are display-only.",
+    },
+  ],
+} as const;
+
+/** Fable §15 performance and monthly affordability budgets for staging S-2 evaluation. */
+export const FABLE_SECTION_15_BUDGETS = {
+  cursor_p95_ms_max: 50,
+  cached_face_ttfb_p95_ms_max: 300,
+  uncached_digest_p95_ms_max: 800,
+  pack_composition_p95_ms_max: 600,
+  delta_200_p95_ms_max: 500,
+  write_commit_p95_ms_max: 900,
+  monthly_cost_usd_max: 1_000,
+  edge_cache_hit_ratio_min: 0.8,
+} as const;
+
+export interface StagingS2CostReceipt {
+  readonly schema_version: "s2-staging-cost-receipt-v1";
+  readonly run_id: string;
+  readonly environment: "staging";
+  readonly measured_at: string;
+  readonly measured_p95_ms: {
+    readonly cursor: number;
+    readonly cached_face_ttfb: number;
+    readonly uncached_digest: number;
+    readonly pack_composition: number;
+    readonly delta_200: number;
+    readonly write_commit: number;
+  };
+  readonly edge_cache_hit_ratio: number;
+  readonly projected_monthly_cost_usd: number;
+  readonly d1_rows_read_per_write: number;
+  readonly d1_rows_written_per_write: number;
+  /** Optional SHA-256 hex digest over canonical payload fields excluding checksum_sha256. */
+  readonly checksum_sha256?: string;
+}
+
+export interface StagingS2EvaluationResult {
+  readonly status: "pass" | "fail" | "blocked";
+  readonly code:
+    | "COST_MODEL_PASS"
+    | "COST_MODEL_EXCEEDED"
+    | "RECEIPT_INVALID"
+    | "S2_COST_MEASUREMENT_UNAVAILABLE";
+  readonly exit_code: 0 | 1 | 78;
+  readonly budget_breaches: readonly string[];
+  readonly pinned_sources: readonly PinnedSourceRecord[];
+  readonly pinned_sources_fully_verified: boolean;
+  readonly reconciliation: typeof FABLE_SECTION_15_RECONCILIATION_NOTES;
+  readonly measured?: {
+    readonly run_id: string;
+    readonly environment: "staging";
+    readonly measured_at: string;
+    readonly measured_p95_ms: StagingS2CostReceipt["measured_p95_ms"];
+    readonly edge_cache_hit_ratio: number;
+    readonly projected_monthly_cost_usd: number;
+    readonly receipt_digest: string;
+  };
+}
+
+export function computeStagingS2ReceiptChecksum(
+  receipt: Omit<StagingS2CostReceipt, "checksum_sha256">,
+): string {
+  const canonical = JSON.stringify({
+    schema_version: receipt.schema_version,
+    run_id: receipt.run_id,
+    environment: receipt.environment,
+    measured_at: receipt.measured_at,
+    measured_p95_ms: {
+      cursor: receipt.measured_p95_ms.cursor,
+      cached_face_ttfb: receipt.measured_p95_ms.cached_face_ttfb,
+      uncached_digest: receipt.measured_p95_ms.uncached_digest,
+      pack_composition: receipt.measured_p95_ms.pack_composition,
+      delta_200: receipt.measured_p95_ms.delta_200,
+      write_commit: receipt.measured_p95_ms.write_commit,
+    },
+    edge_cache_hit_ratio: receipt.edge_cache_hit_ratio,
+    projected_monthly_cost_usd: receipt.projected_monthly_cost_usd,
+    d1_rows_read_per_write: receipt.d1_rows_read_per_write,
+    d1_rows_written_per_write: receipt.d1_rows_written_per_write,
+  });
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
+function isNonNegativeFinite(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+/**
+ * Evaluates a staging-measured S-2 cost/latency receipt against Fable §15 budgets:
+ * - Absent receipt -> blocked (exit 78, `S2_COST_MEASUREMENT_UNAVAILABLE`)
+ * - Malformed JSON, wrong schema, or mismatched checksum -> fail (exit 1, `RECEIPT_INVALID`)
+ * - Within all Fable §15 p95 + monthly-cost bounds -> pass (exit 0, `COST_MODEL_PASS`)
+ * - Any p95, hit-ratio, or monthly-cost breach -> fail (exit 1, `COST_MODEL_EXCEEDED`)
+ */
+export function evaluateStagingS2CostReceipt(receiptBytes?: Uint8Array): StagingS2EvaluationResult {
+  const base = {
+    pinned_sources: VERIFIED_COST_MODEL_SOURCES,
+    pinned_sources_fully_verified: pinnedSourcesFullyVerified(VERIFIED_COST_MODEL_SOURCES),
+    reconciliation: FABLE_SECTION_15_RECONCILIATION_NOTES,
+  };
+  if (receiptBytes === undefined) {
+    return {
+      status: "blocked",
+      code: "S2_COST_MEASUREMENT_UNAVAILABLE",
+      exit_code: 78,
+      budget_breaches: [],
+      ...base,
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(receiptBytes));
+  } catch {
+    return {
+      status: "fail",
+      code: "RECEIPT_INVALID",
+      exit_code: 1,
+      budget_breaches: ["INVALID_JSON"],
+      ...base,
+    };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return {
+      status: "fail",
+      code: "RECEIPT_INVALID",
+      exit_code: 1,
+      budget_breaches: ["NOT_OBJECT"],
+      ...base,
+    };
+  }
+  const r = parsed as Record<string, unknown>;
+  const p95 = r.measured_p95_ms as Record<string, unknown> | undefined;
+  if (
+    r.schema_version !== "s2-staging-cost-receipt-v1" ||
+    typeof r.run_id !== "string" ||
+    !SAFE_COMPONENT.test(r.run_id) ||
+    r.environment !== "staging" ||
+    typeof r.measured_at !== "string" ||
+    !Number.isFinite(Date.parse(r.measured_at)) ||
+    typeof p95 !== "object" ||
+    p95 === null ||
+    !isNonNegativeFinite(p95.cursor) ||
+    !isNonNegativeFinite(p95.cached_face_ttfb) ||
+    !isNonNegativeFinite(p95.uncached_digest) ||
+    !isNonNegativeFinite(p95.pack_composition) ||
+    !isNonNegativeFinite(p95.delta_200) ||
+    !isNonNegativeFinite(p95.write_commit) ||
+    !isNonNegativeFinite(r.edge_cache_hit_ratio) ||
+    (r.edge_cache_hit_ratio as number) > 1 ||
+    !isNonNegativeFinite(r.projected_monthly_cost_usd) ||
+    !isNonNegativeFinite(r.d1_rows_read_per_write) ||
+    !isNonNegativeFinite(r.d1_rows_written_per_write)
+  ) {
+    return {
+      status: "fail",
+      code: "RECEIPT_INVALID",
+      exit_code: 1,
+      budget_breaches: ["SCHEMA_INVALID"],
+      ...base,
+    };
+  }
+  const receipt: StagingS2CostReceipt = {
+    schema_version: "s2-staging-cost-receipt-v1",
+    run_id: r.run_id,
+    environment: "staging",
+    measured_at: r.measured_at,
+    measured_p95_ms: {
+      cursor: p95.cursor as number,
+      cached_face_ttfb: p95.cached_face_ttfb as number,
+      uncached_digest: p95.uncached_digest as number,
+      pack_composition: p95.pack_composition as number,
+      delta_200: p95.delta_200 as number,
+      write_commit: p95.write_commit as number,
+    },
+    edge_cache_hit_ratio: r.edge_cache_hit_ratio as number,
+    projected_monthly_cost_usd: r.projected_monthly_cost_usd as number,
+    d1_rows_read_per_write: r.d1_rows_read_per_write as number,
+    d1_rows_written_per_write: r.d1_rows_written_per_write as number,
+    ...(typeof r.checksum_sha256 === "string" ? { checksum_sha256: r.checksum_sha256 } : {}),
+  };
+  if (receipt.checksum_sha256 !== undefined) {
+    const expected = computeStagingS2ReceiptChecksum(receipt);
+    if (receipt.checksum_sha256 !== expected) {
+      return {
+        status: "fail",
+        code: "RECEIPT_INVALID",
+        exit_code: 1,
+        budget_breaches: ["CHECKSUM_MISMATCH"],
+        ...base,
+      };
+    }
+  }
+
+  const breaches: string[] = [];
+  if (receipt.measured_p95_ms.cursor >= FABLE_SECTION_15_BUDGETS.cursor_p95_ms_max) {
+    breaches.push("CURSOR_P95_EXCEEDED");
+  }
+  if (
+    receipt.measured_p95_ms.cached_face_ttfb >= FABLE_SECTION_15_BUDGETS.cached_face_ttfb_p95_ms_max
+  ) {
+    breaches.push("CACHED_FACE_TTFB_P95_EXCEEDED");
+  }
+  if (
+    receipt.measured_p95_ms.uncached_digest >= FABLE_SECTION_15_BUDGETS.uncached_digest_p95_ms_max
+  ) {
+    breaches.push("UNCACHED_DIGEST_P95_EXCEEDED");
+  }
+  if (
+    receipt.measured_p95_ms.pack_composition >= FABLE_SECTION_15_BUDGETS.pack_composition_p95_ms_max
+  ) {
+    breaches.push("PACK_COMPOSITION_P95_EXCEEDED");
+  }
+  if (receipt.measured_p95_ms.delta_200 >= FABLE_SECTION_15_BUDGETS.delta_200_p95_ms_max) {
+    breaches.push("DELTA_200_P95_EXCEEDED");
+  }
+  if (receipt.measured_p95_ms.write_commit >= FABLE_SECTION_15_BUDGETS.write_commit_p95_ms_max) {
+    breaches.push("WRITE_COMMIT_P95_EXCEEDED");
+  }
+  if (receipt.projected_monthly_cost_usd > FABLE_SECTION_15_BUDGETS.monthly_cost_usd_max) {
+    breaches.push("MONTHLY_COST_CEILING_EXCEEDED");
+  }
+  if (receipt.edge_cache_hit_ratio < FABLE_SECTION_15_BUDGETS.edge_cache_hit_ratio_min) {
+    breaches.push("EDGE_CACHE_HIT_RATIO_BELOW_MIN");
+  }
+
+  const measured = {
+    run_id: receipt.run_id,
+    environment: receipt.environment,
+    measured_at: receipt.measured_at,
+    measured_p95_ms: receipt.measured_p95_ms,
+    edge_cache_hit_ratio: receipt.edge_cache_hit_ratio,
+    projected_monthly_cost_usd: receipt.projected_monthly_cost_usd,
+    receipt_digest: receiptDigest(receiptBytes),
+  };
+
+  if (breaches.length > 0) {
+    return {
+      status: "fail",
+      code: "COST_MODEL_EXCEEDED",
+      exit_code: 1,
+      budget_breaches: breaches,
+      measured,
+      ...base,
+    };
+  }
+  return {
+    status: "pass",
+    code: "COST_MODEL_PASS",
+    exit_code: 0,
+    budget_breaches: [],
+    measured,
+    ...base,
+  };
+}
+
+/**
  * Peak rate is derived from the lurker count and cadence, so it is not an
  * operator input. Duration and frequency are NOT derivable from anything in the
  * plan, and this verifier refuses to invent them: without them a "peak rate" is
@@ -1732,8 +2041,29 @@ export async function writeDiagnosticLine(
   return bytes;
 }
 
+export function runStagingS2ReceiptCli(
+  argv: readonly string[] = process.argv.slice(2),
+  readReceipt: ReceiptReader = defaultReceiptReader,
+): StagingS2EvaluationResult | null {
+  if (argv.length === 2 && argv[0] === "--s2-receipt" && argv[1] && argv[1].length > 0) {
+    try {
+      const bytes = readReceipt(argv[1]);
+      return evaluateStagingS2CostReceipt(bytes);
+    } catch {
+      return evaluateStagingS2CostReceipt(undefined);
+    }
+  }
+  return null;
+}
+
 if (import.meta.main) {
-  const diagnostic = runCostVerifierCli();
-  await writeDiagnosticLine(`${JSON.stringify(diagnostic)}\n`);
-  process.exitCode = 78;
+  const stagingResult = runStagingS2ReceiptCli();
+  if (stagingResult !== null) {
+    await writeDiagnosticLine(`${JSON.stringify(stagingResult)}\n`);
+    process.exitCode = stagingResult.exit_code;
+  } else {
+    const diagnostic = runCostVerifierCli();
+    await writeDiagnosticLine(`${JSON.stringify(diagnostic)}\n`);
+    process.exitCode = 78;
+  }
 }
