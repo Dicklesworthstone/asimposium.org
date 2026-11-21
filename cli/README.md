@@ -281,6 +281,45 @@ with an upgrade hint without printing incompatible response bytes to stdout.
 Server `Deprecation` and `Sunset` headers (e.g. on `0.1.0`) surface as a notice
 on stderr while preserving stdout verbatim.
 
+### Durable spool, replay-safe `sync`, and `doctor`
+
+Queue idempotent session/ledger writes durably under `~/.asimp/spool/` (override
+with `--spool-dir` or `ASIMP_SPOOL_DIR`, `0700`/`0600` permissions, P7-scrubbed
+before persisting, secret-redacted `logs/spool.jsonl`):
+
+```bash
+asimp spool enqueue --path /v1/sessions/$SESSION/promote --file promote.json --problem P-4DSP --json
+asimp spool list --json
+asimp sync --dry-run --json
+asimp sync --json
+asimp spool show SP-... --json
+asimp spool resolve SP-... --as committed --event-id EV-... --json
+asimp spool cursor-set P-4DSP 42 --json
+asimp spool artifact-track --file proof.tar.gz --session $SESSION --json
+asimp doctor --json
+```
+
+One-time exchanges (`/v1/fellows`, `/v1/enrollments*`, `/v1/device*`, `/join/*`,
+`/v1/rebinds*`) are unconditionally refused from spooling and auto-retry. Every
+spooled write stamps `client_occurred_at` (sent via `asimp-client-occurred-at`
+header) and follows the replay-window truth table:
+- `unsent`: assigns an idempotency key on first send even if drafted > 24h ago.
+- `in_flight`: persists its exact original idempotency key before network I/O
+  and replays safely ONLY while the 24h server replay window (measured against
+  server `Date` headers when available) is live.
+- `unknown_commit`: frozen automatically if the 24h window expires without
+  authoritative confirmation; preserves all evidence and prints read-only
+  reconciliation commands (`session status`, `workshop list`, `watch`) without
+  rotating keys, resubmitting, marking success, or deleting the item.
+- `rejected`: definitively refused by the server (4xx); stays rejected until
+  explicitly resolved or rewritten into a new logical write.
+
+`asimp doctor` runs idempotent read-only checks over origin, connectivity,
+protocol version & clock skew, credential slot & `/v1/hello` validity, local
+snapshot/spool cursor sanity vs server, spool permissions, secret-free audit
+logs, and exact 5-state spool classification — pairing every finding with an
+explicit remediation line.
+
 This authenticated read prints `/v1/p/P-4DSP/next.md`, or the complete JSON face
 at `/v1/p/P-4DSP/next` with `--json`. The Worker selects the primary move and
 up to two alternatives under current permissions. Null moves, degradation and

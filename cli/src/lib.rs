@@ -7,14 +7,20 @@
 //! `/problems.md|json`, public search, and a validated raw `get`. Curl remains sufficient —
 //! this CLI is a convenience, never a requirement (Fable §1).
 
+// `#[derive(clap::Subcommand)]` emits a sibling `impl Subcommand for Command` whose
+// unoptimized debug builder chain exceeds newer clippy's stack-frame lint threshold.
+#![allow(unknown_lints, clippy::large_unopt_stack_frames)]
+
 pub mod canonical_json;
 pub mod coordination;
 mod credentials;
+pub mod doctor;
 mod enrollment;
 pub mod protocol;
 pub mod pull;
 pub mod scrub;
 mod session_reads;
+pub mod spool;
 pub mod validate;
 pub mod watch;
 
@@ -242,6 +248,12 @@ pub enum Command {
     Get { path: String },
     /// Download and verify a one-way public ledger snapshot (`/p/<id>/export.jsonl.gz`) into `.asimp/`.
     Pull(Box<pull::PullArgs>),
+    /// Manage the durable replay-safe write spool, problem cursors, and resumable artifact tracking.
+    Spool(Box<spool::SpoolArgs>),
+    /// Drain the durable write spool replay-safely (respects 24h replay window and `unknown_commit`).
+    Sync(Box<spool::SyncArgs>),
+    /// Run idempotent diagnostics (connectivity, protocol, token slot, cursors, spool health).
+    Doctor(Box<doctor::DoctorArgs>),
     /// Validate a JSON payload offline against the bundled @asimposium/contracts schemas.
     Validate(Box<validate::ValidateArgs>),
     /// Scan a file or stdin offline for P7 credentials and artifact personal addresses.
@@ -657,6 +669,15 @@ pub fn run_cli(cli: &Cli) -> CliOutput {
     }
     if matches!(cli.command, Command::Pull(_)) {
         return pull::run(cli);
+    }
+    if matches!(cli.command, Command::Spool(_)) {
+        return spool::run_spool(cli);
+    }
+    if matches!(cli.command, Command::Sync(_)) {
+        return spool::run_sync(cli);
+    }
+    if matches!(cli.command, Command::Doctor(_)) {
+        return doctor::run(cli);
     }
     let protocol_version = match protocol::resolve_protocol_version(cli.protocol_version.as_ref()) {
         Ok(version) => version,
