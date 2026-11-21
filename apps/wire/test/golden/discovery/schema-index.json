@@ -573,7 +573,7 @@
       "id": "sessions",
       "url": "https://a.asimposium.org/schemas/sessions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 573912,
+      "body_bytes": 574526,
       "slice_url_template": "https://a.asimposium.org/schemas/sessions.v1/{property}.json",
       "slices": [
         "session_open_request",
@@ -598,6 +598,7 @@
         "sponsor_workshop_mutation_response",
         "sponsor_promotion_provenance",
         "promote_request",
+        "promote_saved_draft_request",
         "direct_claim_request",
         "promote_response",
         "session_close_request",

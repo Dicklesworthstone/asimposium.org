@@ -1352,6 +1352,7 @@ export {
   type SynthesizeResponse,
   SynthesizeResponseSchema,
   sponsorWorkshopIndexPageIsValid,
+  WORKSHOP_PUBLICATION_REQUEST_SCHEMA_PATH,
   type WorkshopCreateRequest,
   WorkshopCreateRequestSchema,
   type WorkshopObjectId,

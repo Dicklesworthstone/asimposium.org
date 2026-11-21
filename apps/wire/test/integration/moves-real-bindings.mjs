@@ -105,6 +105,29 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(Buffer.byteLength(JSON.stringify(firstPack.pack)) <= 10_000);
   const first = firstPack.selected.primary_move;
   assert.equal(first.move, "state-claim");
+  assert.equal(
+    first.contract.target_contract,
+    "/schemas/sessions.v1/promote_saved_draft_request.json",
+  );
+  const readPublicSchema = async (path) => {
+    const response = await worker.fetch(new URL(path, origin), {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(response.status, 200);
+    return response.text();
+  };
+  const savedSchemaText = await readPublicSchema(first.contract.target_contract);
+  const inlineSchemaText = await readPublicSchema("/schemas/sessions.v1/promote_request.json");
+  const savedSchema = JSON.parse(savedSchemaText);
+  assert.deepEqual(savedSchema.required, ["workshop_id"]);
+  assert.deepEqual(Object.keys(savedSchema.properties), [
+    "workshop_id",
+    "expected_workshop_version",
+    "client_context_cursor",
+  ]);
+  const savedSchemaBytes = Buffer.byteLength(savedSchemaText);
+  const inlineSchemaBytes = Buffer.byteLength(inlineSchemaText);
+  assert.ok(savedSchemaBytes * 3 < inlineSchemaBytes);
   const { captured_cursor, workshop_first, saved_promotion_example } = first.contract.preparation;
   assert.equal(workshop_first.schema, "/schemas/sessions.v1/first_claim_draft_request.json");
   const draftSchema = await call(workshop_first.schema);
@@ -196,6 +219,7 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.equal(inlineRefusal.code, "PROMOTE_BODY_INVALID");
   assert.equal(inlineRefusal.example.kind, "conjecture");
+  assert.equal(new URL(inlineRefusal.schema).pathname, "/schemas/sessions.v1/promote_request.json");
   const claim = await call(
     firstPromotionPath,
     {
@@ -213,6 +237,9 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(firstDetail);
   assert.equal(JSON.parse(firstDetail.body).statement, "Zero squared is even.");
   assert.ok(!JSON.stringify(firstFace).includes(privateNotes));
+  console.log(
+    JSON.stringify({ stage: "saved-promotion-schema", savedSchemaBytes, inlineSchemaBytes }),
+  );
 
   // A non-author is sent to review the unreviewed claim first.
   const forOther = await next(other);

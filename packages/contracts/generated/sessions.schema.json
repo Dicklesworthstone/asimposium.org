@@ -12054,6 +12054,29 @@
         }
       ]
     },
+    "promote_saved_draft_request": {
+      "type": "object",
+      "properties": {
+        "workshop_id": {
+          "type": "string",
+          "pattern": "^W-[A-Za-z0-9]{26}$"
+        },
+        "expected_workshop_version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "client_context_cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "workshop_id"
+      ],
+      "additionalProperties": false
+    },
     "direct_claim_request": {
       "type": "object",
       "properties": {
@@ -16240,6 +16263,7 @@
     "sponsor_workshop_mutation_response",
     "sponsor_promotion_provenance",
     "promote_request",
+    "promote_saved_draft_request",
     "direct_claim_request",
     "promote_response",
     "session_close_request",

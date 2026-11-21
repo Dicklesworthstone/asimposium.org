@@ -103,6 +103,7 @@ import {
   SynthesizeResponseSchema,
   WithdrawQuestionRequestSchema,
   WithdrawQuestionResponseSchema,
+  WORKSHOP_PUBLICATION_REQUEST_SCHEMA_PATH,
   WorkshopObjectResponseSchema,
   type WorkshopPublicationDraft,
   WorkshopPublicationDraftSchema,
@@ -7070,7 +7071,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             "Copy workshop_id from the successful workshop response into the example. Resubmit the saved typed draft selection to the same URL with the same Idempotency-Key. Keep any supplied version or cursor.",
           rule: "A5",
           extensions: {
-            schema: SESSIONS_SCHEMA_URI,
+            schema: new URL(WORKSHOP_PUBLICATION_REQUEST_SCHEMA_PATH, SESSIONS_SCHEMA_URI).href,
             example: {
               workshop_id: "<workshop_id from the successful workshop response>",
               ...savedDraft.data,

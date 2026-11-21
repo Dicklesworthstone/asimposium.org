@@ -1,4 +1,8 @@
-import type { MoveTemplate, NextMoveCandidate } from "@asimposium/contracts";
+import {
+  type MoveTemplate,
+  type NextMoveCandidate,
+  WORKSHOP_PUBLICATION_REQUEST_SCHEMA_PATH,
+} from "@asimposium/contracts";
 import type { ReviewQueueItem, ReviewQueueResponse } from "@asimposium/contracts/review-queue";
 import { statementVersionPath } from "@asimposium/contracts/statements";
 import type { D1Database } from "@cloudflare/workers-types";
@@ -54,6 +58,7 @@ export function firstClaimMove(
     refs: [problemId],
     contract: {
       ...template,
+      target_contract: WORKSHOP_PUBLICATION_REQUEST_SCHEMA_PATH,
       required_fields: Object.keys(savedPromotionExample),
       prefilled_hints: { client_context_cursor: cursor },
       preparation: {

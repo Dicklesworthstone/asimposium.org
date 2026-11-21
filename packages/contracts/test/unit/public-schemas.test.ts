@@ -31,7 +31,12 @@ import {
 } from "../../src/public-schemas.ts";
 import { generateReviewRequestsSchema } from "../../src/review-requests-artifact.ts";
 import { generateScientificWithdrawalsSchema } from "../../src/scientific-withdrawals.ts";
-import { SessionsContractsSchema, WorkshopPushRequestSchema } from "../../src/sessions.ts";
+import {
+  PromoteRequestSchema,
+  SessionsContractsSchema,
+  WorkshopPublicationRequestSchema,
+  WorkshopPushRequestSchema,
+} from "../../src/sessions.ts";
 import { generateSponsorFollowsSchema } from "../../src/sponsor-follows.ts";
 import { generateStatementsSchema } from "../../src/statements.ts";
 import { generateWorkshopSearchSchema } from "../../src/workshop-search.ts";
@@ -356,6 +361,32 @@ test("the first-claim draft slice is small and accepts the same draft as worksho
   );
 });
 
+test("the saved publication slice uses the strict stored-draft branch of promote", () => {
+  const slice = getPublicSchemaSlice("/schemas/sessions.v1/promote_saved_draft_request.json");
+  const promote = getPublicSchemaSlice("/schemas/sessions.v1/promote_request.json");
+  expect(slice).toBeDefined();
+  expect(promote).toBeDefined();
+  expect(Buffer.byteLength(slice?.body ?? "") * 3).toBeLessThan(
+    Buffer.byteLength(promote?.body ?? ""),
+  );
+  const saved = {
+    workshop_id: `W-${"1".repeat(26)}`,
+    expected_workshop_version: 1,
+    client_context_cursor: 0,
+  };
+  expect(WorkshopPublicationRequestSchema.parse(saved)).toEqual(PromoteRequestSchema.parse(saved));
+  expect(
+    WorkshopPublicationRequestSchema.safeParse({ workshop_id: saved.workshop_id }).success,
+  ).toBe(true);
+  for (const invalid of [
+    { client_context_cursor: 0 },
+    { ...saved, expected_workshop_version: 0 },
+    { ...saved, statement: "An override of the saved statement." },
+  ]) {
+    expect(WorkshopPublicationRequestSchema.safeParse(invalid).success).toBe(false);
+  }
+});
+
 test("schema slice paths accept only registry ids and own property names", () => {
   for (const path of [
     "/schemas/sessions.v1/__proto__.json",
@@ -376,6 +407,9 @@ test("nearest slices rank distinctive tokens over request/response", () => {
   );
   expect(nearestPublicSchemaSlices("sessions", "close_request")[0]).toBe(
     "/schemas/sessions.v1/session_close_request.json",
+  );
+  expect(nearestPublicSchemaSlices("sessions", "promote_saved_request")[0]).toBe(
+    "/schemas/sessions.v1/promote_saved_draft_request.json",
   );
   // request/response alone never make a match, and junk yields nothing.
   expect(nearestPublicSchemaSlices("sessions", "request")).toEqual([]);

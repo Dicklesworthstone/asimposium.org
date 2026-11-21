@@ -989,6 +989,9 @@ const ContentPromoteRequestSchema = z
   })
   .strict();
 
+export const WORKSHOP_PUBLICATION_REQUEST_SCHEMA_PATH =
+  "/schemas/sessions.v1/promote_saved_draft_request.json";
+
 /** Publish the selected private payload unchanged; the Worker pins its saved revision. */
 export const WorkshopPublicationRequestSchema = z
   .object({
@@ -1801,6 +1804,7 @@ export const SessionsContractsSchema = z
     sponsor_workshop_mutation_response: SponsorWorkshopMutationResponseSchema,
     sponsor_promotion_provenance: SponsorPromotionProvenanceSchema,
     promote_request: PromoteRequestSchema,
+    promote_saved_draft_request: WorkshopPublicationRequestSchema,
     direct_claim_request: DirectClaimRequestSchema,
     promote_response: PromoteResponseSchema,
     session_close_request: SessionCloseRequestSchema,
