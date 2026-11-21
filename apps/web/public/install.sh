@@ -43,7 +43,13 @@ readonly DEFAULT_COSIGN_OIDC_ISSUER="https://token.actions.githubusercontent.com
 PINNED_VERSION=""
 
 VERSION="${ASIMP_VERSION:-}"
-DEST="${ASIMP_INSTALL_DEST:-${HOME:-}/.local/bin}"
+if [[ -n "${ASIMP_INSTALL_DEST:-}" ]]; then
+  DEST="$ASIMP_INSTALL_DEST"
+elif [[ -n "${HOME:-}" ]]; then
+  DEST="${HOME%/}/.local/bin"
+else
+  DEST=""
+fi
 RELEASE_BASE="${ASIMP_RELEASE_BASE_URL:-$DEFAULT_RELEASE_BASE}"
 COSIGN_IDENTITY_RE="${ASIMP_COSIGN_IDENTITY_RE:-$DEFAULT_COSIGN_IDENTITY_RE}"
 COSIGN_OIDC_ISSUER="${ASIMP_COSIGN_OIDC_ISSUER:-$DEFAULT_COSIGN_OIDC_ISSUER}"
@@ -65,6 +71,8 @@ fi
 
 TMP_DIR=""
 LOCK_DIR=""
+LOCK_OWNED=0
+STAGED_BIN=""
 OS=""
 ARCH=""
 TARGET=""
@@ -201,10 +209,13 @@ print_banner() {
 }
 
 cleanup() {
+  if [[ -n "${STAGED_BIN:-}" && -e "$STAGED_BIN" ]]; then
+    rm -f "$STAGED_BIN"
+  fi
   if [[ -n "${TMP_DIR:-}" && -d "$TMP_DIR" ]]; then
     rm -rf "$TMP_DIR"
   fi
-  if [[ -n "${LOCK_DIR:-}" && -d "$LOCK_DIR" ]]; then
+  if [[ "${LOCK_OWNED:-0}" -eq 1 && -n "${LOCK_DIR:-}" && -d "$LOCK_DIR" ]]; then
     rm -rf "$LOCK_DIR"
   fi
 }
@@ -426,27 +437,31 @@ resolve_version() {
 acquire_lock() {
   local lock_parent="${TMPDIR:-/tmp}"
   [[ -d "$lock_parent" && -w "$lock_parent" ]] || lock_parent="${HOME:-/tmp}"
-  LOCK_DIR="${lock_parent%/}/asimp-install.lock"
+  local candidate_lock="${lock_parent%/}/asimp-install.lock"
 
-  if mkdir "$LOCK_DIR" 2>/dev/null; then
+  if mkdir "$candidate_lock" 2>/dev/null; then
+    LOCK_DIR="$candidate_lock"
+    LOCK_OWNED=1
     printf '%s\n' "$$" > "${LOCK_DIR}/pid"
     return 0
   fi
 
   local existing_pid=""
-  if [[ -r "${LOCK_DIR}/pid" ]]; then
-    existing_pid=$(tr -cd '0-9' < "${LOCK_DIR}/pid" || true)
+  if [[ -r "${candidate_lock}/pid" ]]; then
+    existing_pid=$(tr -cd '0-9' < "${candidate_lock}/pid" || true)
   fi
   if [[ -n "$existing_pid" ]] && ! kill -0 "$existing_pid" 2>/dev/null; then
     warn "Clearing stale installer lock (dead PID ${existing_pid})"
-    rm -rf "$LOCK_DIR"
-    if mkdir "$LOCK_DIR" 2>/dev/null; then
+    rm -rf "$candidate_lock"
+    if mkdir "$candidate_lock" 2>/dev/null; then
+      LOCK_DIR="$candidate_lock"
+      LOCK_OWNED=1
       printf '%s\n' "$$" > "${LOCK_DIR}/pid"
       return 0
     fi
   fi
 
-  err "Another asimp install is currently running (lock: ${LOCK_DIR}). Wait for it to finish and retry."
+  err "Another asimp install is currently running (lock: ${candidate_lock}). Wait for it to finish and retry."
   exit 1
 }
 
@@ -502,7 +517,7 @@ preflight_checks() {
       exit 1
     fi
   fi
-  if [[ -z "$OFFLINE_TARBALL" || -n "$OFFLINE_TARBALL" ]] && [[ "$FROM_SOURCE" -eq 0 ]]; then
+  if [[ "$FROM_SOURCE" -eq 0 ]]; then
     if ! command -v tar >/dev/null 2>&1; then
       err "tar is required to extract release archives."
       exit 1
@@ -654,9 +669,18 @@ download_resumable() {
 
 validate_tarball_entries() {
   local archive="$1"
-  local entry
+  local line entry mode_char
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    mode_char="${line:0:1}"
+    if [[ "$mode_char" != "-" && "$mode_char" != "d" ]]; then
+      err "Refusing non-regular member (symlink/hardlink/device) in release archive: $line"
+      return 1
+    fi
+  done < <(tar -tvzf "$archive")
+
   while IFS= read -r entry; do
-    if [[ "$entry" == /* || "$entry" == *".."* ]]; then
+    if [[ "$entry" == /* || "$entry" =~ (^|/)\.\.(/|$) ]]; then
       err "Refusing unsafe path in release archive: $entry"
       return 1
     fi
@@ -673,12 +697,14 @@ install_staged_binary() {
     return 1
   fi
 
+  STAGED_BIN="$staged_bin"
   install -m 0755 "$src_bin" "$staged_bin"
 
   if [[ "$DO_VERIFY" -eq 1 ]]; then
     local out_ver=""
     if ! out_ver=$("$staged_bin" --version 2>&1); then
       rm -f "$staged_bin"
+      STAGED_BIN=""
       err "Post-stage verification failed: staged binary did not execute --version cleanly."
       return 1
     fi
@@ -686,6 +712,7 @@ install_staged_binary() {
   fi
 
   mv -f "$staged_bin" "$final_bin"
+  STAGED_BIN=""
   ok "Installed ${BINARY_NAME} to ${final_bin}"
 }
 

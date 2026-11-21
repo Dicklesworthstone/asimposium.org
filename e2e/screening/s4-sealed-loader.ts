@@ -1,5 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+} from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import {
   type ConfusionMetric,
@@ -167,9 +175,16 @@ function assertPrivateRegularFile(
     throw new SealedCorpusError("SEALED_CORPUS_TOO_LARGE");
   }
   if (checkOutOfRepo) {
-    const realRepoRoot = realpathSync(repoRoot);
-    const realParent = realpathSync(dirname(resolvedPath));
-    const realFile = realpathSync(resolvedPath);
+    let realRepoRoot: string;
+    let realParent: string;
+    let realFile: string;
+    try {
+      realRepoRoot = realpathSync(repoRoot);
+      realParent = realpathSync(dirname(resolvedPath));
+      realFile = realpathSync(resolvedPath);
+    } catch {
+      throw new SealedCorpusError("SEALED_CORPUS_UNREADABLE");
+    }
     if (
       isPathInsideDirectory(realFile, realRepoRoot) ||
       isPathInsideDirectory(realParent, realRepoRoot)
@@ -195,10 +210,35 @@ export function assertSafeSealedFilePath(
 
 function readSealedRawText(safePath: string, options: SealedFileOptions): string {
   if (!safePath.endsWith(".age")) {
+    let fd: number | undefined;
     try {
-      return readFileSync(safePath, "utf8");
-    } catch {
+      const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+      fd = openSync(safePath, flags);
+      const st = fstatSync(fd);
+      if (!st.isFile()) {
+        throw new SealedCorpusError("SEALED_CORPUS_NOT_REGULAR_FILE");
+      }
+      if (process.platform !== "win32" && (st.mode & 0o077) !== 0) {
+        throw new SealedCorpusError("SEALED_CORPUS_INSECURE_PERMISSIONS");
+      }
+      if (st.size <= 0) {
+        throw new SealedCorpusError("SEALED_CORPUS_MALFORMED");
+      }
+      if (st.size > MAX_SEALED_FILE_BYTES) {
+        throw new SealedCorpusError("SEALED_CORPUS_TOO_LARGE");
+      }
+      return readFileSync(fd, "utf8");
+    } catch (error) {
+      if (error instanceof SealedCorpusError) throw error;
       throw new SealedCorpusError("SEALED_CORPUS_UNREADABLE");
+    } finally {
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {
+          // ignore close failure
+        }
+      }
     }
   }
   const identityFile = options.age_identity_file ?? process.env.ASIMPOSIUM_S4_AGE_IDENTITY_FILE;

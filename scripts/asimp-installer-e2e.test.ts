@@ -379,6 +379,132 @@ describe("asimp W11.5 release packager, installer E2E, doc parity, and startup b
     expect(badUrlErr).toContain("Refusing insecure --release-base-url");
   });
 
+  test("REGRESSION: concurrent installer fails closed WITHOUT deleting the running process's active lock", async () => {
+    const lockTmp = join(workDir, "tmp-lock-race");
+    const lockDir = join(lockTmp, "asimp-install.lock");
+    mkdirSync(lockDir, { recursive: true });
+    writeFileSync(join(lockDir, "pid"), `${process.pid}\n`, "utf8");
+
+    const proc = Bun.spawn(
+      [
+        "bash",
+        INSTALLER_PATH,
+        "--offline",
+        join(distDir, tarballName),
+        "--checksum-file",
+        join(distDir, "SHA256SUMS"),
+        "--dest",
+        join(workDir, "dest-lock-race"),
+        "--no-gum",
+      ],
+      {
+        env: {
+          PATH: "/usr/local/bin:/usr/bin:/bin",
+          HOME: workDir,
+          TMPDIR: lockTmp,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Another asimp install is currently running");
+    // Critical regression invariant: losing installer's EXIT trap must NEVER remove winner's lock!
+    expect(existsSync(lockDir)).toBe(true);
+    expect(readFileSync(join(lockDir, "pid"), "utf8").trim()).toBe(`${process.pid}`);
+  });
+
+  test("REGRESSION: malicious release tarball containing a symlink member fails closed before extraction", async () => {
+    const evilStage = join(workDir, "evil-stage");
+    const evilPkg = join(evilStage, `asimp-v${version}-${target}`);
+    mkdirSync(evilPkg, { recursive: true });
+    const symlinkProc = Bun.spawnSync(["ln", "-s", "/etc/passwd", join(evilPkg, "asimp")]);
+    expect(symlinkProc.exitCode).toBe(0);
+
+    const evilTar = join(workDir, `asimp-v${version}-${target}-symlink.tar.gz`);
+    const tarProc = Bun.spawnSync([
+      "tar",
+      "-C",
+      evilStage,
+      "-czf",
+      evilTar,
+      `asimp-v${version}-${target}`,
+    ]);
+    expect(tarProc.exitCode).toBe(0);
+    const evilSha = createHash("sha256").update(readFileSync(evilTar)).digest("hex");
+    const evilSums = join(workDir, "EVIL_SHA256SUMS");
+    writeFileSync(evilSums, `${evilSha}  asimp-v${version}-${target}-symlink.tar.gz\n`, "utf8");
+
+    const proc = Bun.spawn(
+      [
+        "bash",
+        INSTALLER_PATH,
+        "--offline",
+        evilTar,
+        "--checksum-file",
+        evilSums,
+        "--dest",
+        join(workDir, "dest-evil-symlink"),
+        "--no-gum",
+      ],
+      {
+        env: {
+          PATH: "/usr/local/bin:/usr/bin:/bin",
+          HOME: workDir,
+          TMPDIR: join(workDir, "tmp-evil-symlink"),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    mkdirSync(join(workDir, "tmp-evil-symlink"), { recursive: true });
+    const [, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("Refusing non-regular member");
+    expect(existsSync(join(workDir, "dest-evil-symlink", "asimp"))).toBe(false);
+  });
+
+  test("REGRESSION: unset HOME without --dest fails cleanly with exit 2 instead of targeting /.local/bin", async () => {
+    const tmpEmpty = join(workDir, "tmp-empty-home");
+    mkdirSync(tmpEmpty, { recursive: true });
+    const proc = Bun.spawn(
+      [
+        "bash",
+        INSTALLER_PATH,
+        "--offline",
+        join(distDir, tarballName),
+        "--checksum-file",
+        join(distDir, "SHA256SUMS"),
+        "--no-gum",
+      ],
+      {
+        env: {
+          PATH: "/usr/local/bin:/usr/bin:/bin",
+          HOME: "",
+          TMPDIR: tmpEmpty,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("Install destination --dest is empty");
+  });
+
   test("README.md and cli/README.md byte-agree on canonical apex installer URL; onboarding capsule stays curl-first", () => {
     const canonicalCmd = "curl -fsSL https://asimposium.org/install.sh | bash";
     const rootReadme = readFileSync(join(REPO_ROOT, "README.md"), "utf8");

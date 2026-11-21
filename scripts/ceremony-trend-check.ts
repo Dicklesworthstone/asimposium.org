@@ -161,9 +161,19 @@ if (import.meta.main) {
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === "--budget-tokens") budgetTokens = Number(argv[++i] ?? "25000");
-    else if (arg === "--max-regression-pct") maxRegressionPct = Number(argv[++i] ?? "15");
-    else if (arg === "--receipts") {
+    if (arg === "--budget-tokens") {
+      budgetTokens = Number(argv[++i] ?? "");
+      if (!Number.isFinite(budgetTokens) || budgetTokens <= 0) {
+        console.error("ERROR: --budget-tokens must be a positive finite number.");
+        process.exit(2);
+      }
+    } else if (arg === "--max-regression-pct") {
+      maxRegressionPct = Number(argv[++i] ?? "");
+      if (!Number.isFinite(maxRegressionPct) || maxRegressionPct < 0) {
+        console.error("ERROR: --max-regression-pct must be a non-negative finite number.");
+        process.exit(2);
+      }
+    } else if (arg === "--receipts") {
       while (i + 1 < argv.length) {
         const next = argv[i + 1];
         if (!next || next.startsWith("--")) break;

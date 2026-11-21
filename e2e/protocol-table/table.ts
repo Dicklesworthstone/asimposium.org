@@ -13,14 +13,18 @@
 import {
   type ContractProblem,
   ContractProblemSchema,
+  DirectClaimRequestSchema,
   type OpaqueProblem,
   OpaqueProblemSchema,
   type ProblemDocument,
   type ProblemRule,
+  RecordDeadEndRequestSchema,
+  SynthesisAnchorSchema,
 } from "@asimposium/contracts";
 import { wouldCreateCycle } from "../../apps/wire/src/krater/claim-deps.ts";
 import { claimContentDigest, mintClaimVersion } from "../../apps/wire/src/krater/claim-version.ts";
 import { assessNoteIntent, suggestedClaimFromNote } from "../../apps/wire/src/krater/intent.ts";
+import { validateDeadEndSubstance } from "../../apps/wire/src/ledger/dead-ends.ts";
 import {
   computeReviewStateFacet,
   computeStalenessFacet,
@@ -142,16 +146,31 @@ export async function runProtocolFixtureTable(): Promise<readonly ProtocolFixtur
     });
   }
 
-  // P3: Missing falsifier on conjecture-class kinds
+  // P3: Missing/blank falsifier on conjecture-class kinds (real DirectClaimRequestSchema + P3 gate)
   {
-    const conjectureNeedsFalsifier = (kind: string, falsifier: string | null | undefined) =>
-      (kind === "conjecture" || kind === "hypothesis") &&
-      (typeof falsifier !== "string" || falsifier.trim().length === 0);
-    const missing = conjectureNeedsFalsifier("conjecture", "");
-    const present = !conjectureNeedsFalsifier(
-      "conjecture",
-      "Explicit counterexample integer n > 2.",
-    );
+    const blankFalsifier = DirectClaimRequestSchema.safeParse({
+      kind: "conjecture",
+      statement: "All odd perfect numbers exceed 10^1500.",
+      falsifier: "   ",
+    });
+    const omittedFalsifier = DirectClaimRequestSchema.safeParse({
+      kind: "conjecture",
+      statement: "All odd perfect numbers exceed 10^1500.",
+    });
+    const validConjecture = DirectClaimRequestSchema.safeParse({
+      kind: "conjecture",
+      statement: "All odd perfect numbers exceed 10^1500.",
+      falsifier: "An odd integer n <= 10^1500 with sigma(n) = 2n.",
+    });
+    const missing =
+      !blankFalsifier.success &&
+      omittedFalsifier.success &&
+      omittedFalsifier.data.kind === "conjecture" &&
+      omittedFalsifier.data.falsifier === undefined;
+    const present =
+      validConjecture.success &&
+      typeof validConjecture.data.falsifier === "string" &&
+      validConjecture.data.falsifier.length > 0;
     const body = buildTeachingProblem({
       status: 422,
       code: "MISSING_FALSIFIER",
@@ -484,13 +503,27 @@ export async function runProtocolFixtureTable(): Promise<readonly ProtocolFixtur
     });
   }
 
-  // P13: SYNTHESIS_UNANCHORED
+  // P13: SYNTHESIS_UNANCHORED (real SynthesisAnchorSchema + ledger set membership)
   {
-    const checkAnchors = (anchors: readonly string[], knownLedgerIds: ReadonlySet<string>) =>
-      anchors.length > 0 && anchors.every((id) => knownLedgerIds.has(id));
+    const badAnchorShape = SynthesisAnchorSchema.safeParse({
+      target_kind: "claim",
+      target_id: "",
+      assertion_summary: "Invalid empty target_id",
+    });
+    const unanchoredRef = SynthesisAnchorSchema.safeParse({
+      target_kind: "claim",
+      target_id: "C-999",
+      assertion_summary: "Unanchored claim reference",
+    });
+    const validRef = SynthesisAnchorSchema.safeParse({
+      target_kind: "claim",
+      target_id: "C-1",
+      assertion_summary: "Anchored claim reference",
+    });
     const known = new Set(["C-1", "E-1", "R-1"]);
-    const refused = !checkAnchors(["C-999"], known);
-    const valid = checkAnchors(["C-1", "E-1"], known);
+    const refused =
+      !badAnchorShape.success && unanchoredRef.success && !known.has(unanchoredRef.data.target_id);
+    const valid = validRef.success && known.has(validRef.data.target_id);
     const body = buildTeachingProblem({
       status: 422,
       code: "SYNTHESIS_UNANCHORED",
@@ -604,20 +637,37 @@ export async function runScientificStateMachineTable(): Promise<
     });
   }
 
-  // SM-5: Negative results without scope/detection fields coerced (P5)
+  // SM-5: Negative results without scope/detection substance refused/coerced (real RecordDeadEndRequestSchema + validateDeadEndSubstance)
   {
-    const evaluateNeg = (scope: string, floor: string) =>
-      scope.trim().length > 0 && floor.trim().length > 0 ? "accepted" : "coerced:P5";
-    const coerced = evaluateNeg("", "");
-    const clean = evaluateNeg("n <= 10^6", "finds all counterexamples <= 10^6");
+    const emptySchemaRefused = RecordDeadEndRequestSchema.safeParse({
+      approach: "",
+      why_it_fails: "",
+      retry_predicate: "",
+    });
+    const lowSubstanceRefused = validateDeadEndSubstance({
+      approach: "tried something",
+      why_it_fails: "did not work",
+      retry_predicate: "maybe later",
+      retry_when: { kind: "predicate", predicate: "maybe later" },
+      what_was_examined: "partial search",
+    });
+    const cleanDeadEnd = RecordDeadEndRequestSchema.parse({
+      approach: "Exhaustive modular sieve over odd integers up to one million",
+      why_it_fails: "Residue classes mod 12 leave zero admissible candidates in bounded range",
+      retry_predicate: "Sharper lower bound eliminates modular obstruction completely",
+      what_was_examined: "All odd integers n <= 10^6 with prime factor decomposition",
+    });
+    const cleanSubstance = validateDeadEndSubstance(cleanDeadEnd);
+    const coerced = !emptySchemaRefused.success && !lowSubstanceRefused.valid;
+    const clean = cleanSubstance.valid;
     results.push({
       id: "SM-005-NEGATIVE-P5-COERCED",
       invariant: "Negative results without scope/detection fields are coerced (P5)",
       rule_id: "P5",
-      observed: coerced,
+      observed: coerced ? "coerced:P5" : "accepted",
       expected: "coerced:P5",
-      passed: coerced === "coerced:P5",
-      should_fail_control_passed: clean === "accepted",
+      passed: coerced,
+      should_fail_control_passed: clean,
     });
   }
 

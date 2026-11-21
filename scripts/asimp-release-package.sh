@@ -36,10 +36,10 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --binary) BINARY="$2"; shift 2 ;;
-    --target) TARGET="$2"; shift 2 ;;
-    --version) VERSION="${2#v}"; shift 2 ;;
-    --out-dir) OUT_DIR="$2"; shift 2 ;;
+    --binary) [[ $# -ge 2 ]] || { echo "ERROR: --binary requires a value" >&2; exit 2; }; BINARY="$2"; shift 2 ;;
+    --target) [[ $# -ge 2 ]] || { echo "ERROR: --target requires a value" >&2; exit 2; }; TARGET="$2"; shift 2 ;;
+    --version) [[ $# -ge 2 ]] || { echo "ERROR: --version requires a value" >&2; exit 2; }; VERSION="${2#v}"; shift 2 ;;
+    --out-dir) [[ $# -ge 2 ]] || { echo "ERROR: --out-dir requires a value" >&2; exit 2; }; OUT_DIR="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
