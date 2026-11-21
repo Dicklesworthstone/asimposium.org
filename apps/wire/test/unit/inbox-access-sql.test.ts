@@ -70,6 +70,185 @@ function unacknowledged(db: Database, fellow: string) {
   return (db.query(INBOX_UNACKNOWLEDGED_SQL).get(fellow, 100) as { unack: number }).unack;
 }
 
+function claimCritique(db: Database, kind: "review" | "evidence") {
+  const sourceId = kind === "review" ? "R-1" : "E-1";
+  const payload =
+    kind === "review"
+      ? { target_claim_id: "C-1", target_version: 1 }
+      : { bears_on_kind: "claim", bears_on_id: "C-1", bears_on_version: 1 };
+  db.exec(`UPDATE problems SET public_seq = 10 WHERE id = 'P-PUBLIC';
+    INSERT INTO events VALUES
+      ('claim-source','P-PUBLIC',1,'claim.created','claim','C-1',1,'claim-digest','fellow-a');
+    INSERT INTO event_content VALUES ('claim-source','claim-digest','{}',NULL);`);
+  db.query("INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?)").run(
+    "critique-source",
+    "P-PUBLIC",
+    2,
+    `${kind}.created`,
+    kind,
+    sourceId,
+    1,
+    "critique-digest",
+    "fellow-b",
+  );
+  db.query("INSERT INTO event_content VALUES (?,?,?,NULL)").run(
+    "critique-source",
+    "critique-digest",
+    JSON.stringify(payload),
+  );
+  notice(db, "critique", "fellow-a", "P-PUBLIC", 1);
+  db.exec(`UPDATE fellow_inbox_notices SET notice_type='object_critique',
+    target_id='C-1@1', caused_by_event_id='critique-source' WHERE id='critique'`);
+  return sourceId;
+}
+
+function acknowledgeVisible(db: Database) {
+  return db
+    .query(`UPDATE fellow_inbox_notices SET acknowledged_at = 100
+      WHERE fellow_id = 'fellow-a' AND id = 'critique'
+        AND acknowledged_at IS NULL AND ${VISIBLE_INBOX_NOTICE_SQL}`)
+    .run().changes;
+}
+
+describe.each(["review", "evidence"] as const)("current claim %s notice visibility", (kind) => {
+  test("keeps the exact published version readable after a later revision", () => {
+    fixture((db) => {
+      claimCritique(db, kind);
+      expect(visible(db, "fellow-a")).toEqual([{ id: "critique", seq: 1 }]);
+      db.exec(`INSERT INTO events VALUES
+        ('claim-v2','P-PUBLIC',3,'claim.revised','claim','C-1',2,'v2-digest','fellow-a');
+        INSERT INTO event_content VALUES ('claim-v2','v2-digest','{}',NULL);
+        INSERT INTO content_controls VALUES ('P-PUBLIC','C-1@2',1,'hidden');`);
+      expect(visible(db, "fellow-a")).toEqual([{ id: "critique", seq: 1 }]);
+      expect(unacknowledged(db, "fellow-a")).toBe(1);
+      expect(acknowledgeVisible(db)).toBe(1);
+    });
+  });
+
+  test.each([
+    "source",
+    "source-version",
+    "source-event",
+    "target",
+    "target-version",
+    "target-event",
+    "problem",
+  ] as const)(
+    "current %s hide suppresses the entire notice, counts and acknowledgment until restored",
+    (hidden) => {
+      fixture((db) => {
+        const source = claimCritique(db, kind);
+        const target = {
+          source,
+          "source-version": `${source}@1`,
+          "source-event": "#2",
+          target: "C-1",
+          "target-version": "C-1@1",
+          "target-event": "#1",
+          problem: "problem",
+        }[hidden];
+        db.query("INSERT INTO content_controls VALUES ('P-PUBLIC',?,1,'hidden')").run(target);
+        expect(visible(db, "fellow-a")).toEqual([]);
+        expect(unacknowledged(db, "fellow-a")).toBe(0);
+        expect(acknowledgeVisible(db)).toBe(0);
+        expect(db.query("SELECT acknowledged_at FROM fellow_inbox_notices").get()).toEqual({
+          acknowledged_at: null,
+        });
+        db.query("INSERT INTO content_controls VALUES ('P-PUBLIC',?,2,'visible')").run(target);
+        expect(visible(db, "fellow-a")).toEqual([{ id: "critique", seq: 1 }]);
+        expect(unacknowledged(db, "fellow-a")).toBe(1);
+      });
+    },
+  );
+
+  test.each(["critique-source", "claim-source"])(
+    "redacting %s removes the retained notice from every read",
+    (source) => {
+      fixture((db) => {
+        claimCritique(db, kind);
+        db.query("UPDATE event_content SET redacted_at='redacted' WHERE event_id=?").run(source);
+        notice(db, "later-account", "fellow-a", null, 2);
+        expect(visible(db, "fellow-a", 0, 1)).toEqual([{ id: "later-account", seq: 2 }]);
+        expect(unacknowledged(db, "fellow-a")).toBe(1);
+        expect(acknowledgeVisible(db)).toBe(0);
+      });
+    },
+  );
+
+  test("a recorded source withdrawal still applies when its rationale is hidden", () => {
+    fixture((db) => {
+      const source = claimCritique(db, kind);
+      db.exec(`INSERT INTO events VALUES
+        ('withdraw-source','P-PUBLIC',4,'object.retracted','retraction','RT-1',1,'withdraw-digest','fellow-b');
+        INSERT INTO content_controls VALUES ('P-PUBLIC','RT-1',1,'hidden');`);
+      db.query("INSERT INTO scientific_withdrawals VALUES (?,?,?,?,?,?,?,?,?)").run(
+        "withdraw-source",
+        "P-PUBLIC",
+        4,
+        "withdraw-digest",
+        "RT-1",
+        kind,
+        source,
+        "critique-source",
+        "critique-digest",
+      );
+      expect(visible(db, "fellow-a")).toEqual([]);
+      expect(unacknowledged(db, "fellow-a")).toBe(0);
+      expect(acknowledgeVisible(db)).toBe(0);
+    });
+  });
+
+  test.each(["C-1", "C-1@1"])(
+    "withdrawing the target %s removes obsolete actionability",
+    (target) => {
+      fixture((db) => {
+        claimCritique(db, kind);
+        db.exec(`INSERT INTO events VALUES
+        ('withdraw-target','P-PUBLIC',4,'object.retracted','retraction','RT-2',1,'withdraw-digest','fellow-a');`);
+        db.query("INSERT INTO retractions VALUES ('P-PUBLIC',4,?,'fellow-a')").run(target);
+        expect(visible(db, "fellow-a")).toEqual([]);
+        expect(unacknowledged(db, "fellow-a")).toBe(0);
+        expect(acknowledgeVisible(db)).toBe(0);
+      });
+    },
+  );
+
+  test.each(["target", "version", "problem", "recipient", "cause", "digest"])(
+    "a mismatched %s cannot make a retained notice actionable",
+    (mismatch) => {
+      fixture((db) => {
+        claimCritique(db, kind);
+        if (mismatch === "target") db.exec("UPDATE fellow_inbox_notices SET target_id='C-2@1'");
+        if (mismatch === "version") db.exec("UPDATE fellow_inbox_notices SET target_id='C-1@2'");
+        if (mismatch === "problem")
+          db.exec("UPDATE fellow_inbox_notices SET problem_id='P-UNLISTED'");
+        if (mismatch === "recipient")
+          db.exec("UPDATE events SET actor_fellow_id='fellow-b' WHERE id='claim-source'");
+        if (mismatch === "cause")
+          db.exec("UPDATE fellow_inbox_notices SET caused_by_event_id='claim-source'");
+        if (mismatch === "digest")
+          db.exec(
+            "UPDATE event_content SET payload_sha256='other' WHERE event_id='critique-source'",
+          );
+        expect(visible(db, "fellow-a")).toEqual([]);
+        expect(unacknowledged(db, "fellow-a")).toBe(0);
+        expect(acknowledgeVisible(db)).toBe(0);
+      });
+    },
+  );
+
+  test("legacy source-target notices retain history but obey current source controls", () => {
+    fixture((db) => {
+      const source = claimCritique(db, kind);
+      db.query("UPDATE fellow_inbox_notices SET target_id=?").run(source);
+      expect(visible(db, "fellow-a")).toEqual([{ id: "critique", seq: 1 }]);
+      db.query("INSERT INTO content_controls VALUES ('P-PUBLIC',?,1,'hidden')").run(source);
+      expect(visible(db, "fellow-a")).toEqual([]);
+      expect(unacknowledged(db, "fellow-a")).toBe(0);
+    });
+  });
+});
+
 describe("follow and inbox visibility is current authority, not a subscription", () => {
   test("known public and unlisted IDs remain followable without membership", () => {
     fixture((db) => {

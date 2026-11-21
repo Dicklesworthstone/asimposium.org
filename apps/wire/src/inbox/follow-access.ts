@@ -1,3 +1,4 @@
+import { VISIBLE_CLAIM_NOTICE_SQL } from "./claim-notices.ts";
 import { VISIBLE_HYPOTHESIS_NOTICE_SQL } from "./hypothesis-notices.ts";
 import { VISIBLE_QUESTION_ANSWER_NOTICE_SQL } from "./question-notices.ts";
 
@@ -45,7 +46,7 @@ export const VISIBLE_INBOX_NOTICE_SQL = `(
       )
     )
   )
-) AND ${VISIBLE_HYPOTHESIS_NOTICE_SQL} AND ${VISIBLE_QUESTION_ANSWER_NOTICE_SQL}`;
+) AND ${VISIBLE_CLAIM_NOTICE_SQL} AND ${VISIBLE_HYPOTHESIS_NOTICE_SQL} AND ${VISIBLE_QUESTION_ANSWER_NOTICE_SQL}`;
 
 /** Expiry ends inbox actionability, not durable history or cursor allocation.
  * Bind one captured request time after any visibility bindings. */

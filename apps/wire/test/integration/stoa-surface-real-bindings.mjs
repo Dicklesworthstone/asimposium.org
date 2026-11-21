@@ -11,6 +11,7 @@ import {
   ProblemNextResponseSchema,
   PromoteRequestSchema,
   PromoteResponseSchema,
+  SponsorInboxResponseSchema,
   TriageResponseSchema,
 } from "@asimposium/contracts";
 import { EventTailResponseSchema } from "../../../../packages/contracts/src/event-tail.ts";
@@ -611,11 +612,10 @@ await runLocalWorkerJourney(
       });
       sourceProbeIds.push(probe.id);
       const item = (await inbox(author)).items.find((notice) => notice.id === probe.id);
-      assert.ok(item);
-      assert.deepEqual(
-        item.next_actions?.map((action) => action.url),
-        [`/p/${problemId}/claims/${targetId}.json`],
-        `${name}: a mismatched cause cannot author an exact source link`,
+      assert.equal(
+        item,
+        undefined,
+        `${name}: a mismatched cause cannot expose notice content or a target link`,
       );
     }
     for (const token of [reviewer, second]) {
@@ -626,6 +626,100 @@ await runLocalWorkerJourney(
     }
     console.log(
       JSON.stringify({ stage: "claim-critique-source-links", causes: 2, planted_probes: 5 }),
+    );
+
+    // Current content controls apply to the entire retained critique, not
+    // just its source link. Exercise both signed sponsor reads and the Fellow
+    // inbox; hiding neither deletes delivery history nor marks it read.
+    const sponsorInbox = async () =>
+      SponsorInboxResponseSchema.parse(
+        await sponsorCall("usr_stoa_author", "POST", "/v1/sponsors/inbox", "inbox.read", {
+          fellow_id: before.fellow_id,
+          limit: 50,
+        }),
+      );
+    const critiqueSources = [
+      [recordedReview.review_id, fresh[0]],
+      [evidence.evidence_id, evidenceNotices[0]],
+    ];
+    for (const [source, notice] of critiqueSources) {
+      const control = await inbox(author, "?limit=100");
+      assert.ok(control.items.some((item) => item.id === notice.id));
+      assert.ok((await sponsorInbox()).items.some((item) => item.id === notice.id));
+      await fixtures.setArtifactSourceVisibility(problem, source, "hidden");
+      const current = await inbox(author, "?limit=100");
+      assert.ok(!current.items.some((item) => item.id === notice.id));
+      assert.equal(current.unacknowledged_count, control.unacknowledged_count - 1);
+      const sponsorCurrent = await sponsorInbox();
+      assert.ok(!sponsorCurrent.items.some((item) => item.id === notice.id));
+      assert.equal(sponsorCurrent.fellow_unacknowledged_count, current.unacknowledged_count);
+      const markdown = await worker.fetch(`${origin}/v1/inbox.md`, {
+        headers: { "User-Agent": userAgent, authorization: `Bearer ${author}` },
+      });
+      assert.equal(markdown.status, 200);
+      const body = await markdown.text();
+      assert.ok(!body.includes(notice.id));
+      assert.ok(!body.includes(source));
+      const hiddenAck = InboxAckResponseSchema.parse(
+        await call("/v1/inbox/ack", { notice_ids: [notice.id] }, author),
+      );
+      assert.equal(hiddenAck.acknowledged_count, 0);
+      assert.equal(
+        (
+          await env.DB.prepare("SELECT acknowledged_at FROM fellow_inbox_notices WHERE id = ?")
+            .bind(notice.id)
+            .first()
+        ).acknowledged_at,
+        null,
+      );
+      await fixtures.setArtifactSourceVisibility(problem, source, "visible");
+      assert.deepEqual(
+        (await inbox(author, "?limit=100")).items.find((item) => item.id === notice.id),
+        notice,
+        "restoring a source restores its original notice without new unread debt",
+      );
+    }
+
+    // Native scheduling controls hide an actually selected source after the
+    // page query. The final read snapshot must withhold the selected page and
+    // its lookahead rather than release stale content or a has_more oracle.
+    for (const [index, path] of ["/v1/inbox", "/v1/inbox.md"].entries()) {
+      const [source, notice] = critiqueSources[index];
+      await fixtures.armRaceAfterNextRead(
+        `INSERT INTO content_controls
+          (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,actor,reason,version,created_at)
+          SELECT ?,?,'ledger-object',?,'hidden','operator','privacy','stoa-lane-operator',
+            'Verify that selected critique notices retain current visibility.',COALESCE(MAX(version),0)+1,?
+          FROM content_controls WHERE problem_id=? AND target_ref=?`,
+        [
+          `CC-stoa-critique-race-${index}`,
+          problem,
+          source,
+          new Date().toISOString(),
+          problem,
+          source,
+        ],
+        "FROM fellow_inbox_notices",
+      );
+      const response = await worker.fetch(`${origin}${path}?limit=1`, {
+        headers: { "User-Agent": userAgent, authorization: `Bearer ${author}` },
+      });
+      assert.equal(await fixtures.raceStillArmed(), false);
+      assert.equal(
+        response.status,
+        503,
+        "a hidden selected or lookahead source invalidates the page",
+      );
+      const body = await response.text();
+      assert.ok(!body.includes(notice.id));
+      assert.ok(!body.includes(source));
+      assert.ok(!body.includes("has_more"));
+      assert.ok(!body.includes("unacknowledged_count"));
+      assert.equal(ProblemDocumentSchema.parse(JSON.parse(body)).code, "INTERNAL_ERROR");
+      await fixtures.setArtifactSourceVisibility(problem, source, "visible");
+    }
+    console.log(
+      JSON.stringify({ stage: "claim-critique-current-visibility", sources: 2, raced: 2 }),
     );
 
     // Reordered delivery: two queued jobs processed in reverse order still
