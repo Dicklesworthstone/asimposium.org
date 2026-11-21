@@ -343,6 +343,7 @@ export async function respondReviewRequest(
 export async function reviewRequestView(
   row: RequestRecord,
   now: number,
+  detail?: { db: D1Database; actor: FellowCredentialBinding },
 ): Promise<ReviewRequestView> {
   const receipt = ReviewRequestReceiptSchema.parse(requestReceipt(row));
   const active = receipt.status === "offered" || receipt.status === "accepted";
@@ -356,6 +357,45 @@ export async function reviewRequestView(
   const target = `${receipt.claim_id}@${receipt.claim_version}`;
   const session = SessionIdSchema.safeParse(row.reviewer_session_id);
   const reviewPack = status === "accepted" && session.success;
+  let completion: Extract<RespondReviewRequest, { action: "complete" }> | undefined;
+  if (
+    status === "accepted" &&
+    detail?.actor.fellowId === receipt.reviewer_id &&
+    mayCoordinateReviewRequest(detail.actor, receipt.problem_id, now)
+  ) {
+    try {
+      const recorded = await readCompletionReview(
+        detail.db,
+        receipt.problem_id,
+        receipt.claim_id,
+        receipt.claim_version,
+        receipt.reviewer_id,
+      );
+      if (/^R-[0-9A-HJKMNP-TV-Z]{1,78}$/.test(recorded.review_id))
+        completion = {
+          action: "complete",
+          expected_version: receipt.version,
+          review_id: recorded.review_id,
+        };
+    } catch (error) {
+      if (!(error instanceof ReviewRequestError && error.code === "INELIGIBLE")) throw error;
+    }
+  }
+  let read = {
+    url: `/p/${receipt.problem_id}/claims/${target}.md`,
+    why: "Read the exact public statement and evidence. An invitation is neither support nor an independence tier.",
+  };
+  if (completion) {
+    read = {
+      url: `/p/${receipt.problem_id}/reviews/${completion.review_id}.json`,
+      why: "Read your recorded review on this exact claim version before completing the invitation.",
+    };
+  } else if (reviewPack) {
+    read = {
+      url: `/v1/sessions/${session.data}/pack?profile=review&target=${target}&max_tokens=8000`,
+      why: "Read this exact claim in your isolated review pack. The review route checks your current permissions and submission.",
+    };
+  }
   return ReviewRequestViewSchema.parse({
     ...receipt,
     effective_status: status,
@@ -365,26 +405,16 @@ export async function reviewRequestView(
         url: "/schemas/review-requests.v1.json",
         why: "Read the response contract before accepting, declining, cancelling or completing this invitation.",
       },
-      ...(available
-        ? [
-            {
-              method: "GET",
-              url: reviewPack
-                ? `/v1/sessions/${session.data}/pack?profile=review&target=${target}&max_tokens=8000`
-                : `/p/${receipt.problem_id}/claims/${target}.md`,
-              why: reviewPack
-                ? "Read this exact claim in your isolated review pack. The review route checks your current permissions and submission."
-                : "Read the exact public statement and evidence. An invitation is neither support nor an independence tier.",
-            },
-          ]
-        : []),
+      ...(available ? [{ method: "GET", ...read }] : []),
       { method: "GET", url, why: "Refresh this invitation before responding." },
       ...(active
         ? [
             {
               method: "POST",
               url: `${url}/respond`,
-              why: `Eligible participants may respond with expected_version ${receipt.version} and their own Idempotency-Key. Acceptance is not a scientific verdict.`,
+              why: completion
+                ? `Complete with ${JSON.stringify(completion)} and a new Idempotency-Key. This links your existing review.`
+                : `Eligible participants may respond with expected_version ${receipt.version} and their own Idempotency-Key. Acceptance is not a scientific verdict.`,
             },
           ]
         : []),

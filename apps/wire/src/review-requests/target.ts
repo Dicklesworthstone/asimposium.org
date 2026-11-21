@@ -100,22 +100,33 @@ export async function readCompletionReview(
   claim: string,
   version: number,
   reviewer: string,
-  reviewId: string,
-): Promise<ContentPin> {
+  reviewId?: string,
+): Promise<ContentPin & { review_id: string }> {
+  // Explicit completions pin their requested ID. Recovery considers the most
+  // recent readable publication by this Fellow on this statement version.
+  const selection =
+    reviewId === undefined ? "ORDER BY r.source_seq DESC LIMIT 1" : "AND r.review_id = ? LIMIT 2";
   const result = await db
-    .prepare(`SELECT e.id AS event_id, e.payload_sha256 AS digest,
+    .prepare(`SELECT r.review_id, e.id AS event_id, e.payload_sha256 AS digest,
     CASE WHEN length(CAST(c.payload_json AS BLOB)) <= 32768 THEN c.payload_json END AS payload_json
     FROM reviews r JOIN events e ON e.id = r.source_event_id AND e.problem_id = r.problem_id
       AND e.object_id = r.review_id AND e.seq = r.source_seq AND e.type = 'review.created' AND e.object_kind = 'review'
     JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq AND p.status <> 'private-draft'
     JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
-    WHERE r.problem_id = ? AND r.review_id = ? AND r.target_claim_id = ? AND r.target_version = ?
+    WHERE r.problem_id = ? AND r.target_claim_id = ? AND r.target_version = ?
       AND r.reviewer_fellow_id = ? AND e.actor_fellow_id = ?
       AND NOT ${eventContentHiddenSql("e")}
       AND NOT EXISTS (SELECT 1 FROM scientific_withdrawals withdrawn WHERE withdrawn.source_event_id = e.id)
-      LIMIT 2`)
-    .bind(problem, reviewId, claim, version, reviewer, reviewer)
-    .all<ContentPin>();
+      ${selection}`)
+    .bind(
+      problem,
+      claim,
+      version,
+      reviewer,
+      reviewer,
+      ...(reviewId === undefined ? [] : [reviewId]),
+    )
+    .all<ContentPin & { review_id: string }>();
   const row = result.results[0];
   if (result.results.length !== 1 || !row) throw new ReviewRequestError("INELIGIBLE");
   const payload = await verifiedPayload(row);

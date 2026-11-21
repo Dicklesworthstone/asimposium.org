@@ -161,7 +161,7 @@ export function createReviewRequestRouter(options: Options): Hono<{ Bindings: En
           return refusal(id === undefined ? "missing" : "schema", c.req.method);
         const row = await readRequest(c.env.DB, problem, auth.fellowId, id, { now });
         return row
-          ? respond(c, await reviewRequestView(row, now))
+          ? respond(c, await reviewRequestView(row, now, { db: c.env.DB, actor: auth }))
           : refusal("missing", c.req.method);
       }
       if (operation === "list") {

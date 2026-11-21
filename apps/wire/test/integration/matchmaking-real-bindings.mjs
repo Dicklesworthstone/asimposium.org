@@ -234,7 +234,12 @@ await runLocalWorkerJourney(
           view.next_actions.find(
             ({ method, url }) => method === "GET" && url.includes("/pack?profile=review&"),
           );
+        const recordedReviewAction = (view) =>
+          view.next_actions.find(
+            ({ method, url }) => method === "GET" && url.includes("/reviews/"),
+          );
         assert.equal(reviewPackAction(offered), undefined);
+        assert.equal(recordedReviewAction(offered), undefined);
 
         const privateCanary = "PRIVATE_AUTHOR_REVIEW_ISOLATION_CANARY";
         await call(
@@ -365,26 +370,77 @@ await runLocalWorkerJourney(
           201,
         );
         assert.equal(review.tier, "T2", "independence comes from the actual review pipeline");
-        const completionBody = {
+        await call(
+          `/v1/sessions/${currentReviewSession}/close`,
+          { handback: "The exact review was published before this session ended." },
+          eligible,
+          201,
+        );
+        const recovery = await call(requestPath, undefined, eligible);
+        assert.equal(recovery.status, "accepted");
+        assert.equal(reviewPackAction(recovery), undefined);
+        const readRecordedReview = recordedReviewAction(recovery);
+        assert.ok(readRecordedReview, "recover the recorded review from the invitation alone");
+        assert.equal(readRecordedReview.url, `/p/${problem}/reviews/${review.review_id}.json`);
+        const exact = await call(readRecordedReview.url);
+        const publicReview = exact.items.find((item) => item.kind === "claim-review");
+        assert.equal(publicReview?.id, review.review_id);
+        assert.ok(!JSON.stringify(exact).includes(privateCanary));
+        assert.equal(
+          recordedReviewAction(await call(requestPath, undefined, author)),
+          undefined,
+          "the author's private view does not offer the recipient's completion",
+        );
+        await controlTarget("hide");
+        assert.equal(recordedReviewAction(await call(requestPath, undefined, eligible)), undefined);
+        await controlTarget("restore");
+        const controlRecordedReview = (action) =>
+          operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+            target_id: `${problem}/${review.review_id}`,
+            target_kind: "review",
+            action,
+            reason: "Verify that invitation recovery follows current review visibility.",
+          });
+        await controlRecordedReview("hide");
+        const hiddenReview = await call(requestPath, undefined, eligible);
+        assert.equal(recordedReviewAction(hiddenReview), undefined);
+        assert.ok(!hiddenReview.next_actions.some(({ why }) => why.includes(review.review_id)));
+        await controlRecordedReview("restore");
+        const publicState = () =>
+          env.DB.prepare(`SELECT public_seq, (
+            SELECT COUNT(*) FROM events WHERE problem_id = p.id AND type = 'review.created'
+          ) AS reviews FROM problems p WHERE id = ?`)
+            .bind(problem)
+            .first();
+        const publicBefore = await publicState();
+        const restored = await call(requestPath, undefined, eligible);
+        assert.deepEqual(recordedReviewAction(restored), readRecordedReview);
+        const complete = restored.next_actions.find(({ method }) => method === "POST");
+        assert.equal(complete?.url, `${requestPath}/respond`);
+        const offeredBody = complete.why.match(
+          /^Complete with (\{.*\}) and a new Idempotency-Key\./,
+        );
+        assert.ok(offeredBody);
+        const completionBody = JSON.parse(offeredBody[1]);
+        assert.deepEqual(completionBody, {
           action: "complete",
           expected_version: accepted.version,
-          review_id: review.review_id,
-        };
+          review_id: publicReview.id,
+        });
         const completed = await call(
-          `${requestPath}/respond`,
+          complete.url,
           completionBody,
           eligible,
           200,
           "unlisted-complete",
         );
         assert.equal(completed.status, "completed");
-        assert.equal(reviewPackAction(await call(requestPath, undefined, eligible)), undefined);
-        const committedReview = await env.DB.prepare(
-          "SELECT source_event_id FROM reviews WHERE problem_id=? AND review_id=?",
-        )
-          .bind(problem, review.review_id)
-          .first();
-        assert.equal(completed.review_event_id, committedReview.source_event_id);
+        const completedView = await call(requestPath, undefined, eligible);
+        assert.equal(reviewPackAction(completedView), undefined);
+        assert.equal(recordedReviewAction(completedView), undefined);
+        assert.equal(completed.review_event_id, JSON.parse(publicReview.body).event);
+        assert.deepEqual(await publicState(), publicBefore);
+        console.log(JSON.stringify({ stage: "review-invitation-completion-recovered" }));
 
         // A new invitation remains withdrawable after the steward removes the
         // recipient. Old successful receipts remain exact, but no new acceptance
