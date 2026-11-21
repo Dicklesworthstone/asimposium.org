@@ -1266,23 +1266,29 @@ process.exit(0);
       const root = fixtureRoot();
       const sentinel = join(root, "grandchild-survived-timeout");
       const started = join(root, "grandchild-started");
+      const release = join(root, "release-grandchild");
       const summary = await runG0Spikes({
         root,
         spikes: [
           executable(
             root,
             "s1",
-            `(trap '' TERM; sleep 0.4; printf leaked > ${JSON.stringify(sentinel)}) &\n` +
+            `(trap '' TERM\n` +
               `printf started > ${JSON.stringify(started)}\n` +
-              "while :; do sleep 0.01; done",
+              `while [[ ! -e ${JSON.stringify(release)} ]]; do sleep 0.01; done\n` +
+              `printf leaked > ${JSON.stringify(sentinel)}) &\n` +
+              "wait",
           ),
         ],
-        timeoutMs: 150,
+        // Leave room for the real launcher and child to start. The release
+        // file keeps the leak check independent of their startup duration.
+        timeoutMs: 2_000,
         terminationGraceMs: 100,
       });
 
       expect(summary.results[0]?.code, formatG0Summary(summary, root)).toBe("G0_SPIKE_TIMEOUT");
-      await waitFor(started);
+      expect(existsSync(started), "the TERM-ignoring grandchild wrote its own marker").toBe(true);
+      writeFileSync(release, "release");
       await Bun.sleep(600);
       expect(existsSync(sentinel)).toBe(false);
     },
