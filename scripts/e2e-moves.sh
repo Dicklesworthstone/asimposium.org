@@ -72,7 +72,17 @@ fi
 
 cd "$repository_root"
 
-# Run the moves engine and materiality E2E test suite
+# 1. Real local Workerd/D1 moves engine & materiality lane (fail-closed if absent)
+if [[ ! -f apps/wire/test/integration/moves-real-bindings.mjs ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "MOVES_REAL_BINDINGS_MISSING" "$reproduce"
+  exit 1
+fi
+if ! node apps/wire/test/integration/moves-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "MOVES_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
+fi
+
+# 2. Unit-level moves engine checks (in-process; supplementary to real-bindings lane above)
 if ! bun scripts/suite/moves-e2e.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "MOVES_E2E_ASSERTION_FAILED" "$reproduce"
   exit 1

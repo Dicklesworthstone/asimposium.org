@@ -66,7 +66,17 @@ fi
 
 cd "$repository_root"
 
-# Run the search E2E test engine
+# 1. Real local Workerd/D1 search filters & privacy lane (fail-closed if absent)
+if [[ ! -f apps/wire/test/integration/search-filters-real-bindings.mjs ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "SEARCH_REAL_BINDINGS_MISSING" "$reproduce"
+  exit 1
+fi
+if ! node apps/wire/test/integration/search-filters-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "SEARCH_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
+fi
+
+# 2. Unit-level search checks (in-process; supplementary to real-bindings lane above)
 if ! bun scripts/suite/search-e2e.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "SEARCH_E2E_ASSERTION_FAILED" "$reproduce"
   exit 1

@@ -95,6 +95,16 @@ if ! bun test apps/wire/test/unit/review-matching-contract.test.ts; then
   exit 1
 fi
 
+# 0. Real local Workerd/D1 review matchmaking lane (fail-closed if absent)
+if [[ ! -f apps/wire/test/integration/matchmaking-real-bindings.mjs ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "MATCHMAKING_REAL_BINDINGS_MISSING" "$reproduce"
+  exit 1
+fi
+if ! node apps/wire/test/integration/matchmaking-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "MATCHMAKING_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
+fi
+
 # 2. Run wire review request state and store tests
 if ! bun test apps/wire/test/unit/review-request-state.test.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "REVIEW_REQUEST_STATE_TESTS_FAILED" "$reproduce"

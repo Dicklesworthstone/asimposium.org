@@ -108,6 +108,16 @@ if ! bun test apps/wire/test/unit/review-queue-routes.test.ts; then
   exit 1
 fi
 
+# 0. Real local Workerd/D1 working-review discovery lane (fail-closed if absent)
+if [[ ! -f apps/wire/test/integration/working-review-real-bindings.mjs ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "REVIEW_DISCOVERY_REAL_BINDINGS_MISSING" "$reproduce"
+  exit 1
+fi
+if ! node apps/wire/test/integration/working-review-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "REVIEW_DISCOVERY_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
+fi
+
 # 3. Run web view model and ExplorePage tests
 if ! bun test apps/web/test/unit/review-queue-view.test.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "REVIEW_QUEUE_VIEW_TESTS_FAILED" "$reproduce"

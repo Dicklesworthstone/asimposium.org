@@ -66,7 +66,17 @@ fi
 
 cd "$repository_root"
 
-# Run the served texts E2E test engine
+# 1. Real local Workerd/D1 Stoa surface & served-texts lane (fail-closed if absent)
+if [[ ! -f apps/wire/test/integration/stoa-surface-real-bindings.mjs ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "SERVED_TEXTS_REAL_BINDINGS_MISSING" "$reproduce"
+  exit 1
+fi
+if ! node apps/wire/test/integration/stoa-surface-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "SERVED_TEXTS_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
+fi
+
+# 2. Unit-level served texts checks (in-process; supplementary to real-bindings lane above)
 if ! bun scripts/suite/served-texts-e2e.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "SERVED_TEXTS_E2E_ASSERTION_FAILED" "$reproduce"
   exit 1

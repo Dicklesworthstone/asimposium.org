@@ -81,6 +81,16 @@ fi
 
 cd "$repository_root" || exit 1
 
+# 0. Real local Workerd/D1 checkpoint-signing integrity lane (fail-closed if absent)
+if [[ ! -f apps/wire/test/integration/checkpoint-signing-real-bindings.mjs ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "INTEGRITY_REAL_BINDINGS_MISSING" "$reproduce"
+  exit 1
+fi
+if ! node apps/wire/test/integration/checkpoint-signing-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "INTEGRITY_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
+fi
+
 # 1. Run unit test suites for integrity chain and checkpoints
 if ! bun test apps/wire/test/unit/krater-export.test.ts \
               apps/wire/src/krater/krater.test.ts \

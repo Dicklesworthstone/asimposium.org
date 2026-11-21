@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 // Observed defect (2026-09-24, asimposiumorg-1c09): five e2e gates wrapped their
@@ -81,5 +81,50 @@ describe("e2e suites declare an honest proof level", () => {
   test("the census detects a shim suite mislabelled real", () => {
     const planted = 'import { Database } from "bun:sqlite";';
     expect(SHIM.test(planted)).toBe(true);
+  });
+
+  test("all 24 in-process/pure suites are accounted for in e2e-gate-mapping.json and wired gates execute real lanes fail-closed (luqx)", () => {
+    const repoRoot = resolve(import.meta.dir, "../..");
+    const mappingDoc = JSON.parse(
+      readFileSync(join(suiteDir, "e2e-gate-mapping.json"), "utf8"),
+    ) as {
+      suites: Record<
+        string,
+        {
+          suite_proof_level: string;
+          entrypoint: string;
+          authoritative_real_lane: string;
+          wired_in_entrypoint: boolean;
+          honest_classification: string;
+        }
+      >;
+    };
+
+    const nonRealSuites = suites.filter((name) => levels[name] !== "real").sort();
+    expect(Object.keys(mappingDoc.suites).sort()).toEqual(nonRealSuites);
+
+    for (const [suiteName, entry] of Object.entries(mappingDoc.suites)) {
+      const expectedLevel = levels[suiteName];
+      if (expectedLevel === undefined) {
+        throw new Error(`Missing declared suite proof level for ${suiteName}`);
+      }
+      expect(entry.suite_proof_level).toBe(expectedLevel);
+      const entrypointPath = join(repoRoot, entry.entrypoint);
+      const lanePath = join(repoRoot, entry.authoritative_real_lane);
+      expect(existsSync(entrypointPath), `missing entrypoint ${entry.entrypoint}`).toBe(true);
+      expect(existsSync(lanePath), `missing real lane ${entry.authoritative_real_lane}`).toBe(true);
+
+      if (entry.wired_in_entrypoint) {
+        const scriptBody = readFileSync(entrypointPath, "utf8");
+        expect(
+          scriptBody.includes(entry.authoritative_real_lane) ||
+            /apps\/wire\/test\/integration\/[a-z0-9-]+\.mjs/.test(scriptBody),
+          `${entry.entrypoint} must invoke a real-bindings lane when wired_in_entrypoint=true`,
+        ).toBe(true);
+        expect(SKIP_IF_MISSING.test(scriptBody)).toBe(false);
+      } else {
+        expect(entry.honest_classification).toBe("unit-only-browser-proof-in-agora-local-lane");
+      }
+    }
   });
 });

@@ -72,6 +72,16 @@ fi
 
 cd "$repository_root" || exit 1
 
+# 0. Real local Workerd/D1 sponsor workshop lane (fail-closed if absent)
+if [[ ! -f apps/wire/test/integration/sponsor-workshop-real-bindings.mjs ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "WORKSHOP_REAL_BINDINGS_MISSING" "$reproduce"
+  exit 1
+fi
+if ! node apps/wire/test/integration/sponsor-workshop-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "WORKSHOP_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
+fi
+
 # 1. Run Workshop Page unit tests in apps/web
 if ! bun test apps/web/test/unit/workshop-page.test.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "WORKSHOP_PAGE_UNIT_TESTS_FAILED" "$reproduce"

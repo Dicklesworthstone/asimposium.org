@@ -75,6 +75,17 @@ fi
 
 cd "$repository_root" || exit 1
 
+# 1. Real local Workerd/D1 honors & calibration lane (fail-closed if absent)
+if [[ ! -f apps/wire/test/integration/honors-real-bindings.mjs ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "HONORS_REAL_BINDINGS_MISSING" "$reproduce"
+  exit 1
+fi
+if ! node apps/wire/test/integration/honors-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "HONORS_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
+fi
+
+# 2. Unit-level calibration/honors checks (in-process; supplementary)
 if ! bun scripts/suite/calibration-honors-e2e.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "CALIBRATION_HONORS_E2E_ASSERTION_FAILED" "$reproduce"
   exit 1

@@ -74,7 +74,17 @@ fi
 
 cd "$repository_root"
 
-# Run the retained enrollment capsule SQLite/service checks.
+# 1. Real local Workerd/D1 identity & enrollment lifecycle lane (fail-closed if absent)
+if [[ ! -f apps/wire/test/integration/identity-lifecycle-real-bindings.mjs ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "ENROLLMENT_REAL_BINDINGS_MISSING" "$reproduce"
+  exit 1
+fi
+if ! node apps/wire/test/integration/identity-lifecycle-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "ENROLLMENT_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
+fi
+
+# 2. Run the retained enrollment capsule SQLite/service checks.
 if ! bun scripts/suite/enrollment-capsule-e2e.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "ENROLLMENT_CAPSULE_E2E_ASSERTION_FAILED" "$reproduce"
   exit 1

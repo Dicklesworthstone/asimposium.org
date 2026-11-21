@@ -1,0 +1,173 @@
+{
+  "$comment": "Authoritative mapping of all 24 in-process/pure scripts/suite/*-e2e.ts files to their real local Workerd/D1/R2 or Chromium Playwright lanes (bead asimposiumorg-rc-artifact-archival-e2e-shims-luqx). Enforced by scripts/suite/e2e-gate-fail-closed.test.ts so no bun:sqlite/in-process shim can masquerade as e2e proof.",
+  "suites": {
+    "agora-shell-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-agora-shell.sh",
+      "authoritative_real_lane": "e2e/playwright/agora-local-lane.mjs",
+      "wired_in_entrypoint": false,
+      "honest_classification": "unit-only-browser-proof-in-agora-local-lane"
+    },
+    "agora-support-surfaces-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-agora-support-surfaces.sh",
+      "authoritative_real_lane": "e2e/playwright/agora-local-lane.mjs",
+      "wired_in_entrypoint": false,
+      "honest_classification": "unit-only-browser-proof-in-agora-local-lane"
+    },
+    "calibration-honors-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-calibration-honors.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/honors-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane"
+    },
+    "claim-page-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-claim-page.sh",
+      "authoritative_real_lane": "e2e/playwright/agora-local-lane.mjs",
+      "wired_in_entrypoint": false,
+      "honest_classification": "unit-only-browser-proof-in-agora-local-lane"
+    },
+    "cursor-edge-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-cursor-edge.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/event-tails-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane"
+    },
+    "diptych-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-diptych.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/face-census-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane"
+    },
+    "directives-e2e.ts": {
+      "suite_proof_level": "pure",
+      "entrypoint": "scripts/e2e-directives.sh",
+      "authoritative_real_lane": "e2e/playwright/agora-local-lane.mjs",
+      "wired_in_entrypoint": false,
+      "honest_classification": "unit-only-browser-proof-in-agora-local-lane"
+    },
+    "discovery-versioning-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-discovery-versioning.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/discovery-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane"
+    },
+    "enrollment-capsule-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-enrollment-capsule.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/identity-lifecycle-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane-browser-blocked-78"
+    },
+    "event-tails-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-event-tails.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/event-tails-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane"
+    },
+    "export-restore-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-export-restore.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/export-restore-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane"
+    },
+    "inbox-follows-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-inbox-follows.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/sponsor-inbox-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane"
+    },
+    "integrity-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-integrity.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/checkpoint-signing-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane"
+    },
+    "intent-classifier-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-intent-classifier.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/direct-append-screening-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane"
+    },
+    "mega-commands-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-mega-commands.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/stoa-surface-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane"
+    },
+    "moves-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-moves.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/moves-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane"
+    },
+    "protocol-admin-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-protocol-admin.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/protocol-conflicts-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane"
+    },
+    "review-discovery-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-review-discovery.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/working-review-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane"
+    },
+    "review-matchmaking-e2e.ts": {
+      "suite_proof_level": "pure",
+      "entrypoint": "scripts/e2e-review-matchmaking.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/matchmaking-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane"
+    },
+    "search-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-search.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/search-filters-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane"
+    },
+    "served-texts-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-served-texts.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/stoa-surface-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane"
+    },
+    "share-cards-e2e.ts": {
+      "suite_proof_level": "pure",
+      "entrypoint": "scripts/e2e-share-cards.sh",
+      "authoritative_real_lane": "e2e/playwright/agora-local-lane.mjs",
+      "wired_in_entrypoint": false,
+      "honest_classification": "unit-only-browser-proof-in-agora-local-lane"
+    },
+    "sponsor-console-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-sponsor-console.sh",
+      "authoritative_real_lane": "e2e/playwright/agora-local-lane.mjs",
+      "wired_in_entrypoint": false,
+      "honest_classification": "unit-only-browser-proof-in-agora-local-lane"
+    },
+    "workshop-live-e2e.ts": {
+      "suite_proof_level": "in-process",
+      "entrypoint": "scripts/e2e-workshop-live.sh",
+      "authoritative_real_lane": "apps/wire/test/integration/sponsor-workshop-real-bindings.mjs",
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-real-bindings-lane"
+    }
+  }
+}

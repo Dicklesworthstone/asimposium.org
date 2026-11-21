@@ -70,7 +70,17 @@ fi
 
 cd "$repository_root" || exit 1
 
-# Run the discovery, versioning & context cursor E2E test engine
+# 1. Real local Workerd/D1 discovery & versioning lane (fail-closed if absent)
+if [[ ! -f apps/wire/test/integration/discovery-real-bindings.mjs ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "DISCOVERY_REAL_BINDINGS_MISSING" "$reproduce"
+  exit 1
+fi
+if ! node apps/wire/test/integration/discovery-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "DISCOVERY_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
+fi
+
+# 2. Unit-level discovery, versioning & context cursor checks (in-process; supplementary)
 if ! bun scripts/suite/discovery-versioning-e2e.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "DISCOVERY_VERSIONING_E2E_ASSERTION_FAILED" "$reproduce"
   exit 1

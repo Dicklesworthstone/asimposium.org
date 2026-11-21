@@ -77,6 +77,16 @@ fi
 
 cd "$repository_root" || exit 1
 
+# 0. Real local Workerd/D1/R2 export & restore lane (fail-closed if absent)
+if [[ ! -f apps/wire/test/integration/export-restore-real-bindings.mjs ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "EXPORT_RESTORE_REAL_BINDINGS_MISSING" "$reproduce"
+  exit 1
+fi
+if ! node apps/wire/test/integration/export-restore-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "EXPORT_RESTORE_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
+fi
+
 # 1. Run pure unit test suites for export, backup, restore, retention, and citation
 if ! bun test apps/wire/test/unit/krater-export.test.ts \
               apps/wire/test/unit/krater-backup.test.ts \
