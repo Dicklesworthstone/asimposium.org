@@ -51,6 +51,7 @@ import {
   truthMetricFor,
   verifyObservationBodyBindings,
 } from "../../apps/wire/src/screening/index";
+import { computeInjectionRecall, computeLatencyPercentiles } from "./s4-sealed-loader";
 
 /** No hard-reject half means no complete run, whatever else went right. */
 export const PARTIAL_BLOCKED_EXIT_CODE = 78;
@@ -103,6 +104,14 @@ export interface S4PartialScreeningReport {
   /** Actual legitimate bodies observed by the provider. */
   readonly legitimate_observed_count: number;
   readonly legitimate_false_positive_rate: RateMetric;
+  /** Actual Tier-A in-repo hard-reject bodies observed by the provider. */
+  readonly tier_a_hard_reject_observed_count: number;
+  /** Directly observed false negatives on evaluated Tier-A hard-reject entries. */
+  readonly tier_a_hard_reject_false_negative_count: number;
+  readonly injection_recall: RateMetric;
+  readonly by_policy_category: readonly ConfusionMetric[];
+  readonly latency_p50_ms: number | null;
+  readonly latency_p95_ms: number | null;
   readonly quarantine_publish_rate: RateMetric;
   readonly quarantine_over_refusal_rate: RateMetric;
   /** Ground-truth classes the manifest declares but this run could not evaluate. */
@@ -306,14 +315,45 @@ export function aggregatePartialScreeningRun(
   );
 
   const legitimateMetric = truthMetricFor("legitimate", pairs);
+  const hardRejectMetric = truthMetricFor("hard-reject", pairs);
   const quarantineMetric = truthMetricFor("quarantine", pairs);
   const observedLegitimateRate = rateFrom(legitimateMetric, "false_positive_rate");
   const legitimateMetricUnmeasured =
     reservedByGroundTruth.legitimate > 0 ||
     providerFailures.some(([example]) => example.ground_truth === "legitimate");
   const falsePositiveRate = legitimateMetricUnmeasured ? EMPTY_RATE : observedLegitimateRate;
+  const tierAHardRejectFnRate = rateFrom(hardRejectMetric, "false_negative_rate");
+  const tierAHardRejectFnCount = tierAHardRejectFnRate.numerator;
   const quarantinePublishRate = rateFrom(quarantineMetric, "quarantine_publish_rate");
   const quarantineOverRefusalRate = rateFrom(quarantineMetric, "quarantine_over_refusal_rate");
+  const injectionRecall = computeInjectionRecall(input.corpus, input.observations);
+  const latency = computeLatencyPercentiles(input.observations);
+
+  const byCategoryMap = new Map<string, [ScreeningCorpusExample, ScreeningObservation][]>();
+  for (const pair of pairs) {
+    const category = pair[0].policy_category;
+    const list = byCategoryMap.get(category) ?? [];
+    list.push(pair);
+    byCategoryMap.set(category, list);
+  }
+  const byPolicyCategory: ConfusionMetric[] = [...byCategoryMap.entries()]
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([category, group]) => {
+      const legit = truthMetricFor("legitimate", group);
+      const hard = truthMetricFor("hard-reject", group);
+      const quar = truthMetricFor("quarantine", group);
+      return {
+        label: category,
+        ...(legit.false_positive_rate ? { false_positive_rate: legit.false_positive_rate } : {}),
+        ...(hard.false_negative_rate ? { false_negative_rate: hard.false_negative_rate } : {}),
+        ...(quar.quarantine_publish_rate
+          ? {
+              quarantine_publish_rate: quar.quarantine_publish_rate,
+              quarantine_over_refusal_rate: quar.quarantine_over_refusal_rate,
+            }
+          : {}),
+      };
+    });
 
   const failures: string[] = [];
 
@@ -343,8 +383,10 @@ export function aggregatePartialScreeningRun(
   }
 
   // Outside the completeness guard, matching `aggregateScreeningRun`: a publish
-  // is a directly observed safety event on an observation the provider did
-  // answer, not a statistic another observation's timeout can dilute.
+  // or a missed Tier-A hard-reject is a directly observed safety event on an
+  // observation the provider did answer, not a statistic another timeout dilutes.
+  if (tierAHardRejectFnCount > thresholds.hard_reject_false_negative_max)
+    failures.push("HARD_REJECT_FALSE_NEGATIVE_THRESHOLD_FAILED");
   if (quarantinePublishRate.numerator > thresholds.quarantine_publish_max)
     failures.push("QUARANTINE_PUBLISH_THRESHOLD_FAILED");
 
@@ -396,6 +438,7 @@ export function aggregatePartialScreeningRun(
   const measuredBreach = failures.some(
     (failure) =>
       failure === "LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED" ||
+      failure === "HARD_REJECT_FALSE_NEGATIVE_THRESHOLD_FAILED" ||
       failure === "QUARANTINE_OVER_REFUSAL_THRESHOLD_FAILED" ||
       failure === "QUARANTINE_PUBLISH_THRESHOLD_FAILED" ||
       failure.endsWith("_MISMATCH"),
@@ -416,6 +459,12 @@ export function aggregatePartialScreeningRun(
     provider_failure_count: providerFailureCount,
     legitimate_observed_count: observedLegitimateCount,
     legitimate_false_positive_rate: falsePositiveRate,
+    tier_a_hard_reject_observed_count: eligibleHardReject.length,
+    tier_a_hard_reject_false_negative_count: tierAHardRejectFnCount,
+    injection_recall: injectionRecall,
+    by_policy_category: byPolicyCategory,
+    latency_p50_ms: latency.p50_ms,
+    latency_p95_ms: latency.p95_ms,
     quarantine_publish_rate: quarantinePublishRate,
     quarantine_over_refusal_rate: quarantineOverRefusalRate,
     unmeasured: unmeasuredMetrics(
@@ -553,6 +602,12 @@ export function partialRunOpsJsonl(report: S4PartialScreeningReport): string {
     provider_failure_count: report.provider_failure_count,
     legitimate_observed_count: report.legitimate_observed_count,
     legitimate_false_positive_rate: report.legitimate_false_positive_rate,
+    tier_a_hard_reject_observed_count: report.tier_a_hard_reject_observed_count,
+    tier_a_hard_reject_false_negative_count: report.tier_a_hard_reject_false_negative_count,
+    injection_recall: report.injection_recall,
+    by_policy_category: report.by_policy_category,
+    latency_p50_ms: report.latency_p50_ms,
+    latency_p95_ms: report.latency_p95_ms,
     quarantine_publish_rate: report.quarantine_publish_rate,
     quarantine_over_refusal_rate: report.quarantine_over_refusal_rate,
     unmeasured: report.unmeasured,

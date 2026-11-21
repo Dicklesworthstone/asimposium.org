@@ -94,17 +94,38 @@ function validObservations(
 }
 
 /** Contract stub only: it proves mounted routing, never screening accuracy. */
-function mountedContractAi() {
+function mountedContractAi(tierABodies: ReadonlySet<string> = new Set()) {
   const calls: string[] = [];
   return {
     calls,
-    async run(model: string) {
+    async run(
+      model: string,
+      input?: { messages?: readonly { role?: string; content?: string }[] },
+    ) {
       calls.push(model);
+      const userText = input?.messages?.find((m) => m.role === "user")?.content ?? "";
+      let decision: "pass" | "reject" = "pass";
+      for (const body of tierABodies) {
+        if (userText.includes(body)) {
+          decision = "reject";
+          break;
+        }
+      }
       return {
         response: JSON.stringify({
-          decision: "pass",
-          coarse_category: "benign-context",
-          bands: { "benign-context": "low" },
+          decision,
+          coarse_category: decision === "reject" ? "injection" : "benign-context",
+          bands: {
+            "benign-context": decision === "pass" ? "high" : "low",
+            "off-topic": "low",
+            "spam-commercial": "low",
+            injection: decision === "reject" ? "high" : "low",
+            "dual-use-boundary": "low",
+            "operational-harm": "low",
+            harassment: "low",
+            "sexual-content": "low",
+            "provider-unavailable": null,
+          },
         }),
       };
     },
@@ -217,12 +238,18 @@ describe("S-4 frozen corpus", () => {
     );
   });
 
-  test("the current evaluable corpus traverses the mounted route while absent hard-reject bodies remain blocked", async () => {
+  test("the current evaluable corpus traverses the mounted route while absent Tier-B hard-reject bodies remain blocked", async () => {
     // Supply the real 200-row manifest to the runner. Its honest partial path
-    // sends only the 150 digest-bound inline bodies to the route; the 50
-    // protected rows have neither bodies nor digests and remain unmeasured.
+    // sends the 180 digest-bound inline bodies (150 legitimate + 30 Tier-A
+    // adversarial controls) to the route; the 20 Tier-B protected rows have
+    // neither bodies nor digests and remain unmeasured.
     const corpus = await createS4Corpus();
-    const ai = mountedContractAi();
+    const tierABodies = new Set(
+      corpus
+        .filter((example) => example.ground_truth === "hard-reject" && example.body !== undefined)
+        .map((example) => example.body as string),
+    );
+    const ai = mountedContractAi(tierABodies);
     const { env, context } = mountedWorkerEnv(ai);
     const { posted, fetch_impl } = mountedFetchImpl(env, context);
     const writes: string[] = [];
@@ -251,8 +278,10 @@ describe("S-4 frozen corpus", () => {
       record_type: "screening-partial-aggregate",
       evidence_class: "provider-measured",
       verdict: "blocked",
-      evaluated_count: 150,
-      reserved_count: 50,
+      evaluated_count: 180,
+      reserved_count: 20,
+      tier_a_hard_reject_observed_count: 30,
+      tier_a_hard_reject_false_negative_count: 0,
       exit_code: 78,
     });
     expect(posted).toHaveLength(1);
@@ -260,13 +289,13 @@ describe("S-4 frozen corpus", () => {
     expect(request.partial_run).toBe(true);
     expect(Array.isArray(request.examples)).toBe(true);
     const examples = request.examples as { source?: { kind?: string }; body?: unknown }[];
-    expect(examples).toHaveLength(150);
+    expect(examples).toHaveLength(180);
     expect(examples.every((example) => example.source?.kind === "inline-safe")).toBe(true);
     expect(examples.every((example) => typeof example.body === "string")).toBe(true);
-    expect(ai.calls).toHaveLength(150);
+    expect(ai.calls).toHaveLength(180);
     expect(ai.calls.every((model) => model === WORKERS_AI_MODEL)).toBe(true);
     expect(corpus.filter((example) => example.source.kind === "protected-staging")).toHaveLength(
-      50,
+      20,
     );
     expect(
       corpus
@@ -282,7 +311,12 @@ describe("S-4 frozen corpus", () => {
 
   test("PLANTED NEGATIVE: dropping partial_run from the runner POST is refused by the mounted route with no aggregate", async () => {
     const corpus = await createS4Corpus();
-    const ai = mountedContractAi();
+    const tierABodies = new Set(
+      corpus
+        .filter((example) => example.ground_truth === "hard-reject" && example.body !== undefined)
+        .map((example) => example.body as string),
+    );
+    const ai = mountedContractAi(tierABodies);
     const { env, context } = mountedWorkerEnv(ai);
     const { fetch_impl } = mountedFetchImpl(env, context, (body) => {
       const rest = { ...body };
@@ -344,7 +378,7 @@ describe("S-4 frozen corpus", () => {
     expect(posted).toHaveLength(1);
     const postedExamples = posted[0]?.examples;
     expect(Array.isArray(postedExamples)).toBe(true);
-    expect(Array.isArray(postedExamples) ? postedExamples.length : 0).toBe(150);
+    expect(Array.isArray(postedExamples) ? postedExamples.length : 0).toBe(180);
   });
 
   test("PLANTED NEGATIVE: the real self-test reports the identity of the available bodies, never a placeholder digest", async () => {

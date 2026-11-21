@@ -1113,12 +1113,13 @@ case "${self_test_terminal}" in
     ;;
 esac
 
-# The measurable half must actually be measured: refusing the whole corpus
-# because half of it is unavailable discards evidence that costs nothing to get.
+# The measurable corpus (150 legitimate + 30 Tier-A adversarial controls) must
+# actually be measured: refusing everything because the 20 Tier-B entries are
+# unavailable discards evidence that costs nothing to get.
 case "${self_test_output}" in
-  *'"evaluated_count":150'* ) ;;
+  *'"evaluated_count":180'* ) ;;
   *)
-    printf '%s\n' 'expected the 150 available bodies to be screened and reported' >&2
+    printf '%s\n' 'expected the 180 available bodies (150 legitimate + 30 Tier-A) to be screened and reported' >&2
     exit 1
     ;;
 esac

@@ -885,7 +885,7 @@ run_suite() {
       null \
       null
   fi
-  run_controlled_command bun test /dev/null --timeout=120000 e2e/screening/s4-runner.test.ts
+  run_controlled_command bun test /dev/null --timeout=120000 e2e/screening/s4-runner.test.ts e2e/screening/s4-sealed-loader.test.ts
   runner_test_status=$?
   captured_runner_test_status="${runner_test_status}"
   fail_if_active_controlled_command_remains runner-focused-test

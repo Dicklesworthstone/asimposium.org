@@ -5,7 +5,7 @@ import {
   type ScreeningRunIdentity,
   screenWithProvider,
 } from "../../apps/wire/src/screening/index";
-import { createS4Corpus } from "./s4-corpus";
+import { createS4Corpus, S4_CORPUS_REVISION } from "./s4-corpus";
 import {
   createFixtureScreeningProvider,
   FIXTURE_CONFIGURATION_DIGEST,
@@ -25,7 +25,7 @@ import {
 } from "./s4-legitimate-only";
 
 const FIXTURE_IDENTITY: ScreeningRunIdentity = {
-  corpus_revision: "s4-manifest-2026-08-13-v2",
+  corpus_revision: S4_CORPUS_REVISION,
   corpus_digest: `sha256:${"0".repeat(64)}`,
   model_version: FIXTURE_MODEL_VERSION,
   policy_version: FIXTURE_POLICY_VERSION,
@@ -39,20 +39,27 @@ const FIXTURE_IDENTITY: ScreeningRunIdentity = {
  */
 async function partialRun(decide?: (exampleId: string) => "pass" | "reject") {
   const corpus = await createS4Corpus();
+  const effectiveDecide =
+    decide === undefined
+      ? (exampleId: string) =>
+          exampleId.startsWith("hard-") ? ("reject" as const) : ("pass" as const)
+      : (exampleId: string) =>
+          exampleId.startsWith("hard-") ? ("reject" as const) : decide(exampleId);
   return runLegitimateOnlyScreening({
     corpus,
-    provider: createFixtureScreeningProvider(decide === undefined ? {} : { decide }),
+    provider: createFixtureScreeningProvider({ decide: effectiveDecide }),
     identity: FIXTURE_IDENTITY,
     evidence_class: "fixture-not-model-evidence",
   });
 }
 
 describe("S-4 partial run over the available corpus half", () => {
-  test("partitions the frozen manifest into 150 evaluable bodies and 50 reserved entries", async () => {
+  test("partitions the frozen manifest into 180 evaluable bodies (150 legitimate + 30 Tier-A) and 20 Tier-B reserved entries", async () => {
     const { evaluable, reserved } = partitionEvaluableCorpus(await createS4Corpus());
-    expect(evaluable).toHaveLength(150);
-    expect(reserved).toHaveLength(50);
-    expect(evaluable.every((example) => example.ground_truth === "legitimate")).toBe(true);
+    expect(evaluable).toHaveLength(180);
+    expect(reserved).toHaveLength(20);
+    expect(evaluable.filter((example) => example.ground_truth === "legitimate")).toHaveLength(150);
+    expect(evaluable.filter((example) => example.ground_truth === "hard-reject")).toHaveLength(30);
     expect(reserved.every((example) => example.source.kind === "protected-staging")).toBe(true);
     // A reserved body is absent, not merely unread.
     expect(reserved.every((example) => example.body === undefined)).toBe(true);
@@ -79,10 +86,15 @@ describe("S-4 partial run over the available corpus half", () => {
     expect(isPartialRunEligible(["EVALUATED_BODY_DIGEST_MISSING"])).toBe(false);
   });
 
-  test("measures the false-positive rate over 150 bodies and names the false-negative half unmeasured", async () => {
+  test("measures the false-positive rate over 150 legitimate + 30 Tier-A bodies and names the full false-negative metric unmeasured", async () => {
     const report = await partialRun();
-    expect(report.evaluated_count).toBe(150);
-    expect(report.reserved_count).toBe(50);
+    expect(report.evaluated_count).toBe(180);
+    expect(report.reserved_count).toBe(20);
+    expect(report.tier_a_hard_reject_observed_count).toBe(30);
+    expect(report.tier_a_hard_reject_false_negative_count).toBe(0);
+    expect(report.injection_recall.numerator).toBe(10);
+    expect(report.injection_recall.denominator).toBe(10);
+    expect(report.injection_recall.rate).toBe(1);
     expect(report.provider_failure_count).toBe(0);
     // Measured: a real denominator and a real interval.
     expect(report.legitimate_false_positive_rate.denominator).toBe(150);
@@ -176,8 +188,9 @@ describe("S-4 partial run over the available corpus half", () => {
     const report = await runLegitimateOnlyScreening({
       corpus,
       provider: createFixtureScreeningProvider({
+        decide: (exampleId) => (exampleId.startsWith("hard-") ? "reject" : "pass"),
         onScreen: (exampleId) => {
-          if (exampleId.endsWith("001")) throw new Error("provider exploded");
+          if (exampleId === "legit-001") throw new Error("provider exploded");
         },
       }),
       identity: FIXTURE_IDENTITY,
@@ -214,7 +227,7 @@ describe("S-4 partial run over the available corpus half", () => {
       evidence_class: "fixture-not-model-evidence",
     });
 
-    expect(report.provider_failure_count).toBe(150);
+    expect(report.provider_failure_count).toBe(180);
     expect(report.legitimate_observed_count).toBe(0);
     expect(report.legitimate_false_positive_rate).toEqual({
       numerator: 0,
@@ -252,14 +265,16 @@ describe("S-4 partial run over the available corpus half", () => {
       corpus: corpus.map((example) =>
         example.id === original.id ? unavailableLegitimate : example,
       ),
-      provider: createFixtureScreeningProvider(),
+      provider: createFixtureScreeningProvider({
+        decide: (exampleId) => (exampleId.startsWith("hard-") ? "reject" : "pass"),
+      }),
       identity: FIXTURE_IDENTITY,
       evidence_class: "fixture-not-model-evidence",
     });
 
     expect(report.reserved_by_ground_truth).toEqual({
       legitimate: 1,
-      "hard-reject": 50,
+      "hard-reject": 20,
       quarantine: 0,
     });
     expect(report.legitimate_false_positive_rate).toEqual({

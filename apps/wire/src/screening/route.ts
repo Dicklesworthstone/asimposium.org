@@ -155,10 +155,9 @@ function parseScreeningRequest(
     if (!isSha256Digest(candidate.body_digest)) {
       return { ok: false, code: "SCREENING_REQUEST_MALFORMED" };
     }
-    // Only inline-safe, available material is evaluable today: staging holds
-    // no protected-body resolver yet, and screening an entry whose body never
-    // arrived would attest a digest the screened bytes do not hash to. This is
-    // a corpus-side gap, so it gets its own code rather than the generic one.
+    // Only available material carrying a verified body is evaluable: blocked
+    // reservations without bodies are refused with SCREENING_BODY_UNEVALUABLE
+    // so staging never attests a digest the screened bytes do not hash to.
     const source = candidate.source;
     const sourceKind =
       typeof source === "object" && source !== null && "kind" in source ? source.kind : undefined;
@@ -167,9 +166,10 @@ function parseScreeningRequest(
         ? source.availability
         : undefined;
     if (
-      sourceKind !== "inline-safe" ||
+      (sourceKind !== "inline-safe" && sourceKind !== "protected-staging") ||
       sourceAvailability !== "available" ||
       typeof candidate.body !== "string" ||
+      candidate.body.length === 0 ||
       new TextEncoder().encode(candidate.body).byteLength > WORKERS_AI_MAX_BODY_BYTES
     ) {
       return { ok: false, code: "SCREENING_BODY_UNEVALUABLE" };

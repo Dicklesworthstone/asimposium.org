@@ -33,6 +33,7 @@ import {
   partitionEvaluableCorpus,
   runLegitimateOnlyScreening,
 } from "./s4-legitimate-only";
+import { fullRunScorecardJsonl, loadS4SealedCorpus, SealedCorpusError } from "./s4-sealed-loader";
 
 // The live call carries the whole evaluable corpus in one request: 150
 // provider classifications at ~4s each over the route's 16 lanes cannot fit a
@@ -343,6 +344,12 @@ async function assertOAuthDryCheck(oauthUrl: URL, bearer: string): Promise<void>
 export interface LiveScreeningOptions {
   /** Test-only injection for a future ready protected manifest; production creates the frozen manifest. */
   readonly corpus?: readonly ScreeningCorpusExample[];
+  /** Optional out-of-repo chmod<=0600 Tier-B sealed corpus file; defaults to ASIMPOSIUM_S4_PROTECTED_CORPUS_FILE. */
+  readonly sealed_corpus_file?: string;
+  /** Optional pinned SHA-256 digest map for tests overriding TIER_B_SEALED_DIGESTS. */
+  readonly pinned_digests?: Readonly<Record<string, string | null>>;
+  /** Optional repo root override for sealed-file out-of-repo validation tests. */
+  readonly repo_root?: string;
   /** Test-only transport injection; production uses bounded HTTPS fetch. */
   readonly fetch_live_json?: typeof fetchBoundedLiveJson;
   /**
@@ -357,19 +364,40 @@ export interface LiveScreeningOptions {
 }
 
 export async function runLiveScreening(options: LiveScreeningOptions = {}): Promise<void> {
-  const corpus = options.corpus ?? (await createS4Corpus());
+  const sealedPath = options.sealed_corpus_file ?? process.env.ASIMPOSIUM_S4_PROTECTED_CORPUS_FILE;
+  let corpus: readonly ScreeningCorpusExample[];
+  let resolvedBodies: ReadonlyMap<string, string> | undefined;
+  if (options.corpus !== undefined) {
+    corpus = options.corpus;
+  } else if (sealedPath && sealedPath.trim().length > 0) {
+    try {
+      const hydrated = await loadS4SealedCorpus(sealedPath, {
+        ...(options.pinned_digests === undefined ? {} : { pinned_digests: options.pinned_digests }),
+        ...(options.repo_root === undefined ? {} : { repo_root: options.repo_root }),
+      });
+      corpus = hydrated.corpus;
+      resolvedBodies = hydrated.resolved_bodies;
+    } catch (error) {
+      if (error instanceof SealedCorpusError) {
+        throw new RunnerFailure(error.code, 1);
+      }
+      throw new RunnerFailure("SEALED_CORPUS_UNREADABLE", 1);
+    }
+  } else {
+    corpus = await createS4Corpus();
+  }
   assertS4CorpusShape(corpus);
   const readiness = inspectS4ManifestReadiness(corpus);
   /**
    * A blocked manifest used to refuse the entire run here, before staging was
-   * ever contacted. That discarded the measurable half: the 150 legitimate
-   * bodies are inline and available, and the false-positive criterion does not
-   * need a hard-reject example to mean something.
+   * ever contacted. That discarded the measurable portion: the 150 legitimate
+   * bodies and 30 Tier-A adversarial controls are inline and available.
    *
-   * So a manifest blocked *only* by protected staging material now proceeds as a
-   * partial run. Any other blocker — a missing inline body, a malformed entry —
-   * is a corpus defect rather than an availability gap and still refuses
-   * everything, because there is nothing trustworthy to partially measure.
+   * So a manifest blocked *only* by absent Tier-B protected staging material
+   * proceeds as a partial run (still fail-closed, exit 78 or exit 1 on any
+   * threshold breach). When `ASIMPOSIUM_S4_PROTECTED_CORPUS_FILE` supplies and
+   * verifies all 20 Tier-B entries, `readiness.status` becomes `"ready"` and
+   * the full 200-entry run executes.
    */
   const partial = readiness.status === "blocked";
   if (partial && !isPartialRunEligible(readiness.blockers)) {
@@ -391,13 +419,17 @@ export async function runLiveScreening(options: LiveScreeningOptions = {}): Prom
       ));
   const write = options.write ?? ((line: string) => process.stdout.write(line));
   const corpusIdentity = await deriveS4EvaluatedCorpusIdentity(submitted);
+  const wireExamples = submitted.map((example) => {
+    const body = example.body ?? resolvedBodies?.get(example.id);
+    return body === undefined ? example : { ...example, body };
+  });
   let response: unknown;
   try {
     response = await fetchLiveJson(screeningUrl, {
       method: "POST",
       headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
-      // Staging owns protected bodies. This request carries safe inline bodies
-      // plus protected locators/digests, never a substitute response.
+      // Ephemeral HTTPS submission behind staging bearer auth (`no-store`);
+      // Tier-B bodies stay strictly in memory and are never written to logs.
       body: JSON.stringify({
         corpus_revision: S4_CORPUS_REVISION,
         corpus_digest: corpusIdentity.corpus_digest,
@@ -405,7 +437,7 @@ export async function runLiveScreening(options: LiveScreeningOptions = {}): Prom
         // reserved entries would invite staging to answer for bodies neither
         // side holds.
         partial_run: partial,
-        examples: submitted,
+        examples: wireExamples,
       }),
     });
   } catch (error) {
@@ -478,8 +510,9 @@ export async function runLiveScreening(options: LiveScreeningOptions = {}): Prom
     );
   }
   const report = aggregateScreeningRun(corpus, screening.observations, identity);
-  // Write the full OPS.2a result before any independent OAuth phase can fail.
+  // Write the full OPS.2a result and secret-free scorecard before any independent OAuth phase can fail.
   write(`${screeningOpsJsonl(corpus, screening.observations, report)}\n`);
+  write(`${fullRunScorecardJsonl(corpus, screening.observations, report, "provider-measured")}\n`);
   if (report.verdict !== "pass") {
     throw new RunnerFailure(
       report.verdict === "blocked"
@@ -522,7 +555,9 @@ async function runSelfTest(): Promise<number> {
   const corpusIdentity = await deriveS4EvaluatedCorpusIdentity(evaluable);
   const report = await runLegitimateOnlyScreening({
     corpus,
-    provider: createFixtureScreeningProvider(),
+    provider: createFixtureScreeningProvider({
+      decide: (exampleId) => (exampleId.startsWith("hard-") ? "reject" : "pass"),
+    }),
     identity: {
       corpus_revision: corpusIdentity.corpus_revision,
       corpus_digest: corpusIdentity.corpus_digest,
