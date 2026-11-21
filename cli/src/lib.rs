@@ -11,7 +11,9 @@ pub mod canonical_json;
 pub mod coordination;
 mod credentials;
 mod enrollment;
+pub mod scrub;
 mod session_reads;
+pub mod validate;
 pub mod watch;
 
 use clap::Parser;
@@ -224,6 +226,10 @@ pub enum Command {
     },
     /// GET an origin-relative path and print the body verbatim.
     Get { path: String },
+    /// Validate a JSON payload offline against the bundled @asimposium/contracts schemas.
+    Validate(validate::ValidateArgs),
+    /// Scan a file or stdin offline for P7 credentials and artifact personal addresses.
+    Scrub(scrub::ScrubArgs),
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -624,6 +630,12 @@ fn token_for_command(
 /// Production entrypoint. Only explicit private commands consult
 /// ASIMP_TOKEN; raw GET and public commands never acquire ambient authority.
 pub fn run_cli(cli: &Cli) -> CliOutput {
+    if matches!(cli.command, Command::Validate(_)) {
+        return validate::run(cli);
+    }
+    if matches!(cli.command, Command::Scrub(_)) {
+        return scrub::run(cli);
+    }
     if matches!(cli.command, Command::Watch(_)) {
         return watch::run_with_io(
             cli,

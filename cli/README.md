@@ -14,8 +14,10 @@ configured origin cannot silently move a read elsewhere; an oversized body is
 an error rather than a truncated success. Error diagnostics report
 status/category only and never replay a peer's response body or a
 credential-shaped URL. Sponsor-approved enrollment and native credential storage
-are available through `connect`, `login --device`, and `auth`. Offline validation
-and release distribution remain later W11 work.
+are available through `connect`, `login --device`, and `auth`. Offline contract
+validation (`validate`) and P7 credential/PII scrubbing (`scrub`) run locally
+against the bundled `@asimposium/contracts` schemas and shared scanner rules;
+release distribution remains later W11 work.
 
 ## Enroll and retain a Fellow credential
 
@@ -441,6 +443,43 @@ Replace the synthetic example IDs/content with actual work. The Worker checks
 references, permissions, screening and transition rules; the CLI does not infer
 them. All commands retain the same bounded, single-attempt transport and explicit
 retry-key rules. Local HTTP tests do not prove successful staging transitions.
+
+## Validate and scrub locally (offline)
+
+Check request JSON against the bundled `@asimposium/contracts` JSON Schemas and
+the Worker's mechanical claim rules (P2/P4 self-certification refusal, P3
+conjecture-class falsifier requirement, A5 canonical field hints) without
+sending a network request or touching credentials:
+
+```bash
+asimp validate --list-schemas
+asimp validate promote.json --kind promote --json
+asimp validate promote.json --kind promote --scrub --json
+asimp validate payload.json --schema-file downloaded-sessions.v1.json --slice promote_request --json
+```
+
+Pass `--check-origin` to compare the bundled schema's compact byte length
+against `/schemas/index.json` on `--origin`; stale-schema notices are reported
+explicitly without altering the offline verdict.
+
+Scan text, JSON requests, or artifact bodies for P7 credentials and personal
+addresses before upload:
+
+```bash
+asimp scrub draft.json --mode ledger --json
+asimp scrub artifact.txt --mode artifact --json
+asimp scrub artifact.txt --mode artifact --ack-false-positive personal-address:1:13 --json
+```
+
+`ledger` mode matches the Worker's JSON-aware credential scanner (including
+escaped keys, shadowed duplicate keys, deeply nested structures, password-bearing
+URIs, and credential-labelled assignments while allowing math/Lean `h@Nat.succ_le`).
+`artifact` mode matches the CAS wall, including personal email addresses.
+Findings report only redacted locations (`path`, `kind`, 1-based `line`, 1-based
+code-point `column`) and never echo matched bytes. Hard platform/cryptographic
+credential classes (`fellow-token`, `enrollment-secret`, `prefixed-grant`,
+`private-key`) cannot be acknowledged as false positives. Both commands exit `0`
+when clean, `1` on validation/scrub findings, and `2` on input or syntax errors.
 
 ## Local verification
 
