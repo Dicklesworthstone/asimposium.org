@@ -286,15 +286,34 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, worker, ori
     );
     const ackCount = [approveRes, denyRes].filter((r) => r?.acknowledged === true).length;
     assert.equal(ackCount, 1, "Exactly ONE of competing approve vs deny may succeed");
-    const credsAfterExpire = { cnt: finalProp.status === "denied" ? 0 : 0 };
-    const expiredDecision = { code: finalProp.status };
+    // Actually query real D1 fellow_tokens (zero credentials minted at decision time;
+    // and if denied, polling /v1/fellows/flow MUST return status=denied with zero token).
+    const racedCreds = await env.DB.prepare(
+      `SELECT COUNT(*) AS cnt
+         FROM fellow_tokens c
+         JOIN enrollment_proposals p ON p.proposal_id = c.proposal_id
+        WHERE p.enrollment_id = ?`,
+    )
+      .bind(racedProp.enrollment_id)
+      .first();
+    assert.equal(racedCreds.cnt, 0, "Zero credentials may exist before one-time poll");
+    if (finalProp.status === "denied") {
+      const deniedPoll = await rawFetch("/v1/fellows/flow", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "race2c-denied-poll" },
+        body: JSON.stringify({ flow_handle: claimed2c.json.flow_handle }),
+      });
+      assert.equal(deniedPoll.json?.status, "denied");
+      assert.equal(deniedPoll.json?.token, undefined);
+    }
 
     traces.push({
-      race: "RACE-2-JOIN-TTL-VS-PROPOSAL-EXPIRY",
+      race: "RACE-2-JOIN-TTL-VS-PROPOSAL-TTL-AND-APPROVE-VS-DENY",
       late_claim_status: lateClaim.status,
+      proposal_ttl_ms: propRow2b.expires_at - propRow2b.created_at,
       post_secret_ttl_approval: approved2b.acknowledged,
-      expired_proposal_decision_code: expiredDecision?.code ?? null,
-      d1_creds_after_expiry: credsAfterExpire.cnt,
+      raced_final_status: finalProp.status,
+      raced_d1_creds: racedCreds.cnt,
       invariant_held: true,
     });
   }
@@ -429,7 +448,13 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, worker, ori
       ),
     ]);
     const acks = [dec1, dec2].filter((d) => d?.acknowledged === true);
-    assert.ok(acks.length >= 1, "At least one concurrent approve must succeed");
+    assert.equal(
+      acks.length,
+      1,
+      `Exactly ONE distinct-key concurrent approve may succeed (got ${acks.length})`,
+    );
+    const losingDec = [dec1, dec2].find((d) => d?.acknowledged !== true);
+    assert.equal(losingDec?.code, "PROPOSAL_NOT_PENDING");
 
     // Same-key idempotent double-POST approval replay returns clean 200 acknowledged
     const replayDec = await sponsorCall(
@@ -623,8 +648,9 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, worker, ori
       `Browser cookie on Stoa must be rejected with 401, got ${cookieOnStoa.status}`,
     );
 
-    // Concurrent sponsor credential revocation + Fellow read/write
-    const [revokeRes, concurrentHello] = await Promise.all([
+    // Concurrent sponsor credential revocation racing an in-flight Fellow WRITE (POST /v1/sessions)
+    // plus an in-flight read (GET /v1/hello).
+    const [revokeRes, concurrentWrite, concurrentHello] = await Promise.all([
       sponsorCall(
         SPONSOR_A,
         "POST",
@@ -638,6 +664,15 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, worker, ori
         },
         200,
       ),
+      rawFetch("/v1/sessions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${fellowToken}`,
+          "idempotency-key": "race7-inflight-session-write",
+        },
+        body: JSON.stringify({ problem_id: "P-4DSP" }),
+      }),
       rawFetch("/v1/hello", {
         method: "GET",
         headers: { authorization: `Bearer ${fellowToken}` },
@@ -646,6 +681,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, worker, ori
     assert.ok(revokeRes, "Revoke call must commit");
 
     // Immediately after revocation commits: zero grace window -> MUST return 401 FELLOW_TOKEN_INVALID
+    // on BOTH reads and writes (even if the raced pre-commit session write had opened a session).
     const helloAfter = await rawFetch("/v1/hello", {
       method: "GET",
       headers: { authorization: `Bearer ${fellowToken}` },
@@ -668,6 +704,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, worker, ori
       race: "RACE-7-REVOCATION-AND-BIDIRECTIONAL-WRONG-PRINCIPAL",
       bearer_on_sponsor_status: wrongPrincipalResp.status,
       cookie_on_stoa_status: cookieOnStoa.status,
+      concurrent_write_status: concurrentWrite.status,
       concurrent_hello_status: concurrentHello.status,
       post_revoke_hello_status: helloAfter.status,
       post_revoke_hello_code: helloAfter.json?.code,
@@ -676,16 +713,14 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, worker, ori
     });
   }
 
+  // Emit single-line NDJSON verdict required by lanes-real-bindings.test.ts
   console.log(
-    JSON.stringify(
-      {
-        stage: "auth-race-matrix-complete",
-        bead: "asimposiumorg-ana",
-        races_passed: traces.length,
-        traces,
-      },
-      null,
-      2,
-    ),
+    JSON.stringify({
+      stage: "auth-race-matrix-complete",
+      status: "pass",
+      bead: "asimposiumorg-ana",
+      races_passed: traces.length,
+      traces,
+    }),
   );
 });

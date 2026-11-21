@@ -15,6 +15,7 @@ const LANES = [
   "artifact",
   "artifact-staging-retention",
   "atomic-batch",
+  "auth-race-matrix",
   "backup-scheduler",
   "backup-segments",
   "batch-replay",
