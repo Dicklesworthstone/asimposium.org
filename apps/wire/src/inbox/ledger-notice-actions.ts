@@ -26,7 +26,7 @@ export function ledgerNoticeActions(
       {
         action: "orient",
         url: `/p/${problemId}/questions.json?target=${targetId}`,
-        reason: `Read ${targetId} and its recorded answer before relying on the resolution.`,
+        reason: `Read ${targetId}, its target references and current status before responding or relying on an answer.`,
       },
     ];
     const answer =

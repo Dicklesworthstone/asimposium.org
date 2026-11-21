@@ -989,14 +989,8 @@ await runLocalWorkerJourney(async (context) => {
   const hiddenReviewFeedback = (await sponsorInbox()).items.find(
     (item) => item.id === reviewFeedback.id,
   );
-  assert.equal(hiddenReviewFeedback.source_refs, undefined);
-  assert.ok(
-    !(await inbox(authorA)).items
-      .find((item) => item.id === reviewFeedback.id)
-      .next_actions.some((action) =>
-        action.url.includes(`/reviews/${refutingReview.review_id}.json`),
-      ),
-  );
+  assert.equal(hiddenReviewFeedback, undefined, "hidden reviews remove the entire stale notice");
+  assert.ok(!(await inbox(authorA)).items.some((item) => item.id === reviewFeedback.id));
   await reviewControl("restore");
   assert.deepEqual(
     (await sponsorInbox()).items.find((item) => item.id === reviewFeedback.id).source_refs,
@@ -1423,6 +1417,137 @@ await runLocalWorkerJourney(async (context) => {
     1,
   );
 
+  // A new question reaches the author of referenced work, including a target
+  // named only by blocking. This uses ordinary publication and signed private
+  // inbox reads; synthetic classifier and enrollment fixtures remain local.
+  const requestDraft = await call(
+    `/v1/sessions/${sessionIdA}/workshop`,
+    {
+      type: "claim-draft",
+      title: "A bounded residue question target",
+      body_md: "A separate finite target for a directed research question.",
+      publication: {
+        kind: "conjecture",
+        statement: "The residues of the integers zero through three modulo four are distinct.",
+        falsifier: "Two distinct integers in this stated domain have the same residue modulo four.",
+      },
+    },
+    authorA,
+    201,
+    "request-notice-draft",
+  );
+  const requestClaim = await call(
+    `/v1/sessions/${sessionIdA}/promote`,
+    { workshop_id: requestDraft.workshop_id, expected_workshop_version: requestDraft.version },
+    authorA,
+    201,
+    "request-notice-claim",
+  );
+  const requestPath = `/v1/sessions/${sessionIdB}/questions`;
+  const requestBody = {
+    body_md: "Which explicit pairwise comparisons establish the finite residue claim?",
+    target_refs: [
+      `${requestClaim.claim_id}@1`,
+      requestClaim.claim_id,
+      `${requestClaim.claim_id}@1`,
+      refutingReview.review_id,
+      "C-99999@1",
+    ],
+    blocking: `${requestClaim.claim_id}@1`,
+  };
+  const directed = await call(requestPath, requestBody, reviewerB, 201, "directed-question");
+  assert.deepEqual(
+    await call(requestPath, requestBody, reviewerB, 200, "directed-question"),
+    directed,
+  );
+  const requestSource = await env.DB.prepare(
+    "SELECT id FROM events WHERE problem_id=? AND object_id=? AND type='question.asked'",
+  )
+    .bind(problemId, directed.question_id)
+    .first();
+  assert.ok(requestSource);
+  await drainAnswers();
+  const directedNotices = questionNotices(await inbox(authorA), directed.question_id);
+  assert.equal(directedNotices.length, 1, "multiple references to one author yield one notice");
+  const directedNotice = directedNotices[0];
+  assert.equal(directedNotice.caused_by_event_id, requestSource.id);
+  assert.deepEqual(
+    directedNotice.next_actions.map((action) => action.url),
+    [`/p/${problemId}/questions.json?target=${directed.question_id}`],
+  );
+  const requestRead = await call(directedNotice.next_actions[0].url);
+  assert.deepEqual(requestRead.questions[0].target_refs, requestBody.target_refs);
+  assert.equal(requestRead.questions[0].blocking, requestBody.blocking);
+  assert.deepEqual(questionNotices(await inbox(reviewerB), directed.question_id), []);
+  assert.equal(questionNotices(await sponsorInbox(), directed.question_id).length, 1);
+  assert.ok(!JSON.stringify(directedNotice).includes(requestBody.body_md));
+  const requestControl = (target, kind, action) =>
+    operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+      target_id: `${problemId}/${target}`,
+      target_kind: kind,
+      action,
+      reason: "Directed research questions must follow current source and target visibility.",
+    });
+  await requestControl(requestClaim.claim_id, "claim", "hide");
+  assert.deepEqual(questionNotices(await inbox(authorA), directed.question_id), []);
+  assert.deepEqual(questionNotices(await sponsorInbox(), directed.question_id), []);
+  assert.equal(
+    (await call("/v1/inbox/ack", { notice_ids: [directedNotice.id] }, authorA)).acknowledged_count,
+    0,
+  );
+  await requestControl(requestClaim.claim_id, "claim", "restore");
+  assert.equal(
+    questionNotices(await inbox(authorA), directed.question_id)[0].id,
+    directedNotice.id,
+  );
+  await requestControl(directed.question_id, "question", "hide");
+  assert.deepEqual(questionNotices(await inbox(authorA), directed.question_id), []);
+  await requestControl(directed.question_id, "question", "restore");
+  assert.equal(
+    (await call("/v1/inbox/ack", { notice_ids: [directedNotice.id] }, authorA)).acknowledged_count,
+    1,
+  );
+  await drainAnswers();
+  const replayedRequestNotice = questionNotices(await inbox(authorA), directed.question_id);
+  assert.equal(replayedRequestNotice.length, 1);
+  assert.equal(replayedRequestNotice[0].id, directedNotice.id);
+  assert.ok(replayedRequestNotice[0].acknowledged_at);
+  const blockingOnly = await call(
+    requestPath,
+    {
+      body_md: "Which explicit domain boundary makes the residue comparison finite?",
+      target_refs: [],
+      blocking: `${requestClaim.claim_id}@1`,
+    },
+    reviewerB,
+    201,
+    "blocking-only-question",
+  );
+  await drainAnswers();
+  assert.equal(questionNotices(await inbox(authorA), blockingOnly.question_id).length, 1);
+  await call(
+    `/v1/sessions/${sessionIdB}/questions/${blockingOnly.question_id}/withdraw`,
+    {
+      reason: "The question is no longer blocking this analysis.",
+    },
+    reviewerB,
+    200,
+    "withdraw-blocking-question",
+  );
+  assert.deepEqual(questionNotices(await inbox(authorA), blockingOnly.question_id), []);
+  assert.deepEqual(questionNotices(await sponsorInbox(), blockingOnly.question_id), []);
+  console.log(
+    JSON.stringify({
+      stage: "question-request-inbox",
+      status: "pass",
+      target_authors_and_blocking_refs: true,
+      duplicate_self_and_unknown_refs: true,
+      exact_question_read: true,
+      source_target_visibility_and_withdrawal: true,
+      replay_preserves_acknowledgment: true,
+    }),
+  );
+
   console.log(
     JSON.stringify({
       stage: "questions-retractions-real-bindings",
@@ -1437,6 +1562,7 @@ await runLocalWorkerJourney(async (context) => {
       author_authority_p9_verified: true,
       leasing_and_answering_verified: true,
       private_answer_inbox_delivery_verified: true,
+      private_question_request_inbox_delivery_verified: true,
       answer_inbox_exact_reads_and_visibility_verified: true,
       self_answer_and_replay_do_not_duplicate_inbox_verified: true,
       self_corrected_vs_externally_refuted_verified: true,

@@ -19,7 +19,7 @@ const migration = (name: string) =>
 // Real base ledger/inbox DDL and the new migration; minimal identity and
 // publication fixture extensions. This adapter tests SQLite batch rollback,
 // not the full migration chain or a deployed Cloudflare D1 binding.
-function fixture() {
+function fixture(questionRequests = false) {
   const sql = new Database(":memory:");
   sql.exec(migration("0001_krater_v0.sql"));
   sql.exec(migration("0043_screening_publication_provenance.sql"));
@@ -58,9 +58,16 @@ function fixture() {
   sql.exec(migration("0068_claim_evidence_inbox.sql"));
   sql.exec(migration("0104_hypothesis_evidence_inbox.sql"));
   sql.exec(migration("0147_question_answer_inbox.sql"));
+  if (questionRequests) sql.exec(migration("0149_question_request_inbox.sql"));
   let beforeBatch: (() => void) | undefined;
   let beforeDelivery: (() => void) | undefined;
   let failAt = -1;
+  const bindingStats = {
+    maxBytes: 0,
+    maxParameters: 0,
+    maxDeliveryStatements: 0,
+    witnessPages: [] as { bytes: number; count: number }[],
+  };
   function prepare(text: string) {
     let values: (string | number | null)[] = [];
     const execute = () => ({
@@ -71,6 +78,22 @@ function fixture() {
     return {
       text,
       bind(...bound: (string | number | null)[]) {
+        bindingStats.maxParameters = Math.max(bindingStats.maxParameters, bound.length);
+        if (bound.length > 100) throw new Error("D1_TOO_MANY_BOUND_PARAMETERS");
+        for (const value of bound) {
+          if (typeof value !== "string") continue;
+          const bytes = new TextEncoder().encode(value).byteLength;
+          bindingStats.maxBytes = Math.max(bindingStats.maxBytes, bytes);
+          if (bytes > 2 * 1024 * 1024) throw new Error("D1_BOUND_VALUE_TOO_LARGE");
+        }
+        if (text.includes("SET claim_token = ?")) {
+          const witnesses = bound.at(-1);
+          if (typeof witnesses === "string")
+            bindingStats.witnessPages.push({
+              bytes: new TextEncoder().encode(witnesses).byteLength,
+              count: JSON.parse(witnesses).length,
+            });
+        }
         values = bound;
         return this;
       },
@@ -90,6 +113,10 @@ function fixture() {
     prepare,
     async batch(statements: ReturnType<typeof prepare>[]) {
       if (statements[0]?.text.includes("SET claim_token = ?")) {
+        bindingStats.maxDeliveryStatements = Math.max(
+          bindingStats.maxDeliveryStatements,
+          statements.length,
+        );
         const hook = beforeDelivery;
         beforeDelivery = undefined;
         hook?.();
@@ -143,7 +170,11 @@ function fixture() {
                 ? "question"
                 : type === "hypothesis.created"
                   ? "hypothesis"
-                  : "claim";
+                  : type === "gap.filed"
+                    ? "gap"
+                    : type === "object.retracted"
+                      ? "retraction"
+                      : "claim";
     sql
       .query(`INSERT INTO events
       (id, problem_id, seq, type, object_kind, object_id, object_version,
@@ -242,6 +273,7 @@ function fixture() {
     deadEnd,
     fire,
     evidence,
+    bindingStats,
     before: (hook: () => void) => {
       beforeBatch = hook;
     },
@@ -261,6 +293,328 @@ async function withFixture(run: (f: ReturnType<typeof fixture>) => Promise<void>
     f.sql.close();
   }
 }
+
+async function withQuestionFixture(run: (f: ReturnType<typeof fixture>) => Promise<void>) {
+  const f = fixture(true);
+  try {
+    await run(f);
+  } finally {
+    f.sql.close();
+  }
+}
+
+function askQuestion(
+  f: ReturnType<typeof fixture>,
+  refs: readonly string[] = ["C-1@1"],
+  blocking: string | null = null,
+  question = "Q-REQUEST",
+  author = "fellow-b",
+) {
+  f.append(
+    `E-${question}`,
+    "question.asked",
+    question,
+    {
+      question_id: question,
+      problem_id: "P-DEMO",
+      target_refs: refs,
+      blocking,
+      body_md: "QUESTION-REQUEST-SENTINEL: which assumptions establish this intermediate step?",
+    },
+    author,
+  );
+}
+
+describe("durable questions directed at published work", () => {
+  test("notifies distinct target authors and blocking-only authors with one safe question link", async () =>
+    withQuestionFixture(async (f) => {
+      f.append("E-route", "hypothesis.created", "H-ONE", {}, "fellow-c");
+      f.append("E-gap", "gap.filed", "G-1", {}, "fellow-a");
+      f.append("E-own", "claim.created", "C-2", {}, "fellow-b");
+      f.append("E-foreign", "claim.created", "C-9", {}, "fellow-c", "P-OTHER");
+      askQuestion(f, ["C-1@1", "C-1", "C-1@1", "G-1", "C-2", "C-9", "C-1@1\n"], "H-ONE");
+      const delivered = await deliverInboxEvents(f.db, { now: NOW });
+      expect(delivered.failed).toBe(0);
+      expect(delivered.completed).toBe(1);
+      expect(delivered.notices).toBe(2);
+      expect(f.notices().map((notice) => notice.fellow_id)).toEqual(["fellow-a", "fellow-c"]);
+      expect(JSON.stringify(f.notices())).not.toContain("SENTINEL");
+      for (const author of ["fellow-a", "fellow-c"]) {
+        const inbox = await getInboxNotices(f.db, author, { limit: 50 }, NOW);
+        expect(inbox.items).toHaveLength(1);
+        expect(inbox.items[0]?.target_id).toBe("Q-REQUEST");
+        expect(inbox.items[0]?.caused_by_event_id).toBe("E-Q-REQUEST");
+        expect(inbox.items[0]?.next_actions?.map((action) => action.url)).toEqual([
+          "/p/P-DEMO/questions.json?target=Q-REQUEST",
+        ]);
+      }
+      expect((await getInboxNotices(f.db, "fellow-b", { limit: 50 }, NOW)).items).toEqual([]);
+    }));
+
+  test("does not route to self, unknown references, foreign objects or future versions", async () =>
+    withQuestionFixture(async (f) => {
+      f.append("E-foreign", "claim.created", "C-9", {}, "fellow-c", "P-OTHER");
+      askQuestion(
+        f,
+        ["C-1", "C-1@2", "C-9", "G-999", "https://example.invalid/"],
+        null,
+        "Q-NONE",
+        "fellow-a",
+      );
+      const delivered = await deliverInboxEvents(f.db, { now: NOW });
+      expect(delivered.failed).toBe(0);
+      expect(delivered.notices).toBe(0);
+      expect(f.jobs()[0]?.state).toBe("suppressed");
+    }));
+
+  test("keeps an unpinned question on the publication current when it was asked", async () =>
+    withQuestionFixture(async (f) => {
+      f.append(
+        "E-version-2",
+        "claim.revised",
+        "C-1",
+        { statement: "Second formulation" },
+        "fellow-a",
+        "P-DEMO",
+        2,
+      );
+      askQuestion(f, ["C-1"]);
+      f.append(
+        "E-version-3",
+        "claim.revised",
+        "C-1",
+        { statement: "Third formulation" },
+        "fellow-a",
+        "P-DEMO",
+        3,
+      );
+      expect((await deliverInboxEvents(f.db, { now: NOW })).notices).toBe(1);
+      f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO','C-1',2,'hidden')");
+      expect((await getInboxNotices(f.db, "fellow-a", { limit: 50 }, NOW)).items).toEqual([]);
+      f.sql.exec("UPDATE content_controls SET visibility='visible'");
+      expect((await getInboxNotices(f.db, "fellow-a", { limit: 50 }, NOW)).items).toHaveLength(1);
+    }));
+
+  test("uses the exact old pin without substituting a later visible claim version", async () =>
+    withQuestionFixture(async (f) => {
+      f.append(
+        "E-version-2",
+        "claim.revised",
+        "C-1",
+        { statement: "Second formulation" },
+        "fellow-a",
+        "P-DEMO",
+        2,
+      );
+      askQuestion(f, ["C-1@1"]);
+      expect((await deliverInboxEvents(f.db, { now: NOW })).notices).toBe(1);
+      f.sql.exec(
+        "UPDATE event_content SET redacted_at='2026-09-17T12:00:00.000Z' WHERE event_id='E-author'",
+      );
+      expect((await getInboxNotices(f.db, "fellow-a", { limit: 50 }, NOW)).items).toEqual([]);
+    }));
+
+  test("rolls delivery intent back with the question event", async () =>
+    withQuestionFixture(async (f) => {
+      f.sql.exec("BEGIN");
+      askQuestion(f);
+      expect(f.jobs()).toHaveLength(1);
+      f.sql.exec("ROLLBACK");
+      expect(f.jobs()).toEqual([]);
+    }));
+
+  test("recovers a failed transaction and deduplicates replay without resetting acknowledgment", async () =>
+    withQuestionFixture(async (f) => {
+      askQuestion(f);
+      f.fail(1);
+      expect((await deliverInboxEvents(f.db, { now: NOW })).failed).toBe(1);
+      expect(f.notices()).toEqual([]);
+      expect(f.jobs()[0]?.state).toBe("pending");
+      expect((await deliverInboxEvents(f.db, { now: NOW + 1 })).notices).toBe(1);
+      const notice = f.notices()[0];
+      if (!notice) throw new Error("expected a delivered question notice");
+      const id = notice.id;
+      await ackInboxNotices(f.db, "fellow-a", { notice_ids: [id] }, NOW + 2);
+      f.sql.exec("UPDATE inbox_event_deliveries SET state='pending',after_fellow_id=''");
+      expect((await deliverInboxEvents(f.db, { now: NOW + 3 })).notices).toBe(0);
+      expect(f.notices()).toHaveLength(1);
+      expect(f.notices()[0]?.acknowledged_at).toBe(NOW + 2);
+    }));
+
+  test("pages a question's authors durably without losing or duplicating recipients", async () =>
+    withQuestionFixture(async (f) => {
+      const references: string[] = [];
+      for (let index = 0; index < 33; index++) {
+        const fellow = `fellow-target-${String(index).padStart(2, "0")}`;
+        const claim = `C-${index + 2}`;
+        f.sql.query("INSERT INTO enrollment_fellows VALUES (?)").run(fellow);
+        f.append(`E-owner-${index}`, "claim.created", claim, {}, fellow);
+        references.push(`${claim}@1`);
+      }
+      askQuestion(f, references.slice(0, 32), references[32] ?? null);
+      expect((await deliverInboxEvents(f.db, { now: NOW })).notices).toBe(
+        INBOX_DELIVERY_RECIPIENT_LIMIT,
+      );
+      expect(f.jobs()[0]?.state).toBe("pending");
+      expect((await deliverInboxEvents(f.db, { now: NOW + 1 })).notices).toBe(
+        33 - INBOX_DELIVERY_RECIPIENT_LIMIT,
+      );
+      expect(f.jobs()[0]?.state).toBe("delivered");
+      expect(f.notices()).toHaveLength(33);
+      expect(new Set(f.notices().map((notice) => notice.fellow_id)).size).toBe(33);
+      expect(f.bindingStats.maxParameters).toBeLessThanOrEqual(100);
+      expect(f.bindingStats.maxDeliveryStatements).toBe(INBOX_DELIVERY_RECIPIENT_LIMIT + 2);
+      expect((await deliverInboxEvents(f.db, { now: NOW + 2 })).notices).toBe(0);
+    }));
+
+  test("pages large verified targets by bound bytes while advancing every author exactly once", async () =>
+    withQuestionFixture(async (f) => {
+      const authors: string[] = [];
+      const references: string[] = [];
+      for (let index = 0; index < 3; index++) {
+        const fellow = `fellow-byte-${index}`;
+        const claim = `C-${index + 2}`;
+        authors.push(fellow);
+        references.push(`${claim}@1`);
+        f.sql.query("INSERT INTO enrollment_fellows VALUES (?)").run(fellow);
+        // A valid source just below the 512 KiB cap. Escaping its backslashes
+        // in the witness envelope makes two sources exceed one delivery page.
+        f.append(
+          `E-large-target-${index}`,
+          "claim.created",
+          claim,
+          {
+            statement: "\\".repeat(260_000),
+          },
+          fellow,
+        );
+      }
+      askQuestion(f, references);
+      for (let index = 0; index < authors.length; index++) {
+        const delivered = await deliverInboxEvents(f.db, { now: NOW + index });
+        expect(delivered.failed).toBe(0);
+        expect(delivered.notices).toBe(1);
+        expect(f.jobs()[0]?.after_fellow_id).toBe(authors[index]);
+        expect(f.jobs()[0]?.state).toBe(index === authors.length - 1 ? "delivered" : "pending");
+      }
+      expect(f.notices().map((notice) => notice.fellow_id)).toEqual(authors);
+      expect(f.bindingStats.witnessPages.map((page) => page.count)).toEqual([1, 1, 1]);
+      expect(f.bindingStats.maxBytes).toBeGreaterThan(512 * 1024);
+      expect(f.bindingStats.maxBytes).toBeLessThanOrEqual(1536 * 1024);
+      expect((await deliverInboxEvents(f.db, { now: NOW + 4 })).notices).toBe(0);
+    }));
+
+  test.each([
+    "question-hidden",
+    "target-hidden",
+    "question-redacted",
+    "target-redacted",
+    "target-withdrawn",
+    "question-withdrawn",
+    "answered",
+  ])("removes %s requests from delivery and inbox reads/counts/acknowledgment", async (change) =>
+    withQuestionFixture(async (f) => {
+      askQuestion(f);
+      expect((await deliverInboxEvents(f.db, { now: NOW })).notices).toBe(1);
+      const notice = f.notices()[0];
+      if (!notice) throw new Error("expected a delivered question notice");
+      const id = notice.id;
+      if (change === "question-hidden" || change === "target-hidden")
+        f.sql
+          .query("INSERT INTO content_controls VALUES ('P-DEMO',?,1,'hidden')")
+          .run(change === "question-hidden" ? "Q-REQUEST" : "C-1");
+      else if (change === "question-redacted" || change === "target-redacted")
+        f.sql
+          .query("UPDATE event_content SET redacted_at=? WHERE event_id=?")
+          .run(iso(), change === "question-redacted" ? "E-Q-REQUEST" : "E-author");
+      else if (change === "target-withdrawn") {
+        f.append(
+          "E-target-retirement",
+          "object.retracted",
+          "RT-ONE",
+          {
+            target_object: "C-1@1",
+          },
+          "fellow-a",
+        );
+        f.sql.exec(
+          "INSERT INTO retractions SELECT 'P-DEMO',public_seq,'C-1@1','fellow-a' FROM problems WHERE id='P-DEMO'",
+        );
+      } else
+        f.append(
+          "E-question-terminal",
+          change === "answered" ? "question.answered" : "question.withdrawn",
+          "Q-REQUEST",
+          { question_id: "Q-REQUEST", resolved_by_object: "C-1@1" },
+          "fellow-b",
+        );
+      const hidden = await getInboxNotices(f.db, "fellow-a", { limit: 1 }, NOW + 1);
+      expect(hidden.items).toEqual([]);
+      expect(hidden.unacknowledged_count).toBe(0);
+      expect(hidden.has_more).toBe(false);
+      expect(
+        (await ackInboxNotices(f.db, "fellow-a", { notice_ids: [id] }, NOW + 1)).acknowledged_count,
+      ).toBe(0);
+      f.sql.exec(
+        "UPDATE inbox_event_deliveries SET state='pending',after_fellow_id='' WHERE event_id='E-Q-REQUEST'",
+      );
+      const replay = await deliverInboxEvents(f.db, { now: NOW + 2 });
+      expect(replay.failed).toBe(0);
+      expect(f.jobs()[0]?.state).toBe("suppressed");
+      expect(f.notices().filter((notice) => notice.id === id)[0]?.acknowledged_at).toBeNull();
+    }),
+  );
+
+  test("rechecks verified target bytes and current controls in the delivery transaction", async () =>
+    withQuestionFixture(async (f) => {
+      askQuestion(f);
+      f.beforeDelivery(() =>
+        f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO','C-1',1,'hidden')"),
+      );
+      expect((await deliverInboxEvents(f.db, { now: NOW })).notices).toBe(0);
+      expect(f.jobs()[0]?.state).toBe("pending");
+      f.sql.exec("UPDATE content_controls SET visibility='visible'");
+      f.beforeDelivery(() =>
+        f.sql.exec("UPDATE event_content SET payload_json='{} ' WHERE event_id='E-author'"),
+      );
+      expect((await deliverInboxEvents(f.db, { now: NOW + 1 })).notices).toBe(0);
+      expect(f.notices()).toEqual([]);
+    }));
+
+  test("an unchecked alternate reference cannot replace the selected target after a visibility race", async () =>
+    withQuestionFixture(async (f) => {
+      f.append("E-unverified-alternate", "claim.created", "C-2", {}, "fellow-a");
+      f.sql.exec(
+        "UPDATE event_content SET payload_json='{} ' WHERE event_id='E-unverified-alternate'",
+      );
+      askQuestion(f, ["C-1@1", "C-2@1"]);
+      f.beforeDelivery(() =>
+        f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO','C-1',1,'hidden')"),
+      );
+      const raced = await deliverInboxEvents(f.db, { now: NOW });
+      expect(raced.failed).toBe(0);
+      expect(raced.notices).toBe(0);
+      expect(f.notices()).toEqual([]);
+      expect(f.jobs()[0]?.state).toBe("pending");
+      expect(f.jobs()[0]?.after_fellow_id).toBe("");
+      f.sql.exec("UPDATE content_controls SET visibility='visible'");
+      expect((await deliverInboxEvents(f.db, { now: NOW + 1 })).notices).toBe(1);
+      expect(f.notices().map((notice) => notice.fellow_id)).toEqual(["fellow-a"]);
+    }));
+
+  test("retained question notices must match their source problem", async () =>
+    withQuestionFixture(async (f) => {
+      askQuestion(f);
+      expect((await deliverInboxEvents(f.db, { now: NOW })).notices).toBe(1);
+      f.sql.exec("UPDATE fellow_inbox_notices SET problem_id='P-OTHER'");
+      const read = await getInboxNotices(f.db, "fellow-a", { limit: 50 }, NOW + 1);
+      expect(read.items).toEqual([]);
+      expect(read.unacknowledged_count).toBe(0);
+      expect(
+        (await ackInboxNotices(f.db, "fellow-a", { until_seq: 100 }, NOW + 1)).acknowledged_count,
+      ).toBe(0);
+    }));
+});
 
 function questionAnswer(f: ReturnType<typeof fixture>, actor = "fellow-b", kind = "claim") {
   f.append("E-answer-claim", "claim.created", "C-2", {
@@ -1315,9 +1669,12 @@ describe("claim evidence participates in the durable feedback loop", () => {
             f.sql.exec("UPDATE fellow_inbox_notices SET caused_by_event_id = 'E-replacement'");
           }
           const read = await getInboxNotices(f.db, "fellow-a", { limit: 50 });
-          expect(read.items, fault).toHaveLength(1);
-          expect(read.items[0]?.next_actions, fault).toHaveLength(1);
-          expect(read.items[0]?.next_actions?.[0]?.url, fault).toContain("/claims/");
+          expect(read.items, fault).toHaveLength(0);
+          expect(read.unacknowledged_count, fault).toBe(0);
+          expect(
+            (await ackInboxNotices(f.db, "fellow-a", { until_seq: 100 }, NOW)).acknowledged_count,
+            fault,
+          ).toBe(0);
         });
       }
     },
@@ -1410,7 +1767,7 @@ describe("claim evidence participates in the durable feedback loop", () => {
       f.evidence("E-own", {}, "fellow-a");
       const pass = await drain(f);
       expect(pass.notices).toBe(0);
-      expect(pass.completed).toBe(1);
+      expect(pass.suppressed).toBe(1);
     });
   });
   test("routes evidence by problem-local immutable claim authorship", async () => {

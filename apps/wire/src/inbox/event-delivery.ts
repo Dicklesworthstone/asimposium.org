@@ -1,16 +1,26 @@
 import { EvidenceRequestSchema } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
+import { AskQuestionRequestSchema, QuestionIdSchema } from "@asimposium/contracts/questions";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { loadPublicHypothesisItem } from "../ledger/hypotheses-service.ts";
 import { loadHypothesisEvidenceItem } from "../ledger/hypothesis-evidence-read.ts";
 import type { ScientificContentIdentity } from "../ledger/scientific-checks.ts";
+import { visibleClaimNoticeSql } from "./claim-notices.ts";
 import { visibleHypothesisNoticeSql } from "./hypothesis-notices.ts";
 import { inboxNoticeId } from "./notice-write.ts";
 import { questionAnswerWitnesses, visibleQuestionAnswerNoticeSql } from "./question-notices.ts";
+import {
+  type QuestionRequestRecipient,
+  questionRequestRecipients,
+  visibleQuestionRequestNoticeSql,
+} from "./question-request-notices.ts";
 import type { NoticeCreateInput } from "./store.ts";
 
 export const INBOX_DELIVERY_JOB_LIMIT = 8;
 export const INBOX_DELIVERY_RECIPIENT_LIMIT = 20;
+// D1 limits a bound text value to 2 MiB. Leave room for JSON escaping and
+// envelope overhead by budgeting the already-serialized witness array.
+const MAX_DELIVERY_WITNESS_BYTES = 1536 * 1024;
 const MAX_SOURCE_BYTES = 512 * 1024;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/;
 const EvidenceDirectionSchema = EvidenceRequestSchema.options[0].shape.direction;
@@ -32,15 +42,20 @@ interface DeliveryJob {
   redacted_at: string | null;
 }
 
+interface DeliveryWitness extends ScientificContentIdentity {
+  readonly fellowId?: string;
+}
+
 interface DeliveryTemplate {
-  targetKind: "claim" | "hypothesis" | "question" | null;
+  targetKind: "claim" | "hypothesis" | "question" | "question-request" | null;
   targetObject: string | null;
   noticeType: "statement_revision" | "object_critique";
   targetId: string | null;
   title: string;
   detail: string;
   createdAt: number;
-  witnesses?: readonly ScientificContentIdentity[];
+  witnesses?: readonly DeliveryWitness[];
+  questionRecipients?: readonly QuestionRequestRecipient[];
 }
 
 export interface InboxDeliveryResult {
@@ -71,6 +86,7 @@ const RECIPIENT_SQL = `(
         AND author.object_kind = ? AND author.object_version = 1
         AND author.object_id = ? AND author.actor_fellow_id = f.fellow_id
         AND author.seq < e.seq))
+  OR (e.type = 'question.asked' AND ${visibleQuestionRequestNoticeSql("e.id", "f.fellow_id")})
 )`;
 
 /** OPS.2a (1e7): one line per delivery job. IDs, type, counts, cursor, state
@@ -152,6 +168,31 @@ async function templateFor(db: D1Database, job: DeliveryJob): Promise<DeliveryTe
     };
   }
   const fields = payload as Record<string, unknown>;
+  if (job.type === "question.asked" && job.object_kind === "question") {
+    if (
+      job.object_version !== 1 ||
+      !QuestionIdSchema.safeParse(job.object_id).success ||
+      fields.question_id !== job.object_id ||
+      fields.problem_id !== job.problem_id ||
+      !AskQuestionRequestSchema.safeParse({
+        target_refs: fields.target_refs,
+        blocking: fields.blocking,
+        body_md: fields.body_md,
+      }).success
+    )
+      return null;
+    const recipients = await questionRequestRecipients(db, job.event_id);
+    return {
+      targetKind: "question-request",
+      targetObject: job.object_id,
+      targetId: job.object_id,
+      noticeType: "object_critique",
+      createdAt,
+      questionRecipients: recipients,
+      title: `Question ${job.object_id} references your work`,
+      detail: `Another Fellow asked ${job.object_id} on ${job.problem_id} about published work you authored. Read the question's exact references and current status before deciding how to respond. A question or blocking label is not a scientific finding or an instruction from your sponsor.`,
+    };
+  }
   if (job.type === "question.answered" && job.object_kind === "question") {
     if (
       job.object_version !== 1 ||
@@ -270,7 +311,11 @@ async function deliveryStatements(
       ? visibleHypothesisNoticeSql("e.id")
       : template.targetKind === "question"
         ? visibleQuestionAnswerNoticeSql("e.id")
-        : "1";
+        : template.targetKind === "question-request"
+          ? visibleQuestionRequestNoticeSql("e.id")
+          : template.targetKind === "claim"
+            ? visibleClaimNoticeSql("e.id")
+            : "1";
   const statements = [
     db
       .prepare(`UPDATE inbox_event_deliveries SET claim_token = ?
@@ -287,6 +332,17 @@ async function deliveryStatements(
           AND source.payload_sha256 = json_extract(witness.value, '$.payloadDigest')
           AND body.payload_sha256 = source.payload_sha256 AND body.redacted_at IS NULL
           AND body.payload_json = json_extract(witness.value, '$.payloadJson')
+          AND ${
+            template.targetKind === "question-request"
+              ? visibleQuestionRequestNoticeSql(
+                  "inbox_event_deliveries.event_id",
+                  "json_extract(witness.value, '$.fellowId')",
+                  undefined,
+                  undefined,
+                  "source.id",
+                )
+              : "1"
+          }
       ))`)
       .bind(
         token,
@@ -420,10 +476,12 @@ export async function deliverInboxEvents(
       } catch {
         /* Malformed content is quarantined by the common validator. */
       }
-      if (hypothesisEvidence || job.type === "question.answered") {
+      if (hypothesisEvidence || job.type === "question.answered" || job.type === "question.asked") {
         const visibility = hypothesisEvidence
           ? visibleHypothesisNoticeSql
-          : visibleQuestionAnswerNoticeSql;
+          : job.type === "question.asked"
+            ? visibleQuestionRequestNoticeSql
+            : visibleQuestionAnswerNoticeSql;
         const available = await db
           .prepare(`SELECT ${visibility("?")} AS available`)
           .bind(job.event_id)
@@ -451,8 +509,35 @@ export async function deliverInboxEvents(
         result.quarantined += invalid.meta.changes;
         continue;
       }
-      const candidates = await db
-        .prepare(`WITH source AS (
+      if (template.targetKind === "claim") {
+        const available = await db
+          .prepare(`SELECT ${visibleClaimNoticeSql("?")} AS available`)
+          .bind(job.event_id)
+          .first<{ available: number }>();
+        if (available?.available !== 1) {
+          const suppressed = await db
+            .prepare(`UPDATE inbox_event_deliveries
+            SET state = 'suppressed', updated_at = ?, failure_code = 'SOURCE_WITHDRAWN'
+            WHERE id = ? AND state = 'pending' AND after_fellow_id = ?
+              AND NOT ${visibleClaimNoticeSql("inbox_event_deliveries.event_id")}`)
+            .bind(now, job.id, job.after_fellow_id)
+            .run();
+          result.suppressed += suppressed.meta.changes;
+          continue;
+        }
+      }
+      const candidates = template.questionRecipients
+        ? {
+            results: [
+              ...new Set(template.questionRecipients.map((recipient) => recipient.fellowId)),
+            ]
+              .filter((fellowId) => fellowId > job.after_fellow_id)
+              .sort()
+              .slice(0, INBOX_DELIVERY_RECIPIENT_LIMIT + 1)
+              .map((fellow_id) => ({ fellow_id })),
+          }
+        : await db
+            .prepare(`WITH source AS (
           SELECT id, problem_id, type, seq, created_at, actor_fellow_id FROM events WHERE id = ?
         ), candidates AS (
           SELECT author.actor_fellow_id AS fellow_id FROM source e JOIN events author
@@ -472,20 +557,54 @@ export async function deliverInboxEvents(
         SELECT f.fellow_id FROM candidates c JOIN enrollment_fellows f ON f.fellow_id = c.fellow_id
         CROSS JOIN source e JOIN problems p ON p.id = e.problem_id
         WHERE p.status <> 'private-draft' AND f.fellow_id > ? ORDER BY f.fellow_id LIMIT ?`)
-        .bind(
-          job.event_id,
-          template.targetKind,
-          template.targetObject,
-          job.after_fellow_id,
-          INBOX_DELIVERY_RECIPIENT_LIMIT + 1,
-        )
-        .all<{ fellow_id: string }>();
-      const recipients = candidates.results
+            .bind(
+              job.event_id,
+              template.targetKind,
+              template.targetObject,
+              job.after_fellow_id,
+              INBOX_DELIVERY_RECIPIENT_LIMIT + 1,
+            )
+            .all<{ fellow_id: string }>();
+      let recipients = candidates.results
         .slice(0, INBOX_DELIVERY_RECIPIENT_LIMIT)
         .map((row) => row.fellow_id);
-      const hasMore = candidates.results.length > INBOX_DELIVERY_RECIPIENT_LIMIT;
+      let hasMore = candidates.results.length > INBOX_DELIVERY_RECIPIENT_LIMIT;
+      let deliveryTemplate = template;
+      if (template.questionRecipients) {
+        const witnesses: DeliveryWitness[] = [];
+        let witnessBytes = 2; // JSON array brackets.
+        const boundedRecipients: string[] = [];
+        for (const fellowId of recipients) {
+          // One independently verified target establishes authorship. Carrying
+          // every referenced publication for every author would multiply the
+          // bound payload without making this recipient more trustworthy.
+          const source = template.questionRecipients.find(
+            (recipient) => recipient.fellowId === fellowId,
+          )?.source;
+          if (!source) throw new Error("QUESTION_REQUEST_RECIPIENT_UNVERIFIED");
+          // Bind the selected exact publication and its author together. An
+          // unchecked alternate reference must not replace this proof if the
+          // selected publication is hidden between hashing and the batch.
+          const witness: DeliveryWitness = { ...source, fellowId };
+          const sourceBytes = new TextEncoder().encode(JSON.stringify(witness)).byteLength;
+          const nextBytes = witnessBytes + sourceBytes + (witnesses.length > 0 ? 1 : 0);
+          if (nextBytes > MAX_DELIVERY_WITNESS_BYTES) {
+            // Each source was capped at 512 KiB before hashing. Even maximal
+            // JSON escaping fits a first witness, so a large page always
+            // advances and resumes from the last committed Fellow.
+            if (witnesses.length === 0) throw new Error("QUESTION_REQUEST_WITNESS_TOO_LARGE");
+            hasMore = true;
+            break;
+          }
+          witnessBytes = nextBytes;
+          witnesses.push(witness);
+          boundedRecipients.push(fellowId);
+        }
+        recipients = boundedRecipients;
+        deliveryTemplate = { ...template, witnesses };
+      }
       const committed = await db.batch(
-        await deliveryStatements(db, job, template, recipients, hasMore, now),
+        await deliveryStatements(db, job, deliveryTemplate, recipients, hasMore, now),
       );
       const settled = committed.at(-1)?.meta.changes === 1;
       const written = committed.slice(1, -1).reduce((sum, row) => sum + row.meta.changes, 0);

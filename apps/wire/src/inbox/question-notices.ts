@@ -7,6 +7,7 @@ import {
   ScientificInputError,
 } from "../ledger/scientific-checks.ts";
 import { findSettlementReference } from "../ledger/settlement-references.ts";
+import { visibleQuestionRequestNoticeSql } from "./question-request-notices.ts";
 
 /** Question answers are pointers to published work. Keep both the question and
  * that exact publication live before delivery, pagination, counts and ack.
@@ -108,6 +109,12 @@ export const VISIBLE_QUESTION_ANSWER_NOTICE_SQL = `(
     "fellow_inbox_notices.caused_by_event_id",
     "fellow_inbox_notices.fellow_id",
     "fellow_inbox_notices.target_id",
+  )}
+  OR ${visibleQuestionRequestNoticeSql(
+    "fellow_inbox_notices.caused_by_event_id",
+    "fellow_inbox_notices.fellow_id",
+    "fellow_inbox_notices.target_id",
+    "fellow_inbox_notices.problem_id",
   )}
 )`;
 
