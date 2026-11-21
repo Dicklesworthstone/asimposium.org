@@ -50,7 +50,7 @@ interface EventRow {
 }
 
 interface StoredClaimRow {
-  id: string;
+  claim_id: string;
   problem_id: string;
   source_seq: number;
   projection_version: number;
@@ -105,10 +105,10 @@ function loadProblemEventsAndClaims(
 
   const claimRows = db
     .prepare(
-      `SELECT id, problem_id, source_seq, projection_version, build_digest, stale
-       FROM claims
+      `SELECT claim_id, problem_id, source_seq, projection_version, build_digest, stale
+       FROM claim_projections
        WHERE problem_id = ?
-       ORDER BY id ASC`,
+       ORDER BY claim_id ASC`,
     )
     .all(problemId) as StoredClaimRow[];
 
@@ -134,7 +134,7 @@ function loadProblemEventsAndClaims(
   }));
 
   const stored: ClaimProjection[] = claimRows.map((c) => ({
-    claimId: c.id,
+    claimId: c.claim_id,
     problemId: c.problem_id,
     sourceSeq: c.source_seq,
     projectionVersion: c.projection_version,
@@ -174,16 +174,19 @@ export function runProjectionRebuild(opts: {
     if (apply && !before.sound) {
       const replayed = replayClaimProjections(initial.events);
       const replayedById = new Map(replayed.map((p) => [p.claimId, p]));
+      const nowIso = new Date().toISOString();
       const updateStmt = db.prepare(
-        `UPDATE claims
-         SET source_seq = ?, projection_version = ?, build_digest = ?, stale = ?
-         WHERE problem_id = ? AND id = ?`,
+        `UPDATE claim_projections
+         SET source_seq = ?, projection_version = ?, build_digest = ?, stale = ?, updated_at = ?
+         WHERE problem_id = ? AND claim_id = ?`,
       );
       const insertStmt = db.prepare(
-        `INSERT INTO claims (id, problem_id, source_seq, projection_version, build_digest, stale)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO claim_projections (claim_id, problem_id, source_seq, projection_version, build_digest, stale, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       );
-      const deleteOrphanStmt = db.prepare("DELETE FROM claims WHERE problem_id = ? AND id = ?");
+      const deleteOrphanStmt = db.prepare(
+        "DELETE FROM claim_projections WHERE problem_id = ? AND claim_id = ?",
+      );
       const storedIds = new Set(initial.stored.map((c) => c.claimId));
 
       db.exec("BEGIN IMMEDIATE");
@@ -197,6 +200,7 @@ export function runProjectionRebuild(opts: {
                 expected.projectionVersion,
                 expected.buildDigest,
                 expected.stale ? 1 : 0,
+                nowIso,
                 opts.problemId,
                 claimId,
               );
@@ -208,6 +212,7 @@ export function runProjectionRebuild(opts: {
                 expected.projectionVersion,
                 expected.buildDigest,
                 expected.stale ? 1 : 0,
+                nowIso,
               );
             }
           } else {

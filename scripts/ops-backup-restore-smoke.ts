@@ -119,28 +119,68 @@ function runNegativeAuthorityProbes(
       ).map((r) => r.name),
     );
     for (const entry of entries) {
-      if (entry.kind === "token_revocation" && tables.has("fellow_credentials")) {
+      if (entry.kind === "token_revocation") {
+        if (!tables.has("fellow_tokens")) {
+          failures.push("MISSING_REQUIRED_AUTHORITY_TABLE: fellow_tokens");
+          continue;
+        }
         const active = db
           .prepare(
-            "SELECT COUNT(*) AS n FROM fellow_credentials WHERE id = ? AND revoked_at IS NULL",
+            "SELECT COUNT(*) AS n FROM fellow_tokens WHERE credential_id = ? AND revoked_at IS NULL",
           )
           .get(entry.target_id) as { n: number } | null;
         if ((active?.n ?? 0) > 0) {
           failures.push(`STALE_AUTHORITY_LEAK: revoked token ${entry.target_id} still active`);
         }
-      } else if (entry.kind === "private_draft_removal" && tables.has("workshop_objects")) {
+      } else if (entry.kind === "private_draft_removal") {
+        if (!tables.has("workshop_objects")) {
+          failures.push("MISSING_REQUIRED_AUTHORITY_TABLE: workshop_objects");
+          continue;
+        }
         const live = db
-          .prepare("SELECT COUNT(*) AS n FROM workshop_objects WHERE id = ? AND deleted_at IS NULL")
+          .prepare("SELECT COUNT(*) AS n FROM workshop_objects WHERE workshop_id = ?")
           .get(entry.target_id) as { n: number } | null;
         if ((live?.n ?? 0) > 0) {
           failures.push(`DELETED_DRAFT_RESURRECTED: workshop draft ${entry.target_id} still live`);
         }
-      } else if (entry.kind === "account_deletion" && tables.has("sponsors")) {
+      } else if (entry.kind === "account_deletion") {
+        if (!tables.has("sponsors")) {
+          failures.push("MISSING_REQUIRED_AUTHORITY_TABLE: sponsors");
+          continue;
+        }
         const live = db
-          .prepare("SELECT COUNT(*) AS n FROM sponsors WHERE id = ? AND deleted_at IS NULL")
+          .prepare(
+            "SELECT COUNT(*) AS n FROM sponsors WHERE sponsor_id = ? AND tombstoned_at IS NULL",
+          )
           .get(entry.target_id) as { n: number } | null;
         if ((live?.n ?? 0) > 0) {
           failures.push(`DELETED_ACCOUNT_RESURRECTED: sponsor ${entry.target_id} still active`);
+        }
+      } else if (entry.kind === "content_control") {
+        if (!tables.has("content_controls")) {
+          failures.push("MISSING_REQUIRED_AUTHORITY_TABLE: content_controls");
+          continue;
+        }
+        const present = db
+          .prepare("SELECT COUNT(*) AS n FROM content_controls WHERE control_id = ?")
+          .get(entry.target_id) as { n: number } | null;
+        if ((present?.n ?? 0) === 0) {
+          failures.push(
+            `CONTENT_CONTROL_MISSING_AFTER_RESTORE: control ${entry.target_id} not replayed`,
+          );
+        }
+      } else if (entry.kind === "cas_unbind" && entry.shared_cas !== true) {
+        if (!tables.has("artifact_uploads")) {
+          failures.push("MISSING_REQUIRED_AUTHORITY_TABLE: artifact_uploads");
+          continue;
+        }
+        const live = db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM artifact_uploads WHERE upload_id = ? AND state <> 'expired'",
+          )
+          .get(entry.target_id) as { n: number } | null;
+        if ((live?.n ?? 0) > 0) {
+          failures.push(`UNBOUND_PRIVATE_CAS_STILL_LIVE: upload ${entry.target_id} still active`);
         }
       }
     }

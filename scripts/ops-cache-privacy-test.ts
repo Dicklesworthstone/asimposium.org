@@ -71,7 +71,8 @@ async function probeOnce(
 
   if (expectAllowed) {
     const statusOk = resp.status === 200;
-    const pass = statusOk && cacheSafe;
+    const ownerHasCanary = canary === null || canary.length === 0 || body.includes(canary);
+    const pass = statusOk && cacheSafe && ownerHasCanary;
     return {
       actor,
       status: resp.status,
@@ -80,10 +81,12 @@ async function probeOnce(
       canary_leaked: false,
       pass,
       reason: pass
-        ? "owner read authorized with private/no-store cache policy"
+        ? "owner read authorized with private/no-store cache policy and expected private canary"
         : !statusOk
           ? `expected 200 for owner read, got ${resp.status}`
-          : `private response exposed unsafe Cache-Control: ${cacheControl ?? "<missing>"}`,
+          : !cacheSafe
+            ? `private response exposed unsafe Cache-Control: ${cacheControl ?? "<missing>"}`
+            : "OWNER_CANARY_ABSENT: owner 200 response lacked expected private canary (refusing vacuous cache-privacy pass)",
     };
   }
 
@@ -119,7 +122,7 @@ export async function runCachePrivacyTest(opts: {
   steps.push(await probeOnce(url, "anon-before", null, canary, false));
 
   if (opts.ownerToken) {
-    steps.push(await probeOnce(url, "owner", opts.ownerToken, null, true));
+    steps.push(await probeOnce(url, "owner", opts.ownerToken, canary, true));
   }
   if (opts.otherToken) {
     steps.push(await probeOnce(url, "other-sponsor", opts.otherToken, canary, false));

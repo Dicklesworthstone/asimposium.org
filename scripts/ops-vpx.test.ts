@@ -4,6 +4,9 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { checkpointSignatureMessage } from "@asimposium/contracts";
+import { CAS_KEY_PREFIX } from "../apps/wire/src/krater/cas.ts";
+import { checkpointSigningKey } from "../apps/wire/src/krater/checkpoint-signing.ts";
 import { serializeProblemExport } from "../apps/wire/src/krater/export.ts";
 import {
   checkpointDigest,
@@ -53,6 +56,7 @@ describe("OPS.5 runbook index, never-log redaction corpus, and audit-logged ops:
   let sqlitePath = "";
   let exportPath = "";
   let auditLogPath = "";
+  let verifyKeysJson = "";
 
   beforeAll(async () => {
     workDir = mkdtempSync(join(tmpdir(), "asimp-ops-vpx-"));
@@ -61,6 +65,9 @@ describe("OPS.5 runbook index, never-log redaction corpus, and audit-logged ops:
     auditLogPath = join(workDir, "ops-audit.ndjson");
 
     const db = new Database(sqlitePath);
+    // Use exact production D1 table & column schemas from db/migrations/
+    // (0001, 0006, 0008, 0017, 0021, 0069, 0079, 0091) so ops:* scripts are
+    // verified against the real column layout, never a synthetic stub schema.
     db.exec(`
       CREATE TABLE events (
         id TEXT PRIMARY KEY,
@@ -93,33 +100,48 @@ describe("OPS.5 runbook index, never-log redaction corpus, and audit-logged ops:
         problem_id TEXT NOT NULL,
         checkpoint_seq INTEGER NOT NULL,
         root_chain_digest TEXT NOT NULL,
-        checkpoint_digest TEXT NOT NULL
+        checkpoint_digest TEXT NOT NULL,
+        PRIMARY KEY (problem_id, checkpoint_seq)
       );
-      CREATE TABLE claims (
-        id TEXT NOT NULL,
+      CREATE TABLE checkpoint_signatures (
+        problem_id TEXT NOT NULL,
+        checkpoint_seq INTEGER NOT NULL,
+        key_id TEXT NOT NULL,
+        algorithm TEXT NOT NULL,
+        signature TEXT NOT NULL,
+        signed_at TEXT NOT NULL,
+        PRIMARY KEY (problem_id, checkpoint_seq, key_id)
+      );
+      CREATE TABLE claim_projections (
+        claim_id TEXT NOT NULL,
         problem_id TEXT NOT NULL,
         source_seq INTEGER NOT NULL,
         projection_version INTEGER NOT NULL,
         build_digest TEXT NOT NULL,
         stale INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (problem_id, id)
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (problem_id, claim_id)
       );
-      CREATE TABLE artifacts (
-        r2_key TEXT PRIMARY KEY,
+      CREATE TABLE artifact_uploads (
+        upload_id TEXT PRIMARY KEY,
         sha256 TEXT NOT NULL,
-        size_bytes INTEGER NOT NULL
+        size_bytes INTEGER NOT NULL,
+        state TEXT NOT NULL
       );
-      CREATE TABLE fellow_credentials (
-        id TEXT PRIMARY KEY,
-        revoked_at TEXT
+      CREATE TABLE fellow_tokens (
+        credential_id TEXT PRIMARY KEY,
+        revoked_at INTEGER
       );
       CREATE TABLE workshop_objects (
-        id TEXT PRIMARY KEY,
-        deleted_at TEXT
+        workshop_id TEXT PRIMARY KEY
       );
       CREATE TABLE sponsors (
-        id TEXT PRIMARY KEY,
-        deleted_at TEXT
+        sponsor_id TEXT PRIMARY KEY,
+        tombstoned_at INTEGER
+      );
+      CREATE TABLE content_controls (
+        control_id TEXT PRIMARY KEY,
+        visibility TEXT NOT NULL
       );
     `);
 
@@ -152,6 +174,29 @@ describe("OPS.5 runbook index, never-log redaction corpus, and audit-logged ops:
     const chainDigest = await eventChainDigest(problemId, 1, payloadSha, rowDigest, genesis);
     const cpDigest = await checkpointDigest(problemId, 1, chainDigest);
     const buildDigest = claimProjectionBuildDigestV1(rowDigest);
+
+    // Mint a real Ed25519 signature over the canonical checkpoint message (0079 schema).
+    const testSeedHex = "11".repeat(32);
+    const signer = await checkpointSigningKey(
+      JSON.stringify({ kid: "ops5-test-k1", seedHex: testSeedHex }),
+    );
+    if (!signer) throw new Error("failed to create test Ed25519 checkpoint signing key");
+    verifyKeysJson = JSON.stringify([{ kid: signer.kid, publicKeyHex: signer.publicKeyHex }]);
+    const sigBytes = new Uint8Array(
+      await crypto.subtle.sign(
+        { name: "Ed25519" },
+        signer.privateKey,
+        new TextEncoder().encode(
+          checkpointSignatureMessage({
+            problemId,
+            checkpointSeq: 1,
+            rootChainDigest: chainDigest,
+            checkpointDigest: cpDigest,
+          }),
+        ),
+      ),
+    );
+    const sigHex = Array.from(sigBytes, (b) => b.toString(16).padStart(2, "0")).join("");
 
     db.prepare(`INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       "EV-01OPS5000000000000000001",
@@ -186,28 +231,39 @@ describe("OPS.5 runbook index, never-log redaction corpus, and audit-logged ops:
       chainDigest,
       cpDigest,
     );
-    db.prepare(`INSERT INTO claims VALUES (?, ?, ?, ?, ?, ?)`).run(
+    db.prepare(`INSERT INTO checkpoint_signatures VALUES (?, ?, ?, ?, ?, ?)`).run(
+      problemId,
+      1,
+      signer.kid,
+      "Ed25519",
+      sigHex,
+      createdAt,
+    );
+    db.prepare(`INSERT INTO claim_projections VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
       "C-1",
       problemId,
       1,
       1,
       buildDigest,
       0,
+      createdAt,
     );
 
     const artBody = Buffer.from("proof artifact bytes\n", "utf8");
     const artSha = createHash("sha256").update(artBody).digest("hex");
-    db.prepare(`INSERT INTO artifacts VALUES (?, ?, ?)`).run(
-      `cas/${artSha}`,
+    db.prepare(`INSERT INTO artifact_uploads VALUES (?, ?, ?, ?)`).run(
+      "AU-01ops500000000000000000000000001",
       artSha,
       artBody.byteLength,
+      "verified",
     );
-    db.prepare(`INSERT INTO fellow_credentials VALUES (?, ?)`).run("CR-REVOKED-1", createdAt);
-    db.prepare(`INSERT INTO workshop_objects VALUES (?, ?)`).run("W-DELETED-1", createdAt);
-    db.prepare(`INSERT INTO sponsors VALUES (?, ?)`).run("SP-DELETED-1", createdAt);
+    db.prepare(`INSERT INTO fellow_tokens VALUES (?, ?)`).run("CR-REVOKED-1", 1_763_760_000_000);
+    // W-DELETED-1 is hard-deleted (absent from workshop_objects).
+    db.prepare(`INSERT INTO sponsors VALUES (?, ?)`).run("SP-DELETED-1", 1_763_760_000_000);
+    db.prepare(`INSERT INTO content_controls VALUES (?, ?)`).run("CC-HIDE-1", "hidden");
     db.close();
 
-    const r2Dir = join(workDir, "r2-mirror", "cas");
+    const r2Dir = join(workDir, "r2-mirror", CAS_KEY_PREFIX);
     mkdirSync(r2Dir, { recursive: true });
     writeFileSync(join(r2Dir, artSha), artBody);
 
@@ -318,15 +374,18 @@ describe("OPS.5 runbook index, never-log redaction corpus, and audit-logged ops:
     expect(redactOpsText(benign)).toBe(benign);
   });
 
-  test("ops:event-verify passes on sound chain and fails closed on tampered chain digest", async () => {
+  test("ops:event-verify passes on sound chain + real Ed25519 checkpoint signature and fails closed on tampered chain or signature", async () => {
     const okReport = await runEventVerify({
       sqlitePath,
       problemId: "P-OPS5",
+      verifyKeysJson,
       auditLogPath,
     });
     expect(okReport.overall_sound).toBe(true);
     expect(okReport.results[0]?.event_count).toBe(1);
     expect(okReport.results[0]?.checkpoints_valid).toBe(true);
+    expect(okReport.results[0]?.signatures_checked).toBe(1);
+    expect(okReport.results[0]?.signatures_valid).toBe(true);
 
     // Plant a tampered chain digest in a scratch copy.
     const badPath = join(workDir, "tampered-chain.sqlite");
@@ -338,14 +397,30 @@ describe("OPS.5 runbook index, never-log redaction corpus, and audit-logged ops:
     const badReport = await runEventVerify({ sqlitePath: badPath, problemId: "P-OPS5" });
     expect(badReport.overall_sound).toBe(false);
     expect(badReport.results[0]?.chain_valid).toBe(false);
+
+    // Plant a tampered Ed25519 signature on real 0079 checkpoint_signatures table.
+    const badSigPath = join(workDir, "tampered-sig.sqlite");
+    writeFileSync(badSigPath, readFileSync(sqlitePath));
+    const badSigDb = new Database(badSigPath);
+    badSigDb.exec(
+      `UPDATE checkpoint_signatures SET signature = '${"0".repeat(128)}' WHERE checkpoint_seq = 1`,
+    );
+    badSigDb.close();
+    const badSigReport = await runEventVerify({
+      sqlitePath: badSigPath,
+      problemId: "P-OPS5",
+      verifyKeysJson,
+    });
+    expect(badSigReport.overall_sound).toBe(false);
+    expect(badSigReport.results[0]?.signatures_valid).toBe(false);
   });
 
-  test("ops:projection-rebuild detects drift in dry-run, enforces reason+step-up on --apply, and heals from log", () => {
+  test("ops:projection-rebuild detects drift in dry-run, enforces reason+step-up on --apply, and heals claim_projections from log", () => {
     const driftPath = join(workDir, "drifted-proj.sqlite");
     writeFileSync(driftPath, readFileSync(sqlitePath));
     const db = new Database(driftPath);
     db.exec(
-      `UPDATE claims SET build_digest = 'stale-corrupted-digest', stale = 1 WHERE id = 'C-1'`,
+      `UPDATE claim_projections SET build_digest = 'stale-corrupted-digest', stale = 1 WHERE claim_id = 'C-1'`,
     );
     db.close();
 
@@ -472,6 +547,18 @@ describe("OPS.5 runbook index, never-log redaction corpus, and audit-logged ops:
       expect(ok.pass).toBe(true);
       expect(ok.steps.length).toBe(4);
 
+      const missingCanary = await runCachePrivacyTest({
+        origin,
+        targetPath: "/v1/sponsors/workshop/private-draft",
+        ownerToken: ownerTok,
+        otherToken: otherTok,
+        canary: "CANARY_NOT_IN_OWNER_RESPONSE",
+      });
+      expect(missingCanary.pass).toBe(false);
+      expect(missingCanary.steps.find((s) => s.actor === "owner")?.reason).toContain(
+        "OWNER_CANARY_ABSENT",
+      );
+
       leakMode = true;
       const leaked = await runCachePrivacyTest({
         origin,
@@ -508,6 +595,12 @@ describe("OPS.5 runbook index, never-log redaction corpus, and audit-logged ops:
         recorded_at: "2026-11-21T12:07:00.000Z",
         legal_hold: true,
         shared_cas: true,
+      },
+      {
+        id: "RJ-4",
+        kind: "content_control",
+        target_id: "CC-HIDE-1",
+        recorded_at: "2026-11-21T12:08:00.000Z",
       },
     ];
     const journalPath = join(workDir, "retention-journal.json");
@@ -554,11 +647,11 @@ describe("OPS.5 runbook index, never-log redaction corpus, and audit-logged ops:
     expect(passReport.legal_hold_entries).toBe(1);
     expect(passReport.shared_cas_entries).toBe(1);
 
-    // Resurrected revoked credential fails negative probe and holds target quarantined.
+    // Resurrected revoked credential in real fellow_tokens fails negative probe and holds target quarantined.
     const resurrectedDb = join(workDir, "resurrected.sqlite");
     writeFileSync(resurrectedDb, readFileSync(sqlitePath));
     const db = new Database(resurrectedDb);
-    db.exec(`UPDATE fellow_credentials SET revoked_at = NULL WHERE id = 'CR-REVOKED-1'`);
+    db.exec(`UPDATE fellow_tokens SET revoked_at = NULL WHERE credential_id = 'CR-REVOKED-1'`);
     db.close();
 
     const failProbe = await runBackupRestoreSmoke({
@@ -570,6 +663,23 @@ describe("OPS.5 runbook index, never-log redaction corpus, and audit-logged ops:
     expect(failProbe.target_quarantine_state).toBe("quarantined-stop");
     expect(failProbe.negative_probes_passed).toBe(false);
     expect(failProbe.failures[0]).toContain("STALE_AUTHORITY_LEAK");
+
+    // Missing authority table fails closed instead of silently skipping probes!
+    const emptySchemaDb = join(workDir, "empty-schema.sqlite");
+    const eDb = new Database(emptySchemaDb);
+    eDb.exec("CREATE TABLE dummy (x INTEGER);");
+    eDb.close();
+    const missingTableProbe = await runBackupRestoreSmoke({
+      targetIdentifier: "scratch-rehearsal-3",
+      exportNdjsonPath: exportPath,
+      retentionJournalPath: journalPath,
+      scratchSqlitePath: emptySchemaDb,
+    });
+    expect(missingTableProbe.target_quarantine_state).toBe("quarantined-stop");
+    expect(missingTableProbe.negative_probes_passed).toBe(false);
+    expect(
+      missingTableProbe.failures.some((f) => f.includes("MISSING_REQUIRED_AUTHORITY_TABLE")),
+    ).toBe(true);
   });
 
   test("append-only SHA-256 audit log verifies intact, holds zero never-log leaks, and detects tampering", () => {

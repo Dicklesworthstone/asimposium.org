@@ -77,7 +77,7 @@ interface RawSigRow {
   checkpoint_seq: number;
   root_chain_digest: string;
   checkpoint_digest: string;
-  kid: string;
+  key_id: string;
   signature: string;
 }
 
@@ -215,19 +215,22 @@ export async function runEventVerify(opts: {
       if (hasSignatures && keyMap.size > 0) {
         const sigs = db
           .prepare(
-            `SELECT checkpoint_seq, root_chain_digest, checkpoint_digest, kid, signature
-             FROM checkpoint_signatures
-             WHERE problem_id = ?
-             ORDER BY checkpoint_seq ASC`,
+            `SELECT cs.checkpoint_seq, ic.root_chain_digest, ic.checkpoint_digest,
+                    cs.key_id, cs.signature
+             FROM checkpoint_signatures cs
+             JOIN integrity_checkpoints ic
+               ON ic.problem_id = cs.problem_id AND ic.checkpoint_seq = cs.checkpoint_seq
+             WHERE cs.problem_id = ?
+             ORDER BY cs.checkpoint_seq ASC`,
           )
           .all(problemId) as RawSigRow[];
         for (const sig of sigs) {
           signaturesChecked += 1;
-          const pubHex = keyMap.get(sig.kid);
+          const pubHex = keyMap.get(sig.key_id);
           if (!pubHex) {
             signaturesValid = false;
             failures.push(
-              `CHECKPOINT_SIGNATURE_UNKNOWN_KID: kid=${sig.kid} seq=${sig.checkpoint_seq}`,
+              `CHECKPOINT_SIGNATURE_UNKNOWN_KID: kid=${sig.key_id} seq=${sig.checkpoint_seq}`,
             );
             continue;
           }
@@ -243,7 +246,9 @@ export async function runEventVerify(opts: {
           );
           if (!ok) {
             signaturesValid = false;
-            failures.push(`CHECKPOINT_SIGNATURE_INVALID: kid=${sig.kid} seq=${sig.checkpoint_seq}`);
+            failures.push(
+              `CHECKPOINT_SIGNATURE_INVALID: kid=${sig.key_id} seq=${sig.checkpoint_seq}`,
+            );
           }
         }
       }

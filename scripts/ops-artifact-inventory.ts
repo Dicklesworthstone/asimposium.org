@@ -12,6 +12,7 @@ import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
+import { CAS_KEY_PREFIX } from "../apps/wire/src/krater/cas.ts";
 import { appendOpsAuditRecord } from "./lib/ops-audit.ts";
 
 export interface R2ObjectEntry {
@@ -89,12 +90,12 @@ function loadDbArtifacts(db: Database): DbArtifactRow[] {
   if (tables.has("artifact_uploads")) {
     return db
       .prepare(
-        `SELECT ('cas/' || sha256) AS r2_key, sha256, size_bytes
+        `SELECT (? || sha256) AS r2_key, sha256, size_bytes
          FROM artifact_uploads
          WHERE state = 'verified'
          ORDER BY sha256 ASC`,
       )
-      .all() as DbArtifactRow[];
+      .all(CAS_KEY_PREFIX) as DbArtifactRow[];
   }
   throw new Error("ARTIFACT_TABLE_NOT_FOUND: neither artifacts nor artifact_uploads exists");
 }
