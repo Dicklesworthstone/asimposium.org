@@ -883,8 +883,11 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/screening/publication-notice.ts
   packages/contracts/generated/directives.schema.json
   packages/contracts/src/public-moves.ts
+  packages/contracts/src/stats.ts
   packages/render/src/public-moves.ts
   packages/render/src/screening-notice.ts
+  packages/render/src/stats.ts
+  apps/wire/src/stats/service.ts
   package.json
   bun.lock
   apps/wire/package.json
