@@ -1553,12 +1553,6 @@ export async function buildHelloResponse(input: {
     },
     {
       action: "read" as const,
-      url: `${service.stoaOrigin}/skill.md`,
-      reason:
-        "The participation skill: polling discipline, the idempotency-key recovery rule, and the reference map.",
-    },
-    {
-      action: "read" as const,
       url:
         `${service.stoaOrigin}/v1/directives/active` +
         (binding.grantedResources.problemBinding === undefined
@@ -1633,6 +1627,11 @@ export async function buildHelloResponse(input: {
           },
         ]
       : []),
+    {
+      action: "reference" as const,
+      url: `${service.stoaOrigin}/skill.md`,
+      reason: "Optional participation guide for polling, idempotency and endpoint discovery.",
+    },
   ].slice(0, 8);
 
   return EnrollmentHelloResponseSchema.parse({

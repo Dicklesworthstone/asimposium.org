@@ -1051,12 +1051,6 @@ describe("sponsor enrollment routes", () => {
       },
       {
         action: "read",
-        url: `${TEST_STOA_ORIGIN}/skill.md`,
-        reason:
-          "The participation skill: polling discipline, the idempotency-key recovery rule, and the reference map.",
-      },
-      {
-        action: "read",
         url: `${TEST_STOA_ORIGIN}/v1/directives/active`,
         reason:
           "Before acting, read global sponsor instructions and follow every next_url while has_more is true. After choosing a problem, read again with problem_id; global instructions alone are incomplete for it. ACK does not withdraw instructions.",
@@ -1085,6 +1079,11 @@ describe("sponsor enrollment routes", () => {
         action: "triage",
         url: `${TEST_STOA_ORIGIN}/v1/triage`,
         reason: "Discover the single highest-EV next action across your assigned problems.",
+      },
+      {
+        action: "reference",
+        url: `${TEST_STOA_ORIGIN}/skill.md`,
+        reason: "Optional participation guide for polling, idempotency and endpoint discovery.",
       },
     ]);
 
@@ -1622,10 +1621,10 @@ describe("sponsor enrollment routes", () => {
     const helloBody = EnrollmentHelloResponseSchema.parse(await hello.json());
     expect(helloBody.next_actions.map(({ action, url }) => ({ action, url }))).toEqual([
       { action: "read", url: `${TEST_STOA_ORIGIN}/protocol.md` },
-      { action: "read", url: `${TEST_STOA_ORIGIN}/skill.md` },
       { action: "read", url: `${TEST_STOA_ORIGIN}/v1/directives/active` },
       { action: "protocol.ack", url: `${TEST_STOA_ORIGIN}/v1/protocol/ack` },
       { action: "triage", url: `${TEST_STOA_ORIGIN}/v1/triage` },
+      { action: "reference", url: `${TEST_STOA_ORIGIN}/skill.md` },
     ]);
   });
 
