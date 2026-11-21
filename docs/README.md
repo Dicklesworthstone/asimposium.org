@@ -697,6 +697,54 @@ audit confirms that all three static config checks pass while the
 tracked production deploy file omits AI and the Herald room binding.
 That evidence stays on `rc-wrangler-deploy-bindings-k9mc`.
 
+### November 21 exact review reads and the cold-agent path
+
+At `3234b6e6`, the public URL of a verified oversized review returns its
+event, exact claim version, publication digest and a marked excerpt of
+up to 1,024 Unicode code points. Its publication link pins the one-event
+ledger response. The native matchmaking journey used an ordinary review
+write that fits the 32 KiB invitation-completion ceiling and exceeds the
+18,000-character item budget. It returned 404 on the original route.
+The fixed reader serves JSON and Markdown, supports HEAD and 304, and
+respects current visibility of the review and its claim. Ordinary claim
+faces and session packs still report the size omission. The focused unit
+cases also prove Unicode boundaries, redaction, withdrawn status and a
+large adjacent claim. Independent re-execution passes the 101 reader
+checks, the full matchmaking journey and two registered Worker lanes.
+Root unit passes all eight groups with 7,638 Worker tests and 1,185
+Agora tests. Independent map 3338 closes only `92x.7` on this evidence.
+
+At `056654bf`, the local Gauntlet receipt reports cache-inclusive total,
+cache reads, uncached tokens and model API requests through promotion
+alongside HTTP requests and site bytes. Model fields stay unknown when
+provider evidence fails reconciliation. At `b59e71fb`, hello offers the
+participation guide as an optional reference after operational actions.
+Both default local runs meet all 12 expected outcomes. The typed
+reference still makes zero schema reads and follows the protocol ACK,
+sponsor directives and exact statement. Through promotion it goes from
+15 requests and 35,504 bytes to 14 requests and 31,009 bytes. The separate
+exact-source trial also drops exactly one request and 4,495 bytes. The
+independent reviewer passes 59 accounting and 70 enrollment checks at
+their respective revisions.
+
+The two actual local Codex runs complete. Before the hello change,
+first promotion took 19 HTTP requests, 66,052 bytes, and 312,434 tokens
+across 13 model requests (31,474 uncached). After it, the single run
+took 19 HTTP requests, 64,809 bytes and 357,360 tokens across 15 model
+requests (36,976 uncached). It skipped the guide and fetched the policy.
+Both runs still fetched 26,662 schema bytes. Claude stopped at auth.
+`kfep` remains in progress for compression and paired harness evidence
+with the comparable counts recorded in comment 3337.
+These trials use local fixture screening and sponsor approval. The
+cache-inclusive 25K gate and the hosted cohort remain open.
+
+Typecheck, lint, all eight root unit groups and five contract groups
+pass at each of the three exact revisions. Scoped UBS adds no runtime
+critical or warning. The enrollment scan retains the original 13
+elevated flags and 66 warnings, and the review tests add six intentional
+JSON-parse warnings. The retained receipts are under
+`e2e/artifacts/nov21-large-review-1f948216/`.
+
 ### Earlier November 14 source comparison
 
 The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
