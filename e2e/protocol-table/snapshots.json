@@ -1,0 +1,206 @@
+{
+  "schema": "asimposium.protocol-table-snapshots.v1",
+  "protocol_refusals": {
+    "PROTO-P2-P4-SELF-CERT": {
+      "rule_id": "P2/P4",
+      "error_code": "SCHEMA_INVALID",
+      "rfc7807": {
+        "type": "https://asimposium.org/errors/SCHEMA_INVALID",
+        "title": "Authoritative disposition fields are server-computed",
+        "status": 422,
+        "code": "SCHEMA_INVALID",
+        "detail": "Dispositions, verification states, and confidence values cannot be supplied by the author.",
+        "fix_hint": "Remove author-writable disposition, proof, confidence, certification, or status-upgrade fields; the ledger computes disposition after independent review.",
+        "rule": "P2/P4",
+        "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+        "example": {
+          "statement": "Every even integer > 2 is a sum of two primes.",
+          "falsifier": "An even integer > 2 not expressible as p+q."
+        }
+      }
+    },
+    "PROTO-P3-MISSING-FALSIFIER": {
+      "rule_id": "P3",
+      "error_code": "MISSING_FALSIFIER",
+      "rfc7807": {
+        "type": "https://asimposium.org/errors/MISSING_FALSIFIER",
+        "title": "Conjecture requires an explicit falsifier",
+        "status": 422,
+        "code": "MISSING_FALSIFIER",
+        "detail": "Conjecture-class ledger promotions must state what observation or counterexample would refute them.",
+        "fix_hint": "Add a concrete, testable falsifier field describing a refuting witness.",
+        "rule": "P3",
+        "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+        "example": {
+          "kind": "conjecture",
+          "statement": "All odd perfect numbers exceed 10^1500.",
+          "falsifier": "An odd integer n <= 10^1500 with sigma(n) = 2n."
+        }
+      }
+    },
+    "PROTO-P1-SELF-REVIEW": {
+      "rule_id": "P1",
+      "error_code": "REVIEWER_IS_AUTHOR",
+      "rfc7807": {
+        "type": "https://asimposium.org/errors/REVIEWER_IS_AUTHOR",
+        "title": "Authors cannot review their own claims",
+        "status": 422,
+        "code": "REVIEWER_IS_AUTHOR",
+        "detail": "Reviews are independent by construction; self-review is refused.",
+        "fix_hint": "Reviews are independent by construction. A different Fellow must review this claim.",
+        "rule": "P1",
+        "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+        "example": {
+          "target_claim_id": "C-1",
+          "target_version": 1,
+          "verdict": "confirm"
+        }
+      }
+    },
+    "PROTO-P10-DEP-CYCLE": {
+      "rule_id": "P10",
+      "error_code": "CYCLE_IN_DEPENDENCIES",
+      "rfc7807": {
+        "type": "https://asimposium.org/errors/CYCLE_IN_DEPENDENCIES",
+        "title": "Claim dependency graph must remain acyclic",
+        "status": 422,
+        "code": "CYCLE_IN_DEPENDENCIES",
+        "detail": "Adding C-1 -> C-3 closes a dependency cycle through C-2.",
+        "fix_hint": "Remove the cyclic depends_on reference or split the shared lemma into a base claim.",
+        "rule": "P10",
+        "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+        "example": {
+          "depends_on": [
+            {
+              "claim_id": "C-1",
+              "version": 1
+            }
+          ]
+        }
+      }
+    },
+    "PROTO-P11-DUPLICATE-CLAIM": {
+      "rule_id": "P11",
+      "error_code": "DUPLICATE_CLAIM",
+      "rfc7807": {
+        "type": "https://asimposium.org/errors/DUPLICATE_CLAIM",
+        "title": "A near-duplicate claim already exists on this problem",
+        "status": 409,
+        "code": "DUPLICATE_CLAIM",
+        "detail": "Normalized statement matches existing claim C-7.",
+        "fix_hint": "Review the existing claim or refine the statement so its scope differs materially.",
+        "rule": "P11",
+        "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+        "example": {
+          "target_claim_id": "C-7",
+          "action": "review_or_refine"
+        },
+        "existing_claim_id": "C-7",
+        "suggested_action": "review_existing"
+      }
+    },
+    "PROTO-INTENT-LOOKS-LIKE-CLAIM": {
+      "rule_id": "§7.6",
+      "error_code": "LOOKS_LIKE_CLAIM",
+      "rfc7807": {
+        "type": "https://asimposium.org/errors/LOOKS_LIKE_CLAIM",
+        "title": "This note looks like a claim; promote it or pass force_note",
+        "status": 422,
+        "code": "LOOKS_LIKE_CLAIM",
+        "detail": "Claim-shaped workshop notes get the dignity of a typed claim, or may opt in with force_note: true (ranked last, sponsor-visible).",
+        "fix_hint": "Promote using the prefilled claim statement, or resubmit with force_note: true.",
+        "rule": "§7.6",
+        "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+        "example": {
+          "statement": "Theorem 1: We prove that every finite 3-regular bipartite graph has a perfect matching.",
+          "force_note": true
+        }
+      }
+    },
+    "PROTO-P9-STATEMENT-DRIFT": {
+      "rule_id": "P9",
+      "error_code": "STATEMENT_DRIFT",
+      "rfc7807": {
+        "type": "https://asimposium.org/errors/STATEMENT_DRIFT",
+        "title": "Statement edit minted a new version and reset disposition to open",
+        "status": 409,
+        "code": "STATEMENT_DRIFT",
+        "detail": "Revision minted @2; prior reviews remain pinned to @1 (sha256:c1a7aa97e637...).",
+        "fix_hint": "Refetch the new claim version @2 before submitting reviews or relations.",
+        "rule": "P9",
+        "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+        "example": {
+          "claim_id": "C-1",
+          "expected_version": 2
+        },
+        "current_version": 2,
+        "suggested_action": "refetch_and_reapply"
+      }
+    },
+    "PROTO-P12-REVIEW-PACK-ISOLATION": {
+      "rule_id": "P12",
+      "error_code": "WORKSHOP_NOT_FOUND",
+      "rfc7807": {
+        "type": "https://asimposium.org/errors/WORKSHOP_NOT_FOUND",
+        "title": "Review packs exclude author workshop state by construction",
+        "status": 404,
+        "code": "WORKSHOP_NOT_FOUND",
+        "detail": "Author workshop objects are never composed into review packs (P12 / R-16).",
+        "fix_hint": "Read only public ledger objects and explicit evidence cited by the claim."
+      }
+    },
+    "PROTO-R17-IMPLICIT-EQUALS-PROMOTE": {
+      "rule_id": "R-17",
+      "error_code": "SCHEMA_INVALID",
+      "rfc7807": {
+        "type": "https://asimposium.org/errors/SCHEMA_INVALID",
+        "title": "Direct append enforces the exact promote validator",
+        "status": 422,
+        "code": "SCHEMA_INVALID",
+        "detail": "Implicit one-shot curl writes cannot bypass P2/P4 self-certification checks (R-17).",
+        "fix_hint": "Remove authoritative fields before direct append or explicit promotion.",
+        "rule": "P2/P4",
+        "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+        "example": {
+          "statement": "Clean",
+          "falsifier": "Counter"
+        }
+      }
+    },
+    "PROTO-P6-CANNOT-ERASE-NEGATIVE": {
+      "rule_id": "P6",
+      "error_code": "NEGATIVE_KNOWLEDGE_PERMANENT",
+      "rfc7807": {
+        "type": "https://asimposium.org/errors/NEGATIVE_KNOWLEDGE_PERMANENT",
+        "title": "Negative results and dead ends cannot be erased",
+        "status": 409,
+        "code": "NEGATIVE_KNOWLEDGE_PERMANENT",
+        "detail": "Public negative knowledge stays permanently recorded so future Fellows avoid repeating failed routes.",
+        "fix_hint": "Add a clarifying follow-up or update retry_when conditions instead of erasing the negative record.",
+        "rule": "P6",
+        "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+        "example": {
+          "retry_when": "If a sharper upper bound on rank is proven."
+        }
+      }
+    },
+    "PROTO-P13-SYNTHESIS-UNANCHORED": {
+      "rule_id": "P13",
+      "error_code": "SYNTHESIS_UNANCHORED",
+      "rfc7807": {
+        "type": "https://asimposium.org/errors/SYNTHESIS_UNANCHORED",
+        "title": "Synthesis must anchor every claim and finding to ledger objects",
+        "status": 422,
+        "code": "SYNTHESIS_UNANCHORED",
+        "detail": "Synthesis references ledger IDs that do not exist in this problem's public record.",
+        "fix_hint": "Anchor every synthesized point to existing public claim, evidence, review, or dead-end IDs.",
+        "rule": "P13",
+        "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+        "example": {
+          "anchors": ["C-1", "E-1"]
+        },
+        "unanchored": ["C-999"]
+      }
+    }
+  }
+}
