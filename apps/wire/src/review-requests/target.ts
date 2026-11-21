@@ -101,13 +101,13 @@ export async function readCompletionReview(
   version: number,
   reviewer: string,
   reviewId?: string,
-): Promise<ContentPin & { review_id: string }> {
+): Promise<ContentPin & { review_id: string; seq: number }> {
   // Explicit completions pin their requested ID. Recovery considers the most
   // recent readable publication by this Fellow on this statement version.
   const selection =
     reviewId === undefined ? "ORDER BY r.source_seq DESC LIMIT 1" : "AND r.review_id = ? LIMIT 2";
   const result = await db
-    .prepare(`SELECT r.review_id, e.id AS event_id, e.payload_sha256 AS digest,
+    .prepare(`SELECT r.review_id, e.seq, e.id AS event_id, e.payload_sha256 AS digest,
     CASE WHEN length(CAST(c.payload_json AS BLOB)) <= 32768 THEN c.payload_json END AS payload_json
     FROM reviews r JOIN events e ON e.id = r.source_event_id AND e.problem_id = r.problem_id
       AND e.object_id = r.review_id AND e.seq = r.source_seq AND e.type = 'review.created' AND e.object_kind = 'review'
@@ -126,7 +126,7 @@ export async function readCompletionReview(
       reviewer,
       ...(reviewId === undefined ? [] : [reviewId]),
     )
-    .all<ContentPin & { review_id: string }>();
+    .all<ContentPin & { review_id: string; seq: number }>();
   const row = result.results[0];
   if (result.results.length !== 1 || !row) throw new ReviewRequestError("INELIGIBLE");
   const payload = await verifiedPayload(row);

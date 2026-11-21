@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventTailResponseSchema, eventTailPath } from "@asimposium/contracts/event-tail";
 import { readProblemReviewFeedback } from "../../src/sessions/review-feedback.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
@@ -236,7 +237,7 @@ await runLocalWorkerJourney(
           );
         const recordedReviewAction = (view) =>
           view.next_actions.find(
-            ({ method, url }) => method === "GET" && url.includes("/reviews/"),
+            ({ method, url }) => method === "GET" && url.includes("/events.json?"),
           );
         assert.equal(reviewPackAction(offered), undefined);
         assert.equal(recordedReviewAction(offered), undefined);
@@ -364,7 +365,9 @@ await runLocalWorkerJourney(
               },
             },
             body_md:
-              "The invitation supplies coordination only; the evidence available here is insufficient for a verified result.",
+              "Checking the two sums at each sampled integer preserves their equality.\n".repeat(
+                290,
+              ),
           },
           eligible,
           201,
@@ -381,10 +384,26 @@ await runLocalWorkerJourney(
         assert.equal(reviewPackAction(recovery), undefined);
         const readRecordedReview = recordedReviewAction(recovery);
         assert.ok(readRecordedReview, "recover the recorded review from the invitation alone");
-        assert.equal(readRecordedReview.url, `/p/${problem}/reviews/${review.review_id}.json`);
-        const exact = await call(readRecordedReview.url);
-        const publicReview = exact.items.find((item) => item.kind === "claim-review");
-        assert.equal(publicReview?.id, review.review_id);
+        const exact = EventTailResponseSchema.parse(await call(readRecordedReview.url));
+        assert.equal(exact.events.length, 1);
+        const [{ seq, event: publicReview }] = exact.events;
+        assert.equal(publicReview?.type, "review.created");
+        assert.equal(publicReview.object_id, review.review_id);
+        assert.equal(
+          readRecordedReview.url,
+          eventTailPath(problem, "json", { since: seq - 1, through: seq, limit: 1 }),
+        );
+        assert.equal(exact.page_end.has_more, false);
+        // The review fits the completion gate, but the separate full work
+        // product has a tighter budget. Its event still identifies the review.
+        assert.equal(publicReview.object_url, `/p/${problem}/reviews/${review.review_id}.json`);
+        await call(publicReview.object_url, undefined, undefined, 404);
+        const contentBytes = await env.DB.prepare(
+          "SELECT length(CAST(payload_json AS BLOB)) AS bytes FROM event_content WHERE event_id = ?",
+        )
+          .bind(publicReview.id)
+          .first("bytes");
+        assert.ok(contentBytes > 18000 && contentBytes <= 32768);
         assert.ok(!JSON.stringify(exact).includes(privateCanary));
         assert.equal(
           recordedReviewAction(await call(requestPath, undefined, author)),
@@ -425,7 +444,7 @@ await runLocalWorkerJourney(
         assert.deepEqual(completionBody, {
           action: "complete",
           expected_version: accepted.version,
-          review_id: publicReview.id,
+          review_id: publicReview.object_id,
         });
         const completed = await call(
           complete.url,
@@ -438,7 +457,7 @@ await runLocalWorkerJourney(
         const completedView = await call(requestPath, undefined, eligible);
         assert.equal(reviewPackAction(completedView), undefined);
         assert.equal(recordedReviewAction(completedView), undefined);
-        assert.equal(completed.review_event_id, JSON.parse(publicReview.body).event);
+        assert.equal(completed.review_event_id, publicReview.id);
         assert.deepEqual(await publicState(), publicBefore);
         console.log(JSON.stringify({ stage: "review-invitation-completion-recovered" }));
 

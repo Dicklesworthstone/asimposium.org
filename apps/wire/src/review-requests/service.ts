@@ -1,4 +1,5 @@
 import { SessionIdSchema } from "@asimposium/contracts";
+import { eventTailCursor, eventTailPath } from "@asimposium/contracts/event-tail";
 import {
   type CreateReviewRequest,
   type RespondReviewRequest,
@@ -357,7 +358,9 @@ export async function reviewRequestView(
   const target = `${receipt.claim_id}@${receipt.claim_version}`;
   const session = SessionIdSchema.safeParse(row.reviewer_session_id);
   const reviewPack = status === "accepted" && session.success;
-  let completion: Extract<RespondReviewRequest, { action: "complete" }> | undefined;
+  let recovery:
+    | { eventUrl: string; body: Extract<RespondReviewRequest, { action: "complete" }> }
+    | undefined;
   if (
     status === "accepted" &&
     detail?.actor.fellowId === receipt.reviewer_id &&
@@ -371,12 +374,25 @@ export async function reviewRequestView(
         receipt.claim_version,
         receipt.reviewer_id,
       );
-      if (/^R-[0-9A-HJKMNP-TV-Z]{1,78}$/.test(recorded.review_id))
-        completion = {
-          action: "complete",
-          expected_version: receipt.version,
-          review_id: recorded.review_id,
+      if (
+        /^R-[0-9A-HJKMNP-TV-Z]{1,78}$/.test(recorded.review_id) &&
+        recorded.seq > 0 &&
+        eventTailCursor(String(recorded.seq)) === recorded.seq
+      ) {
+        recovery = {
+          // The exact event also works when the public item face omits a long body.
+          eventUrl: eventTailPath(receipt.problem_id, "json", {
+            since: recorded.seq - 1,
+            through: recorded.seq,
+            limit: 1,
+          }),
+          body: {
+            action: "complete",
+            expected_version: receipt.version,
+            review_id: recorded.review_id,
+          },
         };
+      }
     } catch (error) {
       if (!(error instanceof ReviewRequestError && error.code === "INELIGIBLE")) throw error;
     }
@@ -385,10 +401,10 @@ export async function reviewRequestView(
     url: `/p/${receipt.problem_id}/claims/${target}.md`,
     why: "Read the exact public statement and evidence. An invitation is neither support nor an independence tier.",
   };
-  if (completion) {
+  if (recovery) {
     read = {
-      url: `/p/${receipt.problem_id}/reviews/${completion.review_id}.json`,
-      why: "Read your recorded review on this exact claim version before completing the invitation.",
+      url: recovery.eventUrl,
+      why: "Read the exact public ledger event for your recorded review before completing the invitation.",
     };
   } else if (reviewPack) {
     read = {
@@ -412,8 +428,8 @@ export async function reviewRequestView(
             {
               method: "POST",
               url: `${url}/respond`,
-              why: completion
-                ? `Complete with ${JSON.stringify(completion)} and a new Idempotency-Key. This links your existing review.`
+              why: recovery
+                ? `Complete with ${JSON.stringify(recovery.body)} and a new Idempotency-Key. This links your existing review.`
                 : `Eligible participants may respond with expected_version ${receipt.version} and their own Idempotency-Key. Acceptance is not a scientific verdict.`,
             },
           ]
