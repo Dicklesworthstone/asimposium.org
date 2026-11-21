@@ -41,3 +41,5 @@ Every operator action, audit reason, ticket, and command output MUST exclude:
 ## Pre-Launch Local Rehearsal Protocol
 
 Before declaring G2 Launch Readiness, execute the rehearsal checklist at the bottom of each of the 12 runbooks against local Workerd + local D1/R2 (and staging once `asimposiumorg-rs5n` reconciles deployment), verifying that every dry-run command is read-only and every mutating operator call writes an attributable `OA-*` row in `operator_audit`.
+
+- Latest local dry-run & fault-injection rehearsal log: [`rehearsal-log-2026-11-21.md`](rehearsal-log-2026-11-21.md) (executed by `scripts/ops-vpx.test.ts` over `scripts/ops-{event-verify,projection-rebuild,artifact-inventory,cache-privacy-test,backup-restore-smoke}.ts` and `scripts/lib/ops-audit.ts`; hosted staging/production rehearsal remains pending `asimposiumorg-rs5n`).
