@@ -472,6 +472,37 @@ describe("published screening warnings", () => {
       expect(count(f, "screening_refusals")).toBe(0);
     }));
 
+  test("question warnings require the exact filing writer and cannot relax screening authority", () =>
+    withFixture(async (f) => {
+      const input = { ...candidate(f, "question"), falsifier: null };
+      for (const category of ["dual-use-boundary", "off-topic"] as const) {
+        const receipt = published(
+          await screen(f, input, { coarse_category: category }, "questions"),
+        );
+        expect(receipt.provenance.public_action).toEqual(
+          category === "off-topic"
+            ? { category, action: "published-with-warning", notice: "off-scope" }
+            : { category, action: "published-with-warning", notice: "screening-warning" },
+        );
+      }
+      expect(count(f, "screening_cases")).toBe(0);
+      for (const [kind, route, patch] of [
+        ["question", "promote", {}],
+        ["question", "questions/withdraw", {}],
+        ["question-withdraw", "questions", {}],
+        ["question-lease", "questions/lease", {}],
+        ["question", "questions", { provider_status: "timeout" }],
+        ["question", "questions", { coarse_category: "benign-context" }],
+        ["question", "questions", { evaluated_body_digest: `sha256:${"f".repeat(64)}` }],
+        ["question", "questions", { evaluated_context_digest: `sha256:${"f".repeat(64)}` }],
+      ] as const) {
+        const result = await screen(f, { ...input, kind }, patch, route);
+        expect(result instanceof Response && result.status).toBe(202);
+      }
+      expect(f.state().events).toEqual([]);
+      expect(count(f, "screening_refusals")).toBe(0);
+    }));
+
   test("unsupported kinds still hold, and a warning cannot relax provider failure, incoherence or digest binding", () =>
     withFixture(async (f) => {
       for (const [kind, patch] of [

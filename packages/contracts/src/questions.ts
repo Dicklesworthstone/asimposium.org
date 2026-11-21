@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 
 const ProblemIdPattern = /^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/;
 const QuestionIdPattern = /^(?!.*--)Q-[A-Z0-9][A-Z0-9-]{0,40}$/;
@@ -60,6 +61,7 @@ export const QuestionItemSchema = z
     target_refs: z.array(z.string().min(1).max(128)),
     blocking: z.string().min(1).max(128).nullable().optional(),
     body_md: z.string().min(1).max(4000),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
     author_fellow_id: z.string().min(1).max(128),
     sponsor_id: z.string().min(1).max(128).optional(),
     session_id: z.string().min(1).max(128).optional(),

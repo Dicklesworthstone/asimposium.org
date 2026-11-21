@@ -4,17 +4,25 @@ import {
   AskQuestionRequestSchema,
   ProblemDocumentSchema,
   QuestionsListResponseSchema,
+  type ScreeningPublicationNotice,
 } from "@asimposium/contracts";
+import { screeningNoticeText } from "@asimposium/render";
 import type { Env } from "../../src/env.ts";
 import { sha256Hex, writeLedgerEvent } from "../../src/krater/krater.ts";
 import { loadProblemQuestions, validateQuestionSubstance } from "../../src/ledger/questions.ts";
 import { createLedgerFaceRoutes } from "../../src/ledger-face.ts";
 import { operatorContentControl } from "../../src/moderation/operator-http.ts";
 import {
+  publicationProvenance,
+  type ScreenedPublication,
+  screeningPublicationStatements,
+} from "../../src/screening/ingress.ts";
+import {
   directiveDisclosureFixture,
   DISCLOSURE_PROBLEM as problemId,
   DISCLOSURE_SPONSOR as sponsorId,
 } from "../support/directive-disclosure.ts";
+import { syntheticScreeningObservation } from "../support/screening.ts";
 
 type Fixture = Awaited<ReturnType<typeof directiveDisclosureFixture>>;
 const fixtures: Fixture[] = [];
@@ -36,6 +44,7 @@ async function publish(
   questionId = "Q-1",
   type = "question.asked",
   extra: Record<string, unknown> = {},
+  screened?: ScreenedPublication,
 ) {
   const payload =
     type === "question.asked"
@@ -51,13 +60,14 @@ async function publish(
   const payloadJson = JSON.stringify(payload),
     createdAt = new Date().toISOString();
   const eventId = `E-question-${crypto.randomUUID()}`;
+  const requestDigest = await sha256Hex(payloadJson);
   return writeLedgerEvent(
     f.db,
     {
       problemId,
       eventId,
       idempotencyKey: eventId,
-      requestDigest: await sha256Hex(payloadJson),
+      requestDigest,
       eventType: type,
       objectKind: "question",
       objectId: questionId,
@@ -73,8 +83,8 @@ async function publish(
       },
     },
     {
-      statementsAfterEvent: ({ sequence }) =>
-        type === "question.asked"
+      statementsAfterEvent: ({ sequence }) => [
+        ...(type === "question.asked"
           ? [
               f.db
                 .prepare(
@@ -83,8 +93,29 @@ async function publish(
                 )
                 .bind(questionId, problemId, sequence, body, f.binding.fellowId, createdAt),
             ]
-          : [],
+          : []),
+        ...(screened === undefined
+          ? []
+          : screeningPublicationStatements(f.db, screened, eventId, "S-question", requestDigest)),
+      ],
     },
+  );
+}
+async function warning(f: Fixture, category: "dual-use-boundary" | "off-topic") {
+  const input = {
+    problemId,
+    fellowId: f.binding.fellowId,
+    kind: "question",
+    statement: JSON.stringify({ body_md: body, target_refs: ["C-1@1"], blocking: "C-1@1" }),
+    falsifier: null,
+  };
+  return publicationProvenance(
+    input,
+    await syntheticScreeningObservation(input, {
+      decision: "allow-with-warning",
+      coarse_category: category,
+      provider_status: "ok",
+    }),
   );
 }
 function control(f: Fixture, ref: string, visibility: "hidden" | "visible", version: number) {
@@ -108,6 +139,97 @@ function face(f: Fixture, format: string, init?: RequestInit) {
     { DB: f.db } as Env,
   );
 }
+
+test("question notices stay bound to original publications through lifecycle changes and frozen reads", async () => {
+  for (const category of ["dual-use-boundary", "off-topic"] as const) {
+    const f = await fixture();
+    const receipt = await warning(f, category);
+    const admitted = await publish(f, "Q-1", "question.asked", {}, receipt);
+    const notice = receipt.provenance.public_action as ScreeningPublicationNotice;
+    const other = await warning(f, category === "off-topic" ? "dual-use-boundary" : "off-topic");
+    // A later lifecycle event's receipt and a neighboring author's forged
+    // payload field cannot replace the question's trusted publication notice.
+    await publish(f, "Q-1", "question.answered", { resolved_by_object: "C-1@1" }, other);
+    await publish(f, "Q-2", "question.asked", { screening_notice: notice });
+    const result = await loadProblemQuestions(f.db, problemId);
+    expect(result.questions[0]?.status).toBe("resolved");
+    expect(result.questions[0]?.screening_notice).toEqual(notice);
+    expect(result.questions[1]?.screening_notice).toBeUndefined();
+    const historical = await loadProblemQuestions(f.db, problemId, {
+      target: "Q-1",
+      through: admitted.seq,
+    });
+    expect(historical.questions[0]?.status).toBe("open");
+    expect(historical.questions[0]?.screening_notice).toEqual(notice);
+    for (const format of formats) {
+      const response = await face(f, `${format}?target=Q-1`);
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      if (format === "json")
+        expect(
+          QuestionsListResponseSchema.parse(JSON.parse(text)).questions[0]?.screening_notice,
+        ).toEqual(notice);
+      else {
+        expect(text.indexOf(screeningNoticeText(notice))).toBeGreaterThan(-1);
+        expect(text.indexOf(screeningNoticeText(notice))).toBeLessThan(text.indexOf(body));
+        expect(text.split(screeningNoticeText(notice))).toHaveLength(2);
+      }
+      expect(text).not.toMatch(/input_digest|context_digest|configuration_digest|policy_version/);
+      expect(
+        (
+          await face(f, `${format}?target=Q-1`, {
+            headers: { "if-none-match": response.headers.get("etag") ?? "" },
+          })
+        ).status,
+      ).toBe(304);
+    }
+    control(f, "Q-1", "hidden", 1);
+    for (const format of formats) {
+      const response = await face(f, `${format}?target=Q-1&through=${admitted.seq}`);
+      expect(response.status).toBe(404);
+      const text = await response.text();
+      expect(text).not.toContain(body);
+      expect(text).not.toContain(screeningNoticeText(notice));
+    }
+    control(f, "Q-1", "visible", 2);
+    expect((await loadProblemQuestions(f.db, problemId)).questions[0]?.screening_notice).toEqual(
+      notice,
+    );
+  }
+});
+
+test("corrupt question screening receipts refuse every face before a cached success", async () => {
+  // Valid bounded SQLite JSON can still be an invalid receipt or exceed the
+  // public UTF-8 byte cap; the table's own JSON/character checks stay enabled.
+  for (const malformed of ["{}", "[]", JSON.stringify("é".repeat(2500))]) {
+    const f = await fixture();
+    const admitted = await publish(
+      f,
+      "Q-1",
+      "question.asked",
+      {},
+      await warning(f, "dual-use-boundary"),
+    );
+    const originals = await Promise.all(formats.map((format) => face(f, `${format}?target=Q-1`)));
+    // Deliberate corruption below the immutable write guard tests read-side
+    // failure; it is not an available public mutation.
+    f.sql.exec("DROP TRIGGER screening_publications_no_update");
+    f.sql
+      .query("UPDATE screening_publications SET provenance_json=? WHERE event_id=?")
+      .run(malformed, admitted.eventId);
+    await expect(loadProblemQuestions(f.db, problemId)).rejects.toThrow(
+      "PUBLIC_SCREENING_RECEIPT_UNAVAILABLE",
+    );
+    for (const [index, format] of formats.entries()) {
+      const response = await face(f, `${format}?target=Q-1`, {
+        headers: { "if-none-match": originals[index]?.headers.get("etag") ?? "" },
+      });
+      expect(response.status).toBe(503);
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      expect(await response.text()).not.toContain(body);
+    }
+  }
+});
 
 test("question faces use immutable content, attribution and state despite poisoned projections", async () => {
   const f = await fixture(),

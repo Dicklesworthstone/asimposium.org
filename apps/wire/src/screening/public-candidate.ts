@@ -141,7 +141,10 @@ function supportsPublishedWarning(
       (holdContext?.route === "review" || holdContext?.route === "statement-review")) ||
     // Self-corrections preserve their exact publication notice on canonical
     // retraction faces, event history and exports; the notice is not a verdict.
-    (kind === "retraction" && holdContext?.route === "retract")
+    (kind === "retraction" && holdContext?.route === "retract") ||
+    // Scientific questions preserve their own notice on canonical collection,
+    // exact, event and pack readers. Lease and withdrawal prose stay separate.
+    (kind === "question" && holdContext?.route === "questions")
   );
 }
 

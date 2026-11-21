@@ -163,7 +163,27 @@ await runLocalWorkerJourney(async (context) => {
   const qRefusal = ScreeningPromotionDeniedResponseSchema.safeParse(canaryQuestionRes);
   assert.ok(qRefusal.success);
 
-  // 5. Ask Question 1 successfully (201)
+  // 5. A publishable context warning must not block a precise research ask.
+  // The notice is server-owned and remains bound to this exact publication.
+  const questionWarning = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  };
+  const screensBeforeQuestionForgery = await fixtures.screeningCalls();
+  const forgedQuestion = await call(
+    `/v1/sessions/${sessionIdA}/questions`,
+    {
+      body_md: "Is there a known non-archimedean metric that bounds the residue sequence?",
+      screening_notice: questionWarning,
+    },
+    authorA,
+    422,
+    "question-forged-warning",
+  );
+  assert.equal(forgedQuestion.code, "QUESTION_BODY_INVALID");
+  assert.equal(await fixtures.screeningCalls(), screensBeforeQuestionForgery);
+  await fixtures.setScreenMode("allow-with-warning");
   const question1 = await call(
     `/v1/sessions/${sessionIdA}/questions`,
     {
@@ -175,12 +195,14 @@ await runLocalWorkerJourney(async (context) => {
     201,
     "q-idempotency-1",
   );
+  await fixtures.setScreenMode("pass");
   assert.equal(question1.ok, true);
   assert.ok(question1.question_id.startsWith("Q-"));
   assert.equal(question1.problem_id, problemId);
   assert.equal(question1.status, "open");
   assert.ok(question1.seq > 0);
   const question1Id = question1.question_id;
+  const screensAfterQuestion = await fixtures.screeningCalls();
 
   // 6. Idempotent replay of ask question (200)
   const replayQ1 = await call(
@@ -196,6 +218,39 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.equal(replayQ1.question_id, question1Id);
   assert.equal(replayQ1.ok, true);
+  assert.deepEqual(
+    replayQ1,
+    question1,
+    "warning publication replays the original question receipt",
+  );
+  assert.equal(await fixtures.screeningCalls(), screensAfterQuestion);
+  const questionReceipts = await env.DB.prepare(
+    `SELECT s.provenance_json FROM events e
+     JOIN screening_publications s ON s.event_id=e.id
+     WHERE e.problem_id=? AND e.object_id=? AND e.type='question.asked'`,
+  )
+    .bind(problemId, question1Id)
+    .all();
+  assert.equal(questionReceipts.results.length, 1, "one question event and notice after replay");
+  assert.deepEqual(
+    JSON.parse(questionReceipts.results[0].provenance_json).public_action,
+    questionWarning,
+  );
+  const questionPack = await call(
+    `/v1/sessions/${sessionIdA}/pack?profile=full&max_tokens=8000&through=${question1.seq}&after=${question1.seq - 1}`,
+    undefined,
+    authorA,
+  );
+  const packedQuestion = questionPack.items.find((item) => item.kind === "full-event");
+  assert.deepEqual(packedQuestion?.screening_notice, questionWarning);
+  assert.equal(
+    JSON.parse(packedQuestion.body).content.body_md,
+    "Is there a known non-archimedean metric that bounds the residue sequence?",
+  );
+  assert.ok(
+    !Object.hasOwn(JSON.parse(packedQuestion.body).content, "screening_notice"),
+    "the trusted notice is outside the question's untrusted scientific body",
+  );
 
   // 7. Lease question (Reviewer B opens session)
   const sessionB = await call(
@@ -542,6 +597,16 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(q1Item.session_id, sessionIdA);
   assert.equal(q1Item.status, "resolved");
   assert.equal(q1Item.resolved_by_object, `${claim1Id}@1`);
+  assert.deepEqual(
+    q1Item.screening_notice,
+    questionWarning,
+    "answers and leases cannot replace the question publication's notice",
+  );
+  assert.equal(
+    parsedQList.data.questions.find((q) => q.question_id === question2Id)?.screening_notice,
+    undefined,
+    "a different question cannot borrow its neighbor's notice",
+  );
 
   const qListMdRes = await worker.fetch(`${origin}/p/${problemId}/questions.md`);
   assert.equal(qListMdRes.status, 200);
@@ -549,12 +614,21 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(qListMd.includes(`## Question \`${question1Id}\``));
   assert.ok(qListMd.includes("- **Status**: resolved"));
   assert.ok(!qListMd.includes("Leaderboard"));
+  const questionNoticeText = "Published with a screening context notice: dual-use-boundary.";
+  assert.ok(qListMd.includes(questionNoticeText));
+  assert.ok(qListMd.indexOf(questionNoticeText) < qListMd.indexOf("known non-archimedean metric"));
 
   const qListHtmlRes = await worker.fetch(`${origin}/p/${problemId}/questions.html`);
   assert.equal(qListHtmlRes.status, 200);
   const qListHtml = await qListHtmlRes.text();
   assert.ok(qListHtml.includes(`<h3>Question <code>${question1Id}</code></h3>`));
   assert.ok(qListHtml.includes("asimp-status asimp-status-resolved"));
+  assert.ok(qListHtml.includes(questionNoticeText));
+  assert.ok(
+    qListHtml.indexOf(questionNoticeText) < qListHtml.indexOf("known non-archimedean metric"),
+  );
+  for (const text of [JSON.stringify(qListJson), qListMd, qListHtml])
+    assert.ok(!/input_digest|context_digest|configuration_digest|policy_version/.test(text));
 
   // Exact links and complete collection browsing use the same bounded
   // scientific snapshot. The second source is outside a one-admission page.
@@ -606,11 +680,13 @@ await runLocalWorkerJourney(async (context) => {
     `${origin}/p/${problemId}/questions.json?target=${question1Id}&through=${question1.seq}`,
   );
   assert.equal(historicalQuestion.status, 200);
+  const historicalQuestionBody = await historicalQuestion.json();
   assert.equal(
-    (await historicalQuestion.json()).questions[0].status,
+    historicalQuestionBody.questions[0].status,
     "open",
     "a later lease and answer cannot cross the public snapshot",
   );
+  assert.deepEqual(historicalQuestionBody.questions[0].screening_notice, questionWarning);
   const filteredQuestionPage = await worker.fetch(
     `${origin}/p/${problemId}/questions.json?through=${qListJson.cursor}&limit=1&status=withdrawn`,
   );

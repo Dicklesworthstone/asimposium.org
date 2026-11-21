@@ -69,6 +69,26 @@ test("research questions render complete authored work with exact target links a
   expect(html).toContain('href="/r/p/P-DEMO/events/12"');
 });
 
+test("question context notices render before scientific text and survive the public reader", async () => {
+  const notices = [
+    { category: "dual-use-boundary", action: "published-with-warning", notice: "screening-warning" },
+    { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
+  ] as const;
+  for (const notice of notices) {
+    globalThis.fetch = mock(async () => Response.json(face({
+      questions: [{ ...question(), screening_notice: notice }],
+    }))) as unknown as typeof fetch;
+    const html = renderToStaticMarkup(await QuestionsPage(props()));
+    expect(html).toContain(`data-screening-notice="${notice.notice}"`);
+    expect(html.indexOf(`data-screening-notice="${notice.notice}"`)).toBeLessThan(html.indexOf("boundary estimate"));
+    expect(html).not.toMatch(/input_digest|context_digest|policy_version/);
+    expect(html).not.toContain("Scientific approval");
+  }
+  const legacy = renderToStaticMarkup(<QuestionsView result={{ state: "ok", origin: PRODUCTION_STOA_ORIGIN,
+    data: face() }} query={{ limit: 8 }} />);
+  expect(legacy).not.toContain("data-screening-notice=");
+});
+
 test("filtered question navigation advances through a wholly omitted page without losing its snapshot", async () => {
   globalThis.fetch = mock(async () => Response.json(face({
     after: 12, scanned_through: 25, next_after: 25, status: "resolved", questions: [],
@@ -151,6 +171,8 @@ test("question readers reject mismatched snapshot identity, filters and continua
     { target: "Q-12" }, { scanned_through: 81 }, { next_after: 80 },
     { questions: [question(), question()] }, { questions: [question(81)] },
     { questions: [{ ...question(), problem_id: "P-OTHER" }] },
+    { questions: [{ ...question(), screening_notice: { category: "dual-use-boundary", action: "published-with-warning", notice: "none" } }] },
+    { questions: [{ ...question(), screening_notice: { category: "off-topic", action: "published-with-warning", notice: "off-scope", detector: "private" } }] },
   ]) {
     response = face(patch as Partial<QuestionsListResponse>);
     expect(await stoaFetchQuestions("P-DEMO", undefined, { through: "80", limit: "1" }))
