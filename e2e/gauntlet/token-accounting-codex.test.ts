@@ -191,6 +191,7 @@ describe("first-promotion Codex request accounting", () => {
       cacheWriteInputTokens: 0,
       outputTokens: 10,
       reasoningOutputTokens: 0,
+      uncachedTokens: 110,
       totalTokens: 110,
     });
     expect(
@@ -274,6 +275,7 @@ describe("first-promotion Codex request accounting", () => {
     };
     expect(codexUsageToFirstPromotion(events, expected, BASE + 30)).toMatchObject({
       totalTokens: 110,
+      uncachedTokens: 60,
       cachedInputTokens: 50,
       cacheWriteInputTokens: 3,
       reasoningOutputTokens: 4,

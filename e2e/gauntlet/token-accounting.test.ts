@@ -201,6 +201,7 @@ describe("Claude request intervals through first promotion", () => {
       outputTokens: 4,
       cacheReadInputTokens: 200,
       cacheCreationInputTokens: 100,
+      uncachedTokens: 106,
       totalTokens: 306,
     });
     expect(whole()?.totalTokens).toBe(764);

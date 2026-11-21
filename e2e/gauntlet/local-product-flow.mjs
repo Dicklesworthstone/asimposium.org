@@ -871,6 +871,7 @@ async function main() {
               o.code === "MISSING_FALSIFIER" &&
               o.injected !== true,
           ));
+      const firstPromotion = isHarness ? agentOutcome.first_promotion_token_usage : null;
       const record = {
         attempt: index,
         agent: isHarness ? mode : `reference:${mode}`,
@@ -885,7 +886,7 @@ async function main() {
           ? {
               tokens: agentOutcome.tokens,
               token_usage: agentOutcome.token_usage,
-              first_promotion_token_usage: agentOutcome.first_promotion_token_usage,
+              first_promotion_token_usage: firstPromotion,
               stdin_write_failed: agentOutcome.stdin_write_failed,
               duration_ms: agentOutcome.duration_ms,
               transcript_sha256: agentOutcome.transcript_sha256,
@@ -906,6 +907,14 @@ async function main() {
         approval: approvalTrace,
         requests: facts.observations.length,
         ...servedBudget(facts.observations, isHarness),
+        // Model API requests are counted by the reconciled provider intervals.
+        // Keep these separate from HTTP requests to the site and CLI turns.
+        model_requests_to_first_promotion: firstPromotion?.requests ?? null,
+        uncached_tokens_to_first_promotion: firstPromotion?.uncachedTokens ?? null,
+        cache_read_tokens_to_first_promotion: firstPromotion
+          ? firstPromotion.totalTokens - firstPromotion.uncachedTokens
+          : null,
+        total_tokens_to_first_promotion: firstPromotion?.totalTokens ?? null,
         // Where the agent's requests went (route shape and status class only).
         request_histogram: Object.entries(
           facts.observations.reduce((counts, o) => {

@@ -174,6 +174,8 @@ export interface CodexPromotionTokenUsage extends TurnUsage {
   readonly scope: "first_promotion";
   readonly source: "codex_websocket_intervals";
   readonly requests: number;
+  /** All tokens except cache reads. Cache writes are already included in input. */
+  readonly uncachedTokens: number;
   readonly totalTokens: number;
 }
 
@@ -372,11 +374,13 @@ export function codexUsageToFirstPromotion(
   const prior = responses.filter((event) => event.atMs < firstPromotionAt);
   const sum = sumUsage(prior);
   if (prior.length === 0 || sum === null) return null;
+  const totalTokens = sum.inputTokens + sum.outputTokens;
   return {
     scope: "first_promotion",
     source: "codex_websocket_intervals",
     requests: prior.length,
     ...sum,
-    totalTokens: sum.inputTokens + sum.outputTokens,
+    uncachedTokens: totalTokens - sum.cachedInputTokens,
+    totalTokens,
   };
 }

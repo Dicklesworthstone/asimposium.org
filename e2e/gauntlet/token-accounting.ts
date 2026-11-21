@@ -120,6 +120,8 @@ export interface ClaudePromotionTokenUsage {
   readonly cacheCreationInputTokens: number;
   readonly cacheReadInputTokens: number;
   readonly outputTokens: number;
+  /** All tokens except cache reads, including cache creation and output. */
+  readonly uncachedTokens: number;
   readonly totalTokens: number;
 }
 
@@ -321,6 +323,7 @@ export function claudeUsageToFirstPromotion(
     source: "claude_request_spans",
     requests,
     ...prior,
+    uncachedTokens: totalTokens - prior.cacheReadInputTokens,
     totalTokens,
   };
 }
