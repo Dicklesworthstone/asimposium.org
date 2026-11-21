@@ -4,6 +4,8 @@
  * (`e2e/playwright/target-surfaces.spec.ts`, bead `asimposiumorg-rc-staging-smoke-playwright-real-4wnk`).
  */
 
+import { SITE } from "../../apps/web/lib/site.ts";
+
 export const PRODUCTION_HOSTNAMES = new Set([
   "a.asimposium.org",
   "artifacts.asimposium.org",
@@ -86,6 +88,29 @@ export function validateStagingOrigin(
   }
 
   return parsed.origin;
+}
+
+/** Probe the selected Agora's image renderer even when its metadata uses the canonical URL. */
+export function targetOgImageUrl(
+  href: string,
+  agoraOrigin: string,
+  options: StagingOriginOptions = {},
+): URL {
+  const target = new URL(validateStagingOrigin("og:image target", agoraOrigin, options));
+  const advertised = new URL(href, target);
+  if (
+    advertised.username ||
+    advertised.password ||
+    advertised.hash ||
+    (advertised.origin !== target.origin && advertised.origin !== SITE.agora)
+  ) {
+    throw new Error("og:image must identify an image on the selected or canonical Agora.");
+  }
+  // Assign path and query as components. A path starting with two slashes
+  // must still be requested from the preflighted Agora.
+  target.pathname = advertised.pathname;
+  target.search = advertised.search;
+  return target;
 }
 
 export function validateProblemId(candidate: string): boolean {

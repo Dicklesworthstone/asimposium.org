@@ -6,6 +6,7 @@ import {
   formatPlaywrightTelemetry,
   isPrivateCacheControl,
   parsePngDimensions,
+  targetOgImageUrl,
   validateProblemId,
   validateStagingOrigin,
 } from "./target-surfaces.helpers";
@@ -272,37 +273,44 @@ async function verifyOgImage1200x630(
   ogImageHref: string | null,
 ): Promise<void> {
   expect(ogImageHref, `${pagePath} must publish an og:image meta tag`).toBeTruthy();
-  const resolved = new URL(ogImageHref as string, agoraOrigin);
-  // Refuse production origins even if an og:image tag points there.
-  validateStagingOrigin("og:image", resolved.origin, { allowLoopbackRehearsal });
+  const resolved = targetOgImageUrl(ogImageHref as string, agoraOrigin, { allowLoopbackRehearsal });
 
   const response = await request.get(resolved.toString(), {
     failOnStatusCode: false,
+    maxRedirects: 0,
     timeout: 15_000,
     headers: { "user-agent": USER_AGENT },
   });
   expect(response.status(), `OG image for ${pagePath} must return HTTP 200`).toBe(200);
-  const contentType = (response.headers()["content-type"] ?? "").toLowerCase();
-  expect(contentType, `OG image for ${pagePath} must be image/png`).toContain("image/png");
+  // The home page uses the site's static JPEG. Scientific cards use the
+  // PNG renderer and must keep their lossless output and exact dimensions.
+  const expectedType = pagePath === "/" ? "image/jpeg" : "image/png";
+  const contentType = response.headers()["content-type"]?.split(";")[0]?.trim().toLowerCase();
+  expect(contentType, `OG image for ${pagePath} must be ${expectedType}`).toBe(expectedType);
 
-  const pngBytes = new Uint8Array(await response.body());
-  const dims = parsePngDimensions(pngBytes);
-  expect(dims, `OG image for ${pagePath} must carry a valid PNG IHDR`).toEqual({
-    width: 1200,
-    height: 630,
-  });
+  const imageBytes = await response.body();
+  if (expectedType === "image/png") {
+    expect(
+      parsePngDimensions(imageBytes),
+      `OG image for ${pagePath} must carry a valid PNG IHDR`,
+    ).toEqual({ width: 1200, height: 630 });
+  } else {
+    expect(imageBytes.subarray(0, 3).toString("hex"), "Home OG image must contain JPEG bytes").toBe(
+      "ffd8ff",
+    );
+  }
 
   // Decode in real Chromium to verify browser image decoding succeeds cleanly.
   const page = await context.newPage();
   try {
-    const dataUrl = `data:image/png;base64,${Buffer.from(pngBytes).toString("base64")}`;
+    const dataUrl = `data:${expectedType};base64,${imageBytes.toString("base64")}`;
     const decoded = await page.evaluate(async (src) => {
       const img = new Image();
       img.src = src;
       await img.decode();
       return { width: img.naturalWidth, height: img.naturalHeight };
     }, dataUrl);
-    expect(decoded, `Chromium failed to decode 1200x630 PNG for ${pagePath}`).toEqual({
+    expect(decoded, `Chromium failed to decode a 1200x630 image for ${pagePath}`).toEqual({
       width: 1200,
       height: 630,
     });
@@ -337,7 +345,7 @@ if (process.env.ASIMPOSIUM_PLAYWRIGHT_ENTRY === "1") {
     expect(Number.isSafeInteger(Number(cursorBody.trim()))).toBe(true);
   });
 
-  test("Agora anonymous real Chromium rendering across public routes (JS on and JS off, strict CSP, KaTeX, honest labels, 1200x630 OG PNG)", async ({
+  test("Agora anonymous Chromium rendering, strict CSP, honest labels and 1200x630 share cards", async ({
     browser,
     request,
   }) => {

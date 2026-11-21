@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { deflateSync } from "node:zlib";
@@ -11,6 +11,7 @@ import {
   formatPlaywrightTelemetry,
   isPrivateCacheControl,
   parsePngDimensions,
+  targetOgImageUrl,
   validateProblemId,
   validateStagingOrigin,
 } from "./target-surfaces.helpers";
@@ -47,6 +48,7 @@ async function runAsync(
 }
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
+const HOME_OG_JPEG = readFileSync(join(REPO_ROOT, "apps/web/public/og.jpg"));
 
 /** Builds a valid, decodable 1200x630 RGB PNG in memory without external deps. */
 function makeValidPng(width: number, height: number): Buffer {
@@ -97,6 +99,28 @@ function makeValidPng(width: number, height: number): Buffer {
 }
 
 const VALID_1200_630_PNG = makeValidPng(1200, 630);
+
+test("canonical Agora metadata is probed only on the selected target", () => {
+  const staging = "https://staging.asimposium.org";
+  expect(targetOgImageUrl("https://asimposium.org/opengraph-image?v=1", staging).href).toBe(
+    `${staging}/opengraph-image?v=1`,
+  );
+  expect(targetOgImageUrl("/opengraph-image", staging).origin).toBe(staging);
+  expect(targetOgImageUrl("https://asimposium.org//elsewhere.invalid/og", staging).href).toBe(
+    `${staging}//elsewhere.invalid/og`,
+  );
+  for (const href of [
+    "https://a.asimposium.org/og.png",
+    "https://other.asimposium.org/og.png",
+    "https://user@asimposium.org/og.png",
+    "/og.png#not-a-resource-path",
+  ]) {
+    expect(() => targetOgImageUrl(href, staging)).toThrow("selected or canonical Agora");
+  }
+  expect(() => targetOgImageUrl("/og.png", "https://asimposium.org")).toThrow(
+    "canonical production",
+  );
+});
 
 describe("target-surfaces helpers & fail-closed guards (asimposiumorg-rc-staging-smoke-playwright-real-4wnk)", () => {
   test("SHOULD-FAIL CONTROL 1: refuses canonical production origins in both staging and loopback modes", () => {
@@ -296,6 +320,12 @@ async function startLoopbackPair(options: LoopbackFixtureOptions): Promise<{
         "asimp.session=valid-loopback-sponsor",
       );
 
+      if (path === "/og.jpg") {
+        return new Response(new Uint8Array(HOME_OG_JPEG), {
+          status: 200,
+          headers: { "content-type": "image/jpeg", "cache-control": "public, max-age=60" },
+        });
+      }
       if (path === "/og.png") {
         return new Response(new Uint8Array(VALID_1200_630_PNG), {
           status: 200,
@@ -368,7 +398,7 @@ async function startLoopbackPair(options: LoopbackFixtureOptions): Promise<{
         return new Response(
           `<!doctype html><html><head>
         <title>ASImposium ${path}</title>
-        <meta property="og:image" content="/og.png" />
+        <meta property="og:image" content="https://asimposium.org${path === "/" ? "/og.jpg" : "/og.png"}" />
       </head><body>
         <h1>ASImposium Public Surface ${path}</h1>
         <span data-disposition="strongly-supported">strongly-supported</span>
