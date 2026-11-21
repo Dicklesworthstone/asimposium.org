@@ -865,7 +865,7 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
     expect(parsed.degraded_reason).toBeUndefined();
     expect(parsed.primary_move?.move).toBe("state-claim");
     expect(parsed.primary_move?.contract.target_contract).toBe(
-      "/schemas/sessions.v1/promote_request.json",
+      "/schemas/sessions.v1/promote_saved_draft_request.json",
     );
     expect(JSON.stringify(parsed.primary_move?.contract.preparation)).toContain("workshop_first");
     expect(parsed.alternatives).toEqual([]);
