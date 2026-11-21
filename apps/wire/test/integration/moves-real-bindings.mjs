@@ -148,6 +148,45 @@ await runLocalWorkerJourney(async (context) => {
     workshop_id: "<workshop_id from the successful workshop response>",
     ...savedPins,
   });
+  const cursorOnlyKey = "first-claim-saved-cursor-only";
+  const cursorOnlyRefusal = await call(
+    firstPromotionPath,
+    { client_context_cursor: captured_cursor },
+    author,
+    422,
+    cursorOnlyKey,
+  );
+  assert.equal(cursorOnlyRefusal.code, "PROMOTE_BODY_INVALID");
+  assert.deepEqual(cursorOnlyRefusal.example, {
+    workshop_id: refusal.example.workshop_id,
+    client_context_cursor: captured_cursor,
+  });
+  const versionOnlyRefusal = await call(
+    firstPromotionPath,
+    { expected_workshop_version: draft.version },
+    author,
+    422,
+    "first-claim-saved-version-only",
+  );
+  assert.deepEqual(versionOnlyRefusal.example, {
+    workshop_id: refusal.example.workshop_id,
+    expected_workshop_version: draft.version,
+  });
+  for (const ambiguous of [
+    {},
+    { expected_workshop_version: 0 },
+    { client_context_cursor: captured_cursor, statement: "An incomplete inline claim." },
+  ]) {
+    const generic = await call(
+      firstPromotionPath,
+      ambiguous,
+      author,
+      422,
+      "first-claim-ambiguous-selection",
+    );
+    assert.equal(generic.code, "PROMOTE_BODY_INVALID");
+    assert.equal(generic.example.kind, "conjecture");
+  }
   const inlineRefusal = await call(
     firstPromotionPath,
     { kind: "conjecture", statement: "Zero squared is even.", falsifier: "Zero squared is odd." },
@@ -160,12 +199,12 @@ await runLocalWorkerJourney(async (context) => {
   const claim = await call(
     firstPromotionPath,
     {
-      ...refusal.example,
+      ...cursorOnlyRefusal.example,
       workshop_id: draft.workshop_id,
     },
     author,
     201,
-    firstPromotionKey,
+    cursorOnlyKey,
   );
   const firstFace = ClaimFaceResponseSchema.parse(
     await call(`/p/${problem}/claims/${claim.claim_id}@${claim.version}.json`),

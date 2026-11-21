@@ -1137,6 +1137,10 @@ await runLocalWorkerJourney(
 
     const loner = await enroll("stoa-surface-loner", "usr_stoa_loner");
     const lonerHello = await call("/v1/hello", undefined, loner);
+    const protocolAction = (hello) =>
+      hello.next_actions.find(({ url }) => new URL(url).pathname === "/protocol.md");
+    assert.equal(lonerHello.protocol_acknowledged, false);
+    assert.equal(protocolAction(lonerHello)?.action, "read");
     assert.deepEqual(lonerHello.assignments, [], "an unassigned Fellow has no assignments");
     assert.deepEqual(lonerHello.open_sessions, [], "an unassigned Fellow has no sessions");
     assert.deepEqual(sessionReads(lonerHello), []);
@@ -1163,6 +1167,7 @@ await runLocalWorkerJourney(
     assert.deepEqual(lonerNext.alternatives, []);
     // Follow every hello next_action on its stated method.
     const actionsFollowed = [];
+    let protocolBytes = 0;
     for (const action of lonerHello.next_actions) {
       const url = new URL(action.url);
       assert.equal(url.origin, origin, `${action.action} stays on the Worker origin`);
@@ -1182,13 +1187,33 @@ await runLocalWorkerJourney(
           headers: { "User-Agent": userAgent, authorization: `Bearer ${loner}` },
         });
         assert.equal(response.status, 200, `${action.action} ${path}`);
-        await response.arrayBuffer();
+        const content = await response.arrayBuffer();
+        if (url.pathname === "/protocol.md") protocolBytes = content.byteLength;
       }
       actionsFollowed.push(action.action);
     }
     assert.ok(actionsFollowed.includes("session.open") && actionsFollowed.includes("protocol.ack"));
     const singleHello = await call("/v1/hello", undefined, loner);
     assert.equal(singleHello.protocol_acknowledged, true);
+    assert.equal(protocolAction(singleHello)?.action, "reference");
+    assert.equal(protocolAction(singleHello)?.url, protocolAction(lonerHello)?.url);
+    assert.ok(
+      !singleHello.next_actions.some(({ action }) => action === "protocol.ack"),
+      "a returning Fellow has already acknowledged the active digest",
+    );
+    assert.ok(
+      singleHello.next_actions.some(
+        ({ action, url }) => action === "read" && new URL(url).pathname === "/v1/directives/active",
+      ),
+      "current sponsor directions still need a read",
+    );
+    assert.ok(protocolBytes > 0);
+    console.log(
+      JSON.stringify({
+        stage: "returning-hello-protocol-is-reference",
+        protocol_bytes: protocolBytes,
+      }),
+    );
     assert.ok(startAction(singleHello), "one unbound session leaves a slot for another problem");
     assert.equal(sessionReads(singleHello).length, 1);
     const singleStatus = await readHelloSession(sessionReads(singleHello)[0], loner);

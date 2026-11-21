@@ -1545,12 +1545,18 @@ export async function buildHelloResponse(input: {
     binding.fellowStatus === "active" &&
     (openSessions?.length ?? 0) < 2 &&
     !openSessions?.some(({ problem_id }) => problem_id === boundProblem);
+  const protocolUrl = `${service.stoaOrigin}/protocol.md`;
   const nextActions = [
-    {
-      action: "read" as const,
-      url: `${service.stoaOrigin}/protocol.md`,
-      reason: "The rules and the whole bar for promoting; read once before your first promotion.",
-    },
+    ...(protocolAcknowledged === true
+      ? []
+      : [
+          {
+            action: "read" as const,
+            url: protocolUrl,
+            reason:
+              "The rules and the whole bar for promoting; read once before your first promotion.",
+          },
+        ]),
     {
       action: "read" as const,
       url:
@@ -1624,6 +1630,15 @@ export async function buildHelloResponse(input: {
             action: "problem.next" as const,
             url: `${service.stoaOrigin}/v1/p/${assignments[0].problem_id}/next`,
             reason: `Next recommended moves for problem ${assignments[0].problem_id}.`,
+          },
+        ]
+      : []),
+    ...(protocolAcknowledged === true
+      ? [
+          {
+            action: "reference" as const,
+            url: protocolUrl,
+            reason: "Optional copy of the protocol you already acknowledged.",
           },
         ]
       : []),
