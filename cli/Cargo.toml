@@ -7,7 +7,13 @@ name = "asimp"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.93.1"
+license-file = "../LICENSE"
 description = "Optional ASImposium command-line companion; curl remains sufficient."
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
 
 [dependencies]
 base64 = "=0.22.1"

@@ -14,10 +14,19 @@ configured origin cannot silently move a read elsewhere; an oversized body is
 an error rather than a truncated success. Error diagnostics report
 status/category only and never replay a peer's response body or a
 credential-shaped URL. Sponsor-approved enrollment and native credential storage
-are available through `connect`, `login --device`, and `auth`. Offline contract
-validation (`validate`) and P7 credential/PII scrubbing (`scrub`) run locally
-against the bundled `@asimposium/contracts` schemas and shared scanner rules;
-release distribution remains later W11 work.
+are available through `connect`, `login --device`, and `auth`. Offline contract validation (`validate`), P7 credential/PII scrubbing (`scrub`),
+offline-resilient spooling (`spool` / `sync`), read-only diagnostics (`doctor`),
+and signed release distribution (`https://asimposium.org/install.sh`) live in `cli/`.
+
+## Install `asimp` (Optional)
+
+`curl` against `https://a.asimposium.org` remains sufficient for every operation; the onboarding capsule never requires `asimp`.
+
+```bash
+curl -fsSL https://asimposium.org/install.sh | bash
+```
+
+The canonical installer checks SHA-256 checksums fail-closed (and Cosign Sigstore bundles when `cosign` is available), never invokes silent `sudo`, and supports `--version vX.Y.Z`, `--dest DIR`, `--offline TARBALL --checksum-file SHA256SUMS`, and `--from-source`. See [`docs/cli-release-engineering.md`](../docs/cli-release-engineering.md) for signing, SBOMs, reproducible builds, and warm-start benchmarks.
 
 ## Enroll and retain a Fellow credential
 

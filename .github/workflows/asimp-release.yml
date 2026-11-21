@@ -1,0 +1,267 @@
+name: asimp CLI Release
+
+on:
+  push:
+    tags:
+      - "asimp-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without leading v (e.g. 0.1.0)"
+        required: true
+        type: string
+      dry_run:
+        description: "Build, verify, and attest without publishing a GitHub Release"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: asimp-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  supply-chain-gate:
+    name: Supply-Chain Audit, Lint & Test Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.1"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli -> target
+
+      - name: Format, Clippy, and Locked Tests
+        run: |
+          cargo fmt --manifest-path cli/Cargo.toml --check
+          cargo clippy --locked --manifest-path cli/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path cli/Cargo.toml
+
+      - name: Security Audit (cargo-audit)
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          cargo-lock-path: cli/Cargo.lock
+
+      - name: Policy Check (cargo-deny)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: cli/Cargo.toml
+          arguments: --all-features
+
+      - name: Shellcheck Installer & Release Packager
+        run: |
+          shellcheck -x apps/web/public/install.sh scripts/asimp-release-package.sh
+
+  build:
+    name: Build & Benchmark (${{ matrix.target }})
+    needs: supply-chain-gate
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            musl_pkg: musl-tools
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            musl_pkg: musl-tools
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            musl_pkg: ""
+          - os: macos-14
+            target: aarch64-apple-darwin
+            musl_pkg: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VER="${{ inputs.version }}"
+          else
+            VER="${GITHUB_REF_NAME#asimp-v}"
+          fi
+          VER="${VER#v}"
+          if [[ ! "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version: $VER" >&2
+            exit 1
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "source_date_epoch=$(git log -1 --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Linux musl toolchain
+        if: matrix.musl_pkg != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.musl_pkg }}
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.1"
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli -> target
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('cli/Cargo.lock') }}
+
+      - name: Build release binary (reproducible path remapping)
+        env:
+          RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/asimposium-src"
+        run: |
+          cargo build --release --locked --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Package deterministic tarball, SHA256SUMS, SBOM, and version-pinned installer
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.ver.outputs.source_date_epoch }}
+        run: |
+          bash scripts/asimp-release-package.sh \
+            --binary "cli/target/${{ matrix.target }}/release/asimp" \
+            --target "${{ matrix.target }}" \
+            --version "${{ steps.ver.outputs.version }}" \
+            --out-dir "dist/${{ matrix.target }}"
+
+      - name: Generate SPDX SBOM with Syft
+        uses: anchore/sbom-action@v0
+        with:
+          path: "dist/${{ matrix.target }}/asimp-v${{ steps.ver.outputs.version }}-${{ matrix.target }}.tar.gz"
+          format: spdx-json
+          output-file: "dist/${{ matrix.target }}/asimp-v${{ steps.ver.outputs.version }}-${{ matrix.target }}.spdx.json"
+
+      - name: Setup Bun for warm-start CLI benchmark gate
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - name: Run W11.5 warm-start performance gate (<100ms p95)
+        run: |
+          bun scripts/asimp-bench-startup.ts \
+            --binary "cli/target/${{ matrix.target }}/release/asimp" \
+            --samples 50 \
+            --warmup 5 \
+            --budget-ms 100 \
+            --out "dist/${{ matrix.target }}/asimp-v${{ steps.ver.outputs.version }}-${{ matrix.target }}.startup-bench.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asimp-dist-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/
+          if-no-files-found: error
+
+  installer-e2e-clean-container:
+    name: Clean-Container Installer E2E (debian:bookworm-slim)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: asimp-dist-x86_64-unknown-linux-musl
+          path: dist-linux
+
+      - name: Verify version-pinned installer inside clean container (no rust, no sudo)
+        run: |
+          docker run --rm \
+            -v "${PWD}/dist-linux:/release:ro" \
+            debian:bookworm-slim \
+            bash -euo pipefail -c '
+              apt-get update -qq && apt-get install -y -qq --no-install-recommends bash ca-certificates coreutils curl tar >/dev/null
+              TARBALL=$(ls /release/asimp-v*-x86_64-unknown-linux-musl.tar.gz)
+              INSTALLER=$(ls /release/install-v*.sh)
+              export HOME=/tmp/clean-user
+              mkdir -p "$HOME"
+              bash "$INSTALLER" --offline "$TARBALL" --checksum-file /release/SHA256SUMS --dest "$HOME/.local/bin" --no-gum --verify
+              "$HOME/.local/bin/asimp" --version
+              # Negative control: tampered tarball must fail closed and leave existing binary intact.
+              cp "$TARBALL" /tmp/tampered.tar.gz
+              printf "tamper" >> /tmp/tampered.tar.gz
+              if bash "$INSTALLER" --offline /tmp/tampered.tar.gz --checksum-file /release/SHA256SUMS --dest "$HOME/.local/bin" --force --no-gum; then
+                echo "ERROR: tampered tarball unexpectedly succeeded" >&2
+                exit 1
+              fi
+              "$HOME/.local/bin/asimp" --version
+            '
+
+  sign-and-publish:
+    name: Sign (Cosign + SLSA) & Publish Release
+    needs: [build, installer-e2e-clean-container]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: asimp-dist-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Rebuild combined SHA256SUMS across all targets
+        working-directory: release-assets
+        run: |
+          rm -f SHA256SUMS
+          for f in asimp-v*.tar.gz asimp-v*.cdx.json asimp-v*.spdx.json install-v*.sh; do
+            [[ -f "$f" ]] || continue
+            sha256sum "$f" >> SHA256SUMS.raw
+          done
+          LC_ALL=C sort -k2,2 SHA256SUMS.raw > SHA256SUMS
+          rm -f SHA256SUMS.raw
+          cat SHA256SUMS
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign release artifacts and SHA256SUMS (keyless Sigstore)
+        working-directory: release-assets
+        run: |
+          for f in asimp-v*.tar.gz SHA256SUMS install-v*.sh; do
+            [[ -f "$f" ]] || continue
+            cosign sign-blob --yes "$f" --bundle "${f}.sigstore.json"
+          done
+
+      - name: Attest SLSA Build Provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            release-assets/asimp-v*.tar.gz
+            release-assets/SHA256SUMS
+            release-assets/install-v*.sh
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' || inputs.dry_run == false
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-assets/asimp-v*.tar.gz
+            release-assets/asimp-v*.tar.gz.sha256
+            release-assets/asimp-v*.tar.gz.sigstore.json
+            release-assets/asimp-v*.cdx.json
+            release-assets/asimp-v*.spdx.json
+            release-assets/asimp-v*.startup-bench.json
+            release-assets/install-v*.sh
+            release-assets/install-v*.sh.sigstore.json
+            release-assets/SHA256SUMS
+            release-assets/SHA256SUMS.sigstore.json

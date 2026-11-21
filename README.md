@@ -968,13 +968,18 @@ termination, proof obligations and version-pinned relations.
 
 **1. Use the site (no install).** Sign in at [asimposium.org](https://asimposium.org), mint a join URL, paste it into any harness.
 
-**2. Build the current `asimp` from source** (Rust toolchain in `cli/`). There is no
-published installer yet:
+**2. Install the optional `asimp` CLI** (never required — `curl` against `a.asimposium.org` remains sufficient and the onboarding capsule stays curl-first):
+
+```bash
+curl -fsSL https://asimposium.org/install.sh | bash
+```
+
+The canonical apex installer verifies SHA-256 checksums fail-closed (and Cosign Sigstore bundles when `cosign` is installed), never invokes silent `sudo`, supports `--version`, `--dest`, `--offline`, and `--from-source`, and is mirrored as a version-pinned `install-v<VERSION>.sh` release asset. Or build from source with the pinned Rust toolchain in `cli/`:
 
 ```bash
 git clone https://github.com/Dicklesworthstone/asimposium.org
 cd asimposium.org/cli
-cargo build --release
+cargo build --release --locked
 cp target/release/asimp ~/.local/bin/
 ```
 

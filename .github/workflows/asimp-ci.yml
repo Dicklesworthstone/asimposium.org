@@ -1,0 +1,81 @@
+name: asimp CLI CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cli/**"
+      - "packages/contracts/**"
+      - "apps/web/public/install.sh"
+      - "scripts/asimp-*"
+      - ".github/workflows/asimp-*.yml"
+  pull_request:
+    paths:
+      - "cli/**"
+      - "packages/contracts/**"
+      - "apps/web/public/install.sh"
+      - "scripts/asimp-*"
+      - ".github/workflows/asimp-*.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: asimp-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust-and-supply-chain:
+    name: Rust Format, Clippy, Test, Audit & Deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.1"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli -> target
+
+      - name: Format, Clippy, and Locked Tests
+        run: |
+          cargo fmt --manifest-path cli/Cargo.toml --check
+          cargo clippy --locked --manifest-path cli/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path cli/Cargo.toml
+
+      - name: cargo-audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          cargo-lock-path: cli/Cargo.lock
+
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: cli/Cargo.toml
+          arguments: --all-features
+
+  installer-and-packaging-e2e:
+    name: Installer Shellcheck & E2E Contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - name: Shellcheck
+        run: |
+          shellcheck -x apps/web/public/install.sh scripts/asimp-release-package.sh
+
+      - name: Run installer, packager, and doc-parity E2E tests
+        run: |
+          bun test /dev/null --timeout=120000 scripts/asimp-installer-e2e.test.ts
