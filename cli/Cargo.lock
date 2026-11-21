@@ -95,9 +95,11 @@ dependencies = [
  "clap",
  "flate2",
  "jsonschema",
+ "ring",
  "serde_json",
  "ureq",
  "url",
+ "zeroize",
 ]
 
 [[package]]

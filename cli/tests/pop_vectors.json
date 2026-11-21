@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "standard": "RFC 9421 HTTP Message Signatures (alg=ed25519) + RFC 9530 Content-Digest",
+  "credential_profile": "http-message-signature",
+  "tag": "asimposium-pop-v1",
+  "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "public_key_b64url": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+  "key_id": "ed25519:21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9",
+  "vectors": [
+    {
+      "name": "get-hello-no-body",
+      "method": "GET",
+      "target_uri": "https://a.asimposium.org/v1/hello",
+      "authorization": "Bearer asimp_ag_01JXYZ4K6QABCDEFGHJKMNPQRS_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "body": null,
+      "created": 1795240000,
+      "expires": 1795240120,
+      "nonce": "vec-get-nonce-0123456789abcdef",
+      "content_digest": null,
+      "signature_input": "sig1=(\"@method\" \"@authority\" \"@target-uri\" \"authorization\");created=1795240000;expires=1795240120;nonce=\"vec-get-nonce-0123456789abcdef\";keyid=\"ed25519:21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\";alg=\"ed25519\";tag=\"asimposium-pop-v1\"",
+      "signature_base": "\"@method\": GET\n\"@authority\": a.asimposium.org\n\"@target-uri\": https://a.asimposium.org/v1/hello\n\"authorization\": Bearer asimp_ag_01JXYZ4K6QABCDEFGHJKMNPQRS_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n\"@signature-params\": (\"@method\" \"@authority\" \"@target-uri\" \"authorization\");created=1795240000;expires=1795240120;nonce=\"vec-get-nonce-0123456789abcdef\";keyid=\"ed25519:21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\";alg=\"ed25519\";tag=\"asimposium-pop-v1\"",
+      "signature": "sig1=:Iros+3mwO1p2yliRrxKNqZo0xswVz9mAr0vxSCI2V03jBM0yDHT6+WOLBM4plyktrGOQXI8tdPbh5WlRZEJ2CA==:"
+    },
+    {
+      "name": "post-session-open-json-body",
+      "method": "POST",
+      "target_uri": "https://a.asimposium.org/v1/sessions",
+      "authorization": "Bearer asimp_ag_01JXYZ4K6QABCDEFGHJKMNPQRS_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "body": "{\"problem_id\":\"P-4DSP\",\"intent\":\"explore\"}",
+      "created": 1795240000,
+      "expires": 1795240120,
+      "nonce": "vec-post-nonce-fedcba9876543210",
+      "content_digest": "sha-256=:xSlO6ZRIjlBiFDuTWZ9Gy46R3etGPZq8gHBmXmhsOOY=:",
+      "signature_input": "sig1=(\"@method\" \"@authority\" \"@target-uri\" \"authorization\" \"content-digest\");created=1795240000;expires=1795240120;nonce=\"vec-post-nonce-fedcba9876543210\";keyid=\"ed25519:21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\";alg=\"ed25519\";tag=\"asimposium-pop-v1\"",
+      "signature_base": "\"@method\": POST\n\"@authority\": a.asimposium.org\n\"@target-uri\": https://a.asimposium.org/v1/sessions\n\"authorization\": Bearer asimp_ag_01JXYZ4K6QABCDEFGHJKMNPQRS_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n\"content-digest\": sha-256=:xSlO6ZRIjlBiFDuTWZ9Gy46R3etGPZq8gHBmXmhsOOY=:\n\"@signature-params\": (\"@method\" \"@authority\" \"@target-uri\" \"authorization\" \"content-digest\");created=1795240000;expires=1795240120;nonce=\"vec-post-nonce-fedcba9876543210\";keyid=\"ed25519:21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\";alg=\"ed25519\";tag=\"asimposium-pop-v1\"",
+      "signature": "sig1=:fbuSmyTMkRHMeUS1EE6BjA12VVMMMqCRiTImtEQNycCQ/F9Zn1/w5i5qs9IQXVGdSp+F67E+zIxuCG4kGXwKDw==:"
+    }
+  ]
+}

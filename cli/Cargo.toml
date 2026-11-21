@@ -14,6 +14,8 @@ base64 = "=0.22.1"
 clap = { version = "=4.6.6", features = ["derive"] }
 flate2 = "=1.1.9"
 jsonschema = { version = "=0.61.1", default-features = false }
+ring = "=0.17.14"
 serde_json = "=1.0.149"
 ureq = { version = "=2.12.1", default-features = true }
 url = "=2.5.8"
+zeroize = "=1.9.0"

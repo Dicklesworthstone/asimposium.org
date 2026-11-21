@@ -2,20 +2,35 @@
 //! written to a configuration file, subprocess argument, or diagnostic.
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use ring::{
+    aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey},
+    pbkdf2::{self, PBKDF2_HMAC_SHA256},
+    rand::{SecureRandom, SystemRandom},
+};
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
+    num::NonZeroU32,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
+use zeroize::Zeroizing;
 
-pub(crate) const KEYCHAIN_UNAVAILABLE: &str = "The operating-system keychain is unavailable or locked. On Linux install secret-tool and unlock a Secret Service keyring; on macOS unlock your login keychain. No enrollment request was sent unless a saved flow already exists. Headless callers can continue using sponsor-approved ASIMP_TOKEN and the documented curl enrollment flow.";
+pub(crate) const KEYCHAIN_UNAVAILABLE: &str = "The operating-system keychain is unavailable or locked. On Linux install secret-tool and unlock a Secret Service keyring; on macOS unlock your login keychain. Alternatively use the encrypted file store (~/.asimp/credentials.enc with ASIMP_KEYSTORE_PASSPHRASE_FILE/FD), or paste the URL instead / use ASIMP_TOKEN with the documented curl enrollment flow. No enrollment request was sent unless a saved flow already exists.";
 const SERVICE: &str = "org.asimposium.cli.v1";
 const MAX_RECORD_BYTES: usize = 6_000;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(15);
+const ENCRYPTED_STORE_VERSION: u32 = 1;
+const ENCRYPTED_STORE_KDF: &str = "pbkdf2-hmac-sha256";
+const ENCRYPTED_STORE_AEAD: &str = "chacha20-poly1305";
+pub const ENCRYPTED_STORE_DEFAULT_ITERATIONS: u32 = 600_000;
+const ENCRYPTED_STORE_MIN_ITERATIONS: u32 = 100_000;
+const ENCRYPTED_STORE_MAX_FILE_BYTES: usize = 32 * 1024;
+const ENCRYPTED_STORE_SALT_LEN: usize = 16;
+const ENCRYPTED_STORE_NONCE_LEN: usize = 12;
 
-pub(crate) trait CredentialStore {
+pub trait CredentialStore {
     fn load(&mut self) -> Result<Option<String>, &'static str>;
     fn save(&mut self, value: &str) -> Result<(), &'static str>;
 }
@@ -28,11 +43,32 @@ pub(crate) fn valid_identity(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
+/// Accepts production (`https://a.asimposium.org`), staging (`https://a-staging.asimposium.org`),
+/// and operator-owned HTTPS preview subdomains (`https://<label>.asimposium.org`) with no port,
+/// credentials, path, query, or fragment.
 pub(crate) fn trusted_origin(origin: &str) -> bool {
-    matches!(
+    if matches!(
         origin,
         "https://a.asimposium.org" | "https://a-staging.asimposium.org"
-    )
+    ) {
+        return true;
+    }
+    let Some(host) = origin.strip_prefix("https://") else {
+        return false;
+    };
+    if host.contains(['/', ':', '?', '#', '@']) {
+        return false;
+    }
+    let Some(prefix) = host.strip_suffix(".asimposium.org") else {
+        return false;
+    };
+    !prefix.is_empty()
+        && prefix.len() <= 63
+        && !prefix.starts_with('-')
+        && !prefix.ends_with('-')
+        && prefix
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 #[derive(Clone, Copy)]
@@ -262,17 +298,386 @@ pub(crate) fn lock_identity(origin: &str, identity: &str) -> Result<File, &'stat
     let home = std::env::var_os("HOME")
         .ok_or("HOME is required for the local enrollment lock; no credential is written there.")?;
     let root = PathBuf::from(home).join(".asimp");
-    lock_at(
-        &root,
-        &format!(
-            "auth-{}-{identity}.lock",
-            if origin == crate::DEFAULT_ORIGIN {
-                "production"
-            } else {
-                "staging"
+    let origin_slug = if origin == crate::DEFAULT_ORIGIN {
+        "production".to_string()
+    } else if origin == "https://a-staging.asimposium.org" {
+        "staging".to_string()
+    } else {
+        origin
+            .strip_prefix("https://")
+            .unwrap_or("custom")
+            .replace('.', "_")
+    };
+    lock_at(&root, &format!("auth-{origin_slug}-{identity}.lock"))
+}
+
+/// Encrypted-file credential fallback (`~/.asimp/credentials.enc`) for headless
+/// Linux/Windows environments without OS keychain access (Fable §12).
+///
+/// Security properties:
+/// - Strict `0700` parent directory and `0600` regular non-symlink file perms;
+///   refuses `0644` or symlink files BEFORE reading or writing.
+/// - Audited `ring` PBKDF2-HMAC-SHA256 (600,000 iterations default) +
+///   ChaCha20-Poly1305 AEAD with fresh 96-bit CSPRNG nonce per write.
+/// - AEAD Additional Authenticated Data binds `"asimp-cred-v1|<origin>|<identity>"`
+///   so ciphertext cannot be transplanted across origins or identities.
+/// - Passphrase is read from `ASIMP_KEYSTORE_PASSPHRASE_FD` or a `0600`
+///   `ASIMP_KEYSTORE_PASSPHRASE_FILE` (NEVER CLI argv) and zeroized on drop.
+/// - Zero plaintext fallback: if unusable, emits the Fable §12 hint
+///   (*"paste the URL instead / use ASIMP_TOKEN"*).
+pub struct EncryptedFileStore {
+    path: PathBuf,
+    origin: String,
+    identity: String,
+    passphrase: Zeroizing<Vec<u8>>,
+    iterations: u32,
+}
+
+impl EncryptedFileStore {
+    pub fn new(
+        path: PathBuf,
+        origin: &str,
+        identity: &str,
+        passphrase: Vec<u8>,
+    ) -> Result<Self, &'static str> {
+        Self::with_iterations(
+            path,
+            origin,
+            identity,
+            passphrase,
+            ENCRYPTED_STORE_DEFAULT_ITERATIONS,
+        )
+    }
+
+    pub fn with_iterations(
+        path: PathBuf,
+        origin: &str,
+        identity: &str,
+        passphrase: Vec<u8>,
+        iterations: u32,
+    ) -> Result<Self, &'static str> {
+        if !trusted_origin(origin) || !valid_identity(identity) {
+            return Err(
+                "Encrypted credential storage requires a trusted *.asimposium.org HTTPS origin and valid --identity; paste the URL instead / use ASIMP_TOKEN.",
+            );
+        }
+        if passphrase.is_empty() {
+            return Err(
+                "Encrypted credential store requires a non-empty passphrase via ASIMP_KEYSTORE_PASSPHRASE_FD or 0600 ASIMP_KEYSTORE_PASSPHRASE_FILE; otherwise paste the URL instead / use ASIMP_TOKEN.",
+            );
+        }
+        if iterations < ENCRYPTED_STORE_MIN_ITERATIONS {
+            return Err(
+                "Encrypted credential store PBKDF2 iteration count is below minimum bound.",
+            );
+        }
+        Ok(Self {
+            path,
+            origin: origin.to_string(),
+            identity: identity.to_string(),
+            passphrase: Zeroizing::new(passphrase),
+            iterations,
+        })
+    }
+
+    /// Reads the keystore passphrase from `ASIMP_KEYSTORE_PASSPHRASE_FILE` (strictly
+    /// `0600` regular non-symlink) or `ASIMP_KEYSTORE_PASSPHRASE_FD` (Unix FD).
+    /// Never reads passphrases from CLI argv.
+    pub fn read_passphrase_from_env() -> Result<Zeroizing<Vec<u8>>, &'static str> {
+        if let Ok(file_path) = std::env::var("ASIMP_KEYSTORE_PASSPHRASE_FILE") {
+            let path = PathBuf::from(&file_path);
+            let meta = std::fs::symlink_metadata(&path)
+                .map_err(|_| "Cannot inspect ASIMP_KEYSTORE_PASSPHRASE_FILE; paste the URL instead / use ASIMP_TOKEN.")?;
+            if !meta.is_file() {
+                return Err(
+                    "ASIMP_KEYSTORE_PASSPHRASE_FILE must be a regular file, not a symlink; paste the URL instead / use ASIMP_TOKEN.",
+                );
             }
-        ),
-    )
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if meta.permissions().mode() & 0o077 != 0 {
+                    return Err(
+                        "ASIMP_KEYSTORE_PASSPHRASE_FILE must have 0600 permissions; paste the URL instead / use ASIMP_TOKEN.",
+                    );
+                }
+            }
+            let mut raw = Zeroizing::new(
+                std::fs::read(&path)
+                    .map_err(|_| "Cannot read ASIMP_KEYSTORE_PASSPHRASE_FILE; paste the URL instead / use ASIMP_TOKEN.")?,
+            );
+            while matches!(raw.last(), Some(b'\n' | b'\r')) {
+                raw.pop();
+            }
+            if raw.is_empty() {
+                return Err(
+                    "ASIMP_KEYSTORE_PASSPHRASE_FILE is empty; paste the URL instead / use ASIMP_TOKEN.",
+                );
+            }
+            return Ok(raw);
+        }
+        #[cfg(unix)]
+        if let Ok(fd_str) = std::env::var("ASIMP_KEYSTORE_PASSPHRASE_FD") {
+            let fd: u32 = fd_str.trim().parse().map_err(
+                |_| "ASIMP_KEYSTORE_PASSPHRASE_FD must be an open file descriptor number.",
+            )?;
+            if fd < 3 {
+                return Err("ASIMP_KEYSTORE_PASSPHRASE_FD must be >= 3 (not stdin/stdout/stderr).");
+            }
+            let fd_path = format!("/dev/fd/{fd}");
+            let file = File::open(&fd_path)
+                .map_err(|_| "Cannot open ASIMP_KEYSTORE_PASSPHRASE_FD via /dev/fd.")?;
+            let mut buf = Zeroizing::new(Vec::new());
+            file.take(4097)
+                .read_to_end(&mut buf)
+                .map_err(|_| "Failed reading ASIMP_KEYSTORE_PASSPHRASE_FD.")?;
+            if buf.len() > 4096 {
+                return Err("ASIMP_KEYSTORE_PASSPHRASE_FD exceeds 4096 bytes.");
+            }
+            while matches!(buf.last(), Some(b'\n' | b'\r')) {
+                buf.pop();
+            }
+            if buf.is_empty() {
+                return Err(
+                    "ASIMP_KEYSTORE_PASSPHRASE_FD was empty; paste the URL instead / use ASIMP_TOKEN.",
+                );
+            }
+            return Ok(buf);
+        }
+        Err(
+            "No encrypted keystore passphrase configured (set ASIMP_KEYSTORE_PASSPHRASE_FILE or ASIMP_KEYSTORE_PASSPHRASE_FD), or paste the URL instead / use ASIMP_TOKEN.",
+        )
+    }
+
+    fn aad_context(&self) -> String {
+        format!("asimp-cred-v1|{}|{}", self.origin, self.identity)
+    }
+
+    fn derive_key(
+        &self,
+        salt: &[u8],
+        iterations: u32,
+    ) -> Result<Zeroizing<[u8; 32]>, &'static str> {
+        let iters = NonZeroU32::new(iterations)
+            .ok_or("Invalid PBKDF2 iteration count in encrypted credential store.")?;
+        let mut key = Zeroizing::new([0u8; 32]);
+        pbkdf2::derive(
+            PBKDF2_HMAC_SHA256,
+            iters,
+            salt,
+            self.passphrase.as_slice(),
+            key.as_mut(),
+        );
+        Ok(key)
+    }
+
+    fn validate_existing_file(&self) -> Result<bool, &'static str> {
+        match std::fs::symlink_metadata(&self.path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(_) => Err(
+                "Cannot inspect encrypted credential store; paste the URL instead / use ASIMP_TOKEN.",
+            ),
+            Ok(meta) => {
+                if !meta.is_file() {
+                    return Err(
+                        "Encrypted credential store must be a regular file, not a symlink; refusing to read.",
+                    );
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if meta.permissions().mode() & 0o077 != 0 {
+                        return Err(
+                            "Encrypted credential store has insecure permissions (must be 0600, refusing 0644/group/world-readable file).",
+                        );
+                    }
+                }
+                if meta.len() as usize > ENCRYPTED_STORE_MAX_FILE_BYTES {
+                    return Err("Encrypted credential store exceeds maximum file size bound.");
+                }
+                Ok(true)
+            }
+        }
+    }
+}
+
+impl CredentialStore for EncryptedFileStore {
+    fn load(&mut self) -> Result<Option<String>, &'static str> {
+        if !self.validate_existing_file()? {
+            return Ok(None);
+        }
+        let raw = std::fs::read_to_string(&self.path)
+            .map_err(|_| "Cannot read encrypted credential store.")?;
+        let doc: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|_| "Encrypted credential store is malformed JSON; decryption refused.")?;
+        if doc.get("version").and_then(serde_json::Value::as_u64)
+            != Some(u64::from(ENCRYPTED_STORE_VERSION))
+            || doc.get("kdf").and_then(serde_json::Value::as_str) != Some(ENCRYPTED_STORE_KDF)
+            || doc.get("aead").and_then(serde_json::Value::as_str) != Some(ENCRYPTED_STORE_AEAD)
+        {
+            return Err("Encrypted credential store carries unsupported envelope parameters.");
+        }
+        let iterations = doc
+            .get("iterations")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| *v >= ENCRYPTED_STORE_MIN_ITERATIONS)
+            .ok_or("Encrypted credential store carries invalid KDF iteration count.")?;
+        let aad_context = doc
+            .get("aad_context")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("Encrypted credential store missing aad_context.")?;
+        let expected_aad = self.aad_context();
+        if aad_context != expected_aad {
+            return Err(
+                "Encrypted credential store belongs to a different origin or identity; decryption refused.",
+            );
+        }
+        let salt = URL_SAFE_NO_PAD
+            .decode(
+                doc.get("salt_b64")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or("Encrypted credential store missing salt.")?,
+            )
+            .map_err(|_| "Encrypted credential store has malformed salt.")?;
+        if salt.len() != ENCRYPTED_STORE_SALT_LEN {
+            return Err("Encrypted credential store salt has unexpected length.");
+        }
+        let nonce_bytes = URL_SAFE_NO_PAD
+            .decode(
+                doc.get("nonce_b64")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or("Encrypted credential store missing nonce.")?,
+            )
+            .map_err(|_| "Encrypted credential store has malformed nonce.")?;
+        let nonce_arr: [u8; ENCRYPTED_STORE_NONCE_LEN] = nonce_bytes
+            .try_into()
+            .map_err(|_| "Encrypted credential store nonce has unexpected length.")?;
+        let mut ciphertext = URL_SAFE_NO_PAD
+            .decode(
+                doc.get("ciphertext_b64")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or("Encrypted credential store missing ciphertext.")?,
+            )
+            .map_err(|_| "Encrypted credential store has malformed ciphertext.")?;
+
+        let derived = self.derive_key(&salt, iterations)?;
+        let unbound = UnboundKey::new(&CHACHA20_POLY1305, derived.as_ref())
+            .map_err(|_| "Failed initializing AEAD key.")?;
+        let key = LessSafeKey::new(unbound);
+        let plaintext = key
+            .open_in_place(
+                Nonce::assume_unique_for_key(nonce_arr),
+                Aad::from(expected_aad.as_bytes()),
+                &mut ciphertext,
+            )
+            .map_err(|_| {
+                "Encrypted credential store authentication failed (tampered file or wrong passphrase); zero partial data returned."
+            })?;
+        if plaintext.len() > MAX_RECORD_BYTES {
+            return Err("Decrypted credential record exceeds size bound.");
+        }
+        let decoded = std::str::from_utf8(plaintext)
+            .map_err(|_| "Decrypted credential record is not valid UTF-8.")?
+            .to_string();
+        Ok(Some(decoded))
+    }
+
+    fn save(&mut self, value: &str) -> Result<(), &'static str> {
+        if value.len() > MAX_RECORD_BYTES {
+            return Err("Credential record exceeds encrypted store size bound.");
+        }
+        // If an existing file already exists at target path, refuse insecure perms or symlinks first.
+        let _ = self.validate_existing_file()?;
+        if let Some(parent) = self.path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            let mut builder = std::fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder
+                .create(parent)
+                .map_err(|_| "Cannot create 0700 directory for encrypted credential store.")?;
+            let meta = std::fs::symlink_metadata(parent)
+                .map_err(|_| "Cannot inspect encrypted credential store parent directory.")?;
+            if !meta.is_dir() {
+                return Err("Encrypted credential store parent must be a real directory.");
+            }
+        }
+
+        let rng = SystemRandom::new();
+        let mut salt = [0u8; ENCRYPTED_STORE_SALT_LEN];
+        let mut nonce_arr = [0u8; ENCRYPTED_STORE_NONCE_LEN];
+        rng.fill(&mut salt)
+            .map_err(|_| "CSPRNG failed while generating keystore salt.")?;
+        rng.fill(&mut nonce_arr)
+            .map_err(|_| "CSPRNG failed while generating keystore nonce.")?;
+
+        let derived = self.derive_key(&salt, self.iterations)?;
+        let unbound = UnboundKey::new(&CHACHA20_POLY1305, derived.as_ref())
+            .map_err(|_| "Failed initializing AEAD key.")?;
+        let key = LessSafeKey::new(unbound);
+
+        let expected_aad = self.aad_context();
+        let mut in_out = Zeroizing::new(value.as_bytes().to_vec());
+        key.seal_in_place_append_tag(
+            Nonce::assume_unique_for_key(nonce_arr),
+            Aad::from(expected_aad.as_bytes()),
+            &mut *in_out,
+        )
+        .map_err(|_| "AEAD encryption failed for credential store.")?;
+
+        let envelope = serde_json::json!({
+            "version": ENCRYPTED_STORE_VERSION,
+            "kdf": ENCRYPTED_STORE_KDF,
+            "iterations": self.iterations,
+            "aead": ENCRYPTED_STORE_AEAD,
+            "aad_context": expected_aad,
+            "salt_b64": URL_SAFE_NO_PAD.encode(salt),
+            "nonce_b64": URL_SAFE_NO_PAD.encode(nonce_arr),
+            "ciphertext_b64": URL_SAFE_NO_PAD.encode(in_out.as_slice()),
+        });
+        let encoded = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&envelope)
+                .map_err(|_| "Failed encoding keystore envelope.")?
+        );
+
+        // Write atomically via a unique 0600 sibling temp file, fsync, then rename.
+        let mut suffix_bytes = [0u8; 8];
+        rng.fill(&mut suffix_bytes)
+            .map_err(|_| "CSPRNG failed while generating temp filename.")?;
+        let tmp_name = format!(
+            ".{}.tmp-{}",
+            self.path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("credentials.enc"),
+            URL_SAFE_NO_PAD.encode(suffix_bytes)
+        );
+        let tmp_path = self.path.with_file_name(tmp_name);
+        let mut opts = OpenOptions::new();
+        opts.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts
+            .open(&tmp_path)
+            .map_err(|_| "Cannot create temporary 0600 encrypted credential file.")?;
+        file.write_all(encoded.as_bytes())
+            .and_then(|_| file.sync_all())
+            .map_err(|_| "Failed writing encrypted credential store.")?;
+        drop(file);
+        std::fs::rename(&tmp_path, &self.path)
+            .map_err(|_| "Failed atomically committing encrypted credential store.")?;
+        Ok(())
+    }
 }
 
 fn lock_at(root: &Path, name: &str) -> Result<File, &'static str> {
@@ -433,5 +838,103 @@ mod tests {
             .is_err()
         );
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn encrypted_file_store_round_trips_0600_refuses_0644_and_tamper() {
+        let dir = std::env::temp_dir().join(format!(
+            "asimp-enc-store-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("credentials.enc");
+        let canary_token = "asimp_ag_01JXYZ4K6QABCDEFGHJKMNPQRS_ENCRYPTION_CANARY_TOKEN_012345678";
+        let origin = "https://preview-42.asimposium.org";
+
+        let mut store = EncryptedFileStore::with_iterations(
+            path.clone(),
+            origin,
+            "fellow_enc_1",
+            b"strong-test-passphrase-for-chacha20".to_vec(),
+            ENCRYPTED_STORE_MIN_ITERATIONS,
+        )
+        .unwrap();
+
+        // Missing file loads cleanly as None.
+        assert_eq!(store.load().unwrap(), None);
+
+        // Save encrypts with 0600 permissions and zero plaintext token on disk.
+        store.save(canary_token).unwrap();
+        let disk_text = std::fs::read_to_string(&path).unwrap();
+        assert!(!disk_text.contains(canary_token));
+        assert!(!disk_text.contains("ENCRYPTION_CANARY"));
+        assert!(!disk_text.contains("strong-test-passphrase"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::symlink_metadata(&path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        // Exact round-trip succeeds.
+        assert_eq!(store.load().unwrap().as_deref(), Some(canary_token));
+
+        // Wrong passphrase fails closed without leaking plaintext.
+        let mut wrong_pass = EncryptedFileStore::with_iterations(
+            path.clone(),
+            origin,
+            "fellow_enc_1",
+            b"wrong-passphrase".to_vec(),
+            ENCRYPTED_STORE_MIN_ITERATIONS,
+        )
+        .unwrap();
+        let err = wrong_pass.load().unwrap_err();
+        assert!(!err.contains(canary_token));
+
+        // Cross-origin / cross-identity swap fails closed.
+        let mut wrong_origin = EncryptedFileStore::with_iterations(
+            path.clone(),
+            "https://a.asimposium.org",
+            "fellow_enc_1",
+            b"strong-test-passphrase-for-chacha20".to_vec(),
+            ENCRYPTED_STORE_MIN_ITERATIONS,
+        )
+        .unwrap();
+        assert!(wrong_origin.load().is_err());
+
+        // SHOULD-FAIL CONTROL: 0644 permissions are refused before decryption.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let perm_err = store.load().unwrap_err();
+            assert!(perm_err.contains("0600"));
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        // SHOULD-FAIL CONTROL: tampering 1 byte of ciphertext fails AEAD authentication closed.
+        let mut doc: serde_json::Value = serde_json::from_str(&disk_text).unwrap();
+        let mut ct = URL_SAFE_NO_PAD
+            .decode(doc["ciphertext_b64"].as_str().unwrap())
+            .unwrap();
+        ct[0] ^= 0x01;
+        doc["ciphertext_b64"] = serde_json::Value::String(URL_SAFE_NO_PAD.encode(&ct));
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        let tamper_err = store.load().unwrap_err();
+        assert!(tamper_err.contains("authentication failed"));
+        assert!(!tamper_err.contains(canary_token));
+
+        // Empty passphrase fails with the exact Fable §12 fallback hint.
+        let hint_err = EncryptedFileStore::new(path, origin, "fellow_enc_1", Vec::new())
+            .err()
+            .unwrap();
+        assert!(hint_err.contains("paste the URL instead / use ASIMP_TOKEN"));
     }
 }

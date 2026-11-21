@@ -13,9 +13,10 @@
 
 pub mod canonical_json;
 pub mod coordination;
-mod credentials;
+pub mod credentials;
 pub mod doctor;
 mod enrollment;
+pub mod pop;
 pub mod protocol;
 pub mod pull;
 pub mod scrub;
@@ -51,6 +52,10 @@ pub struct Cli {
     /// Wire protocol version header (`asimp-protocol-version`; default: ASIMP_PROTOCOL_VERSION or 0.2.0-draft).
     #[arg(long, global = true, value_name = "VERSION")]
     pub protocol_version: Option<String>,
+
+    /// Optional Ed25519 Proof-of-Possession private key file (0600 JSON, RFC 9421; or ASIMP_POP_KEY_FILE).
+    #[arg(long, global = true, value_name = "FILE")]
+    pub pop_key: Option<std::path::PathBuf>,
 
     #[command(subcommand)]
     pub command: Command,
@@ -258,6 +263,33 @@ pub enum Command {
     Validate(Box<validate::ValidateArgs>),
     /// Scan a file or stdin offline for P7 credentials and artifact personal addresses.
     Scrub(Box<scrub::ScrubArgs>),
+    /// Manage optional RFC 9421 Ed25519 Proof-of-Possession keypairs (ADR-11 / Fable §5.5).
+    Pop {
+        #[command(subcommand)]
+        command: PopCommand,
+    },
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum PopCommand {
+    /// Generate a fresh 0600 Ed25519 PoP keypair file and print only its public key and fingerprint.
+    Keygen {
+        /// Output path for the 0600 private key JSON file (default: ~/.asimp/pop-key.json).
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
+        /// Print machine-readable JSON metadata (never contains private key bytes).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the public key and ed25519:<sha256> fingerprint of an existing 0600 PoP key file.
+    Fingerprint {
+        /// Path to the 0600 Ed25519 PoP private key JSON file.
+        #[arg(long, value_name = "FILE")]
+        key: std::path::PathBuf,
+        /// Print machine-readable JSON metadata (never contains private key bytes).
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -698,6 +730,9 @@ pub fn run_cli(cli: &Cli) -> CliOutput {
     ) {
         return enrollment::run(cli);
     }
+    if let Command::Pop { command } = &cli.command {
+        return run_pop_command(command);
+    }
     // Invalid local navigation must not prompt for a keychain credential.
     // These builders are pure and use the same checks as the dispatch below.
     let recovery_path = match &cli.command {
@@ -748,6 +783,14 @@ pub fn run_cli(cli: &Cli) -> CliOutput {
             };
         }
     };
+    let pop_key = if cli.command.requires_token() {
+        match resolve_pop_key(cli) {
+            Ok(key) => key.map(std::sync::Arc::new),
+            Err(message) => return input_error(message),
+        }
+    } else {
+        None
+    };
     if cli.command.write_request().is_some() {
         let mut deprecation_stderr = String::new();
         let mut output = run_cli_write(cli, read_request_file, |url, key, body| {
@@ -757,8 +800,16 @@ pub fn run_cli(cli: &Cli) -> CliOutput {
             let token = token.to_owned();
             let key = key.to_owned();
             let proto = protocol_version.clone();
+            let pop_key = pop_key.clone();
             let (fetched, notice) = run_with_deadline_protocol(READ_TIMEOUT, move || {
-                request_text_with_protocol(&agent, &url, Some(&token), &proto, Some((&key, &body)))
+                request_text_with_protocol_and_pop(
+                    &agent,
+                    &url,
+                    Some(&token),
+                    pop_key.as_deref(),
+                    &proto,
+                    Some((&key, &body)),
+                )
             })?;
             if let Some(notice) = notice {
                 deprecation_stderr.push_str(&notice.render_stderr());
@@ -772,8 +823,12 @@ pub fn run_cli(cli: &Cli) -> CliOutput {
     }
     let mut deprecation_stderr = String::new();
     let mut output = run_cli_with_fetch(cli, |url| {
-        let (fetched, notice) =
-            fetch_text_authenticated_with_protocol(url, token.as_deref(), &protocol_version)?;
+        let (fetched, notice) = fetch_text_authenticated_with_protocol_and_pop(
+            url,
+            token.as_deref(),
+            pop_key.clone(),
+            &protocol_version,
+        )?;
         if let Some(notice) = notice {
             deprecation_stderr.push_str(&notice.render_stderr());
         }
@@ -1255,6 +1310,110 @@ fn request_text_with_agent(
         .map(|(fetched, _)| fetched)
 }
 
+fn resolve_pop_key(cli: &Cli) -> Result<Option<pop::PopKey>, &'static str> {
+    if let Some(path) = &cli.pop_key {
+        return pop::PopKey::load_private_file(path).map(Some);
+    }
+    if let Ok(env_path) = std::env::var("ASIMP_POP_KEY_FILE")
+        && !env_path.trim().is_empty()
+    {
+        return pop::PopKey::load_private_file(std::path::Path::new(env_path.trim())).map(Some);
+    }
+    Ok(None)
+}
+
+fn run_pop_command(command: &PopCommand) -> CliOutput {
+    match command {
+        PopCommand::Keygen { out, json } => {
+            let target = match out {
+                Some(path) => path.clone(),
+                None => match std::env::var_os("HOME") {
+                    Some(home) => std::path::PathBuf::from(home)
+                        .join(".asimp")
+                        .join("pop-key.json"),
+                    None => {
+                        return input_error(
+                            "HOME is required when --out is omitted for asimp pop keygen.",
+                        );
+                    }
+                },
+            };
+            let key = match pop::PopKey::generate() {
+                Ok(key) => key,
+                Err(message) => return input_error(message),
+            };
+            if let Err(message) = key.save_private_file(&target) {
+                return input_error(message);
+            }
+            if *json {
+                let doc = serde_json::json!({
+                    "credential_profile": pop::POP_CREDENTIAL_PROFILE,
+                    "alg": pop::POP_SIGNATURE_ALG,
+                    "tag": pop::POP_SIGNATURE_TAG,
+                    "key_id": key.key_id(),
+                    "public_key_b64url": key.public_key_b64url(),
+                    "saved_to": target.to_string_lossy(),
+                });
+                CliOutput {
+                    exit_code: 0,
+                    stdout: format!("{}\n", serde_json::to_string_pretty(&doc).unwrap()),
+                    stderr: String::new(),
+                }
+            } else {
+                CliOutput {
+                    exit_code: 0,
+                    stdout: format!(
+                        "credential_profile: {}\nkey_id: {}\npublic_key_b64url: {}\nsaved_to: {}\n",
+                        pop::POP_CREDENTIAL_PROFILE,
+                        key.key_id(),
+                        key.public_key_b64url(),
+                        target.display()
+                    ),
+                    stderr: String::new(),
+                }
+            }
+        }
+        PopCommand::Fingerprint { key, json } => {
+            let loaded = match pop::PopKey::load_private_file(key) {
+                Ok(loaded) => loaded,
+                Err(message) => return input_error(message),
+            };
+            if *json {
+                let doc = serde_json::json!({
+                    "credential_profile": pop::POP_CREDENTIAL_PROFILE,
+                    "alg": pop::POP_SIGNATURE_ALG,
+                    "tag": pop::POP_SIGNATURE_TAG,
+                    "key_id": loaded.key_id(),
+                    "public_key_b64url": loaded.public_key_b64url(),
+                });
+                CliOutput {
+                    exit_code: 0,
+                    stdout: format!("{}\n", serde_json::to_string_pretty(&doc).unwrap()),
+                    stderr: String::new(),
+                }
+            } else {
+                CliOutput {
+                    exit_code: 0,
+                    stdout: format!(
+                        "key_id: {}\npublic_key_b64url: {}\n",
+                        loaded.key_id(),
+                        loaded.public_key_b64url()
+                    ),
+                    stderr: String::new(),
+                }
+            }
+        }
+    }
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
 fn request_text_with_protocol(
     agent: &Agent,
     url: &str,
@@ -1262,6 +1421,18 @@ fn request_text_with_protocol(
     protocol_version: &str,
     write: Option<(&str, &str)>,
 ) -> Result<(Fetched, Option<protocol::DeprecationNotice>), FetchError> {
+    request_text_with_protocol_and_pop(agent, url, token, None, protocol_version, write)
+}
+
+fn request_text_with_protocol_and_pop(
+    agent: &Agent,
+    url: &str,
+    token: Option<&str>,
+    pop_key: Option<&pop::PopKey>,
+    protocol_version: &str,
+    write: Option<(&str, &str)>,
+) -> Result<(Fetched, Option<protocol::DeprecationNotice>), FetchError> {
+    let method = if write.is_some() { "POST" } else { "GET" };
     let mut request = if write.is_some() {
         agent.post(url)
     } else {
@@ -1269,7 +1440,20 @@ fn request_text_with_protocol(
     };
     request = request.set(protocol::PROTOCOL_VERSION_HEADER, protocol_version);
     if let Some(token) = token {
-        request = request.set("authorization", &format!("Bearer {token}"));
+        let auth_header = format!("Bearer {token}");
+        request = request.set("authorization", &auth_header);
+        if let Some(key) = pop_key {
+            let body_bytes = write.map(|(_, body)| body.as_bytes());
+            let signed = key
+                .sign_request_now(method, url, &auth_header, body_bytes, now_unix_secs())
+                .map_err(|_| FetchError::Network)?;
+            request = request
+                .set("signature-input", &signed.signature_input)
+                .set("signature", &signed.signature);
+            if let Some(digest_header) = &signed.content_digest {
+                request = request.set("content-digest", digest_header);
+            }
+        }
     }
     let response = match write {
         Some((key, body)) => request
@@ -1383,6 +1567,24 @@ pub fn fetch_text(url: &str) -> Result<Fetched, FetchError> {
     fetch_text_authenticated(url, None)
 }
 
+/// Authenticated GET with RFC 9421 Ed25519 Proof-of-Possession headers attached.
+pub fn fetch_text_with_pop(
+    url: &str,
+    token: &str,
+    pop_key: &pop::PopKey,
+) -> Result<Fetched, FetchError> {
+    let agent = agent();
+    request_text_with_protocol_and_pop(
+        &agent,
+        url,
+        Some(token),
+        Some(pop_key),
+        protocol::DEFAULT_PROTOCOL_VERSION,
+        None,
+    )
+    .map(|(fetched, _)| fetched)
+}
+
 fn fetch_text_authenticated(url: &str, token: Option<&str>) -> Result<Fetched, FetchError> {
     fetch_text_with_protocol_only(url, token, protocol::DEFAULT_PROTOCOL_VERSION)
 }
@@ -1400,13 +1602,29 @@ fn fetch_text_authenticated_with_protocol(
     token: Option<&str>,
     protocol_version: &str,
 ) -> Result<(Fetched, Option<protocol::DeprecationNotice>), FetchError> {
+    fetch_text_authenticated_with_protocol_and_pop(url, token, None, protocol_version)
+}
+
+fn fetch_text_authenticated_with_protocol_and_pop(
+    url: &str,
+    token: Option<&str>,
+    pop_key: Option<std::sync::Arc<pop::PopKey>>,
+    protocol_version: &str,
+) -> Result<(Fetched, Option<protocol::DeprecationNotice>), FetchError> {
     let started = std::time::Instant::now();
     let agent = agent();
     let url = url.to_string();
     let token = token.map(str::to_owned);
     let proto = protocol_version.to_owned();
     run_with_deadline_protocol(READ_TIMEOUT.saturating_sub(started.elapsed()), move || {
-        request_text_with_protocol(&agent, &url, token.as_deref(), &proto, None)
+        request_text_with_protocol_and_pop(
+            &agent,
+            &url,
+            token.as_deref(),
+            pop_key.as_deref(),
+            &proto,
+            None,
+        )
     })
 }
 
@@ -2927,6 +3145,7 @@ mod tests {
                 origin: Some("https://example.test".to_string()),
                 identity: "default".to_string(),
                 protocol_version: None,
+                pop_key: None,
                 command,
             };
             let oversized = vec![b'x'; MAX_BODY_BYTES as usize + 1];

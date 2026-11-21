@@ -87,10 +87,13 @@ if [[ "$WANT_FULL" == 0 && "$WANT_WIRE" == 1 ]]; then
   phase "wire unit gate (real workerd)" bun run --filter @asimposium/wire test:unit
 fi
 
-run_cargo_tests() {
-  if ! command -v cargo >/dev/null 2>&1; then
-    printf 'blocked: cargo is unavailable (CARGO_GATE_UNAVAILABLE)\n' >&2
-    exit 78
+run_cargo_step() {
+  local label="$1"
+  shift
+
+  if [[ "${GATES_CLI_DRY_RUN:-0}" == "1" ]]; then
+    printf '[dry-run] cwd=%s cmd=%s\n' "$(pwd)" "$*"
+    return 0
   fi
 
   local out_file err_file status
@@ -98,7 +101,7 @@ run_cargo_tests() {
   err_file="$(mktemp "${TMPDIR:-/tmp}/asimp-cargo-stderr-XXXXXX")"
 
   set +e
-  (cd cli && cargo test >"$out_file" 2>"$err_file")
+  "$@" >"$out_file" 2>"$err_file"
   status=$?
   set -e
 
@@ -106,12 +109,27 @@ run_cargo_tests() {
   cat "$err_file" >&2
 
   if [[ $status -ne 0 ]] && grep -qE '\[RCH\].*refusing local fallback' "$err_file"; then
-    printf 'blocked: cargo is unavailable (CARGO_GATE_UNAVAILABLE)\n' >&2
+    printf 'blocked: cargo is unavailable (CARGO_GATE_UNAVAILABLE) during %s\n' "$label" >&2
     exit 78
   fi
 
   # Retain the per-run diagnostics; repository policy forbids file deletion.
   return "$status"
+}
+
+run_cargo_tests() {
+  if ! command -v cargo >/dev/null 2>&1; then
+    printf 'blocked: cargo is unavailable (CARGO_GATE_UNAVAILABLE)\n' >&2
+    exit 78
+  fi
+
+  # Run from repository root with --manifest-path cli/Cargo.toml (never `cd cli`)
+  # so RCH transfers include packages/contracts/ schemas/fixtures referenced by
+  # include_str! (see cli/README.md and asimposiumorg-rc-cli-pop-encrypted-store-gates-sn5p).
+  cd "$REPO_ROOT"
+  run_cargo_step "cargo fmt" cargo fmt --manifest-path cli/Cargo.toml --check
+  run_cargo_step "cargo clippy" cargo clippy --locked --manifest-path cli/Cargo.toml --all-targets -- -D warnings
+  run_cargo_step "cargo test" cargo test --locked --manifest-path cli/Cargo.toml
 }
 
 if [[ "$WANT_CLI" == 1 ]]; then
