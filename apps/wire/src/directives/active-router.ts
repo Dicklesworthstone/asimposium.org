@@ -74,8 +74,7 @@ export function createActiveDirectiveRouter(options: {
             detail: changed
               ? "The applicable instruction set changed. This continuation cannot establish the current constraints."
               : "The cursor does not continue this exact credential, scope and page size.",
-            fixHint:
-              "Discard earlier pages and restart without cursor. Read every new page before acting.",
+            fixHint: `Discard earlier pages and GET ${activeDirectivesUrl(parsed.data.problem_id, parsed.data.limit)} without cursor. Read every new page before acting.`,
             rule: "A5",
             extensions: {
               schema: DIRECTIVES_SCHEMA_ID,

@@ -961,7 +961,7 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
     {
       relativePath: "generated/directives.types.ts",
       content:
-        "// Generated from src/directives.ts. Do not edit.\nexport type { SponsorDirectiveVerb, SponsorDirectiveRequest, SponsorDirectiveReceipt, SponsorDirectiveListResponse, ActiveDirectiveQuery, ActiveDirectiveResponse } from '../src/directives.ts';\n",
+        "// Generated from src/directives.ts. Do not edit.\nexport type { SponsorDirectiveVerb, SponsorDirectiveRequest, SponsorDirectiveReceipt, SponsorDirectiveListResponse, ActiveDirectiveQuery, ActiveDirectiveResponse, InitialSponsorInstruction } from '../src/directives.ts';\n",
     },
     {
       relativePath: "generated/dead-ends.schema.json",

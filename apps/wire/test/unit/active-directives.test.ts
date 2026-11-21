@@ -37,11 +37,16 @@ function fixtureBinding(fellowId = "F-ONE", sponsorId = "SP-ONE"): FellowCredent
 function fixture() {
   const db = new Database(":memory:", { strict: true });
   databases.push(db);
-  db.exec(`CREATE TABLE enrollment_fellows(fellow_id TEXT PRIMARY KEY,sponsor_id TEXT,status TEXT);
+  db.exec(`CREATE TABLE enrollment_fellows(fellow_id TEXT PRIMARY KEY,sponsor_id TEXT,status TEXT,
+      created_at INTEGER);
     CREATE TABLE sponsors(sponsor_id TEXT PRIMARY KEY,tombstoned_at INTEGER);
     CREATE TABLE enrollment_sponsor_security(sponsor_id TEXT PRIMARY KEY,panic_at INTEGER);
     CREATE TABLE enrollment_grants(fellow_id TEXT,sponsor_id TEXT,granted_scopes_json TEXT,
-      granted_resources_json TEXT,granted_at INTEGER);
+      granted_resources_json TEXT,granted_at INTEGER,proposal_id TEXT);
+    CREATE TABLE enrollment_proposals(proposal_id TEXT PRIMARY KEY,enrollment_id TEXT,
+      fellow_id TEXT,status TEXT,granted_scopes_json TEXT,granted_resources_json TEXT);
+    CREATE TABLE enrollment_records(enrollment_id TEXT PRIMARY KEY,sponsor_id TEXT,
+      requested_resources_json TEXT);
     CREATE TABLE fellow_tokens(fellow_id TEXT,sponsor_id TEXT,credential_id TEXT,token_hash TEXT,
       granted_scopes_json TEXT,granted_resources_json TEXT,credential_profile TEXT,
       revoked_at INTEGER,issued_at INTEGER,expires_at INTEGER);
@@ -53,12 +58,19 @@ function fixture() {
       UNIQUE(fellow_id,seq));
     CREATE TABLE sponsor_directives(id TEXT PRIMARY KEY,sponsor_id TEXT,fellow_id TEXT,
       problem_id TEXT,verb TEXT,body TEXT,notice_id TEXT,created_at INTEGER);
-    INSERT INTO enrollment_fellows VALUES('F-ONE','SP-ONE','active'),('F-TWO','SP-TWO','active');`);
+    INSERT INTO enrollment_fellows VALUES('F-ONE','SP-ONE','active',1),('F-TWO','SP-TWO','active',1);`);
   function seedCredential(fellow = "F-ONE", sponsor = "SP-ONE") {
     const binding = fixtureBinding(fellow, sponsor);
-    db.query("INSERT INTO enrollment_grants VALUES(?,?,'[\"promote\"]','{}',1)").run(
+    const proposal = "proposal-" + fellow;
+    const enrollment = "enrollment-" + fellow;
+    db.query("INSERT OR IGNORE INTO enrollment_records VALUES(?,?,'{}')").run(enrollment, sponsor);
+    db.query(
+      "INSERT OR IGNORE INTO enrollment_proposals VALUES(?,?,?,'approved','[\"promote\"]','{}')",
+    ).run(proposal, enrollment, fellow);
+    db.query("INSERT INTO enrollment_grants VALUES(?,?,'[\"promote\"]','{}',1,?)").run(
       fellow,
       sponsor,
+      proposal,
     );
     db.query(
       "INSERT INTO fellow_tokens VALUES(?,?,?,?,'[\"promote\"]','{}','bearer',NULL,1,?)",

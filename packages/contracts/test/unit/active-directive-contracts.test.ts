@@ -42,6 +42,31 @@ test("all directive continuation refusals teach and missing teaching fields are 
     expect(ContractProblemSchema.safeParse(fixture).success).toBe(false);
 });
 
+test("initial instructions retain their full enrollment limit and distinct source identity", () => {
+  const validate = new Ajv2020({ strict: false }).compile(
+    JSON.parse(generateDirectivesSchema()).active_response,
+  );
+  const initial = { ...golden.valid_response.initial_instruction, text: "x".repeat(2000) };
+  for (const value of [initial, null, undefined]) {
+    const response = { ...golden.valid_response, initial_instruction: value };
+    expect(ActiveDirectiveResponseSchema.safeParse(response).success).toBe(true);
+    expect(validate(response)).toBe(true);
+  }
+  for (const change of [
+    { text: "x".repeat(2001) },
+    { text: "" },
+    { directive_id: "DIR-" + "0".repeat(32) },
+    { source_kind: "directive" },
+    { verb: "focus" },
+    { notice_id: "N-invented-receipt" },
+    { sponsor_id: "another-sponsor" },
+  ]) {
+    const response = { ...golden.valid_response, initial_instruction: { ...initial, ...change } };
+    expect(ActiveDirectiveResponseSchema.safeParse(response).success).toBe(false);
+    expect(validate(response)).toBe(false);
+  }
+});
+
 test("focus, scope and completion invariants are structural in the served contract", () => {
   const schema = ActiveDirectiveResponseSchema;
   for (const response of [
