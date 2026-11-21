@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import {
@@ -43,6 +44,61 @@ await runLocalWorkerJourney(
     origin,
     userAgent,
   }) => {
+    const capabilitiesResponse = await worker.fetch(`${origin}/capabilities`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(capabilitiesResponse.status, 200);
+    const capabilitiesBytes = await capabilitiesResponse.text();
+    const capabilities = JSON.parse(capabilitiesBytes);
+    const pipeline = await readFile(
+      new URL("../../../../scripts/e2e-ci-pipeline.sh", import.meta.url),
+      "utf8",
+    );
+    const validator = /bun -e '([\s\S]+?)' "\$STAGING_WORKER_ORIGIN"/.exec(pipeline)?.[1];
+    assert.ok(validator, "the deployed readiness step invokes its capabilities validator");
+    const validateCapabilities = (bytes, expectedOrigin = origin) =>
+      spawnSync("bun", ["-e", validator, expectedOrigin], {
+        cwd: new URL("../../../../", import.meta.url),
+        input: bytes,
+        encoding: "utf8",
+        timeout: 15000,
+      });
+    const ready = validateCapabilities(capabilitiesBytes);
+    assert.equal(ready.status, 0, ready.stderr);
+    const schemas = ready.stdout.trim().split("\n");
+    assert.ok(schemas.length > 0);
+    const { status, schema_count, observed_capabilities_sha256 } = JSON.parse(ready.stderr);
+    assert.equal(status, "pass");
+    assert.equal(schema_count, schemas.length);
+    assert.equal(
+      observed_capabilities_sha256,
+      createHash("sha256").update(capabilitiesBytes).digest("hex"),
+    );
+    for (const path of schemas) {
+      const document = await call(path);
+      assert.equal(document.$id, `https://a.asimposium.org${path}`);
+    }
+    const { operations, ...legacy } = capabilities;
+    const { error_dictionary: _error, ...incomplete } = capabilities;
+    for (const bad of [
+      validateCapabilities(
+        JSON.stringify({
+          ...legacy,
+          version: "0.1.0-draft",
+          reads: operations.map(({ path }) => path),
+        }),
+      ),
+      validateCapabilities(JSON.stringify(incomplete)),
+      validateCapabilities(capabilitiesBytes, "https://a.asimposium.org"),
+    ]) {
+      assert.equal(bad.status, 1);
+      assert.equal(bad.stdout, "");
+      assert.equal(JSON.parse(bad.stderr).code, "WORKER_CAPABILITIES_CONTRACT_INVALID");
+    }
+    console.log(
+      JSON.stringify({ stage: "worker-readiness-live-capabilities", schemas: schemas.length }),
+    );
+
     const protocolSource = await readFile(
       new URL("../../../../packages/protocol/assets/protocol.md", import.meta.url),
       "utf8",

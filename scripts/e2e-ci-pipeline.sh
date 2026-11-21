@@ -975,25 +975,33 @@ worker_readiness() {
   [[ "$status" -eq 0 ]] || return "$status"
 
   ci_artifact_capability_is_current || return 64
-  python3 - "$capabilities" <<'PY' > "$schema_paths"
-import json
-import re
-import sys
+  (
+    cd "$repository_root" || exit 1
+    bun -e '
+import { workerReadinessSchemaPaths } from "./apps/wire/src/discovery/discovery.ts";
 
-with open(sys.argv[1], encoding="utf-8") as stream:
-    document = json.load(stream)
-if document.get("origin") != "https://a-staging.asimposium.org":
-    sys.exit(1)
-reads = document.get("reads")
-if not isinstance(reads, list) or any(not isinstance(value, str) for value in reads):
-    sys.exit(1)
-paths = [value for value in reads if value.startswith("/schemas/")]
-if not paths or len(paths) != len(set(paths)):
-    sys.exit(1)
-if any(not re.fullmatch(r"/schemas/[a-z0-9.-]+\.v1\.json", value) for value in paths):
-    sys.exit(1)
-print("\n".join(paths))
-PY
+const origin = process.argv[1];
+try {
+  const raw = await Bun.stdin.text();
+  const paths = workerReadinessSchemaPaths(JSON.parse(raw), origin);
+  console.log(paths.join("\n"));
+  console.error(JSON.stringify({
+    stage: "worker-capabilities",
+    status: "pass",
+    origin,
+    observed_capabilities_sha256: Bun.CryptoHasher.hash("sha256", raw, "hex"),
+    schema_count: paths.length,
+  }));
+} catch {
+  console.error(JSON.stringify({
+    stage: "worker-capabilities",
+    status: "fail",
+    code: "WORKER_CAPABILITIES_CONTRACT_INVALID",
+  }));
+  process.exitCode = 1;
+}
+' "$STAGING_WORKER_ORIGIN"
+  ) < "$capabilities" > "$schema_paths"
   status=$?
   [[ "$status" -eq 0 ]] || return "$status"
 

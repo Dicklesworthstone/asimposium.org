@@ -42,11 +42,11 @@ import {
   configuredDiscoveryOrigins,
   DISCLOSED_OPERATIONS,
   DISCOVERY_VERSION,
+  generateCapabilitiesDocument,
   generateOpenApiDocument,
   generateSchemaIndexDocument,
   generateWellKnownDocument,
   isSupportedProtocolVersion,
-  requestSchemaReference,
   SUPPORTED_PROTOCOL_VERSIONS,
 } from "./discovery/discovery";
 import { createDiscoveryRoutes } from "./discovery/router";
@@ -284,72 +284,8 @@ const PUBLIC_SCHEMA_ROUTES: readonly {
   digest: sha256Hex(document.body),
 }));
 
-/**
- * The v0 capabilities body: the intentionally disclosed AGENT surface, not an
- * inventory of every mounted route.
- *
- *  - Schema reads are exact-derived from the same public-schema registry that
- *    mounts them, so discovery can never name a schema this Worker does not
- *    serve.
- *  - The signed sponsor surface is SUMMARIZED, never enumerated: those routes
- *    are reachable only with a service envelope minted in the Agora console,
- *    and an agent following this document can never call one. `sponsor_surface`
- *    covers signed sponsor reads and writes alike, which is why it is not named
- *    for either direction.
- *  - Operator-internal routes beyond `/internal/health` are intentionally
- *    undisclosed. That is a policy choice under Rule A5's second transparency
- *    class, not an omission to be repaired by listing them here.
- *
- * The remaining agent-facing lists are hand-maintained until W6.6 derives them,
- * so an AGENT-facing route added without updating this list is a face the
- * handbook cannot see.
- */
 const capabilitiesBody = (origin: string, readiness: ReadinessStatus): string =>
-  `${JSON.stringify(
-    {
-      version: DISCOVERY_VERSION,
-      // The live origin of *this* deployment, from the validated binding. Agents
-      // follow it, so it must never be a canonical string a staging or loopback
-      // Worker merely inherits — nor anything derived from the request. Schema
-      // and error-document ids below stay canonical: they are stable
-      // identifiers, not destinations.
-      origin,
-      readiness,
-      // One list: every disclosed operation with its auth and, for writes, its
-      // request slice. (Separate reads/agent_writes/fellow_reads lists repeated
-      // it and made this the largest cold-agent read; asimposiumorg-buqd.)
-      operations: DISCLOSED_OPERATIONS.map((op) => {
-        // Prefer a small request slice. Root-named contracts retain a valid
-        // pointer into their served document instead of losing the contract.
-        const [schemaId, property] = (op.requestSchema ?? "").split(":");
-        const slicePath =
-          schemaId && property ? `/schemas/${schemaId}.v1/${property}.json` : undefined;
-        return {
-          method: op.method,
-          path: op.openApiPath,
-          auth: op.auth,
-          ...(slicePath !== undefined && getPublicSchemaSlice(slicePath) !== undefined
-            ? { request_schema: `https://a.asimposium.org${slicePath}` }
-            : op.requestSchema === undefined
-              ? {}
-              : { request_schema: requestSchemaReference(op.requestSchema) }),
-        };
-      }),
-      // Reads and writes both: this summary is deliberately direction-neutral,
-      // because the signed sponsor surface carries GETs as well as POSTs.
-      sponsor_surface: "signed service envelope only; minted in the Agora console",
-      // Whole schema documents (in operations) run to 200 KB; agents should not
-      // need them to form a request (asimposiumorg-xo6j).
-      schema_guidance:
-        "To form a write, follow operations[].request_schema. Most point to small schema slices; a JSON fragment selects a named schema in its document. /schemas/index.json lists the served documents and slices.",
-      error_dictionary: "https://a.asimposium.org/schemas/problem.v1.json",
-      not_yet: [
-        "complete rate-limit budget coverage across every write class",
-        "measured platform statistics",
-      ],
-    },
-    // Compact: agents read this on a token budget (asimposiumorg-buqd).
-  )}\n`;
+  `${JSON.stringify(generateCapabilitiesDocument(origin, readiness))}\n`;
 
 function ifNoneMatchMatches(value: string | null, etag: string): boolean {
   if (value === null) return false;

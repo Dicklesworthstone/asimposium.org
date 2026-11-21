@@ -792,7 +792,7 @@ describe("OPS.2b review pipeline orchestration", () => {
       'bash "$repository_root/scripts/e2e-environments.sh" staging',
     );
     expectCapabilityGuardBefore(workerReadiness, '--output "$capabilities"');
-    expectCapabilityGuardBefore(workerReadiness, 'python3 - "$capabilities"');
+    expectCapabilityGuardBefore(workerReadiness, "bun -e '");
     expectCapabilityGuardBefore(
       workerReadiness,
       '--output "$ARTIFACT_DIRECTORY/schema-$index.json"',

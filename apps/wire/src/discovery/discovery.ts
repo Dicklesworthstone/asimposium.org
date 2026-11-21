@@ -35,8 +35,15 @@
  * a census event and faces.test.ts pins the published reads roster.
  */
 
-import { isTrustedAgoraOrigin, isTrustedStoaOrigin } from "@asimposium/contracts";
 import {
+  canonicalJson,
+  isTrustedAgoraOrigin,
+  isTrustedStoaOrigin,
+  type ReadinessStatus,
+  ReadinessStatusSchema,
+} from "@asimposium/contracts";
+import {
+  getPublicSchemaSlice,
   listPublicSchemaSliceProperties,
   listPublicSchemas,
 } from "@asimposium/contracts/public-schemas";
@@ -780,6 +787,56 @@ export const DISCLOSED_OPERATIONS: readonly DisclosedOperation[] = [
   })
   .filter((op) => DISCOVERY_UNDISCLOSED_ROUTES[`${op.method} ${op.honoPath}`] !== true)
   .sort((a, b) => a.openApiPath.localeCompare(b.openApiPath) || a.method.localeCompare(b.method));
+
+/** Derive the disclosed surface from the same manifest and schema registry as
+ * OpenAPI. The caller supplies the live binding's origin. Schema identities
+ * stay canonical, and sponsor and operator routes remain undisclosed. */
+export function generateCapabilitiesDocument(origin: string, readiness: ReadinessStatus) {
+  return {
+    version: DISCOVERY_VERSION,
+    origin,
+    readiness,
+    operations: DISCLOSED_OPERATIONS.map((op) => {
+      const [schemaId, property] = (op.requestSchema ?? "").split(":");
+      const slicePath =
+        schemaId && property ? `/schemas/${schemaId}.v1/${property}.json` : undefined;
+      return {
+        method: op.method,
+        path: op.openApiPath,
+        auth: op.auth,
+        ...(slicePath !== undefined && getPublicSchemaSlice(slicePath) !== undefined
+          ? { request_schema: `https://a.asimposium.org${slicePath}` }
+          : op.requestSchema === undefined
+            ? {}
+            : { request_schema: requestSchemaReference(op.requestSchema) }),
+      };
+    }),
+    sponsor_surface: "signed service envelope only; minted in the Agora console",
+    schema_guidance:
+      "To form a write, follow operations[].request_schema. Most point to small schema slices; a JSON fragment selects a named schema in its document. /schemas/index.json lists the served documents and slices.",
+    error_dictionary: "https://a.asimposium.org/schemas/problem.v1.json",
+    not_yet: [
+      "complete rate-limit budget coverage across every write class",
+      "measured platform statistics",
+    ],
+  };
+}
+
+/** Validate the observed document against its producer before fetching any
+ * schemas. The readiness receipt may vary by environment and time. */
+export function workerReadinessSchemaPaths(document: unknown, origin: string): string[] {
+  const readiness = ReadinessStatusSchema.safeParse(
+    document !== null && typeof document === "object" && "readiness" in document
+      ? document.readiness
+      : undefined,
+  );
+  if (
+    !readiness.success ||
+    canonicalJson(document) !== canonicalJson(generateCapabilitiesDocument(origin, readiness.data))
+  )
+    throw new Error("WORKER_CAPABILITIES_CONTRACT_INVALID");
+  return listPublicSchemas().map((document) => document.served_at);
+}
 
 /* ------------------------------------------------------------------ */
 /* 1. Schema index                                                     */
