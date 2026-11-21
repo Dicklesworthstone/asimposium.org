@@ -193,9 +193,9 @@ export async function assertLedgerTriggersRefuse(db, lane) {
 /**
  * W2.1 (jfi) public search holds only public claims, by behaviour rather than
  * by table names: every FTS row is a claim of a published problem (never a
- * private draft or an unpublished one) and its indexed text is exactly that
- * claim's current statement, so no other text (workshop bytes, a revision
- * body) can ride along under a real claim id. Unlisted and redacted claims
+ * private draft or an unpublished one). After the current index job settles,
+ * the indexed text is exactly the claim's current statement. Workshop bytes
+ * cannot ride along under a real claim id. Unlisted and redacted claims
  * may stay indexed: search filters those at query time (search/window.ts).
  *
  * Workshop cursors are checked in the workshop-read lane instead: an object's
@@ -204,27 +204,64 @@ export async function assertLedgerTriggersRefuse(db, lane) {
  * pairs is the invariant.
  */
 export async function assertSearchHoldsOnlyPublicClaims(db, { seeded = () => false } = {}) {
-  const privateSearch = (
-    await db
+  const readInvalidRows = async () => {
+    const { results } = await db
       .prepare(
-        `SELECT fts.claim_id, fts.problem_id FROM public_claim_fts fts
+        `SELECT fts.claim_id, fts.problem_id,
+                CASE
+                  WHEN claim.id IS NULL THEN 'missing_claim'
+                  WHEN problem.id IS NULL THEN 'missing_problem'
+                  WHEN problem.public_seq = 0 OR problem.status = 'private-draft'
+                    THEN 'unpublished_problem'
+                  ELSE 'statement_mismatch'
+                END AS reason,
+                head.id AS head_event_id,
+                head.seq AS head_seq,
+                head.object_version AS head_version,
+                index_job.state AS head_index_state,
+                (SELECT MAX(version.version) FROM claim_versions version
+                  WHERE version.problem_id = fts.problem_id AND version.claim_id = fts.claim_id
+                    AND version.statement IS fts.statement
+                    AND version.version < head.object_version) AS indexed_prior_version
+           FROM public_claim_fts fts
            LEFT JOIN claims claim ON claim.problem_id = fts.problem_id AND claim.id = fts.claim_id
            LEFT JOIN problems problem ON problem.id = fts.problem_id
+           LEFT JOIN events head ON head.problem_id = claim.problem_id
+             AND head.seq = claim.source_seq AND head.object_kind = 'claim'
+           LEFT JOIN outbox index_job ON index_job.dedupe_key = 'search.index:' || head.id
           WHERE claim.id IS NULL OR problem.id IS NULL
              OR fts.statement IS NOT claim.statement
              OR problem.public_seq = 0 OR problem.status = 'private-draft'`,
       )
-      .all()
-  ).results;
-  const indexed = (await db.prepare("SELECT COUNT(*) AS n FROM public_claim_fts").first()).n;
-  console.log(
-    JSON.stringify({
-      stage: "public-search-invariant",
-      indexed,
-      non_public: privateSearch.map((row) => `${row.problem_id}/${row.claim_id}`),
-    }),
+      .all();
+    return results;
+  };
+  const requireCurrentRows = async (invalid) => {
+    const indexed = (await db.prepare("SELECT COUNT(*) AS n FROM public_claim_fts").first()).n;
+    console.log(
+      JSON.stringify({
+        stage: "public-search-invariant",
+        indexed,
+        non_public: invalid.map((row) => `${row.problem_id}/${row.claim_id}`),
+        ...(invalid.length === 0 ? {} : { details: invalid }),
+      }),
+    );
+    assert.deepEqual(invalid, [], "public claim search holds only public claims");
+  };
+
+  // A known prior version can remain while the current head's job is pending.
+  // Missing/unpublished ownership and any other statement bytes fail at once.
+  const initial = await readInvalidRows();
+  const unexpected = initial.filter(
+    (row) =>
+      row.reason !== "statement_mismatch" ||
+      row.head_index_state !== "pending" ||
+      row.indexed_prior_version === null,
   );
-  assert.deepEqual(privateSearch, [], "public claim search holds only public claims");
+  if (unexpected.length > 0) await requireCurrentRows(unexpected);
+  if (initial.length > 0) {
+    console.log(JSON.stringify({ stage: "public-search-pending-revisions", details: initial }));
+  }
 
   // r8w / Rule A6: the incrementally maintained index equals a rebuild from
   // the durable public claims. Every claim search may return (published,
@@ -243,6 +280,7 @@ export async function assertSearchHoldsOnlyPublicClaims(db, { seeded = () => fal
   for (let attempt = 0; attempt < 50 && (await pendingIndexJobs()) > 0; attempt++) {
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
+  await requireCurrentRows(await readInvalidRows());
   const searchable = `FROM claims
       JOIN problems problem ON problem.id = claims.problem_id
      WHERE problem.public_seq > 0 AND problem.status <> 'private-draft' AND problem.unlisted = 0
