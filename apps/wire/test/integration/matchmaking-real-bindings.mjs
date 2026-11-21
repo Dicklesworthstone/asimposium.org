@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { ClaimFaceResponseSchema } from "@asimposium/contracts";
 import { EventTailResponseSchema, eventTailPath } from "@asimposium/contracts/event-tail";
 import { readProblemReviewFeedback } from "../../src/sessions/review-feedback.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
@@ -394,16 +395,64 @@ await runLocalWorkerJourney(
           eventTailPath(problem, "json", { since: seq - 1, through: seq, limit: 1 }),
         );
         assert.equal(exact.page_end.has_more, false);
-        // The review fits the completion gate, but the separate full work
-        // product has a tighter budget. Its event still identifies the review.
         assert.equal(publicReview.object_url, `/p/${problem}/reviews/${review.review_id}.json`);
-        await call(publicReview.object_url, undefined, undefined, 404);
         const contentBytes = await env.DB.prepare(
           "SELECT length(CAST(payload_json AS BLOB)) AS bytes FROM event_content WHERE event_id = ?",
         )
           .bind(publicReview.id)
           .first("bytes");
         assert.ok(contentBytes > 18000 && contentBytes <= 32768);
+        const reviewUrl = publicReview.object_url;
+        const face = ClaimFaceResponseSchema.parse(await call(reviewUrl));
+        const publication = face.items.find((item) => item.id === review.review_id);
+        assert.equal(publication?.kind, "claim-review");
+        assert.equal(publication.untrusted, true);
+        const reviewPreview = JSON.parse(publication.body);
+        assert.equal(reviewPreview.event, publicReview.id);
+        assert.equal(reviewPreview.content_digest, `sha256:${publicReview.payload_sha256}`);
+        assert.equal(reviewPreview.target, `${nextTarget}@1`);
+        assert.equal(reviewPreview.publication_url, readRecordedReview.url);
+        assert.equal(reviewPreview.content_omitted, "item_too_large");
+        assert.equal(reviewPreview.body_md, null);
+        assert.match(reviewPreview.body_md_excerpt, /^Checking the two sums/);
+        assert.ok(!JSON.stringify(face).includes(privateCanary));
+        const ordinaryClaim = ClaimFaceResponseSchema.parse(
+          await call(`/p/${problem}/claims/${nextTarget}@1.json`),
+        );
+        assert.ok(!ordinaryClaim.items.some((item) => item.id === review.review_id));
+        assert.ok(
+          ordinaryClaim.omitted.some(
+            (item) => item.reason === "item_too_large" && item.detail === review.review_id,
+          ),
+        );
+        const readReview = (url, init) =>
+          worker.fetch(`${origin}${url}`, {
+            ...init,
+            headers: { "user-agent": userAgent, ...init?.headers },
+          });
+        const markdown = await readReview(reviewUrl.replace(/\.json$/, ".md"));
+        assert.equal(markdown.status, 200);
+        const text = await markdown.text();
+        assert.ok(text.includes(reviewPreview.content_digest));
+        assert.ok(text.includes("Checking the two sums"));
+        assert.ok(text.includes("item_too_large"));
+        const reviewResponse = await readReview(reviewUrl);
+        const etag = reviewResponse.headers.get("etag");
+        assert.ok(etag);
+        const head = await readReview(reviewUrl, { method: "HEAD" });
+        assert.equal(head.status, 200);
+        assert.equal(head.headers.get("etag"), etag);
+        assert.equal(await head.text(), "");
+        assert.equal(
+          (await readReview(reviewUrl, { headers: { "if-none-match": etag } })).status,
+          304,
+        );
+        await call(
+          `/p/${problem}/reviews/R-00000000000000000000000000.json`,
+          undefined,
+          undefined,
+          404,
+        );
         assert.ok(!JSON.stringify(exact).includes(privateCanary));
         assert.equal(
           recordedReviewAction(await call(requestPath, undefined, author)),
@@ -412,6 +461,7 @@ await runLocalWorkerJourney(
         );
         await controlTarget("hide");
         assert.equal(recordedReviewAction(await call(requestPath, undefined, eligible)), undefined);
+        await call(reviewUrl, undefined, undefined, 404);
         await controlTarget("restore");
         const controlRecordedReview = (action) =>
           operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
@@ -421,10 +471,20 @@ await runLocalWorkerJourney(
             reason: "Verify that invitation recovery follows current review visibility.",
           });
         await controlRecordedReview("hide");
+        assert.equal(
+          (await readReview(reviewUrl, { headers: { "if-none-match": etag } })).status,
+          404,
+        );
         const hiddenReview = await call(requestPath, undefined, eligible);
         assert.equal(recordedReviewAction(hiddenReview), undefined);
         assert.ok(!hiddenReview.next_actions.some(({ why }) => why.includes(review.review_id)));
         await controlRecordedReview("restore");
+        const restoredFace = ClaimFaceResponseSchema.parse(await call(reviewUrl));
+        assert.equal(
+          JSON.parse(restoredFace.items.find((item) => item.id === review.review_id).body)
+            .content_digest,
+          reviewPreview.content_digest,
+        );
         const publicState = () =>
           env.DB.prepare(`SELECT public_seq, (
             SELECT COUNT(*) FROM events WHERE problem_id = p.id AND type = 'review.created'

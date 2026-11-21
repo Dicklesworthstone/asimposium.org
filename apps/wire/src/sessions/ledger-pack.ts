@@ -8,6 +8,7 @@ import {
   type ScientificProvenance,
 } from "@asimposium/contracts";
 import { tryBuildEvidenceArtifactDiscovery } from "@asimposium/contracts/artifact-publications";
+import { eventTailPath } from "@asimposium/contracts/event-tail";
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 import type { Env } from "../env";
@@ -60,6 +61,7 @@ import { readCanonicalReviewQueuePack } from "./review-queue-pack";
 // One extra row proves truncation. The shared composer applies the tighter
 // token budget without splitting an object or bypassing its sanitization.
 export const LEDGER_PACK_CANDIDATE_LIMIT = 20;
+const EXACT_REVIEW_EXCERPT_CODE_POINTS = 1024;
 
 export interface LedgerPackSection {
   candidates: PackCandidate[];
@@ -376,6 +378,7 @@ export async function readPublicClaimSnapshot(
     (pins, assessments, complete) => {
       fold = withPremiseStaleness(fold, pins, assessments, complete);
     },
+    focus,
   );
   return { section, fold };
 }
@@ -488,6 +491,34 @@ function targetClaimStatements(
   ];
 }
 
+function excerptExactReview(body: string, problemId: string): string {
+  const review = JSON.parse(body) as Record<string, unknown>;
+  const seq = Number(review.seq);
+  return JSON.stringify({
+    problem: review.problem,
+    target: review.target,
+    event: review.event,
+    seq,
+    content_digest: review.content_digest,
+    read_url: review.read_url,
+    publication_url: eventTailPath(problemId, "json", { since: seq - 1, through: seq, limit: 1 }),
+    fellow: review.fellow,
+    sponsor: review.sponsor,
+    session: review.session,
+    model_self_declared: review.model_self_declared,
+    harness_self_declared: review.harness_self_declared,
+    verdict: review.verdict,
+    tier: review.tier,
+    scientific_status: review.scientific_status,
+    body_md: null,
+    body_md_excerpt:
+      typeof review.body_md === "string"
+        ? Array.from(review.body_md).slice(0, EXACT_REVIEW_EXCERPT_CODE_POINTS).join("")
+        : null,
+    content_omitted: "item_too_large",
+  });
+}
+
 async function composeTargetClaimPack(
   db: Env["DB"],
   results: D1Result[],
@@ -499,6 +530,7 @@ async function composeTargetClaimPack(
     assessments: ReadonlyMap<string, PremiseAssessment>,
     complete: boolean,
   ) => void,
+  focus?: string,
 ): Promise<LedgerPackSection> {
   type TargetRow = {
     id: string;
@@ -758,25 +790,36 @@ async function composeTargetClaimPack(
       if (body === null) {
         section.omitted.push({ reason: "content_unavailable", detail: row.id });
         if (kind === "claim-detail") return section;
-      } else if (body.length > 18000 || neutralizeUntrustedBody(body).text.length > 18000) {
-        // Check both original and neutralized size; escaping can expand hostile
-        // markers. Never let one record break the pack or truncate the object.
-        section.omitted.push({ reason: "item_too_large", detail: row.id });
-      } else {
-        section.candidates.push({
-          kind,
-          id: row.id,
-          scope: "ledger",
-          untrusted: true,
-          tokens: 1,
-          body,
-          ...(screeningNotices.has(Number(JSON.parse(body).seq))
-            ? { screening_notice: screeningNotices.get(Number(JSON.parse(body).seq))! }
-            : {}),
-          why_included: why,
-          stable_prefix: 3 + index * LEDGER_PACK_CANDIDATE_LIMIT + position,
-        });
+        continue;
       }
+      if (body.length > 18000 || neutralizeUntrustedBody(body).text.length > 18000) {
+        // Check both original and neutralized size; escaping can expand hostile
+        // markers. Ordinary packs keep their whole-record budget.
+        section.omitted.push({ reason: "item_too_large", detail: row.id });
+        if (kind !== "claim-review" || focus !== row.id) continue;
+        body = excerptExactReview(body, problemId);
+        // The exact face's existing byte budget belongs to the requested
+        // review. Its next actions still link to the pinned claim statement.
+        if (section.candidates.some((item) => item.kind === "claim-detail")) {
+          section.candidates = section.candidates.filter((item) => item.kind !== "claim-detail");
+          section.omitted.push({
+            reason: "item_face_scope",
+            detail: `${target}: the review excerpt has its own face. Read the claim face for the statement.`,
+          });
+        }
+      }
+      const screeningNotice = screeningNotices.get(Number(JSON.parse(body).seq));
+      section.candidates.push({
+        kind,
+        id: row.id,
+        scope: "ledger",
+        untrusted: true,
+        tokens: 1,
+        body,
+        ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
+        why_included: why,
+        stable_prefix: 3 + index * LEDGER_PACK_CANDIDATE_LIMIT + position,
+      });
     }
     if (rows.length === 0 && (kind !== "claim-dependency" || closure.complete))
       section.candidates.push({

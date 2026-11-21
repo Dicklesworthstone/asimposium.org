@@ -533,6 +533,7 @@ async function scientificReview(
   seq: number,
   claim: string,
   novelty?: "new" | "rediscovery",
+  bodyMd = "CONTROLLED_REVIEW_BODY_CANARY",
 ) {
   const event = `EV-REVIEW-${seq}`,
     id = `R-${seq}`;
@@ -544,7 +545,7 @@ async function scientificReview(
     basis: "The supplied enumeration could not be independently reproduced.",
     capable_of_failure: "A reproduced enumeration with no exceptions.",
     rubric: [],
-    body_md: "CONTROLLED_REVIEW_BODY_CANARY",
+    body_md: bodyMd,
     ...(novelty === undefined
       ? {}
       : {
@@ -566,10 +567,63 @@ async function scientificReview(
   f.db
     .prepare(`INSERT INTO reviews VALUES (?, 'P-PACK', ?, ?, ?, 1, 'T1', ?,
     'The supplied enumeration could not be independently reproduced.',
-    'A reproduced enumeration with no exceptions.', '[]', 'CONTROLLED_REVIEW_BODY_CANARY', NULL)`)
-    .run(id, event, seq, claim, verdict);
+    'A reproduced enumeration with no exceptions.', '[]', ?, NULL)`)
+    .run(id, event, seq, claim, verdict, bodyMd);
   return { event, id };
 }
+
+test("an oversized review keeps a bounded exact face even beside a large claim", async () => {
+  const f = fixture();
+  const target = "C-1@1";
+  await f.add(1, [], "& Scientific statement. ".repeat(700));
+  const body = `${"😀 & mathematical witness. ".repeat(2000)}END_OF_PUBLISHED_REVIEW`;
+  const review = await scientificReview(f, 2, "C-1", undefined, body);
+  const path = `reviews/${review.id}.json`;
+  const read = (suffix: string) =>
+    createLedgerFaceRoutes().request(`https://a.asimposium.org/p/P-PACK/${suffix}`, {}, {
+      DB: f.d1,
+    } as Env);
+
+  const ordinary = await f.pack(target, 2);
+  expect(ordinary.candidates.some((item) => item.id === review.id)).toBe(false);
+  expect(ordinary.omitted).toContainEqual({ reason: "item_too_large", detail: review.id });
+
+  const response = await read(path);
+  expect(response.status).toBe(200);
+  const face = ClaimFaceResponseSchema.parse(await response.json());
+  expect(face.items.map((item) => item.id)).toEqual([review.id]);
+  expect(face.claim_state).toMatchObject({ claim_id: "C-1", version: 1 });
+  expect(
+    face.next_actions.some(({ url }) => url.startsWith(`/p/P-PACK/claims/${target}.json?`)),
+  ).toBe(true);
+  const [item] = face.items;
+  if (item === undefined) throw new Error("Missing the focused review");
+  const published = JSON.parse(item.body);
+  const original = f.db
+    .query("SELECT payload_json FROM event_content WHERE event_id = ?")
+    .get(review.event) as { payload_json: string };
+  expect(published).toMatchObject({
+    event: review.event,
+    target,
+    content_digest: `sha256:${await digest(original.payload_json)}`,
+    sponsor: "usr-reviewer",
+    body_md: null,
+    content_omitted: "item_too_large",
+  });
+  expect(body.startsWith(published.body_md_excerpt)).toBe(true);
+  expect(Array.from(published.body_md_excerpt)).toHaveLength(1024);
+  expect(item.body).not.toContain("END_OF_PUBLISHED_REVIEW");
+
+  await withdrawInput(f, review, 3);
+  const history = ClaimFaceResponseSchema.parse(await (await read(path)).json());
+  const [withdrawn] = history.items;
+  if (withdrawn === undefined) throw new Error("Missing the withdrawn review");
+  expect(JSON.parse(withdrawn.body).scientific_status.withdrawal).toBe("withdrawn");
+  f.db
+    .prepare("UPDATE event_content SET redacted_at = '2026-10-02' WHERE event_id = ?")
+    .run(review.event);
+  expect((await read(path)).status).toBe(404);
+});
 
 async function withdrawInput(
   f: ReturnType<typeof fixture>,
@@ -947,7 +1001,7 @@ test("focused public records retain current controls, immutable bodies, privacy 
   }
 });
 
-test("focused records keep the item byte ceiling and exact problem scope", async () => {
+test("focused records keep the byte ceiling and exact problem scope when a review is excerpted", async () => {
   const f = await focusedClaimHistory();
   expect((await f.read(`reviews/${f.review.id}.json`)).status).toBe(200);
   expect((await f.read(`evidence/${f.evidence.id}.json`)).status).toBe(200);
@@ -966,7 +1020,7 @@ test("focused records keep the item byte ceiling and exact problem scope", async
       .get(record.event) as { payload_json: string };
     const payload = JSON.stringify({
       ...JSON.parse(row.payload_json),
-      body_md: `OVERSIZED_BODY_CANARY${"x".repeat(18000)}`,
+      body_md: `OVERSIZED_BODY_CANARY${"x".repeat(18000)}END_OF_WORK_PRODUCT`,
     });
     const hash = await digest(payload);
     f.db
@@ -974,8 +1028,24 @@ test("focused records keep the item byte ceiling and exact problem scope", async
       .run(payload, hash, record.event);
     f.db.prepare("UPDATE events SET payload_sha256 = ? WHERE id = ?").run(hash, record.event);
     const response = await f.read(`${segment}/${record.id}.json`);
-    expect(response.status).toBe(404);
-    expect(await response.text()).not.toContain("OVERSIZED_BODY_CANARY");
+    if (segment === "evidence") {
+      expect(response.status).toBe(404);
+      expect(await response.text()).not.toContain("OVERSIZED_BODY_CANARY");
+      continue;
+    }
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(64000);
+    const face = ClaimFaceResponseSchema.parse(JSON.parse(text));
+    const item = face.items.find(({ id }) => id === record.id);
+    if (item === undefined) throw new Error("Missing the focused review");
+    expect(JSON.parse(item.body)).toMatchObject({
+      content_digest: `sha256:${hash}`,
+      body_md: null,
+      body_md_excerpt: expect.stringMatching(/^OVERSIZED_BODY_CANARYx+$/),
+      content_omitted: "item_too_large",
+    });
+    expect(text).not.toContain("END_OF_WORK_PRODUCT");
   }
 });
 
