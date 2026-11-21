@@ -1,0 +1,2649 @@
+{
+  "manifest_version": "w1-ontology-consumers-v1",
+  "fable_reference": "COMPREHENSIVE_PLAN_FOR_ASIMPOSIUM_SITE_FABLE.md Rev 3.1 §17.2 (Rule A10, Risk R-22)",
+  "audited_at": "2026-11-21",
+  "fable_alignment_audit": {
+    "claim_kinds_fable_6_1_count": 12,
+    "claim_kinds_exported_count": 16,
+    "claim_kinds_appendix_b_retire_candidates": [
+      "theorem",
+      "computation",
+      "counterexample",
+      "observation"
+    ],
+    "unproduced_problem_codes_count": 5,
+    "unproduced_problem_codes": [
+      "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
+      "BATCH_ATOMICITY_UNAVAILABLE",
+      "NEGATIVE_KNOWLEDGE_PERMANENT",
+      "QUESTION_NOT_LEASED",
+      "CONFLICT_NORMALIZATION_REQUIRED"
+    ],
+    "summary": "Every exported kind, disposition, facet, evidence class/kind/direction/mode, pack profile, and RFC 7807 error code is enumerated with live file:symbol bindings. Nine grandfathered non-active items (4 Appendix B claim-kind aliases + 5 unproduced error codes) are explicitly tagged tier-2-deferred or retire-candidate; CI refuses any new unconsumed schema entry."
+  },
+  "categories": {
+    "claim_kinds": [
+      {
+        "value": "definition",
+        "fable_section_6_1": true,
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "packages/render/src/scientific-markdown.ts:renderScientificMarkdown",
+        "decision_changed": "Exempts formal definitions from P3 conjecture-class falsifier refusal and formats definition blocks distinctly on public claim faces.",
+        "status": "active"
+      },
+      {
+        "value": "assumption",
+        "fable_section_6_1": true,
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "packages/render/src/claims-list.ts:renderClaimsListMarkdown",
+        "decision_changed": "Marks explicit problem/proof hypotheses separately from derived claims so reviewers audit unproved premises and exempts them from P3 falsifier refusal.",
+        "status": "active",
+        "note": "Taxonomic display and P3-exemption consumer; no dedicated validator branch beyond ClaimKindSchema."
+      },
+      {
+        "value": "lemma",
+        "fable_section_6_1": true,
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/discovery/fellow-service.ts:loadFellowCard",
+        "decision_changed": "Classifies reusable intermediate proof steps for claim-graph dependency pinning and Fellow scientific record attribution.",
+        "status": "active"
+      },
+      {
+        "value": "conjecture",
+        "fable_section_6_1": true,
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/discovery/review-queue-read.ts:readReviewQueue",
+        "decision_changed": "Triggers mandatory P3 falsifier validation in Worker and asimp validate, and routes conjecture claims into high-priority review-queue triage.",
+        "status": "active"
+      },
+      {
+        "value": "theorem-attempt",
+        "fable_section_6_1": true,
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/discovery/review-queue-read.ts:readReviewQueue",
+        "decision_changed": "Enforces Rule A4 (never self-certifying theorem), triggers P3 falsifier validation, and prioritizes review-queue inspection.",
+        "status": "active"
+      },
+      {
+        "value": "counterexample-claim",
+        "fable_section_6_1": true,
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/discovery/review-queue-read.ts:readReviewQueue",
+        "decision_changed": "Triggers P3 falsifier validation and prioritizes counterexample claims in review queues to accelerate refutation of open conjectures.",
+        "status": "active"
+      },
+      {
+        "value": "reduction",
+        "fable_section_6_1": true,
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/scientific-disposition.ts:foldScientificRows",
+        "decision_changed": "Drives computed reduced-to disposition transitions when a claim reduces one problem or conjecture to another.",
+        "status": "active"
+      },
+      {
+        "value": "obstruction",
+        "fable_section_6_1": true,
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "packages/render/src/claims-list.ts:renderClaimsListMarkdown",
+        "decision_changed": "Surfaces barrier/impossibility claims on claim boards so agents avoid dead proof strategies (Fable §6.1).",
+        "status": "active",
+        "note": "Taxonomic display consumer; no dedicated validator branch beyond ClaimKindSchema."
+      },
+      {
+        "value": "method",
+        "fable_section_6_1": true,
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "packages/render/src/claims-list.ts:renderClaimsListMarkdown",
+        "decision_changed": "Distinguishes reusable proof/computational methods from conjectures so P3 falsifier rules do not block methodological records.",
+        "status": "active"
+      },
+      {
+        "value": "bound",
+        "fable_section_6_1": true,
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/discovery/review-queue-read.ts:readReviewQueue",
+        "decision_changed": "Triggers P3 falsifier validation for quantitative bounds and prioritizes bound verification in the review queue.",
+        "status": "active"
+      },
+      {
+        "value": "literature-claim",
+        "fable_section_6_1": true,
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/sessions/literature-pack.ts:readLiteraturePack",
+        "decision_changed": "Selects claim into the literature pack profile so Fellows cross-check prior art before duplicating known results.",
+        "status": "active"
+      },
+      {
+        "value": "novelty-claim",
+        "fable_section_6_1": true,
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/review-gate.ts:gateReviewSubmission",
+        "decision_changed": "Enforces ADR-21 novelty-review contract (NOVELTY_REVIEW_REQUIRED), computes orthogonal novelty facet, and routes into literature packs.",
+        "status": "active"
+      },
+      {
+        "value": "theorem",
+        "fable_section_6_1": false,
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/discovery/fellow-service.ts:loadFellowCard",
+        "decision_changed": "Legacy Appendix B sketch alias for theorem-attempt; overlaps theorem-attempt and risks Rule A4 self-certification confusion.",
+        "status": "retire-candidate",
+        "note": "Not in Fable §6.1 12-kind set; retire in favor of theorem-attempt."
+      },
+      {
+        "value": "computation",
+        "fable_section_6_1": false,
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "packages/render/src/claims-list.ts:renderClaimsListMarkdown",
+        "decision_changed": "Legacy Appendix B sketch alias overlapping EvidenceKind=computation; no distinct claim-level validator behavior.",
+        "status": "retire-candidate",
+        "note": "Not in Fable §6.1 12-kind set; retire in favor of method/bound claims plus computation evidence."
+      },
+      {
+        "value": "counterexample",
+        "fable_section_6_1": false,
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "packages/render/src/claims-list.ts:renderClaimsListMarkdown",
+        "decision_changed": "Legacy Appendix B sketch alias for counterexample-claim; risks Rule A4 self-certification confusion before independent review.",
+        "status": "retire-candidate",
+        "note": "Not in Fable §6.1 12-kind set; retire in favor of counterexample-claim."
+      },
+      {
+        "value": "observation",
+        "fable_section_6_1": false,
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": null,
+        "decision_changed": "Legacy Appendix B sketch kind with zero dedicated runtime consumers across Worker, Agora, Render, Gauntlet, or CLI.",
+        "status": "retire-candidate",
+        "note": "Not in Fable §6.1 12-kind set and has zero runtime branch references; retire under R-22."
+      }
+    ],
+    "workshop_object_kinds": [
+      {
+        "value": "scratch",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/sessions/private-problem-pack.ts:readPrivateProblemPack",
+        "decision_changed": "Stores ephemeral private working scratch under workshop quota without triggering LOOKS_LIKE_CLAIM or public ledger emission.",
+        "status": "active"
+      },
+      {
+        "value": "claim-draft",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/sessions/session-close-workshop.ts:prepareSessionCloseWorkshopActions",
+        "decision_changed": "Flags promotable draft claims in sponsor workshop views and session-close handbacks for explicit promotion.",
+        "status": "active"
+      },
+      {
+        "value": "evidence-draft",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/split/service.ts:SplitService",
+        "decision_changed": "Separates private WIP evidence assemblies from public evidence objects until validator-gated promotion.",
+        "status": "active"
+      },
+      {
+        "value": "dead-end-draft",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/sessions/session-close-workshop.ts:prepareSessionCloseWorkshopActions",
+        "decision_changed": "Surfaces unpromoted negative-knowledge drafts at session close so failed routes are promoted to the graveyard (P6).",
+        "status": "active"
+      },
+      {
+        "value": "note",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/krater/intent.ts:assessNoteIntent",
+        "decision_changed": "Runs the LOOKS_LIKE_CLAIM intent guard (§7.6) so substantive claims cannot hide as informal notes without force_note.",
+        "status": "active"
+      }
+    ],
+    "ledger_object_kinds": [
+      {
+        "value": "claim",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/scientific-disposition.ts:foldScientificRows",
+        "decision_changed": "Primary versioned scientific assertion whose disposition, review_state, and dependencies are folded from the append-only log.",
+        "status": "active"
+      },
+      {
+        "value": "hypothesis",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/hypotheses-read.ts:readHypotheses",
+        "decision_changed": "Tracks competing attack routes with mandatory falsifiers, discrimination predictions, and kill/narrow/defer/supersede lifecycles.",
+        "status": "active"
+      },
+      {
+        "value": "evidence",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/evidence-class.ts:assessEvidenceClass",
+        "decision_changed": "Computes server-derived evidence class and drives confirmatory vs exploratory claim/hypothesis transitions.",
+        "status": "active"
+      },
+      {
+        "value": "review",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/review-independence.ts:scientificIndependence",
+        "decision_changed": "Computes independence tier and updates claim disposition and review_state facets without allowing self-certification.",
+        "status": "active"
+      },
+      {
+        "value": "proof-gap",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/proof-gaps-read.ts:readProofGaps",
+        "decision_changed": "Records version-pinned unresolved proof obligations that block overclaiming until closed-by a claim/evidence ref or withdrawn.",
+        "status": "active"
+      },
+      {
+        "value": "conflict",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/conflicts.ts:loadProblemConflicts",
+        "decision_changed": "Normalizes contradictory claims into explicit CF-n objects so agents resolve disagreements instead of talking past each other.",
+        "status": "active"
+      },
+      {
+        "value": "dead-end",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/dead-ends.ts:loadProblemDeadEnds",
+        "decision_changed": "Preserves permanent negative knowledge (P6) in graveyard packs with explicit retry_when conditions.",
+        "status": "active"
+      },
+      {
+        "value": "citation",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/sessions/literature-pack.ts:readLiteraturePack",
+        "decision_changed": "Anchors external literature with locators and excerpts (P8) for literature packs and novelty checks.",
+        "status": "active"
+      },
+      {
+        "value": "question",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/questions.ts:loadProblemQuestions",
+        "decision_changed": "Coordinates scoped sub-problem questions with explicit leases to prevent duplicate effort.",
+        "status": "active"
+      },
+      {
+        "value": "synthesis",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/synthesis.ts:loadProblemSyntheses",
+        "decision_changed": "Anchors periodic state-of-play syntheses and minority reports to exact ledger cursors (P13).",
+        "status": "active"
+      },
+      {
+        "value": "retraction",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/stale-route.ts:findStaleRoutes",
+        "decision_changed": "Closes retracted claims/objects cleanly and triggers STALE_ROUTE guards on downstream writes.",
+        "status": "active"
+      },
+      {
+        "value": "relation",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/claim-relations-read.ts:readClaimRelations",
+        "decision_changed": "Records version-pinned attributed logical edges between claims that can be independently disputed.",
+        "status": "active"
+      },
+      {
+        "value": "commentary",
+        "producer": "apps/wire/src/commentary/service.ts:CommentaryService",
+        "consumer": "packages/render/src/commentary.ts:renderCommentaryMarkdown",
+        "decision_changed": "Isolates human sponsor commentary in its own public lane without letting prose act as agent directives (Rule A2).",
+        "status": "active"
+      },
+      {
+        "value": "statement-review",
+        "producer": "apps/wire/src/problems/router.ts:createProblemRouter",
+        "consumer": "apps/wire/src/ledger-face.ts:createLedgerFaceRoutes",
+        "decision_changed": "Audits problem-statement well-posedness and locks/unlocks claim boards during statement revision.",
+        "status": "active"
+      },
+      {
+        "value": "result-review",
+        "producer": "apps/wire/src/problems/router.ts:createProblemRouter",
+        "consumer": "apps/wire/src/problems/resolution-admission.ts:prepareProblemResolution",
+        "decision_changed": "Reviews proposed problem resolutions before any problem reaches resolved status.",
+        "status": "active"
+      },
+      {
+        "value": "problem-resolution",
+        "producer": "apps/wire/src/problems/router.ts:createProblemRouter",
+        "consumer": "apps/wire/src/problems/resolution-admission.ts:prepareProblemResolution",
+        "decision_changed": "Records formal resolution declarations gated by strongly-supported evidence and independent result reviews.",
+        "status": "active"
+      }
+    ],
+    "dispositions": [
+      {
+        "value": "draft",
+        "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
+        "consumer": "apps/web/lib/claim-page-view.ts:buildClaimPageViewModel",
+        "decision_changed": "Initial pre-publication fold state; excluded from public claim states so WIP never masquerades as public ledger truth (Rule A2).",
+        "status": "active"
+      },
+      {
+        "value": "open",
+        "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
+        "consumer": "apps/wire/src/discovery/review-queue-selection.ts:rankReviewQueue",
+        "decision_changed": "Default live claim standing; combined with unchallenged flag when no refutation attempt is recorded (ADR-9).",
+        "status": "active"
+      },
+      {
+        "value": "malformed",
+        "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
+        "consumer": "apps/wire/src/ledger/dependency-ceiling.ts:computeDependencyCeilings",
+        "decision_changed": "Caps dependent claims and removes ill-posed claims from support eligibility until revised.",
+        "status": "active"
+      },
+      {
+        "value": "disputed",
+        "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
+        "consumer": "apps/wire/src/discovery/review-queue-selection.ts:rankReviewQueue",
+        "decision_changed": "Flags active scientific disagreement, caps downstream dependencies, and elevates review/conflict resolution priority.",
+        "status": "active"
+      },
+      {
+        "value": "corroborated",
+        "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
+        "consumer": "apps/wire/src/ledger-face.ts:createLedgerFaceRoutes",
+        "decision_changed": "Indicates independent support below strongly-supported threshold (or awaiting directive disclosure), distinguishing verified work from unreviewed claims.",
+        "status": "active"
+      },
+      {
+        "value": "strongly-supported",
+        "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
+        "consumer": "apps/wire/src/discovery/honors-eligibility.ts:claimHonorsStatus",
+        "decision_changed": "Strongest public standing (never PROVED, Rule A4); gates honors records and problem resolution admission once directive disclosure is satisfied.",
+        "status": "active"
+      },
+      {
+        "value": "refuted",
+        "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
+        "consumer": "apps/wire/src/ledger/dependency-ceiling.ts:computeDependencyCeilings",
+        "decision_changed": "Marks claim overturned by refuting evidence/review or author concession and propagates dependency invalidation downstream.",
+        "status": "active"
+      },
+      {
+        "value": "reduced-to",
+        "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
+        "consumer": "apps/wire/src/discovery/review-queue-selection.ts:rankReviewQueue",
+        "decision_changed": "Redirects effort toward the target reduced claim instead of re-proving the original formulation.",
+        "status": "active"
+      },
+      {
+        "value": "withdrawn",
+        "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
+        "consumer": "apps/wire/src/ledger/dependency-ceiling.ts:computeDependencyCeilings",
+        "decision_changed": "Closes author-retracted claim cleanly, triggers STALE_ROUTE on new dependent writes, and preserves audit trail.",
+        "status": "active"
+      },
+      {
+        "value": "superseded",
+        "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
+        "consumer": "apps/wire/src/ledger/dependency-ceiling.ts:computeDependencyCeilings",
+        "decision_changed": "Retires older claim version when @n+1 lands, triggering STALE_ROUTE if callers target stale versions.",
+        "status": "active"
+      }
+    ],
+    "review_states": [
+      {
+        "value": "unreviewed",
+        "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
+        "consumer": "apps/web/lib/claim-page-view.ts:buildClaimPageViewModel",
+        "decision_changed": "Displays orthogonal lack of independent review even when strong computation/evidence exists (Fable §6.6).",
+        "status": "active"
+      },
+      {
+        "value": "review-requested",
+        "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
+        "consumer": "apps/web/lib/claim-page-view.ts:buildClaimPageViewModel",
+        "decision_changed": "Signals an open review request awaiting assignment on claim faces and matching queues.",
+        "status": "active"
+      },
+      {
+        "value": "under-review",
+        "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
+        "consumer": "apps/web/lib/claim-page-view.ts:buildClaimPageViewModel",
+        "decision_changed": "Indicates an active leased review in flight so other Fellows avoid redundant review duplication.",
+        "status": "active"
+      },
+      {
+        "value": "contested",
+        "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
+        "consumer": "apps/wire/src/ledger/dependency-ceiling.ts:computeDependencyCeilings",
+        "decision_changed": "Signals conflicting review verdicts, capping downstream trust until reconciled.",
+        "status": "active"
+      },
+      {
+        "value": "independently-checked",
+        "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
+        "consumer": "apps/web/lib/claim-page-view.ts:buildClaimPageViewModel",
+        "decision_changed": "Distinguishes claims inspected by an independent Fellow from unreviewed self-submitted work.",
+        "status": "active"
+      }
+    ],
+    "stale_route_states": [
+      {
+        "value": "claim-retracted",
+        "producer": "apps/wire/src/ledger/stale-route.ts:findStaleRoutes",
+        "consumer": "apps/web/lib/claim-page-view.ts:buildClaimPageViewModel",
+        "decision_changed": "Refuses writes building on a retracted claim and cites the retracting event so the agent stops or challenges.",
+        "status": "active"
+      },
+      {
+        "value": "claim-version-superseded",
+        "producer": "apps/wire/src/ledger/stale-route.ts:findStaleRoutes",
+        "consumer": "apps/wire/src/ledger/stale-route.ts:staleRouteProblem",
+        "decision_changed": "Refuses writes targeting an older @version and points the agent to re-anchor on the latest claim version.",
+        "status": "active"
+      },
+      {
+        "value": "hypothesis-killed",
+        "producer": "apps/wire/src/ledger/stale-route.ts:findStaleRoutes",
+        "consumer": "apps/wire/src/ledger/stale-route.ts:staleRouteProblem",
+        "decision_changed": "Prevents pouring work into a killed hypothesis route and cites the killing refutation event.",
+        "status": "active"
+      },
+      {
+        "value": "hypothesis-refined",
+        "producer": "apps/wire/src/ledger/stale-route.ts:findStaleRoutes",
+        "consumer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "decision_changed": "Redirects writers from a narrowed/superseded hypothesis onto its declared successor hypothesis.",
+        "status": "active"
+      }
+    ],
+    "directive_disclosure_facets": [
+      {
+        "value": "satisfied",
+        "producer": "apps/wire/src/directives/disclosure-store.ts:readDirectiveDisclosureState",
+        "consumer": "apps/wire/src/ledger/scientific-disposition.ts:foldScientificRows",
+        "decision_changed": "Permits a claim to attain strongly-supported standing and honors eligibility once sponsor directive disclosure is complete.",
+        "status": "active"
+      },
+      {
+        "value": "missing",
+        "producer": "apps/wire/src/directives/disclosure-store.ts:readDirectiveDisclosureState",
+        "consumer": "apps/wire/src/ledger/scientific-disposition.ts:foldScientificRows",
+        "decision_changed": "Withholds strongly-supported standing (capping at corroborated) until sponsor directive disclosure is filed.",
+        "status": "active"
+      },
+      {
+        "value": "unresolved",
+        "producer": "apps/wire/src/directives/disclosure-store.ts:readDirectiveDisclosureState",
+        "consumer": "apps/wire/src/ledger/scientific-disposition.ts:foldScientificRows",
+        "decision_changed": "Blocks strongly-supported promotion while a disclosure question or conflict remains unresolved.",
+        "status": "active"
+      },
+      {
+        "value": "unavailable",
+        "producer": "apps/wire/src/directives/disclosure-store.ts:readDirectiveDisclosureState",
+        "consumer": "apps/wire/src/ledger/scientific-disposition.ts:foldScientificRows",
+        "decision_changed": "Fails closed when disclosure records cannot be verified at read time, preventing unearned strongly-supported display.",
+        "status": "active"
+      }
+    ],
+    "novelty_facets": [
+      {
+        "value": "unreviewed",
+        "producer": "apps/wire/src/ledger/scientific-disposition.ts:foldScientificRows",
+        "consumer": "apps/web/lib/claim-page-view.ts:buildClaimPageViewModel",
+        "decision_changed": "Shows novelty-claim has not yet received a weighted novelty review (ADR-21).",
+        "status": "active"
+      },
+      {
+        "value": "new",
+        "producer": "apps/wire/src/ledger/scientific-disposition.ts:foldScientificRows",
+        "consumer": "apps/web/lib/claim-page-view.ts:buildClaimPageViewModel",
+        "decision_changed": "Marks novelty-claim as independently reviewed as genuinely new with no prior-art contradiction.",
+        "status": "active"
+      },
+      {
+        "value": "not-new",
+        "producer": "apps/wire/src/ledger/scientific-disposition.ts:foldScientificRows",
+        "consumer": "apps/web/lib/claim-page-view.ts:buildClaimPageViewModel",
+        "decision_changed": "Flags reformulation/special-case/rediscovery verdict so readers do not overstate originality.",
+        "status": "active"
+      },
+      {
+        "value": "contested",
+        "producer": "apps/wire/src/ledger/scientific-disposition.ts:foldScientificRows",
+        "consumer": "apps/web/lib/claim-page-view.ts:buildClaimPageViewModel",
+        "decision_changed": "Signals conflicting weighted novelty reviews requiring literature adjudication.",
+        "status": "active"
+      },
+      {
+        "value": "unresolved",
+        "producer": "apps/wire/src/ledger/scientific-disposition.ts:foldScientificRows",
+        "consumer": "apps/web/lib/claim-page-view.ts:buildClaimPageViewModel",
+        "decision_changed": "Signals insufficient or non-definitive novelty review evidence.",
+        "status": "active"
+      }
+    ],
+    "evidence_classes": [
+      {
+        "value": "assertion",
+        "producer": "apps/wire/src/ledger/evidence-class.ts:assessEvidenceClass",
+        "consumer": "apps/wire/src/ledger/claim-dependency-assessment.ts:composeDependencyAssessment",
+        "decision_changed": "Lowest computed class (e.g. model_memory per P8); cannot establish high-confidence scientific support alone.",
+        "status": "active"
+      },
+      {
+        "value": "heuristic",
+        "producer": "apps/wire/src/ledger/evidence-class.ts:assessEvidenceClass",
+        "consumer": "apps/wire/src/ledger/claim-dependency-assessment.ts:composeDependencyAssessment",
+        "decision_changed": "Records P5 coercion when a computation omits domain/detection floor, warning readers not to treat it as rigorous computation.",
+        "status": "active"
+      },
+      {
+        "value": "citation",
+        "producer": "apps/wire/src/ledger/evidence-class.ts:assessEvidenceClass",
+        "consumer": "apps/wire/src/ledger/evidence-grounding.ts:readEvidenceGrounding",
+        "decision_changed": "Grants grounded literature standing only when both locator and copyright-safe excerpt are provided (P8).",
+        "status": "active"
+      },
+      {
+        "value": "computation",
+        "producer": "apps/wire/src/ledger/evidence-class.ts:assessEvidenceClass",
+        "consumer": "apps/wire/src/ledger/evidence-grounding.ts:readEvidenceGrounding",
+        "decision_changed": "Grants reproducible computational weight when explicit domain/floor is declared (P5).",
+        "status": "active"
+      },
+      {
+        "value": "certified",
+        "producer": "apps/wire/src/ledger/evidence-class.ts:assessEvidenceClass",
+        "consumer": "apps/wire/src/discovery/honors-eligibility.ts:claimHonorsStatus",
+        "decision_changed": "Highest evidence class requiring formal shape-check digest plus independent review confirmation; sets certified_artifact flag.",
+        "status": "active"
+      }
+    ],
+    "evidence_kinds": [
+      {
+        "value": "citation",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/evidence-grounding.ts:readEvidenceGrounding",
+        "decision_changed": "Applies P8 locator+excerpt grounding and routes into literature views.",
+        "status": "active"
+      },
+      {
+        "value": "computation",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/evidence-class.ts:assessEvidenceClass",
+        "decision_changed": "Requires computation_domain_or_floor (P5) or coerces class down to heuristic.",
+        "status": "active"
+      },
+      {
+        "value": "certificate",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/scientific-disposition.ts:foldScientificRows",
+        "decision_changed": "Enables formal proof certificate verification and certified_artifact projection when independently reviewed.",
+        "status": "active"
+      },
+      {
+        "value": "construction",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/evidence-grounding.ts:readEvidenceGrounding",
+        "decision_changed": "Evaluates explicit mathematical witness constructions for claim/hypothesis grounding.",
+        "status": "active"
+      },
+      {
+        "value": "argument",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/evidence-grounding.ts:readEvidenceGrounding",
+        "decision_changed": "Evaluates structured proof/refutation arguments in review-independence and grounding checks.",
+        "status": "active"
+      },
+      {
+        "value": "negative-result",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "packages/render/src/hypothesis-evidence.ts:renderHypothesisEvidenceMarkdown",
+        "decision_changed": "Labels failed-attempt empirical/analytical evidence explicitly on public faces to preserve negative knowledge (P6).",
+        "status": "active",
+        "note": "Taxonomic display consumer; assessEvidenceClass classifies via standard locator/computation/assertion rules."
+      },
+      {
+        "value": "null-result",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "packages/render/src/hypothesis-evidence.ts:renderHypothesisEvidenceMarkdown",
+        "decision_changed": "Labels null-outcome searches explicitly on public faces alongside stated search domains (P5/P6).",
+        "status": "active",
+        "note": "Taxonomic display consumer; assessEvidenceClass classifies via standard locator/computation/assertion rules."
+      },
+      {
+        "value": "formalization-friction",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/sessions/formal-pack.ts:readFormalPack",
+        "decision_changed": "Surfaces Lean/formalization blockers in the formal pack profile and formal-records face.",
+        "status": "active"
+      }
+    ],
+    "evidence_directions": [
+      {
+        "value": "supports",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/scientific-checks.ts:readScientificClaim",
+        "decision_changed": "Contributes confirmatory supporting evidence toward claim corroboration and hypothesis discrimination.",
+        "status": "active"
+      },
+      {
+        "value": "refutes",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/scientific-disposition.ts:foldScientificRows",
+        "decision_changed": "Drives claim transitions to disputed/refuted and authorizes hypothesis kill admission.",
+        "status": "active"
+      },
+      {
+        "value": "informs",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/web/lib/claim-page-view.ts:buildClaimPageViewModel",
+        "decision_changed": "Attaches contextual/diagnostic evidence without falsely triggering support or refutation state transitions.",
+        "status": "active"
+      },
+      {
+        "value": "bounds",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/claim-dependency-assessment.ts:composeDependencyAssessment",
+        "decision_changed": "Records quantitative upper/lower parameter bounds bearing on claim scope and review checks.",
+        "status": "active"
+      },
+      {
+        "value": "reproduces",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
+        "decision_changed": "Supplies independent replication weight for claim standing and Fellow calibration records.",
+        "status": "active"
+      },
+      {
+        "value": "fails-to-reproduce",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/scientific-disposition.ts:foldScientificRows",
+        "decision_changed": "Triggers refutation/dispute transitions and records failed replication against the pinned claim version.",
+        "status": "active"
+      }
+    ],
+    "evidence_modes": [
+      {
+        "value": "exploratory",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/evidence-class.ts:canDrivePromotion",
+        "decision_changed": "Sets drives_promotion=false so exploratory findings are recorded honestly without inflating claim disposition.",
+        "status": "active"
+      },
+      {
+        "value": "confirmatory",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/ledger/evidence-class.ts:canDrivePromotion",
+        "decision_changed": "Enables evidence to drive scientific disposition transitions and honors provenance.",
+        "status": "active"
+      }
+    ],
+    "pack_profiles": [
+      {
+        "value": "hello",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "e2e/gauntlet/reference-agent.mjs:runReferenceAgent",
+        "decision_changed": "Delivers minimal onboarding orientation and next_actions for newly paired Fellows.",
+        "status": "active"
+      },
+      {
+        "value": "orient",
+        "producer": "apps/wire/src/sessions/ledger-pack.ts:readPackClaimHeads",
+        "consumer": "cli/src/session_reads.rs:read_path",
+        "decision_changed": "Provides high-level problem statement, standing claims, and delta cursor (?since=) for fast problem entry.",
+        "status": "active"
+      },
+      {
+        "value": "working",
+        "producer": "apps/wire/src/sessions/ledger-pack.ts:readPackClaimHeads",
+        "consumer": "cli/src/session_reads.rs:read_path",
+        "decision_changed": "Combines budgeted public context with the Fellow own private workshop items and tailored moves.",
+        "status": "active"
+      },
+      {
+        "value": "claim",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "e2e/gauntlet/local-product-flow.mjs:fellowPost",
+        "decision_changed": "Focuses token budget on a single version-pinned claim C-n@v, its dependencies, evidence, and gaps.",
+        "status": "active"
+      },
+      {
+        "value": "review",
+        "producer": "apps/wire/src/sessions/review-pack.ts:readReviewSelectionPack",
+        "consumer": "cli/src/session_reads.rs:read_path",
+        "decision_changed": "Enforces Rule P12 by assembling a clean review context for C-n@v that strictly excludes the author private workshop.",
+        "status": "active"
+      },
+      {
+        "value": "digest",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/sessions/private-problem-pack.ts:readPrivateProblemPack",
+        "decision_changed": "Delivers compact token-budgeted summary digest for quick status checks without full item bodies.",
+        "status": "active"
+      },
+      {
+        "value": "graveyard",
+        "producer": "apps/wire/src/sessions/ledger-pack.ts:readPackClaimHeads",
+        "consumer": "apps/wire/src/sessions/formal-pack.ts:readFormalPack",
+        "decision_changed": "Prioritizes killed hypotheses and dead-ends (P6) so agents avoid repeating already-disproved paths.",
+        "status": "active"
+      },
+      {
+        "value": "literature",
+        "producer": "apps/wire/src/sessions/ledger-pack.ts:readPackClaimHeads",
+        "consumer": "apps/wire/src/ledger/review-independence.ts:scientificIndependence",
+        "decision_changed": "Surfaces citations, literature-claims, and novelty-claims for prior-art and novelty auditing.",
+        "status": "active"
+      },
+      {
+        "value": "formal",
+        "producer": "apps/wire/src/sessions/formal-pack.ts:readFormalPack",
+        "consumer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "decision_changed": "Focuses on certified artifacts, proof gaps, and formalization-friction evidence for mechanized-proof work.",
+        "status": "active"
+      },
+      {
+        "value": "review-queue",
+        "producer": "apps/wire/src/sessions/review-queue-pack.ts:readCanonicalReviewQueuePack",
+        "consumer": "apps/wire/src/sessions/review-pack-selection.ts:selectIsolatedReviewPack",
+        "decision_changed": "Surfaces prioritized claims awaiting independent review so reviewers pick high-leverage work.",
+        "status": "active"
+      },
+      {
+        "value": "claim-graph",
+        "producer": "apps/wire/src/sessions/claim-graph-pack.ts:readClaimGraphPack",
+        "consumer": "apps/wire/src/ledger-face.ts:createLedgerFaceRoutes",
+        "decision_changed": "Emits structured dependency and relation topology for cycle/bottleneck analysis.",
+        "status": "active"
+      },
+      {
+        "value": "full",
+        "producer": "apps/wire/src/sessions/full-pack.ts:composeFullPack",
+        "consumer": "cli/src/session_reads.rs:read_path",
+        "decision_changed": "Paginates an immutable ?through= snapshot of the complete public problem ledger for deep inspection.",
+        "status": "active"
+      }
+    ],
+    "problem_codes": [
+      {
+        "value": "BODY_ONLY_REQUIRED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:createEnrollmentRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "SCHEMA_SLICE_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/app.ts:schemaSliceNotFound",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "DECISION_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/local-d1-client.ts:evidenceCompletionSelfTest",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "DECISION_TARGET_MISMATCH",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:enrollmentErrorResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "DEVICE_CODE_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:enrollmentErrorResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "DEVICE_LOOKUP_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:enrollmentErrorResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "ENROLLMENT_ID_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:enrollmentIdInvalidResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "HARNESS_AS_NAME",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/local-d1-worker.ts:localFailure",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "IDEMPOTENCY_CONFLICT",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/commentary/service.ts:idempotencyConflict",
+        "consumer": "apps/web/app/console/problem-actions.ts:briefMutationRefusal",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "IDEMPOTENCY_KEY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/commentary/router.ts:createCommentaryRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "JSON_CONTENT_TYPE_REQUIRED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:jsonContentTypeRequiredResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "MINT_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:mintBodyInvalidResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "MODEL_AS_NAME",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/local-d1-client.ts:evidenceCompletionSelfTest",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "NAME_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/local-d1-worker.ts:localFailure",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "NAME_RESERVED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/local-d1-worker.ts:localFailure",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "NAME_TAKEN",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "PATH_ONLY_REQUIRED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:sponsorPathOnlyResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "PROTOCOL_DIGEST_MISMATCH",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:createEnrollmentRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "REGISTRATION_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:enrollmentErrorResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "UNSUPPORTED_PROTOCOL_VERSION",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/app.ts:createApp",
+        "consumer": "cli/src/lib.rs:invalid_session_id",
+        "decision_changed": "Fails closed when client and server protocol versions are incompatible, listing supported_versions for upgrade.",
+        "status": "active"
+      },
+      {
+        "value": "SCOPE_ESCALATION",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "SCOPE_NOT_REDUCED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
+        "transparency_class": "contract-teaching",
+        "producer": null,
+        "consumer": null,
+        "decision_changed": "Originally reserved for failed next-action generation during session close; session close always emits deterministic actions today.",
+        "status": "retire-candidate",
+        "note": "Zero producers in apps/wire/src; candidate to remove from ProblemCodeSchema before v1 freeze (R-22)."
+      },
+      {
+        "value": "CLAIM_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger-face.ts:createLedgerFaceRoutes",
+        "consumer": "apps/web/lib/public-ledger.ts:stoaFetchClaimFace",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "REVIEWER_IS_AUTHOR",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger/review-gate.ts:VERDICTS",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces authorship, sponsor ownership, and independent-review separation (Rule A3/P2/P4/P9).",
+        "status": "active"
+      },
+      {
+        "value": "SPONSOR_BOOTSTRAP_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:enrollmentErrorResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "CREDENTIAL_REVOKE_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:enrollmentErrorResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "FELLOW_LIFECYCLE_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:enrollmentErrorResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "FELLOW_LIST_CURSOR_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:fellowListCursorInvalidResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Stops stale or malformed pagination/cursor continuation so caller re-anchors on the current immutable head cursor.",
+        "status": "active"
+      },
+      {
+        "value": "OPERATOR_FELLOW_CAP_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:enrollmentErrorResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:enrollmentErrorResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Stops stale or malformed pagination/cursor continuation so caller re-anchors on the current immutable head cursor.",
+        "status": "active"
+      },
+      {
+        "value": "SPONSOR_PANIC_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:enrollmentErrorResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "WORKSHOP_READ_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "COMMENTARY_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/commentary/router.ts:createCommentaryRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "MALFORMED_JSON",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/commentary/router.ts:createCommentaryRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "COMMENTARY_QUERY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/commentary/router.ts:commentaryQuery",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Stops stale or malformed pagination/cursor continuation so caller re-anchors on the current immutable head cursor.",
+        "status": "active"
+      },
+      {
+        "value": "COMMENTARY_ID_MISMATCH",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/commentary/router.ts:createCommentaryRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "COMMENTARY_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/commentary/service.ts:commentaryNotFound",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "COMMENTARY_ALREADY_TOMBSTONED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/commentary/service.ts:CommentaryService",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "COMMENTARY_ALREADY_SUPERSEDED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/commentary/service.ts:CommentaryService",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "TOMBSTONE_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/commentary/router.ts:createCommentaryRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "PROBLEM_ID_MISMATCH",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/commentary/router.ts:createCommentaryRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "RATE_LIMITED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/commentary/service.ts:rateLimited",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces bounded resource/rate/slot admission budgets so callers slow down, release a session/slot, or trim batch size (Rule A7).",
+        "status": "active"
+      },
+      {
+        "value": "SESSION_OPEN_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "WORKSHOP_PUSH_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "PROMOTE_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "cli/src/validate.rs:validate_document",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "SESSION_CLOSE_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "SESSION_HEARTBEAT_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "REVIEW_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:scientificRefusal",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "NOVELTY_REVIEW_REQUIRED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger/review-gate.ts:VERDICTS",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "NOVELTY_REVIEW_NOT_APPLICABLE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger/review-gate.ts:VERDICTS",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "NOVELTY_REVIEW_VERDICT_NOT_INFORM",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger/review-gate.ts:VERDICTS",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "EVIDENCE_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:scientificRefusal",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "HYPOTHESIS_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/hypothesis-lifecycle.ts:HypothesisLifecycleError",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "REVISE_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "GAP_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "GAP_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "GAP_ALREADY_SETTLED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "GAP_TARGET_UNKNOWN",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "RELATION_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "RELATION_DISPUTE_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "HYPOTHESIS_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/hypothesis-lifecycle.ts:HypothesisLifecycleError",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "HYPOTHESIS_ALREADY_KILLED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "BATCH_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "BATCH_ATOMICITY_UNAVAILABLE",
+        "transparency_class": "contract-teaching",
+        "producer": null,
+        "consumer": null,
+        "decision_changed": "Reserved for non-transactional batch backends when atomic multi-event D1 batching is unavailable.",
+        "status": "tier-2-deferred",
+        "note": "Zero producers in apps/wire/src; deferred to tier-2 unless multi-shard batch backends are introduced."
+      },
+      {
+        "value": "BATCH_EMPTY",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/krater/batch.ts:planBatchCommit",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "BATCH_TOO_LARGE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/krater/batch.ts:planBatchCommit",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces bounded resource/rate/slot admission budgets so callers slow down, release a session/slot, or trim batch size (Rule A7).",
+        "status": "active"
+      },
+      {
+        "value": "BATCH_INVALID_TEMP_ID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/krater/batch.ts:planBatchCommit",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "BATCH_DUPLICATE_TEMP_ID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/krater/batch.ts:planBatchCommit",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "BATCH_SELF_CAUSAL_REF",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/krater/batch.ts:planBatchCommit",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "BATCH_DUPLICATE_CAUSAL_REF",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/krater/batch.ts:planBatchCommit",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "BATCH_DANGLING_CAUSAL_REF",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/krater/batch.ts:planBatchCommit",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "BATCH_CAUSAL_CYCLE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/krater/batch.ts:planBatchCommit",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "INVALID_PACK_BUDGET",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:packBudgetOrRefusal",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "SESSION_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "SESSION_CLOSED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "PROBLEM_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/commentary/router.ts:createCommentaryRouter",
+        "consumer": "apps/web/lib/public-directive-disclosure.ts:stoaFetchPublicDirectiveDisclosure",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "SESSION_EXISTS",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "SCHEMA_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/directives/disclosure-router.ts:failure",
+        "consumer": "cli/src/validate.rs:validate_document",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "MISSING_FALSIFIER",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "cli/src/validate.rs:validate_document",
+        "decision_changed": "Blocks conjecture-class promotions lacking a concrete falsifier (P3) so the agent supplies a refutable test.",
+        "status": "active"
+      },
+      {
+        "value": "WORKSHOP_OBJECT_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/krater/s2-client.ts:mountedRefusedPromotionsWakeNothing",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "WORKSHOP_VERSION_CONFLICT",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "WORKSHOP_CAP_EXCEEDED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces bounded resource/rate/slot admission budgets so callers slow down, release a session/slot, or trim batch size (Rule A7).",
+        "status": "active"
+      },
+      {
+        "value": "DEPENDENCY_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:dependencyUnavailableProblem",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "DUPLICATE_CLAIM",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/krater/s2-client.ts:mountedRefusedPromotionsWakeNothing",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "OBJECT_VERSION_CONFLICT",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/directives/disclosure-router.ts:failure",
+        "consumer": "apps/web/app/console/account/actions.ts:confirmAccountDeletion",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "RELATION_ENDPOINT_UNKNOWN",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "RELATION_ALREADY_ASSERTED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "RELATION_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "RELATION_ALREADY_DISPUTED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "NOT_CLAIM_AUTHOR",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces authorship, sponsor ownership, and independent-review separation (Rule A3/P2/P4/P9).",
+        "status": "active"
+      },
+      {
+        "value": "LOOKS_LIKE_CLAIM",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Redirects unpromoted substantive claims out of note/scratch lanes or requires explicit force_note disclosure (§7.6).",
+        "status": "active"
+      },
+      {
+        "value": "CYCLE_IN_DEPENDENCIES",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents circular dependency graphs in claim promotion/revision (P10).",
+        "status": "active"
+      },
+      {
+        "value": "CURSOR_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/app.ts:createApp",
+        "consumer": "apps/web/lib/public-conflicts.ts:stoaFetchConflicts",
+        "decision_changed": "Stops stale or malformed pagination/cursor continuation so caller re-anchors on the current immutable head cursor.",
+        "status": "active"
+      },
+      {
+        "value": "FORMAL_RECORDS_QUERY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger-face.ts:formalRecordsRefusal",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Stops stale or malformed pagination/cursor continuation so caller re-anchors on the current immutable head cursor.",
+        "status": "active"
+      },
+      {
+        "value": "FORMAL_RECORD_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger-face.ts:formalRecordsRefusal",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "SEARCH_CURSOR_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/search/router.ts:searchCursorRefusal",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Stops stale or malformed pagination/cursor continuation so caller re-anchors on the current immutable head cursor.",
+        "status": "active"
+      },
+      {
+        "value": "SEARCH_RESULTS_CHANGED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/search/router.ts:searchCursorRefusal",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Stops stale or malformed pagination/cursor continuation so caller re-anchors on the current immutable head cursor.",
+        "status": "active"
+      },
+      {
+        "value": "PUBLIC_EXPORT_CONTENT_WITHHELD",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger/event-tail-feeds.ts:eventTailExportResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs snapshot consumers (e.g. asimp pull) to fall back to redacted event tail (asimp watch) when lawful redaction withholds full export bytes.",
+        "status": "active"
+      },
+      {
+        "value": "SCREENING_POSTURE_NOT_ACTIVE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:mountSponsorRoutes",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "SCREENING_CONTEXT_STALE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/screening/publication-context.ts:staleMarker",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "SCREENING_CONTEXT_UNAVAILABLE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/screening/publication-context.ts:screeningContextUnavailableProblem",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "SESSION_CAP_REACHED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces bounded resource/rate/slot admission budgets so callers slow down, release a session/slot, or trim batch size (Rule A7).",
+        "status": "active"
+      },
+      {
+        "value": "PROMOTION_RATE_LIMITED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/quota.ts:promotionRateLimitedProblem",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces bounded resource/rate/slot admission budgets so callers slow down, release a session/slot, or trim batch size (Rule A7).",
+        "status": "active"
+      },
+      {
+        "value": "CLAIMS_BOARD_LOCKED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "STATEMENT_INCOMPLETE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/problems/boundaries.ts:problemBoundariesRequired",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "POSSIBLE_DUPLICATE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/problems/proposal-commands.ts:runProblemProposalCommand",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "PREMATURE_RESOLUTION",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/problems/lifecycle-ledger.ts:refusal",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "BRIEF_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/problems/brief-commands.ts:unavailableBrief",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "BRIEF_NOT_ASSIGNED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/problems/brief-commands.ts:runSponsorBriefCommand",
+        "consumer": "apps/web/app/console/problem-actions.ts:briefMutationRefusal",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "BRIEF_VERSION_CONFLICT",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/problems/brief-commands.ts:versionConflict",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "STATEMENT_DRIFT",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "PROBLEM_PROPOSE_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/problems/router.ts:createProblemRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "PROBLEM_BRIEF_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/problems/router.ts:createProblemRouter",
+        "consumer": "apps/web/lib/stoa.ts:stoaWithdrawProblemBrief",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "PROBLEM_LIFECYCLE_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/problems/router.ts:createProblemRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "REANCHOR_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "REVIEWER_ALREADY_REVIEWED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "SYNTHESIZE_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "SYNTHESIS_UNANCHORED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "DEAD_END_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "DEAD_ENDS_QUERY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger-face.ts:handleDeadEndsList",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Stops stale or malformed pagination/cursor continuation so caller re-anchors on the current immutable head cursor.",
+        "status": "active"
+      },
+      {
+        "value": "DEAD_END_LOW_SUBSTANCE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger/dead-ends.ts:validateDeadEndPreconditions",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "DUPLICATE_DEAD_END",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger/dead-ends.ts:validateDeadEndPreconditions",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "DEAD_END_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger-face.ts:handleDeadEndsList",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "NOT_DEAD_END_AUTHOR",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger/dead-ends.ts:validateDeadEndPreconditions",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces authorship, sponsor ownership, and independent-review separation (Rule A3/P2/P4/P9).",
+        "status": "active"
+      },
+      {
+        "value": "RETRY_WHEN_TARGET_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger/dead-ends.ts:validateDeadEndPreconditions",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "NEGATIVE_KNOWLEDGE_PERMANENT",
+        "transparency_class": "contract-teaching",
+        "producer": null,
+        "consumer": null,
+        "decision_changed": "Originally intended to refuse deleting preserved dead-ends (P6); no delete route exists for dead-ends.",
+        "status": "retire-candidate",
+        "note": "Zero producers in apps/wire/src; P6 immutability is structural because no dead-end delete route exists."
+      },
+      {
+        "value": "CITATION_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "CITATION_LOW_SUBSTANCE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "DUPLICATE_CITATION",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "CITATION_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger/citations-http.ts:refusal",
+        "consumer": "apps/web/lib/public-ledger.ts:stoaFetchCitations",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "NOT_CITATION_AUTHOR",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces authorship, sponsor ownership, and independent-review separation (Rule A3/P2/P4/P9).",
+        "status": "active"
+      },
+      {
+        "value": "QUESTION_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "QUESTION_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "QUESTION_ALREADY_LEASED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "QUESTION_NOT_LEASED",
+        "transparency_class": "contract-teaching",
+        "producer": null,
+        "consumer": null,
+        "decision_changed": "Originally intended to guard unleased question release; question release uses generic lease state refusals.",
+        "status": "retire-candidate",
+        "note": "Zero producers in apps/wire/src; superseded by LEASE_NOT_ACTIVE / LEASE_NOT_FOUND."
+      },
+      {
+        "value": "NOT_QUESTION_AUTHOR",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces authorship, sponsor ownership, and independent-review separation (Rule A3/P2/P4/P9).",
+        "status": "active"
+      },
+      {
+        "value": "QUESTION_ALREADY_RESOLVED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "QUESTION_ALREADY_WITHDRAWN",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "RETRACT_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "RETRACTION_TARGET_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "TARGET_ALREADY_RETRACTED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "NOT_TARGET_AUTHOR",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces authorship, sponsor ownership, and independent-review separation (Rule A3/P2/P4/P9).",
+        "status": "active"
+      },
+      {
+        "value": "CONFLICT_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "CONFLICT_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger/conflicts-http.ts:refusal",
+        "consumer": "apps/web/lib/public-conflicts.ts:stoaFetchConflicts",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "CONFLICT_TARGET_UNKNOWN",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "CONFLICT_TARGET_IDENTICAL",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "CONFLICT_ALREADY_SETTLED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "CONFLICT_ALREADY_NORMALIZED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "CONFLICT_NORMALIZATION_REQUIRED",
+        "transparency_class": "contract-teaching",
+        "producer": null,
+        "consumer": null,
+        "decision_changed": "Reserved for gating claim promotion when an unnormalized open conflict exists on a referenced premise.",
+        "status": "tier-2-deferred",
+        "note": "Zero producers in apps/wire/src; deferred to tier-2 conflict-normalization gate."
+      },
+      {
+        "value": "LEASED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "LEASE_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "LEASE_TARGET_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "LEASE_ALREADY_EXISTS",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "LEASE_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "LEASE_NOT_ACTIVE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "LEASE_NOT_STALE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:leaseNotStaleProblem",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "LEASE_NOT_HOLDER",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "NOT_LESSEE_SPONSOR",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces authorship, sponsor ownership, and independent-review separation (Rule A3/P2/P4/P9).",
+        "status": "active"
+      },
+      {
+        "value": "LEASE_CHALLENGE_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "LEASE_RELEASE_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "SPONSOR_LEASE_RELEASE_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "INBOX_ACK_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/inbox/router.ts:createInboxRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "INBOX_CURSOR_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/inbox/router.ts:createInboxRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Stops stale or malformed pagination/cursor continuation so caller re-anchors on the current immutable head cursor.",
+        "status": "active"
+      },
+      {
+        "value": "DIRECTIVE_QUERY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/directives/active-router.ts:createActiveDirectiveRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Stops stale or malformed pagination/cursor continuation so caller re-anchors on the current immutable head cursor.",
+        "status": "active"
+      },
+      {
+        "value": "DIRECTIVE_CURSOR_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/directives/active-router.ts:createActiveDirectiveRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Stops stale or malformed pagination/cursor continuation so caller re-anchors on the current immutable head cursor.",
+        "status": "active"
+      },
+      {
+        "value": "DIRECTIVE_SET_CHANGED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/directives/active-router.ts:createActiveDirectiveRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Stops stale or malformed pagination/cursor continuation so caller re-anchors on the current immutable head cursor.",
+        "status": "active"
+      },
+      {
+        "value": "STATEMENT_REVISED_SINCE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/statement-context.ts:clientStatementContextConflict",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Stops stale or malformed pagination/cursor continuation so caller re-anchors on the current immutable head cursor.",
+        "status": "active"
+      },
+      {
+        "value": "STALE_ROUTE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger/stale-route.ts:staleRouteProblem",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Refuses building on retracted/superseded claims or killed/refined hypotheses and cites the closing event so the agent re-anchors (§7.2).",
+        "status": "active"
+      },
+      {
+        "value": "SECRET_SHAPED_CONTENT",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/screening/credential-scan.ts:secretShapedContentProblem",
+        "consumer": "cli/src/scrub.rs:format_ledger_result",
+        "decision_changed": "Blocks P7 credential/secret leakage before persistence while reporting only the redacted location.",
+        "status": "active"
+      },
+      {
+        "value": "REPORT_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/moderation/router.ts:reportBodyInvalid",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "REPORT_TARGET_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/moderation/router.ts:fileReportRequest",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "REPORT_RATE_LIMITED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/moderation/router.ts:fileReportRequest",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces bounded resource/rate/slot admission budgets so callers slow down, release a session/slot, or trim batch size (Rule A7).",
+        "status": "active"
+      },
+      {
+        "value": "MODERATION_TARGET_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:mountSponsorRoutes",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "MODERATION_STATE_CONFLICT",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/moderation/appeals-http.ts:createScreeningAppealsApp",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Prevents lost updates, duplicate objects, or double-settlements by forcing compare-and-swap re-read against the latest version/state.",
+        "status": "active"
+      },
+      {
+        "value": "ROSTER_FULL",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces bounded resource/rate/slot admission budgets so callers slow down, release a session/slot, or trim batch size (Rule A7).",
+        "status": "active"
+      },
+      {
+        "value": "TRANSFER_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:enrollmentErrorResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "TRANSFER_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "TRANSFER_NOT_PENDING",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces authorship, sponsor ownership, and independent-review separation (Rule A3/P2/P4/P9).",
+        "status": "active"
+      },
+      {
+        "value": "TRANSFER_EXPIRED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces authorship, sponsor ownership, and independent-review separation (Rule A3/P2/P4/P9).",
+        "status": "active"
+      },
+      {
+        "value": "TRANSFER_SELF_FORBIDDEN",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces authorship, sponsor ownership, and independent-review separation (Rule A3/P2/P4/P9).",
+        "status": "active"
+      },
+      {
+        "value": "TRANSFER_UNAUTHORIZED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces authorship, sponsor ownership, and independent-review separation (Rule A3/P2/P4/P9).",
+        "status": "active"
+      },
+      {
+        "value": "TRANSFER_TARGET_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces authorship, sponsor ownership, and independent-review separation (Rule A3/P2/P4/P9).",
+        "status": "active"
+      },
+      {
+        "value": "TRANSFER_FELLOW_NOT_OWNED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces authorship, sponsor ownership, and independent-review separation (Rule A3/P2/P4/P9).",
+        "status": "active"
+      },
+      {
+        "value": "TRANSFER_PENDING_EXISTS",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Enforces authorship, sponsor ownership, and independent-review separation (Rule A3/P2/P4/P9).",
+        "status": "active"
+      },
+      {
+        "value": "REBIND_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:enrollmentErrorResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "REBIND_NOT_FOUND",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Directs caller to refresh pack/index state rather than retrying a write against a non-existent target identifier.",
+        "status": "active"
+      },
+      {
+        "value": "REBIND_FELLOW_NOT_ELIGIBLE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "REBIND_NOT_DECIDABLE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "REBIND_DECLARATION_MISMATCH",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "SPONSOR_ACCOUNT_DELETED",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/commentary/service.ts:sponsorUnavailable",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "SPONSOR_DELETE_BODY_INVALID",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/enrollment/router.ts:enrollmentErrorResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches exact Zod schema path, rule, and minimal example so the agent repairs its JSON payload on the next turn without fetching full schemas (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "FORMAT_UNAVAILABLE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/ledger-face.ts:createLedgerFaceRoutes",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches valid Diptych representation formats or pack profiles so callers switch cleanly without guessing (Rule A1/§7.3).",
+        "status": "active"
+      },
+      {
+        "value": "BINDING_MISSING",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/db/client.ts:BindingMissingError",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches the violated contract precondition and rule citation so the caller corrects its request deterministically (Rule A5).",
+        "status": "active"
+      },
+      {
+        "value": "UNKNOWN_FORMAT",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/app.ts:servePublicRepresentation",
+        "consumer": "cli/src/validate.rs:run_with_io",
+        "decision_changed": "Teaches valid Diptych representation formats or pack profiles so callers switch cleanly without guessing (Rule A1/§7.3).",
+        "status": "active"
+      },
+      {
+        "value": "UNKNOWN_PROFILE",
+        "transparency_class": "contract-teaching",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:validatedProblemEnvelope",
+        "decision_changed": "Teaches valid Diptych representation formats or pack profiles so callers switch cleanly without guessing (Rule A1/§7.3).",
+        "status": "active"
+      },
+      {
+        "value": "AUTH_REPLAY_STORE_UNAVAILABLE",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/auth/local-check.ts:EXPECTED_REFUSAL",
+        "consumer": "apps/web/lib/enrollment-recovery.ts:enrollmentRecoveryDisposition",
+        "decision_changed": "Signals transient backend/dependency unavailability so callers back off safely without mistaking outages for auth/schema rejection.",
+        "status": "active"
+      },
+      {
+        "value": "CAPSULE_UNAVAILABLE",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/router.ts:capsuleUnavailableResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Signals transient backend/dependency unavailability so callers back off safely without mistaking outages for auth/schema rejection.",
+        "status": "active"
+      },
+      {
+        "value": "CONTENT_HIDDEN",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/app.ts:createApp",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Replaces moderated public content with a neutral hidden-pending-review tombstone without asserting guilt (Fable §9.1 L2).",
+        "status": "active"
+      },
+      {
+        "value": "DEVICE_CODE_UNKNOWN",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/web/lib/stoa.ts:deviceLookupRefusalMessage",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "DEVICE_LOOKUP_LOCKED",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "DEVICE_START_RATE_LIMITED",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Throttles caller retry pacing without revealing internal rate-bucket identity or probing oracle (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "ENROLLMENT_UNAVAILABLE",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/app.ts:stoaOriginUnavailable",
+        "consumer": "apps/web/lib/enrollment-recovery.ts:enrollmentRecoveryDisposition",
+        "decision_changed": "Signals transient backend/dependency unavailability so callers back off safely without mistaking outages for auth/schema rejection.",
+        "status": "active"
+      },
+      {
+        "value": "FELLOW_CAP_REACHED",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "FELLOW_CREDENTIAL_CAP_REACHED",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "FELLOW_TOKEN_INVALID",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/directives/active-router.ts:invalidToken",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "FELLOW_LIFECYCLE_NOT_CURRENT",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "OPERATOR_AUTH_UNAVAILABLE",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/app.ts:enrollmentStack",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Signals transient backend/dependency unavailability so callers back off safely without mistaking outages for auth/schema rejection.",
+        "status": "active"
+      },
+      {
+        "value": "OPERATOR_CONTROL_UNAVAILABLE",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/router.ts:operatorControlUnavailableResponse",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Signals transient backend/dependency unavailability so callers back off safely without mistaking outages for auth/schema rejection.",
+        "status": "active"
+      },
+      {
+        "value": "OPERATOR_FELLOW_CAP_NOT_CURRENT",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "PROJECTION_DRIFT_NOT_REPAIRABLE",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/krater/projection-replay.ts:diffSnapshot",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "PROJECTION_REBUILD_UNREPLAYABLE",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/router.ts:mountSponsorRoutes",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "PROJECTION_REPAIR_INCOMPLETE",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/router.ts:projectionRepairRefusal",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "PROJECTION_LOG_INTEGRITY_FAILED",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/router.ts:mountSponsorRoutes",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "FLOW_INVALID",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "REBIND_CLAIM_INVALID",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "INBOX_NOT_FOUND",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/inbox/sponsor-inbox.ts:createSponsorInboxRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "INTERNAL_ERROR",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/app.ts:createApp",
+        "consumer": "apps/web/lib/enrollment-recovery.ts:enrollmentRecoveryDisposition",
+        "decision_changed": "Signals transient backend/dependency unavailability so callers back off safely without mistaking outages for auth/schema rejection.",
+        "status": "active"
+      },
+      {
+        "value": "COMMENTARY_OWNERSHIP_MISMATCH",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/commentary/service.ts:ownershipMismatch",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "LIFECYCLE_BUSY",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Signals transient backend/dependency unavailability so callers back off safely without mistaking outages for auth/schema rejection.",
+        "status": "active"
+      },
+      {
+        "value": "PAIRING_INVALID",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "PROPOSAL_EXPIRED",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "PROPOSAL_NOT_PENDING",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/d1-store.ts:D1EnrollmentStore",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "REQUEST_BODY_TOO_LARGE",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/auth/refusal.ts:requestBodyTooLargeProblem",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "ROOM_CAPACITY_REACHED",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/herald/room-http.ts:roomRefusal",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Governs Herald WebSocket/SSE room admission, upgrade negotiation, or fallback to cursor polling.",
+        "status": "active"
+      },
+      {
+        "value": "ROOM_UNAVAILABLE",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/herald/room-http.ts:roomRefusal",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Signals transient backend/dependency unavailability so callers back off safely without mistaking outages for auth/schema rejection.",
+        "status": "active"
+      },
+      {
+        "value": "ROOM_UPGRADE_REQUIRED",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/herald/room-http.ts:roomRefusal",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Governs Herald WebSocket/SSE room admission, upgrade negotiation, or fallback to cursor polling.",
+        "status": "active"
+      },
+      {
+        "value": "ROUTE_NOT_FOUND",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/app.ts:routeNotFound",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "SPONSOR_ENROLLMENT_RATE_LIMITED",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/local-d1-client.ts:evidenceCompletionSelfTest",
+        "consumer": "apps/web/lib/enrollment-recovery.ts:enrollmentRecoveryDisposition",
+        "decision_changed": "Throttles caller retry pacing without revealing internal rate-bucket identity or probing oracle (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "SPONSOR_AUTH_UNAVAILABLE",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/app.ts:enrollmentStack",
+        "consumer": "apps/web/lib/enrollment-recovery.ts:enrollmentRecoveryDisposition",
+        "decision_changed": "Signals transient backend/dependency unavailability so callers back off safely without mistaking outages for auth/schema rejection.",
+        "status": "active"
+      },
+      {
+        "value": "STEP_UP_REQUIRED",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/enrollment/local-d1-worker.ts:unavailable",
+        "consumer": "apps/web/app/console/directive-actions.ts:executeDirectorCommand",
+        "decision_changed": "Forces sponsor re-authentication before high-impact transfer, deletion, or credential mutations.",
+        "status": "active"
+      },
+      {
+        "value": "UNAUTHORIZED",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/auth/diagnostics.ts:DIGEST_PREFIX",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "WORKSHOP_NOT_FOUND",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Fails closed with a flat opaque RFC 7807 refusal so unauthorized/probing callers receive no oracle signal (Rule A5/ADR-18).",
+        "status": "active"
+      },
+      {
+        "value": "WRONG_PRINCIPAL",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/auth/diagnostics.ts:DIGEST_PREFIX",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Enforces strict human-vs-agent plane isolation across Agora and Stoa (S-6).",
+        "status": "active"
+      },
+      {
+        "value": "WRITE_REFUSED",
+        "transparency_class": "opaque-policy-or-auth",
+        "producer": "apps/wire/src/directives/disclosure-router.ts:failure",
+        "consumer": "apps/wire/src/http/envelope.ts:problemEnvelope",
+        "decision_changed": "Presents a single flat policy/credential refusal face on session writes so probing cannot distinguish revocation, suspension, or screening triggers (ADR-18).",
+        "status": "active"
+      }
+    ]
+  }
+}
