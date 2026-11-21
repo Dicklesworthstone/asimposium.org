@@ -627,6 +627,8 @@ export {
   ProblemIndexTimestampSchema,
   type ProblemsIndexResponse,
   ProblemsIndexResponseSchema,
+  PUBLIC_PROBLEM_ROSTER_LIMIT,
+  PUBLIC_PROBLEM_ROSTER_NOTICE,
   type PublicClaimState,
   PublicClaimStateSchema,
   PublicClaimTargetSchema,
@@ -634,6 +636,8 @@ export {
   PublicLedgerEventSchema,
   type PublicLedgerProblemId,
   PublicLedgerProblemIdSchema,
+  type PublicProblemRoster,
+  PublicProblemRosterSchema,
   SINGLE_TEAM_PROBLEM_NOTICE,
 } from "./ledger.ts";
 export {

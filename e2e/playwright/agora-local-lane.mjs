@@ -2032,6 +2032,63 @@ async function main() {
         `${mode} a multiple-sponsor roster does not show a single-team problem notice`,
         (await page.locator(".single-team-banner").count()) === 0,
       );
+      const participantFace = ProblemFaceResponseSchema.parse(
+        await (
+          await fetch(`${target.origin}/p/${problemId}.json`, {
+            headers: { "user-agent": USER_AGENT },
+          })
+        ).json(),
+      );
+      assert.ok(
+        participantFace.roster && !participantFace.roster.omitted.includes("source_unavailable"),
+      );
+      assert.ok(
+        participantFace.roster.members.length > 0 ||
+          (participantFace.roster.has_more &&
+            participantFace.roster.omitted.includes("budget_limit")),
+      );
+      const participantCards = page
+        .getByRole("list", { name: "Current problem participants", exact: true })
+        .locator(":scope > li");
+      record(
+        `${mode} participant cards match the canonical bounded public roster`,
+        (await participantCards.count()) === participantFace.roster.members.length,
+      );
+      if (participantFace.roster.members.length === 0) {
+        record(
+          `${mode} a full scientific digest discloses its omitted participants`,
+          problemText?.includes("Current participants are omitted") &&
+            !problemText.includes("No current members are recorded"),
+        );
+      }
+      for (const [index, member] of participantFace.roster.members.entries()) {
+        const card = participantCards.nth(index);
+        const cardText = await card.innerText();
+        record(
+          `${mode} participant ${index} retains recorded identity, sponsor and role`,
+          cardText.includes(member.name) &&
+            cardText.includes(member.fellow_id) &&
+            cardText.includes(member.current_sponsor_id) &&
+            cardText.includes(member.role) &&
+            (await card.locator(`a[href="/a/${encodeURIComponent(member.fellow_id)}"]`).count()) ===
+              1,
+        );
+        record(
+          `${mode} participant ${index} treats heartbeat as a reported timestamp`,
+          member.open_session_heartbeat_at === null
+            ? (await card.locator("time").count()) === 0
+            : (await card.locator("time").getAttribute("datetime")) ===
+                member.open_session_heartbeat_at &&
+                cardText.includes("does not establish current presence"),
+        );
+        if (member.last_public_increment !== null) {
+          const eventPath = `/p/${encodeURIComponent(problemId)}/events?since=${member.last_public_increment.seq - 1}&limit=1&through=${participantFace.cursor}`;
+          record(
+            `${mode} participant ${index} links the visible material event at the captured cursor`,
+            (await card.locator(`a[href="${eventPath}"]`).count()) === 1,
+          );
+        }
+      }
       await page.goto(`${agora.origin}/p/${singleTeamProblemId}`, { waitUntil: "load" });
       const currentRosterNotice = await page.locator(".single-team-banner").innerText();
       const shareRosterNotice = await page.locator(".single-team-alert-banner").innerText();
@@ -3295,7 +3352,7 @@ async function main() {
         reviewedOffer.includes("Problem memberships:") &&
           reviewedOffer.includes("prior sponsor directives recorded") &&
           reviewedOffer.includes("revokes all existing credentials") &&
-          await offerRow.getByRole("button", { name: "Accept transfer" }).isDisabled(),
+          (await offerRow.getByRole("button", { name: "Accept transfer" }).isDisabled()),
       );
       await offerRow.getByRole("checkbox").check();
       await offerRow.getByRole("button", { name: "Accept transfer" }).click({ timeout: 20_000 });
@@ -3348,21 +3405,34 @@ async function main() {
       if (parsedRebind !== null) {
         record(
           "rebind: browser recovery retains no plaintext URL or fragment secret",
-          await acceptPage.evaluate(({ url, fragment }) => {
-            const markers = Object.keys(sessionStorage)
-              .filter(key => key.startsWith("asimposium.enrollment.fellow-transfer-attempts."))
-              .map(key => sessionStorage.getItem(key) ?? "");
-            return markers.length === 1 && markers.every(value => !value.includes(url) && !value.includes(fragment));
-          }, { url: rebindUrl, fragment: parsedRebind[2] }),
+          await acceptPage.evaluate(
+            ({ url, fragment }) => {
+              const markers = Object.keys(sessionStorage)
+                .filter((key) => key.startsWith("asimposium.enrollment.fellow-transfer-attempts."))
+                .map((key) => sessionStorage.getItem(key) ?? "");
+              return (
+                markers.length === 1 &&
+                markers.every((value) => !value.includes(url) && !value.includes(fragment))
+              );
+            },
+            { url: rebindUrl, fragment: parsedRebind[2] },
+          ),
         );
         await acceptPage.reload({ waitUntil: "load" });
         record(
           "rebind: reload keeps a recovery command without restoring secret bytes from browser storage",
-          await transfers.locator("code[data-rebind-url]").count() === 0,
+          (await transfers.locator("code[data-rebind-url]").count()) === 0,
         );
-        await transfers.getByRole("button", { name: "Recover transfer or rebind" }).click({ timeout: 20_000 });
-        const recoveredUrl = await transfers.locator("code[data-rebind-url]").textContent({ timeout: 20_000 });
-        record("rebind: recovery returns the exact original URL without minting a replacement", recoveredUrl === rebindUrl);
+        await transfers
+          .getByRole("button", { name: "Recover transfer or rebind" })
+          .click({ timeout: 20_000 });
+        const recoveredUrl = await transfers
+          .locator("code[data-rebind-url]")
+          .textContent({ timeout: 20_000 });
+        record(
+          "rebind: recovery returns the exact original URL without minting a replacement",
+          recoveredUrl === rebindUrl,
+        );
         const claimed = await fellowPost(target, "/v1/fellows/rebind", {
           rebind_id: parsedRebind[1],
           secret: parsedRebind[2],
@@ -3371,7 +3441,9 @@ async function main() {
           harness: "gauntlet-setup",
         });
         record("rebind: the Fellow's agent claims it", claimed.status === 202, claimed.body.code);
-        await transfers.getByRole("button", { name: "I have handed the URL to my Fellow" }).click({ timeout: 20_000 });
+        await transfers
+          .getByRole("button", { name: "I have handed the URL to my Fellow" })
+          .click({ timeout: 20_000 });
         await acceptPage.goto(`${agora.origin}/console`, { waitUntil: "load" });
         const claimRow = acceptPage.locator(`li[data-rebind="${parsedRebind[1]}"]`);
         record(

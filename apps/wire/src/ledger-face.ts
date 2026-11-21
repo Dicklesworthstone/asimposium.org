@@ -21,6 +21,7 @@ import {
   PublicClaimStateSchema,
   PublicClaimTargetSchema,
   PublicLedgerProblemIdSchema,
+  type PublicProblemRoster,
   RETRACTIONS_SCHEMA_ID,
   RetractionsListResponseSchema,
   SINGLE_TEAM_PROBLEM_NOTICE,
@@ -44,6 +45,7 @@ import {
   type RenderedFace,
   renderAllFaces,
   renderHypothesisEvidenceMarkdown,
+  renderProblemRosterMarkdown,
   renderProjection,
   renderPublicProblemMovesHtml,
   renderPublicProblemMovesMarkdown,
@@ -103,6 +105,7 @@ import {
   renderSingleSynthesisMarkdown,
 } from "./ledger/synthesis";
 import { loadPublicProblemMoves } from "./mega-commands/public-moves";
+import { PROBLEM_ROSTER_SOURCE_LIMIT, readPublicProblemRoster } from "./problems/public-roster.ts";
 import {
   publicationScreeningNotice,
   readPublicationNotices,
@@ -177,9 +180,10 @@ function indexingHeaders(unlisted: boolean): Record<string, string> {
 }
 const PROBLEM_DIGEST_CANDIDATE_LIMIT = 200;
 const PROBLEM_DIGEST_TOKEN_BUDGET = 4_000;
+// Coordination gets at most one quarter of the unchanged 4K-token digest.
+const PROBLEM_ROSTER_BYTE_BUDGET = PROBLEM_DIGEST_TOKEN_BUDGET * 4 * 0.25;
 const LEDGER_ITEM_ID_SUFFIX = "[0-9A-HJKMNP-TV-Z]{1,78}";
 const PUBLIC_EVIDENCE_ID = new RegExp(`^E-${LEDGER_ITEM_ID_SUFFIX}$`);
-const PROBLEM_ROSTER_SOURCE_LIMIT = 128;
 const STATEMENT_REVIEW_LIMIT = 20;
 const PROBLEM_DIGEST_SELECT = `SELECT
   p.id AS problem_id,
@@ -187,15 +191,6 @@ const PROBLEM_DIGEST_SELECT = `SELECT
   p.unlisted AS unlisted,
   p.status AS status,
   p.current_statement_version AS current_statement_version,
-  CASE WHEN ROW_NUMBER() OVER (ORDER BY claims.source_seq ASC, claims.id ASC) = 1 THEN (
-    SELECT json_group_array(sponsor_id) FROM (
-      SELECT CASE WHEN typeof(f.sponsor_id) = 'text'
-        AND length(CAST(f.sponsor_id AS BLOB)) BETWEEN 1 AND 128
-        THEN f.sponsor_id END AS sponsor_id
-      FROM problem_memberships m LEFT JOIN enrollment_fellows f ON f.fellow_id = m.fellow_id
-      WHERE m.problem_id = p.id ORDER BY m.fellow_id LIMIT ${PROBLEM_ROSTER_SOURCE_LIMIT + 1}
-    )
-  ) END AS roster_sponsorship_json,
   (SELECT h.source_cursor FROM projection_health h
     WHERE h.problem_id = p.id AND h.status = 'drift') AS projection_drift_cursor,
   CASE WHEN ROW_NUMBER() OVER (ORDER BY claims.source_seq ASC, claims.id ASC) = 1 THEN (
@@ -277,7 +272,6 @@ interface ProblemDigestRow {
   /** W2.6: the cursor at which unrepaired projection drift was recorded, else null. */
   readonly projection_drift_cursor?: number | null;
   readonly current_statement_version: number;
-  readonly roster_sponsorship_json?: string | null;
   readonly statement_reviews_json: string | null;
   readonly result_review_json: string | null;
   readonly claim_id: string | null;
@@ -646,6 +640,7 @@ function problemFaceProjection(
   itemCount: number,
   forceBudgetOmission: boolean,
   status: NonNullable<Projection["problem_status"]>,
+  roster: PublicProblemRoster,
 ): Projection {
   const omitted =
     forceBudgetOmission && !composed.omitted.some((entry) => entry.reason === "budget_exceeded")
@@ -657,6 +652,7 @@ function problemFaceProjection(
     schema: "asimposium.problem-face.v1",
     kind: "problem-face",
     problem_status: status,
+    roster,
     problem: composed.problem,
     profile: composed.profile,
     cursor: composed.cursor,
@@ -690,6 +686,36 @@ function facesFitDigestBudget(faces: ProblemFaceFaces): boolean {
   );
 }
 
+function omitRosterTail(roster: PublicProblemRoster): PublicProblemRoster {
+  return {
+    ...roster,
+    members: roster.members.slice(0, -1),
+    has_more: true,
+    omitted: roster.omitted.includes("budget_limit")
+      ? roster.omitted
+      : [...roster.omitted, "budget_limit"],
+  };
+}
+
+function boundedRosterForDigest(
+  roster: PublicProblemRoster,
+  problem: string,
+  cursor: number,
+): PublicProblemRoster {
+  let bounded = roster;
+  const encoder = new TextEncoder();
+  while (bounded.members.length > 0) {
+    // Include the JSON property's envelope and Markdown section separators.
+    const bytes = Math.max(
+      encoder.encode(JSON.stringify({ roster: bounded }, null, 2)).byteLength,
+      encoder.encode(renderProblemRosterMarkdown(bounded, problem, cursor)).byteLength + 2,
+    );
+    if (bytes <= PROBLEM_ROSTER_BYTE_BUDGET) break;
+    bounded = omitRosterTail(bounded);
+  }
+  return bounded;
+}
+
 /**
  * composePack gives us its validated, stable-prefix O(n) selector. The served
  * problem projection has a different envelope and Markdown can be larger than
@@ -698,20 +724,41 @@ function facesFitDigestBudget(faces: ProblemFaceFaces): boolean {
 function renderBudgetedProblemFace(
   composed: ComposedPack,
   status: NonNullable<Projection["problem_status"]>,
+  roster: PublicProblemRoster,
 ): ProblemFaceFaces {
-  const initial = renderProblemFacePair(
-    problemFaceProjection(composed, composed.items.length, false, status),
-  );
-  if (facesFitDigestBudget(initial)) return initial;
+  const boundedRoster = boundedRosterForDigest(roster, composed.problem, composed.cursor);
+  let displayedRoster = boundedRoster;
+  // Preserve all scientific items whenever a shorter coordination prefix can
+  // make them fit. Empty due to budget is explicit, never an empty membership.
+  for (;;) {
+    const initial = renderProblemFacePair(
+      problemFaceProjection(
+        composed,
+        composed.items.length,
+        displayedRoster !== roster,
+        status,
+        displayedRoster,
+      ),
+    );
+    if (facesFitDigestBudget(initial)) return initial;
+    if (displayedRoster.members.length === 0) break;
+    displayedRoster = omitRosterTail(displayedRoster);
+  }
 
+  // Find the largest scientific prefix without spending its remaining space
+  // on participants. Only then refill the roster at that same scientific cut.
   let low = 0;
   let high = composed.items.length - 1;
   let best: ProblemFaceFaces | undefined;
+  let scientificItemCount = 0;
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
-    const candidate = renderProblemFacePair(problemFaceProjection(composed, middle, true, status));
+    const candidate = renderProblemFacePair(
+      problemFaceProjection(composed, middle, true, status, displayedRoster),
+    );
     if (facesFitDigestBudget(candidate)) {
       best = candidate;
+      scientificItemCount = middle;
       low = middle + 1;
     } else {
       high = middle - 1;
@@ -719,6 +766,14 @@ function renderBudgetedProblemFace(
   }
   if (best === undefined) {
     throw new Error("the mandatory problem-face envelope exceeds its public digest budget");
+  }
+  let remainingRoster = boundedRoster;
+  while (remainingRoster.members.length > 0) {
+    const candidate = renderProblemFacePair(
+      problemFaceProjection(composed, scientificItemCount, true, status, remainingRoster),
+    );
+    if (facesFitDigestBudget(candidate)) return candidate;
+    remainingRoster = omitRosterTail(remainingRoster);
   }
   return best;
 }
@@ -851,6 +906,11 @@ async function loadProblemFace(
   const driftNotice = projectionDriftNotice(first.projection_drift_cursor);
   const formulationItems = formulationCandidates(formulation, headerCandidates.length);
   const candidateTruncated = rows.length > PROBLEM_DIGEST_CANDIDATE_LIMIT;
+  // Current members and the complete bounded sponsorship proof must share a
+  // snapshot. A join or transfer during the earlier scientific reads cannot
+  // leave a stale single-team annotation beside the new participant cards.
+  const rosterSnapshot = await readPublicProblemRoster(db, first.problem_id, first.public_seq);
+  if (rosterSnapshot === null) return null;
   const composed = composePack({
     schema: "asimposium.problem-face.v1",
     session: "PUBLIC-FACE",
@@ -931,7 +991,7 @@ async function loadProblemFace(
       },
     ],
     omitted: [
-      ...currentRosterNotice(first.roster_sponsorship_json),
+      ...currentRosterNotice(rosterSnapshot.sponsorshipJson),
       ...resolution.omitted,
       ...resultReview.omitted,
       ...reviews.omitted,
@@ -977,6 +1037,7 @@ async function loadProblemFace(
         " Statement reviews describe a pinned formulation, not a proof of its claims. Model and harness declarations are self-declared.",
     },
     status,
+    rosterSnapshot.roster,
   );
   ProblemFaceResponseSchema.parse(JSON.parse(faces.json.body));
   return { ...faces, unlisted, formulationUnavailable: formulation === null };

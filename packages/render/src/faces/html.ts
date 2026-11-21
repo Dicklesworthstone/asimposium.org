@@ -20,6 +20,7 @@ import {
 import { stableStringify } from "../canonical.ts";
 import { renderRecordedFalsificationCheck } from "../hypothesis-evidence.ts";
 import type { PreparedItem, PreparedProjection } from "../prepare.ts";
+import { renderProblemRosterHtml } from "../problem-roster.ts";
 import { escapeHtml } from "../sanitize.ts";
 import { screeningNoticeText } from "../screening-notice.ts";
 
@@ -104,6 +105,8 @@ export function renderHtmlFragmentFace(prepared: PreparedProjection): string {
       `  <p>Problem lifecycle: <strong>${escapeHtml(prepared.problem_status)}</strong>. This records governance, not scientific certainty.</p>`,
     );
   }
+  if (prepared.roster !== undefined)
+    lines.push(renderProblemRosterHtml(prepared.roster, prepared.problem, prepared.cursor));
   if (prepared.claim_state !== undefined) {
     lines.push(
       `  <section class="asimp-claim-state"><h3>Computed claim state</h3><pre><code>${escapeHtml(stableStringify(prepared.claim_state, 2))}</code></pre></section>`,

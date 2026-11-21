@@ -11,6 +11,7 @@ import { type Projection, screeningNoticeText } from "@asimposium/render";
 import type { Env } from "../../src/env.ts";
 import { sha256Hex } from "../../src/krater/krater.ts";
 import { createLedgerFaceRoutes, renderBudgetedClaimFace } from "../../src/ledger-face.ts";
+import { PUBLIC_PROBLEM_ROSTER_SQL } from "../../src/problems/public-roster.ts";
 import { readTargetClaimPack } from "../../src/sessions/ledger-pack.ts";
 
 const base = ClaimFaceResponseSchema.parse(
@@ -27,19 +28,41 @@ const base = ClaimFaceResponseSchema.parse(
  * still carries a real immutable governance payload and its actual byte hash.
  * Mounted SQLite coverage below the route boundary exercises the source SQL.
  */
-function formulationEnv(row: {
-  problem_id: string;
-  public_seq: number;
-  current_statement_version: number;
-  formulation_json: string;
-  roster_sponsorship_json?: string | null;
-}): Env {
+function formulationEnv(
+  row: {
+    problem_id: string;
+    public_seq: number;
+    current_statement_version: number;
+    formulation_json: string;
+    roster_sponsorship_json?: string | null;
+  },
+  rosterRows?: Record<string, unknown>[],
+  rosterSponsorship?: () => string | null | undefined,
+): Env {
   return {
     DB: {
       prepare(query: string) {
         const stmt = {
           bind: () => stmt,
           all: async () => {
+            if (query === PUBLIC_PROBLEM_ROSTER_SQL) {
+              const sponsorshipJson =
+                rosterSponsorship !== undefined
+                  ? rosterSponsorship()
+                  : Object.hasOwn(row, "roster_sponsorship_json")
+                    ? row.roster_sponsorship_json
+                    : rosterRows === undefined
+                      ? "[]"
+                      : JSON.stringify(rosterRows.map((member) => member.sponsor_id ?? null));
+              return {
+                results: (rosterRows ?? [{ problem_id: row.problem_id, fellow_id: null }]).map(
+                  (member, index) => ({
+                    ...member,
+                    roster_sponsorship_json: index === 0 ? sponsorshipJson : null,
+                  }),
+                ),
+              };
+            }
             if (!query.includes("FROM problems p JOIN events e ON e.id = (")) {
               return { results: [{ roster_sponsorship_json: "[]", ...row }] };
             }
@@ -227,6 +250,156 @@ test("single-team notices require complete bounded current sponsorship, not scie
     ).text();
     if (notice) expect(markdown).toContain(`Single-team problem: ${SINGLE_TEAM_PROBLEM_NOTICE}`);
     expect(new TextEncoder().encode(markdown).length).toBeLessThanOrEqual(16_000);
+  }
+});
+
+test.each([
+  { initial: ["usr_stale"], current: ["usr_one", "usr_other"], single: false },
+  { initial: ["usr_stale", "usr_previous"], current: ["usr_now", "usr_now"], single: true },
+])(
+  "current participants and single-team annotation share the final sponsorship snapshot (unit row double): $single",
+  async ({ initial, current, single }) => {
+    const row = {
+      problem_id: "P-PATHS",
+      public_seq: 1,
+      status: "sharpening",
+      current_statement_version: 1,
+      formulation_json: JSON.stringify({
+        title: "Paths",
+        current_statement_version: 1,
+        statement: "A path has one more vertex than edges.",
+        falsifier: "A path with equal vertex and edge counts.",
+        motivation: "A finite convention.",
+      }),
+      claim_id: null,
+      statement: null,
+      source_seq: null,
+      // Simulate a join/transfer after the initial scientific digest read.
+      // This earlier source must never decide the current membership notice.
+      roster_sponsorship_json: JSON.stringify(initial),
+    };
+    const rosterRows = current.map((sponsor_id, index) => ({
+      problem_id: row.problem_id,
+      fellow_id: `F-current-${index}`,
+      name: `current-fellow-${index}`,
+      sponsor_id,
+      role: "contributor",
+      heartbeat_at: null,
+      events_json: "[]",
+    }));
+    const env = formulationEnv(row, rosterRows, () => JSON.stringify(current));
+    const app = createLedgerFaceRoutes();
+    const response = await app.request("https://a.asimposium.org/p/P-PATHS.json", {}, env);
+    expect(response.status).toBe(200);
+    const face = ProblemFaceResponseSchema.parse(await response.json());
+    expect(face.roster?.members.map((member) => member.current_sponsor_id)).toEqual(current);
+    expect(face.omitted.some((entry) => entry.reason === "single_team")).toBe(single);
+    expect(JSON.stringify(face)).not.toContain("usr_stale");
+    const markdown = await (
+      await app.request("https://a.asimposium.org/p/P-PATHS.md", {}, env)
+    ).text();
+    expect(markdown.includes(`Single-team problem: ${SINGLE_TEAM_PROBLEM_NOTICE}`)).toBe(single);
+  },
+);
+
+test("maximum roster identities and uncertain histories preserve the 4K digest envelope (unit row double)", async () => {
+  const cursor = Number.MAX_SAFE_INTEGER;
+  const problem = `P-${"A".repeat(126)}`;
+  const at = "2026-11-20T10:00:00.000Z";
+  const row = {
+    problem_id: problem,
+    public_seq: cursor,
+    status: "active",
+    current_statement_version: 1,
+    formulation_json: JSON.stringify({
+      title: "A finite roster budget",
+      current_statement_version: 1,
+      statement: "A path has one more vertex than edges.",
+      falsifier: "A path with equal vertex and edge counts.",
+      motivation: "Keep scientific reads available at the maximum contract bounds.",
+    }),
+    claim_id: null,
+    statement: null,
+    source_seq: null,
+  };
+  const rosterRows = Array.from({ length: 9 }, (_, index) => ({
+    problem_id: problem,
+    fellow_id: `F-${index}-${"漢".repeat(76)}`,
+    name: "界".repeat(128),
+    sponsor_id: `usr_${"a".repeat(60)}`,
+    role: "contributor",
+    heartbeat_at: at,
+    events_json: JSON.stringify([
+      {
+        seq: cursor,
+        type: "claim.created",
+        object_kind: "claim",
+        created_at: at,
+        available: 0,
+        materiality_status: null,
+        low_substance: 0,
+      },
+      {
+        seq: cursor - 1,
+        type: "problem.statement-reviewed",
+        object_kind: "problem",
+        created_at: at,
+        available: 1,
+        materiality_status: "sharpening",
+        low_substance: 0,
+      },
+    ]),
+  }));
+  const app = createLedgerFaceRoutes();
+  const env = formulationEnv(row, rosterRows);
+  for (const suffix of ["json", "md"]) {
+    const response = await app.request(`https://a.asimposium.org/p/${problem}.${suffix}`, {}, env);
+    expect(response.status).toBe(200);
+    const raw = await response.text();
+    expect(new TextEncoder().encode(raw).length).toBeLessThanOrEqual(16_000);
+    if (suffix === "json") {
+      const face = ProblemFaceResponseSchema.parse(JSON.parse(raw));
+      const roster = face.roster!;
+      expect(roster.members.length).toBeGreaterThan(0);
+      expect(roster.members.length).toBeLessThanOrEqual(8);
+      expect(roster.members.map((member) => member.fellow_id)).toEqual(
+        rosterRows.slice(0, roster.members.length).map((member) => member.fellow_id),
+      );
+      expect(roster.has_more).toBe(true);
+      if (roster.members.length < 8) expect(roster.omitted).toContain("budget_limit");
+      expect(
+        face.items.some((item) => item.body === "A path has one more vertex than edges."),
+      ).toBe(true);
+    } else {
+      expect(raw).toContain("A path has one more vertex than edges.");
+    }
+  }
+
+  // The full science exceeds the envelope, but its long statement fits when
+  // the roster is omitted. Restoring even one large member before tail fitting
+  // must not displace that scientific item.
+  const longStatement = "漢".repeat(4100);
+  row.formulation_json = JSON.stringify({
+    ...JSON.parse(row.formulation_json),
+    statement: longStatement,
+    falsifier: "幅".repeat(1500),
+  });
+  for (const suffix of ["json", "md"]) {
+    const response = await app.request(`https://a.asimposium.org/p/${problem}.${suffix}`, {}, env);
+    expect(response.status).toBe(200);
+    const raw = await response.text();
+    expect(new TextEncoder().encode(raw).length).toBeLessThanOrEqual(16_000);
+    expect(raw.includes(longStatement)).toBe(true);
+    if (suffix === "json") {
+      const face = ProblemFaceResponseSchema.parse(JSON.parse(raw));
+      expect(face.roster?.members).toHaveLength(0);
+      expect(face.roster?.has_more).toBe(true);
+      expect(face.roster?.omitted).toContain("budget_limit");
+      expect(face.items.some((item) => item.body === longStatement)).toBe(true);
+    } else {
+      expect(raw).toContain("participants are omitted");
+      expect(raw).not.toContain("No current members are recorded");
+    }
   }
 });
 

@@ -11,6 +11,7 @@ import {
   ProblemSlowModeBudgetSchema,
   type PublicClaimState,
   PublicClaimStateSchema,
+  PublicProblemRosterSchema,
   type RateLimitBudget,
   type ScreeningPublicationNotice,
   ScreeningPublicationNoticeSchema,
@@ -97,6 +98,7 @@ export interface PreparedProjection {
   readonly promotion_budget?: RateLimitBudget;
   readonly claim_state?: PublicClaimState;
   readonly problem_status?: Projection["problem_status"];
+  readonly roster?: Projection["roster"];
   readonly fingerprint: string;
   /** Flat per-item report, in item order. */
   readonly neutralized: readonly NeutralizationReport[];
@@ -449,6 +451,19 @@ function snapshotProjection(value: Projection): Projection {
   ) {
     refuseUnreadableProjection("problem_status requires a public lifecycle on a problem digest");
   }
+  const rosterValue = readProjectionMember(source, "roster", "roster");
+  let roster: Projection["roster"];
+  if (rosterValue !== undefined) {
+    if (!requiresProblemStatus)
+      refuseUnreadableProjection("roster requires a public problem digest");
+    try {
+      roster = PublicProblemRosterSchema.parse(rosterValue);
+    } catch {
+      refuseUnreadableProjection("roster");
+    }
+    if (roster.members.some((member) => (member.last_public_increment?.seq ?? 0) > cursor))
+      refuseUnreadableProjection("roster increment exceeds the captured ledger cursor");
+  }
   if (
     claimState !== undefined &&
     (kind !== "claim-face" || schema !== "asimposium.claim-face.v1")
@@ -476,6 +491,7 @@ function snapshotProjection(value: Projection): Projection {
     ...(promotionBudget === undefined ? {} : { promotion_budget: promotionBudget }),
     ...(claimState === undefined ? {} : { claim_state: claimState }),
     ...(problemStatus?.success ? { problem_status: problemStatus.data } : {}),
+    ...(roster === undefined ? {} : { roster }),
   };
 }
 
@@ -647,6 +663,37 @@ function projectionStrings(projection: Projection): ProjectionString[] {
         reject_control_comment: false,
       });
     }
+  }
+
+  if (projection.roster !== undefined) {
+    fields.push({
+      field: "roster.notice",
+      value: projection.roster.notice,
+      reject_control_comment: true,
+    });
+    for (const [index, member] of projection.roster.members.entries()) {
+      const path = `roster.members[${index}]`;
+      for (const [key, value] of Object.entries(member)) {
+        if (typeof value === "string")
+          fields.push({ field: `${path}.${key}`, value, reject_control_comment: false });
+      }
+      if (member.last_public_increment !== null) {
+        fields.push(
+          {
+            field: `${path}.last_public_increment.type`,
+            value: member.last_public_increment.type,
+            reject_control_comment: false,
+          },
+          {
+            field: `${path}.last_public_increment.created_at`,
+            value: member.last_public_increment.created_at,
+            reject_control_comment: false,
+          },
+        );
+      }
+    }
+    for (const [index, value] of projection.roster.omitted.entries())
+      fields.push({ field: `roster.omitted[${index}]`, value, reject_control_comment: false });
   }
 
   for (const [index, item] of projection.items.entries()) {
@@ -1148,6 +1195,7 @@ export function prepareProjection(rawProjection: Projection): PreparedProjection
     ...(projection.problem_status === undefined
       ? {}
       : { problem_status: projection.problem_status }),
+    ...(projection.roster === undefined ? {} : { roster: projection.roster }),
   });
 
   return {
@@ -1201,6 +1249,7 @@ export function prepareProjection(rawProjection: Projection): PreparedProjection
     ...(projection.problem_status === undefined
       ? {}
       : { problem_status: projection.problem_status }),
+    ...(projection.roster === undefined ? {} : { roster: projection.roster }),
     fingerprint: contentFingerprint(fingerprintSource),
     neutralized,
   };

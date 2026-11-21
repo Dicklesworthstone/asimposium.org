@@ -73,6 +73,12 @@ export {
   prepareProjection,
 } from "./prepare.ts";
 export {
+  renderProblemRosterMarkdown,
+  rosterIncrementPath,
+  rosterIncrementSummary,
+  rosterOmissionText,
+} from "./problem-roster.ts";
+export {
   publicMovesPagePath,
   renderPublicMovesHtml,
   renderPublicMovesMarkdown,

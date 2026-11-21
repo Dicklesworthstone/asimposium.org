@@ -108,6 +108,7 @@
     --color-rule: CanvasText;
   }
   .claim-card,
+  .participant-card,
   .status-badge,
   .table-graph,
   button,
@@ -940,7 +941,8 @@
 }
 
 .explore-page .problems-list,
-.problem-page .claims-list {
+.problem-page .claims-list,
+.problem-page .participants-list {
   list-style: none;
   margin: 1rem 0;
   padding: 0;
@@ -950,7 +952,8 @@
 }
 
 .explore-page .problem-card,
-.problem-page .claim-card {
+.problem-page .claim-card,
+.problem-page .participant-card {
   border: 1px solid var(--color-line);
   background: var(--color-card);
   padding: 1.05rem 1.25rem;

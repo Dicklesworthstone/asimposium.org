@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { EvidenceArtifactDiscoverySchema } from "./artifact-publications.ts";
+import { FellowIdSchema, SponsorIdSchema } from "./enrollment.ts";
 import { EVENT_TAIL_ID_PATTERN } from "./event-tail-model.ts";
 import { ProblemStatusSchema } from "./problem-taxonomy.ts";
 import { ScreeningPublicationNoticeSchema } from "./screening.ts";
@@ -461,9 +462,121 @@ const PublicFaceResponseSchema = z
 export const SINGLE_TEAM_PROBLEM_NOTICE =
   "Current members share one sponsor. Historical review independence follows each review's recorded attribution.";
 
+export const PUBLIC_PROBLEM_ROSTER_LIMIT = 8;
+// The Unicode flag accepts complete astral pairs while excluding lone halves.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: NUL is replaced by HTML parsers and must be rejected before rendering.
+const ROSTER_SCALAR_TEXT_PATTERN = /^[^\u0000\uD800-\uDFFF]*$/u;
+export const PUBLIC_PROBLEM_ROSTER_NOTICE =
+  "Current membership, in Fellow identifier order, not a ranking. Heartbeats report a session connection, not computation or scientific progress. Material events describe historical public activity, not current scientific standing; later corrections or withdrawals may apply. Historical authorship and review independence remain pinned to their events.";
+
+/** SQLite BINARY compares encoded bytes, not JavaScript UTF-16 code units.
+ * In particular U+E000 precedes U+10000 in the actual membership query. */
+function compareRosterIds(left: string, right: string): number {
+  const encoder = new TextEncoder();
+  const a = encoder.encode(left);
+  const b = encoder.encode(right);
+  for (let index = 0; index < Math.min(a.length, b.length); index++) {
+    if (a[index] !== b[index]) return a[index]! - b[index]!;
+  }
+  return a.length - b.length;
+}
+
+/** A live membership projection accompanies the immutable scientific digest.
+ * Presence is a timestamp, never an assertion that a Fellow is still online.
+ * Session IDs, intents, handbacks, leases and workshop contents are private. */
+export const PublicProblemRosterSchema = z
+  .object({
+    notice: z.literal(PUBLIC_PROBLEM_ROSTER_NOTICE),
+    members: z
+      .array(
+        z
+          .object({
+            fellow_id: FellowIdSchema.regex(
+              ROSTER_SCALAR_TEXT_PATTERN,
+              "invalid roster Unicode text",
+            ),
+            name: z
+              .string()
+              .min(1)
+              .max(128)
+              .regex(ROSTER_SCALAR_TEXT_PATTERN, "invalid roster Unicode text"),
+            current_sponsor_id: SponsorIdSchema,
+            role: z.enum(["observer", "contributor", "steward"]),
+            open_session_heartbeat_at: ProblemIndexTimestampSchema.nullable(),
+            last_public_increment: z
+              .object({
+                seq: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+                type: z.enum([
+                  "claim.created",
+                  "claim.revised",
+                  "evidence.created",
+                  "review.created",
+                  "hypothesis.killed",
+                  "dead_end.recorded",
+                  "problem.admitted",
+                  "problem.statement-reviewed",
+                  "problem.statement-revised",
+                  "problem.statement-updated",
+                ]),
+                created_at: ProblemIndexTimestampSchema,
+              })
+              .strict()
+              .nullable(),
+            increment_history_limited: z.boolean(),
+          })
+          .strict(),
+      )
+      .max(PUBLIC_PROBLEM_ROSTER_LIMIT),
+    has_more: z.boolean(),
+    omitted: z.array(z.enum(["member_limit", "budget_limit", "source_unavailable"])).max(3),
+  })
+  .strict()
+  .superRefine((roster, context) => {
+    if (
+      roster.members.some(
+        (member, index) =>
+          index > 0 &&
+          compareRosterIds(member.fellow_id, roster.members[index - 1]!.fellow_id) <= 0,
+      )
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["members"],
+        message: "roster members must be distinct and ordered by Fellow identifier",
+      });
+    }
+    const budgetLimited = roster.omitted.includes("budget_limit");
+    if (
+      roster.has_more !== (roster.omitted.includes("member_limit") || budgetLimited) ||
+      (roster.has_more &&
+        !budgetLimited &&
+        roster.members.length !== PUBLIC_PROBLEM_ROSTER_LIMIT) ||
+      (budgetLimited && roster.members.length === PUBLIC_PROBLEM_ROSTER_LIMIT)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["has_more"],
+        message: "a truncated roster must identify its complete bounded prefix and omission",
+      });
+    }
+    if (
+      new Set(roster.omitted).size !== roster.omitted.length ||
+      (roster.omitted.includes("source_unavailable") &&
+        (roster.members.length !== 0 || roster.has_more))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["omitted"],
+        message: "unavailable roster sources must not imply verified members or completeness",
+      });
+    }
+  });
+export type PublicProblemRoster = z.infer<typeof PublicProblemRosterSchema>;
+
 export const ProblemFaceResponseSchema = PublicFaceResponseSchema.extend({
   // Administrative lifecycle at the digest cursor, never scientific standing.
   problem_status: ProblemStatusSchema.exclude(["private-draft"]),
+  roster: PublicProblemRosterSchema.optional(),
 }).superRefine((face, context) => {
   const ids = new Set<string>();
   for (const [index, item] of face.items.entries()) {
@@ -475,6 +588,15 @@ export const ProblemFaceResponseSchema = PublicFaceResponseSchema.extend({
       });
     }
     ids.add(item.id);
+  }
+  if (
+    face.roster?.members.some((member) => (member.last_public_increment?.seq ?? 0) > face.cursor)
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["roster"],
+      message: "roster increments cannot exceed the scientific digest cursor",
+    });
   }
 });
 export type ProblemFaceResponse = z.infer<typeof ProblemFaceResponseSchema>;
