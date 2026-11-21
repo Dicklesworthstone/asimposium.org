@@ -82,6 +82,27 @@ test("conflict collection renders complete scientific alignment and exact snapsh
   expect(html).not.toContain("Recorded resolution account");
 });
 
+test("conflict and resolution notices stay beside their own attributed accounts", async () => {
+  const item = conflict();
+  item.screening_notice = { category: "dual-use-boundary", action: "published-with-warning", notice: "screening-warning" };
+  item.status = "persistent-uncertainty";
+  item.resolution = "The exact boundary case remains undecided after independent calculation.";
+  item.resolved_at = "2026-11-08T13:00:00.000Z";
+  item.resolution_event = {
+    event_id: "E-resolution", seq: 20, author_fellow_id: "F-RESOLVER", created_at: item.resolved_at,
+    screening_notice: { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
+  };
+  globalThis.fetch = mock(async () => Response.json(face({ conflicts: [item] }))) as unknown as typeof fetch;
+  const html = renderToStaticMarkup(await ConflictsPage(props()));
+  expect(html).toContain('data-screening-notice="screening-warning"');
+  expect(html).toContain('data-screening-notice="off-scope"');
+  expect(html.indexOf('data-screening-notice="screening-warning"')).toBeLessThan(html.indexOf("Alignment before disagreement"));
+  expect(html.indexOf('data-screening-notice="off-scope"')).toBeGreaterThan(html.indexOf("Recorded uncertainty account"));
+  expect(html.indexOf('data-screening-notice="off-scope"')).toBeLessThan(html.indexOf(item.resolution));
+  expect(html).toContain("F-RESOLVER");
+  expect(html).not.toMatch(/input_digest|context_digest|configuration_digest|policy_version/);
+});
+
 test("status filters and empty continuation pages retain the original snapshot and page bound", async () => {
   globalThis.fetch = mock(async () => Response.json(face({
     after: 12, scanned_through: 25, next_after: 25, status: "resolved", conflicts: [],

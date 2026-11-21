@@ -4,17 +4,25 @@ import {
   ConflictsListResponseSchema,
   OpaqueProblemSchema,
   ProblemDocumentSchema,
+  type ScreeningPublicationNotice,
 } from "@asimposium/contracts";
+import { screeningNoticeText } from "@asimposium/render";
 import type { Env } from "../../src/env.ts";
 import { sha256Hex, writeLedgerEvent } from "../../src/krater/krater.ts";
 import { loadProblemConflicts } from "../../src/ledger/conflicts.ts";
 import { createLedgerFaceRoutes } from "../../src/ledger-face.ts";
 import { operatorContentControl } from "../../src/moderation/operator-http.ts";
 import {
+  publicationProvenance,
+  type ScreenedPublication,
+  screeningPublicationStatements,
+} from "../../src/screening/ingress.ts";
+import {
   directiveDisclosureFixture,
   DISCLOSURE_PROBLEM as problemId,
   DISCLOSURE_SPONSOR as sponsorId,
 } from "../support/directive-disclosure.ts";
+import { syntheticScreeningObservation } from "../support/screening.ts";
 
 type Fixture = Awaited<ReturnType<typeof directiveDisclosureFixture>>;
 const fixtures: Fixture[] = [];
@@ -48,6 +56,7 @@ async function publish(
   conflictId = "CF-1",
   status?: "resolved" | "persistent-uncertainty",
   extra: Record<string, unknown> = {},
+  screened?: ScreenedPublication,
 ) {
   const createdAt = new Date().toISOString(),
     eventId = `E-conflict-${crypto.randomUUID()}`;
@@ -70,13 +79,14 @@ async function publish(
           ...extra,
         };
   const payloadJson = JSON.stringify(payload);
+  const requestDigest = await sha256Hex(payloadJson);
   return writeLedgerEvent(
     f.db,
     {
       problemId,
       eventId,
       idempotencyKey: eventId,
-      requestDigest: await sha256Hex(payloadJson),
+      requestDigest,
       eventType: status === undefined ? "conflict.normalized" : "conflict.resolved",
       objectKind: "conflict",
       objectId: conflictId,
@@ -92,8 +102,8 @@ async function publish(
       },
     },
     {
-      statementsAfterEvent: ({ sequence }) =>
-        status === undefined
+      statementsAfterEvent: ({ sequence }) => [
+        ...(status === undefined
           ? [
               f.db
                 .prepare(
@@ -116,8 +126,29 @@ async function publish(
                   createdAt,
                 ),
             ]
-          : [],
+          : []),
+        ...(screened === undefined
+          ? []
+          : screeningPublicationStatements(f.db, screened, eventId, "S-conflict", requestDigest)),
+      ],
     },
+  );
+}
+async function warning(f: Fixture, category: "dual-use-boundary" | "off-topic", settled = false) {
+  const input = {
+    problemId,
+    fellowId: f.binding.fellowId,
+    kind: "conflict",
+    statement: settled ? resolution : JSON.stringify(normalized),
+    falsifier: null,
+  };
+  return publicationProvenance(
+    input,
+    await syntheticScreeningObservation(input, {
+      decision: "allow-with-warning",
+      coarse_category: category,
+      provider_status: "ok",
+    }),
   );
 }
 function control(f: Fixture, ref: string, visibility: "hidden" | "visible", version: number) {
@@ -141,6 +172,98 @@ function face(f: Fixture, format: string, init?: RequestInit, query = "") {
     { DB: f.db } as Env,
   );
 }
+
+test("conflict normalization and resolution retain distinct exact-publication notices", async () => {
+  const f = await fixture();
+  const normalization = await warning(f, "dual-use-boundary");
+  const settlement = await warning(f, "off-topic", true);
+  const notice = normalization.provenance.public_action as ScreeningPublicationNotice;
+  const resolutionNotice = settlement.provenance.public_action as ScreeningPublicationNotice;
+  const admitted = await publish(f, "CF-1", undefined, {}, normalization);
+  await publish(f, "CF-1", "persistent-uncertainty", {}, settlement);
+  // Payload-authored notices confer no platform authority, even when shaped correctly.
+  await publish(f, "CF-2", undefined, { screening_notice: notice });
+  const current = await loadProblemConflicts(f.db, problemId);
+  expect(current.conflicts[0]?.screening_notice).toEqual(notice);
+  expect(current.conflicts[0]?.resolution_event?.screening_notice).toEqual(resolutionNotice);
+  expect(current.conflicts[1]?.screening_notice).toBeUndefined();
+  const snapshot = await loadProblemConflicts(f.db, problemId, {
+    target: "CF-1",
+    through: admitted.seq,
+  });
+  expect(snapshot.conflicts[0]?.screening_notice).toEqual(notice);
+  expect(snapshot.conflicts[0]?.resolution_event).toBeNull();
+  for (const format of formats) {
+    const response = await face(f, format, undefined, "?target=CF-1");
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    if (format === "json") {
+      const item = ConflictsListResponseSchema.parse(JSON.parse(text)).conflicts[0];
+      expect(item?.screening_notice).toEqual(notice);
+      expect(item?.resolution_event?.screening_notice).toEqual(resolutionNotice);
+    } else {
+      for (const [entry, body] of [
+        [notice, normalized.smallest_disagreement],
+        [resolutionNotice, resolution],
+      ] as const) {
+        expect(text.indexOf(screeningNoticeText(entry))).toBeGreaterThan(-1);
+        expect(text.indexOf(screeningNoticeText(entry))).toBeLessThan(text.indexOf(body));
+        expect(text.split(screeningNoticeText(entry))).toHaveLength(2);
+      }
+    }
+    expect(text).not.toMatch(/input_digest|context_digest|configuration_digest|policy_version/);
+    expect(
+      (
+        await face(
+          f,
+          format,
+          { headers: { "if-none-match": response.headers.get("etag") ?? "" } },
+          "?target=CF-1",
+        )
+      ).status,
+    ).toBe(304);
+  }
+  control(f, "CF-1", "hidden", 1);
+  for (const format of formats) {
+    const hidden = await face(f, format, undefined, `?target=CF-1&through=${admitted.seq}`);
+    expect(hidden.status).toBe(404);
+    const text = await hidden.text();
+    expect(text).not.toContain(normalized.smallest_disagreement);
+    expect(text).not.toContain(screeningNoticeText(notice));
+  }
+});
+
+test("corrupt normalization or resolution notices cannot become unqualified scientific text", async () => {
+  for (const corruptResolution of [false, true]) {
+    const f = await fixture();
+    const admitted = await publish(f, "CF-1", undefined, {}, await warning(f, "dual-use-boundary"));
+    const settled = await publish(f, "CF-1", "resolved", {}, await warning(f, "off-topic", true));
+    const before = await face(f, "json", undefined, "?target=CF-1");
+    // Simulate storage damage below the immutable production write guard.
+    f.sql.exec("DROP TRIGGER screening_publications_no_update");
+    f.sql
+      .query("UPDATE screening_publications SET provenance_json='{}' WHERE event_id=?")
+      .run(corruptResolution ? settled.eventId : admitted.eventId);
+    const collection = await loadProblemConflicts(f.db, problemId);
+    expect(collection.conflicts).toEqual([]);
+    expect(collection.omitted).toContain(
+      "Some conflict content or lifecycle history is unavailable.",
+    );
+    for (const format of formats) {
+      const response = await face(
+        f,
+        format,
+        { headers: { "if-none-match": before.headers.get("etag") ?? "*" } },
+        "?target=CF-1",
+      );
+      expect(response.status).toBe(503);
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      expect(await response.text()).not.toContain(resolution);
+    }
+    const historical = await face(f, "json", undefined, `?target=CF-1&through=${admitted.seq}`);
+    expect(historical.status).toBe(corruptResolution ? 200 : 503);
+  }
+});
 
 test("audited operator conflict controls hide pinned faces and restore the original work", async () => {
   const f = await fixture();

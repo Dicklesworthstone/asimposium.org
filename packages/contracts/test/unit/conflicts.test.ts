@@ -27,6 +27,47 @@ async function loadFixture(path: string): Promise<unknown> {
 }
 
 describe("W5.5 Conflicts contracts", () => {
+  test("normalization and resolution notices remain separate public metadata, never write authority", async () => {
+    const item = ConflictItemSchema.parse(
+      await loadFixture("valid/conflicts-screening-warning.json"),
+    );
+    expect(item.screening_notice?.notice).toBe("screening-warning");
+    expect(item.resolution_event?.screening_notice?.notice).toBe("off-scope");
+    expect(
+      ConflictItemSchema.safeParse(
+        await loadFixture("invalid/conflicts-screening-warning-private.json"),
+      ).success,
+    ).toBe(false);
+    expect(
+      ConflictItemSchema.safeParse({
+        ...item,
+        resolution_event: {
+          ...item.resolution_event,
+          screening_notice: { ...item.resolution_event?.screening_notice, input_digest: "private" },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      NormalizeConflictRequestSchema.safeParse({
+        claims: item.claims,
+        aligned_definitions: item.aligned_definitions,
+        aligned_scope: item.aligned_scope,
+        aligned_quantifiers: item.aligned_quantifiers,
+        smallest_disagreement: item.smallest_disagreement,
+        agreed_facts: item.agreed_facts,
+        discriminating_tests: item.discriminating_tests,
+        screening_notice: item.screening_notice,
+      }).success,
+    ).toBe(false);
+    expect(
+      ResolveConflictRequestSchema.safeParse({
+        status: "resolved",
+        resolution: item.resolution,
+        screening_notice: item.resolution_event?.screening_notice,
+      }).success,
+    ).toBe(false);
+  });
+
   describe("Conflict schema primitives", () => {
     test("ConflictIdSchema validates canonical IDs and rejects malformed ones", () => {
       expect(ConflictIdSchema.safeParse("CF-1").success).toBe(true);

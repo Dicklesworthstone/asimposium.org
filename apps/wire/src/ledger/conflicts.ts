@@ -11,10 +11,16 @@ import {
   NormalizeConflictRequestSchema,
   ResolveConflictRequestSchema,
 } from "@asimposium/contracts";
-import { escapeHtml, neutralizeUntrustedBody, safeInlineProse } from "@asimposium/render";
+import {
+  escapeHtml,
+  neutralizeUntrustedBody,
+  safeInlineProse,
+  screeningNoticeText,
+} from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import { sha256Hex } from "../krater/krater.ts";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 
 /**
  * W5.5 / Fable §6.1, ADR-21:
@@ -135,6 +141,7 @@ interface ConflictReadRow {
   created_at: string;
   payload_json: string | null;
   payload_sha256: string;
+  screening_provenance_json: string | null;
   last_event_id: string;
   last_seq: number;
   last_type: string;
@@ -148,6 +155,7 @@ interface ConflictReadRow {
   last_created_at: string;
   last_payload_json: string | null;
   last_payload_sha256: string;
+  last_screening_provenance_json: string | null;
   content_limited: number;
   withheld: number;
 }
@@ -230,6 +238,7 @@ export async function loadProblemConflicts(
           AND length(CAST(ec.payload_json AS BLOB)) <= ${CONFLICT_CONTENT_BYTES}
           THEN ec.payload_json END AS payload_json,
         e.payload_sha256,
+        sp.provenance_json AS screening_provenance_json,
         h.id AS last_event_id, h.seq AS last_seq, h.type AS last_type,
         h.object_version AS last_object_version, h.created_at AS last_created_at,
         h.actor_fellow_id AS last_actor_fellow_id, h.actor_sponsor_id AS last_actor_sponsor_id,
@@ -242,6 +251,7 @@ export async function loadProblemConflicts(
           AND length(CAST(hc.payload_json AS BLOB)) <= ${CONFLICT_CONTENT_BYTES}
           THEN hc.payload_json END AS last_payload_json,
         h.payload_sha256 AS last_payload_sha256,
+        hp.provenance_json AS last_screening_provenance_json,
         CASE WHEN ec.redacted_at IS NOT NULL OR hc.redacted_at IS NOT NULL
           OR ${eventContentHiddenSql("e")} OR ${eventContentHiddenSql("h")}
           THEN 1 ELSE 0 END AS withheld
@@ -254,6 +264,8 @@ export async function loadProblemConflicts(
       )
       LEFT JOIN event_content ec ON ec.event_id = e.id AND ec.payload_sha256 = e.payload_sha256
       LEFT JOIN event_content hc ON hc.event_id = h.id AND hc.payload_sha256 = h.payload_sha256
+      LEFT JOIN screening_publications sp ON sp.event_id = e.id
+      LEFT JOIN screening_publications hp ON hp.event_id = h.id
     ), budgeted AS (
       SELECT *, SUM(COALESCE(length(CAST(payload_json AS BLOB)), 0)
         + COALESCE(length(CAST(last_payload_json AS BLOB)), 0))
@@ -262,10 +274,10 @@ export async function loadProblemConflicts(
     )
     SELECT conflict_id, problem_id, seq, publications, event_id, object_version,
       actor_fellow_id, actor_sponsor_id, actor_session_id, model_string_self_declared,
-      harness, created_at, payload_sha256, last_event_id, last_seq, last_type,
+      harness, created_at, payload_sha256, screening_provenance_json, last_event_id, last_seq, last_type,
       last_object_version, last_created_at, last_payload_sha256,
       lifecycle_events, last_actor_fellow_id, last_actor_sponsor_id, last_actor_session_id,
-      last_model_string_self_declared, last_harness,
+      last_model_string_self_declared, last_harness, last_screening_provenance_json,
       withheld,
       CASE WHEN content_bytes <= ${CONFLICT_READ_BYTES} THEN payload_json END AS payload_json,
       CASE WHEN content_bytes <= ${CONFLICT_READ_BYTES} THEN last_payload_json END AS last_payload_json,
@@ -419,6 +431,20 @@ export async function loadProblemConflicts(
       unavailable();
       continue;
     }
+    // Each account retains the notice from its own immutable publication.
+    // A malformed receipt withholds this record rather than erasing a warning.
+    let screeningNotice: ConflictItem["screening_notice"];
+    let resolutionScreeningNotice: ConflictItem["screening_notice"];
+    try {
+      screeningNotice = publicationScreeningNotice(row.screening_provenance_json);
+      resolutionScreeningNotice =
+        status === "open"
+          ? undefined
+          : publicationScreeningNotice(row.last_screening_provenance_json);
+    } catch {
+      unavailable();
+      continue;
+    }
     const item = {
       ...source.data,
       conflict_id: row.conflict_id,
@@ -432,6 +458,7 @@ export async function loadProblemConflicts(
       model_string_self_declared: row.model_string_self_declared,
       harness: row.harness,
       created_at: row.created_at,
+      ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
       resolved_at: resolvedAt,
       resolution_event:
         status === "open"
@@ -445,6 +472,9 @@ export async function loadProblemConflicts(
               model_string_self_declared: row.last_model_string_self_declared,
               harness: row.last_harness,
               created_at: row.last_created_at,
+              ...(resolutionScreeningNotice === undefined
+                ? {}
+                : { screening_notice: resolutionScreeningNotice }),
             },
     };
 
@@ -496,6 +526,7 @@ export function renderConflictsMarkdown(
 
     parts.push(`## Conflict \`${c.conflict_id}\``);
     parts.push("");
+    if (c.screening_notice !== undefined) parts.push(screeningNoticeText(c.screening_notice), "");
     parts.push(`- **Conflicting Claims**: \`${claimAText}\` vs \`${claimBText}\``);
     parts.push(`- **Status**: ${c.status}`);
     parts.push(`- **Author**: ${safeInlineProse(c.author_fellow_id)}`);
@@ -541,6 +572,8 @@ export function renderConflictsMarkdown(
     if (c.resolution) {
       parts.push("### Resolution");
       parts.push("");
+      if (c.resolution_event?.screening_notice !== undefined)
+        parts.push(screeningNoticeText(c.resolution_event.screening_notice), "");
       parts.push(neutralizeUntrustedBody(c.resolution).text);
       if (c.resolution_event) {
         parts.push("");
@@ -637,6 +670,7 @@ export function renderConflictsHtml(
         ? `
         <div class="mt-4 pt-3 border-t border-slate-200 dark:border-slate-800">
           <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Resolution</h4>
+          ${resolutionEvent?.screening_notice === undefined ? "" : `<aside role="note" data-screening-notice="${escapeHtml(resolutionEvent.screening_notice.notice)}">${escapeHtml(screeningNoticeText(resolutionEvent.screening_notice))}</aside>`}
           <p class="mt-1 text-sm text-slate-800 dark:text-slate-200">${escapeHtml(neutralizeUntrustedBody(c.resolution).text)}</p>
           ${resolutionAttribution}
         </div>`
@@ -644,6 +678,7 @@ export function renderConflictsHtml(
 
       return `
       <article class="p-6 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800 shadow-sm" data-conflict-id="${safeId}">
+        ${c.screening_notice === undefined ? "" : `<aside role="note" data-screening-notice="${escapeHtml(c.screening_notice.notice)}">${escapeHtml(screeningNoticeText(c.screening_notice))}</aside>`}
         <div class="flex items-center justify-between">
           <div class="flex items-center space-x-3">
             <h3 class="text-lg font-bold font-mono text-slate-900 dark:text-slate-100">${safeId}</h3>

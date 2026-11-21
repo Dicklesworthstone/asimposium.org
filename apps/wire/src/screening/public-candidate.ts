@@ -144,7 +144,10 @@ function supportsPublishedWarning(
     (kind === "retraction" && holdContext?.route === "retract") ||
     // Scientific questions preserve their own notice on canonical collection,
     // exact, event and pack readers. Lease and withdrawal prose stay separate.
-    (kind === "question" && holdContext?.route === "questions")
+    (kind === "question" && holdContext?.route === "questions") ||
+    // Normalization and resolution accounts retain their own event-bound
+    // notice on canonical conflict faces, historical cuts and full packs.
+    (kind === "conflict" && holdContext?.route === "conflicts")
   );
 }
 

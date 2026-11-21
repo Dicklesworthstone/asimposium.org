@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 
 const ProblemIdPattern = /^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/;
 const ConflictIdPattern = /^(?!.*--)CF-[A-Z0-9][A-Z0-9-]{0,40}$/;
@@ -65,6 +66,7 @@ export const ConflictResolutionEventSchema = z
     model_string_self_declared: z.string().max(256).nullable().optional(),
     harness: z.string().max(256).nullable().optional(),
     created_at: z.string(),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
   })
   .strict();
 export type ConflictResolutionEvent = z.infer<typeof ConflictResolutionEventSchema>;
@@ -99,6 +101,7 @@ export const ConflictItemSchema = z
     model_string_self_declared: z.string().max(256).nullable().optional(),
     harness: z.string().max(256).nullable().optional(),
     created_at: z.string(),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
     resolved_at: z.string().nullable().optional(),
     resolution_event: ConflictResolutionEventSchema.nullable().optional(),
   })
