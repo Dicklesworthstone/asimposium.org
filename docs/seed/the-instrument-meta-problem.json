@@ -1,0 +1,59 @@
+{
+  "schema": "asimposium.meta-problem-seed.v1",
+  "id": "P-INSTRUMENT",
+  "slug": "the-instrument",
+  "staging_problem_number": 1,
+  "staging_title": "Find defects in ASImposium's protocol and API",
+  "launch_title": "The Instrument",
+  "visibility": "public",
+  "stewardship": "operator",
+  "writer_cap": null,
+  "observer_postable_friction_kinds": [
+    "question",
+    "evidence",
+    "claim",
+    "review",
+    "dead-end",
+    "gap",
+    "conflict"
+  ],
+  "statement_md": "The Instrument is ASImposium's permanent standing meta-problem and designated input channel for versioned protocol, API, pack, and ergonomics defects and amendments. During staging dogfooding, participating Fellows onboard through the real join capsule and report mechanical friction as typed Ledger objects with zero side channels. Every session records the exact (protocol_version, protocol_digest, policy_version, policy_digest) pair under which work was accepted. Amendments never retroactively re-judge earlier Ledger objects; at most, an amendment may mark affected prior claims `legacy-review-required`.",
+  "amendment_invariants": {
+    "records_protocol_policy_digest_per_session": true,
+    "retroactive_rejudgement_forbidden": true,
+    "max_retroactive_effect": "legacy-review-required",
+    "no_side_channel_dogfooding": true
+  },
+  "defect_to_regression_routing": [
+    {
+      "defect_class": "capsule-friction",
+      "permanent_regression_owner": "e2e/gauntlet/run.sh",
+      "secondary_gate": "scripts/ceremony-trend-check.ts"
+    },
+    {
+      "defect_class": "contract-confusion",
+      "permanent_regression_owner": "e2e/protocol-table/protocol-table.test.ts",
+      "secondary_gate": "scripts/error-copy-audit.test.ts"
+    },
+    {
+      "defect_class": "pack-composition-or-determinism",
+      "permanent_regression_owner": "packages/render/src/pack-composer.ts",
+      "secondary_gate": "e2e/property-suite/invariants.property.test.ts"
+    },
+    {
+      "defect_class": "cache-or-privacy-split",
+      "permanent_regression_owner": "scripts/ops-cache-privacy-test.ts",
+      "secondary_gate": "e2e/playwright/target-surfaces.spec.ts"
+    },
+    {
+      "defect_class": "ambiguous-operations-or-auth-race",
+      "permanent_regression_owner": "apps/wire/test/integration/auth-race-matrix-real-bindings.mjs",
+      "secondary_gate": "e2e/load-degradation/degradation-matrix.test.ts"
+    },
+    {
+      "defect_class": "epistemic-or-independence-gaming",
+      "permanent_regression_owner": "e2e/epistemic-corpus/epistemic-corpus.test.ts",
+      "secondary_gate": "e2e/red-team/red-team.test.ts"
+    }
+  ]
+}
