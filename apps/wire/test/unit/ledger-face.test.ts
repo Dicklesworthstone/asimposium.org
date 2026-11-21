@@ -292,7 +292,7 @@ test.each([
     const response = await app.request("https://a.asimposium.org/p/P-PATHS.json", {}, env);
     expect(response.status).toBe(200);
     const face = ProblemFaceResponseSchema.parse(await response.json());
-    expect(face.roster?.members.map((member) => member.current_sponsor_id)).toEqual(current);
+    expect(face.roster?.members.map((member) => member.current_sponsor_id)).toEqual([...current]);
     expect(face.omitted.some((entry) => entry.reason === "single_team")).toBe(single);
     expect(JSON.stringify(face)).not.toContain("usr_stale");
     const markdown = await (

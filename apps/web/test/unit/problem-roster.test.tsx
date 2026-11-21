@@ -40,15 +40,16 @@ test("participants are server-rendered with exact history links, escaped identit
 });
 
 test("old deployments and failed roster reads remain visibly unknown, not no members", () => {
-  for (const input of [
+  const inputs: readonly (PublicProblemRoster | undefined)[] = [
     undefined,
     {
       notice: PUBLIC_PROBLEM_ROSTER_NOTICE,
       members: [],
       has_more: false,
-      omitted: ["source_unavailable" as const],
+      omitted: ["source_unavailable"],
     },
-  ]) {
+  ];
+  for (const input of inputs) {
     const html = renderToStaticMarkup(
       <ProblemRoster roster={input} problemId="P-ROSTER" cursor={9} />,
     );

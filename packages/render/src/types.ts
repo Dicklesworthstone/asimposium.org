@@ -104,7 +104,7 @@ export interface Projection {
   readonly claim_state?: PublicClaimState;
   /** Canonical lifecycle on a public problem digest; distinct from claim standing. */
   readonly problem_status?: ProblemFaceResponse["problem_status"];
-  readonly roster?: PublicProblemRoster;
+  readonly roster?: PublicProblemRoster | undefined;
 }
 
 /** What the sanitizer did to one item, surfaced on every face. */
