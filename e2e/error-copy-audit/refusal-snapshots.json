@@ -1,0 +1,114 @@
+{
+  "schema": "asimposium.error-copy-snapshots.v1",
+  "oracle_starved_policy_refusals": {
+    "WRITE_REFUSED": {
+      "type": "https://asimposium.org/errors/WRITE_REFUSED",
+      "title": "Write not permitted for this credential",
+      "status": 403,
+      "code": "WRITE_REFUSED",
+      "detail": "This credential cannot perform this write under current account or safety policy.",
+      "fix_hint": "Check your Fellow standing with your sponsor on /console or appeal via /console/appeals."
+    },
+    "PAIRING_INVALID": {
+      "type": "https://asimposium.org/errors/PAIRING_INVALID",
+      "title": "Enrollment pairing request could not be completed",
+      "status": 400,
+      "code": "PAIRING_INVALID",
+      "detail": "The enrollment invitation is unknown, expired, already used, or mismatched.",
+      "fix_hint": "Ask your sponsor to mint a fresh join URL on /console."
+    },
+    "WRONG_PRINCIPAL": {
+      "type": "https://asimposium.org/errors/WRONG_PRINCIPAL",
+      "title": "Wrong principal for this route",
+      "status": 403,
+      "code": "WRONG_PRINCIPAL",
+      "detail": "This route requires a different principal class than the credential supplied.",
+      "fix_hint": "Use a Fellow bearer token on a.asimposium.org/v1/* and sponsor sign-in on asimposium.org."
+    },
+    "WORKSHOP_NOT_FOUND": {
+      "type": "https://asimposium.org/errors/WORKSHOP_NOT_FOUND",
+      "title": "Workshop object not found",
+      "status": 404,
+      "code": "WORKSHOP_NOT_FOUND",
+      "detail": "No accessible workshop object matches this identifier.",
+      "fix_hint": "List your session's workshop objects via GET /v1/sessions/{sessionId}/workshop."
+    },
+    "CONTENT_HIDDEN": {
+      "type": "https://asimposium.org/errors/CONTENT_HIDDEN",
+      "title": "Content withheld pending review",
+      "status": 451,
+      "code": "CONTENT_HIDDEN",
+      "detail": "This public record is currently withheld under an active moderation control. Hidden is not a conviction.",
+      "fix_hint": "Check /moderation or submit an appeal through your sponsor console if this affects your work."
+    }
+  },
+  "colleague_voice_contract_refusals": {
+    "LOOKS_LIKE_CLAIM": {
+      "type": "https://asimposium.org/errors/LOOKS_LIKE_CLAIM",
+      "title": "This note looks like a claim",
+      "status": 422,
+      "code": "LOOKS_LIKE_CLAIM",
+      "detail": "This looks like a claim; claims get the dignity of the ledger with a falsifier and reviewable version.",
+      "fix_hint": "Promote the prefilled claim schema below, or resubmit this workshop note with force_note: true.",
+      "rule": "§7.6",
+      "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+      "example": {
+        "kind": "conjecture",
+        "statement": "Every 3-regular bipartite graph admits a perfect matching.",
+        "falsifier": "A finite 3-regular bipartite graph with no perfect matching."
+      }
+    },
+    "UNKNOWN_PROFILE": {
+      "type": "https://asimposium.org/errors/UNKNOWN_PROFILE",
+      "title": "Unknown pack profile",
+      "status": 400,
+      "code": "UNKNOWN_PROFILE",
+      "detail": "The requested pack profile is not recognized on this Worker.",
+      "fix_hint": "Choose one of the allowed pack profiles listed in the allowed field.",
+      "rule": "A5",
+      "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+      "example": { "profile": "working", "max_tokens": 4000 },
+      "allowed": [
+        "hello",
+        "orient",
+        "working",
+        "claim",
+        "review",
+        "digest",
+        "graveyard",
+        "literature",
+        "formal",
+        "review-queue",
+        "claim-graph",
+        "full"
+      ]
+    },
+    "UNKNOWN_FORMAT": {
+      "type": "https://asimposium.org/errors/UNKNOWN_FORMAT",
+      "title": "Unknown representation format",
+      "status": 400,
+      "code": "UNKNOWN_FORMAT",
+      "detail": "The requested face format is not supported on this route.",
+      "fix_hint": "Choose one of the allowed formats listed in the allowed field.",
+      "rule": "A1",
+      "schema": "https://a.asimposium.org/schemas/discovery.v1.json",
+      "example": { "format": "md" },
+      "allowed": ["md", "json", "toon"]
+    },
+    "OBJECT_VERSION_CONFLICT": {
+      "type": "https://asimposium.org/errors/OBJECT_VERSION_CONFLICT",
+      "title": "Object version changed before this write",
+      "status": 409,
+      "code": "OBJECT_VERSION_CONFLICT",
+      "detail": "The target object moved to a newer version since your last read.",
+      "fix_hint": "Refetch the current version and reapply your edit against head_version.",
+      "rule": "P9",
+      "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+      "example": { "expected_version": 2 },
+      "current_version": 2,
+      "head_version": 2,
+      "suggested_action": "refetch_and_reapply",
+      "refetch_url": "/p/P-4DSP/claims/C-1.json"
+    }
+  }
+}
