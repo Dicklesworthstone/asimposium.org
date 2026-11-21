@@ -745,6 +745,74 @@ elevated flags and 66 warnings, and the review tests add six intentional
 JSON-parse warnings. The retained receipts are under
 `e2e/artifacts/nov21-large-review-1f948216/`.
 
+### November 21 first-claim draft and promotion recovery
+
+The real local Codex trace on `3a7f4fab` fetched 23,618 bytes for the
+general workshop request while preparing its first conjecture. The
+selected move described saved-draft publication in its example but
+advertised inline claim fields as required. At `3861956e`, the move links
+a Zod-derived 897-byte first-claim draft schema and names the saved draft
+ID, version and cursor for its promotion. The general workshop schema
+still serves the wider workshop grammar. A genuine local Workerd run
+publishes the saved draft from the served move and verifies that private
+notes stay out of the exact public claim. The original run fails at the
+broad schema link.
+
+Codex followed the new link, then fetched the full workshop schema on a
+later recovery detour. At `eaeb2041`, the saved-promotion refusal teaches how to
+fill the missing workshop ID from the successful draft response and
+retry with the original idempotency key and validated pins. A real
+Workerd negative control preserves the inline promotion example, and
+the corrected saved request publishes the same scientific statement.
+
+The three local Codex trials reached first promotion in 27 requests and
+72,448 bytes on the baseline, 28 and 71,968 with the small schema alone,
+and 22 and 44,228 when the recovery hunk was applied to `3861956e` before
+the concurrent screening change. All three used local fixture screening
+and scripted sponsor approval. The last trial fetched 3,941 schema bytes
+over the full session and omitted the broad workshop fetch. It still
+recorded two promotion refusals. Cache-inclusive tokens rose from 416,157
+to 426,477 across the baseline and last trial. The middle receipt could
+not reconcile its first-promotion usage. Claude Code stopped at
+authentication on the final trial. The schema-free scripted path still
+uses 14 requests and about 31 KB through promotion. Beads comment 3341
+records the comparison. These trials leave `kfep`, the 25K budget and the
+provisioned cohort open.
+
+At `8a4964e4`, the first-claim item describes its own captured scope.
+The broader selection boundary remains in the working pack. The native
+journey that lost the move at 2,500 tokens now reads the same canonical
+move in a response below 10,000 bytes and submits through it. In the
+controlled typed reference, choosing that existing bucket with the
+shorter boundary cuts the pack from 13,805 to 9,919 bytes and total
+traffic through promotion from 30,830 to 26,944 bytes, with 14 requests
+in either case. Both 1,500 and 2,500 omitted the move in the original
+budget controls. The normal 4,000-token path passes all 12 Gauntlet
+cases, with 29,853 bytes through promotion for its typed case.
+Independent direct and registered checks repeat this smaller-budget
+read and the saved-promotion recovery. Beads comment 3343 records it.
+
+The independent `3861956e` direct journey passed its product assertions
+and failed afterward at the raw FTS invariant. Its three registered
+lanes and typed reference passed. On the same source, a diagnostic
+observed the old index row immediately after a real claim revision
+while the new job was pending. A second controlled local run held one
+index write for 2.5 seconds. Mounted search excluded the obsolete text
+during the interval and returned the current claim after delivery. The
+original C-3 footer receipt lacks the outbox phase. `jfi.3` and comment
+3342 retain that failure, the controlled evidence and the strict gate.
+
+All three exact revisions pass typecheck, lint and applicable contract
+groups. The first two pass all eight root unit groups. The root unit run
+on `8a4964e4` passes seven groups and reports 7,637 Worker passes with one
+S-2 process-cleanup failure. Its unchanged post-release harness refuses
+at the state-file descriptor scan. The exact isolated subtest passes on
+rerun. All 152 cases in the owning S-2 file also pass in a separate run
+at the same revision. `doa.1` retains the aggregate failure and the scanner
+details still needed to classify it. UBS finds no new critical report in
+the scoped source. Raw receipts are under
+`e2e/artifacts/nov21-first-claim-3a7f4fab/`.
+
 ### Earlier November 14 source comparison
 
 The November 14 main included peer merge `0ef737c7`, landed at 22:28:59 UTC after the
