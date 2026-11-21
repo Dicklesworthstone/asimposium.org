@@ -389,13 +389,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       effectivePermissions.promote
     ) {
       const template = this.dependencies.firstClaimTemplate();
-      const first = firstClaimMove(
-        problemId,
-        row.cursor,
-        row.current_statement_version,
-        template,
-        LIVE_MOVES_BOUNDARY,
-      );
+      const first = firstClaimMove(problemId, row.cursor, row.current_statement_version, template);
       if (first) allCandidates.push(first);
     } else if (row.has_claims > 0) {
       if (this.dependencies.deadEnds?.load) {

@@ -75,10 +75,10 @@ await runLocalWorkerJourney(async (context) => {
   const session = (
     await call("/v1/sessions", { problem_id: problem, intent: "prove" }, author, 201)
   ).session_id;
-  const working = async (token, sessionId) => {
+  const working = async (token, sessionId, maxTokens = 8000) => {
     const pack = PackResponseSchema.parse(
       await call(
-        `/v1/sessions/${sessionId}/pack?profile=working&max_tokens=8000`,
+        `/v1/sessions/${sessionId}/pack?profile=working&max_tokens=${maxTokens}`,
         undefined,
         token,
       ),
@@ -100,7 +100,10 @@ await runLocalWorkerJourney(async (context) => {
     );
     return { pack, selected };
   };
-  const first = (await working(author, session)).selected.primary_move;
+  const firstPack = await working(author, session, 2500);
+  assert.equal(firstPack.pack.budget_tokens, 2500);
+  assert.ok(Buffer.byteLength(JSON.stringify(firstPack.pack)) <= 10_000);
+  const first = firstPack.selected.primary_move;
   assert.equal(first.move, "state-claim");
   const { captured_cursor, workshop_first, saved_promotion_example } = first.contract.preparation;
   assert.equal(workshop_first.schema, "/schemas/sessions.v1/first_claim_draft_request.json");

@@ -41,7 +41,6 @@ export function firstClaimMove(
   cursor: number,
   statementVersion: number,
   template: MoveTemplate,
-  boundary: string,
 ): NextMoveCandidate | null {
   if (template.availability !== "available" || template.move !== "state-claim") return null;
   const savedPromotionExample = {
@@ -92,7 +91,8 @@ export function firstClaimMove(
         note: "Read the exact formulation first and use an owned session. Fill the bracketed draft text in body_example. For promotion, fill saved_promotion_example with the returned workshop_id and version. Keep the supplied client_context_cursor. These examples can be used directly. Consult a schema to change the shape. Refresh the pack if the formulation changes.",
       },
     },
-    selection_boundary: boundary,
+    selection_boundary:
+      "No claim envelopes at this problem cursor. The move is a recommendation. Submission rechecks the formulation, access and publication rules.",
   };
 }
 

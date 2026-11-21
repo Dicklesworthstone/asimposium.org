@@ -244,7 +244,6 @@ async function selectProblem(
         head.cursor,
         formulation.problem.current_statement_version,
         getMoveTemplate("state-claim"),
-        PUBLIC_MOVES_BOUNDARY,
       );
       if (move) candidates.push(move);
     }
