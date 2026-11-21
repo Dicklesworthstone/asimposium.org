@@ -354,6 +354,7 @@ async function startLoopbackPair(options: LoopbackFixtureOptions): Promise<{
         const html = isSponsor
           ? `<!doctype html><html><head><title>Sponsor Console — ASImposium</title></head><body>
           <h1>Sponsor Console</h1>
+          <h2>Your account</h2>
           <p>Manage Fellows, mint join URLs, and issue sponsor directives.</p>
           <a href="/console/workshop/F-LOOPBACK/${options.problemId}">Open private workshop</a>
           ${plantedScript}
@@ -375,7 +376,7 @@ async function startLoopbackPair(options: LoopbackFixtureOptions): Promise<{
         }
         return new Response(
           `<!doctype html><html><head><title>Private Workshop</title></head><body>
-        <h1>Private Workshop</h1>
+        <h1>Private workshop</h1>
         <p>${options.canary}</p>
         ${plantedScript}
       </body></html>`,
@@ -498,6 +499,28 @@ describe("real Chromium staging Playwright loopback rehearsal + planted failure 
       );
       expect(blockedRun.status).toBe(78);
       expect(blockedRun.stdout).toContain("PLAYWRIGHT_LOOPBACK_REHEARSAL_SPONSOR_BLOCKED");
+
+      const signedOutPath = join(scratchDir, "signed-out-state.json");
+      writeFileSync(signedOutPath, '{"cookies":[],"origins":[]}', { mode: 0o600 });
+      const signedOut = await runAsync(
+        "bash",
+        [
+          resolve(REPO_ROOT, "e2e/run-playwright.sh"),
+          "--local-rehearsal",
+          "--run-id",
+          `rehearsal-4wnk-signed-out-${Date.now()}`,
+        ],
+        {
+          ...envWithoutSponsor,
+          ASIMPOSIUM_STAGING_AGENT_BASE_URL: fixture.agentOrigin,
+          ASIMPOSIUM_STAGING_AGORA_BASE_URL: fixture.agoraOrigin,
+          ASIMPOSIUM_STAGING_SPONSOR_STORAGE_STATE: signedOutPath,
+        },
+        240_000,
+      );
+      expect(signedOut.status).toBe(1);
+      expect(signedOut.stdout).toContain("Your account");
+      expect(signedOut.stdout).not.toContain("PLAYWRIGHT_LOOPBACK_REHEARSAL_PASS");
     } finally {
       await fixture.close();
     }

@@ -102,13 +102,13 @@ async function inspectAgoraPageInContext(
     readonly requirePrivateCache?: boolean;
     readonly forbiddenCanary?: string;
     readonly requiredCanary?: string;
+    readonly expectedHeading?: string;
     readonly allowStatusCodes?: readonly number[];
   },
 ): Promise<{
   readonly status: number;
   readonly headers: Record<string, string>;
   readonly ogImageHref: string | null;
-  readonly bodyText: string;
   readonly workshopLinks: string[];
 }> {
   const startedAt = Date.now();
@@ -142,6 +142,11 @@ async function inspectAgoraPageInContext(
 
     if (jsEnabled) {
       await page.waitForTimeout(50);
+    }
+    if (options.expectedHeading) {
+      await expect(
+        page.getByRole("heading", { name: options.expectedHeading, exact: true }),
+      ).toBeVisible();
     }
 
     const csp = checkStrictCspHeaders(headers);
@@ -257,7 +262,6 @@ async function inspectAgoraPageInContext(
       status,
       headers,
       ogImageHref: domSnapshot.ogImageHref,
-      bodyText: domSnapshot.bodyText,
       workshopLinks: domSnapshot.workshopLinks,
     };
   } finally {
@@ -421,14 +425,9 @@ if (process.env.ASIMPOSIUM_PLAYWRIGHT_ENTRY === "1") {
           {
             principal: "sponsor",
             requirePrivateCache: true,
+            expectedHeading: "Your account",
           },
         );
-
-        // Authenticated sponsor console should render enrollment / Fellow management or directive surfaces.
-        expect(
-          /fellow|enroll|mint|directive|workshop|sponsor/i.test(consoleResult.bodyText),
-          "Authenticated /console did not render sponsor workspace surfaces",
-        ).toBe(true);
 
         // Inspect private workshop view (explicit path or discovered link) and confirm private cacheability + canary visibility.
         const workshopPath = explicitWorkshopPath ?? consoleResult.workshopLinks[0];
@@ -437,6 +436,7 @@ if (process.env.ASIMPOSIUM_PLAYWRIGHT_ENTRY === "1") {
             principal: "sponsor",
             requirePrivateCache: true,
             requiredCanary: workshopCanary,
+            expectedHeading: "Private workshop",
           });
         }
 
