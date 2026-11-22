@@ -417,6 +417,7 @@ const DEFAULT_PACK_TOKENS: Readonly<Record<PackProfile, number>> = {
   "claim-graph": 2000,
   full: 8000,
 };
+const FIRST_CLAIM_PACK_BUDGET = 2500;
 const SavedPublicationPinsSchema = WorkshopPublicationRequestSchema.omit({
   workshop_id: true,
 }).refine(
@@ -3980,8 +3981,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     };
     const composePackResponse = async (
       selection: Parameters<typeof composePack>[0],
-      allowCompactActions = true,
-      includeProvenance = true,
+      {
+        allowCompactActions = true,
+        includeProvenance = true,
+        firstClaimFallback,
+      }: {
+        allowCompactActions?: boolean;
+        includeProvenance?: boolean;
+        firstClaimFallback?: {
+          selection: Parameters<typeof composePack>[0];
+          formulationId: string;
+          moveItemId: string;
+        };
+      } = {},
     ): Promise<Response> => {
       const input: Parameters<typeof composePack>[0] = {
         ...selection,
@@ -4044,12 +4056,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       };
       const compactActionResponse = (): Promise<Response> | undefined => {
         if (!allowCompactActions || input.viewer.membership === "none") return undefined;
-        return composePackResponse(compactSelection(!includeProvenance), false, includeProvenance);
+        return composePackResponse(compactSelection(!includeProvenance), {
+          allowCompactActions: false,
+          includeProvenance,
+        });
       };
       const provenanceReferenceResponse = (): Promise<Response> | undefined => {
         if (!includeProvenance || provenance === null || input.viewer.membership === "none")
           return undefined;
-        return composePackResponse(compactSelection(true), false, false);
+        return composePackResponse(compactSelection(true), {
+          allowCompactActions: false,
+          includeProvenance: false,
+        });
       };
       try {
         let composed = composePack(input);
@@ -4132,6 +4150,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               item.id === "SYS-digest") &&
             !composed.items.some((included) => included.id === item.id),
         );
+        if (
+          firstClaimFallback !== undefined &&
+          (prefixOmitted ||
+            !composed.items.some(({ id }) => id === firstClaimFallback.formulationId) ||
+            !composed.items.some(({ id }) => id === firstClaimFallback.moveItemId))
+        )
+          return composePackResponse(firstClaimFallback.selection);
         if (prefixOmitted) {
           const compact = compactActionResponse() ?? provenanceReferenceResponse();
           if (compact !== undefined) return await compact;
@@ -4140,6 +4165,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       } catch (error) {
         if (error instanceof PackComposerError) {
           if (error.code === "MANDATORY_OVERHEAD_EXCEEDS_BUDGET") {
+            if (firstClaimFallback !== undefined)
+              return composePackResponse(firstClaimFallback.selection);
             const compact = compactActionResponse() ?? provenanceReferenceResponse();
             if (compact !== undefined) return await compact;
           }
@@ -4990,7 +5017,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         if (retryMove) candidates.push(retryMove);
       }
     }
-    return composePackResponse({
+    const selection: Parameters<typeof composePack>[0] = {
       schema: "asimposium.pack.v1",
       session: session.session_id,
       problem: session.problem_id,
@@ -5191,7 +5218,42 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           detail: key,
         })),
       ],
-    });
+    };
+    const formulation = orientation.candidates.find(({ kind }) => kind === "problem-formulation");
+    const moveItem = workingMoves.candidates[0];
+    if (
+      workingMoves.primaryMove?.move === "state-claim" &&
+      moveItem !== undefined &&
+      !workingMoves.degraded &&
+      !url.searchParams.has("max_tokens") &&
+      since === undefined &&
+      directiveContext.candidates.length === 0 &&
+      !hasLeaseContext &&
+      !candidates.some(({ scope }) => scope === "workshop") &&
+      formulation !== undefined &&
+      !orientation.omitted.some(({ detail }) => detail.startsWith("problem-formulation:")) &&
+      neutralizeUntrustedBody(formulation.body).text === formulation.body
+    ) {
+      return composePackResponse(
+        {
+          ...selection,
+          requested_max_tokens: FIRST_CLAIM_PACK_BUDGET,
+          action_candidates: [
+            ...selection.action_candidates,
+            {
+              method: "GET",
+              url: `/v1/sessions/${session.session_id}/pack?profile=working&max_tokens=${DEFAULT_PACK_TOKENS.working}`,
+              why: "Read the standard working pack for more context.",
+              public_read: false,
+            },
+          ],
+        },
+        {
+          firstClaimFallback: { selection, formulationId: formulation.id, moveItemId: moveItem.id },
+        },
+      );
+    }
+    return composePackResponse(selection);
   });
 
   // --- POST /v1/sessions/:id/workshop ------------------------------------

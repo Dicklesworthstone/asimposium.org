@@ -74,9 +74,94 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(empty.primary_move?.move, "state-claim");
   assert.equal(empty.degraded, false);
 
-  const session = (
-    await call("/v1/sessions", { problem_id: problem, intent: "prove" }, author, 201)
-  ).session_id;
+  const opened = await call("/v1/sessions", { problem_id: problem, intent: "prove" }, author, 201);
+  const session = opened.session_id;
+  const workingPath = opened.next_actions.find((action) => action.url.includes("/pack")).url;
+  const usualPack = PackResponseSchema.parse(await call(workingPath, undefined, author));
+  assert.equal(usualPack.budget_tokens, 2500, "the advertised cold working pack is compact");
+  assert.ok(usualPack.omitted.some(({ reason }) => reason === "budget_exceeded"));
+  const largerAction = usualPack.next_actions.find((action) =>
+    action.url.includes("max_tokens=4000"),
+  );
+  assert.ok(largerAction, "the compact pack links a complete-context read");
+  const standardPack = PackResponseSchema.parse(await call(largerAction.url, undefined, author));
+  assert.equal(standardPack.budget_tokens, 4000);
+  assert.ok(standardPack.items.length > usualPack.items.length);
+  const deltaPack = PackResponseSchema.parse(
+    await call(`${workingPath}&since=0`, undefined, author),
+  );
+  assert.equal(deltaPack.budget_tokens, 4000, "cursor catch-up keeps the default full budget");
+  const longOwner = "usr_moves_long_owner";
+  const longAuthor = await enroll("moves-long-author", longOwner);
+  const longProblem = (
+    await call(
+      "/v1/problems",
+      {
+        title: "Parity of triangular numbers by residue class",
+        statement: "If n has residue 0 or 3 modulo 4, n(n+1)/2 is even.",
+        falsifier: "A nonnegative n of either residue with n(n+1)/2 odd.",
+        motivation: Array.from(
+          { length: 26 },
+          (_, index) =>
+            `For index ${index}, record both residue classes and compare the parity after dividing an even product by two. `,
+        ).join(""),
+        areas: ["number-theory"],
+      },
+      longAuthor,
+      201,
+    )
+  ).problem.id;
+  await sponsorCall(
+    longOwner,
+    "POST",
+    `/v1/sponsors/problems/${longProblem}/lifecycle`,
+    "problem-lifecycle",
+    { action: "publish" },
+  );
+  const longReview = await call(
+    "/v1/sessions",
+    { problem_id: longProblem, intent: "review" },
+    other,
+    201,
+  );
+  await call(
+    `/v1/problems/${longProblem}/statement-review`,
+    {
+      session_id: longReview.session_id,
+      statement_version: 1,
+      verdict: "statement-clear",
+      basis: "The modular claim has explicit positive classes and a parity falsifier.",
+    },
+    other,
+  );
+  const longSession = await call("/v1/sessions", { problem_id: longProblem }, longAuthor, 201);
+  const longPath = longSession.next_actions.find((action) => action.url.includes("/pack")).url;
+  const smallLong = PackResponseSchema.parse(
+    await call(`${longPath}&max_tokens=2500`, undefined, longAuthor),
+  );
+  assert.equal(smallLong.budget_tokens, 2500);
+  assert.ok(!smallLong.items.some(({ id }) => id === "SYS-working-moves"));
+  const defaultLong = PackResponseSchema.parse(await call(longPath, undefined, longAuthor));
+  assert.equal(defaultLong.budget_tokens, 4000);
+  const longMove = JSON.parse(
+    defaultLong.items.find(({ id }) => id === "SYS-working-moves").body,
+  ).primary_move;
+  assert.equal(
+    hasExactFirstClaimFormulation(
+      defaultLong,
+      longMove.contract.preparation,
+      longProblem,
+      longSession.session_id,
+    ),
+    true,
+    "the standard fallback keeps the long formulation and whole claim move",
+  );
+  await call(
+    `/v1/sessions/${longReview.session_id}/close`,
+    { handback: "The modular statement is explicit." },
+    other,
+    201,
+  );
   const working = async (token, sessionId, maxTokens = 8000) => {
     const pack = PackResponseSchema.parse(
       await call(
@@ -126,6 +211,7 @@ await runLocalWorkerJourney(async (context) => {
     assert.deepEqual(firstFormulation[key], exactFirstStatement.statement[key]);
   }
   const preparation = first.contract.preparation;
+  assert.equal(hasExactFirstClaimFormulation(usualPack, preparation, problem, session), true);
   assert.equal(hasExactFirstClaimFormulation(firstPack.pack, preparation, problem, session), true);
   for (const fallback of [
     { ...inPack, neutralized: [{ marker: "fence-extended", count: 1 }] },
@@ -206,6 +292,9 @@ await runLocalWorkerJourney(async (context) => {
     author,
     201,
   );
+  const resumedPack = PackResponseSchema.parse(await call(workingPath, undefined, author));
+  assert.equal(resumedPack.budget_tokens, 4000, "resuming an open workshop keeps its context");
+  assert.ok(resumedPack.items.some(({ id }) => id === draft.workshop_id));
   const firstPromotionPath = first.contract.request.path.replace("{id}", session);
   const firstPromotionKey = "first-claim-saved-publication";
   const savedPins = {
