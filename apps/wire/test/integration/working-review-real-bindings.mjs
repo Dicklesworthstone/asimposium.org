@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import {
   ClaimFaceResponseSchema,
   getMoveTemplate,
   PackResponseSchema,
   ReviewRequestSchema,
 } from "@asimposium/contracts";
+import { EventTailResponseSchema, eventTailPath } from "@asimposium/contracts/event-tail";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Real Workerd HTTP, D1, R2, enrollment and signed sponsor publication.
@@ -507,6 +510,235 @@ await runLocalWorkerJourney(
         }
       }
     }
+    // Keep the archive control on its own board so the earlier redaction
+    // cannot block recovery of this fixture's complete public archive.
+    const evidenceBoard = await call(
+      "/v1/problems",
+      {
+        title: "Evidence archive for an exact finite check",
+        statement: "Multiples of four up to forty have even halves.",
+        falsifier: "An odd half among the listed multiples would disprove the statement.",
+        motivation: "Make the finite enumeration and its assumptions independently inspectable.",
+        areas: ["number-theory"],
+      },
+      author,
+      201,
+    );
+    const evidenceProblem = evidenceBoard.problem.id;
+    await sponsorCall(
+      authorSponsor,
+      "POST",
+      `/v1/sponsors/problems/${evidenceProblem}/lifecycle`,
+      "problem-lifecycle",
+      { action: "publish" },
+    );
+    const evidenceReviewer = await call(
+      "/v1/sessions",
+      { problem_id: evidenceProblem, intent: "review" },
+      reviewer,
+      201,
+    );
+    const evidenceReviewerPath = `/v1/sessions/${evidenceReviewer.session_id}`;
+    await call(
+      `/v1/problems/${evidenceProblem}/statement-review`,
+      {
+        session_id: evidenceReviewer.session_id,
+        statement_version: 1,
+        verdict: "statement-clear",
+        basis: "The finite range and parity test specify an independently reproducible check.",
+      },
+      reviewer,
+    );
+    const evidenceAuthor = await call(
+      "/v1/sessions",
+      { problem_id: evidenceProblem, intent: "prove" },
+      author,
+      201,
+    );
+    const evidenceAuthorPath = `/v1/sessions/${evidenceAuthor.session_id}`;
+    const evidenceDraft = await call(
+      `${evidenceAuthorPath}/workshop`,
+      { type: "claim-draft", title: "A separate finite check", body_md: privateCanary },
+      author,
+      201,
+    );
+    const evidenceClaim = await call(
+      `${evidenceAuthorPath}/promote`,
+      {
+        workshop_id: evidenceDraft.workshop_id,
+        kind: "conjecture",
+        statement: "Each multiple of four from four through forty has an even half.",
+        falsifier: "A listed multiple has an odd half.",
+      },
+      author,
+      201,
+    );
+    const evidenceTarget = `${evidenceClaim.claim_id}@${evidenceClaim.version}`;
+    const evidenceTargetFace = ClaimFaceResponseSchema.parse(
+      await call(`/p/${evidenceProblem}/claims/${evidenceTarget}.json`),
+    );
+    const targetDetail = evidenceTargetFace.items.find(({ id }) => id === evidenceTarget);
+    assert.ok(targetDetail);
+    const grounded = await call(
+      `${evidenceReviewerPath}/evidence`,
+      {
+        bears_on_kind: "claim",
+        bears_on_id: evidenceClaim.claim_id,
+        bears_on_version: evidenceClaim.version,
+        direction: "informs",
+        kind: "computation",
+        source: {
+          kind: "locator",
+          locator: "local/finite-enumeration.txt",
+          excerpt: "2, 4, …, 20",
+        },
+        computation_domain_or_floor: "The ten positive multiples of four at most forty.",
+        reproduction: {
+          commands: ["Enumerate 4k for k from 1 to 10 and divide by two."],
+          environment: "Integer arithmetic",
+        },
+        mode: "confirmatory",
+        body_md: "Each enumerated half equals twice its index.",
+      },
+      reviewer,
+      201,
+    );
+    const groundingUrl = `/p/${evidenceProblem}/evidence/${grounded.evidence_id}.json`;
+    const groundingFace = ClaimFaceResponseSchema.parse(await call(groundingUrl));
+    const groundingItem = groundingFace.items.find(({ id }) => id === grounded.evidence_id);
+    assert.ok(groundingItem);
+    const check = {
+      target_digest: JSON.parse(targetDetail.body).content_digest,
+      attempted_falsifier: "Find an odd half in the enumerated range.",
+      capable_of_failure: "Any odd half would disprove the statement.",
+      result: "survived",
+      evidence: [
+        {
+          evidence_id: grounded.evidence_id,
+          digest: JSON.parse(groundingItem.body).content_digest,
+        },
+      ],
+    };
+    const fullEvidence = `EXACT_LARGE_EVIDENCE: ${"🟢 Division leaves an even quotient. ".repeat(670)}END_OF_EVIDENCE`;
+    const oversized = await call(
+      `${evidenceReviewerPath}/evidence`,
+      {
+        bears_on_kind: "claim",
+        bears_on_id: evidenceClaim.claim_id,
+        bears_on_version: evidenceClaim.version,
+        direction: "informs",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "exploratory",
+        falsification_check: check,
+        body_md: fullEvidence,
+      },
+      reviewer,
+      201,
+    );
+    assert.ok(fullEvidence.length > 18000 && Buffer.byteLength(fullEvidence) < 65536);
+    console.log(
+      JSON.stringify({
+        stage: "large-evidence-published",
+        body_bytes: Buffer.byteLength(fullEvidence),
+      }),
+    );
+    const evidencePath = `/p/${evidenceProblem}/evidence/${oversized.evidence_id}`;
+    const evidenceJson = `${evidencePath}.json`;
+    const exactEvidence = await rawPublic(evidenceJson);
+    assert.equal(
+      exactEvidence.status,
+      200,
+      "a published large evidence record keeps its exact face",
+    );
+    const evidenceText = await exactEvidence.text();
+    assert.ok(Buffer.byteLength(evidenceText) <= 64000);
+    const evidenceFace = ClaimFaceResponseSchema.parse(JSON.parse(evidenceText));
+    const evidenceItem = evidenceFace.items.find(({ id }) => id === oversized.evidence_id);
+    assert.equal(evidenceItem?.kind, "claim-evidence");
+    assert.equal(evidenceItem.untrusted, true);
+    const evidencePreview = JSON.parse(evidenceItem.body);
+    assert.equal(evidencePreview.target, evidenceTarget);
+    assert.equal(evidencePreview.kind, "argument");
+    assert.equal(evidencePreview.direction, "informs");
+    assert.equal(evidencePreview.computed_class, oversized.computed_class);
+    assert.equal(evidencePreview.mode, "exploratory");
+    assert.deepEqual(evidencePreview.falsification_check, check);
+    assert.ok(evidenceFace.next_actions.some(({ url }) => url === groundingUrl));
+    assert.equal(evidencePreview.body_md, null);
+    assert.equal(evidencePreview.content_omitted, "item_too_large");
+    assert.equal(evidencePreview.body_md_excerpt, Array.from(fullEvidence).slice(0, 1024).join(""));
+    assert.ok(!evidenceText.includes("END_OF_EVIDENCE") && !evidenceText.includes(privateCanary));
+    assert.equal(
+      evidencePreview.publication_url,
+      eventTailPath(evidenceProblem, "json", {
+        since: evidencePreview.seq - 1,
+        through: evidencePreview.seq,
+        limit: 1,
+      }),
+    );
+    const evidenceReceipt = EventTailResponseSchema.parse(
+      await call(evidencePreview.publication_url),
+    );
+    assert.equal(evidenceReceipt.events.length, 1);
+    assert.equal(evidenceReceipt.events[0].event?.id, evidencePreview.event);
+    assert.equal(evidenceReceipt.events[0].event?.object_id, oversized.evidence_id);
+    assert.equal(
+      evidencePreview.content_digest,
+      `sha256:${evidenceReceipt.events[0].event?.payload_sha256}`,
+    );
+    assert.equal(evidencePreview.export_url, `/p/${evidenceProblem}/export.jsonl.gz`);
+    assert.match(evidencePreview.export_note, /When a complete public archive is available/);
+    const archive = await rawPublic(evidencePreview.export_url);
+    assert.equal(archive.status, 200, "the clean board can serve its complete archive");
+    const archived = gunzipSync(Buffer.from(await archive.arrayBuffer()))
+      .toString("utf8")
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .find(({ event_id }) => event_id === evidencePreview.event);
+    assert.ok(archived);
+    assert.equal(JSON.parse(archived.payload_json).body_md, fullEvidence);
+    assert.equal(
+      `sha256:${createHash("sha256").update(archived.payload_json).digest("hex")}`,
+      evidencePreview.content_digest,
+    );
+    for (const summary of [
+      ClaimFaceResponseSchema.parse(
+        await call(`/p/${evidenceProblem}/claims/${evidenceTarget}.json`),
+      ),
+      await readTarget(evidenceReviewerPath, reviewer, evidenceTarget),
+    ]) {
+      assert.ok(!summary.items.some(({ id }) => id === oversized.evidence_id));
+      assert.ok(
+        summary.omitted.some(
+          ({ reason, detail }) => reason === "item_too_large" && detail === oversized.evidence_id,
+        ),
+      );
+    }
+    const evidenceTag = exactEvidence.headers.get("etag");
+    assert.ok(evidenceTag);
+    const evidenceHead = await rawPublic(evidenceJson, { method: "HEAD" });
+    assert.equal(evidenceHead.status, 200);
+    assert.equal(evidenceHead.headers.get("etag"), evidenceTag);
+    assert.equal(await evidenceHead.text(), "");
+    const cachedEvidence = { headers: { "If-None-Match": evidenceTag } };
+    assert.equal((await rawPublic(evidenceJson, cachedEvidence)).status, 304);
+    const evidenceMarkdown = await rawPublic(`${evidencePath}.md`);
+    assert.equal(evidenceMarkdown.status, 200);
+    const evidenceMarkdownBody = await evidenceMarkdown.text();
+    assert.match(evidenceMarkdownBody, /EXACT_LARGE_EVIDENCE/);
+    assert.ok(evidenceMarkdownBody.includes(groundingUrl));
+    assert.ok(evidenceMarkdownBody.includes(evidencePreview.export_url));
+    assert.ok(!evidenceMarkdownBody.includes("END_OF_EVIDENCE"));
+    await fixtures.redactPublicContent(evidencePreview.event);
+    assert.equal((await rawPublic(evidenceJson, cachedEvidence)).status, 404);
+    assert.equal((await rawPublic(`${evidencePath}.md`)).status, 404);
+    const withheldArchive = await rawPublic(evidencePreview.export_url);
+    assert.equal(withheldArchive.status, 409);
+    assert.equal((await withheldArchive.json()).code, "PUBLIC_EXPORT_CONTENT_WITHHELD");
+    console.log(JSON.stringify({ stage: "large-evidence-exact-face", status: "pass" }));
+
     const fellow = await rawPublic("/a/exact-item-reader-20.md");
     assert.equal(fellow.status, 200);
     const fellowBody = await fellow.text();

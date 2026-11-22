@@ -1001,7 +1001,7 @@ test("focused public records retain current controls, immutable bodies, privacy 
   }
 });
 
-test("focused records keep the byte ceiling and exact problem scope when a review is excerpted", async () => {
+test("focused records keep the byte ceiling and exact problem scope when excerpted", async () => {
   const f = await focusedClaimHistory();
   expect((await f.read(`reviews/${f.review.id}.json`)).status).toBe(200);
   expect((await f.read(`evidence/${f.evidence.id}.json`)).status).toBe(200);
@@ -1011,9 +1011,18 @@ test("focused records keep the byte ceiling and exact problem scope when a revie
     { DB: f.d1 } as Env,
   );
   expect(otherProblem.status).toBe(404);
-  for (const [segment, record] of [
-    ["reviews", f.review],
-    ["evidence", f.evidence],
+  const recordedCheck = {
+    target_digest: `sha256:${"a".repeat(64)}`,
+    attempted_falsifier: "Find an exception in the named domain.",
+    capable_of_failure: "One exception suffices.",
+    result: "survived",
+    evidence: [{ evidence_id: "E-3", digest: `sha256:${"b".repeat(64)}` }],
+  };
+  const overBudgetCheck = { ...recordedCheck, attempted_falsifier: "&".repeat(4096) };
+  for (const [segment, record, check] of [
+    ["reviews", f.review, undefined],
+    ["evidence", f.evidence, recordedCheck],
+    ["evidence", f.evidence, overBudgetCheck],
   ] as const) {
     const row = f.db
       .prepare("SELECT payload_json FROM event_content WHERE event_id = ?")
@@ -1021,6 +1030,7 @@ test("focused records keep the byte ceiling and exact problem scope when a revie
     const payload = JSON.stringify({
       ...JSON.parse(row.payload_json),
       body_md: `OVERSIZED_BODY_CANARY${"x".repeat(18000)}END_OF_WORK_PRODUCT`,
+      ...(check === undefined ? {} : { falsification_check: check }),
     });
     const hash = await digest(payload);
     f.db
@@ -1028,23 +1038,33 @@ test("focused records keep the byte ceiling and exact problem scope when a revie
       .run(payload, hash, record.event);
     f.db.prepare("UPDATE events SET payload_sha256 = ? WHERE id = ?").run(hash, record.event);
     const response = await f.read(`${segment}/${record.id}.json`);
-    if (segment === "evidence") {
-      expect(response.status).toBe(404);
-      expect(await response.text()).not.toContain("OVERSIZED_BODY_CANARY");
-      continue;
-    }
     expect(response.status).toBe(200);
     const text = await response.text();
     expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(64000);
     const face = ClaimFaceResponseSchema.parse(JSON.parse(text));
     const item = face.items.find(({ id }) => id === record.id);
-    if (item === undefined) throw new Error("Missing the focused review");
-    expect(JSON.parse(item.body)).toMatchObject({
+    if (item === undefined) throw new Error("Missing the focused publication");
+    const preview = JSON.parse(item.body);
+    expect(preview).toMatchObject({
+      event: record.event,
       content_digest: `sha256:${hash}`,
       body_md: null,
       body_md_excerpt: expect.stringMatching(/^OVERSIZED_BODY_CANARYx+$/),
       content_omitted: "item_too_large",
     });
+    if (segment === "evidence") {
+      expect(preview.export_url).toBe("/p/P-PACK/export.jsonl.gz");
+      if (check === recordedCheck) {
+        expect(preview.falsification_check).toEqual(recordedCheck);
+        expect(preview.falsification_check_omitted).toBeUndefined();
+        expect(face.next_actions.some(({ url }) => url === "/p/P-PACK/evidence/E-3.json")).toBe(
+          true,
+        );
+      } else {
+        expect(preview.falsification_check).toBeUndefined();
+        expect(preview.falsification_check_omitted).toBe("item_too_large");
+      }
+    }
     expect(text).not.toContain("END_OF_WORK_PRODUCT");
   }
 });

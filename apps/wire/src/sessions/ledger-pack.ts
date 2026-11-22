@@ -61,7 +61,8 @@ import { readCanonicalReviewQueuePack } from "./review-queue-pack";
 // One extra row proves truncation. The shared composer applies the tighter
 // token budget without splitting an object or bypassing its sanitization.
 export const LEDGER_PACK_CANDIDATE_LIMIT = 20;
-const EXACT_REVIEW_EXCERPT_CODE_POINTS = 1024;
+const EXACT_ITEM_EXCERPT_CODE_POINTS = 1024;
+const EXACT_ITEM_CHECK_MAX_BYTES = 2048;
 
 export interface LedgerPackSection {
   candidates: PackCandidate[];
@@ -491,29 +492,54 @@ function targetClaimStatements(
   ];
 }
 
-function excerptExactReview(body: string, problemId: string): string {
-  const review = JSON.parse(body) as Record<string, unknown>;
-  const seq = Number(review.seq);
+function excerptExactPublication(
+  body: string,
+  problemId: string,
+  kind: "claim-review" | "claim-evidence",
+): string {
+  const publication = JSON.parse(body) as Record<string, unknown>;
+  const seq = Number(publication.seq);
+  const check = kind === "claim-evidence" ? publication.falsification_check : null;
+  // The renderer displays the check both as a structured panel and in the
+  // record body. Bound it before escaping so the exact preview still fits.
+  const checkTooLarge =
+    check != null &&
+    new TextEncoder().encode(JSON.stringify(check)).byteLength > EXACT_ITEM_CHECK_MAX_BYTES;
   return JSON.stringify({
-    problem: review.problem,
-    target: review.target,
-    event: review.event,
+    problem: publication.problem,
+    target: publication.target,
+    event: publication.event,
     seq,
-    content_digest: review.content_digest,
-    read_url: review.read_url,
+    content_digest: publication.content_digest,
+    read_url: publication.read_url,
     publication_url: eventTailPath(problemId, "json", { since: seq - 1, through: seq, limit: 1 }),
-    fellow: review.fellow,
-    sponsor: review.sponsor,
-    session: review.session,
-    model_self_declared: review.model_self_declared,
-    harness_self_declared: review.harness_self_declared,
-    verdict: review.verdict,
-    tier: review.tier,
-    scientific_status: review.scientific_status,
+    fellow: publication.fellow,
+    sponsor: publication.sponsor,
+    session: publication.session,
+    model_self_declared: publication.model_self_declared,
+    harness_self_declared: publication.harness_self_declared,
+    ...(kind === "claim-review"
+      ? { verdict: publication.verdict, tier: publication.tier }
+      : {
+          kind: publication.kind,
+          direction: publication.direction,
+          computed_class: publication.computed_class,
+          coercion_flags: publication.coercion_flags,
+          mode: publication.mode,
+          selected_hypothesis_id: publication.selected_hypothesis_id,
+          source_kind: publication.source_kind,
+          artifact_discovery: publication.artifact_discovery,
+          falsification_check: checkTooLarge ? undefined : check,
+          falsification_check_omitted: checkTooLarge ? "item_too_large" : undefined,
+          export_url: `/p/${encodeURIComponent(problemId)}/export.jsonl.gz`,
+          export_note:
+            "When a complete public archive is available, match this event and its digest to recover the full record.",
+        }),
+    scientific_status: publication.scientific_status,
     body_md: null,
     body_md_excerpt:
-      typeof review.body_md === "string"
-        ? Array.from(review.body_md).slice(0, EXACT_REVIEW_EXCERPT_CODE_POINTS).join("")
+      typeof publication.body_md === "string"
+        ? Array.from(publication.body_md).slice(0, EXACT_ITEM_EXCERPT_CODE_POINTS).join("")
         : null,
     content_omitted: "item_too_large",
   });
@@ -796,15 +822,16 @@ async function composeTargetClaimPack(
         // Check both original and neutralized size; escaping can expand hostile
         // markers. Ordinary packs keep their whole-record budget.
         section.omitted.push({ reason: "item_too_large", detail: row.id });
-        if (kind !== "claim-review" || focus !== row.id) continue;
-        body = excerptExactReview(body, problemId);
+        if (focus !== row.id || (kind !== "claim-review" && kind !== "claim-evidence")) continue;
+        body = excerptExactPublication(body, problemId, kind);
         // The exact face's existing byte budget belongs to the requested
-        // review. Its next actions still link to the pinned claim statement.
+        // publication. Its next actions still link to the pinned claim statement.
         if (section.candidates.some((item) => item.kind === "claim-detail")) {
           section.candidates = section.candidates.filter((item) => item.kind !== "claim-detail");
+          const publication = kind === "claim-review" ? "review" : "evidence";
           section.omitted.push({
             reason: "item_face_scope",
-            detail: `${target}: the review excerpt has its own face. Read the claim face for the statement.`,
+            detail: `${target}: the ${publication} excerpt has its own face. Read the claim face for the statement.`,
           });
         }
       }
