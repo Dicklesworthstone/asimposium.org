@@ -58,6 +58,8 @@ const LANES = [
   "reviews",
   "screening-appeals",
   "secret-scan",
+  "seed-frontier",
+  "seed-ladder",
   "session-close-publications",
   "session-lifecycle",
   "session-presence",
