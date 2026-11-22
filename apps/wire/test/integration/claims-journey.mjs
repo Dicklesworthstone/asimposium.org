@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { claimsListPath } from "../../../../packages/contracts/src/claims-list.ts";
 import { ClaimFaceResponseSchema } from "../../../../packages/contracts/src/ledger.ts";
 import { ProblemDetailSchema } from "../../../../packages/contracts/src/problems.ts";
 import { ClaimKindSchema } from "../../../../packages/contracts/src/sessions.ts";
@@ -451,7 +452,7 @@ export async function claimsJourney({
     const statement = `Formal statement of ${kind} for integer index ${i + 1}: property P holds.`;
     const needsFalsifier =
       ["conjecture", "theorem-attempt", "counterexample-claim", "bound"].includes(kind) ||
-      i % 2 === 0;
+      (kind !== "definition" && i % 2 === 0);
     const falsifier = needsFalsifier
       ? `A counterexample showing integer index ${i + 1} violates property P.`
       : undefined;
@@ -468,6 +469,22 @@ export async function claimsJourney({
     assert.equal(res.version, 1);
     promotedKinds.set(kind, res);
   }
+  const definitionPublication = promotedKinds.get("definition");
+  assert.ok(definitionPublication);
+  const definitionFace = await worker.fetch(
+    `${origin}${claimsListPath(problem, "md", {
+      after: definitionPublication.seq - 1,
+      through: definitionPublication.seq,
+    })}`,
+    { headers: { "User-Agent": userAgent } },
+  );
+  assert.equal(definitionFace.status, 200);
+  const definitionMarkdown = await definitionFace.text();
+  assert.ok(
+    definitionMarkdown.includes(`${definitionPublication.claim_id}@1 · definition`),
+    "The mounted public list identifies the definition accepted without a falsifier",
+  );
+  assert.ok(!definitionMarkdown.includes(privateCanary));
 
   // --- Requirement 3: Math and NFKC Normalization Equivalence ---
   const mathS1 = "For any $n \\in \\mathbb{N}$, we have $2n \\ge 0$.";

@@ -19,7 +19,7 @@
       "QUESTION_NOT_LEASED",
       "CONFLICT_NORMALIZATION_REQUIRED"
     ],
-    "summary": "Every exported kind, disposition, facet, evidence class/kind/direction/mode, pack profile, and RFC 7807 error code is enumerated with live file:symbol bindings. Nine grandfathered non-active items (4 Appendix B claim-kind aliases + 5 unproduced error codes) are explicitly tagged tier-2-deferred or retire-candidate; CI refuses any new unconsumed schema entry."
+    "summary": "Each exported ontology value lists its declared producer, consumer, and decision. CI checks coverage and verifies that the declared symbols exist. Mounted behavior tests supply separate evidence that a consumer uses the value. Nine grandfathered non-active items are explicitly tagged tier-2-deferred or retire-candidate."
   },
   "categories": {
     "claim_kinds": [
@@ -27,9 +27,10 @@
         "value": "definition",
         "fable_section_6_1": true,
         "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
-        "consumer": "packages/render/src/scientific-markdown.ts:renderScientificMarkdown",
-        "decision_changed": "Exempts formal definitions from P3 conjecture-class falsifier refusal and formats definition blocks distinctly on public claim faces.",
-        "status": "active"
+        "consumer": "packages/render/src/claims-list.ts:renderClaimsListMarkdown",
+        "decision_changed": "The public claim list labels the exact publication as a definition. The promotion validator allows a definition without a falsifier under P3.",
+        "status": "active",
+        "note": "The mounted claims journey publishes this kind without a falsifier and reads the emitted definition label. The same journey verifies a conjecture without a falsifier is refused without appending an event."
       },
       {
         "value": "assumption",
