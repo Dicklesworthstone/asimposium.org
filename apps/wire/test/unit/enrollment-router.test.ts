@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { ContractProblemSchema, OpaqueProblemSchema } from "@asimposium/contracts";
 
+import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
 import {
   createEnrollmentRouter,
   MAX_ENROLLMENT_REQUEST_BODY_BYTES,
@@ -95,22 +96,23 @@ const PUBLIC_ENROLLMENT_WRITES = [
 
 type PublicEnrollmentWrite = (typeof PUBLIC_ENROLLMENT_WRITES)[number];
 
-function routerFixture() {
+function routerFixture(persistentIdentity = false) {
   const random = new FixedRandom();
   const clock = new FixedClock();
+  if (persistentIdentity) clock.value = Date.now();
+  const { db, sqlite } = migratedSqliteD1();
+  readBudgetDatabases.push(sqlite);
   const service = new EnrollmentService({
     stoaOrigin: TEST_STOA_ORIGIN,
     agoraOrigin: "https://asimposium.org",
     clock,
     random,
-    store: new InMemoryEnrollmentStore(),
+    store: persistentIdentity ? new D1EnrollmentStore(db) : new InMemoryEnrollmentStore(),
     replayProtector: new AesGcmEnrollmentReplayProtector(
       Uint8Array.from({ length: 32 }, (_value, index) => index),
       random,
     ),
   });
-  const { db, sqlite } = migratedSqliteD1();
-  readBudgetDatabases.push(sqlite);
   return { clock, service, router: createEnrollmentRouter({ service, db }) };
 }
 
@@ -1599,7 +1601,7 @@ describe("S-1 mountable enrollment router", () => {
   });
 
   test("body-only flow routes issue a token once and minimal hello authenticates the resulting binding", async () => {
-    const { clock, router, service } = routerFixture();
+    const { clock, router, service } = routerFixture(true);
     const minted = await service.mint(sponsor, {
       requested_scopes: ["review"],
       problem_binding: "P-4DSP",
@@ -1742,8 +1744,8 @@ describe("S-1 mountable enrollment router", () => {
   });
 
   test("hello and sponsor inventory stop accepting a token at the Fellow grant boundary", async () => {
-    const { clock, router, service } = routerFixture();
-    const grantLifetimeMs = 1_000;
+    const { clock, router, service } = routerFixture(true);
+    const grantLifetimeMs = 60_000;
     const minted = await service.mint(sponsor, {
       requested_scopes: ["review"],
       fellow_grant_expires_in_ms: grantLifetimeMs,

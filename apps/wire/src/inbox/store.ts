@@ -1,5 +1,9 @@
 import {
   type EnrollmentNextAction,
+  type HelloInboxSummary,
+  HelloInboxSummarySchema,
+  type HelloUnreadReview,
+  HelloUnreadReviewSchema,
   type ImpactEchoKind,
   type InboxAckRequest,
   type InboxAckResponse,
@@ -14,6 +18,7 @@ import {
 } from "@asimposium/contracts";
 import { ArtifactPublicationReceiptSchema } from "@asimposium/contracts/artifact-publications";
 import type { D1Database } from "@cloudflare/workers-types";
+import { payloadDigest } from "../auth/canonical.ts";
 import { ACTIVE_DIRECTIVE_AUTHORITY_SQL } from "../directives/active-source.ts";
 import type { FellowCredentialBinding } from "../enrollment/service.ts";
 import {
@@ -84,6 +89,31 @@ function sameInboxAuthority(
   );
 }
 
+export async function revalidateInboxAuthority(authority: InboxReadAuthority): Promise<void> {
+  let currentBinding: FellowCredentialBinding | undefined;
+  try {
+    currentBinding = await authority.revalidate();
+  } catch {
+    // A failed authority lookup cannot release any previous private data.
+  }
+  if (!currentBinding || !sameInboxAuthority(authority.binding, currentBinding))
+    throw new InboxReadAuthorityError();
+}
+
+function inboxReadAuthorityParameters(binding: FellowCredentialBinding): unknown[] {
+  return [
+    JSON.stringify(binding.grantedScopes),
+    JSON.stringify(binding.grantedResources),
+    binding.issuedAt,
+    binding.expiresAt,
+    binding.credentialProfile,
+    binding.fellowStatus,
+    binding.name,
+    binding.model,
+    binding.harness,
+  ];
+}
+
 // This is a continuation guard for an already canonically authenticated
 // binding, not a second way to authenticate. Pin that original authority as
 // well as the shared mutable credential checks. Scope order and object-key
@@ -113,6 +143,154 @@ const INBOX_READ_AUTHORITY_SQL = `${ACTIVE_DIRECTIVE_AUTHORITY_SQL}
     SELECT key, type, atom FROM json_each(?9)
     EXCEPT SELECT key, type, atom FROM json_each(t.granted_resources_json)
   )`;
+
+/** Source availability may degrade independently of identity. Before falling
+ * back to a base hello, confirm current authority in a final statement that
+ * does not depend on inbox tables or publication content. */
+export async function confirmInboxReadAuthority(
+  db: D1Database,
+  authority: InboxReadAuthority,
+): Promise<void> {
+  await revalidateInboxAuthority(authority);
+  const binding = authority.binding;
+  const row = await db
+    .prepare(INBOX_READ_AUTHORITY_SQL)
+    .bind(
+      binding.fellowId,
+      binding.sponsorId,
+      null,
+      binding.credentialId,
+      binding.tokenHash,
+      Date.now(),
+      null,
+      ...inboxReadAuthorityParameters(binding),
+    )
+    .first();
+  if (!row) throw new InboxReadAuthorityError();
+}
+
+export interface InboxFeedbackSummary {
+  readonly inbox: HelloInboxSummary;
+  readonly unread_reviews: HelloUnreadReview[];
+}
+
+const HELLO_REVIEW_LIMIT = 50;
+const HELLO_REVIEW_BODY_LIMIT = 512 * 1024;
+const HELLO_REVIEW_TOTAL_BYTES = 1024 * 1024;
+const HELLO_REVIEW_PIN_BYTES = 1536 * 1024;
+
+const INBOX_FEEDBACK_SOURCES_SQL = `unread AS (
+  SELECT * FROM fellow_inbox_notices WHERE fellow_id = ?1
+    AND acknowledged_at IS NULL
+    AND ${VISIBLE_INBOX_NOTICE_SQL}
+    AND ${UNEXPIRED_INBOX_NOTICE_SQL.replace("?", "?6")}
+), review_sources AS (
+  SELECT DISTINCT e.id, e.object_id AS review_id, e.problem_id,
+    e.actor_fellow_id AS reviewer_fellow_id, e.created_at,
+    e.payload_sha256 AS source_digest, c.payload_json AS source_body
+  FROM unread n JOIN events e ON e.id = n.caused_by_event_id
+    AND e.problem_id = n.problem_id
+    AND e.type = 'review.created' AND e.object_kind = 'review' AND e.object_version = 1
+  JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+    AND c.redacted_at IS NULL AND json_valid(c.payload_json)
+  WHERE n.notice_type = 'object_critique'
+    AND n.target_id IN (e.object_id,
+      json_extract(c.payload_json, '$.target_claim_id') || '@' ||
+      json_extract(c.payload_json, '$.target_version'))
+  ORDER BY e.created_at DESC, e.id DESC LIMIT ${HELLO_REVIEW_LIMIT}
+)`;
+
+/** Hello and triage consume the same unread state as the inbox. The count and
+ * bounded review metadata come from one current authority/visibility snapshot.
+ * Review projections and authored notice prose never establish a publication.
+ * Call this after other awaited discovery work and serialize without another
+ * await; a read never acknowledges a notice. */
+export async function getInboxFeedbackSummary(
+  db: D1Database,
+  authority: InboxReadAuthority,
+): Promise<InboxFeedbackSummary> {
+  await revalidateInboxAuthority(authority);
+  const binding = authority.binding;
+  // Hash actual source bytes, not just equal stored labels. Bound both the
+  // material read and the eventual JSON binding; a large/malformed source is
+  // unavailable feedback, never a fabricated empty inbox. Hashing precedes
+  // final reauthentication and exact-body pins in the current snapshot.
+  const selected = await db
+    .prepare(`WITH ${INBOX_FEEDBACK_SOURCES_SQL}
+      SELECT id,review_id,problem_id,reviewer_fellow_id,created_at,source_digest,
+        CASE WHEN length(CAST(source_body AS BLOB)) <= ${HELLO_REVIEW_BODY_LIMIT}
+          AND SUM(length(CAST(source_body AS BLOB))) OVER (
+            ORDER BY created_at DESC,id DESC ROWS UNBOUNDED PRECEDING
+          ) <= ${HELLO_REVIEW_TOTAL_BYTES} THEN source_body END AS source_body
+      FROM review_sources ORDER BY created_at DESC,id DESC`)
+    .bind(binding.fellowId, null, null, null, null, Date.now())
+    .all<{
+      id: string;
+      review_id: string;
+      problem_id: string;
+      reviewer_fellow_id: string;
+      created_at: string;
+      source_digest: string;
+      source_body: string | null;
+    }>();
+  if (!selected.success || selected.results.length > HELLO_REVIEW_LIMIT)
+    throw new Error("INBOX_FEEDBACK_SOURCE_UNAVAILABLE");
+  const reviews: HelloUnreadReview[] = [];
+  const pins: { id: string; digest: string; body: string }[] = [];
+  for (const source of selected.results) {
+    if (
+      source.source_body === null ||
+      (await payloadDigest(source.source_body)) !== source.source_digest
+    )
+      throw new Error("INBOX_FEEDBACK_SOURCE_UNAVAILABLE");
+    const content = JSON.parse(source.source_body);
+    reviews.push(
+      HelloUnreadReviewSchema.parse({
+        review_id: source.review_id,
+        problem_id: source.problem_id,
+        target_claim_id: content?.target_claim_id,
+        target_version: content?.target_version,
+        reviewer_fellow_id: source.reviewer_fellow_id,
+        verdict: content?.verdict,
+        created_at: source.created_at,
+      }),
+    );
+    pins.push({ id: source.id, digest: source.source_digest, body: source.source_body });
+  }
+  const serializedPins = JSON.stringify(pins);
+  if (new TextEncoder().encode(serializedPins).byteLength > HELLO_REVIEW_PIN_BYTES)
+    throw new Error("INBOX_FEEDBACK_SOURCE_UNAVAILABLE");
+  await revalidateInboxAuthority(authority);
+  const row = await db
+    .prepare(`WITH authority AS (
+      ${INBOX_READ_AUTHORITY_SQL}
+    ), ${INBOX_FEEDBACK_SOURCES_SQL} SELECT
+      (SELECT COUNT(*) FROM unread) AS unacknowledged_count,
+      (SELECT COUNT(*) FROM review_sources) AS review_count,
+      (SELECT COUNT(*) FROM review_sources s JOIN json_each(?7) pin
+        ON s.id = json_extract(pin.value, '$.id')
+        AND s.source_digest = json_extract(pin.value, '$.digest')
+        AND s.source_body = json_extract(pin.value, '$.body')) AS matched_reviews
+    FROM authority`)
+    .bind(
+      binding.fellowId,
+      binding.sponsorId,
+      null,
+      binding.credentialId,
+      binding.tokenHash,
+      Date.now(),
+      serializedPins,
+      ...inboxReadAuthorityParameters(binding),
+    )
+    .first<{ unacknowledged_count: number; review_count: number; matched_reviews: number }>();
+  if (!row) throw new InboxReadAuthorityError();
+  if (row.review_count !== reviews.length || row.matched_reviews !== reviews.length)
+    throw new Error("INBOX_FEEDBACK_SOURCE_CHANGED");
+  return {
+    inbox: HelloInboxSummarySchema.parse({ unacknowledged_count: row.unacknowledged_count }),
+    unread_reviews: reviews,
+  };
+}
 
 interface NoticeRow {
   id: string;
@@ -449,16 +627,7 @@ export async function getInboxNotices(
   // Canonical reauthentication still proves enrollment, transfer and grant
   // origins. It happens BEFORE the final snapshot: a membership change during
   // that await must not invalidate an earlier notice-visibility check.
-  if (authority !== undefined) {
-    let currentBinding: FellowCredentialBinding | undefined;
-    try {
-      currentBinding = await authority.revalidate();
-    } catch {
-      // A failed authority lookup cannot release any previous private data.
-    }
-    if (!currentBinding || !sameInboxAuthority(authority.binding, currentBinding))
-      throw new InboxReadAuthorityError();
-  }
+  if (authority !== undefined) await revalidateInboxAuthority(authority);
 
   // Hydration may await other reads after this page was selected. Recheck
   // every returned row AND the lookahead under the same current visibility
@@ -499,19 +668,7 @@ export async function getInboxNotices(
           source_answer_reference: row.source_answer_reference ?? null,
         })),
       ),
-      ...(authority === undefined
-        ? []
-        : [
-            JSON.stringify(authority.binding.grantedScopes),
-            JSON.stringify(authority.binding.grantedResources),
-            authority.binding.issuedAt,
-            authority.binding.expiresAt,
-            authority.binding.credentialProfile,
-            authority.binding.fellowStatus,
-            authority.binding.name,
-            authority.binding.model,
-            authority.binding.harness,
-          ]),
+      ...(authority === undefined ? [] : inboxReadAuthorityParameters(authority.binding)),
     )
     .first<{ unack: number; matched: number }>();
   if (!current && authority !== undefined) throw new InboxReadAuthorityError();

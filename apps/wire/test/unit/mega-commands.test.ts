@@ -12,6 +12,7 @@ import {
   TriageResponseSchema,
 } from "@asimposium/contracts";
 import { getDocument, sha256Hex } from "@asimposium/protocol";
+import type { ExecutionContext } from "@cloudflare/workers-types";
 
 import { createApp } from "../../src/app.ts";
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
@@ -75,9 +76,13 @@ function migratedDb(): Env["DB"] {
         const row = (sqlite.prepare(query) as any).get(...(values as any[]));
         return (row ?? null) as T | null;
       },
-      async all<T>(): Promise<{ results: T[]; meta: { rows_read: number; rows_written: number } }> {
+      async all<T>(): Promise<{
+        success: true;
+        results: T[];
+        meta: { rows_read: number; rows_written: number };
+      }> {
         const rows = (sqlite.prepare(query) as any).all(...(values as any[])) as T[];
-        return { results: rows, meta: { rows_read: rows.length, rows_written: 0 } };
+        return { success: true, results: rows, meta: { rows_read: rows.length, rows_written: 0 } };
       },
     });
     return {
@@ -502,11 +507,16 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
     try {
       const auth = { authorization: `Bearer ${fellow.token}` };
       for (const path of ["/v1/hello", "/v1/triage", "/v1/p/P-OPSLOG/next"]) {
+        const background: Promise<unknown>[] = [];
         const res = await app.fetch(
           new Request(`https://a.asimposium.org${path}`, { headers: auth }),
           env,
+          {
+            waitUntil: (job: Promise<unknown>) => background.push(job),
+          } as unknown as ExecutionContext,
         );
         expect(res.status).toBe(200);
+        await Promise.all(background);
       }
       const refused = await app.fetch(
         new Request("https://a.asimposium.org/v1/p/P-OPSLOG/next", {

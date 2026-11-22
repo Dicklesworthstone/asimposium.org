@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { PackResponseSchema, ReviewResponseSchema } from "@asimposium/contracts";
+import {
+  EnrollmentHelloResponseSchema,
+  InboxResponseSchema,
+  PackResponseSchema,
+  ReviewResponseSchema,
+  TriageResponseSchema,
+} from "@asimposium/contracts";
 import { faceCensus } from "./face-census.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
@@ -7,7 +13,15 @@ import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall } = context;
+  const { call, enroll, sponsorCall, operatorCall, fixtures } = context;
+  const hello = async (token) =>
+    EnrollmentHelloResponseSchema.parse(await call("/v1/hello", undefined, token));
+  const inbox = async (token) =>
+    InboxResponseSchema.parse(await call("/v1/inbox?since=0&limit=100", undefined, token));
+  const drainInbox = async () => {
+    for (let tick = 0; tick < 3; tick++)
+      assert.equal((await fixtures.deliverInboxTick()).failed, 0);
+  };
 
   // 1. Setup actors: Author and Reviewers with distinct sponsors and model families
   const authorSponsor = "usr_rev_author_sponsor";
@@ -282,6 +296,64 @@ await runLocalWorkerJourney(async (context) => {
     "Idempotent review replay must return original review_id",
   );
 
+  // A returning author discovers actual unread feedback through hello and
+  // triage, follows the canonical inbox, and acknowledges only after reading.
+  await drainInbox();
+  const beforeHello = await inbox(author);
+  const authorHello = await hello(author);
+  assert.equal(authorHello.inbox.unacknowledged_count, beforeHello.unacknowledged_count);
+  for (const review of [revT0, revT1, revT2]) {
+    assert.ok(authorHello.unread_reviews.some((item) => item.review_id === review.review_id));
+  }
+  const inboxAction = authorHello.next_actions.find(
+    (action) => new URL(action.url, context.origin).pathname === "/v1/inbox",
+  );
+  assert.ok(inboxAction, "hello teaches the existing private feedback loop");
+  const inboxUrl = new URL(inboxAction.url, context.origin);
+  assert.equal(inboxUrl.origin, context.origin);
+  const discovered = InboxResponseSchema.parse(
+    await call(`${inboxUrl.pathname}${inboxUrl.search}`, undefined, author),
+  );
+  const firstReviewNotice = discovered.items.find((item) =>
+    item.next_actions?.some((action) => action.url.endsWith(`/reviews/${revT0.review_id}.json`)),
+  );
+  assert.ok(firstReviewNotice, "the inbox points to the exact immutable review");
+  for (const action of firstReviewNotice.next_actions) {
+    const url = new URL(action.url, context.origin);
+    await call(`${url.pathname}${url.search}`, undefined, undefined, 200);
+  }
+  const authorTriage = TriageResponseSchema.parse(await call("/v1/triage", undefined, author));
+  assert.equal(authorTriage.hello.inbox.unacknowledged_count, beforeHello.unacknowledged_count);
+  assert.ok(authorTriage.hello.unread_reviews.some((item) => item.review_id === revT0.review_id));
+  assert.deepEqual(
+    await inbox(author),
+    beforeHello,
+    "orientation reads never acknowledge feedback",
+  );
+  assert.equal(
+    (await call("/v1/inbox/ack", { notice_ids: [firstReviewNotice.id] }, author))
+      .acknowledged_count,
+    1,
+  );
+  assert.ok(
+    !(await hello(author)).unread_reviews.some((item) => item.review_id === revT0.review_id),
+  );
+  const acknowledgedTriage = TriageResponseSchema.parse(
+    await call("/v1/triage", undefined, author),
+  );
+  assert.ok(
+    !acknowledgedTriage.hello.unread_reviews.some((item) => item.review_id === revT0.review_id),
+  );
+  assert.equal(
+    acknowledgedTriage.hello.inbox.unacknowledged_count,
+    (await inbox(author)).unacknowledged_count,
+  );
+  assert.ok(
+    !(await hello(crossFamilyReviewer)).unread_reviews.some(
+      (item) => item.review_id === revT1.review_id,
+    ),
+  );
+
   // 9. Rule P5: Missing capable_of_failure carries no weight (moves_disposition: false)
   const revNoWeight = await call(
     `/v1/sessions/${secondCrossSession.session_id}/review`,
@@ -303,6 +375,11 @@ await runLocalWorkerJourney(async (context) => {
     revNoWeight.carries_weight,
     false,
     "Review missing capable_of_failure must have carries_weight: false",
+  );
+  await drainInbox();
+  assert.ok(
+    (await hello(author)).unread_reviews.some((item) => item.review_id === revNoWeight.review_id),
+    "acknowledging earlier feedback does not suppress a later review",
   );
 
   // 10. Verify Working Pack Excludes Author's Private Workshop
@@ -372,6 +449,43 @@ await runLocalWorkerJourney(async (context) => {
       console.log(JSON.stringify({ stage: "face-census-unserved", kinds: census.unservedKinds }));
     assert.deepEqual(census.covered.sort(), ["review"].sort(), "every requested kind resolved");
   }
+
+  // Current visibility also applies to hello's compact feedback, not just the
+  // full inbox. Restoring a hidden source makes its unacknowledged notice live.
+  for (const action of ["hide", "restore"]) {
+    await operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+      target_id: `${problemId}/${revT1.review_id}`,
+      target_kind: "review",
+      action,
+      reason: "Returning-author feedback must follow present review visibility.",
+    });
+    const feedback = await hello(author);
+    assert.equal(
+      feedback.unread_reviews.some((item) => item.review_id === revT1.review_id),
+      action === "restore",
+    );
+  }
+  const withdrawnSource = await context.env.DB.prepare(
+    "SELECT id, payload_sha256 FROM events WHERE problem_id = ? AND object_id = ? AND type = 'review.created'",
+  )
+    .bind(problemId, revNoWeight.review_id)
+    .first();
+  assert.ok(withdrawnSource);
+  await call(
+    `/v1/sessions/${secondCrossSession.session_id}/reviews/${revNoWeight.review_id}/retract`,
+    {
+      source_event_id: withdrawnSource.id,
+      source_digest: `sha256:${withdrawnSource.payload_sha256}`,
+      reason: "The superficial review is withdrawn until a substantive check is complete.",
+    },
+    secondCrossFamilyReviewer,
+    200,
+  );
+  assert.ok(
+    !(await hello(author)).unread_reviews.some((item) => item.review_id === revNoWeight.review_id),
+    "withdrawn feedback remains history and is no longer advertised as actionable",
+  );
+  console.log(JSON.stringify({ stage: "returning-author-feedback", status: "pass" }));
 
   // W2.6: every projection row this journey built is reproducible from the log.
   const rebuilt = await assertProjectionsRebuild(context.env.DB, problemId);

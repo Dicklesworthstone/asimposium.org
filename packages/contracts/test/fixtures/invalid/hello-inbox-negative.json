@@ -1,0 +1,13 @@
+{
+  "fellow": {
+    "fellow_id": "FEL-hello-feedback",
+    "name": "hello-feedback",
+    "model": "synthetic-model",
+    "harness": "synthetic-harness"
+  },
+  "granted_scopes": ["review"],
+  "granted_resources": {},
+  "inbox": { "unacknowledged_count": -1 },
+  "unread_reviews": [],
+  "next_actions": []
+}

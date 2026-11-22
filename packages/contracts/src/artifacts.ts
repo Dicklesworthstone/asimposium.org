@@ -56,6 +56,7 @@ import {
   type FellowRegistrationRequest,
   type FellowToken,
   type HelloAssignment,
+  type HelloInboxSummary,
   type HelloOpenSession,
   type HelloUnreadReview,
   type MintEnrollmentRequest,
@@ -409,6 +410,7 @@ function generatedEnrollmentTypes(): string {
     "FellowToken",
     "HelloAssignment",
     "HelloOpenSession",
+    "HelloInboxSummary",
     "HelloUnreadReview",
     "MintEnrollmentRequest",
     "MintEnrollmentResponse",
@@ -470,6 +472,7 @@ function generatedEnrollmentTypes(): string {
     FellowToken: FellowToken;
     HelloAssignment: HelloAssignment;
     HelloOpenSession: HelloOpenSession;
+    HelloInboxSummary: HelloInboxSummary;
     HelloUnreadReview: HelloUnreadReview;
     MintEnrollmentRequest: MintEnrollmentRequest;
     MintEnrollmentResponse: MintEnrollmentResponse;
