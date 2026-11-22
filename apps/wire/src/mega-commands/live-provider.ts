@@ -1,4 +1,9 @@
-import type { MoveTemplate, NextMoveCandidate, ProblemRole } from "@asimposium/contracts";
+import {
+  getMoveTemplate,
+  type MoveTemplate,
+  type NextMoveCandidate,
+  type ProblemRole,
+} from "@asimposium/contracts";
 import type { ReviewQueueItem } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { authorizeFellowWrite, FellowCredentialBinding } from "../enrollment/service.ts";
@@ -41,7 +46,43 @@ const LIVE_MOVES_BOUNDARY = `ledger-needs-v5: back-to-the-object ceremony breake
 
 export const TRIAGE_MAX_PROBLEMS = 4;
 export const TRIAGE_CONCURRENCY = 2;
+export const MOVE_SELECTOR_CONCURRENCY = 2;
 const TRIAGE_BOUNDARY = `${LIVE_MOVES_BOUNDARY} Triage examines at most ${TRIAGE_MAX_PROBLEMS} assigned problems in ASCII ID order, two queue pages per problem; each problem has its own captured cursor.`;
+
+type MoveSelection = { moves: NextMoveCandidate[]; degraded: boolean };
+type MoveUpdate = (selected: MoveSelection) => MoveSelection | Promise<MoveSelection>;
+type MoveRead = { read: () => Promise<MoveUpdate>; fatal?: boolean };
+
+/** Bound independent reads without letting their completion order decide ties,
+ * duplicate winners, or which failure takes precedence. Drain all started work
+ * before returning, including when a required source failed. */
+async function readMoveUpdates(reads: readonly MoveRead[]): Promise<MoveUpdate[]> {
+  const results = new Array<PromiseSettledResult<MoveUpdate>>(reads.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(MOVE_SELECTOR_CONCURRENCY, reads.length) }, async () => {
+      while (next < reads.length) {
+        const index = next++;
+        const source = reads[index];
+        if (source === undefined) throw new Error("MOVE_SELECTOR_UNAVAILABLE");
+        try {
+          results[index] = { status: "fulfilled", value: await source.read() };
+        } catch (reason) {
+          results[index] = source.fatal
+            ? { status: "rejected", reason }
+            : {
+                status: "fulfilled",
+                value: (selected) => ({ ...selected, degraded: true }),
+              };
+        }
+      }
+    }),
+  );
+  return results.map((result) => {
+    if (result.status === "rejected") throw result.reason;
+    return result.value;
+  });
+}
 
 export interface LiveMovesDependencies extends LedgerMovesDependencies {
   readonly authorize: typeof authorizeFellowWrite;
@@ -163,38 +204,6 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
     if (!row || !Number.isSafeInteger(row.count) || row.count < 0)
       throw new Error("MOVE_USAGE_UNAVAILABLE");
     return row.count;
-  }
-
-  private async withHypotheses(
-    db: D1Database,
-    problemId: string,
-    cursor: number,
-    permissions: Record<string, boolean>,
-    selected: { moves: NextMoveCandidate[]; degraded: boolean },
-  ): Promise<{ moves: NextMoveCandidate[]; degraded: boolean }> {
-    const source = this.dependencies.hypotheses;
-    if (!source || !permissions.session_open || !permissions.promote) return selected;
-    try {
-      const extra = selectThirdAlternative(
-        problemId,
-        cursor,
-        await source.load(db, problemId, cursor),
-        source.template,
-      );
-      return {
-        moves:
-          extra.move === null
-            ? selected.moves
-            : [
-                ...selected.moves.filter((move) => move.move !== "state-claim"),
-                extra.move,
-                ...selected.moves.filter((move) => move.move === "state-claim"),
-              ],
-        degraded: selected.degraded || extra.degraded,
-      };
-    } catch {
-      return { moves: selected.moves, degraded: true };
-    }
   }
 
   private async problem(
@@ -319,66 +328,89 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       review: allowed("review"),
     };
 
-    const allCandidates: NextMoveCandidate[] = [];
-    let degraded = false;
+    // One admission snapshot per problem selection. Retain in-flight and failed
+    // reads as well as successful pages: ledger and formalization must observe
+    // the same bounded cut, never retry into a different current projection.
+    const queuePages = new Map<string, ReturnType<LedgerMovesDependencies["loadQueue"]>>();
+    const loadQueue: LedgerMovesDependencies["loadQueue"] = (database, query, snapshot) => {
+      const key = JSON.stringify([
+        query.problem,
+        query.after ?? null,
+        snapshot?.problemId ?? null,
+        snapshot?.through ?? null,
+        snapshot?.includeUnlisted === true,
+        snapshot?.excludeOffScope === true,
+      ]);
+      let page = queuePages.get(key);
+      if (page === undefined) {
+        page = Promise.resolve().then(() => this.dependencies.loadQueue(database, query, snapshot));
+        queuePages.set(key, page);
+      }
+      return page;
+    };
+    const {
+      backToObject,
+      idleClose,
+      sharpen,
+      deadEnds,
+      hypotheses,
+      discriminate,
+      killOrStand,
+      gaps,
+      retries,
+      conflicts,
+      duplicates,
+      reanchor,
+      formalize,
+      synthesize,
+    } = this.dependencies;
+    const reads: MoveRead[] = [];
+    const append = (
+      read: () => Promise<{ move: NextMoveCandidate | null; degraded: boolean }>,
+      fatal = false,
+    ) => {
+      reads.push({
+        fatal,
+        read: async () => {
+          const { move, degraded } = await read();
+          return (selected) => ({
+            moves: move ? [...selected.moves, move] : selected.moves,
+            degraded: selected.degraded || degraded,
+          });
+        },
+      });
+    };
     let continuation: string | null = null;
     let items: ReviewQueueItem[] = [];
 
     // 1. Ceremony Breaker (back-to-the-object, §9.6)
-    if (this.dependencies.backToObject?.load) {
-      try {
-        const b = await this.dependencies.backToObject.load(
-          db,
-          problemId,
-          row.cursor,
-          row.status ?? "active",
-          {
-            viewer: { fellowId: fellowBinding.fellowId, sponsorId: fellowBinding.sponsorId },
-            permissions: effectivePermissions,
-            now,
-          },
-        );
-        if (b.move) allCandidates.push(b.move);
-        degraded ||= b.degraded;
-      } catch {
-        degraded = true;
-      }
+    if (backToObject?.load) {
+      append(() =>
+        backToObject.load(db, problemId, row.cursor, row.status ?? "active", {
+          viewer: { fellowId: fellowBinding.fellowId, sponsorId: fellowBinding.sponsorId },
+          permissions: effectivePermissions,
+          now,
+        }),
+      );
     }
 
     // 2. Idle Session Close (idle-close, 3h quiet)
-    if (this.dependencies.idleClose?.load) {
-      try {
-        const ic = await this.dependencies.idleClose.load(
-          db,
-          problemId,
-          fellowBinding.fellowId,
-          now,
-        );
-        if (ic.move) allCandidates.push(ic.move);
-        degraded ||= ic.degraded;
-      } catch {
-        degraded = true;
-      }
-    }
+    if (idleClose?.load) append(() => idleClose.load(db, problemId, fellowBinding.fellowId, now));
 
     // 3. Statement Sharpening (sharpen-statement)
     if (
-      this.dependencies.sharpen?.load &&
+      sharpen?.load &&
       effectivePermissions.session_open &&
       (effectivePermissions.review || effectivePermissions.workshop_push)
     ) {
-      try {
-        const sm = await this.dependencies.sharpen.load(db, problemId, row.cursor, {
+      append(() =>
+        sharpen.load(db, problemId, row.cursor, {
           fellowId: fellowBinding.fellowId,
           sponsorId: fellowBinding.sponsorId,
           review: effectivePermissions.review,
           workshopPush: effectivePermissions.workshop_push,
-        });
-        if (sm.move) allCandidates.push(sm.move);
-        degraded ||= sm.degraded;
-      } catch {
-        degraded = true;
-      }
+        }),
+      );
     }
 
     // 4. Ledger Moves (reviews and refuters)
@@ -388,220 +420,196 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       effectivePermissions.session_open &&
       effectivePermissions.promote
     ) {
-      const template = this.dependencies.firstClaimTemplate();
-      const first = firstClaimMove(
-        problemId,
-        row.cursor,
-        row.current_statement_version,
-        template,
-        LIVE_MOVES_BOUNDARY,
-      );
-      if (first) allCandidates.push(first);
-    } else if (row.has_claims > 0) {
-      if (this.dependencies.deadEnds?.load) {
-        try {
-          const de = await this.dependencies.deadEnds.load(db, problemId, row.cursor);
-          if (de.move) allCandidates.push(de.move);
-          degraded ||= de.degraded;
-        } catch {
-          degraded = true;
-        }
-      }
-      try {
-        const result = await loadLedgerMoves(
-          db,
-          problemId,
-          fellowBinding,
-          effectivePermissions,
-          this.dependencies,
-          row.cursor,
-          { includeUnlisted: row.unlisted === 1 },
-        );
-        items = result.items;
-        continuation = result.continuation;
-        degraded ||= result.degraded;
-        allCandidates.push(...result.moves);
-
-        // Formalization friction refuters
-        if (this.dependencies.frictions?.load && items.length > 0) {
-          const frictionResult = await withFrictionMove(
-            db,
+      append(
+        async () => ({
+          move: firstClaimMove(
             problemId,
             row.cursor,
-            items,
+            row.current_statement_version,
+            this.dependencies.firstClaimTemplate(),
+            LIVE_MOVES_BOUNDARY,
+          ),
+          degraded: false,
+        }),
+        true,
+      );
+    } else if (row.has_claims > 0) {
+      if (deadEnds?.load) append(() => deadEnds.load(db, problemId, row.cursor));
+      reads.push({
+        // Preserve the existing required-ledger failure policy. Independent
+        // gap/retry sources can keep a partially available selection useful.
+        fatal: !gaps && !retries,
+        read: async () => {
+          const result = await loadLedgerMoves(
+            db,
+            problemId,
+            fellowBinding,
             effectivePermissions,
-            { moves: [...allCandidates], degraded },
-            this.dependencies.frictions,
+            { ...this.dependencies, loadQueue },
+            row.cursor,
+            { includeUnlisted: row.unlisted === 1 },
           );
-          allCandidates.length = 0;
-          allCandidates.push(...frictionResult.moves);
-          degraded ||= frictionResult.degraded;
-        }
-      } catch (error) {
-        if (!this.dependencies.gaps && !this.dependencies.retries) throw error;
-        degraded = true;
-      }
+          return async (selected) => {
+            items = result.items;
+            continuation = result.continuation;
+            // Friction depends on these queue targets and transforms earlier
+            // refuter candidates, so apply it in the original reduction order.
+            return withFrictionMove(
+              db,
+              problemId,
+              row.cursor,
+              items,
+              effectivePermissions,
+              {
+                moves: [...selected.moves, ...result.moves],
+                degraded: selected.degraded || result.degraded,
+              },
+              this.dependencies.frictions,
+            );
+          };
+        },
+      });
     }
 
     // 5. Hypotheses (third-alternative, discriminate, kill-or-stand)
-    if (this.dependencies.hypotheses?.load && effectivePermissions.session_open) {
-      const hypSelected = await this.withHypotheses(
-        db,
-        problemId,
-        row.cursor,
-        effectivePermissions,
-        { moves: [...allCandidates], degraded },
-      );
-      allCandidates.length = 0;
-      allCandidates.push(...hypSelected.moves);
-      degraded ||= hypSelected.degraded;
+    if (hypotheses?.load && effectivePermissions.session_open && effectivePermissions.promote) {
+      reads.push({
+        read: async () => {
+          const extra = selectThirdAlternative(
+            problemId,
+            row.cursor,
+            await hypotheses.load(db, problemId, row.cursor),
+            hypotheses.template,
+          );
+          return (selected) => ({
+            moves:
+              extra.move === null
+                ? selected.moves
+                : [
+                    ...selected.moves.filter((move) => move.move !== "state-claim"),
+                    extra.move,
+                    ...selected.moves.filter((move) => move.move === "state-claim"),
+                  ],
+            degraded: selected.degraded || extra.degraded,
+          });
+        },
+      });
     }
 
-    if (
-      this.dependencies.discriminate?.load &&
-      effectivePermissions.session_open &&
-      effectivePermissions.evidence
-    ) {
-      try {
-        const dm = await this.dependencies.discriminate.load(db, problemId, row.cursor);
-        if (dm.move) allCandidates.push(dm.move);
-        degraded ||= dm.degraded;
-      } catch {
-        degraded = true;
-      }
-    }
+    if (discriminate?.load && effectivePermissions.session_open && effectivePermissions.evidence)
+      append(() => discriminate.load(db, problemId, row.cursor));
 
+    if (killOrStand?.load && effectivePermissions.session_open && effectivePermissions.promote)
+      append(() => killOrStand.load(db, problemId, row.cursor));
+
+    // 6. Gaps (close-gap)
     if (
-      this.dependencies.killOrStand?.load &&
+      row.has_claims > 0 &&
+      gaps?.load &&
       effectivePermissions.session_open &&
       effectivePermissions.promote
     ) {
-      try {
-        const km = await this.dependencies.killOrStand.load(db, problemId, row.cursor);
-        if (km.move) allCandidates.push(km.move);
-        degraded ||= km.degraded;
-      } catch {
-        degraded = true;
-      }
-    }
-
-    // 6. Gaps (close-gap)
-    if (row.has_claims > 0 && this.dependencies.gaps?.load) {
-      const gapSelected = await withGapMove(
-        db,
-        problemId,
-        row.cursor,
-        now,
-        effectivePermissions,
-        { moves: [...allCandidates], degraded },
-        this.dependencies.gaps,
-      );
-      allCandidates.length = 0;
-      allCandidates.push(...gapSelected.moves);
-      degraded ||= gapSelected.degraded;
+      reads.push({
+        read: async () => {
+          const extra = await gaps.load(db, problemId, row.cursor, now);
+          return (selected) =>
+            withGapMove(db, problemId, row.cursor, now, effectivePermissions, selected, {
+              load: async () => extra,
+            });
+        },
+      });
     }
 
     // 7. Retries (retry-dead-end)
-    if (this.dependencies.retries?.load) {
-      const retrySelected = await withRetryMove(
-        db,
-        problemId,
-        row.cursor,
-        fellowBinding.fellowId,
-        effectivePermissions,
-        { moves: [...allCandidates], degraded },
-        this.dependencies.retries,
-      );
-      allCandidates.length = 0;
-      allCandidates.push(...retrySelected.moves);
-      degraded ||= retrySelected.degraded;
+    if (
+      retries?.load &&
+      effectivePermissions.session_open &&
+      effectivePermissions.dead_end &&
+      effectivePermissions.workshop_push
+    ) {
+      reads.push({
+        read: async () => {
+          const extra = await retries.load(db, problemId, row.cursor, fellowBinding.fellowId);
+          return (selected) =>
+            withRetryMove(
+              db,
+              problemId,
+              row.cursor,
+              fellowBinding.fellowId,
+              effectivePermissions,
+              selected,
+              {
+                load: async () => extra,
+              },
+            );
+        },
+      });
     }
 
     // 8. Conflicts (normalize-conflict)
     if (
       row.has_claims > 0 &&
-      this.dependencies.conflicts?.load &&
+      conflicts?.load &&
       effectivePermissions.session_open &&
       effectivePermissions.promote
-    ) {
-      try {
-        const cm = await this.dependencies.conflicts.load(db, problemId, row.cursor);
-        if (cm.move) allCandidates.push(cm.move);
-        degraded ||= cm.degraded;
-      } catch {
-        degraded = true;
-      }
-    }
+    )
+      append(() => conflicts.load(db, problemId, row.cursor));
 
     // 9. Duplicates (collapse-duplicate)
     if (
       row.has_claims > 0 &&
-      this.dependencies.duplicates?.load &&
+      duplicates?.load &&
       effectivePermissions.session_open &&
       effectivePermissions.promote
-    ) {
-      try {
-        const dup = await this.dependencies.duplicates.load(db, problemId, row.cursor);
-        if (dup.move) allCandidates.push(dup.move);
-        degraded ||= dup.degraded;
-      } catch {
-        degraded = true;
-      }
-    }
+    )
+      append(() => duplicates.load(db, problemId, row.cursor));
 
     // 10. Re-anchor (re-anchor)
     if (
       row.has_claims > 0 &&
-      this.dependencies.reanchor?.load &&
+      reanchor?.load &&
       effectivePermissions.session_open &&
       effectivePermissions.promote
-    ) {
-      try {
-        const ra = await this.dependencies.reanchor.load(
-          db,
-          problemId,
-          fellowBinding.fellowId,
-          row.cursor,
-        );
-        if (ra.move) allCandidates.push(ra.move);
-        degraded ||= ra.degraded;
-      } catch {
-        degraded = true;
-      }
-    }
+    )
+      append(() => reanchor.load(db, problemId, fellowBinding.fellowId, row.cursor));
 
     // 11. Formalize (formalize)
     if (
       row.has_claims > 0 &&
-      this.dependencies.formalize?.load &&
+      formalize?.load &&
       effectivePermissions.session_open &&
       effectivePermissions.evidence
     ) {
-      try {
-        const fm = await this.dependencies.formalize.load(db, problemId, row.cursor, undefined, {
-          includeUnlisted: row.unlisted === 1,
-        });
-        if (fm.move) allCandidates.push(fm.move);
-        degraded ||= fm.degraded;
-      } catch {
-        degraded = true;
-      }
+      append(() =>
+        formalize.load(
+          db,
+          problemId,
+          row.cursor,
+          {
+            load: (database, problem, through, after) =>
+              loadQueue(
+                database,
+                { problem, ...(after === undefined ? {} : { after }) },
+                {
+                  problemId: problem,
+                  through,
+                  ...(row.unlisted === 1 ? { includeUnlisted: true } : {}),
+                },
+              ),
+            template: () => getMoveTemplate("formalize"),
+          },
+          { includeUnlisted: row.unlisted === 1 },
+        ),
+      );
     }
 
     // 12. Synthesize (synthesize)
-    if (
-      this.dependencies.synthesize?.load &&
-      effectivePermissions.session_open &&
-      effectivePermissions.promote
-    ) {
-      try {
-        const syn = await this.dependencies.synthesize.load(db, problemId, row.cursor);
-        if (syn.move) allCandidates.push(syn.move);
-        degraded ||= syn.degraded;
-      } catch {
-        degraded = true;
-      }
-    }
+    if (synthesize?.load && effectivePermissions.session_open && effectivePermissions.promote)
+      append(() => synthesize.load(db, problemId, row.cursor));
+
+    let selected: MoveSelection = { moves: [], degraded: false };
+    for (const update of await readMoveUpdates(reads)) selected = await update(selected);
+    const { moves: allCandidates, degraded } = selected;
 
     // Permission checks precede deduplication; different needs sharing a
     // target retain their own contracts until the common priority selection.

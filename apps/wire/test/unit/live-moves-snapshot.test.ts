@@ -142,6 +142,7 @@ function fixture(
     sqlite,
     db,
     calls,
+    dependencies,
     provider,
     next: (capturedCursor?: number) =>
       provider.nextMoves({
@@ -337,6 +338,65 @@ test("ordinary next also refuses an append during selection without a caller cur
     f.sqlite.close();
   }
 });
+
+for (const [change, reason] of [
+  ["UPDATE problems SET public_seq=51 WHERE id='P-DEMO'", "MOVES_CURSOR_CHANGED"],
+  [
+    "UPDATE problem_memberships SET fellow_id='F-other' WHERE problem_id='P-DEMO'",
+    "MOVES_SCOPE_UNAVAILABLE",
+  ],
+] as const)
+  test(`the final check waits for parallel readers and fails closed on ${reason}`, async () => {
+    const f = fixture({ advanceDuringRead: false });
+    let release = () => {};
+    try {
+      let started = false,
+        finished = false;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const provider = new LedgerMovesProvider({
+        ...f.dependencies,
+        idleClose: {
+          load: async () => {
+            started = true;
+            await gate;
+            finished = true;
+            return { move: null, degraded: false };
+          },
+        },
+      });
+      const pending = provider.nextMoves({
+        db: f.db,
+        problemId: "P-DEMO",
+        fellowId: credential.fellowId,
+        credential,
+        role: "observer",
+        effectivePermissions: {},
+        capturedCursor: 50,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(started, true);
+      assert.equal(
+        f.calls.length,
+        1,
+        "the canonical queue completed while another reader remained pending",
+      );
+      assert.equal(finished, false);
+      f.sqlite.exec(change);
+      release();
+      const result = await pending;
+      assert.equal(finished, true);
+      assert.equal(result.primaryMove, null);
+      assert.deepEqual(result.alternatives, []);
+      assert.equal(result.degradedReason, reason);
+      assert.equal(result.effectivePermissions?.review, false);
+      assert.equal(result.viewerRole, undefined);
+    } finally {
+      release();
+      f.sqlite.close();
+    }
+  });
 
 test("triage omits recommendations whose independent problem cuts change during selection", async () => {
   const f = fixture();

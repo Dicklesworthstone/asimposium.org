@@ -192,19 +192,38 @@ for (const unlisted of [0, 1])
     const f = fixture();
     try {
       f.problem("P-DEMO", unlisted);
-      const calls: unknown[][] = [];
+      const calls: Parameters<NonNullable<LiveMovesDependencies["formalize"]>["load"]>[] = [];
       f.deps.formalize = {
         load: async (...args) => {
           calls.push(args);
+          const [db, problem, cursor, source] = args;
+          assert.ok(source);
+          assert.equal(source.template().move, "formalize");
+          await source.load(db, problem, cursor);
           return { move: null, degraded: false };
         },
       };
-      await f.next("P-DEMO", {
+      const result = await f.next("P-DEMO", {
         effectivePermissions: { session_open: true, evidence: true },
       });
-      assert.deepEqual(calls, [
-        [f.db, "P-DEMO", 10, undefined, { includeUnlisted: unlisted === 1 }],
-      ]);
+      assert.equal(result.degraded, false);
+      assert.equal(calls.length, 1);
+      assert.deepEqual(calls[0]?.slice(0, 3), [f.db, "P-DEMO", 10]);
+      assert.deepEqual(calls[0]?.[4], { includeUnlisted: unlisted === 1 });
+      assert.deepEqual(
+        f.queues,
+        [
+          {
+            query: { problem: "P-DEMO" },
+            snapshot: {
+              problemId: "P-DEMO",
+              through: 10,
+              ...(unlisted ? { includeUnlisted: true } : {}),
+            },
+          },
+        ],
+        "formalize reuses ledger's page without changing its listing scope",
+      );
     } finally {
       f.sql.close();
     }
