@@ -8,11 +8,11 @@ import { join, resolve } from "node:path";
 const scripts = resolve(import.meta.dir, "..");
 const SKIP_IF_MISSING =
   /if\s+\[\[\s+-[fe]\s+[^\]]*test\/integration\/[^\]]*\]\]\s*;\s*then\s*\n\s*if\s+!/;
-const WIRE_LANE_INVOCATION =
-  /^[ \t]*(?:if[ \t]+![ \t]+)?(?:node|"\$node_binary")[ \t]+(["']?)(apps\/wire\/test\/integration\/[a-z0-9-]+\.mjs)\1(?=[ \t;]|$)/gm;
+const REAL_LANE_INVOCATION =
+  /^[ \t]*(?:if[ \t]+![ \t]+)?(?:node|"\$node_binary")[ \t]+(["']?)((?:apps\/wire\/test\/integration|e2e\/playwright)\/[a-z0-9-]+\.mjs)\1(?=[ \t;]|$)/gm;
 
-function invokesWireLane(script: string, lane: string): boolean {
-  return Array.from(script.matchAll(WIRE_LANE_INVOCATION)).some((match) => match[2] === lane);
+function invokesRealLane(script: string, lane: string): boolean {
+  return Array.from(script.matchAll(REAL_LANE_INVOCATION)).some((match) => match[2] === lane);
 }
 
 describe("e2e gates fail closed when their real-bindings test is missing", () => {
@@ -53,8 +53,8 @@ describe("e2e gates fail closed when their real-bindings test is missing", () =>
       `if [[ ! -f ${lane} ]]; then`,
       "if ! node apps/wire/test/integration/another-real-bindings.mjs; then",
     ].join("\n");
-    expect(invokesWireLane(unrelatedInvocation, lane)).toBe(false);
-    expect(invokesWireLane(`  if ! "$node_binary" "${lane}"; then`, lane)).toBe(true);
+    expect(invokesRealLane(unrelatedInvocation, lane)).toBe(false);
+    expect(invokesRealLane(`  if ! "$node_binary" "${lane}"; then`, lane)).toBe(true);
   });
 });
 
@@ -100,7 +100,7 @@ describe("e2e suites declare an honest proof level", () => {
     expect(SHIM.test(planted)).toBe(true);
   });
 
-  test("all 24 in-process/pure suites are accounted for in e2e-gate-mapping.json and wired gates execute real lanes fail-closed (luqx)", () => {
+  test("all 24 in-process or pure suites are mapped and wired gates invoke the named real lane (luqx)", () => {
     const repoRoot = resolve(import.meta.dir, "../..");
     const mappingDoc = JSON.parse(
       readFileSync(join(suiteDir, "e2e-gate-mapping.json"), "utf8"),
@@ -134,7 +134,7 @@ describe("e2e suites declare an honest proof level", () => {
       if (entry.wired_in_entrypoint) {
         const scriptBody = readFileSync(entrypointPath, "utf8");
         expect(
-          invokesWireLane(scriptBody, entry.authoritative_real_lane),
+          invokesRealLane(scriptBody, entry.authoritative_real_lane),
           `${entry.entrypoint} must invoke ${entry.authoritative_real_lane}`,
         ).toBe(true);
         expect(SKIP_IF_MISSING.test(scriptBody)).toBe(false);

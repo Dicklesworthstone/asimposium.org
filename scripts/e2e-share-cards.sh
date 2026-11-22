@@ -77,11 +77,30 @@ if ! bun test apps/web/test/unit/share-card.test.ts; then
   exit 1
 fi
 
-# 2. Run mock-free next/og rendering & OPS.2a logging suite
+# 2. Check renderer inputs and diagnostics in-process.
 if ! bun scripts/suite/share-cards-e2e.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "SHARE_CARDS_E2E_SUITE_FAILED" "$reproduce"
   exit 1
 fi
+
+# 3. Exercise the actual image routes and PNG decoding in the existing Agora browser lane.
+if ! node_binary="$(e2e_select_node_runtime)"; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GENUINE_NODE_UNAVAILABLE" "$reproduce"
+  exit 78
+fi
+browser_status=0
+"$node_binary" e2e/playwright/agora-local-lane.mjs --build || browser_status=$?
+case "$browser_status" in
+  0) ;;
+  78)
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "SHARE_CARDS_BROWSER_UNAVAILABLE" "$reproduce"
+    exit 78
+    ;;
+  *)
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "SHARE_CARDS_BROWSER_FAILED" "$reproduce"
+    exit 1
+    ;;
+esac
 
 e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "" "$reproduce"
 exit 0

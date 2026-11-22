@@ -152,8 +152,8 @@
       "suite_proof_level": "pure",
       "entrypoint": "scripts/e2e-share-cards.sh",
       "authoritative_real_lane": "e2e/playwright/agora-local-lane.mjs",
-      "wired_in_entrypoint": false,
-      "honest_classification": "unit-only-browser-proof-in-agora-local-lane"
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-browser-lane"
     },
     "sponsor-console-e2e.ts": {
       "suite_proof_level": "in-process",

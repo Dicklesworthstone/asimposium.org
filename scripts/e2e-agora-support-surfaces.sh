@@ -78,10 +78,19 @@ cd "$repository_root" || exit 1
 
 # 1. Run W8.8a Honest Share Cards Gate
 echo "=== Step 1/4: Running W8.8a Share Cards Gate ==="
-if ! bash scripts/e2e-share-cards.sh; then
-  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "SHARE_CARDS_GATE_FAILED" "$reproduce"
-  exit 1
-fi
+share_cards_status=0
+bash scripts/e2e-share-cards.sh || share_cards_status=$?
+case "$share_cards_status" in
+  0) ;;
+  78)
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "SHARE_CARDS_GATE_BLOCKED" "$reproduce"
+    exit 78
+    ;;
+  *)
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "SHARE_CARDS_GATE_FAILED" "$reproduce"
+    exit 1
+    ;;
+esac
 
 # 2. Run W8.8b Review Discovery & Honors Gate
 echo "=== Step 2/4: Running W8.8b Review Discovery & Honors Gate ==="
