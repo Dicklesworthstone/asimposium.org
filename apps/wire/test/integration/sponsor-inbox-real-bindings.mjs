@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { SponsorInboxResponseSchema } from "@asimposium/contracts";
+import { SponsorActivityResponseSchema, SponsorInboxResponseSchema } from "@asimposium/contracts";
 import { createInboxNotice } from "../../src/inbox/store.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
@@ -126,6 +126,28 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(!acknowledged.items.some((item) => item.id === impact.id));
   assert.ok((await read()).items.find((item) => item.id === impact.id).acknowledged_at !== null);
 
+  const activityPath = "/v1/sponsors/fellow-activity";
+  const activityRead = async (sponsor, selectedFellow = fellow.fellow_id, body = {}) =>
+    SponsorActivityResponseSchema.parse(
+      await sponsorCall(sponsor, "POST", activityPath, "fellow.activity.read", {
+        fellow_id: selectedFellow,
+        ...body,
+      }),
+    );
+  const beforeActivity = await state();
+  const initialActivity = await activityRead(owner);
+  assert.equal(initialActivity.sponsor_id, owner);
+  assert.equal(initialActivity.fellow_id, fellow.fellow_id);
+  assert.deepEqual(await state(), beforeActivity, "work overview reads do not mutate work");
+  await sponsorCall(recipient, "POST", activityPath, "fellow.activity.read",
+    { fellow_id: fellow.fellow_id }, 404);
+  await sponsorCall(owner, "POST", activityPath, "workshop.read",
+    { fellow_id: fellow.fellow_id }, 401);
+  await call(activityPath, { fellow_id: fellow.fellow_id }, token, 403);
+  await call(activityPath, { fellow_id: fellow.fellow_id }, undefined, 403);
+  await sponsorCall(owner, "POST", activityPath, "fellow.activity.read",
+    { fellow_id: fellow.fellow_id, sponsor_id: owner }, 422);
+
   const now = () => Math.floor(Date.now() / 1000);
   const offer = await sponsorCall(
     owner,
@@ -167,6 +189,11 @@ await runLocalWorkerJourney(async (context) => {
     ).code,
     "INBOX_NOT_FOUND",
   );
+  await sponsorCall(owner, "POST", activityPath, "fellow.activity.read",
+    { fellow_id: fellow.fellow_id }, 404);
+  const transferredActivity = await activityRead(recipient);
+  assert.equal(transferredActivity.sponsor_id, recipient);
+  assert.equal(transferredActivity.fellow_id, fellow.fellow_id);
   const moved = await read({}, recipient);
   assert.deepEqual(
     moved.items.map((item) => item.id),
@@ -197,6 +224,42 @@ await runLocalWorkerJourney(async (context) => {
       201,
     )
   ).problem.id;
+  // Actual private sessions and closed-session context must appear without
+  // publishing them or treating an open session as current presence.
+  const activitySession = await call(
+    "/v1/sessions",
+    { problem_id: problem, intent: "explore" },
+    visibilityToken,
+    201,
+  );
+  const sessionRows = async () => (
+    await env.DB.prepare("SELECT * FROM sessions WHERE fellow_id = ? ORDER BY session_id")
+      .bind(visibilityFellow).all()
+  ).results;
+  const beforeSessionRead = await sessionRows();
+  const privateActivity = await activityRead(visibilityOwner, visibilityFellow);
+  assert.equal(privateActivity.assignments.length, 1);
+  assert.equal(privateActivity.assignments[0].problem_id, problem);
+  assert.equal(privateActivity.assignments[0].public_problem, null);
+  assert.equal(privateActivity.assignments[0].last_public_increment, null);
+  assert.equal(privateActivity.open_sessions[0].session_id, activitySession.session_id);
+  assert.equal(
+    privateActivity.open_sessions[0].last_heartbeat_at,
+    beforeSessionRead.find((row) => row.session_id === activitySession.session_id).last_heartbeat_at,
+  );
+  assert.deepEqual(await sessionRows(), beforeSessionRead, "reading does not keep a session alive");
+  const handback = "PRIVATE_ACTIVITY_HANDBACK: examine the finite boundary next.";
+  await call(
+    "/v1/sessions/" + activitySession.session_id + "/close",
+    { handback },
+    visibilityToken,
+    201,
+  );
+  const closedActivity = await activityRead(visibilityOwner, visibilityFellow);
+  assert.deepEqual(closedActivity.open_sessions, []);
+  assert.equal(closedActivity.assignments[0].latest_handback.text, handback);
+  assert.equal(closedActivity.assignments[0].latest_handback.session_id, activitySession.session_id);
+
   await sponsorCall(
     visibilityOwner,
     "POST",
@@ -239,7 +302,16 @@ await runLocalWorkerJourney(async (context) => {
       action,
       reason: "Verify current publication controls across retained research feedback.",
     });
+  const publicActivity = await activityRead(visibilityOwner, visibilityFellow);
+  assert.equal(publicActivity.assignments[0].public_problem.title, "Inbox current visibility");
+  assert.equal(publicActivity.assignments[0].latest_handback.text, handback);
   await control("hide");
+  const hiddenActivity = await activityRead(visibilityOwner, visibilityFellow);
+  assert.equal(hiddenActivity.assignments[0].public_problem, null);
+  assert.equal(hiddenActivity.assignments[0].last_public_increment, null);
+  assert.equal(hiddenActivity.assignments[0].latest_handback.text, handback);
+  assert.ok(hiddenActivity.omitted.includes("public_activity_unavailable"));
+  assert.ok(!JSON.stringify(hiddenActivity).includes("Inbox current visibility"));
   const privatePage = await call("/v1/inbox?limit=1", undefined, visibilityToken);
   assert.deepEqual(
     privatePage.items.map((item) => item.id),
@@ -297,6 +369,9 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.equal(restored.fellow_unacknowledged_count, 2);
   assert.equal((await call(followPath, undefined, visibilityToken)).following, false);
+  const restoredActivity = await activityRead(visibilityOwner, visibilityFellow);
+  assert.equal(restoredActivity.assignments[0].public_problem.title, "Inbox current visibility");
+  assert.equal(restoredActivity.assignments[0].latest_handback.text, handback);
 });
 
 console.log(
@@ -304,6 +379,6 @@ console.log(
     kind: "sponsor-inbox-real-bindings",
     status: "pass",
     coverage:
-      "signed mounted inbox; current sponsorship; private pagination; Fellow-only acknowledgement; bilateral transfer excludes former directives; current problem hide/restore controls research notices, counts, acknowledgments and follows while preserving private recovery",
+      "signed mounted inbox; current sponsorship; private pagination; Fellow-only acknowledgement; bilateral transfer excludes former directives; current problem hide/restore controls research notices, counts, acknowledgments and follows while preserving private recovery; signed Fellow work overview with actual session timestamps, private handbacks, ownership transfer, and hide/restore",
   }),
 );

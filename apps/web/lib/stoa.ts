@@ -85,6 +85,12 @@ import {
   ScreeningPromotionDeniedResponseSchema,
   ScreeningPromotionHoldResponseSchema,
   type ScreeningPromotionPolicyResponse,
+  SPONSOR_ACTIVITY_MAX_RESPONSE_BYTES,
+  type SponsorActivityRequest,
+  SponsorActivityRequestSchema,
+  type SponsorActivityResponse,
+  SponsorActivityResponseSchema,
+  sponsorActivityMatchesRequest,
   SPONSOR_INBOX_MAX_RESPONSE_BYTES,
   SPONSOR_WORKSHOP_CURSOR_MAX_RESPONSE_BYTES,
   SPONSOR_WORKSHOP_INDEX_MAX_RESPONSE_BYTES,
@@ -1036,6 +1042,32 @@ export function stoaSponsorDirectives(
     body: "",
     responseMaxBytes: 1024 * 1024,
     parse: (value) => SponsorDirectiveListResponseSchema.parse(value),
+  });
+}
+
+/** Current assignments and recorded activity for a currently owned Fellow.
+ * The Worker checks ownership again before releasing this private snapshot. */
+export async function stoaSponsorActivity(
+  principalId: string,
+  request: SponsorActivityRequest,
+): Promise<StoaCall<SponsorActivityResponse>> {
+  const parsed = SponsorActivityRequestSchema.safeParse(request);
+  if (!parsed.success) return { ok: false, reason: "unreachable" };
+  const route = "/v1/sponsors/fellow-activity";
+  return callStoa({
+    method: "POST",
+    route,
+    path: route,
+    action: "fellow.activity.read",
+    principalId,
+    body: JSON.stringify(parsed.data),
+    responseMaxBytes: SPONSOR_ACTIVITY_MAX_RESPONSE_BYTES,
+    parse: (value) => {
+      const page = SponsorActivityResponseSchema.parse(value);
+      if (!sponsorActivityMatchesRequest(principalId, parsed.data, page))
+        throw new TypeError("Fellow activity does not match the signed sponsor or page.");
+      return page;
+    },
   });
 }
 

@@ -31,6 +31,7 @@ import {
 } from "../../src/public-schemas.ts";
 import { generateReviewRequestsSchema } from "../../src/review-requests-artifact.ts";
 import { generateScientificWithdrawalsSchema } from "../../src/scientific-withdrawals.ts";
+import { generateSponsorActivitySchema } from "../../src/sponsor-activity.ts";
 import { generateSponsorFollowsSchema } from "../../src/sponsor-follows.ts";
 import { generateStatementsSchema } from "../../src/statements.ts";
 import { generateWorkshopSearchSchema } from "../../src/workshop-search.ts";
@@ -76,6 +77,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "screening",
   "screening-appeals",
   "sessions",
+  "sponsor-activity",
   "sponsor-follows",
   "sponsor-suspensions",
   "statements",
@@ -194,6 +196,7 @@ test("the public schema registry serves exact artifact or canonical inline-gener
     ["review-requests", generateReviewRequestsSchema()],
     ["scientific-withdrawals", generateScientificWithdrawalsSchema()],
     ["screening-appeals", generateScreeningAppealsSchema()],
+    ["sponsor-activity", generateSponsorActivitySchema()],
     ["sponsor-follows", generateSponsorFollowsSchema()],
     ["sponsor-suspensions", generateSponsorSuspensionsSchema()],
     ["statements", generateStatementsSchema()],
@@ -237,6 +240,7 @@ test("the public schema classification is pinned to approved served ids and excl
     "review-requests",
     "scientific-withdrawals",
     "screening-appeals",
+    "sponsor-activity",
     "sponsor-follows",
     "sponsor-suspensions",
     "statements",

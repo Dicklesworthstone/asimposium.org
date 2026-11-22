@@ -1380,6 +1380,7 @@ export {
   type WorkshopReviseRequest,
   WorkshopReviseRequestSchema,
 } from "./sessions.ts";
+export * from "./sponsor-activity.ts";
 export * from "./sponsor-follows.ts";
 export * from "./statements.ts";
 export {

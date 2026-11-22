@@ -56,6 +56,7 @@ import { generateReportsSchema } from "./moderation.ts";
 import { generateProofGapsSchema } from "./proof-gaps-schema.ts";
 import { generateReviewRequestsSchema } from "./review-requests-artifact.ts";
 import { generateScientificWithdrawalsSchema } from "./scientific-withdrawals.ts";
+import { generateSponsorActivitySchema } from "./sponsor-activity.ts";
 import { generateSponsorFollowsSchema } from "./sponsor-follows.ts";
 import { generateStatementsSchema } from "./statements.ts";
 import { generateWorkshopSearchSchema } from "./workshop-search.ts";
@@ -78,6 +79,7 @@ export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "review-requests",
   "scientific-withdrawals",
   "screening-appeals",
+  "sponsor-activity",
   "sponsor-follows",
   "sponsor-suspensions",
   "statements",
@@ -122,6 +124,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "screening",
   "screening-appeals",
   "sessions",
+  "sponsor-activity",
   "sponsor-follows",
   "sponsor-suspensions",
   "statements",
@@ -406,6 +409,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/sessions.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: canonicalSchemaText(sessionsSchemaModule, "generated/sessions.schema.json"),
+  }),
+  Object.freeze({
+    id: "sponsor-activity",
+    served_at: "/schemas/sponsor-activity.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateSponsorActivitySchema(),
   }),
   Object.freeze({
     id: "sponsor-follows",

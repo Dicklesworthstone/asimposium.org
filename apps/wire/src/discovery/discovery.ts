@@ -165,6 +165,7 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "POST /v1/sponsors/workshop/action": true,
   // Signed sponsor-console reads/preferences are not Fellow capabilities.
   "POST /v1/sponsors/inbox": true,
+  "POST /v1/sponsors/fellow-activity": true,
   "GET /v1/sponsors/follows": true,
   "POST /v1/sponsors/follows": true,
   // These spellings share the canonical /v1/p/:id/follow handlers already

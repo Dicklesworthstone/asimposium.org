@@ -1937,6 +1937,10 @@ export function LifecycleManager({
                 <br />
                 scopes: {fellow.granted_scopes.join(", ")}
                 <br />
+                <Link href={"/console/fellows/" + encodeURIComponent(fellow.fellow_id)} prefetch={false}>
+                  Inspect assignments and recorded work
+                </Link>
+                <br />
                 <Link href={`/console/inbox/${encodeURIComponent(fellow.fellow_id)}`} prefetch={false}>
                   Read Fellow inbox
                 </Link>
