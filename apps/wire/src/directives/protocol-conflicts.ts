@@ -27,6 +27,8 @@ import type {
 } from "../screening/workers-ai.ts";
 import { isArchivedProblemWriteError } from "../sessions/problem-archive-admission.ts";
 import { isProblemMembershipAdmissionError } from "../sessions/problem-membership-admission.ts";
+import { ACTIVE_DIRECTIVE_AUTHORITY_SQL } from "./active-source.ts";
+import { type InitialInstructionRow, initialInstructionFromRow } from "./initial-instruction.ts";
 
 export class ProtocolConflictError extends Error {
   constructor(
@@ -90,6 +92,59 @@ function receipt(row: ConflictRow): ProtocolConflictReceipt {
     seq: row.seq,
     created_at: row.event_created_at,
   });
+}
+
+/** The pin names an authentic received source. Enrollment approval is not a
+ * synthetic focus directive: keep its original enrollment and proposal as the
+ * private causal binding, with no invented inbox receipt or copied text. */
+async function readReceivedSource(
+  db: D1Database,
+  actor: FellowCredentialBinding,
+  problemId: string,
+  directiveId: string,
+  now: number,
+) {
+  if (directiveId.startsWith("EI-")) {
+    const row = await db
+      .prepare(ACTIVE_DIRECTIVE_AUTHORITY_SQL)
+      .bind(actor.fellowId, actor.sponsorId, problemId, actor.credentialId, actor.tokenHash)
+      .first<InitialInstructionRow & { initial_proposal_id: string }>();
+    const instruction = row ? await initialInstructionFromRow(row, actor, problemId) : null;
+    if (
+      !row ||
+      !instruction ||
+      instruction.directive_id !== directiveId ||
+      instruction.created_at > now
+    )
+      throw new ProtocolConflictError("NOT_ALLOWED");
+    return {
+      source_kind: "enrollment-instruction",
+      source_directive_id: null,
+      source_notice_id: null,
+      source_enrollment_id: row.initial_enrollment_id,
+      source_proposal_id: row.initial_proposal_id,
+    } as const;
+  }
+  const source = await db
+    .prepare(`SELECT d.notice_id FROM sponsor_directives d
+      JOIN fellow_inbox_notices n ON n.id = d.notice_id AND n.fellow_id = d.fellow_id
+        AND n.notice_type = 'sponsor_directive' AND n.target_id = d.id
+        AND n.problem_id IS d.problem_id AND n.created_at <= ?
+      WHERE d.id = ? AND d.fellow_id = ? AND d.sponsor_id = ?
+        AND d.verb IN ('focus','forbid') AND (d.problem_id IS NULL OR d.problem_id = ?)
+        AND d.created_at <= ?`)
+    .bind(now, directiveId, actor.fellowId, actor.sponsorId, problemId, now)
+    .first<{ notice_id: string }>();
+  // Missing, foreign, transferred and differently scoped instructions share
+  // one refusal. A private source identifier is never an existence oracle.
+  if (!source) throw new ProtocolConflictError("NOT_ALLOWED");
+  return {
+    source_kind: "sponsor-directive",
+    source_directive_id: directiveId,
+    source_notice_id: source.notice_id,
+    source_enrollment_id: null,
+    source_proposal_id: null,
+  } as const;
 }
 
 /** Record the Fellow's deliberate public refusal, bound to a received private
@@ -178,19 +233,13 @@ export async function recordProtocolConflict(
     }).decision !== "allow"
   )
     throw new ProtocolConflictError("NOT_ALLOWED");
-  const source = await db
-    .prepare(`SELECT d.notice_id FROM sponsor_directives d
-      JOIN fellow_inbox_notices n ON n.id = d.notice_id AND n.fellow_id = d.fellow_id
-        AND n.notice_type = 'sponsor_directive' AND n.target_id = d.id
-        AND n.problem_id IS d.problem_id AND n.created_at <= ?
-      WHERE d.id = ? AND d.fellow_id = ? AND d.sponsor_id = ?
-        AND d.verb IN ('focus','forbid') AND (d.problem_id IS NULL OR d.problem_id = ?)
-        AND d.created_at <= ?`)
-    .bind(now, request.directive_id, actor.fellowId, actor.sponsorId, authority.problem_id, now)
-    .first<{ notice_id: string }>();
-  // The same opaque refusal covers missing, somebody else's, transferred and
-  // differently scoped directives. Private source existence is not an oracle.
-  if (!source) throw new ProtocolConflictError("NOT_ALLOWED");
+  const source = await readReceivedSource(
+    db,
+    actor,
+    authority.problem_id,
+    request.directive_id,
+    now,
+  );
   if (
     await db
       .prepare("SELECT 1 FROM protocol_conflicts WHERE directive_id = ? AND problem_id = ?")
@@ -296,7 +345,7 @@ export async function recordProtocolConflict(
             conflict_id: conflictId,
             seq: settled.sequence,
             directive_id: request.directive_id,
-            source_notice_id: source.notice_id,
+            ...source,
             fellow_id: actor.fellowId,
             sponsor_id: actor.sponsorId,
             credential_id: actor.credentialId,

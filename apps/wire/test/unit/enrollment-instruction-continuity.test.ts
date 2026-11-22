@@ -167,7 +167,7 @@ test("the actual hello read and working/resume actions retain all 2,000 onboardi
   expect(item?.body).not.toContain("Receipt:");
   expect(working.next_actions.some((action) => action.url === ACTIVE)).toBe(true);
   expect(working.next_actions.some((action) => action.url.endsWith("/protocol-conflicts"))).toBe(
-    false,
+    true,
   );
   const status = await f.call("/v1/sessions/" + opened.session.session_id);
   expect(status.status).toBe(200);

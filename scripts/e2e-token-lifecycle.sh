@@ -191,6 +191,8 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0146_protocol_conflicts.sql"
   "0147_question_answer_inbox.sql"
   "0148_disposition_delivery_fairness.sql"
+  "0149_question_request_inbox.sql"
+  "0150_enrollment_protocol_conflicts.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then

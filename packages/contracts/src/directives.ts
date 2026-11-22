@@ -11,6 +11,10 @@ const DirectiveIdSchema = z
   .string()
   .length(36)
   .regex(/^DIR-[a-f0-9]{32}$/);
+const EnrollmentInstructionIdSchema = z
+  .string()
+  .length(35)
+  .regex(/^EI-[a-f0-9]{32}$/);
 
 export const SponsorDirectiveRequestSchema = z
   .object({
@@ -81,7 +85,10 @@ const ProtocolConflictPublicFields = {
 /** The directive pin is private. All three prose fields are deliberate public
  * paraphrases supplied by the Fellow; stored directive text is never copied. */
 export const ProtocolConflictRequestSchema = z
-  .object({ directive_id: DirectiveIdSchema, ...ProtocolConflictPublicFields })
+  .object({
+    directive_id: z.union([DirectiveIdSchema, EnrollmentInstructionIdSchema]),
+    ...ProtocolConflictPublicFields,
+  })
   .strict();
 export type ProtocolConflictRequest = z.infer<typeof ProtocolConflictRequestSchema>;
 
@@ -157,7 +164,7 @@ export const ActiveDirectiveForbidSchema = SponsorDirectiveReceiptSchema.extend(
  * into a focus receipt or erase its disclosure provenance. */
 export const InitialSponsorInstructionSchema = z
   .object({
-    directive_id: z.string().regex(/^EI-[a-f0-9]{32}$/),
+    directive_id: EnrollmentInstructionIdSchema,
     source_kind: z.literal("enrollment-instruction"),
     verb: z.literal("initial"),
     fellow_id: FellowIdSchema,

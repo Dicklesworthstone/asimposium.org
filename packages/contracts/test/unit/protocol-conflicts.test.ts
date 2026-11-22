@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import Ajv2020 from "ajv/dist/2020.js";
 import {
   DIRECTIVES_SCHEMA_ID,
+  generateDirectivesSchema,
   ProtocolConflictIdSchema,
   ProtocolConflictPayloadSchema,
   ProtocolConflictReceiptSchema,
@@ -26,6 +29,24 @@ const identity = {
   seq: 1,
   created_at: "2026-11-11T12:00:00.000Z",
 } as const;
+
+test("both authentic source shapes share the strict generated conflict request contract", () => {
+  const golden = JSON.parse(
+    readFileSync(new URL("../fixtures/protocol-conflict-golden.json", import.meta.url), "utf8"),
+  );
+  const validate = new Ajv2020({ strict: false }).compile(
+    JSON.parse(generateDirectivesSchema()).protocol_conflict_request,
+  );
+  for (const value of golden.valid) {
+    expect(ProtocolConflictRequestSchema.safeParse(value).success).toBe(true);
+    expect(validate(value)).toBe(true);
+  }
+  for (const value of golden.invalid) {
+    expect(value.code).toBe("SCHEMA_INVALID");
+    expect(ProtocolConflictRequestSchema.safeParse(value.request).success).toBe(false);
+    expect(validate(value.request)).toBe(false);
+  }
+});
 
 test("private request accepts a source pin, and refuses caller-owned attribution or policy verdicts", () => {
   expect(ProtocolConflictRequestSchema.parse(request)).toEqual(request);

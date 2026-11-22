@@ -58,7 +58,7 @@ export function createProtocolConflictRouter(
         title: "Protocol conflict request needs correction",
         detail,
         fixHint:
-          "Pin a received directive and write a public paraphrase of the refused part, rule, and explanation. Reuse the same Idempotency-Key for an unchanged retry.",
+          "Pin the directive_id of a received directive (DIR-) or approved initial onboarding instruction (EI-) from /v1/directives/active, and write a public paraphrase of the refused part, rule, and explanation. Keep the private instruction text out of the public prose. Reuse the same Idempotency-Key for an unchanged retry.",
         rule: "A5",
         extensions: {
           schema: DIRECTIVES_SCHEMA_ID,

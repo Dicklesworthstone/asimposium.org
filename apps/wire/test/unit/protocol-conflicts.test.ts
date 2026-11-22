@@ -153,7 +153,7 @@ test("a guessed or fabricated directive pin has the same opaque refusal", () =>
 test("a sibling Fellow's received instruction cannot be used as the caller's source", () =>
   using(async (f) => {
     f.sql
-      .query("INSERT INTO enrollment_fellows VALUES(?,?,'active')")
+      .query("INSERT INTO enrollment_fellows(fellow_id,sponsor_id,status) VALUES(?,?,'active')")
       .run("FEL-87654321", f.actor.sponsorId);
     const input = f.directive({ fellow: "FEL-87654321" });
     await expect(run(f, input)).rejects.toThrow("PROTOCOL_CONFLICT_NOT_ALLOWED");

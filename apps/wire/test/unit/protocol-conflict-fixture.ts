@@ -8,7 +8,7 @@ export { NOW, SESSION } from "./scientific-withdrawal-fixture.ts";
 
 /** Real new migration, screening and atomic projection SQL on SQLite; the
  * existing fixture models identity/writer ports. Native D1 proof is separate. */
-export function protocolConflictFixture() {
+export function protocolConflictFixture({ enrollmentSources = true } = {}) {
   const base = withdrawalFixture();
   const { sql } = base;
   const actor: FellowCredentialBinding = {
@@ -28,10 +28,20 @@ export function protocolConflictFixture() {
       .query(`UPDATE ${table} SET fellow_id=? WHERE fellow_id=?`)
       .run(actor.fellowId, base.actor.fellowId);
   sql.query("INSERT INTO sponsors VALUES(?,NULL)").run(actor.sponsorId);
+  // The enrollment source branch of the actual trigger resolves these parent
+  // tables even for a later DIR source. No enrollment source is invented here.
+  sql.exec(`CREATE TABLE enrollment_records(enrollment_id TEXT PRIMARY KEY,sponsor_id TEXT,
+      requested_resources_json TEXT,created_at INTEGER);
+    CREATE TABLE enrollment_proposals(proposal_id TEXT PRIMARY KEY,enrollment_id TEXT,fellow_id TEXT,
+      status TEXT,granted_scopes_json TEXT,granted_resources_json TEXT,created_at INTEGER);
+    ALTER TABLE enrollment_grants ADD COLUMN proposal_id TEXT;
+    ALTER TABLE enrollment_grants ADD COLUMN granted_at INTEGER;
+    ALTER TABLE enrollment_fellows ADD COLUMN created_at INTEGER;`);
   for (const migration of [
     "0064_inbox_and_follows.sql",
     "0073_sponsor_directives.sql",
     "0146_protocol_conflicts.sql",
+    ...(enrollmentSources ? ["0150_enrollment_protocol_conflicts.sql"] : []),
   ])
     sql.exec(
       readFileSync(new URL(`../../../../db/migrations/${migration}`, import.meta.url), "utf8"),

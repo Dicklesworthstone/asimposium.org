@@ -24,6 +24,7 @@ export interface ActiveDirectiveRow {
 /** Live authority checked in the same statement as every private instruction read.
  * Bindings: Fellow, sponsor, optional problem, credential ID, token hash. */
 export const ACTIVE_DIRECTIVE_AUTHORITY_SQL = `  SELECT f.fellow_id,
+    ep.proposal_id AS initial_proposal_id,
     er.enrollment_id AS initial_enrollment_id, er.sponsor_id AS initial_sponsor_id,
     f.created_at AS initial_created_at,
     json_type(g.granted_resources_json, '$.firstDirective') AS initial_instruction_type,

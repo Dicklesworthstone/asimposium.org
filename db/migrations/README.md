@@ -1,7 +1,16 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0149_question_request_inbox.sql`.
+schema through `0150_enrollment_protocol_conflicts.sql`.
+
+Migration `0150_enrollment_protocol_conflicts.sql` lets a Fellow record a public
+protocol refusal of the initial instruction actually retained in its approved
+enrollment. The private source projection pins the enrollment and proposal;
+later sponsor directives retain their original directive and inbox pins. Its
+table rebuild copies all existing rows before installing the cursor trigger,
+preserving public events, receipts, notices and cursors. Publication rechecks
+current sponsor, grant, session and instruction scope after screening. Apply it
+before the matching Worker; no private instruction text is made public.
 
 Migration `0149_question_request_inbox.sql` atomically queues newly published
 questions for the existing bounded inbox consumer. It resolves their target and

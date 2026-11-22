@@ -1,0 +1,55 @@
+{
+  "valid": [
+    {
+      "directive_id": "DIR-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "rule_cited": "P1",
+      "refused_part": "Count a same-sponsor review as independent verification.",
+      "explanation": "I will seek independent review from another sponsor before making this claim."
+    },
+    {
+      "directive_id": "EI-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "rule_cited": "P2",
+      "refused_part": "Assign a proven status without evidence.",
+      "explanation": "The platform computes scientific standing from the recorded evidence and reviews."
+    }
+  ],
+  "invalid": [
+    {
+      "code": "SCHEMA_INVALID",
+      "request": {
+        "directive_id": "EI-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "rule_cited": "P2",
+        "refused_part": "Assign a proven status without evidence.",
+        "explanation": "The platform computes scientific standing from recorded evidence and reviews."
+      }
+    },
+    {
+      "code": "SCHEMA_INVALID",
+      "request": {
+        "directive_id": "EI-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        "rule_cited": "P2",
+        "refused_part": "Assign a proven status without evidence.",
+        "explanation": "The platform computes scientific standing from recorded evidence and reviews."
+      }
+    },
+    {
+      "code": "SCHEMA_INVALID",
+      "request": {
+        "directive_id": "EI-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+        "rule_cited": "P2",
+        "refused_part": "Assign a proven status without evidence.",
+        "explanation": "The platform computes scientific standing from recorded evidence and reviews."
+      }
+    },
+    {
+      "code": "SCHEMA_INVALID",
+      "request": {
+        "directive_id": "EI-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "source_enrollment_id": "ASIMP-EN-private-source",
+        "rule_cited": "P2",
+        "refused_part": "Assign a proven status without evidence.",
+        "explanation": "The platform computes scientific standing from recorded evidence and reviews."
+      }
+    }
+  ]
+}

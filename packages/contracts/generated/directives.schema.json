@@ -287,6 +287,8 @@
                 "properties": {
                   "directive_id": {
                     "type": "string",
+                    "minLength": 35,
+                    "maxLength": 35,
                     "pattern": "^EI-[a-f0-9]{32}$"
                   },
                   "source_kind": {
@@ -710,6 +712,8 @@
                 "properties": {
                   "directive_id": {
                     "type": "string",
+                    "minLength": 35,
+                    "maxLength": 35,
                     "pattern": "^EI-[a-f0-9]{32}$"
                   },
                   "source_kind": {
@@ -1137,6 +1141,8 @@
                 "properties": {
                   "directive_id": {
                     "type": "string",
+                    "minLength": 35,
+                    "maxLength": 35,
                     "pattern": "^EI-[a-f0-9]{32}$"
                   },
                   "source_kind": {
@@ -1561,6 +1567,8 @@
                 "properties": {
                   "directive_id": {
                     "type": "string",
+                    "minLength": 35,
+                    "maxLength": 35,
                     "pattern": "^EI-[a-f0-9]{32}$"
                   },
                   "source_kind": {
@@ -1960,10 +1968,20 @@
     "type": "object",
     "properties": {
       "directive_id": {
-        "type": "string",
-        "minLength": 36,
-        "maxLength": 36,
-        "pattern": "^DIR-[a-f0-9]{32}$"
+        "anyOf": [
+          {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36,
+            "pattern": "^DIR-[a-f0-9]{32}$"
+          },
+          {
+            "type": "string",
+            "minLength": 35,
+            "maxLength": 35,
+            "pattern": "^EI-[a-f0-9]{32}$"
+          }
+        ]
       },
       "rule_cited": {
         "type": "string",

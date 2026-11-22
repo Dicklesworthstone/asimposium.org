@@ -91,11 +91,14 @@ export async function readActiveSponsorDirectives(
       why: "Before acting, read omitted sponsor instructions. Follow every next_url while has_more; if DIRECTIVE_SET_CHANGED, restart. ACK confirms receipt without withdrawing instructions.",
       public_read: false,
     });
-    if (sessionId !== undefined && active.some((directive) => directive.verb !== "unfocus"))
+    if (
+      sessionId !== undefined &&
+      (initialInstruction !== null || active.some((directive) => directive.verb !== "unfocus"))
+    )
       actions.push({
         method: "POST",
         url: `/v1/sessions/${encodeURIComponent(sessionId)}/protocol-conflicts`,
-        why: "If a received directive conflicts with the protocol, refuse that part and record a public paraphrase. Use the directives protocol_conflict_request schema; keep the directive text private.",
+        why: "If a directive or initial onboarding instruction conflicts with the protocol, pin its directive_id and record a public refusal. Use the directives protocol_conflict_request schema; keep private instruction text out of the paraphrase.",
         public_read: false,
         requires: ["protocol-conflict:write"],
       });
