@@ -54,6 +54,60 @@ test("unrelated withdrawals do not invalidate a grounded route", () =>
     assert.equal((await readEvidenceGrounding(f.db, "P-DEMO", claim, [root])).roots.length, 1);
   }));
 
+for (const computedClass of ["computation", "certified"])
+  test(`an old unscanned ${computedClass} certificate cannot ground new or derived work`, () =>
+    withGroundingFixture(async (f) => {
+      const certificate = f.add("E-unscanned", {
+        kind: "certificate",
+        computed_class: computedClass,
+        source: { kind: "locator", locator: "https://example.org/unscanned" },
+      });
+      const source = f.sql.query("SELECT * FROM event_content").all();
+      const derived = f.derived("E-derived", [certificate]);
+      for (const reference of [certificate, derived])
+        await assert.rejects(
+          readEvidenceGrounding(f.db, "P-DEMO", claim, [reference]),
+          check("invalid"),
+        );
+      assert.deepEqual(
+        f.sql.query("SELECT * FROM event_content WHERE event_id='event-E-unscanned'").all(),
+        source,
+        "Correcting current eligibility must not rewrite the immutable publication",
+      );
+    }));
+
+test("a qualifying scanned artifact remains digest-bound computation, not certified proof", () =>
+  withGroundingFixture(async (f) => {
+    const formalArtifact = {
+      language: "lean",
+      declaration: "zero_add",
+      source: "theorem zero_add (n : Nat) : 0 + n = n := Nat.zero_add n",
+      toolchain: "Lean fixture",
+      axiom_report: "zero_add: no axioms",
+    };
+    const certificate = f.add("E-scanned", {
+      kind: "certificate",
+      computed_class: "computation",
+      formal_artifact: formalArtifact,
+    });
+    const result = await readEvidenceGrounding(f.db, "P-DEMO", claim, [certificate]);
+    assert.equal(result.roots[0]?.payload.computed_class, "computation");
+    assert.deepEqual(result.roots[0]?.payload.formal_artifact, formalArtifact);
+    assert.equal(`sha256:${result.roots[0]?.payloadDigest}`, certificate.digest);
+    const sourceWithHole = f.add("E-hole", {
+      kind: "certificate",
+      computed_class: "computation",
+      formal_artifact: {
+        ...formalArtifact,
+        source: "theorem zero_add (n : Nat) : 0 + n = n := sorry",
+      },
+    });
+    await assert.rejects(
+      readEvidenceGrounding(f.db, "P-DEMO", claim, [sourceWithHole]),
+      check("invalid"),
+    );
+  }));
+
 for (const mutation of ["redaction", "missing", "bytes", "digest", "cursor"] as const)
   test(`${mutation} of an ancestor refuses the whole read, not a partially verified root`, () =>
     withGroundingFixture(async (f) => {

@@ -1,5 +1,6 @@
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
+import { scanFormalArtifact } from "./evidence-class.ts";
 
 /** Admission reads, not historical presentation. Closed routes cannot acquire
  * new positive authority through another evidence object's method/check pins. */
@@ -20,6 +21,17 @@ export function scientificEvidenceClassEligible(
   payload: Record<string, unknown>,
   use: ScientificEvidenceUse = "grounding",
 ): boolean {
+  // Older publications could receive computation from a certificate label
+  // alone. Keep those immutable bodies, but do not let the old computed field
+  // establish new grounding or keep dependent standing elevated. Grounding
+  // reads bind the full payload to its ledger digest before this scan; formal
+  // review still checks the exact artifact digest and independent confirmation.
+  if (
+    payload.kind === "certificate" &&
+    (payload.computed_class === "computation" || payload.computed_class === "certified") &&
+    scanFormalArtifact(payload.formal_artifact) === null
+  )
+    return false;
   return (
     payload.computed_class === "citation" ||
     payload.computed_class === "computation" ||

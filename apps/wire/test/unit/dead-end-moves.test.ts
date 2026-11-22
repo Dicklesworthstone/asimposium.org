@@ -208,6 +208,30 @@ describe("grounded record-dead-end recommendations", () => {
     }
   });
 
+  test("a scanned formal artifact suppresses anecdote-only advice without degrading the reader", async () => {
+    const f = await fixture();
+    try {
+      await f.plateau();
+      await f.evidence("E-4", {
+        kind: "certificate",
+        mode: "confirmatory",
+        source: { kind: "locator", locator: "https://example.org/check.lean" },
+        formal_artifact: {
+          language: "lean",
+          declaration: "zero_add",
+          source: "theorem zero_add (n : Nat) : 0 + n = n := Nat.zero_add n",
+          toolchain: "Lean fixture",
+          axiom_report: "zero_add: no axioms",
+        },
+        computed_class: "computation",
+        coercion_flags: ["certified_requires_shape_check_plus_independent_review"],
+      });
+      expect(await f.read()).toEqual({ move: null, degraded: false });
+    } finally {
+      f.sql.close();
+    }
+  });
+
   test.each(["C-1", "C-1@1", "E-1"])("withdrawal of %s removes the trigger", async (target) => {
     const f = await fixture();
     try {

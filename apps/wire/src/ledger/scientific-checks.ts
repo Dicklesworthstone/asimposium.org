@@ -15,6 +15,7 @@ import {
   ClaimDependencyAdmissionError,
   requireLiveClaimDependencyClosure,
 } from "./claim-dependency-preflight.ts";
+import { scanFormalArtifact } from "./evidence-class.ts";
 import {
   EvidenceGroundingError,
   type GroundingWitness,
@@ -275,18 +276,8 @@ export async function validateFalsificationCheck(
 }
 
 export async function inspectFormalArtifact(value: unknown): Promise<string | null> {
-  const parsed = FormalArtifactSchema.safeParse(value);
-  if (!parsed.success) return null;
-  const artifact = parsed.data;
-  // This is only the conservative source/axiom scan from Fable §6.5. A passed
-  // scan never says that Lean compiled or that the theorem matches the claim.
-  if (
-    /\b(?:sorry|sorryAx|admit|axiom)\b/u.test(artifact.source) ||
-    /\b(?:sorry|sorryAx|admit)\b/u.test(artifact.axiom_report) ||
-    !artifact.source.includes(artifact.declaration) ||
-    !artifact.axiom_report.includes(artifact.declaration)
-  )
-    return null;
+  const artifact = scanFormalArtifact(value);
+  if (!artifact) return null;
   return `sha256:${await sha256Hex(artifact.source)}`;
 }
 

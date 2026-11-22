@@ -637,6 +637,54 @@ export async function scientificJourney({
   );
   await standing("open · unchallenged");
 
+  // An author-supplied certificate label must not mint computational standing.
+  // Without an artifact scan or a sourced excerpt this is still an assertion,
+  // and a second publication cannot launder it into a falsification attempt.
+  const unscannedCertificate = await call(
+    `${author.path}/evidence`,
+    {
+      bears_on_kind: "claim",
+      bears_on_id: claim.claim_id,
+      bears_on_version: 1,
+      direction: "supports",
+      kind: "certificate",
+      mode: "confirmatory",
+      source: { kind: "locator", locator: "https://example.invalid/science/unscanned" },
+      body_md:
+        "This certificate label supplies no formal source or independently checkable result.",
+    },
+    author.token,
+    201,
+  );
+  assert.equal(unscannedCertificate.computed_class, "assertion");
+  assert.ok(unscannedCertificate.coercion_flags.includes("certificate_without_shape_check"));
+  const unscannedPack = await pack(reviewer, "review", `${claim.claim_id}@1`);
+  const unscannedDetail = JSON.parse(
+    unscannedPack.items.find((item) => item.id === unscannedCertificate.evidence_id).body,
+  );
+  const beforeUnscanned = await fixtures.screeningCalls();
+  const unscannedRefusal = await call(
+    `${reviewer.path}/evidence`,
+    {
+      ...unsupportedCheck,
+      falsification_check: {
+        ...unsupportedCheck.falsification_check,
+        evidence: [
+          {
+            evidence_id: unscannedCertificate.evidence_id,
+            digest: unscannedDetail.content_digest,
+          },
+        ],
+      },
+    },
+    reviewer.token,
+    422,
+  );
+  assert.equal(unscannedRefusal.code, "EVIDENCE_BODY_INVALID");
+  assert.equal(await fixtures.screeningCalls(), beforeUnscanned);
+  assert.equal((await pack(reviewer)).cursor, unscannedPack.cursor);
+  await standing("open · unchallenged");
+
   // This proof has a published scientific premise. The premise is deliberately
   // distinct from the complete write-up so its later redaction exercises
   // transitive grounding, rather than removing the directly reviewed record.
@@ -1737,6 +1785,7 @@ export async function scientificJourney({
         "exact-version reset",
         "same-Fellow duplicate collapse",
         "reference admission before screening",
+        "unscanned certificate labels cannot ground a falsification check or upgrade standing",
         "redaction transaction rollback",
         "transitive evidence loss revokes derived standing at current and retained cursors",
         "withheld statement-defect review preserves malformed standing and removes its public bytes",
