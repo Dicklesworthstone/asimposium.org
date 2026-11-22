@@ -80,6 +80,22 @@ function makeClaimFace(overrides: Partial<ClaimFaceResponse> = {}): ClaimFaceRes
 }
 
 describe("Claim Page View-Model & Diptych Honesty Panels", () => {
+  test("a recorded formal artifact earns the machine-checked badge only with current strongest standing", () => {
+    const face = makeClaimFace();
+    for (const disposition of ["open", "corroborated", "disputed", "malformed", "refuted", "withdrawn", "superseded"] as const) {
+      const vm = buildClaimPageViewModel({
+        ...face,
+        claim_state: { ...face.claim_state, disposition, certified_artifact: true },
+      });
+      expect(vm.badges.machineChecked).toEqual({ earned: false, label: null });
+    }
+    const stale = buildClaimPageViewModel({
+      ...face,
+      claim_state: { ...face.claim_state, disposition: "strongly-supported", certified_artifact: true, stale: true },
+    });
+    expect(stale.badges.machineChecked).toEqual({ earned: false, label: null });
+  });
+
   test("timeline sources use canonical envelope identities rather than authored URLs", () => {
     const face = makeClaimFace();
     const vm = buildClaimPageViewModel(

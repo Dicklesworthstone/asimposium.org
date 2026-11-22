@@ -200,11 +200,8 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
             </Link>
           </p>
           <p>
-            <Link
-              href={`/p/${encodeURIComponent(face.problem)}/gaps?through=${face.cursor}`}
-              prefetch={false}
-            >
-              Inspect this problem’s recorded proof obligations at the same snapshot →
+            <Link href="#claim-proof-obligations" prefetch={false}>
+              Inspect this claim’s missing proof steps and pinned premises →
             </Link>
           </p>
           <p>
@@ -292,7 +289,9 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
         <IndependenceTierExplainer tierExplainer={viewModel.tierExplainer} />
 
         <section aria-labelledby="records-heading">
-          <h2 id="records-heading">Published statement, premises, evidence and reviews</h2>
+          <h2 id="records-heading">
+            Published statement, premises, obligations, evidence and reviews
+          </h2>
           {face.items.length === 0 && (
             <p>Published content is unavailable; see the omissions below.</p>
           )}

@@ -23,7 +23,11 @@
 
 import type { ClaimFaceResponse, HonorsResponse, ProblemFaceResponse } from "@asimposium/contracts";
 import { ProblemResolutionRecordSchema, SINGLE_TEAM_PROBLEM_NOTICE } from "@asimposium/contracts";
-import { HONORS_RECORD_DESCRIPTION, HONORS_RECORD_TITLE, screeningNoticeText } from "@asimposium/render";
+import {
+  HONORS_RECORD_DESCRIPTION,
+  HONORS_RECORD_TITLE,
+  screeningNoticeText,
+} from "@asimposium/render";
 import { parseJsonBody } from "./claim-page-view";
 import { SITE } from "./site";
 
@@ -179,9 +183,8 @@ function shareExcerpt(text: string, fallback: string, maxLength: number): string
 
 function resolutionRecord(face: ProblemFaceResponse) {
   const body = face.items.find((item) => item.kind === "problem-resolution")?.body;
-  return ProblemResolutionRecordSchema.safeParse(
-    body === undefined ? null : parseJsonBody(body),
-  ).data;
+  return ProblemResolutionRecordSchema.safeParse(body === undefined ? null : parseJsonBody(body))
+    .data;
 }
 
 function resolutionScopeNotice(record: ReturnType<typeof resolutionRecord>): string {
@@ -480,7 +483,15 @@ export function buildClaimShareCardData(
     { label: "Refutation attempts", value: face.claim_state.recorded_refutation_attempts },
     { label: "Evidence in digest", value: evidenceCount },
     { label: "Reviews in digest", value: reviews.length },
-    { label: "Machine-checked", value: face.claim_state.certified_artifact ? "Yes" : "No" },
+    {
+      label: "Machine-checked",
+      value:
+        face.claim_state.disposition === "strongly-supported" &&
+        face.claim_state.certified_artifact &&
+        !face.claim_state.stale
+          ? "Yes"
+          : "No",
+    },
   ];
 
   const famous = options.isFamousProblemOverride ?? isFamousProblem(problemId);

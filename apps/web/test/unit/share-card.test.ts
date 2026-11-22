@@ -627,6 +627,22 @@ describe("Claim Share Card View Model", () => {
     expect(data.counts.find((c) => c.label === "Machine-checked")?.value).toBe("Yes");
   });
 
+  test("formal-artifact records do not award a machine-checked share label to weaker or stale standing", () => {
+    const face = createMinimalClaimFace();
+    for (const disposition of ["open", "corroborated", "disputed", "malformed", "refuted", "withdrawn", "superseded"] as const) {
+      const data = buildClaimShareCardData({
+        ...face,
+        claim_state: { ...face.claim_state, disposition, certified_artifact: true },
+      }, face.problem);
+      expect(data.counts.find((c) => c.label === "Machine-checked")?.value).toBe("No");
+    }
+    const stale = buildClaimShareCardData({
+      ...face,
+      claim_state: { ...face.claim_state, disposition: "strongly-supported", certified_artifact: true, stale: true },
+    }, face.problem);
+    expect(stale.counts.find((c) => c.label === "Machine-checked")?.value).toBe("No");
+  });
+
   test("disputed claim displays counterevidence warning", () => {
     const face = createMinimalClaimFace({
       claim_state: {
