@@ -1,3 +1,5 @@
+import { PublicStatementVersionSchema } from "../../packages/contracts/src/statements.ts";
+
 /**
  * Scripted reference agent for the local gauntlet (bead asimposiumorg-g5h0).
  *
@@ -40,6 +42,70 @@ export const REFERENCE_AGENT_MODES = [
 ];
 
 const USER_AGENT = "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
+
+export function firstClaimOffer(pack) {
+  if (!Array.isArray(pack?.items)) return undefined;
+  const item = pack.items.find(
+    (candidate) =>
+      candidate?.id === "SYS-working-moves" &&
+      candidate.scope === "system" &&
+      candidate.untrusted === false,
+  );
+  try {
+    const move = JSON.parse(item?.body ?? "{}").primary_move;
+    return move?.move === "state-claim" ? move : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function hasExactFirstClaimFormulation(pack, preparation, problemId, sessionId) {
+  const version = preparation?.statement_version;
+  const itemId = preparation?.read_first?.working_pack_item;
+  if (
+    pack?.profile !== "working" ||
+    pack.problem !== problemId ||
+    pack.session !== sessionId ||
+    !Number.isSafeInteger(pack.cursor) ||
+    preparation?.problem_id !== problemId ||
+    preparation.captured_cursor !== pack.cursor ||
+    !Number.isSafeInteger(version) ||
+    version < 1 ||
+    itemId !== `S@${version}` ||
+    !Array.isArray(pack.items)
+  ) {
+    return false;
+  }
+
+  const matches = pack.items.filter((candidate) => candidate?.id === itemId);
+  const [item] = matches;
+  if (
+    matches.length !== 1 ||
+    item.kind !== "problem-formulation" ||
+    item.scope !== "ledger" ||
+    item.untrusted !== true ||
+    !Array.isArray(item.neutralized) ||
+    item.neutralized.length !== 0
+  ) {
+    return false;
+  }
+  try {
+    const body = JSON.parse(item.body);
+    const publication = PublicStatementVersionSchema.shape.publication.safeParse(body?.publication);
+    return (
+      body?.problem_id === problemId &&
+      body.statement_version === version &&
+      !Object.hasOwn(body, "content_omitted") &&
+      ["title", "statement", "falsifier", "motivation"].every(
+        (key) => typeof body[key] === "string" && body[key].trim() !== "",
+      ) &&
+      publication.success &&
+      publication.data.seq <= pack.cursor
+    );
+  } catch {
+    return false;
+  }
+}
 
 export async function runReferenceAgent(
   joinUrl,
@@ -158,13 +224,7 @@ export async function runReferenceAgent(
     promoteUrl = served(packActions, "/promote");
     closeUrl = served(packActions, "/close") ?? served(sessionActions, "/close");
     if (mode === "complete-typed") {
-      const moves = pack.body.items?.find((item) => item.id === "SYS-working-moves");
-      let move;
-      try {
-        move = JSON.parse(moves?.body ?? "{}")?.primary_move;
-      } catch {
-        return { stage: "typed-draft-offer", ok: false };
-      }
+      const move = firstClaimOffer(pack.body);
       const promotionPath = move?.contract?.request?.path;
       typedPreparation = move?.contract?.preparation;
       if (
@@ -176,8 +236,17 @@ export async function runReferenceAgent(
       )
         return { stage: "typed-draft-offer", ok: false };
       const { read_first: read, workshop_first: workshop } = typedPreparation;
-      const formulation = await request(read.method, read.path);
-      if (formulation.status !== 200) return { stage: "exact-formulation", ok: false };
+      if (
+        !hasExactFirstClaimFormulation(
+          pack.body,
+          typedPreparation,
+          problemId,
+          session.body.session_id,
+        )
+      ) {
+        const formulation = await request(read.method, read.path);
+        if (formulation.status !== 200) return { stage: "exact-formulation", ok: false };
+      }
       workshopUrl = workshop.path.replace("{id}", session.body.session_id);
       promoteUrl = promotionPath.replace("{id}", session.body.session_id);
     }

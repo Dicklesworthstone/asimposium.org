@@ -5,6 +5,8 @@ import {
   FRICTION_WORK_FORMAT,
   readFrictionWork,
 } from "@asimposium/contracts/formalization-friction";
+import { StatementResponseSchema } from "@asimposium/contracts/statements";
+import { hasExactFirstClaimFormulation } from "../../../../e2e/gauntlet/reference-agent.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // W9.4 moves engine (beads asimposiumorg-z8y / asimposiumorg-codz) on real
@@ -105,6 +107,55 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(Buffer.byteLength(JSON.stringify(firstPack.pack)) <= 10_000);
   const first = firstPack.selected.primary_move;
   assert.equal(first.move, "state-claim");
+  const readFirst = first.contract.preparation.read_first;
+  assert.equal(readFirst.working_pack_item, "S@1");
+  const inPack = firstPack.pack.items.find(
+    (item) => item.kind === "problem-formulation" && item.id === readFirst.working_pack_item,
+  );
+  assert.ok(inPack);
+  assert.deepEqual(inPack.neutralized, []);
+  const firstFormulation = JSON.parse(inPack.body);
+  const pinnedStatement = new URL(readFirst.path, origin);
+  const exactFirstStatement = StatementResponseSchema.parse(
+    await call(`${pinnedStatement.pathname.replace(/\.md$/, ".json")}${pinnedStatement.search}`),
+  );
+  assert.equal(firstFormulation.problem_id, exactFirstStatement.problem_id);
+  assert.equal(firstFormulation.statement_version, exactFirstStatement.statement.version);
+  assert.equal(exactFirstStatement.cursor, firstPack.pack.cursor);
+  for (const key of ["publication", "title", "statement", "falsifier", "motivation"]) {
+    assert.deepEqual(firstFormulation[key], exactFirstStatement.statement[key]);
+  }
+  const preparation = first.contract.preparation;
+  assert.equal(hasExactFirstClaimFormulation(firstPack.pack, preparation, problem, session), true);
+  for (const fallback of [
+    { ...inPack, neutralized: [{ marker: "fence-extended", count: 1 }] },
+    { ...inPack, body: JSON.stringify({ ...firstFormulation, content_omitted: "excerpt" }) },
+    { ...inPack, body: JSON.stringify({ ...firstFormulation, statement_version: 2 }) },
+  ]) {
+    const pack = {
+      ...firstPack.pack,
+      items: firstPack.pack.items.map((item) => (item === inPack ? fallback : item)),
+    };
+    assert.equal(hasExactFirstClaimFormulation(pack, preparation, problem, session), false);
+  }
+  assert.equal(
+    hasExactFirstClaimFormulation(
+      { ...firstPack.pack, items: firstPack.pack.items.filter((item) => item !== inPack) },
+      preparation,
+      problem,
+      session,
+    ),
+    false,
+  );
+  assert.equal(
+    hasExactFirstClaimFormulation(
+      { ...firstPack.pack, cursor: firstPack.pack.cursor + 1 },
+      preparation,
+      problem,
+      session,
+    ),
+    false,
+  );
   assert.equal(
     first.contract.target_contract,
     "/schemas/sessions.v1/promote_saved_draft_request.json",

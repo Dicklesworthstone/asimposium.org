@@ -68,6 +68,7 @@ export function firstClaimMove(
         read_first: {
           method: "GET",
           path: statementVersionPath(problemId, statementVersion, "md", { through: cursor }),
+          working_pack_item: `S@${statementVersion}`,
         },
         open_session: {
           method: "POST",
@@ -93,7 +94,7 @@ export function firstClaimMove(
           },
         },
         saved_promotion_example: savedPromotionExample,
-        note: "Read the exact formulation first and use an owned session. Fill the bracketed draft text in body_example. For promotion, fill saved_promotion_example with the returned workshop_id and version. Keep the supplied client_context_cursor. These examples can be used directly. Consult a schema to change the shape. Refresh the pack if the formulation changes.",
+        note: "Use the whole, unmodified working_pack_item at this problem and cursor, or follow read_first. Fill the draft example. Use the returned workshop ID and version in saved_promotion_example and keep its cursor. The examples need no schema fetch. Refresh if the formulation changes.",
       },
     },
     selection_boundary:

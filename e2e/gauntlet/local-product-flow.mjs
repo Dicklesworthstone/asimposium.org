@@ -828,16 +828,31 @@ async function main() {
           drafts.map((draft) => draft.status),
           [201],
         );
+        const packPath = drafts[0].path.replace(/\/workshop$/, "/pack");
+        const preparedInPack = facts.observations.some(
+          (o) =>
+            o.method === "GET" &&
+            o.path === packPath &&
+            o.status === 200 &&
+            o.first_claim_formulation === attemptProblem &&
+            Number.isSafeInteger(o.completed_order) &&
+            o.completed_order < drafts[0].started_order,
+        );
+        const readPinnedStatement = facts.observations.some(
+          (o) =>
+            o.method === "GET" &&
+            o.path === `/p/${attemptProblem}/statements/1.md` &&
+            o.status === 200 &&
+            Number.isSafeInteger(o.completed_order) &&
+            o.completed_order < drafts[0].started_order,
+        );
         assert.ok(
-          facts.observations.some(
-            (o) =>
-              o.method === "GET" &&
-              o.path === `/p/${attemptProblem}/statements/1.md` &&
-              o.status === 200 &&
-              Number.isSafeInteger(o.completed_order) &&
-              o.completed_order < drafts[0].started_order,
-          ),
-          "complete-typed reads the exact statement before saving the draft",
+          preparedInPack || readPinnedStatement,
+          "complete-typed receives the exact formulation before saving the draft",
+        );
+        assert.ok(
+          !(preparedInPack && readPinnedStatement),
+          "complete-typed skips a separate read when the pack contains the exact formulation",
         );
         assert.ok(
           !facts.observations.some((o) => o.method === "GET" && o.path.startsWith("/schemas/")),

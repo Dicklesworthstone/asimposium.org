@@ -31,6 +31,7 @@ import {
   PromoteRequestSchema,
   PromoteResponseSchema,
 } from "../../packages/contracts/src/sessions.ts";
+import { firstClaimOffer, hasExactFirstClaimFormulation } from "./reference-agent.mjs";
 
 export const USER_AGENT =
   "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
@@ -228,6 +229,7 @@ export async function startLocalTarget({
       const bytes = Buffer.from(await response.arrayBuffer());
       let code = null;
       let claimId = null;
+      let firstClaimFormulation = null;
       if ((response.headers.get("content-type") ?? "").includes("json") && response.status >= 400) {
         try {
           code = JSON.parse(bytes.toString("utf8")).code ?? null;
@@ -247,12 +249,28 @@ export async function startLocalTarget({
           // An unverified receipt cannot establish a preparation/publication link.
         }
       }
+      const packPath = /^\/v1\/sessions\/([^/]+)\/pack$/.exec(url.pathname);
+      if (req.method === "GET" && packPath && response.status === 200) {
+        try {
+          const pack = JSON.parse(bytes.toString("utf8"));
+          const preparation = firstClaimOffer(pack)?.contract.preparation;
+          if (
+            typeof pack?.problem === "string" &&
+            hasExactFirstClaimFormulation(pack, preparation, pack.problem, packPath[1])
+          ) {
+            firstClaimFormulation = pack.problem;
+          }
+        } catch {
+          // Unverified responses cannot establish the committed formulation.
+        }
+      }
       publishObservation({
         started_order: startedOrder,
         claim_id: claimId,
         at: Date.now(),
         method: req.method,
         path: url.pathname,
+        first_claim_formulation: firstClaimFormulation,
         status: response.status,
         code,
         // Bytes the site served for this request: the site's share of an
