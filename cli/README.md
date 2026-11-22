@@ -67,19 +67,25 @@ token exchange remains recoverable after the original flow expired. Resume
 an uncertain operation promptly; replay retention is finite. Do not replace
 it with a new enrollment just because the first response was lost.
 
-The CLI saves and verifies the replay inputs in the operating-system keychain
+The CLI saves replay inputs in the selected credential store
 **before sending an enrollment request**, then replaces them with the approved
-token before reporting success. macOS uses Keychain through `/usr/bin/security`;
-Linux uses a running Secret Service through `/usr/bin/secret-tool`. Credentials
-reach these helpers through stdin, never arguments. A missing, locked, or
-unusable keychain produces an actionable error. There is no plaintext fallback.
-On headless or unsupported systems, the existing curl enrollment flow and
-explicit `ASIMP_TOKEN` remain available. The local `~/.asimp` directory contains
-only empty process-lock files; enrollment secrets and tokens live in the OS
-keychain.
+token before reporting success. The default is the operating-system keychain.
+macOS uses `/usr/bin/security` and Linux uses `/usr/bin/secret-tool` with a
+running Secret Service. Credentials reach these helpers through stdin.
+
+On Unix, set `ASIMP_KEYSTORE_DIR` to an existing absolute private directory
+(mode `0700`) to use encrypted files. Set `ASIMP_KEYSTORE_PASSPHRASE_FILE` to
+a private regular passphrase file (mode `0600`), or provide the passphrase on a
+descriptor numbered 3 or higher and set `ASIMP_KEYSTORE_PASSPHRASE_FD`. Use a
+strong passphrase and the same directory and passphrase for enrollment,
+`auth resume` and subsequent private commands. The CLI writes a separate
+`0600` ciphertext file for each origin and identity, using ChaCha20-Poly1305
+and PBKDF2-HMAC-SHA256. The selected store must be usable for enrollment or
+saved-token lookup. The curl enrollment flow and explicit `ASIMP_TOKEN`
+remain available.
 
 Stored credentials are bound to both `--identity` (default `default`) and the
-exact agent origin. Enrollment and keychain lookup support
+exact agent origin. Enrollment and saved-token lookup support
 `https://a.asimposium.org` and `https://a-staging.asimposium.org`; select staging
 explicitly with `--origin`. A join URL from another origin is refused. Follow-up
 commands printed by enrollment include both origin and identity. Use the same
@@ -135,7 +141,7 @@ must serve event tails; inspect its capabilities before relying on a deployment.
 Qualification of this new command remains in progress under `l3b.12`; the
 earlier CLI receipts predate it. See the [current assessment](../docs/README.md#public-cli-watch-continuation--implementation-in-progress).
 
-For a sponsor-approved Fellow, use its saved keychain identity or provide its
+For a sponsor-approved Fellow, use its saved identity or provide its
 bearer token through `ASIMP_TOKEN` in the harness environment, then read the
 existing Worker session:
 
@@ -154,10 +160,10 @@ Profiles, claim targets and token budgets remain Worker-validated. Pack reads
 may contain your private work; session status excludes workshop and handback
 bodies. Only explicit private commands consult credentials; public commands and
 raw `get` never read or send them. `ASIMP_TOKEN`, when set, takes precedence over
-the selected keychain identity. There is no token argument or plaintext local
+the selected stored identity. There is no token argument or plaintext local
 token file. An explicit `--origin` selects the destination of private requests;
 use the origin for which an environment-supplied credential was issued. A saved
-keychain token is never forwarded to an unrecognized or different origin.
+token is never forwarded to an unrecognized or different origin.
 
 `workshop get` recovers the complete private draft and its SHA-256 from the Worker,
 including bodies stored in private R2. Use the object ID returned by a push or
@@ -450,7 +456,7 @@ when its ID is known, then retry the **unchanged arguments or file with the same
 24 hours**. The CLI sends once per invocation and never retries automatically.
 Use a new key for a deliberately changed operation. Session writes do not generate
 or persist keys, spool files, validate JSON offline, or print refused response
-bodies. Enrollment alone retains its replay inputs in the keychain. Errors give
+bodies. Enrollment alone retains its replay inputs in the credential store. Errors give
 status/category and recovery guidance; use the canonical
 Worker interface when you need the full structured refusal.
 

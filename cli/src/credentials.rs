@@ -1,5 +1,5 @@
-//! The OS owns encryption and unlock policy. No bearer or enrollment secret is
-//! written to a configuration file, subprocess argument, or diagnostic.
+//! Local enrollment state lives in the OS keychain or an explicitly selected
+//! encrypted store. Bearers and enrollment secrets never appear in arguments or diagnostics.
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::{
@@ -17,7 +17,8 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-pub(crate) const KEYCHAIN_UNAVAILABLE: &str = "The operating-system keychain is unavailable or locked. On Linux install secret-tool and unlock a Secret Service keyring; on macOS unlock your login keychain. Alternatively use the encrypted file store (~/.asimp/credentials.enc with ASIMP_KEYSTORE_PASSPHRASE_FILE/FD), or paste the URL instead / use ASIMP_TOKEN with the documented curl enrollment flow. No enrollment request was sent unless a saved flow already exists.";
+pub(crate) const KEYCHAIN_UNAVAILABLE: &str = "The operating-system keychain is unavailable or locked. On Linux install secret-tool and unlock a Secret Service keyring; on macOS unlock your login keychain. To use an encrypted file, set ASIMP_KEYSTORE_DIR and ASIMP_KEYSTORE_PASSPHRASE_FILE or ASIMP_KEYSTORE_PASSPHRASE_FD. You can also paste the URL instead / use ASIMP_TOKEN with the documented curl enrollment flow. Resume an existing flow with its original credential store.";
+pub(crate) const NATIVE_STORAGE_NAME: &str = "operating-system-keychain";
 const SERVICE: &str = "org.asimposium.cli.v1";
 const MAX_RECORD_BYTES: usize = 6_000;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(15);
@@ -26,13 +27,18 @@ const ENCRYPTED_STORE_KDF: &str = "pbkdf2-hmac-sha256";
 const ENCRYPTED_STORE_AEAD: &str = "chacha20-poly1305";
 pub const ENCRYPTED_STORE_DEFAULT_ITERATIONS: u32 = 600_000;
 const ENCRYPTED_STORE_MIN_ITERATIONS: u32 = 100_000;
+const ENCRYPTED_STORE_MAX_ITERATIONS: u32 = 2_000_000;
 const ENCRYPTED_STORE_MAX_FILE_BYTES: usize = 32 * 1024;
 const ENCRYPTED_STORE_SALT_LEN: usize = 16;
 const ENCRYPTED_STORE_NONCE_LEN: usize = 12;
+const MAX_PASSPHRASE_BYTES: usize = 4096;
 
 pub trait CredentialStore {
     fn load(&mut self) -> Result<Option<String>, &'static str>;
     fn save(&mut self, value: &str) -> Result<(), &'static str>;
+    fn storage_name(&self) -> &'static str {
+        NATIVE_STORAGE_NAME
+    }
 }
 
 pub(crate) fn valid_identity(value: &str) -> bool {
@@ -69,6 +75,81 @@ pub(crate) fn trusted_origin(origin: &str) -> bool {
         && prefix
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+pub(crate) fn open_credential_store(
+    origin: &str,
+    identity: &str,
+) -> Result<Box<dyn CredentialStore>, &'static str> {
+    let Some(directory) = std::env::var_os("ASIMP_KEYSTORE_DIR") else {
+        return Ok(Box::new(NativeKeychain::new(origin, identity)?));
+    };
+    #[cfg(not(unix))]
+    {
+        let _ = (directory, origin, identity);
+        Err(
+            "ASIMP_KEYSTORE_DIR requires Unix file permissions; paste the URL instead / use ASIMP_TOKEN.",
+        )
+    }
+    #[cfg(unix)]
+    {
+        if !trusted_origin(origin) || !valid_identity(identity) {
+            return Err(
+                "Encrypted credential storage requires a trusted *.asimposium.org HTTPS origin and valid --identity; paste the URL instead / use ASIMP_TOKEN.",
+            );
+        }
+        let root = PathBuf::from(directory);
+        if !root.is_absolute() || !private_keystore_directory(&root)? {
+            return Err(
+                "ASIMP_KEYSTORE_DIR must name an existing absolute private directory (mode 0700); paste the URL instead / use ASIMP_TOKEN.",
+            );
+        }
+        let host = origin.trim_start_matches("https://");
+        // Lowercase hex preserves case-sensitive identities on case-insensitive filesystems.
+        let encoded: String = identity.bytes().map(|byte| format!("{byte:02x}")).collect();
+        let path = root.join(host).join(format!("{encoded}.enc"));
+        let mut passphrase = EncryptedFileStore::read_passphrase_from_env()?;
+        Ok(Box::new(EncryptedFileStore::new(
+            path,
+            origin,
+            identity,
+            std::mem::take(&mut *passphrase),
+        )?))
+    }
+}
+
+fn private_keystore_directory(path: &Path) -> Result<bool, &'static str> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => {
+            return Err(
+                "Cannot inspect encrypted credential directory; paste the URL instead / use ASIMP_TOKEN.",
+            );
+        }
+    };
+    if !metadata.is_dir() {
+        return Err(
+            "Encrypted credential storage requires real private directories; refusing a symlink or non-directory.",
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(
+                "Encrypted credential directory must be private (mode 0700); paste the URL instead / use ASIMP_TOKEN.",
+            );
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn sync_keystore_directory(path: &Path) -> Result<(), &'static str> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| "Cannot synchronize encrypted credential directory.")
 }
 
 #[derive(Clone, Copy)]
@@ -311,8 +392,8 @@ pub(crate) fn lock_identity(origin: &str, identity: &str) -> Result<File, &'stat
     lock_at(&root, &format!("auth-{origin_slug}-{identity}.lock"))
 }
 
-/// Encrypted-file credential fallback (`~/.asimp/credentials.enc`) for headless
-/// Linux/Windows environments without OS keychain access (Fable §12).
+/// Passphrase-encrypted credential store for Unix environments without
+/// OS keychain access (Fable §12).
 ///
 /// Security properties:
 /// - Strict `0700` parent directory and `0600` regular non-symlink file perms;
@@ -356,6 +437,7 @@ impl EncryptedFileStore {
         passphrase: Vec<u8>,
         iterations: u32,
     ) -> Result<Self, &'static str> {
+        let passphrase = Zeroizing::new(passphrase);
         if !trusted_origin(origin) || !valid_identity(identity) {
             return Err(
                 "Encrypted credential storage requires a trusted *.asimposium.org HTTPS origin and valid --identity; paste the URL instead / use ASIMP_TOKEN.",
@@ -366,16 +448,15 @@ impl EncryptedFileStore {
                 "Encrypted credential store requires a non-empty passphrase via ASIMP_KEYSTORE_PASSPHRASE_FD or 0600 ASIMP_KEYSTORE_PASSPHRASE_FILE; otherwise paste the URL instead / use ASIMP_TOKEN.",
             );
         }
-        if iterations < ENCRYPTED_STORE_MIN_ITERATIONS {
-            return Err(
-                "Encrypted credential store PBKDF2 iteration count is below minimum bound.",
-            );
+        if !(ENCRYPTED_STORE_MIN_ITERATIONS..=ENCRYPTED_STORE_MAX_ITERATIONS).contains(&iterations)
+        {
+            return Err("Encrypted credential store PBKDF2 iteration count is outside its bounds.");
         }
         Ok(Self {
             path,
             origin: origin.to_string(),
             identity: identity.to_string(),
-            passphrase: Zeroizing::new(passphrase),
+            passphrase,
             iterations,
         })
     }
@@ -384,8 +465,8 @@ impl EncryptedFileStore {
     /// `0600` regular non-symlink) or `ASIMP_KEYSTORE_PASSPHRASE_FD` (Unix FD).
     /// Never reads passphrases from CLI argv.
     pub fn read_passphrase_from_env() -> Result<Zeroizing<Vec<u8>>, &'static str> {
-        if let Ok(file_path) = std::env::var("ASIMP_KEYSTORE_PASSPHRASE_FILE") {
-            let path = PathBuf::from(&file_path);
+        if let Some(file_path) = std::env::var_os("ASIMP_KEYSTORE_PASSPHRASE_FILE") {
+            let path = PathBuf::from(file_path);
             let meta = std::fs::symlink_metadata(&path)
                 .map_err(|_| "Cannot inspect ASIMP_KEYSTORE_PASSPHRASE_FILE; paste the URL instead / use ASIMP_TOKEN.")?;
             if !meta.is_file() {
@@ -393,19 +474,33 @@ impl EncryptedFileStore {
                     "ASIMP_KEYSTORE_PASSPHRASE_FILE must be a regular file, not a symlink; paste the URL instead / use ASIMP_TOKEN.",
                 );
             }
+            let file = File::open(&path)
+                .map_err(|_| "Cannot read ASIMP_KEYSTORE_PASSPHRASE_FILE; paste the URL instead / use ASIMP_TOKEN.")?;
+            let opened = file.metadata()
+                .map_err(|_| "Cannot inspect ASIMP_KEYSTORE_PASSPHRASE_FILE; paste the URL instead / use ASIMP_TOKEN.")?;
+            if !opened.is_file() {
+                return Err(
+                    "ASIMP_KEYSTORE_PASSPHRASE_FILE must be a regular file; paste the URL instead / use ASIMP_TOKEN.",
+                );
+            }
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                if meta.permissions().mode() & 0o077 != 0 {
+                use std::os::unix::fs::{MetadataExt, PermissionsExt};
+                if opened.permissions().mode() & 0o077 != 0
+                    || (opened.dev(), opened.ino()) != (meta.dev(), meta.ino())
+                {
                     return Err(
                         "ASIMP_KEYSTORE_PASSPHRASE_FILE must have 0600 permissions; paste the URL instead / use ASIMP_TOKEN.",
                     );
                 }
             }
-            let mut raw = Zeroizing::new(
-                std::fs::read(&path)
-                    .map_err(|_| "Cannot read ASIMP_KEYSTORE_PASSPHRASE_FILE; paste the URL instead / use ASIMP_TOKEN.")?,
-            );
+            let mut raw = Zeroizing::new(Vec::new());
+            file.take((MAX_PASSPHRASE_BYTES + 1) as u64)
+                .read_to_end(&mut raw)
+                .map_err(|_| "Cannot read ASIMP_KEYSTORE_PASSPHRASE_FILE; paste the URL instead / use ASIMP_TOKEN.")?;
+            if raw.len() > MAX_PASSPHRASE_BYTES {
+                return Err("ASIMP_KEYSTORE_PASSPHRASE_FILE exceeds 4096 bytes.");
+            }
             while matches!(raw.last(), Some(b'\n' | b'\r')) {
                 raw.pop();
             }
@@ -428,10 +523,10 @@ impl EncryptedFileStore {
             let file = File::open(&fd_path)
                 .map_err(|_| "Cannot open ASIMP_KEYSTORE_PASSPHRASE_FD via /dev/fd.")?;
             let mut buf = Zeroizing::new(Vec::new());
-            file.take(4097)
+            file.take((MAX_PASSPHRASE_BYTES + 1) as u64)
                 .read_to_end(&mut buf)
                 .map_err(|_| "Failed reading ASIMP_KEYSTORE_PASSPHRASE_FD.")?;
-            if buf.len() > 4096 {
+            if buf.len() > MAX_PASSPHRASE_BYTES {
                 return Err("ASIMP_KEYSTORE_PASSPHRASE_FD exceeds 4096 bytes.");
             }
             while matches!(buf.last(), Some(b'\n' | b'\r')) {
@@ -472,6 +567,12 @@ impl EncryptedFileStore {
     }
 
     fn validate_existing_file(&self) -> Result<bool, &'static str> {
+        if let Some(parent) = self.path.parent()
+            && !parent.as_os_str().is_empty()
+            && !private_keystore_directory(parent)?
+        {
+            return Ok(false);
+        }
         match std::fs::symlink_metadata(&self.path) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(_) => Err(
@@ -502,6 +603,10 @@ impl EncryptedFileStore {
 }
 
 impl CredentialStore for EncryptedFileStore {
+    fn storage_name(&self) -> &'static str {
+        "encrypted-file"
+    }
+
     fn load(&mut self) -> Result<Option<String>, &'static str> {
         if !self.validate_existing_file()? {
             return Ok(None);
@@ -521,7 +626,9 @@ impl CredentialStore for EncryptedFileStore {
             .get("iterations")
             .and_then(serde_json::Value::as_u64)
             .and_then(|v| u32::try_from(v).ok())
-            .filter(|v| *v >= ENCRYPTED_STORE_MIN_ITERATIONS)
+            .filter(|v| {
+                (ENCRYPTED_STORE_MIN_ITERATIONS..=ENCRYPTED_STORE_MAX_ITERATIONS).contains(v)
+            })
             .ok_or("Encrypted credential store carries invalid KDF iteration count.")?;
         let aad_context = doc
             .get("aad_context")
@@ -591,9 +698,12 @@ impl CredentialStore for EncryptedFileStore {
         }
         // If an existing file already exists at target path, refuse insecure perms or symlinks first.
         let _ = self.validate_existing_file()?;
-        if let Some(parent) = self.path.parent()
-            && !parent.as_os_str().is_empty()
-        {
+        let parent = self
+            .path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if !private_keystore_directory(parent)? {
             let mut builder = std::fs::DirBuilder::new();
             builder.recursive(true);
             #[cfg(unix)]
@@ -604,11 +714,16 @@ impl CredentialStore for EncryptedFileStore {
             builder
                 .create(parent)
                 .map_err(|_| "Cannot create 0700 directory for encrypted credential store.")?;
-            let meta = std::fs::symlink_metadata(parent)
-                .map_err(|_| "Cannot inspect encrypted credential store parent directory.")?;
-            if !meta.is_dir() {
-                return Err("Encrypted credential store parent must be a real directory.");
+            if !private_keystore_directory(parent)? {
+                return Err("Cannot find the encrypted credential store parent directory.");
             }
+            #[cfg(target_os = "linux")]
+            sync_keystore_directory(
+                parent
+                    .parent()
+                    .filter(|path| !path.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new(".")),
+            )?;
         }
 
         let rng = SystemRandom::new();
@@ -686,6 +801,11 @@ impl CredentialStore for EncryptedFileStore {
             let _ = std::fs::remove_file(&tmp_path);
             "Failed atomically committing encrypted credential store."
         })?;
+        #[cfg(target_os = "linux")]
+        sync_keystore_directory(parent)?;
+        if self.load()?.as_deref() != Some(value) {
+            return Err("Cannot verify the saved encrypted credential.");
+        }
         Ok(())
     }
 }
@@ -940,6 +1060,13 @@ mod tests {
         let tamper_err = store.load().unwrap_err();
         assert!(tamper_err.contains("authentication failed"));
         assert!(!tamper_err.contains(canary_token));
+
+        // An untrusted envelope cannot raise the KDF work past the local bound.
+        doc["iterations"] = serde_json::json!(ENCRYPTED_STORE_MAX_ITERATIONS + 1);
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        let cost_err = store.load().unwrap_err();
+        assert!(cost_err.contains("invalid KDF iteration count"));
+        assert!(!cost_err.contains(canary_token));
 
         // Empty passphrase fails with the exact Fable §12 fallback hint.
         let hint_err = EncryptedFileStore::new(path, origin, "fellow_enc_1", Vec::new())

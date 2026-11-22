@@ -1,9 +1,9 @@
 //! Curl-equivalent Propylon enrollment. The Worker still decides identity,
 //! naming, scopes and approval. Locally we bind credentials to an origin,
-//! retain exact replay inputs in the OS keychain, and never print them.
+//! retain exact replay inputs in the selected credential store, and never print them.
 
 use crate::credentials::{
-    CredentialStore, NativeKeychain, lock_identity, trusted_origin, valid_identity,
+    CredentialStore, lock_identity, open_credential_store, trusted_origin, valid_identity,
 };
 use crate::{Cli, CliOutput, Command, FetchError, Fetched, READ_TIMEOUT};
 use serde_json::{Value, json};
@@ -16,7 +16,7 @@ use std::{
 const DAY_MS: u64 = 86_400_000;
 const INVALID_RECORD: &str = "The saved enrollment record is invalid or belongs to another origin/identity. Use another --identity; the record was not sent or overwritten.";
 const INVALID_RESPONSE: &str = "The Worker returned an invalid enrollment response. No response body or credential was printed. The saved request can be inspected with asimp auth status and resumed with asimp auth resume.";
-const RECOVERY: &str = "The exact request and its Idempotency-Key remain in your OS keychain. Use asimp auth resume with the same --origin and --identity; do not start another enrollment after an ambiguous response.";
+const RECOVERY: &str = "The exact request and its Idempotency-Key remain in your credential store. Use asimp auth resume with the same --origin, --identity and credential store settings. Resume that enrollment after an ambiguous response.";
 const ENROLLMENT_SCHEMA: &str =
     include_str!("../../packages/contracts/generated/enrollment.schema.json");
 
@@ -498,11 +498,11 @@ impl Runtime for SystemRuntime {
     }
 }
 
-fn save(store: &mut impl CredentialStore, record: &Record) -> Result<(), &'static str> {
+fn save(store: &mut (impl CredentialStore + ?Sized), record: &Record) -> Result<(), &'static str> {
     store.save(&record.encode())
 }
 
-fn display(record: &Record, json_output: bool, inspection: bool) -> CliOutput {
+fn display(record: &Record, json_output: bool, inspection: bool, storage: &str) -> CliOutput {
     // Both fields were validated before entering the state machine and contain
     // no shell metacharacters. Keep follow-up commands on this exact identity.
     let command = format!(
@@ -531,7 +531,7 @@ fn display(record: &Record, json_output: bool, inspection: bool) -> CliOutput {
         _ => None,
     };
     let stdout = if json_output {
-        let mut value = json!({"status":status,"origin":record.origin,"identity":record.identity,"name":record.name,"credential_storage":"operating-system-keychain","remote_validity_checked":false,"next":next});
+        let mut value = json!({"status":status,"origin":record.origin,"identity":record.identity,"name":record.name,"credential_storage":storage,"remote_validity_checked":false,"next":next});
         if let Some((url, code)) = verification {
             value["verification_url"] = json!(url);
             value["user_code"] = json!(code);
@@ -583,7 +583,7 @@ fn drive(
     mut record: Record,
     wait_seconds: u64,
     json_output: bool,
-    store: &mut impl CredentialStore,
+    store: &mut (impl CredentialStore + ?Sized),
     send: &mut impl FnMut(&str, &str, String) -> Result<Fetched, FetchError>,
     runtime: &mut impl Runtime,
 ) -> CliOutput {
@@ -690,7 +690,7 @@ fn drive(
                 // can still recover an approved exchange after the flow's
                 // nominal expiry; never discard that exact flow/key locally.
                 if runtime.elapsed_ms() >= wait_deadline {
-                    return display(&record, json_output, false);
+                    return display(&record, json_output, false, store.storage_name());
                 }
                 if next_poll_at_ms > now {
                     let delay = (next_poll_at_ms - now)
@@ -765,7 +765,7 @@ fn drive(
                     return failure(&format!("{error} {RECOVERY}"));
                 }
             }
-            _ => return display(&record, json_output, false),
+            _ => return display(&record, json_output, false, store.storage_name()),
         }
     }
 }
@@ -773,7 +773,7 @@ fn drive(
 fn run_with(
     cli: &Cli,
     origin: &str,
-    store: &mut impl CredentialStore,
+    store: &mut (impl CredentialStore + ?Sized),
     read_join: &mut impl FnMut(Option<&Path>) -> Result<String, &'static str>,
     send: &mut impl FnMut(&str, &str, String) -> Result<Fetched, FetchError>,
     runtime: &mut impl Runtime,
@@ -806,7 +806,7 @@ fn run_with(
             command: AuthCommand::Status { json },
         } => {
             return match previous {
-                Some(record) => display(&record, *json, true),
+                Some(record) => display(&record, *json, true, store.storage_name()),
                 None => CliOutput {
                     exit_code: 0,
                     stdout: if *json {
@@ -873,7 +873,7 @@ fn run_with(
             expires_at_ms: runtime.now_ms().saturating_add(DAY_MS),
         },
     };
-    // The keychain is proven writable before consuming a one-time join secret.
+    // Persist replay state before sending the one-time join secret.
     if let Err(error) = save(store, &record) {
         return failure(error);
     }
@@ -944,7 +944,7 @@ pub(crate) fn run(cli: &Cli) -> CliOutput {
         Ok(value) => value,
         Err(error) => return failure(&error),
     };
-    let mut store = match NativeKeychain::new(&origin, &cli.identity) {
+    let mut store = match open_credential_store(&origin, &cli.identity) {
         Ok(value) => value,
         Err(error) => return failure(error),
     };
@@ -964,7 +964,7 @@ pub(crate) fn run(cli: &Cli) -> CliOutput {
     run_with(
         cli,
         &origin,
-        &mut store,
+        store.as_mut(),
         &mut read_join_source,
         &mut send,
         &mut SystemRuntime {
@@ -981,7 +981,7 @@ pub(crate) fn stored_token(cli: &Cli) -> Result<Option<String>, &'static str> {
     if !trusted_origin(&origin) {
         return Ok(None);
     }
-    let mut store = NativeKeychain::new(&origin, &cli.identity)?;
+    let mut store = open_credential_store(&origin, &cli.identity)?;
     let Some(raw) = store.load()? else {
         return Ok(None);
     };
@@ -1475,12 +1475,13 @@ mod tests {
             (Phase::Approved { token: token() }, "hello --json"),
         ] {
             record.phase = phase;
-            let output = display(&record, true, false);
+            let storage = crate::credentials::NATIVE_STORAGE_NAME;
+            let output = display(&record, true, false, storage);
             assert_eq!(
                 serde_json::from_str::<Value>(&output.stdout).unwrap()["next"],
                 format!("{prefix} {command}")
             );
-            let text = display(&record, false, true).stdout;
+            let text = display(&record, false, true, storage).stdout;
             assert!(text.contains(&format!("{prefix} {command}")));
             assert!(text.contains(&format!("use {prefix} hello --json")));
         }

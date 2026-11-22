@@ -205,3 +205,108 @@ fn encrypted_store_default_600k_iterations_round_trips_securely() {
     );
     assert_eq!(store.load().unwrap().as_deref(), Some(secret));
 }
+
+#[cfg(unix)]
+#[test]
+fn cli_opens_the_explicit_encrypted_credential_store() {
+    use std::{
+        fs::{DirBuilder, OpenOptions},
+        os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
+        process::Command,
+    };
+
+    let root = std::env::temp_dir().join(format!(
+        "asimp-keystore-cli-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    DirBuilder::new().mode(0o700).create(&root).unwrap();
+    let passphrase_path = root.join("passphrase");
+    let passphrase = b"synthetic encrypted credential test";
+    OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&passphrase_path)
+        .unwrap()
+        .write_all(passphrase)
+        .unwrap();
+
+    let directory = root.join("credentials");
+    let origin = "https://a.asimposium.org";
+    let identity = format!("encrypted-cli-test-{}", std::process::id());
+    let encoded: String = identity.bytes().map(|byte| format!("{byte:02x}")).collect();
+    let path = directory
+        .join("a.asimposium.org")
+        .join(format!("{encoded}.enc"));
+    let token = format!("asimp_ag_{}_{}", "0".repeat(26), "C".repeat(43));
+    let record = serde_json::json!({
+        "version": 1,
+        "origin": origin,
+        "identity": identity,
+        "name": "encrypted-fellow",
+        "state": {"phase": "approved", "token": token},
+    });
+    let mut store =
+        EncryptedFileStore::new(path.clone(), origin, &identity, passphrase.to_vec()).unwrap();
+    store.save(&record.to_string()).unwrap();
+    assert!(!std::fs::read_to_string(&path).unwrap().contains(&token));
+
+    let asimp = |identity: &str| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_asimp"));
+        command
+            .args(["--origin", origin, "--identity", identity])
+            .env("ASIMP_KEYSTORE_DIR", &directory)
+            .env("ASIMP_KEYSTORE_PASSPHRASE_FILE", &passphrase_path)
+            .env_remove("ASIMP_KEYSTORE_PASSPHRASE_FD")
+            .env_remove("ASIMP_TOKEN");
+        command
+    };
+    let status = asimp(&identity)
+        .args(["auth", "status", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "encrypted auth status must succeed"
+    );
+    assert!(status.stderr.is_empty());
+    assert!(!String::from_utf8_lossy(&status.stdout).contains(&token));
+    let body: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(body["status"], "credential-stored");
+    assert_eq!(body["credential_storage"], "encrypted-file");
+    assert_eq!(body["remote_validity_checked"], false);
+
+    let other = asimp(&identity.to_ascii_uppercase())
+        .args(["auth", "status", "--json"])
+        .output()
+        .unwrap();
+    assert!(other.status.success());
+    let other_body: Value = serde_json::from_slice(&other.stdout).unwrap();
+    assert_eq!(other_body["status"], "no-saved-credential");
+
+    let locked = asimp(&identity)
+        .env("ASIMP_KEYSTORE_PASSPHRASE_FILE", root.join("missing"))
+        .arg("hello")
+        .output()
+        .unwrap();
+    assert_eq!(locked.status.code(), Some(2));
+    assert!(locked.stdout.is_empty());
+    let diagnostic = String::from_utf8_lossy(&locked.stderr);
+    assert!(diagnostic.contains("Cannot inspect ASIMP_KEYSTORE_PASSPHRASE_FILE"));
+    assert!(!diagnostic.contains(&token));
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let insecure = asimp(&identity)
+        .args(["auth", "status", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(insecure.status.code(), Some(2));
+    assert!(insecure.stdout.is_empty());
+    let diagnostic = String::from_utf8_lossy(&insecure.stderr);
+    assert!(diagnostic.contains("insecure permissions"));
+    assert!(!diagnostic.contains(&token));
+}

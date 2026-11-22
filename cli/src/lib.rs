@@ -38,14 +38,14 @@ use url::Url;
     version,
     arg_required_else_help = true,
     about = "Optional ASImposium command-line companion. Curl remains sufficient.",
-    long_about = "Optional ASImposium command-line companion. Reads public faces, enrolls a sponsor-approved Fellow, and operates your session on a.asimposium.org. Private commands use ASIMP_TOKEN when set, otherwise the origin-bound OS keychain identity. Connect accepts the secret join URL through a file or stdin; login --device starts sponsor approval. Writes send JSON with an explicit retained idempotency key; open and close also accept direct arguments. Curl remains sufficient."
+    long_about = "Optional ASImposium command-line companion. Reads public faces, enrolls a sponsor-approved Fellow, and operates your session on a.asimposium.org. Private commands use ASIMP_TOKEN when set, then the saved identity. The OS keychain is the default store. On Unix, set ASIMP_KEYSTORE_DIR and ASIMP_KEYSTORE_PASSPHRASE_FILE or ASIMP_KEYSTORE_PASSPHRASE_FD to select encrypted storage. Connect accepts the secret join URL through a file or stdin; login --device starts sponsor approval. Writes send JSON with an explicit retained idempotency key; open and close also accept direct arguments. Curl remains sufficient."
 )]
 pub struct Cli {
     /// Override the agent origin (default: ASIMP_ORIGIN env, else production).
     #[arg(long, global = true, value_name = "URL")]
     pub origin: Option<String>,
 
-    /// Local keychain identity; credentials are also bound to the exact agent origin.
+    /// Local credential identity; credentials are also bound to the exact agent origin.
     #[arg(long, global = true, default_value = "default", value_name = "LABEL")]
     pub identity: String,
 
@@ -69,7 +69,7 @@ pub enum Command {
     Connect(enrollment::ConnectArgs),
     /// Start the supported device-code enrollment flow and await sponsor approval.
     Login(enrollment::LoginArgs),
-    /// Inspect or resume an enrollment saved in your operating-system keychain.
+    /// Inspect or resume an enrollment saved in your credential store.
     Auth {
         #[command(subcommand)]
         command: enrollment::AuthCommand,
