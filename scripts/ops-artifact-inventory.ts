@@ -114,16 +114,42 @@ export function runArtifactInventory(opts: {
     if (!existsSync(opts.r2ManifestPath)) {
       throw new Error(`R2_MANIFEST_NOT_FOUND: ${opts.r2ManifestPath}`);
     }
-    const parsed = JSON.parse(readFileSync(opts.r2ManifestPath, "utf8")) as {
-      objects?: R2ObjectEntry[];
-    };
-    if (!Array.isArray(parsed.objects)) {
+    let parsed: { objects?: R2ObjectEntry[] };
+    try {
+      parsed = JSON.parse(readFileSync(opts.r2ManifestPath, "utf8")) as {
+        objects?: R2ObjectEntry[];
+      };
+    } catch {
+      throw new Error("R2_MANIFEST_INVALID: malformed JSON");
+    }
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.objects)) {
       throw new Error("R2_MANIFEST_INVALID: expected { objects: [...] }");
+    }
+    const seenKeys = new Set<string>();
+    for (const obj of parsed.objects) {
+      if (
+        !obj ||
+        typeof obj.key !== "string" ||
+        obj.key.length === 0 ||
+        typeof obj.size_bytes !== "number" ||
+        !Number.isFinite(obj.size_bytes) ||
+        obj.size_bytes < 0
+      ) {
+        throw new Error("R2_MANIFEST_INVALID: entry missing valid key or non-negative size_bytes");
+      }
+      if (seenKeys.has(obj.key)) {
+        throw new Error(`R2_MANIFEST_DUPLICATE_KEY: duplicate key ${obj.key}`);
+      }
+      seenKeys.add(obj.key);
     }
     r2Entries = parsed.objects;
   } else if (opts.r2DirPath) {
     if (!existsSync(opts.r2DirPath)) {
       throw new Error(`R2_DIR_NOT_FOUND: ${opts.r2DirPath}`);
+    }
+    const rootStat = lstatSync(opts.r2DirPath);
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+      throw new Error(`R2_MIRROR_SYMLINK_REFUSED: root path must be a real directory`);
     }
     r2Entries = walkR2Directory(opts.r2DirPath);
   } else {
@@ -239,6 +265,9 @@ if (import.meta.main) {
         }),
       );
       process.exit(0);
+    } else {
+      console.error(`ERROR: unknown argument '${arg}'`);
+      process.exit(2);
     }
   }
 

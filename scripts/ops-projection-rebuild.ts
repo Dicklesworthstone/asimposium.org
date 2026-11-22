@@ -38,8 +38,8 @@ interface EventRow {
   object_id: string;
   object_version: number;
   payload_sha256: string;
-  row_digest: string;
-  chain_digest: string;
+  row_digest: string | null;
+  chain_digest: string | null;
   created_at: string;
   actor_fellow_id: string | null;
   actor_sponsor_id: string | null;
@@ -82,7 +82,7 @@ function loadProblemEventsAndClaims(
                     e.actor_session_id, e.model_string_self_declared,
                     e.harness, e.writer_credential_id
              FROM events e
-             JOIN event_chain_v2 ch
+             LEFT JOIN event_chain_v2 ch
                ON ch.event_id = e.id AND ch.problem_id = e.problem_id AND ch.seq = e.seq
              WHERE e.problem_id = ?
              ORDER BY e.seq ASC`,
@@ -103,6 +103,13 @@ function loadProblemEventsAndClaims(
           .all(problemId)
   ) as EventRow[];
 
+  const missingChain = eventRows.find((r) => !r.row_digest || !r.chain_digest);
+  if (missingChain) {
+    throw new Error(
+      `EVENT_CHAIN_V2_ROW_MISSING: event ${missingChain.id} (seq=${missingChain.seq}) lacks event_chain_v2 digests; refusing projection rebuild`,
+    );
+  }
+
   const claimRows = db
     .prepare(
       `SELECT claim_id, problem_id, source_seq, projection_version, build_digest, stale
@@ -121,8 +128,8 @@ function loadProblemEventsAndClaims(
     objectId: r.object_id,
     objectVersion: r.object_version,
     payloadSha256: r.payload_sha256,
-    rowDigest: r.row_digest,
-    chainDigest: r.chain_digest,
+    rowDigest: r.row_digest ?? "",
+    chainDigest: r.chain_digest ?? "",
     chainVersion: KRATER_CHAIN_VERSION,
     createdAt: r.created_at,
     actorFellowId: r.actor_fellow_id,
@@ -288,6 +295,9 @@ if (import.meta.main) {
         }),
       );
       process.exit(0);
+    } else {
+      console.error(`ERROR: unknown argument '${arg}'`);
+      process.exit(2);
     }
   }
 

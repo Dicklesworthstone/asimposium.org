@@ -32,10 +32,10 @@ export const NEVER_LOG_CATEGORIES = [
 const EXTRA_NEVER_LOG_PATTERNS: readonly RegExp[] = [
   // Presigned S3 / R2 query credentials.
   /([?&](?:X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token|X-Amz-Algorithm)=)[^&#\s]+/gi,
-  // Auth.js session cookie names in headers or logs.
-  /(\b(?:__Secure-)?(?:authjs|next-auth|asimp)\.session(?:-token)?\s*=\s*)[^;\s,"']+/gi,
+  // Auth.js / Agora host-only session cookie names in headers or logs.
+  /((?:__Host-|__Secure-)?(?:authjs|next-auth|asimp)\.session(?:-token)?\s*=\s*)[^;\s,"']+/gi,
   // Service envelope signature headers & raw hex seeds.
-  /(\b(?:x-asimp-service-sig|x-asimp-signature|service_envelope_sig|seed_hex|seedHex|signing_key|private_key_pem)"?\s*(?:=|:)\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&]+)/gi,
+  /(\b(?:x-asimposium-service-signature|x-asimp-service-sig|x-asimp-signature|service_envelope_sig|seed_hex|seedHex|signing_key|private_key_pem)"?\s*(?:=|:)\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&]+)/gi,
 ];
 
 /** Structured JSON keys whose values must NEVER be emitted verbatim in ops logs. */
@@ -86,14 +86,18 @@ export function redactOpsText(input: string): string {
  * Recursively redact structured JSON-compatible values before logging or writing
  * to the immutable audit trail.
  */
-export function redactOpsValue(value: unknown): unknown {
+export function redactOpsValue(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
   if (typeof value === "string") {
     return redactOpsText(value);
   }
-  if (Array.isArray(value)) {
-    return value.map((item) => redactOpsValue(item));
-  }
   if (value !== null && typeof value === "object") {
+    if (seen.has(value)) {
+      return "[CIRCULAR]";
+    }
+    seen.add(value);
+    if (Array.isArray(value)) {
+      return value.map((item) => redactOpsValue(item, seen));
+    }
     const out: Record<string, unknown> = {};
     const redactedKeys: string[] = [];
     for (const [k, v] of Object.entries(value)) {
@@ -101,7 +105,7 @@ export function redactOpsValue(value: unknown): unknown {
       if (NEVER_LOG_OBJECT_KEYS.has(lower)) {
         redactedKeys.push(k);
       } else {
-        out[k] = redactOpsValue(v);
+        out[k] = redactOpsValue(v, seen);
       }
     }
     if (redactedKeys.length > 0) {
@@ -189,9 +193,20 @@ export function appendOpsAuditRecord(
     const raw = readFileSync(auditLogPath, "utf8").trim();
     if (raw.length > 0) {
       const lines = raw.split("\n");
-      const last = JSON.parse(lines[lines.length - 1] ?? "{}") as { entry_sha256?: string };
+      let last: { entry_sha256?: string };
+      try {
+        last = JSON.parse(lines[lines.length - 1] ?? "") as { entry_sha256?: string };
+      } catch {
+        throw new Error(
+          `OPS_AUDIT_LOG_CORRUPT_TAIL: last line of ${auditLogPath} is malformed JSON; refusing to fork audit chain`,
+        );
+      }
       if (typeof last.entry_sha256 === "string" && /^[0-9a-f]{64}$/.test(last.entry_sha256)) {
         prevHash = last.entry_sha256;
+      } else {
+        throw new Error(
+          `OPS_AUDIT_LOG_CORRUPT_TAIL: last entry of ${auditLogPath} lacks valid 64-hex entry_sha256; refusing to fork audit chain`,
+        );
       }
     }
   } else {
@@ -249,7 +264,16 @@ export function verifyOpsAuditLog(auditLogPath: string): {
         error: `AUDIT_LOG_NEVER_LOG_VIOLATION at line ${i + 1}`,
       };
     }
-    const parsed = JSON.parse(raw) as OpsAuditEntry;
+    let parsed: OpsAuditEntry;
+    try {
+      parsed = JSON.parse(raw) as OpsAuditEntry;
+    } catch {
+      return {
+        valid: false,
+        entryCount: i,
+        error: `AUDIT_LOG_MALFORMED_JSON at line ${i + 1}`,
+      };
+    }
     if (parsed.prev_entry_sha256 !== expectedPrev) {
       return {
         valid: false,

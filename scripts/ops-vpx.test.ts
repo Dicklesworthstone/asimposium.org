@@ -716,6 +716,119 @@ describe("OPS.5 runbook index, never-log redaction corpus, and audit-logged ops:
         command: "ops:noop",
       }),
     ).not.toThrow();
+
+    // Fresh-eyes Pass 3 regressions:
+    // 1. Cyclic objects must not stack-overflow redactOpsValue.
+    const cyclic: Record<string, unknown> = { ok: true };
+    cyclic.self = cyclic;
+    const redactedCyclic = redactOpsValue(cyclic) as Record<string, unknown>;
+    expect(redactedCyclic.self).toBe("[CIRCULAR]");
+
+    // 2. __Host-asimp.session cookie and x-asimposium-service-signature header must redact cleanly.
+    const hostCookie = redactOpsText(
+      "Cookie: __Host-asimp.session=secretCookieVal999; x-asimposium-service-signature=sigHex999",
+    );
+    expect(hostCookie).not.toContain("secretCookieVal999");
+    expect(hostCookie).not.toContain("sigHex999");
+
+    // 3. Corrupt JSON audit tail refuses append instead of silently forking from genesis,
+    //    and verifyOpsAuditLog returns structured AUDIT_LOG_MALFORMED_JSON instead of throwing.
+    const corruptLog = join(workDir, "corrupt-audit.ndjson");
+    writeFileSync(corruptLog, '{"broken": true\n', "utf8");
+    expect(() =>
+      appendOpsAuditRecord(corruptLog, {
+        command: "ops:noop",
+        mode: "dry-run",
+        status: "pass",
+        summary: {},
+      }),
+    ).toThrow(/OPS_AUDIT_LOG_CORRUPT_TAIL/);
+    const malformedVerify = verifyOpsAuditLog(corruptLog);
+    expect(malformedVerify.valid).toBe(false);
+    expect(malformedVerify.error).toContain("AUDIT_LOG_MALFORMED_JSON");
+  });
+
+  test("Fresh-eyes Pass 3 regressions: missing event_chain_v2 row, omitted verify-keys, malformed journal, and pending sponsorship_transfer all fail closed", async () => {
+    // 1. Omitting --verify-keys when checkpoint_signatures rows exist fails closed.
+    const noKeys = await runEventVerify({ sqlitePath });
+    expect(noKeys.overall_sound).toBe(false);
+    expect(
+      noKeys.results[0]?.failures.some((f) =>
+        f.includes("CHECKPOINT_SIGNATURES_UNVERIFIED_NO_KEYS"),
+      ),
+    ).toBe(true);
+
+    // 2. Event row missing its event_chain_v2 record is caught by LEFT JOIN (not silently dropped).
+    const missingV2Db = join(workDir, "missing-chain-v2.sqlite");
+    const srcBytes = readFileSync(sqlitePath);
+    writeFileSync(missingV2Db, srcBytes);
+    const mdb = new Database(missingV2Db);
+    mdb.exec("DELETE FROM event_chain_v2;");
+    mdb.close();
+    const missingRes = await runEventVerify({ sqlitePath: missingV2Db, verifyKeysJson });
+    expect(missingRes.overall_sound).toBe(false);
+    expect(
+      missingRes.results[0]?.failures.some((f) => f.includes("EVENT_CHAIN_V2_ROW_MISSING")),
+    ).toBe(true);
+    expect(() => runProjectionRebuild({ sqlitePath: missingV2Db, problemId: "P-OPS5" })).toThrow(
+      /EVENT_CHAIN_V2_ROW_MISSING/,
+    );
+
+    // 3. Malformed retention-journal JSON returns clean quarantined-stop (no uncaught SyntaxError).
+    const badJournal = join(workDir, "bad-journal.json");
+    writeFileSync(badJournal, "{not json", "utf8");
+    const badJournalReport = await runBackupRestoreSmoke({
+      targetIdentifier: "scratch-rehearsal-bad-json",
+      exportNdjsonPath: exportPath,
+      retentionJournalPath: badJournal,
+    });
+    expect(badJournalReport.target_quarantine_state).toBe("quarantined-stop");
+    expect(badJournalReport.failures.some((f) => f.includes("RETENTION_JOURNAL_INVALID"))).toBe(
+      true,
+    );
+
+    // 4. sponsorship_transfer entry detects resurrected pending transfer in sponsor_fellow_transfers.
+    const trfDbPath = join(workDir, "transfer-resurrected.sqlite");
+    writeFileSync(trfDbPath, srcBytes);
+    const tdb = new Database(trfDbPath);
+    tdb.exec(`
+      CREATE TABLE sponsor_fellow_transfers (
+        transfer_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL
+      );
+      INSERT INTO sponsor_fellow_transfers VALUES ('TRF-01OPS5000000000000000001', 'pending');
+    `);
+    tdb.close();
+    const trfEntries: RetentionControlJournal["entries"] = [
+      {
+        id: "RJ-TRF-1",
+        kind: "sponsorship_transfer",
+        target_id: "TRF-01OPS5000000000000000001",
+        recorded_at: "2026-11-21T12:15:00.000Z",
+      },
+    ];
+    const trfJournalPath = join(workDir, "trf-journal.json");
+    writeFileSync(
+      trfJournalPath,
+      JSON.stringify({
+        schema: "asimposium.retention-control-journal.v1",
+        generated_at: "2026-11-21T12:20:00.000Z",
+        snapshot_cutoff_at: "2026-11-21T12:00:00.000Z",
+        entries: trfEntries,
+        entries_sha256: createHash("sha256").update(JSON.stringify(trfEntries)).digest("hex"),
+      }),
+      "utf8",
+    );
+    const trfReport = await runBackupRestoreSmoke({
+      targetIdentifier: "scratch-rehearsal-trf",
+      exportNdjsonPath: exportPath,
+      retentionJournalPath: trfJournalPath,
+      scratchSqlitePath: trfDbPath,
+    });
+    expect(trfReport.target_quarantine_state).toBe("quarantined-stop");
+    expect(trfReport.failures.some((f) => f.includes("STALE_TRANSFER_PENDING_AFTER_RESTORE"))).toBe(
+      true,
+    );
   });
 
   test("all 12 Fable §13.3 runbooks exist, are indexed in INDEX.md, carry rehearsal checklists, and pass P7 scan", () => {

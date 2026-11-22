@@ -431,6 +431,12 @@ async function main(): Promise<void> {
         console.error("Usage: bun scripts/launch-gates-scorecard.ts --gate G1|G2|G3");
         process.exit(2);
       }
+    } else if (argv[i] === "--help" || argv[i] === "-h") {
+      console.log("Usage: bun scripts/launch-gates-scorecard.ts --gate G1|G2|G3");
+      process.exit(0);
+    } else {
+      console.error(`ERROR: unknown argument '${argv[i]}'`);
+      process.exit(2);
     }
   }
   const report = await evaluateLaunchGate(gate);

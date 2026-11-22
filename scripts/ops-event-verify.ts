@@ -54,9 +54,9 @@ interface RawEventRow {
   object_id: string;
   object_version: number;
   payload_sha256: string;
-  row_digest: string;
-  chain_digest: string;
-  chain_version: number;
+  row_digest: string | null;
+  chain_digest: string | null;
+  chain_version: number | null;
   created_at: string;
   actor_fellow_id: string | null;
   actor_sponsor_id: string | null;
@@ -126,7 +126,7 @@ export async function runEventVerify(opts: {
                         e.actor_session_id, e.model_string_self_declared,
                         e.harness, e.writer_credential_id
                  FROM events e
-                 JOIN event_chain_v2 ch
+                 LEFT JOIN event_chain_v2 ch
                    ON ch.event_id = e.id AND ch.problem_id = e.problem_id AND ch.seq = e.seq
                  WHERE e.problem_id = ?
                  ORDER BY e.seq ASC`,
@@ -147,6 +147,13 @@ export async function runEventVerify(opts: {
               .all(problemId)
       ) as RawEventRow[];
 
+      const missingChainV2 = rows.filter((r) => !r.row_digest || !r.chain_digest);
+      for (const missing of missingChainV2) {
+        failures.push(
+          `EVENT_CHAIN_V2_ROW_MISSING: event ${missing.id} (seq=${missing.seq}) lacks event_chain_v2 digests`,
+        );
+      }
+
       const events: KraterEvent[] = rows.map((r) => ({
         eventId: r.id,
         problemId: r.problem_id,
@@ -156,8 +163,8 @@ export async function runEventVerify(opts: {
         objectId: r.object_id,
         objectVersion: r.object_version,
         payloadSha256: r.payload_sha256,
-        rowDigest: r.row_digest,
-        chainDigest: r.chain_digest,
+        rowDigest: r.row_digest ?? "",
+        chainDigest: r.chain_digest ?? "",
         chainVersion: KRATER_CHAIN_VERSION,
         createdAt: r.created_at,
         actorFellowId: r.actor_fellow_id,
@@ -168,7 +175,7 @@ export async function runEventVerify(opts: {
         writerCredentialId: r.writer_credential_id,
       }));
 
-      const chainValid = await eventChainMatches(events);
+      const chainValid = missingChainV2.length === 0 && (await eventChainMatches(events));
       if (!chainValid) {
         failures.push(
           `EVENT_CHAIN_MISMATCH: canonical v2 chain verification failed for ${problemId}`,
@@ -212,7 +219,7 @@ export async function runEventVerify(opts: {
 
       let signaturesChecked = 0;
       let signaturesValid = true;
-      if (hasSignatures && keyMap.size > 0) {
+      if (hasSignatures) {
         const sigs = db
           .prepare(
             `SELECT cs.checkpoint_seq, ic.root_chain_digest, ic.checkpoint_digest,
@@ -224,31 +231,38 @@ export async function runEventVerify(opts: {
              ORDER BY cs.checkpoint_seq ASC`,
           )
           .all(problemId) as RawSigRow[];
-        for (const sig of sigs) {
-          signaturesChecked += 1;
-          const pubHex = keyMap.get(sig.key_id);
-          if (!pubHex) {
-            signaturesValid = false;
-            failures.push(
-              `CHECKPOINT_SIGNATURE_UNKNOWN_KID: kid=${sig.key_id} seq=${sig.checkpoint_seq}`,
-            );
-            continue;
-          }
-          const ok = await verifyCheckpointSignature(
-            problemId,
-            {
-              checkpoint_seq: sig.checkpoint_seq,
-              root_chain_digest: sig.root_chain_digest,
-              checkpoint_digest: sig.checkpoint_digest,
-              signature: sig.signature,
-            },
-            pubHex,
+        if (sigs.length > 0 && keyMap.size === 0) {
+          signaturesValid = false;
+          failures.push(
+            `CHECKPOINT_SIGNATURES_UNVERIFIED_NO_KEYS: ${sigs.length} signature row(s) present for ${problemId} but --verify-keys was omitted`,
           );
-          if (!ok) {
-            signaturesValid = false;
-            failures.push(
-              `CHECKPOINT_SIGNATURE_INVALID: kid=${sig.key_id} seq=${sig.checkpoint_seq}`,
+        } else {
+          for (const sig of sigs) {
+            signaturesChecked += 1;
+            const pubHex = keyMap.get(sig.key_id);
+            if (!pubHex) {
+              signaturesValid = false;
+              failures.push(
+                `CHECKPOINT_SIGNATURE_UNKNOWN_KID: kid=${sig.key_id} seq=${sig.checkpoint_seq}`,
+              );
+              continue;
+            }
+            const ok = await verifyCheckpointSignature(
+              problemId,
+              {
+                checkpoint_seq: sig.checkpoint_seq,
+                root_chain_digest: sig.root_chain_digest,
+                checkpoint_digest: sig.checkpoint_digest,
+                signature: sig.signature,
+              },
+              pubHex,
             );
+            if (!ok) {
+              signaturesValid = false;
+              failures.push(
+                `CHECKPOINT_SIGNATURE_INVALID: kid=${sig.key_id} seq=${sig.checkpoint_seq}`,
+              );
+            }
           }
         }
       }
@@ -321,6 +335,9 @@ if (import.meta.main) {
         }),
       );
       process.exit(0);
+    } else {
+      console.error(`ERROR: unknown argument '${arg}'`);
+      process.exit(2);
     }
   }
 

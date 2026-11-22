@@ -219,11 +219,14 @@ export function buildRfc9421SignatureBase(input: {
   readonly contentDigest?: string;
   readonly signatureParams: string;
 }): string | null {
+  const upperMethod = input.method.toUpperCase();
+  if (!/^[A-Z]{3,16}$/.test(upperMethod)) return null;
+  if (/[\r\n\t]/.test(input.targetUri)) return null;
   const authority = authorityFromUri(input.targetUri);
   if (authority === null) return null;
   if (/[\r\n]/.test(input.authorization)) return null;
   const lines = [
-    `"@method": ${input.method.toUpperCase()}`,
+    `"@method": ${upperMethod}`,
     `"@authority": ${authority}`,
     `"@target-uri": ${input.targetUri}`,
     `"authorization": ${input.authorization}`,
@@ -267,6 +270,14 @@ export async function verifyFellowPopRequest(
   }
 
   const skew = options.clockSkewSeconds ?? POP_CLOCK_SKEW_SECONDS;
+  if (
+    !Number.isFinite(options.nowSeconds) ||
+    !Number.isFinite(skew) ||
+    skew < 0 ||
+    skew > POP_MAX_LIFETIME_SECONDS
+  ) {
+    return refuse("malformed_signature_input");
+  }
   if (
     parsed.expires <= parsed.created ||
     parsed.expires - parsed.created > POP_MAX_LIFETIME_SECONDS

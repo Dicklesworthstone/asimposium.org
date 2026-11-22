@@ -174,6 +174,62 @@ describe("RFC 9421 Ed25519 PoP verification & Rust<->TS interop (asimposiumorg-r
       nonces: new MemoryNonceStore(),
     });
     expect(expired).toEqual({ ok: false, code: "UNAUTHORIZED", reason: "expired" });
+
+    // 1f. Non-finite nowSeconds, negative/excessive clock skew, and CRLF targetUri/method MUST fail closed
+    const nanClock = await verifyFellowPopRequest({
+      method: vec.method,
+      targetUri: vec.target_uri,
+      authorization: vec.authorization,
+      signatureInput: vec.signature_input,
+      signature: vec.signature,
+      contentDigest: vec.content_digest,
+      bodyBytes,
+      expectedPublicKeyBytes: PUBLIC_KEY_BYTES,
+      nowSeconds: Number.NaN,
+      nonces: new MemoryNonceStore(),
+    });
+    expect(nanClock).toEqual({
+      ok: false,
+      code: "UNAUTHORIZED",
+      reason: "malformed_signature_input",
+    });
+
+    const badSkew = await verifyFellowPopRequest({
+      method: vec.method,
+      targetUri: vec.target_uri,
+      authorization: vec.authorization,
+      signatureInput: vec.signature_input,
+      signature: vec.signature,
+      contentDigest: vec.content_digest,
+      bodyBytes,
+      expectedPublicKeyBytes: PUBLIC_KEY_BYTES,
+      nowSeconds: vec.created + 10,
+      clockSkewSeconds: -5,
+      nonces: new MemoryNonceStore(),
+    });
+    expect(badSkew).toEqual({
+      ok: false,
+      code: "UNAUTHORIZED",
+      reason: "malformed_signature_input",
+    });
+
+    const crlfUri = await verifyFellowPopRequest({
+      method: vec.method,
+      targetUri: `${vec.target_uri}\r\n"@method": DELETE`,
+      authorization: vec.authorization,
+      signatureInput: vec.signature_input,
+      signature: vec.signature,
+      contentDigest: vec.content_digest,
+      bodyBytes,
+      expectedPublicKeyBytes: PUBLIC_KEY_BYTES,
+      nowSeconds: vec.created + 10,
+      nonces: new MemoryNonceStore(),
+    });
+    expect(crlfUri).toEqual({
+      ok: false,
+      code: "UNAUTHORIZED",
+      reason: "malformed_signature_input",
+    });
   });
 
   test("credential_profile enforcement keeps plain bearer curl tokens first-class while enforcing PoP on http-message-signature tokens", async () => {

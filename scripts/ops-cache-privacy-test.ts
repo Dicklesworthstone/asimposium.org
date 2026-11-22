@@ -190,6 +190,9 @@ if (import.meta.main) {
         }),
       );
       process.exit(0);
+    } else {
+      console.error(`ERROR: unknown argument '${arg}'`);
+      process.exit(2);
     }
   }
 
@@ -198,12 +201,22 @@ if (import.meta.main) {
     process.exit(2);
   }
 
+  const readRequiredEnv = (flag: string, envName: string): string | null => {
+    if (!envName) return null;
+    const val = process.env[envName];
+    if (!val || val.trim().length === 0) {
+      console.error(`ERROR: ENV_VAR_UNSET:${envName} (referenced by ${flag})`);
+      process.exit(2);
+    }
+    return val;
+  };
+
   runCachePrivacyTest({
     origin,
     targetPath,
-    ownerToken: ownerTokenEnv ? (process.env[ownerTokenEnv] ?? null) : null,
-    otherToken: otherTokenEnv ? (process.env[otherTokenEnv] ?? null) : null,
-    canary: canaryEnv ? (process.env[canaryEnv] ?? null) : null,
+    ownerToken: readRequiredEnv("--owner-token-env", ownerTokenEnv),
+    otherToken: readRequiredEnv("--other-token-env", otherTokenEnv),
+    canary: readRequiredEnv("--canary-env", canaryEnv),
     auditLogPath,
   })
     .then((report) => {

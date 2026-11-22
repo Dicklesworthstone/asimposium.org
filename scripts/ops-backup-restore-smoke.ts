@@ -78,8 +78,19 @@ function verifyRetentionJournal(journalPath: string): {
       error: `RETENTION_JOURNAL_REQUIRED: missing retention-control journal at ${journalPath}; target MUST stay quarantined`,
     };
   }
-  const parsed = JSON.parse(readFileSync(journalPath, "utf8")) as Partial<RetentionControlJournal>;
+  let parsed: Partial<RetentionControlJournal>;
+  try {
+    parsed = JSON.parse(readFileSync(journalPath, "utf8")) as Partial<RetentionControlJournal>;
+  } catch {
+    return {
+      ok: false,
+      journal: null,
+      error: "RETENTION_JOURNAL_INVALID: malformed JSON; target MUST stay quarantined",
+    };
+  }
   if (
+    parsed === null ||
+    typeof parsed !== "object" ||
     parsed.schema !== "asimposium.retention-control-journal.v1" ||
     !Array.isArray(parsed.entries) ||
     typeof parsed.entries_sha256 !== "string"
@@ -155,6 +166,21 @@ function runNegativeAuthorityProbes(
           .get(entry.target_id) as { n: number } | null;
         if ((live?.n ?? 0) > 0) {
           failures.push(`DELETED_ACCOUNT_RESURRECTED: sponsor ${entry.target_id} still active`);
+        }
+      } else if (entry.kind === "sponsorship_transfer") {
+        if (!tables.has("sponsor_fellow_transfers")) {
+          failures.push("MISSING_REQUIRED_AUTHORITY_TABLE: sponsor_fellow_transfers");
+          continue;
+        }
+        const pending = db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM sponsor_fellow_transfers WHERE transfer_id = ? AND status = 'pending'",
+          )
+          .get(entry.target_id) as { n: number } | null;
+        if ((pending?.n ?? 0) > 0) {
+          failures.push(
+            `STALE_TRANSFER_PENDING_AFTER_RESTORE: transfer ${entry.target_id} still pending`,
+          );
         }
       } else if (entry.kind === "content_control") {
         if (!tables.has("content_controls")) {
@@ -304,6 +330,9 @@ if (import.meta.main) {
         }),
       );
       process.exit(0);
+    } else {
+      console.error(`ERROR: unknown argument '${arg}'`);
+      process.exit(2);
     }
   }
 
