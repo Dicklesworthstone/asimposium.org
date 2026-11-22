@@ -14,6 +14,7 @@ import {
   PromoteResponseSchema,
   TriageResponseSchema,
 } from "@asimposium/contracts";
+import { ActiveDirectiveResponseSchema } from "../../../../packages/contracts/src/directives.ts";
 import { EventTailResponseSchema } from "../../../../packages/contracts/src/event-tail.ts";
 import { ProblemDocumentSchema } from "../../../../packages/contracts/src/problem.ts";
 import {
@@ -1665,6 +1666,35 @@ await runLocalWorkerJourney(
     const bound = await enroll("stoa-action-bound", "usr_stoa_action_bound", {
       problem_binding: problem,
     });
+    const emptyHello = EnrollmentHelloResponseSchema.parse(
+      await call("/v1/hello", undefined, bound),
+    );
+    const emptyDirective = emptyHello.next_actions.find(
+      ({ url }) => new URL(url).pathname === "/v1/directives/active",
+    );
+    assert.equal(emptyDirective?.action, "reference", "a verified empty set needs no repeat read");
+    const activeUrl = new URL(emptyDirective.url);
+    assert.equal(activeUrl.origin, origin);
+    assert.equal(activeUrl.searchParams.get("problem_id"), problem);
+    const activePath = activeUrl.pathname + activeUrl.search;
+    const emptyPage = ActiveDirectiveResponseSchema.parse(await call(activePath, undefined, bound));
+    assert.equal(emptyPage.focus, null);
+    assert.deepEqual(emptyPage.forbids, []);
+    assert.equal(emptyPage.has_more, false);
+    const privateForbid = "Avoid packaging several independent claims in a single promotion.";
+    const issuedForbid = await sponsorCall(
+      "usr_stoa_action_bound",
+      "POST",
+      "/v1/sponsors/directives",
+      "issue-directive",
+      {
+        fellow_id: emptyHello.fellow.fellow_id,
+        problem_id: problem,
+        verb: "forbid",
+        text: privateForbid,
+      },
+      201,
+    );
     const boundHello = EnrollmentHelloResponseSchema.parse(
       await call("/v1/hello", undefined, bound),
     );
@@ -1683,6 +1713,16 @@ await runLocalWorkerJourney(
     SessionOpenRequestSchema.parse(boundOpenAction.request.body_prefill);
     const directiveIndex = boundHello.next_actions.findIndex((action) =>
       action.url.includes("/v1/directives/active"),
+    );
+    assert.equal(boundHello.next_actions[directiveIndex]?.action, "read");
+    assert.ok(!JSON.stringify(boundHello).includes(privateForbid));
+    const activePage = ActiveDirectiveResponseSchema.parse(
+      await call(activePath, undefined, bound),
+    );
+    assert.ok(
+      activePage.forbids.some(
+        (item) => item.directive_id === issuedForbid.directive_id && item.text === privateForbid,
+      ),
     );
     assert.ok(
       directiveIndex >= 0 && directiveIndex < boundHello.next_actions.indexOf(boundOpenAction),
@@ -1753,6 +1793,15 @@ await runLocalWorkerJourney(
       }
     }
     assert.ok(advertisedSession, "the advertised session action actually opens a session");
+    const firstWorking = advertisedSession.next_actions.find(({ url }) => url.includes("/pack"));
+    assert.ok(firstWorking);
+    const boundPack = PackResponseSchema.parse(await call(firstWorking.url, undefined, bound));
+    assert.ok(
+      boundPack.items.some(
+        ({ kind, body }) => kind === "sponsor-directive" && body.includes(privateForbid),
+      ),
+      "the first working pack independently includes instructions issued after hello",
+    );
     const boundReturning = await call("/v1/hello", undefined, bound);
     assert.equal(boundReturning.protocol_acknowledged, true);
     assert.equal(startAction(boundReturning), undefined, "the bound problem already has a session");

@@ -41,13 +41,13 @@ function fixture() {
       movesProvider: new ContractFixtureMovesProvider({ triageMoves }),
     }),
   );
-  async function enroll(tag: string, problemId?: string) {
+  async function enroll(tag: string, problemId?: string, includeInitialDirective = true) {
     const sponsor = { type: "sponsor" as const, sponsorId: "usr_hello_" + tag };
     await service.bootstrapSponsor(sponsor);
     const directive = "PRIVATE-HELLO-DIRECTIVE-" + tag;
     const minted = await service.mint(sponsor, {
       requested_scopes: ["review"],
-      first_directive: directive,
+      ...(includeInitialDirective ? { first_directive: directive } : {}),
       ...(problemId === undefined ? {} : { problem_binding: problemId }),
     });
     const claimed = await service.claim({
@@ -133,6 +133,23 @@ describe("authenticated hello sponsor-directive continuation", () => {
       ORIGIN + "/schemas/sessions.v1/session_open_request.json",
     );
     expect(sessionAction?.request).not.toHaveProperty("body_prefill");
+  });
+
+  test("bound hello still requires a read when live directive authority is unavailable", async () => {
+    const f = fixture();
+    // This fixture's enrollment is in memory, so D1 cannot establish the
+    // live authority needed to distinguish an empty set from an unknown set.
+    const owner = await f.enroll("unknown", "P-UNKNOWN", false);
+    const response = await f.get("/v1/hello", owner.token);
+    expect(response.status).toBe(200);
+    const hello = EnrollmentHelloResponseSchema.parse(await response.json());
+    expect(hello.protocol_acknowledged).toBe(false);
+    expect(hello.open_sessions).toEqual([]);
+    expect(hello.granted_resources.first_directive).toBeUndefined();
+    expect(hello.next_actions.find(({ url }) => url.startsWith(ACTIVE))).toMatchObject({
+      action: "read",
+      url: ACTIVE + "?problem_id=P-UNKNOWN",
+    });
   });
 
   test("triage JSON and Markdown retain the same bounded instruction read before a recommended move", async () => {

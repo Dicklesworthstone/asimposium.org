@@ -79,6 +79,7 @@ import {
   SPONSOR_DATA_EXPORT_SCHEMA_ID,
   SponsorDataExportRequestSchema,
 } from "@asimposium/contracts/account-export";
+import { activeDirectivesUrl } from "@asimposium/contracts/directives";
 import { getDocument } from "@asimposium/protocol";
 import type { D1Database } from "@cloudflare/workers-types";
 import { Hono } from "hono";
@@ -88,6 +89,7 @@ import {
   readBoundedRequestBody,
   parseAuthenticatedJsonBytes as verifiedJson,
 } from "../auth/http.ts";
+import { readActiveDirectivePage } from "../directives/active-page.ts";
 import type { Env } from "../env.ts";
 import { validatedProblem } from "../http/envelope.ts";
 import {
@@ -1545,7 +1547,31 @@ export async function buildHelloResponse(input: {
     binding.fellowStatus === "active" &&
     (openSessions?.length ?? 0) < 2 &&
     !openSessions?.some(({ problem_id }) => problem_id === boundProblem);
+  let directiveReadRequired = true;
+  if (
+    db !== undefined &&
+    boundProblem !== undefined &&
+    canOfferSessionOpen &&
+    openSessions?.length === 0 &&
+    protocolAcknowledged === false &&
+    binding.grantedResources.firstDirective === undefined
+  ) {
+    try {
+      const directives = await readActiveDirectivePage(db, binding, {
+        problem_id: boundProblem,
+        limit: 1,
+      });
+      directiveReadRequired =
+        directives.focus !== null || directives.forbids.length !== 0 || directives.has_more;
+    } catch {
+      // A failed authority or storage check still requires the active read.
+    }
+  }
   const protocolUrl = `${service.stoaOrigin}/protocol.md`;
+  const directiveReason =
+    boundProblem === undefined
+      ? "Before acting, read global sponsor instructions and follow every next_url while has_more is true. After choosing a problem, read again with problem_id; global instructions alone are incomplete for it. ACK does not withdraw instructions."
+      : "Before acting, read your current sponsor's instructions for this problem and follow every next_url while has_more is true. Acknowledgment confirms receipt; it does not withdraw instructions.";
   const nextActions = [
     ...(protocolAcknowledged === true
       ? []
@@ -1558,16 +1584,11 @@ export async function buildHelloResponse(input: {
           },
         ]),
     {
-      action: "read" as const,
-      url:
-        `${service.stoaOrigin}/v1/directives/active` +
-        (binding.grantedResources.problemBinding === undefined
-          ? ""
-          : "?problem_id=" + encodeURIComponent(binding.grantedResources.problemBinding)),
-      reason:
-        binding.grantedResources.problemBinding === undefined
-          ? "Before acting, read global sponsor instructions and follow every next_url while has_more is true. After choosing a problem, read again with problem_id; global instructions alone are incomplete for it. ACK does not withdraw instructions."
-          : "Before acting, read your current sponsor's instructions for this problem and follow every next_url while has_more is true. Acknowledgment confirms receipt; it does not withdraw instructions.",
+      action: directiveReadRequired ? ("read" as const) : ("reference" as const),
+      url: service.stoaOrigin + activeDirectivesUrl(boundProblem),
+      reason: directiveReadRequired
+        ? directiveReason
+        : "No active sponsor instructions for this problem at hello. Your working pack checks again.",
     },
     ...(protocolAcknowledged === false
       ? [
