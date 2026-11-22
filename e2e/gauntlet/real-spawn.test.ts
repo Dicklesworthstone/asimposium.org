@@ -148,8 +148,9 @@ describe("the Rule A11 retention boundary", () => {
 
   test("raw stderr can echo credentials, but none may enter a retained record", async () => {
     const credential = "SECRET-ENROLLMENT-FRAGMENT-CANARY";
-    installFakeCli("claude", `printf "${credential}\\n" >&2; printf "started\\n"`);
+    installFakeCli("claude", `cat >/dev/null; printf "${credential}\\n" >&2; printf "started\\n"`);
     const outcome = await attempt();
+    expect(outcome.diagnostic.stdinWriteFailed).toBe(false);
     expect(outcome.diagnostic.stderrTail).toContain(credential);
     const retained = redactForRetention(ADAPTER.harness, outcome, "none", 0);
     expect(JSON.stringify(retained)).not.toContain(credential);
