@@ -3867,11 +3867,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     };
     const packResponse = async (composed: ReturnType<typeof composePack>): Promise<Response> => {
       const rendered = renderProjection(composedPackToProjection(composed), "json");
-      const body = rendered.body;
-      const parsed = JSON.parse(body);
+      const parsed = JSON.parse(rendered.body);
       PackResponseSchema.parse(parsed);
+      const body = JSON.stringify(parsed);
       const itemTokenTotal = composed.items.reduce((total, item) => total + item.tokens, 0);
-      const est = Math.max(composed.tokens_estimate, Math.ceil(byteLength(body) / 4));
+      // Keep the composer's budget tied to the canonical rendering.
+      const est = Math.max(composed.tokens_estimate, Math.ceil(rendered.bytes / 4));
       if (itemTokenTotal > est) {
         throw new Error("pack composer token estimate diverged from the canonical JSON face");
       }

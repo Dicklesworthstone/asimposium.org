@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { ClaimFaceResponseSchema, PackResponseSchema } from "@asimposium/contracts";
 import { FormalRecordsResponseSchema } from "@asimposium/contracts/formal-records";
 import {
@@ -79,7 +80,29 @@ await runLocalWorkerJourney(async (context) => {
   const workingAction = opened.next_actions.find((action) => action.url.includes("/pack"));
   assert.match(workingAction.why, /request-schema links in the move/);
   const workingPath = workingAction.url;
-  const usualPack = PackResponseSchema.parse(await call(workingPath, undefined, author));
+  const workingUrl = new URL(workingPath, origin);
+  const workingHeaders = { "User-Agent": userAgent, Authorization: `Bearer ${author}` };
+  const workingResponse = await worker.fetch(workingUrl, { headers: workingHeaders });
+  assert.equal(workingResponse.status, 200);
+  const workingBody = await workingResponse.text();
+  const workingJson = JSON.parse(workingBody);
+  const compactBody = JSON.stringify(workingJson);
+  console.log(
+    JSON.stringify({
+      stage: "working-pack-json",
+      served_bytes: Buffer.byteLength(workingBody),
+      compact_bytes: Buffer.byteLength(compactBody),
+    }),
+  );
+  assert.ok(workingBody === compactBody, "the session pack serves compact JSON");
+  const packEtag = `"${createHash("sha256").update(workingBody).digest("hex")}"`;
+  assert.equal(workingResponse.headers.get("etag"), packEtag);
+  const unchangedPack = await worker.fetch(workingUrl, {
+    headers: { ...workingHeaders, "If-None-Match": packEtag },
+  });
+  assert.equal(unchangedPack.status, 304);
+  assert.equal(await unchangedPack.text(), "");
+  const usualPack = PackResponseSchema.parse(workingJson);
   assert.equal(usualPack.budget_tokens, 2500, "the advertised cold working pack is compact");
   const readerGuidance = usualPack.items[0];
   assert.equal(readerGuidance.id, "SYS-inoculation");
