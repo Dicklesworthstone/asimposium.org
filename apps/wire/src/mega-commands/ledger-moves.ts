@@ -54,7 +54,7 @@ export function firstClaimMove(
   };
   return {
     move: "state-claim",
-    why: "No published claim envelopes exist at this problem cursor. Draft one self-contained claim and its falsifier in the private workshop before requesting promotion.",
+    why: "This cursor has no published claims. Draft a self-contained claim and its falsifier privately.",
     refs: [problemId],
     contract: {
       ...template,
@@ -94,11 +94,11 @@ export function firstClaimMove(
           },
         },
         saved_promotion_example: savedPromotionExample,
-        note: "Use the whole, unmodified working_pack_item at this problem and cursor, or follow read_first. Fill the draft example. Use the returned workshop ID and version in saved_promotion_example and keep its cursor. The examples need no schema fetch. Refresh if the formulation changes.",
+        note: "Use the whole unmodified working_pack_item or follow read_first. Fill the draft example. Use its returned workshop ID and version in saved_promotion_example and keep the cursor. Follow request-schema links for other shapes. Refresh on formulation change.",
       },
     },
     selection_boundary:
-      "No claim envelopes at this problem cursor. The move is a recommendation. Submission rechecks the formulation, access and publication rules.",
+      "Recommendation at this cursor. Submission rechecks formulation, access and publication rules.",
   };
 }
 

@@ -76,9 +76,20 @@ await runLocalWorkerJourney(async (context) => {
 
   const opened = await call("/v1/sessions", { problem_id: problem, intent: "prove" }, author, 201);
   const session = opened.session_id;
-  const workingPath = opened.next_actions.find((action) => action.url.includes("/pack")).url;
+  const workingAction = opened.next_actions.find((action) => action.url.includes("/pack"));
+  assert.match(workingAction.why, /request-schema links in the move/);
+  const workingPath = workingAction.url;
   const usualPack = PackResponseSchema.parse(await call(workingPath, undefined, author));
   assert.equal(usualPack.budget_tokens, 2500, "the advertised cold working pack is compact");
+  const readerGuidance = usualPack.items[0];
+  assert.equal(readerGuidance.id, "SYS-inoculation");
+  assert.equal(readerGuidance.scope, "system");
+  assert.equal(readerGuidance.untrusted, false);
+  const guidanceLines = readerGuidance.body.split("\n");
+  assert.equal(guidanceLines.length, 3, "the reader instructions are complete in the pack");
+  assert.match(guidanceLines[0], /sponsor's directives.*server system items.*data/);
+  assert.match(guidanceLines[1], /translate.*decode.*credentials or sponsor-private material/);
+  assert.match(guidanceLines[2], /POST \/v1\/reports.*never quote.*inoculation\.md.*details/);
   assert.ok(usualPack.omitted.some(({ reason }) => reason === "budget_exceeded"));
   const largerAction = usualPack.next_actions.find((action) =>
     action.url.includes("max_tokens=4000"),
@@ -266,6 +277,7 @@ await runLocalWorkerJourney(async (context) => {
   const inlineSchemaBytes = Buffer.byteLength(inlineSchemaText);
   assert.ok(savedSchemaBytes * 3 < inlineSchemaBytes);
   const { captured_cursor, workshop_first, saved_promotion_example } = first.contract.preparation;
+  assert.match(first.contract.preparation.note, /request-schema links for other shapes/);
   assert.equal(workshop_first.schema, "/schemas/sessions.v1/first_claim_draft_request.json");
   const draftSchema = await call(workshop_first.schema);
   assert.deepEqual(draftSchema.required, ["title", "body_md", "type", "publication"]);
