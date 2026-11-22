@@ -132,10 +132,7 @@ import {
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { type Context, Hono } from "hono";
 import { cancelUnconsumedRequestBody, readBoundedRequestBody } from "../auth/http";
-import {
-  accountSponsorDirectiveOmissions,
-  readActiveSponsorDirectives,
-} from "../directives/active.ts";
+import { readActiveSponsorDirectives } from "../directives/active.ts";
 import type {
   EncryptedEnrollmentReplay,
   EnrollmentService,
@@ -313,7 +310,7 @@ import {
   snapshotSessionProvenance,
 } from "./provenance";
 import { findQuestionLeaseSource, QUESTION_LEASE_STATE_SQL } from "./question-leases.ts";
-import { accountQuestionPackOmissions, readQuestionPack } from "./questions-pack.ts";
+import { readQuestionPack } from "./questions-pack.ts";
 import {
   checkAndReserveQuota,
   checkAndReserveQuotaBatch,
@@ -328,6 +325,10 @@ import {
   narrowSessionRefusalSchema,
   SESSIONS_SCHEMA_URL as SESSIONS_SCHEMA_URI,
 } from "./refusal-schema";
+import {
+  accountArrivalContextOmissions,
+  readResearchFrontierPack,
+} from "./research-frontier-pack.ts";
 import { readProblemReviewFeedback } from "./review-feedback.ts";
 import {
   assertSessionClosePublicationPins,
@@ -4078,11 +4079,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ],
           });
         }
-        composed = accountSponsorDirectiveOmissions(input, composed);
-        // Question omission adds at most one bounded marker; it can displace
-        // instructions, whose own fixed-point accounting must run once more.
-        composed = accountQuestionPackOmissions(input, composed);
-        composed = accountSponsorDirectiveOmissions(input, composed);
+        // Bound source-family and sponsor-instruction omission accounting;
+        // never recycle generated generic markers until bytes converge.
+        composed = accountArrivalContextOmissions(input, composed);
         const prefixOmitted = input.candidates.some(
           (item) =>
             (item.id === "SYS-inoculation" ||
@@ -4348,6 +4347,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ? await readQuestionPack(db, session.problem_id, cursor)
         : { candidates: [], omitted: [], actions: [] };
     candidates.push(...questions.candidates);
+    const frontier =
+      !isPrivateDraft && (profile === "orient" || profile === "working")
+        ? await readResearchFrontierPack(db, session.problem_id, cursor)
+        : { candidates: [], omitted: [], actions: [] };
+    candidates.push(...frontier.candidates);
 
     const targetSection =
       targetParam === null
@@ -4975,6 +4979,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...questions.omitted
           .filter((item) => item.reason.endsWith("_unavailable"))
           .map((item) => item.reason),
+        ...frontier.omitted
+          .filter((item) => item.reason.endsWith("_unavailable"))
+          .map((item) => item.reason),
       ],
       candidates,
       // wqlf: an exhausted grant-wide event budget makes both write
@@ -4999,6 +5006,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           : []),
         ...orientation.actions,
         ...questions.actions,
+        ...frontier.actions,
         ...directiveContext.actions,
         ...(workingMoves.primaryMove !== null && isStatementReviewMove(workingMoves.primaryMove)
           ? [
@@ -5122,6 +5130,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       omitted: [
         ...orientation.omitted,
         ...questions.omitted,
+        ...frontier.omitted,
         ...targetSection.omitted,
         ...deadEndSection.omitted,
         ...(claimContentUnavailable ? [{ reason: "content_unavailable", detail: "claims" }] : []),
