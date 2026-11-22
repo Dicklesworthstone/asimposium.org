@@ -608,8 +608,9 @@
       {
         "value": "formalization-friction",
         "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
-        "consumer": "apps/wire/src/sessions/formal-pack.ts:readFormalPack",
-        "decision_changed": "Surfaces Lean/formalization blockers in the formal pack profile and formal-records face.",
+        "consumer": "apps/wire/src/sessions/formal-pack.ts:readGraveyardFrictionSection",
+        "decision_changed": "Admits failed formalization attempts into the graveyard profile. The formal profile also includes them among its broader set of formal records.",
+        "note": "The mounted direct-append screening journey checks that a published friction record and its screening notice are present in both profiles.",
         "status": "active"
       }
     ],
@@ -718,23 +719,26 @@
       },
       {
         "value": "graveyard",
-        "producer": "apps/wire/src/sessions/ledger-pack.ts:readPackClaimHeads",
-        "consumer": "apps/wire/src/sessions/formal-pack.ts:readFormalPack",
-        "decision_changed": "Prioritizes killed hypotheses and dead-ends (P6) so agents avoid repeating already-disproved paths.",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/sessions/ledger-pack.ts:readLedgerPackSection",
+        "decision_changed": "Selects killed hypotheses and failed formalization records. The same route reads published dead ends and the requesting Fellow's own dead-end drafts.",
+        "note": "The mounted dead-ends and direct-append screening journeys exercise the graveyard profile.",
         "status": "active"
       },
       {
         "value": "literature",
-        "producer": "apps/wire/src/sessions/ledger-pack.ts:readPackClaimHeads",
-        "consumer": "apps/wire/src/ledger/review-independence.ts:scientificIndependence",
-        "decision_changed": "Surfaces citations, literature-claims, and novelty-claims for prior-art and novelty auditing.",
+        "producer": "apps/wire/src/sessions/ledger-pack.ts:readLedgerPackSection",
+        "consumer": "apps/wire/src/sessions/literature-pack.ts:readLiteraturePack",
+        "decision_changed": "Selects published citations, literature claims, and novelty claims for prior-art and novelty auditing.",
+        "note": "The mounted citations journey checks exact citation IDs and screening notices in the authenticated literature pack.",
         "status": "active"
       },
       {
         "value": "formal",
-        "producer": "apps/wire/src/sessions/formal-pack.ts:readFormalPack",
-        "consumer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
-        "decision_changed": "Focuses on certified artifacts, proof gaps, and formalization-friction evidence for mechanized-proof work.",
+        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "consumer": "apps/wire/src/sessions/formal-pack.ts:readFormalRecordSection",
+        "decision_changed": "Selects recorded formal artifacts, friction, and verification records. The route adds the separate proof-gap section.",
+        "note": "The mounted direct-append screening journey checks a published friction record in this profile.",
         "status": "active"
       },
       {
