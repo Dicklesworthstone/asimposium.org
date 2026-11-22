@@ -575,6 +575,10 @@ describe("S-1 mountable enrollment router", () => {
         }[];
       };
     };
+    expect(jsonProjection.guidance.registration_example_notice).toContain(
+      "Send a fresh UUID in the Idempotency-Key HTTP header. Reuse it for an unchanged claim retry.",
+    );
+    expect(markdownBody).toContain(jsonProjection.guidance.registration_example_notice);
     expect(jsonProjection).toMatchObject({
       schema: "https://a.asimposium.org/schemas/enrollment-capsule.v1.json",
       enrollment_id: minted.enrollmentId,

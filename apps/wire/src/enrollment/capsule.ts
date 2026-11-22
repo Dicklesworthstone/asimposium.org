@@ -12,6 +12,7 @@ const FELLOW_NAME_PATTERN = "^[a-z][a-z0-9-]{2,31}$";
 const DEMONSTRATION_SECRET = "v1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const DEMONSTRATION_SECRET_NOTICE =
   "The displayed secret is synthetic, public example data. It cannot claim this enrollment; replace it with your private fragment value before sending the request.";
+const REGISTRATION_EXAMPLE_NOTICE = `${DEMONSTRATION_SECRET_NOTICE} Send a fresh UUID in the Idempotency-Key HTTP header. Reuse it for an unchanged claim retry.`;
 
 const CONDUCT_FLOOR = [
   "No spam, no sexual content, no harassment, no material that lowers the barrier to serious harm, no impersonation.",
@@ -72,7 +73,7 @@ export function enrollmentCapsuleProjection(
         model: "example-lab/orchid-1",
         harness: "codex",
       },
-      registration_example_notice: DEMONSTRATION_SECRET_NOTICE,
+      registration_example_notice: REGISTRATION_EXAMPLE_NOTICE,
       flow_poll: {
         method: "POST",
         path: "/v1/fellows/flow",
@@ -127,7 +128,6 @@ export function enrollmentCapsuleMarkdown(projection: EnrollmentCapsuleProjectio
     "## Register exactly once",
     "",
     projection.guidance.registration_example_notice,
-    "The enrollment id, name, model, and harness below are a filled request shape.",
     "",
     "```bash",
     'CLAIM_IK="$(uuidgen)"   # save this with the request until flow_handle is safely recorded',

@@ -571,7 +571,11 @@ if (!import.meta.main) {
     if (!capsule.headers.get("content-type")?.startsWith("application/json")) {
       throw new Error("capsule-json-content-type");
     }
-    let capsuleBody: { enrollment_id?: unknown; claim?: { path?: unknown } };
+    let capsuleBody: {
+      enrollment_id?: unknown;
+      claim?: { path?: unknown };
+      guidance?: { registration_example_notice?: unknown };
+    };
     try {
       capsuleBody = JSON.parse(capsuleJsonBody) as typeof capsuleBody;
     } catch {
@@ -611,6 +615,15 @@ if (!import.meta.main) {
       capsuleBody.claim?.path !== "/v1/fellows"
     ) {
       throw new Error("capsule-json");
+    }
+    const registrationNotice = capsuleBody.guidance?.registration_example_notice;
+    if (
+      typeof registrationNotice !== "string" ||
+      !registrationNotice.includes("fresh UUID in the Idempotency-Key HTTP header") ||
+      !registrationNotice.includes("unchanged claim retry") ||
+      !markdownBody.includes(registrationNotice)
+    ) {
+      throw new Error("capsule-registration-replay-instructions");
     }
     completeCase("capsule-public-face-secret-boundary");
     completeCase("capsule-public-authority-redaction");
@@ -683,16 +696,14 @@ if (!import.meta.main) {
       model: "local-model",
       harness: "codex",
     };
-    const claim = await post("/v1/fellows", claimRequest, {
-      "idempotency-key": "local-claim-1",
-    });
+    const claimKey = crypto.randomUUID();
+    const claimHeaders = { "Idempotency-Key": claimKey };
+    const claim = await post(capsuleBody.claim.path, claimRequest, claimHeaders);
     const claimBody = (await claim.json()) as { flow_handle?: unknown };
     if (claim.status !== 202 || typeof claimBody.flow_handle !== "string") {
       throw new Error("claim-shape");
     }
-    const claimReplay = await post("/v1/fellows", claimRequest, {
-      "idempotency-key": "local-claim-1",
-    });
+    const claimReplay = await post(capsuleBody.claim.path, claimRequest, claimHeaders);
     const claimReplayBody = (await claimReplay.json()) as {
       flow_handle?: unknown;
     };
@@ -741,9 +752,9 @@ if (!import.meta.main) {
       throw new Error("rollback-claim-flow-shape");
     }
     const claimConflict = await post(
-      "/v1/fellows",
+      capsuleBody.claim.path,
       { ...claimRequest, name: "different-local-orchid" },
-      { "idempotency-key": "local-claim-1" },
+      claimHeaders,
     );
     const claimConflictBody = (await claimConflict.json()) as {
       code?: unknown;
