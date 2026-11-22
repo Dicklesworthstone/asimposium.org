@@ -306,6 +306,64 @@ describe("author concession", () => {
     });
   }
 
+  test("evidence cannot publish onto a claim version conceded during screening", async () => {
+    let race: (() => Promise<void>) | undefined;
+    const f = await setup({
+      screenPromotion: async (input) => {
+        if (input.kind === "evidence" && race) {
+          const action = race;
+          race = undefined;
+          await action();
+        }
+        return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+      },
+    });
+    race = async () => {
+      const conceded = await f.send(`${f.path}/retract`, f.body, "concede-during-evidence");
+      expect(conceded.status, await conceded.clone().text()).toBe(201);
+    };
+    const events = await f.count("events");
+    const evidence = await f.count("evidence");
+    const evidenceBody = {
+      bears_on_kind: "claim",
+      bears_on_id: f.claim.claim_id,
+      bears_on_version: 1,
+      direction: "informs",
+      kind: "argument",
+      source: { kind: "model_memory" },
+      mode: "exploratory",
+      body_md: "A new parity argument must not enter a version whose author just conceded it.",
+    };
+    const response = await f.sendWith(
+      f.other.call,
+      "/v1/p/P-4DSP/evidence",
+      evidenceBody,
+      "evidence-racing-concession",
+    );
+    expect(response.status, await response.clone().text()).toBe(422);
+    expect(await response.json()).toMatchObject({ code: "EVIDENCE_BODY_INVALID" });
+    expect(await f.count("claim_concessions")).toBe(1);
+    expect(await f.count("events")).toBe(events + 1);
+    expect(await f.count("evidence")).toBe(evidence);
+    expect(
+      await f.db
+        .prepare("SELECT COUNT(*) AS n FROM session_write_replays WHERE idempotency_key = ?")
+        .bind("evidence-racing-concession")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 0 });
+
+    // Closing the old version must leave a fresh revision available for work.
+    const revised = await f.revise();
+    expect(revised.status, await revised.clone().text()).toBe(201);
+    const fresh = await f.sendWith(
+      f.other.call,
+      "/v1/p/P-4DSP/evidence",
+      { ...evidenceBody, bears_on_version: 2 },
+      "evidence-after-conceded-version-revised",
+    );
+    expect(fresh.status, await fresh.clone().text()).toBe(201);
+  });
+
   test("conceded premises trigger one repair notice for each dependent author", async () => {
     const f = await setup({}, true);
     await deliverDispositionChanges(f.db);

@@ -10666,7 +10666,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           WHERE head_version.problem_id = claims.problem_id AND head_version.claim_id = claims.id) = ?
         AND (? = 0 OR claims.statement_drift = 0)
         AND NOT EXISTS (SELECT 1 FROM retractions retired
-          WHERE retired.problem_id = claims.problem_id AND retired.target_object = claims.id)
+          WHERE retired.problem_id = claims.problem_id
+            AND retired.target_object IN (
+              claims.id, claims.id || '@' || target_version.version))
         AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}`;
     const bindings = [
       targetVersion,
