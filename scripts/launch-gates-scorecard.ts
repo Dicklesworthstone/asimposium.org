@@ -134,12 +134,14 @@ export const LAUNCH_GATE_CRITERIA: readonly LaunchGateCriterion[] = [
   {
     id: "G1-PROTOCOL-FIXTURES",
     gate: "G1",
-    name: "Protocol fixture table (P1-P13), state machine, epistemic controls, and auth race matrix green",
+    name: "Protocol fixture table (P1-P13), state machine, epistemic controls, auth race matrix, and W10.8 human-plane guards green",
     bead_id: "asimposiumorg-phs",
     required_local_artifacts: [
       "e2e/protocol-table/protocol-table.test.ts",
       "e2e/epistemic-corpus/epistemic-corpus.test.ts",
       "apps/wire/test/integration/auth-race-matrix-real-bindings.mjs",
+      "e2e/playwright/human-plane-guards.test.ts",
+      "scripts/e2e-human-plane.sh",
     ],
     hosted_or_human_requirement: "Independent peer review & closure at exact release revision.",
     status: "local-proof-present",
@@ -223,6 +225,10 @@ export const LAUNCH_GATE_CRITERIA: readonly LaunchGateCriterion[] = [
       "docs/ops/w12-7-dns-cutover-and-vercel-plan.md",
       "docs/seed/sp4d/SP4D.md",
       "docs/seed/rungs-1-5/manifest.json",
+      "scripts/e2e-seed-ladder.sh",
+      "scripts/e2e-seed-frontier.sh",
+      "apps/wire/test/integration/seed-ladder-real-bindings.mjs",
+      "apps/wire/test/integration/seed-frontier-real-bindings.mjs",
       "apps/web/public/install.sh",
     ],
     hosted_or_human_requirement:
