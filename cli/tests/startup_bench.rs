@@ -76,10 +76,9 @@ fn measure_flag(bin: &str, flag: &str, warmup: usize, samples: usize) -> (f64, f
 #[test]
 #[ignore = "W11.5 release-only warm-start benchmark gate; invoke with cargo test --release --test startup_bench -- --ignored --nocapture"]
 fn release_warm_startup_meets_100ms_p95_budget() {
-    assert!(
-        !cfg!(debug_assertions),
-        "BENCH_NON_RELEASE_BINARY_REFUSED: startup_bench must run under --release profile"
-    );
+    if cfg!(debug_assertions) {
+        panic!("BENCH_NON_RELEASE_BINARY_REFUSED: startup_bench must run under --release profile");
+    }
 
     let bin = env!("CARGO_BIN_EXE_asimp");
     let budget_ms = 100.0_f64;

@@ -42,8 +42,11 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+static ATOMIC_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Server idempotency retention window (24 hours, Fable §7.1 / AGENTS.md).
 pub const REPLAY_WINDOW_SECONDS: u64 = 24 * 60 * 60;
@@ -479,13 +482,23 @@ fn ensure_private_dir(dir: &Path) -> Result<(), &'static str> {
 fn write_private_atomic(target: &Path, bytes: &[u8]) -> Result<(), &'static str> {
     let parent = target.parent().ok_or("Invalid spool target path.")?;
     ensure_private_dir(parent)?;
+    if let Ok(meta) = fs::symlink_metadata(target)
+        && !meta.is_file()
+    {
+        return Err("Refusing to write spool target that is not a regular file.");
+    }
     let name = target
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or("Invalid spool target filename.")?;
-    let tmp = parent.join(format!(".{name}.tmp.{}", std::process::id()));
+    let seq = ATOMIC_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let tmp = parent.join(format!(".{name}.tmp.{}.{seq}.{nanos}", std::process::id()));
     let mut opts = fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -494,9 +507,15 @@ fn write_private_atomic(target: &Path, bytes: &[u8]) -> Result<(), &'static str>
     let mut file = opts
         .open(&tmp)
         .map_err(|_| "Cannot create temporary spool file.")?;
-    file.write_all(bytes)
+    if file
+        .write_all(bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|_| "Cannot write temporary spool file.")?;
+        .is_err()
+    {
+        drop(file);
+        let _ = fs::remove_file(&tmp);
+        return Err("Cannot write temporary spool file.");
+    }
     drop(file);
     fs::rename(&tmp, target).map_err(|_| {
         let _ = fs::remove_file(&tmp);
@@ -675,10 +694,9 @@ pub fn load_all_items(spool_dir: &Path) -> Result<Vec<SpoolItem>, String> {
 
 pub fn save_item(spool_dir: &Path, item: &SpoolItem) -> Result<(), &'static str> {
     let target = spool_dir.join("items").join(format!("{}.json", item.id));
-    let raw = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&item.to_disk_json()).unwrap_or_default()
-    );
+    let body = serde_json::to_string_pretty(&item.to_disk_json())
+        .map_err(|_| "Cannot serialize spool item.")?;
+    let raw = format!("{body}\n");
     write_private_atomic(&target, raw.as_bytes())
 }
 
@@ -910,7 +928,19 @@ pub fn run_spool(cli: &Cli) -> CliOutput {
             if meta.len() > MAX_SPOOL_BODY_BYTES {
                 return input_error("Request file exceeds the 512 KiB Worker bound.");
             }
-            let raw = match fs::read_to_string(file) {
+            let raw_bytes = match fs::File::open(file).and_then(|f| {
+                let mut buf = Vec::new();
+                f.take(MAX_SPOOL_BODY_BYTES.saturating_add(1))
+                    .read_to_end(&mut buf)?;
+                Ok(buf)
+            }) {
+                Ok(b) => b,
+                Err(_) => return input_error("Cannot read --file."),
+            };
+            if raw_bytes.len() as u64 > MAX_SPOOL_BODY_BYTES {
+                return input_error("Request file exceeds the 512 KiB Worker bound.");
+            }
+            let raw = match String::from_utf8(raw_bytes) {
                 Ok(s) => s,
                 Err(_) => return input_error("Cannot read --file as UTF-8."),
             };
@@ -1545,14 +1575,16 @@ pub fn run_sync_with_io(
         // Hard replay-safety wall: even if a spool file was edited on disk, never
         // auto-retry a non-allowlisted path (e.g. enrollment/token exchange).
         if !is_replay_safe_write_path(&item.path) {
-            item.state = SpoolState::Rejected;
-            item.last_error_code = Some("NON_REPLAYABLE_PATH".to_owned());
-            let _ = save_item(&dir, item);
+            if !args.dry_run {
+                item.state = SpoolState::Rejected;
+                item.last_error_code = Some("NON_REPLAYABLE_PATH".to_owned());
+                let _ = save_item(&dir, item);
+            }
             rejected += 1;
             outcomes.push(json!({
                 "id": item.id,
-                "action": "refused_non_replayable",
-                "state": item.state.as_str(),
+                "action": if args.dry_run { "would_refuse_non_replayable" } else { "refused_non_replayable" },
+                "state": "rejected",
             }));
             continue;
         }
@@ -1688,7 +1720,10 @@ pub fn run_sync_with_io(
                     }) => {
                         item.last_http_status = Some(status);
                         item.last_error_code = code.clone();
-                        let definitive_reject = matches!(status, 400..=428)
+                        // Transient 408 (Request Timeout), 425 (Too Early), 429 (Rate Limit),
+                        // 5xx, and IDEMPOTENCY_IN_FLIGHT stay `in_flight` with the SAME key.
+                        let definitive_reject = matches!(status, 400..=499)
+                            && !matches!(status, 408 | 425 | 429)
                             && code.as_deref() != Some("IDEMPOTENCY_IN_FLIGHT");
                         if definitive_reject {
                             item.state = SpoolState::Rejected;
@@ -1895,5 +1930,107 @@ mod tests {
             decide_replay(&rejected, 20_000),
             ReplayDecision::SkipRejected
         );
+    }
+
+    #[test]
+    fn sync_treats_http_408_and_425_as_retryable_in_flight_and_keeps_dry_run_read_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "asimp-spool-408-dryrun-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let origin = "https://a.asimposium.org";
+        let item_408 = SpoolItem {
+            id: "SP-2000-timeout40800".into(),
+            origin: origin.into(),
+            path: "/v1/sessions/S-1/promote".into(),
+            session_id: Some("S-1".into()),
+            problem_id: Some("P-4DSP".into()),
+            state: SpoolState::Unsent,
+            idempotency_key: Some("idem-408-stable".into()),
+            body_json: r#"{"statement":"x"}"#.into(),
+            body_sha256: "a".repeat(64),
+            client_occurred_at: "2026-11-21T00:00:00Z".into(),
+            created_epoch_s: 2_000,
+            first_attempted_epoch_s: None,
+            first_attempted_clock: None,
+            attempts: 0,
+            last_http_status: None,
+            last_error_code: None,
+            receipt_sha256: None,
+            server_event_id: None,
+            server_object_id: None,
+            resolution_note: None,
+        };
+        save_item(&dir, &item_408).unwrap();
+
+        let cli_live = Cli {
+            origin: Some(origin.into()),
+            identity: "default".into(),
+            protocol_version: None,
+            pop_key: None,
+            command: Command::Sync(Box::new(SyncArgs {
+                spool_dir: Some(dir.clone()),
+                item: Some(item_408.id.clone()),
+                dry_run: false,
+                json: true,
+            })),
+        };
+        let out = run_sync_with_io(
+            &cli_live,
+            origin,
+            "0.2.0-draft",
+            Some("tok"),
+            Some(2_010),
+            2_010,
+            |_url, _tok, _pv, _key, _at, _body| {
+                Err(SyncPostError::Status {
+                    status: 408,
+                    code: Some("REQUEST_TIMEOUT".into()),
+                    server_epoch_s: Some(2_010),
+                })
+            },
+        );
+        assert_eq!(out.exit_code, 1);
+        let loaded = load_all_items(&dir).unwrap();
+        let after = loaded.iter().find(|i| i.id == item_408.id).unwrap();
+        assert_eq!(after.state, SpoolState::InFlight);
+        assert_eq!(after.idempotency_key.as_deref(), Some("idem-408-stable"));
+
+        // Non-replayable path under --dry-run must NOT mutate the on-disk item.
+        let bad_item = SpoolItem {
+            id: "SP-2001-badpath00001".into(),
+            path: "/v1/fellows".into(),
+            ..item_408
+        };
+        save_item(&dir, &bad_item).unwrap();
+        let cli_dry = Cli {
+            origin: Some(origin.into()),
+            identity: "default".into(),
+            protocol_version: None,
+            pop_key: None,
+            command: Command::Sync(Box::new(SyncArgs {
+                spool_dir: Some(dir.clone()),
+                item: Some(bad_item.id.clone()),
+                dry_run: true,
+                json: true,
+            })),
+        };
+        let dry_out = run_sync_with_io(
+            &cli_dry,
+            origin,
+            "0.2.0-draft",
+            None,
+            Some(2_020),
+            2_020,
+            |_url, _tok, _pv, _key, _at, _body| unreachable!("dry_run must never POST"),
+        );
+        assert_eq!(dry_out.exit_code, 1);
+        let reloaded = load_all_items(&dir).unwrap();
+        let untouched = reloaded.iter().find(|i| i.id == bad_item.id).unwrap();
+        assert_eq!(untouched.state, SpoolState::Unsent);
     }
 }

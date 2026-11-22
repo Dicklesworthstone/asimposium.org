@@ -94,10 +94,19 @@ impl PopKey {
                 .create(parent)
                 .map_err(|_| "Cannot create directory for Ed25519 PoP private key.")?;
         }
-        if let Ok(meta) = std::fs::symlink_metadata(path)
-            && !meta.is_file()
-        {
-            return Err("PoP key path must be a regular file, not a symlink.");
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if !meta.is_file() {
+                return Err("PoP key path must be a regular file, not a symlink.");
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if meta.permissions().mode() & 0o077 != 0 {
+                    return Err(
+                        "Existing PoP private key file has insecure permissions (must be 0600).",
+                    );
+                }
+            }
         }
         let payload = Zeroizing::new(
             serde_json::json!({
@@ -110,20 +119,43 @@ impl PopKey {
             })
             .to_string(),
         );
+        let rng = SystemRandom::new();
+        let mut suffix = [0u8; 8];
+        rng.fill(&mut suffix)
+            .map_err(|_| "CSPRNG failed while generating temporary PoP key filename.")?;
+        let tmp_name = format!(
+            ".{}.tmp-{}",
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("pop.key"),
+            URL_SAFE_NO_PAD.encode(suffix)
+        );
+        let tmp_path = path.with_file_name(tmp_name);
         let mut opts = OpenOptions::new();
-        opts.create(true).write(true).truncate(true);
+        opts.create_new(true).write(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
         let mut file = opts
-            .open(path)
+            .open(&tmp_path)
             .map_err(|_| "Cannot open PoP private key file for writing.")?;
-        file.write_all(payload.as_bytes())
+        if file
+            .write_all(payload.as_bytes())
             .and_then(|_| file.write_all(b"\n"))
             .and_then(|_| file.sync_all())
-            .map_err(|_| "Failed to persist PoP private key file.")?;
+            .is_err()
+        {
+            drop(file);
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err("Failed to persist PoP private key file.");
+        }
+        drop(file);
+        std::fs::rename(&tmp_path, path).map_err(|_| {
+            let _ = std::fs::remove_file(&tmp_path);
+            "Failed atomically committing PoP private key file."
+        })?;
         Ok(())
     }
 
@@ -428,5 +460,36 @@ mod tests {
             &tampered,
             &headers.signature
         ));
+    }
+
+    #[test]
+    fn save_private_file_writes_0600_atomically_and_refuses_insecure_existing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "asimp-pop-key-save-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("pop.key.json");
+        let key = PopKey::generate().unwrap();
+        key.save_private_file(&path).unwrap();
+        let loaded = PopKey::load_private_file(&path).unwrap();
+        assert_eq!(loaded.key_id(), key.key_id());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::symlink_metadata(&path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let err = key.save_private_file(&path).unwrap_err();
+            assert!(err.contains("0600"));
+        }
     }
 }

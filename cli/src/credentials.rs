@@ -553,13 +553,15 @@ impl CredentialStore for EncryptedFileStore {
         let nonce_arr: [u8; ENCRYPTED_STORE_NONCE_LEN] = nonce_bytes
             .try_into()
             .map_err(|_| "Encrypted credential store nonce has unexpected length.")?;
-        let mut ciphertext = URL_SAFE_NO_PAD
-            .decode(
-                doc.get("ciphertext_b64")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or("Encrypted credential store missing ciphertext.")?,
-            )
-            .map_err(|_| "Encrypted credential store has malformed ciphertext.")?;
+        let mut ciphertext = Zeroizing::new(
+            URL_SAFE_NO_PAD
+                .decode(
+                    doc.get("ciphertext_b64")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or("Encrypted credential store missing ciphertext.")?,
+                )
+                .map_err(|_| "Encrypted credential store has malformed ciphertext.")?,
+        );
 
         let derived = self.derive_key(&salt, iterations)?;
         let unbound = UnboundKey::new(&CHACHA20_POLY1305, derived.as_ref())
@@ -670,12 +672,20 @@ impl CredentialStore for EncryptedFileStore {
         let mut file = opts
             .open(&tmp_path)
             .map_err(|_| "Cannot create temporary 0600 encrypted credential file.")?;
-        file.write_all(encoded.as_bytes())
+        if file
+            .write_all(encoded.as_bytes())
             .and_then(|_| file.sync_all())
-            .map_err(|_| "Failed writing encrypted credential store.")?;
+            .is_err()
+        {
+            drop(file);
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err("Failed writing encrypted credential store.");
+        }
         drop(file);
-        std::fs::rename(&tmp_path, &self.path)
-            .map_err(|_| "Failed atomically committing encrypted credential store.")?;
+        std::fs::rename(&tmp_path, &self.path).map_err(|_| {
+            let _ = std::fs::remove_file(&tmp_path);
+            "Failed atomically committing encrypted credential store."
+        })?;
         Ok(())
     }
 }
