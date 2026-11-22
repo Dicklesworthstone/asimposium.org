@@ -30,6 +30,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 import {
   ProblemDetailSchema,
   ProblemFaceResponseSchema,
@@ -612,6 +613,16 @@ await runLocalWorkerJourney(
       assert.equal(exportResp.status, 200);
       const exportBytes = new Uint8Array(await exportResp.arrayBuffer());
       assert.ok(exportBytes.byteLength > 40, "Gzipped ledger export must be non-empty");
+      const exportLines = gunzipSync(exportBytes)
+        .toString("utf8")
+        .trim()
+        .split("\n")
+        .filter((line) => line.length > 0);
+      assert.ok(exportLines.length >= 2, "Decompressed ledger export must contain event records");
+      for (const line of exportLines) {
+        const parsed = JSON.parse(line);
+        assert.equal(typeof parsed, "object");
+      }
 
       const record = {
         facility: "OPS.2a",

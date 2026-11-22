@@ -109,8 +109,11 @@ export function evaluateHumanPlaneCacheAndPrivacyPair(
     }
   }
 
-  // 3. Host-only cookie boundary: `asimp.session` / Auth.js cookies MUST stay host-only on Agora
-  //    and NEVER be sent to Stoa (`a.*`).
+  // 3. Host-only cookie boundary: `asimp.session` / Auth.js cookies MUST stay host-only on Agora,
+  //    enforce Secure on HTTPS origins, match exact Agora host (never wildcard `.domain`), and
+  //    NEVER be sent to Stoa (`a.*`).
+  const agoraUrl = new URL(snapshot.agoraOrigin);
+  const agoraHost = agoraUrl.hostname.toLowerCase();
   const stoaHost = new URL(snapshot.stoaOrigin).hostname.toLowerCase();
   for (const cookie of snapshot.cookies) {
     if (
@@ -123,6 +126,13 @@ export function evaluateHumanPlaneCacheAndPrivacyPair(
       }
       if (!cookie.httpOnly) {
         violations.push(`SESSION_COOKIE_NOT_HTTP_ONLY:${cookie.name}`);
+      }
+      if (agoraUrl.protocol === "https:" && !cookie.secure) {
+        violations.push(`SESSION_COOKIE_NOT_SECURE:${cookie.name}`);
+      }
+      const cookieDomain = cookie.domain.toLowerCase();
+      if (cookieDomain.startsWith(".") || cookieDomain !== agoraHost) {
+        violations.push(`SESSION_COOKIE_DOMAIN_MISMATCH:${cookie.name}:${cookie.domain}`);
       }
       for (const sentOrigin of cookie.sentToOrigins) {
         const sentHost = new URL(sentOrigin).hostname.toLowerCase();
@@ -235,7 +245,7 @@ function stripFragmentAndQuerySecrets(rawUrl: string): string {
     const parsed = new URL(rawUrl);
     parsed.hash = "";
     for (const key of [...parsed.searchParams.keys()]) {
-      if (/(token|secret|key|code|state|session|cookie|sig)/i.test(key)) {
+      if (/(token|secret|key|code|state|session|cookie|sig|auth|pass|cred|jwt)/i.test(key)) {
         parsed.searchParams.set(key, "[REDACTED]");
       }
     }
@@ -245,10 +255,35 @@ function stripFragmentAndQuerySecrets(rawUrl: string): string {
   }
 }
 
+function findForbiddenReasoningKey(
+  value: unknown,
+  seen: WeakSet<object> = new WeakSet(),
+): string | null {
+  if (value === null || typeof value !== "object") return null;
+  if (seen.has(value)) return null;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const hit = findForbiddenReasoningKey(item, seen);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (FORBIDDEN_REASONING_KEYS.has(key.toLowerCase())) {
+      return key;
+    }
+    const hit = findForbiddenReasoningKey(nested, seen);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 /**
  * Enforces W10.8 artifact safety before persistence:
  * - Refuses recording entirely on any non-synthetic/private run.
- * - Refuses any artifact carrying raw harness transcripts or hidden reasoning (Rule A11).
+ * - Refuses any artifact carrying raw harness transcripts or hidden reasoning (Rule A11),
+ *   including nested fields under `extra`.
  * - Strips URL fragments (`#v1.<secret>`), sensitive headers, and browser storage values.
  * - Scans serialized output through the canonical never-log redactor/detector.
  */
@@ -260,10 +295,9 @@ export function redactHumanPlaneArtifact(raw: RawPlaywrightArtifact): RedactedAr
     return { ok: false, reason: "INVALID_ARTIFACT_RUN_ID" };
   }
   if (raw.extra) {
-    for (const key of Object.keys(raw.extra)) {
-      if (FORBIDDEN_REASONING_KEYS.has(key.toLowerCase())) {
-        return { ok: false, reason: `FORBIDDEN_HIDDEN_REASONING_FIELD:${key}` };
-      }
+    const forbiddenKey = findForbiddenReasoningKey(raw.extra);
+    if (forbiddenKey) {
+      return { ok: false, reason: `FORBIDDEN_HIDDEN_REASONING_FIELD:${forbiddenKey}` };
     }
   }
 

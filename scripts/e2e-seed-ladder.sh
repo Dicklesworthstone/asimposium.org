@@ -69,17 +69,28 @@ fi
 
 ACTUAL_MANIFEST_SHA="$(sha256sum "$MANIFEST_PATH" | awk '{print $1}')"
 
+if [[ "$MODE" != "verify" && "$MODE" != "production-seed" ]]; then
+  echo "ERROR: unsupported --mode '$MODE' (expected verify or production-seed)" >&2
+  exit 2
+fi
+
 if [[ "$MODE" == "production-seed" ]]; then
   CURRENT_REV="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "")"
   if [[ -z "$EXPECTED_REV" || -z "$EXPECTED_MANIFEST_SHA" ]]; then
     e2e_emit_and_optionally_record 0 "$RUN_ID" "$SUITE" "$STARTED_MS" "fail" "PRODUCTION_SEED_PINS_REQUIRED" "$REPRODUCE"
     exit 2
   fi
-  if [[ "$CURRENT_REV" != "$EXPECTED_REV"* ]]; then
+  if [[ ! "$EXPECTED_REV" =~ ^[0-9a-fA-F]{7,40}$ || ! "$EXPECTED_MANIFEST_SHA" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    e2e_emit_and_optionally_record 0 "$RUN_ID" "$SUITE" "$STARTED_MS" "fail" "PRODUCTION_SEED_PIN_FORMAT_INVALID" "$REPRODUCE"
+    exit 2
+  fi
+  EXPECTED_REV_LOWER="${EXPECTED_REV,,}"
+  EXPECTED_MANIFEST_SHA_LOWER="${EXPECTED_MANIFEST_SHA,,}"
+  if [[ "${CURRENT_REV,,}" != "${EXPECTED_REV_LOWER}"* ]]; then
     e2e_emit_and_optionally_record 0 "$RUN_ID" "$SUITE" "$STARTED_MS" "fail" "PRODUCTION_SEED_REVISION_MISMATCH" "$REPRODUCE"
     exit 2
   fi
-  if [[ "$ACTUAL_MANIFEST_SHA" != "$EXPECTED_MANIFEST_SHA" ]]; then
+  if [[ "${ACTUAL_MANIFEST_SHA,,}" != "$EXPECTED_MANIFEST_SHA_LOWER" ]]; then
     e2e_emit_and_optionally_record 0 "$RUN_ID" "$SUITE" "$STARTED_MS" "fail" "PRODUCTION_SEED_MANIFEST_DIGEST_DRIFT" "$REPRODUCE"
     exit 2
   fi

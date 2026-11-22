@@ -189,9 +189,27 @@ describe("W10.8 Human-plane Playwright E2E guards, redaction & planted negatives
     const res = evaluateHumanPlaneCacheAndPrivacyPair(leakedCookie);
     expect(res.ok).toBe(false);
     expect(res.violations.some((v) => v.includes("SESSION_COOKIE_NOT_HOST_ONLY"))).toBe(true);
+    expect(res.violations.some((v) => v.includes("SESSION_COOKIE_DOMAIN_MISMATCH"))).toBe(true);
     expect(res.violations.some((v) => v.includes("PRINCIPAL_CONFUSION_COOKIE_SENT_TO_STOA"))).toBe(
       true,
     );
+
+    const insecureHttpsCookie: HumanPlanePrivacyPairSnapshot = {
+      ...snap,
+      cookies: [
+        {
+          name: "__Host-asimp.session",
+          domain: "staging.asimposium.org",
+          hostOnly: true,
+          httpOnly: true,
+          secure: false,
+          sentToOrigins: ["https://staging.asimposium.org"],
+        },
+      ],
+    };
+    const insecureRes = evaluateHumanPlaneCacheAndPrivacyPair(insecureHttpsCookie);
+    expect(insecureRes.ok).toBe(false);
+    expect(insecureRes.violations).toContain("SESSION_COOKIE_NOT_SECURE:__Host-asimp.session");
   });
 
   test("PLANTED NEGATIVE 4 & 5 (ACCESSIBILITY & CLIENT EXCEPTION): missing label/live-region, keyboard trap, axe error, or pageerror FAILS", () => {
@@ -249,17 +267,28 @@ describe("W10.8 Human-plane Playwright E2E guards, redaction & planted negatives
     expect(refusedPrivate.ok).toBe(false);
     expect(refusedPrivate.reason).toBe("ARTIFACT_RECORDING_DISABLED_ON_NON_SYNTHETIC_RUN");
 
-    // Rule A11: raw harness transcript or hidden reasoning MUST be refused.
+    // Rule A11: raw harness transcript or hidden reasoning (top-level or nested) MUST be refused.
     const refusedCot = redactHumanPlaneArtifact({
       synthetic_only: true,
       run_id: "human-plane-002",
       kind: "trace",
-      url: "https://staging.asimposium.org/console",
+      url: "https://staging.asimposium.org/console?jwt=eyJsecret&auth=abc",
       headers: {},
-      extra: { chain_of_thought: "never retain this" },
+      extra: { payload: [{ nested: { chain_of_thought: "never retain this" } }] },
     });
     expect(refusedCot.ok).toBe(false);
-    expect(refusedCot.reason).toContain("FORBIDDEN_HIDDEN_REASONING_FIELD");
+    expect(refusedCot.reason).toBe("FORBIDDEN_HIDDEN_REASONING_FIELD:chain_of_thought");
+
+    const redactedQuery = redactHumanPlaneArtifact({
+      synthetic_only: true,
+      run_id: "human-plane-003",
+      kind: "network-log",
+      url: "https://staging.asimposium.org/api/check?jwt=eyJsecret&passphrase=topsecret",
+      headers: {},
+    });
+    expect(redactedQuery.ok).toBe(true);
+    expect(redactedQuery.artifact?.url).not.toContain("eyJsecret");
+    expect(redactedQuery.artifact?.url).not.toContain("topsecret");
 
     // OPS.2a structured correlation record.
     const ops = buildHumanPlaneOpsRecord({
