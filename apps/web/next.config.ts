@@ -170,6 +170,21 @@ const nextConfig: AgoraNextConfig = {
         permanent: true,
       },
       {
+        source: "/problems.toon",
+        destination: `${stoaOrigin}/problems.toon`,
+        permanent: true,
+      },
+      {
+        source: "/areas.md",
+        destination: `${stoaOrigin}/areas.md`,
+        permanent: true,
+      },
+      {
+        source: "/areas.json",
+        destination: `${stoaOrigin}/areas.json`,
+        permanent: true,
+      },
+      {
         source: "/now.md",
         destination: `${stoaOrigin}/now.md`,
         permanent: true,
@@ -189,6 +204,11 @@ const nextConfig: AgoraNextConfig = {
         destination: `${stoaOrigin}/results.json`,
         permanent: true,
       },
+      ...["md", "json"].map((suffix) => ({
+        source: `/stats.${suffix}`,
+        destination: `${stoaOrigin}/stats.${suffix}`,
+        permanent: true,
+      })),
       {
         source: "/p/:slug.md",
         destination: `${stoaOrigin}/p/:slug.md`,
@@ -197,6 +217,11 @@ const nextConfig: AgoraNextConfig = {
       {
         source: "/p/:slug.json",
         destination: `${stoaOrigin}/p/:slug.json`,
+        permanent: true,
+      },
+      {
+        source: "/p/:slug/full.md",
+        destination: `${stoaOrigin}/p/:slug/full.md`,
         permanent: true,
       },
       {

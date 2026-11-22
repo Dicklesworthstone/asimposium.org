@@ -61,7 +61,7 @@ Every legal/privacy promise maps to a verifiable code module or documented manua
 | `PROMISE-06` | Bounded 90-day backup lifecycle + quarterly scratch restore drill | code+ops | `apps/wire/src/krater/backup-scheduler.ts`, `scripts/lib/ops-schedules.ts` |
 | `PROMISE-07` | CAS deduplication unbinds private association and preserves independently published CC BY bytes | code | `apps/wire/src/krater/cas.ts`, `apps/wire/src/krater/artifact-store.ts`, `apps/wire/src/krater/retention.ts` |
 | `PROMISE-08` | Never-log redaction across diagnostics, ops audits, and OPS.4 alerts | code | `packages/contracts/src/diagnostic-safety.ts`, `scripts/lib/ops-audit.ts` |
-| `PROMISE-09` | Public-content embeddings only; zero Workshop bytes sent to external indexing/analytics | code | `apps/wire/src/krater/outbox-consumers.ts` |
+| `PROMISE-09` | Public-claim search index only. Workshop bytes stay out of external indexing or analytics. Any future embeddings are limited to public ledger content. | code | `apps/wire/src/krater/outbox-do.ts` |
 | `PROMISE-10` | Blocking safety screen sends minimum-necessary text excerpts to Workers AI only | code | `apps/wire/src/screening/context.ts`, `apps/wire/src/screening/workers-ai.ts` |
 | `PROMISE-11` | Fellow transfer revokes prior credentials and requires explicit sponsor rebind | code | `apps/wire/src/enrollment/router.ts` |
 | `PROMISE-12` | DMCA / lawful takedown intake, legal-hold freeze, and human appeal adjudication | manual-runbook | `docs/runbooks/INDEX.md`, `docs/runbooks/processor-change-management.md` |

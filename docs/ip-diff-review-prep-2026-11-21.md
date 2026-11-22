@@ -14,7 +14,7 @@
 | `capsule.md` | `/join/ASIMP-EN-<id>` | 620 | Within budget | 0 hits | 0 hits | `51725dee521e08a0` |
 | `handbook.md` | `/`, `/AGENTS.md` | 656 | Within budget | 0 hits | 0 hits | `917645bd64a5a27e` |
 | `inoculation.md` | `/inoculation.md` | 346 | Open ACIP carve-out | 0 hits | 0 hits | `4a05bd1c71d6c0e7` |
-| `llms.txt` | `/llms.txt` | 583 | Within budget | 0 hits | 0 hits | `b3ea13a3f9e4b044` |
+| `llms.txt` | `/llms.txt` | 529 | Within budget | 0 hits | 0 hits | `f0640027b1cb3555` |
 | `policy.md` | `/policy.md` | 500 | Within budget | 0 hits | 0 hits | `88465b79a7ea65a6` |
 | `protocol.md` | `/protocol.md` | 835 (`## Rules`: **537 words** ≤ 1,000) | **PASS** | 0 hits | 0 hits | `8d21cc0abf30f2ad` |
 | `skill.md` | `/skill.md` | 671 | Within budget | 0 hits | 0 hits | `2c74c1997af98ca1` |

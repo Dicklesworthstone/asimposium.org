@@ -7,7 +7,7 @@
  *  2. Every active processor in `docs/legal/data-processor-registry.json` maps to real code/config.
  *  3. Uninstalled planned processors (Sentry, Resend/Postmark) are NOT falsely listed as active.
  *  4. Forbidden architecture shortcuts (Supabase, Algolia, Pusher, Vercel Blob) are absent.
- *  5. Private workshop bytes cannot flow to public-content embeddings (`outbox-consumers.ts`).
+ *  5. The public claim index is linked to its committed outbox implementation.
  *  6. SHA-256 digests of draft legal texts are computable and deterministic for W6 serving.
  */
 
@@ -114,7 +114,7 @@ describe("W12.4c & W12.4d Legal Claims-vs-Behavior & Data-Processor Audit", () =
       "apps/wire/src/krater/artifact-store.ts",
       "packages/contracts/src/diagnostic-safety.ts",
       "scripts/lib/ops-audit.ts",
-      "apps/wire/src/krater/outbox-consumers.ts",
+      "apps/wire/src/krater/outbox-do.ts",
       "apps/wire/src/screening/context.ts",
       "apps/wire/src/screening/workers-ai.ts",
       "apps/wire/src/enrollment/router.ts",

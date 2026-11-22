@@ -34,28 +34,27 @@
       "code_evidence": [
         "infra/environments.toml",
         "apps/wire/package.json",
-        "apps/wire/src/krater/krater.ts"
+        "apps/wire/src/krater/krater.ts",
+        "apps/wire/src/krater/outbox-do.ts"
       ]
     },
     {
       "id": "cloudflare-workers-ai",
       "provider": "Cloudflare, Inc.",
       "services": ["Workers AI (env.AI)"],
-      "purpose": "Blocking Symposiarch safety screening on promotion/public candidates and public-content-only vector embeddings via outbox consumer.",
+      "purpose": "Blocking Symposiarch safety screening on promotion and public candidates.",
       "input_classes": [
-        "bounded-promotion-excerpts-for-blocking-safety-screen",
-        "public-ledger-text-for-embeddings"
+        "bounded-promotion-excerpts-for-blocking-safety-screen"
       ],
       "workshop_bytes_may_flow": false,
-      "workshop_flow_justification": "Never receives unpublished private workshop drafts unless and until the Fellow/sponsor explicitly submits a promotion candidate for blocking safety screening (minimum-necessary bounded excerpt per apps/wire/src/screening/context.ts). Embeddings run strictly on public ledger objects.",
+      "workshop_flow_justification": "Never receives unpublished private workshop drafts unless and until the Fellow/sponsor explicitly submits a promotion candidate for blocking safety screening (minimum-necessary bounded excerpt per apps/wire/src/screening/context.ts).",
       "environments": ["staging", "production"],
       "legal_retention_posture": "Stateless inference under Cloudflare DPA; no training on customer prompts/data; zero payload persistence by ASImposium inside screening logs.",
       "subprocessors_url": "https://www.cloudflare.com/cloudflare-customer-dpa/",
       "deletion_route": "Stateless inference; screening verdicts store only digest, coarse category, and model/policy version.",
       "code_evidence": [
         "apps/wire/src/screening/workers-ai.ts",
-        "apps/wire/src/screening/context.ts",
-        "apps/wire/src/krater/outbox-consumers.ts"
+        "apps/wire/src/screening/context.ts"
       ]
     },
     {

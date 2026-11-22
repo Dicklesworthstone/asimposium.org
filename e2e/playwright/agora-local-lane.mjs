@@ -1,8 +1,8 @@
 /**
  * Real-browser Agora lane (bead asimposiumorg-uaw7).
  *
- *   node e2e/playwright/agora-local-lane.mjs            # needs `bun run build` in apps/web first
- *   node e2e/playwright/agora-local-lane.mjs --build    # builds apps/web itself (bun run e2e:agora-local)
+ *   node e2e/playwright/agora-local-lane.mjs            # builds for the local Worker, then runs next start
+ *   node e2e/playwright/agora-local-lane.mjs --build    # same production lane (bun run e2e:agora-local)
  *   node e2e/playwright/agora-local-lane.mjs --dev      # identical checks on next dev --webpack; no production-build claim
  *   ASIMPOSIUM_CHROMIUM_EXECUTABLE=/path/to/chrome ... # optional existing local Chromium
  *
@@ -41,7 +41,7 @@
  * behaviour and edge caches (3zn), hosted screening.
  */
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -1262,20 +1262,6 @@ async function main() {
     );
     process.exit(78);
   }
-  if (process.argv.includes("--build")) {
-    const build = spawnSync("bun", ["run", "build"], { cwd: `${root}apps/web`, stdio: "inherit" });
-    if (build.status !== 0) {
-      console.log(
-        JSON.stringify({
-          kind: "agora-local-lane-summary",
-          server_mode: serverMode,
-          status: "fail",
-          code: "AGORA_BUILD_FAILED",
-        }),
-      );
-      process.exit(1);
-    }
-  }
   const target = await startLocalTarget({
     injectPromoteRefusal: false,
     operatorPrincipalIds: ADMIN_OPERATORS,
@@ -1376,8 +1362,103 @@ async function main() {
           : claimProbeShape.error.issues.map((i) => ({ path: i.path, code: i.code })),
       },
     );
+    if (!developmentMode) {
+      // Next compiles its redirect destinations into the build manifest.
+      const buildStatus = await new Promise((resolve, reject) => {
+        const build = spawn("bun", ["run", "build"], {
+          cwd: `${root}apps/web`,
+          env: { ...process.env, STOA_ORIGIN: target.origin },
+          stdio: "inherit",
+        });
+        build.once("error", reject);
+        build.once("close", resolve);
+      });
+      if (buildStatus !== 0) {
+        console.log(
+          JSON.stringify({
+            kind: "agora-local-lane-summary",
+            server_mode: serverMode,
+            status: "fail",
+            code: "AGORA_BUILD_FAILED",
+          }),
+        );
+        process.exitCode = 1;
+        return;
+      }
+    }
     agora = await startAgora(target.origin, await target.agoraSigningEnv());
     browser = await chromium.launch(browserOptions);
+
+    const toonPath = "/problems.toon?format=toon";
+    const apexToonUrl = `${agora.origin}${toonPath}`;
+    const stoaToonUrl = `${target.origin}${toonPath}`;
+    const faceHeaders = { "user-agent": USER_AGENT };
+    const [toonRedirect, directToon] = await Promise.all([
+      fetch(apexToonUrl, { redirect: "manual", headers: faceHeaders }),
+      fetch(stoaToonUrl, { headers: faceHeaders }),
+    ]);
+    const redirectsToLocalToon =
+      toonRedirect.status === 308 && toonRedirect.headers.get("location") === stoaToonUrl;
+    const [throughAgora, throughAgoraHead] = redirectsToLocalToon
+      ? await Promise.all([
+          fetch(apexToonUrl, { headers: faceHeaders }),
+          fetch(apexToonUrl, { method: "HEAD", headers: faceHeaders }),
+        ])
+      : [toonRedirect, toonRedirect];
+    record(
+      "problems TOON: Agora redirects to Stoa and preserves the query",
+      redirectsToLocalToon,
+      { status: toonRedirect.status },
+    );
+    const [agoraToonBody, stoaToonBody] = await Promise.all([
+      throughAgora.text(),
+      directToon.text(),
+    ]);
+    const toonEtag = directToon.headers.get("etag");
+    record(
+      "problems TOON: following the redirect reads the exact populated Workerd face",
+      throughAgora.status === 200 &&
+        throughAgora.url === stoaToonUrl &&
+        directToon.status === 200 &&
+        stoaToonBody.includes(problemId) &&
+        agoraToonBody === stoaToonBody &&
+        toonEtag !== null &&
+        throughAgora.headers.get("etag") === toonEtag,
+      { status: throughAgora.status, stoaStatus: directToon.status },
+    );
+    record(
+      "problems TOON: HEAD follows the redirect and preserves the face ETag",
+      throughAgoraHead.status === 200 &&
+        throughAgoraHead.url === stoaToonUrl &&
+        throughAgoraHead.headers.get("etag") === toonEtag &&
+        (await throughAgoraHead.text()) === "",
+      { status: throughAgoraHead.status },
+    );
+
+    for (const path of [
+      "/areas.md",
+      "/areas.json",
+      "/stats.md",
+      "/stats.json",
+      `/p/${problemId}/full.md`,
+    ]) {
+      const apexUrl = `${agora.origin}${path}`;
+      const stoaUrl = `${target.origin}${path}`;
+      const redirect = await fetch(apexUrl, { redirect: "manual", headers: faceHeaders });
+      const redirectsToLocalStoa =
+        redirect.status === 308 && redirect.headers.get("location") === stoaUrl;
+      const face = redirectsToLocalStoa ? await fetch(apexUrl, { headers: faceHeaders }) : redirect;
+      const mediaType = path.endsWith(".json") ? "application/json" : "text/markdown";
+      record(
+        `apex discovery face ${path}: 308 reaches the canonical Stoa response`,
+        redirectsToLocalStoa &&
+          face.status === 200 &&
+          face.url === stoaUrl &&
+          face.headers.get("content-type")?.split(";")[0] === mediaType &&
+          (await face.text()).length > 0,
+        { redirectStatus: redirect.status, stoaStatus: face.status },
+      );
+    }
 
     {
       const { encode } = await import(
