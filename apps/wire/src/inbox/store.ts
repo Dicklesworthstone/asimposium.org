@@ -810,13 +810,16 @@ export async function unfollowProblem(
   problemId: string,
   now: number = Date.now(),
 ): Promise<{ notFound?: boolean; response?: ProblemFollowResponse }> {
-  const results = await db.batch<FollowStatusRow>([
-    db.prepare(FOLLOW_DELETE_SQL).bind(principalId, problemId, principalId),
-    db.prepare(FOLLOW_STATUS_SQL).bind(principalId, problemId, principalId),
-  ]);
-  const row = results[1]?.results[0];
-  if (!row) return { notFound: true };
-  if (row.created_at !== null) throw new Error("Unfollow mutation left a durable follow.");
+  // Like sponsor unfollow, removing a private preference never requires
+  // access to the problem. Missing, hidden and inaccessible targets receive
+  // the same receipt, and a later restore cannot revive the removed follow.
+  const removed = await db.prepare(FOLLOW_DELETE_SQL).bind(principalId, problemId).run();
+  if (
+    removed.success === false ||
+    !Number.isSafeInteger(removed.meta?.changes) ||
+    removed.meta.changes < 0
+  )
+    throw new Error("Unfollow mutation produced no durable receipt.");
 
   console.info(
     JSON.stringify({

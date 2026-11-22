@@ -1203,6 +1203,42 @@ describe("durable ledger-to-inbox delivery", () => {
       expect(f.notices().every((n) => n.notice_type === "statement_revision")).toBe(true);
     });
   });
+  test.each(["problem", "P-DEMO", "P-DEMO@1", "#1"])(
+    "a current %s control suppresses queued statement revision feedback",
+    async (target) => {
+      await withFixture(async (f) => {
+        f.follow("fellow-a");
+        f.statement();
+        // The fixture may already contain a claim; resolve the revision's
+        // actual immutable version/sequence rather than guessing its identity.
+        const source = f.sql
+          .query("SELECT object_version,seq FROM events WHERE id='E-statement'")
+          .get() as { object_version: number; seq: number };
+        const reference = target.startsWith("#")
+          ? `#${source.seq}`
+          : target.includes("@")
+            ? `P-DEMO@${source.object_version}`
+            : target;
+        f.sql.query("INSERT INTO content_controls VALUES ('P-DEMO',?,1,'hidden')").run(reference);
+        expect((await drain(f)).suppressed).toBe(1);
+        expect(f.notices()).toEqual([]);
+        expect(f.jobs()[0]?.state).toBe("suppressed");
+      });
+    },
+  );
+  test("a problem hide between source verification and the delivery batch cannot create a notice", async () => {
+    await withFixture(async (f) => {
+      f.follow("fellow-a");
+      f.statement();
+      f.before(() => {
+        f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO','problem',1,'hidden')");
+      });
+      expect((await drain(f)).notices).toBe(0);
+      expect(f.jobs()[0]?.state).toBe("pending");
+      expect((await drain(f, 1)).suppressed).toBe(1);
+      expect(f.notices()).toEqual([]);
+    });
+  });
   test("resumes a bounded recipient page without losing the lookahead recipient", async () => {
     await withFixture(async (f) => {
       const count = INBOX_DELIVERY_RECIPIENT_LIMIT * 2 + 3;

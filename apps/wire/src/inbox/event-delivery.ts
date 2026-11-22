@@ -2,6 +2,7 @@ import { EvidenceRequestSchema } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import { AskQuestionRequestSchema, QuestionIdSchema } from "@asimposium/contracts/questions";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
+import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 import { loadPublicHypothesisItem } from "../ledger/hypotheses-service.ts";
 import { loadHypothesisEvidenceItem } from "../ledger/hypothesis-evidence-read.ts";
 import type { ScientificContentIdentity } from "../ledger/scientific-checks.ts";
@@ -41,6 +42,7 @@ interface DeliveryJob {
   created_at: string;
   problem_status: string;
   redacted_at: string | null;
+  source_hidden: number;
 }
 
 interface DeliveryWitness extends ScientificContentIdentity {
@@ -325,7 +327,7 @@ async function deliveryStatements(
               WHERE request.question_event_id = e.id)`
           : template.targetKind === "claim"
             ? visibleClaimNoticeSql("e.id")
-            : "1";
+            : `NOT ${eventContentHiddenSql("e")}`;
   const statements = [
     db
       .prepare(`${questionSources}UPDATE inbox_event_deliveries SET claim_token = ?
@@ -335,7 +337,8 @@ async function deliveryStatements(
         WHERE e.id = inbox_event_deliveries.event_id AND e.id = ?
           AND c.redacted_at IS NULL AND c.payload_sha256 = e.payload_sha256
           AND c.payload_sha256 = ? AND c.payload_json = ? AND p.status <> 'private-draft'
-          AND ${visible})
+          AND ${visible}
+          AND NOT ${hiddenByContentControlSql("p.id", "p.id")})
       AND NOT EXISTS (SELECT 1 FROM json_each(?) witness WHERE NOT EXISTS (
         SELECT 1 FROM events source JOIN event_content body ON body.event_id = source.id
         WHERE source.id = json_extract(witness.value, '$.eventId')
@@ -388,7 +391,8 @@ async function deliveryStatements(
       JOIN problems p ON p.id = e.problem_id
       JOIN enrollment_fellows f ON f.fellow_id = ?
       WHERE q.id = ? AND q.state = 'pending' AND q.claim_token = ?
-        AND p.status <> 'private-draft' AND ${visible} AND ${
+        AND p.status <> 'private-draft' AND ${visible}
+        AND NOT ${hiddenByContentControlSql("p.id", "p.id")} AND ${
           questionRequest
             ? `EXISTS (SELECT 1 FROM question_request_sources request
                 WHERE request.question_event_id = e.id AND request.fellow_id = f.fellow_id)`
@@ -448,6 +452,8 @@ export async function deliverInboxEvents(
     .prepare(`SELECT q.id, q.event_id, q.after_fellow_id,
       e.problem_id, e.type, e.object_kind, e.object_id, e.object_version, e.payload_sha256,
       e.actor_fellow_id, e.created_at, p.status AS problem_status, c.redacted_at,
+      CASE WHEN ${eventContentHiddenSql("e")} OR ${hiddenByContentControlSql("p.id", "p.id")}
+        THEN 1 ELSE 0 END AS source_hidden,
       CASE WHEN c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
         AND length(CAST(c.payload_json AS BLOB)) <= ? THEN c.payload_json END AS payload_json
     FROM inbox_event_deliveries q JOIN events e ON e.id = q.event_id
@@ -466,7 +472,11 @@ export async function deliverInboxEvents(
   for (const job of jobs.results) {
     const jobStartedAt = Date.now();
     try {
-      if (job.problem_status === "private-draft" || job.redacted_at !== null) {
+      if (
+        job.problem_status === "private-draft" ||
+        job.redacted_at !== null ||
+        job.source_hidden === 1
+      ) {
         const suppressed = await db
           .prepare(`UPDATE inbox_event_deliveries
           SET state = 'suppressed', updated_at = ?, failure_code = 'SOURCE_WITHDRAWN'
@@ -474,7 +484,9 @@ export async function deliverInboxEvents(
             AND EXISTS (SELECT 1 FROM events e JOIN problems p ON p.id = e.problem_id
               LEFT JOIN event_content c ON c.event_id = e.id
               WHERE e.id = inbox_event_deliveries.event_id
-                AND (p.status = 'private-draft' OR c.redacted_at IS NOT NULL))`)
+                AND (p.status = 'private-draft' OR c.redacted_at IS NOT NULL
+                  OR ${eventContentHiddenSql("e")}
+                  OR ${hiddenByContentControlSql("p.id", "p.id")}))`)
           .bind(now, job.id, job.after_fellow_id)
           .run();
         result.suppressed += suppressed.meta.changes;

@@ -250,6 +250,74 @@ describe.each(["review", "evidence"] as const)("current claim %s notice visibili
 });
 
 describe("follow and inbox visibility is current authority, not a subscription", () => {
+  test.each(["problem", "P-PUBLIC"])(
+    "a current %s hide refuses new follows, status reads and revision fan-out until restored",
+    (target) => {
+      fixture((db) => {
+        follow(db, "fellow-a", "P-PUBLIC");
+        db.exec("INSERT INTO problem_memberships VALUES ('P-PUBLIC','fellow-a')");
+        db.query("INSERT INTO content_controls VALUES ('P-PUBLIC',?,1,'hidden')").run(target);
+        follow(db, "fellow-b", "P-PUBLIC");
+        expect(status(db, "fellow-a", "P-PUBLIC")).toBe(null);
+        expect(status(db, "fellow-b", "P-PUBLIC")).toBe(null);
+        expect(db.query(FOLLOW_RECIPIENTS_SQL).all("P-PUBLIC")).toEqual([]);
+        expect(db.query("SELECT principal_id FROM problem_follows").all()).toEqual([
+          { principal_id: "fellow-a" },
+        ]);
+        db.query("INSERT INTO content_controls VALUES ('P-PUBLIC',?,2,'visible')").run(target);
+        expect(status(db, "fellow-a", "P-PUBLIC")?.created_at).toBe(100);
+        expect(db.query(FOLLOW_RECIPIENTS_SQL).all("P-PUBLIC")).toEqual([
+          { principal_id: "fellow-a" },
+        ]);
+        follow(db, "fellow-b", "P-PUBLIC");
+        expect(status(db, "fellow-b", "P-PUBLIC")?.created_at).toBe(100);
+      });
+    },
+  );
+
+  test.each(["problem", "P-PUBLIC"])(
+    "a %s hide suppresses retained scientific notices before pagination, counts and acknowledgments",
+    (target) => {
+      fixture((db) => {
+        const researchTypes = [
+          "review_request",
+          "review_decline",
+          "disposition_change",
+          "statement_revision",
+          "impact_echo",
+        ];
+        researchTypes.forEach((type, index) => {
+          notice(db, type, "fellow-a", "P-PUBLIC", index + 1);
+          db.query("UPDATE fellow_inbox_notices SET notice_type=? WHERE id=?").run(type, type);
+        });
+        notice(db, "account", "fellow-a", null, 6);
+        notice(db, "private-member", "fellow-a", "P-PRIVATE", 7);
+        notice(db, "unlisted", "fellow-a", "P-UNLISTED", 8);
+        db.query("INSERT INTO content_controls VALUES ('P-PUBLIC',?,1,'hidden')").run(target);
+        expect(visible(db, "fellow-a", 0, 1)).toEqual([{ id: "account", seq: 6 }]);
+        expect(visible(db, "fellow-a").map((row) => row.id)).toEqual([
+          "account",
+          "private-member",
+          "unlisted",
+        ]);
+        expect(unacknowledged(db, "fellow-a")).toBe(3);
+        expect(
+          db
+            .query(`UPDATE fellow_inbox_notices SET acknowledged_at=100
+            WHERE fellow_id='fellow-a' AND seq <= 5 AND ${VISIBLE_INBOX_NOTICE_SQL}`)
+            .run().changes,
+        ).toBe(0);
+        db.query("INSERT INTO content_controls VALUES ('P-PUBLIC',?,2,'visible')").run(target);
+        expect(unacknowledged(db, "fellow-a")).toBe(8);
+        expect(
+          visible(db, "fellow-a")
+            .slice(0, 5)
+            .map((row) => row.id),
+        ).toEqual(researchTypes);
+      });
+    },
+  );
+
   test("known public and unlisted IDs remain followable without membership", () => {
     fixture((db) => {
       for (const id of ["P-PUBLIC", "P-UNLISTED"]) {
@@ -260,12 +328,69 @@ describe("follow and inbox visibility is current authority, not a subscription",
     });
   });
 
+  test("restoring only one whole-problem control cannot reveal the problem", () => {
+    fixture((db) => {
+      db.exec(`INSERT INTO content_controls VALUES
+        ('P-PUBLIC','problem',1,'hidden'),('P-PUBLIC','P-PUBLIC',1,'hidden'),
+        ('P-PUBLIC','problem',2,'visible')`);
+      notice(db, "research", "fellow-a", "P-PUBLIC", 1);
+      follow(db, "fellow-a", "P-PUBLIC");
+      expect(status(db, "fellow-a", "P-PUBLIC")).toBe(null);
+      expect(visible(db, "fellow-a")).toEqual([]);
+      db.exec("INSERT INTO content_controls VALUES ('P-PUBLIC','P-PUBLIC',2,'visible')");
+      expect(status(db, "fellow-a", "P-PUBLIC")?.created_at).toBeNull();
+      expect(visible(db, "fellow-a")).toEqual([{ id: "research", seq: 1 }]);
+    });
+  });
+
+  test("hiding research preserves the recipient's private recovery and directive channels", () => {
+    fixture((db) => {
+      const privateTypes = [
+        "sponsor_directive",
+        "protocol_notice",
+        "moderation_outcome",
+        "lease_expiry_warning",
+      ];
+      privateTypes.forEach((type, index) => {
+        notice(db, type, "fellow-a", "P-PUBLIC", index + 1);
+        db.query("UPDATE fellow_inbox_notices SET notice_type=? WHERE id=?").run(type, type);
+      });
+      db.exec("INSERT INTO content_controls VALUES ('P-PUBLIC','problem',1,'hidden')");
+      expect(visible(db, "fellow-a").map((row) => row.id)).toEqual(privateTypes);
+      expect(unacknowledged(db, "fellow-a")).toBe(privateTypes.length);
+      expect(visible(db, "fellow-b")).toEqual([]);
+      db.exec("UPDATE problems SET status='private-draft' WHERE id='P-PUBLIC'");
+      expect(visible(db, "fellow-a")).toEqual([]);
+      db.exec("INSERT INTO problem_memberships VALUES ('P-PUBLIC','fellow-a')");
+      expect(visible(db, "fellow-a").map((row) => row.id)).toEqual(privateTypes);
+    });
+  });
+
+  test("unfollow removes only the caller's preference after hide or loss of private membership", () => {
+    fixture((db) => {
+      follow(db, "fellow-a", "P-PUBLIC");
+      follow(db, "fellow-b", "P-PUBLIC");
+      follow(db, "fellow-a", "P-PRIVATE");
+      db.exec(`INSERT INTO content_controls VALUES ('P-PUBLIC','problem',1,'hidden');
+        DELETE FROM problem_memberships WHERE fellow_id='fellow-a'`);
+      db.query(FOLLOW_DELETE_SQL).run("fellow-a", "P-PUBLIC");
+      db.query(FOLLOW_DELETE_SQL).run("fellow-a", "P-PRIVATE");
+      db.query(FOLLOW_DELETE_SQL).run("fellow-a", "P-MISSING");
+      expect(db.query("SELECT principal_id,problem_id FROM problem_follows").all()).toEqual([
+        { principal_id: "fellow-b", problem_id: "P-PUBLIC" },
+      ]);
+      db.exec("INSERT INTO content_controls VALUES ('P-PUBLIC','problem',2,'visible')");
+      expect(status(db, "fellow-a", "P-PUBLIC")?.created_at).toBeNull();
+      expect(status(db, "fellow-b", "P-PUBLIC")?.created_at).toBe(100);
+    });
+  });
+
   test("private outsiders and nonexistent targets are indistinguishable", () => {
     fixture((db) => {
       for (const id of ["P-PRIVATE", "P-MISSING"]) {
         follow(db, "fellow-b", id);
         expect(status(db, "fellow-b", id)).toBe(null);
-        db.query(FOLLOW_DELETE_SQL).run("fellow-b", id, "fellow-b");
+        db.query(FOLLOW_DELETE_SQL).run("fellow-b", id);
       }
       expect(db.query("SELECT * FROM problem_follows").all()).toEqual([]);
     });
@@ -275,7 +400,7 @@ describe("follow and inbox visibility is current authority, not a subscription",
     fixture((db) => {
       follow(db, "fellow-a", "P-PRIVATE");
       expect(status(db, "fellow-a", "P-PRIVATE")?.created_at).toBe(100);
-      db.query(FOLLOW_DELETE_SQL).run("fellow-a", "P-PRIVATE", "fellow-a");
+      db.query(FOLLOW_DELETE_SQL).run("fellow-a", "P-PRIVATE");
       expect(status(db, "fellow-a", "P-PRIVATE")?.created_at).toBe(null);
     });
   });
@@ -292,7 +417,7 @@ describe("follow and inbox visibility is current authority, not a subscription",
     fixture((db) => {
       follow(db, "fellow-a", "P-PUBLIC");
       expect(status(db, "fellow-b", "P-PUBLIC")?.created_at).toBe(null);
-      db.query(FOLLOW_DELETE_SQL).run("fellow-b", "P-PUBLIC", "fellow-b");
+      db.query(FOLLOW_DELETE_SQL).run("fellow-b", "P-PUBLIC");
       expect(status(db, "fellow-a", "P-PUBLIC")?.created_at).toBe(100);
     });
   });

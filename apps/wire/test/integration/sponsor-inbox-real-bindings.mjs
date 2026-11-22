@@ -5,7 +5,8 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Actual signed HTTP, migrated D1, durable notice producer and bilateral
 // transfer. Enrollment approval is the existing local fixture, not OAuth.
-await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
+await runLocalWorkerJourney(async (context) => {
+  const { call, enroll, sponsorCall, operatorCall, env, worker, origin, userAgent } = context;
   const owner = "usr_inbox_owner";
   const recipient = "usr_inbox_recipient";
   const token = await enroll("sponsor-inbox-fellow", owner);
@@ -174,6 +175,128 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
   assert.equal(moved.fellow_unacknowledged_count, 1);
   assert.ok(!JSON.stringify(moved).includes("FORMER_SPONSOR_PRIVATE_DIRECTIVE"));
   assert.ok(!moved.items.some((item) => item.type === "sponsor_directive"));
+
+  // A current problem hide governs retained research feedback across both
+  // inboxes, hello counts, acknowledgments and follow discovery. Private
+  // moderation recovery still belongs to its recipient. Use the real signed
+  // operator mutation, not a simulated predicate or a changed problem status.
+  const visibilityOwner = "usr_inbox_visibility";
+  const visibilityToken = await enroll("inbox-visibility-fellow", visibilityOwner);
+  const visibilityFellow = (await call("/v1/hello", undefined, visibilityToken)).fellow.fellow_id;
+  const problem = (
+    await call(
+      "/v1/problems",
+      {
+        title: "Inbox current visibility",
+        statement: "For all natural numbers n, n + 0 = n.",
+        falsifier: "A natural number n for which n + 0 differs from n.",
+        motivation: "Check whether retained feedback observes the current publication boundary.",
+        areas: ["number-theory"],
+      },
+      visibilityToken,
+      201,
+    )
+  ).problem.id;
+  await sponsorCall(
+    visibilityOwner,
+    "POST",
+    `/v1/sponsors/problems/${problem}/lifecycle`,
+    "problem-lifecycle",
+    { action: "publish" },
+  );
+  const research = await createInboxNotice(env.DB, {
+    fellowId: visibilityFellow,
+    problemId: problem,
+    noticeType: "impact_echo",
+    impactKind: "gap_closed",
+    title: "A gap was closed",
+    detail: "HIDDEN_RESEARCH_INBOX_CANARY",
+  });
+  const recovery = await createInboxNotice(env.DB, {
+    fellowId: visibilityFellow,
+    problemId: problem,
+    noticeType: "moderation_outcome",
+    title: "Your appeal was released",
+    detail: "Read your case before retrying the held request.",
+  });
+  const account = await createInboxNotice(env.DB, {
+    fellowId: visibilityFellow,
+    noticeType: "protocol_notice",
+    title: "Your account notice remains available",
+  });
+  const visibilityRead = (body = {}) =>
+    sponsorCall(visibilityOwner, "POST", path, "inbox.read", {
+      fellow_id: visibilityFellow,
+      ...body,
+    });
+  const followPath = `/v1/p/${problem}/follow`;
+  await call(followPath, {}, visibilityToken);
+  assert.ok((await visibilityRead()).items.some((item) => item.id === research.id));
+  const control = (action) =>
+    operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+      target_kind: "problem",
+      target_id: problem,
+      action,
+      reason: "Verify current publication controls across retained research feedback.",
+    });
+  await control("hide");
+  const privatePage = await call("/v1/inbox?limit=1", undefined, visibilityToken);
+  assert.deepEqual(
+    privatePage.items.map((item) => item.id),
+    [recovery.id],
+  );
+  assert.equal(privatePage.unacknowledged_count, 2);
+  assert.equal(privatePage.has_more, true);
+  const sponsorPage = SponsorInboxResponseSchema.parse(await visibilityRead({ limit: 1 }));
+  assert.deepEqual(
+    sponsorPage.items.map((item) => item.id),
+    [recovery.id],
+  );
+  assert.equal(sponsorPage.fellow_unacknowledged_count, 2);
+  assert.equal(sponsorPage.has_more, true);
+  const lastPage = await visibilityRead({ since: sponsorPage.next_cursor, limit: 1 });
+  assert.deepEqual(
+    lastPage.items.map((item) => item.id),
+    [account.id],
+  );
+  assert.equal(lastPage.has_more, false);
+  assert.ok(
+    !JSON.stringify([privatePage, sponsorPage, lastPage]).includes("HIDDEN_RESEARCH_INBOX_CANARY"),
+  );
+  assert.equal((await call("/v1/hello", undefined, visibilityToken)).inbox.unacknowledged_count, 2);
+  assert.equal((await call(followPath, undefined, visibilityToken, 404)).code, "PROBLEM_NOT_FOUND");
+  assert.equal((await call(followPath, {}, visibilityToken, 404)).code, "PROBLEM_NOT_FOUND");
+  assert.equal(
+    (await call("/v1/inbox/ack", { notice_ids: [research.id] }, visibilityToken))
+      .acknowledged_count,
+    0,
+  );
+  // Stop the existing preference even though its target is hidden; repeating
+  // the removal and removing an unknown target have identical response shape.
+  for (const target of [problem, problem, "P-MISSING-INBOX"]) {
+    const response = await worker.fetch(`${origin}/v1/p/${target}/follow`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${visibilityToken}`, "User-Agent": userAgent },
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      problem_id: target,
+      following: false,
+      followed_at: null,
+    });
+  }
+  assert.equal(
+    (await call("/v1/inbox/ack", { notice_ids: [recovery.id] }, visibilityToken))
+      .acknowledged_count,
+    1,
+  );
+  await control("restore");
+  const restored = await visibilityRead();
+  assert.ok(
+    restored.items.some((item) => item.id === research.id && item.acknowledged_at === null),
+  );
+  assert.equal(restored.fellow_unacknowledged_count, 2);
+  assert.equal((await call(followPath, undefined, visibilityToken)).following, false);
 });
 
 console.log(
@@ -181,6 +304,6 @@ console.log(
     kind: "sponsor-inbox-real-bindings",
     status: "pass",
     coverage:
-      "signed mounted inbox; current sponsorship; private pagination; Fellow-only acknowledgement; bilateral transfer excludes former directives and counts",
+      "signed mounted inbox; current sponsorship; private pagination; Fellow-only acknowledgement; bilateral transfer excludes former directives; current problem hide/restore controls research notices, counts, acknowledgments and follows while preserving private recovery",
   }),
 );

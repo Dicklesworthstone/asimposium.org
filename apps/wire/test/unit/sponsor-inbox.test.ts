@@ -277,9 +277,16 @@ describe("sponsor exact publication references", () => {
       else f.sql.exec("UPDATE problems SET public_seq=1 WHERE id='P-PUBLIC'");
       expect((await f.read())?.items[0]?.source_refs).toBeUndefined();
       const fellow = await getInboxNotices(f.db, FELLOW, { limit: 50 }, NOW);
-      expect(
-        fellow.items[0]?.next_actions?.some((action) => action.url.includes("/reviews/")),
-      ).toBe(false);
+      if (change === "withdrawn") {
+        // This synthetic row has no author-bound withdrawal event. It removes
+        // the source link, but is not authority to retire the notice itself.
+        expect(
+          fellow.items[0]?.next_actions?.some((action) => action.url.includes("/reviews/")),
+        ).toBe(false);
+      } else {
+        expect(fellow.items).toEqual([]);
+        expect(fellow.unacknowledged_count).toBe(0);
+      }
     } finally {
       f.sql.close();
     }
@@ -371,6 +378,62 @@ describe("sponsor inbox reads currently owned Fellow notices", () => {
       expect((await f.read())?.fellow_unacknowledged_count).toBe(3);
     } finally {
       f.sql.close();
+    }
+  });
+
+  test.each(["problem", "P-PUBLIC"])(
+    "%s hide removes research previews and counts while preserving private appeal recovery",
+    async (target) => {
+      const f = fixture();
+      try {
+        const research = f.add(1, { problem: "P-PUBLIC", detail: "HIDDEN_RESEARCH_CANARY" });
+        const appeal = f.add(2, {
+          problem: "P-PUBLIC",
+          type: "moderation_outcome",
+          detail: "Your screening appeal was released; resubmit the original request.",
+        });
+        const account = f.add(3, { type: "protocol_notice" });
+        f.sql.query("INSERT INTO content_controls VALUES ('P-PUBLIC',?,1,'hidden')").run(target);
+        const first = await f.read({ limit: 1 });
+        expect(first?.items.map((item) => item.id)).toEqual([appeal]);
+        expect(first?.fellow_unacknowledged_count).toBe(2);
+        expect(first?.has_more).toBe(true);
+        const next = await f.read({ since: first?.next_cursor ?? 0, limit: 1 });
+        expect(next?.items.map((item) => item.id)).toEqual([account]);
+        expect(next?.has_more).toBe(false);
+        expect(JSON.stringify(first)).not.toContain("HIDDEN_RESEARCH_CANARY");
+        f.sql.query("INSERT INTO content_controls VALUES ('P-PUBLIC',?,2,'visible')").run(target);
+        expect((await f.read())?.items.map((item) => item.id)).toEqual([research, appeal, account]);
+      } finally {
+        f.sql.close();
+      }
+    },
+  );
+
+  test("a whole-problem hide during hydration withholds the selected notice and lookahead", async () => {
+    for (const reader of ["fellow", "sponsor"] as const) {
+      const f = fixture();
+      try {
+        f.add(1, { type: "protocol_notice" });
+        f.add(2, { problem: "P-PUBLIC", detail: "HIDDEN_LOOKAHEAD_CANARY" });
+        f.onPageRead(() =>
+          f.sql.exec("INSERT INTO content_controls VALUES ('P-PUBLIC','problem',1,'hidden')"),
+        );
+        if (reader === "fellow") {
+          await expect(getInboxNotices(f.db, FELLOW, { limit: 1 }, NOW)).rejects.toThrow(
+            "INBOX_PAGE_CHANGED",
+          );
+        } else {
+          const response = await f.request({ fellow_id: FELLOW, limit: 1 });
+          expect(response.status).toBe(503);
+          expect(await response.text()).not.toContain("HIDDEN_LOOKAHEAD_CANARY");
+        }
+        const current = await f.read({ limit: 1 });
+        expect(current?.fellow_unacknowledged_count).toBe(1);
+        expect(current?.has_more).toBe(false);
+      } finally {
+        f.sql.close();
+      }
     }
   });
 
