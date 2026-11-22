@@ -249,6 +249,9 @@ export function retainedRouteTemplate(path) {
       "/",
       "/v1/hello",
       "/v1/fellows",
+      "/v1/fellows/flow",
+      "/v1/protocol/ack",
+      "/v1/directives/active",
       "/protocol.md",
       "/skill.md",
       "/policy.md",
@@ -256,6 +259,16 @@ export function retainedRouteTemplate(path) {
       "/inoculation.md",
       "/capabilities",
       "/schemas/index.json",
+      "/schemas/enrollment-capsule.v1.json",
+      "/schemas/enrollment.v1.json",
+      "/schemas/enrollment.v1/protocol_ack_request.json",
+      "/schemas/sessions.v1.json",
+      "/schemas/sessions.v1/session_open_request.json",
+      "/schemas/sessions.v1/workshop_push_request.json",
+      "/schemas/sessions.v1/first_claim_draft_request.json",
+      "/schemas/sessions.v1/promote_request.json",
+      "/schemas/sessions.v1/promote_saved_draft_request.json",
+      "/schemas/sessions.v1/session_close_request.json",
     ].includes(path)
   )
     return path;
@@ -268,6 +281,8 @@ export function retainedRouteTemplate(path) {
   if (/^\/v1\/enrollments\/[^/]+\/flow-token$/.test(path))
     return "/v1/enrollments/:enrollment/flow-token";
   if (/^\/schemas\/[^/]+(?:\/[^/]+)?$/.test(path)) return "/schemas/:schema";
+  const statement = /^\/p\/[^/]+\/statements\/\d+\.(md|json)$/.exec(path);
+  if (statement) return `/p/:problem/statements/:version.${statement[1]}`;
   if (/^\/p\/[^/]+$/.test(path)) return "/p/:problem";
   return "unrecognized";
 }

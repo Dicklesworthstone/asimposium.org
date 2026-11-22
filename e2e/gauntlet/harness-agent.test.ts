@@ -211,10 +211,25 @@ process.stdin.on("end",()=>{
   test.each([
     ["/", "/"],
     ["/v1/hello", "/v1/hello"],
+    ["/v1/fellows/flow", "/v1/fellows/flow"],
+    ["/v1/protocol/ack", "/v1/protocol/ack"],
+    ["/v1/directives/active", "/v1/directives/active"],
     ["/join/ASIMP-EN-private-value", "/join/:enrollment"],
     ["/v1/sessions/S-private-value/pack", "/v1/sessions/:session/pack"],
     ["/v1/sessions/S-private-value/promote", "/v1/sessions/:session/promote"],
-    ["/schemas/sessions.v1/workshop_push_request.json", "/schemas/:schema"],
+    ["/schemas/sessions.v1.json", "/schemas/sessions.v1.json"],
+    [
+      "/schemas/sessions.v1/workshop_push_request.json",
+      "/schemas/sessions.v1/workshop_push_request.json",
+    ],
+    [
+      "/schemas/sessions.v1/promote_saved_draft_request.json",
+      "/schemas/sessions.v1/promote_saved_draft_request.json",
+    ],
+    ["/schemas/sessions.v1/asimp_ag_private-value.json", "/schemas/:schema"],
+    ["/p/P-private-value/statements/386.md", "/p/:problem/statements/:version.md"],
+    ["/p/P-private-value/statements/386.json", "/p/:problem/statements/:version.json"],
+    ["/v1/directives/active?problem_id=private-value", "unrecognized"],
     ["/unknown/asimp_ag_private-value", "unrecognized"],
     ["/unknown/v1.private-value/more", "unrecognized"],
   ])("retained route %s contains only a fixed template", (path, expected) => {
