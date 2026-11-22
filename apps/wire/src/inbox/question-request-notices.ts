@@ -126,6 +126,16 @@ export function visibleQuestionRequestNoticeSql(
   return `EXISTS (SELECT 1 ${questionRequestSourcesSql(eventId, recipient, target, problem, sourceEventId)})`;
 }
 
+/** The same current publication/author checks as the read predicate, projected
+ * to small immutable identities. Delivery materializes this relation once per
+ * statement so its source, recipient and byte-witness guards do not nest the
+ * full eligibility expression beyond D1's expression-depth limit. */
+export function questionRequestSourceIdentitiesSql(eventId: string): string {
+  return `SELECT DISTINCT request_question.id AS question_event_id,
+    request_author.actor_fellow_id AS fellow_id, request_source.id AS source_event_id
+    ${questionRequestSourcesSql(eventId)}`;
+}
+
 export interface QuestionRequestRecipient {
   readonly fellowId: string;
   readonly source: ScientificContentIdentity;

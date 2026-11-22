@@ -12,6 +12,7 @@ import { questionAnswerWitnesses, visibleQuestionAnswerNoticeSql } from "./quest
 import {
   type QuestionRequestRecipient,
   questionRequestRecipients,
+  questionRequestSourceIdentitiesSql,
   visibleQuestionRequestNoticeSql,
 } from "./question-request-notices.ts";
 import type { NoticeCreateInput } from "./store.ts";
@@ -86,7 +87,6 @@ const RECIPIENT_SQL = `(
         AND author.object_kind = ? AND author.object_version = 1
         AND author.object_id = ? AND author.actor_fellow_id = f.fellow_id
         AND author.seq < e.seq))
-  OR (e.type = 'question.asked' AND ${visibleQuestionRequestNoticeSql("e.id", "f.fellow_id")})
 )`;
 
 /** OPS.2a (1e7): one line per delivery job. IDs, type, counts, cursor, state
@@ -306,19 +306,29 @@ async function deliveryStatements(
   now: number,
 ): Promise<D1PreparedStatement[]> {
   const token = crypto.randomUUID();
+  const questionRequest = template.targetKind === "question-request";
+  // Keep the full question/source publication law in its own relation. Nesting
+  // it inside both the delivery guard and each byte witness exceeds native
+  // D1's expression-depth limit even for a single recipient. Only identities
+  // are materialized; the exact verified source bytes remain pinned below.
+  const questionSources = questionRequest
+    ? `WITH question_request_sources AS MATERIALIZED (${questionRequestSourceIdentitiesSql("?")}) `
+    : "";
+  const questionSourceBindings = questionRequest ? [job.event_id] : [];
   const visible =
     template.targetKind === "hypothesis"
       ? visibleHypothesisNoticeSql("e.id")
       : template.targetKind === "question"
         ? visibleQuestionAnswerNoticeSql("e.id")
-        : template.targetKind === "question-request"
-          ? visibleQuestionRequestNoticeSql("e.id")
+        : questionRequest
+          ? `EXISTS (SELECT 1 FROM question_request_sources request
+              WHERE request.question_event_id = e.id)`
           : template.targetKind === "claim"
             ? visibleClaimNoticeSql("e.id")
             : "1";
   const statements = [
     db
-      .prepare(`UPDATE inbox_event_deliveries SET claim_token = ?
+      .prepare(`${questionSources}UPDATE inbox_event_deliveries SET claim_token = ?
     WHERE id = ? AND state = 'pending' AND after_fellow_id = ?
       AND EXISTS (SELECT 1 FROM events e JOIN event_content c ON c.event_id = e.id
         JOIN problems p ON p.id = e.problem_id
@@ -333,18 +343,16 @@ async function deliveryStatements(
           AND body.payload_sha256 = source.payload_sha256 AND body.redacted_at IS NULL
           AND body.payload_json = json_extract(witness.value, '$.payloadJson')
           AND ${
-            template.targetKind === "question-request"
-              ? visibleQuestionRequestNoticeSql(
-                  "inbox_event_deliveries.event_id",
-                  "json_extract(witness.value, '$.fellowId')",
-                  undefined,
-                  undefined,
-                  "source.id",
-                )
+            questionRequest
+              ? `EXISTS (SELECT 1 FROM question_request_sources request
+                  WHERE request.question_event_id = inbox_event_deliveries.event_id
+                    AND request.fellow_id = json_extract(witness.value, '$.fellowId')
+                    AND request.source_event_id = source.id)`
               : "1"
           }
       ))`)
       .bind(
+        ...questionSourceBindings,
         token,
         job.id,
         job.after_fellow_id,
@@ -369,7 +377,7 @@ async function deliveryStatements(
     // synchronous statement-revision producer. Never reset an acknowledgment.
     statements.push(
       db
-        .prepare(`INSERT INTO fellow_inbox_notices
+        .prepare(`${questionSources}INSERT INTO fellow_inbox_notices
       (id, fellow_id, problem_id, notice_type, seq, title, detail, impact_kind,
        caused_by_event_id, target_id, acknowledged_at, expires_at, created_at)
       SELECT ?, f.fellow_id, e.problem_id, ?,
@@ -380,7 +388,12 @@ async function deliveryStatements(
       JOIN problems p ON p.id = e.problem_id
       JOIN enrollment_fellows f ON f.fellow_id = ?
       WHERE q.id = ? AND q.state = 'pending' AND q.claim_token = ?
-        AND p.status <> 'private-draft' AND ${visible} AND ${RECIPIENT_SQL}
+        AND p.status <> 'private-draft' AND ${visible} AND ${
+          questionRequest
+            ? `EXISTS (SELECT 1 FROM question_request_sources request
+                WHERE request.question_event_id = e.id AND request.fellow_id = f.fellow_id)`
+            : RECIPIENT_SQL
+        }
         AND NOT EXISTS (SELECT 1 FROM fellow_inbox_notices n
           WHERE n.fellow_id = f.fellow_id AND n.problem_id = e.problem_id
             AND n.notice_type = ? AND n.caused_by_event_id = e.id
@@ -389,6 +402,7 @@ async function deliveryStatements(
             AND n.impact_kind IS NULL)
       ON CONFLICT (id) DO NOTHING`)
         .bind(
+          ...questionSourceBindings,
           id,
           template.noticeType,
           template.title,
@@ -398,8 +412,7 @@ async function deliveryStatements(
           fellowId,
           job.id,
           token,
-          template.targetKind,
-          template.targetObject,
+          ...(questionRequest ? [] : [template.targetKind, template.targetObject]),
           template.noticeType,
           template.targetId,
         ),
