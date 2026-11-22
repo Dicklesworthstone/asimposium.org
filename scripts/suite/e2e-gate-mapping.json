@@ -81,7 +81,7 @@
     "inbox-follows-e2e.ts": {
       "suite_proof_level": "in-process",
       "entrypoint": "scripts/e2e-inbox-follows.sh",
-      "authoritative_real_lane": "apps/wire/test/integration/sponsor-inbox-real-bindings.mjs",
+      "authoritative_real_lane": "apps/wire/test/integration/stoa-surface-real-bindings.mjs",
       "wired_in_entrypoint": true,
       "honest_classification": "wired-to-real-bindings-lane"
     },
