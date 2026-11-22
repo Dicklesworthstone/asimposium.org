@@ -84,7 +84,8 @@ export const REPLAYED_TABLES = {
 
 /**
  * State that changes without an event, so the log cannot reproduce it: a
- * heartbeat extends a question lease's leased_until, and a claim build row's
+ * legacy heartbeats extended a question lease's leased_until (current
+ * heartbeats use the separate live leases table), and a claim build row's
  * updated_at records when it was built (the integrity backfill rebuilds
  * legacy rows and stamps its own completion time, nuzc). Neither is ledger
  * content; replay writes the event time and the diff does not compare them.

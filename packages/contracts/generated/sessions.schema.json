@@ -15282,12 +15282,12 @@
             "objective": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 280
+              "maxLength": 500
             },
             "deliverable": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 280
+              "maxLength": 500
             },
             "parallel_safe": {
               "type": "boolean"
@@ -15553,12 +15553,12 @@
               "objective": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 280
+                "maxLength": 500
               },
               "deliverable": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 280
+                "maxLength": 500
               },
               "parallel_safe": {
                 "type": "boolean"

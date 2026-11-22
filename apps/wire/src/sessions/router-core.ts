@@ -312,6 +312,7 @@ import {
   sessionPackProvenanceReference,
   snapshotSessionProvenance,
 } from "./provenance";
+import { findQuestionLeaseSource, QUESTION_LEASE_STATE_SQL } from "./question-leases.ts";
 import { accountQuestionPackOmissions, readQuestionPack } from "./questions-pack.ts";
 import {
   checkAndReserveQuota,
@@ -3154,15 +3155,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           const idleCloseAt = new Date(now.getTime() + SESSION_IDLE_MS).toISOString();
           const renewedLeaseUntil = new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString();
 
-          const activeQuestions = await db
-            .prepare(
-              `SELECT question_id, leased_until FROM questions
-         WHERE problem_id = ? AND leased_by = ? AND status = 'leased' AND (leased_until IS NULL OR leased_until > ?)
-         ORDER BY question_id ASC`,
-            )
-            .bind(session.problem_id, auth.binding.fellowId, lastHeartbeatAt)
-            .all<{ question_id: string; leased_until: string | null }>();
-
           const activeObjectLeases = await db
             .prepare(
               `SELECT lease_id, problem_id, object_ref, object_id, session_id, fellow_id, sponsor_id, objective, deliverable, parallel_safe, leased_until
@@ -3186,10 +3178,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             }>();
 
           const renewedLeases = Array.from(
-            new Set([
-              ...(activeQuestions.results ?? []).map((r) => r.question_id),
-              ...(activeObjectLeases.results ?? []).map((r) => r.object_ref),
-            ]),
+            new Set([...(activeObjectLeases.results ?? []).map((r) => r.object_ref)]),
           ).sort();
 
           const responsePayload = SessionHeartbeatResponseSchema.parse({
@@ -3242,10 +3231,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               AND (p.status <> 'private-draft' OR (p.sponsor_id = t.sponsor_id
                 AND (p.created_by_fellow_id = t.fellow_id
                   OR json_extract(t.granted_resources_json, '$.problemBinding') = p.id))))
-          AND (SELECT json_group_array(json_array(question_id, leased_until)) FROM
-            (SELECT question_id, leased_until FROM questions WHERE problem_id = ? AND leased_by = ?
-              AND status = 'leased' AND (leased_until IS NULL OR leased_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-              ORDER BY question_id)) = ?
           AND (SELECT json_group_array(json_array(lease_id, leased_until)) FROM
             (SELECT lease_id, leased_until FROM leases WHERE problem_id = ? AND fellow_id = ? AND session_id = ?
               AND status IN ('active', 'challenged') AND leased_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -3266,11 +3251,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                     lastHeartbeatAt,
                     session.problem_id,
                     auth.binding.fellowId,
-                    JSON.stringify(
-                      (activeQuestions.results ?? []).map((q) => [q.question_id, q.leased_until]),
-                    ),
-                    session.problem_id,
-                    auth.binding.fellowId,
                     sessionId,
                     JSON.stringify(
                       (activeObjectLeases.results ?? []).map((l) => [l.lease_id, l.leased_until]),
@@ -3284,24 +3264,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   )
                   .bind(lastHeartbeatAt, idleCloseAt, session.session_id, ...owner),
               ];
-
-              if ((activeQuestions.results ?? []).length > 0) {
-                statements.push(
-                  db
-                    .prepare(
-                      `UPDATE questions
-             SET leased_until = ?
-             WHERE problem_id = ? AND leased_by = ? AND status = 'leased' AND (leased_until IS NULL OR leased_until > ?) AND ${owns}`,
-                    )
-                    .bind(
-                      renewedLeaseUntil,
-                      session.problem_id,
-                      auth.binding.fellowId,
-                      lastHeartbeatAt,
-                      ...owner,
-                    ),
-                );
-              }
 
               if ((activeObjectLeases.results ?? []).length > 0) {
                 statements.push(
@@ -13841,16 +13803,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     });
     if (decision.decision !== "allow") return writeRefusedProblem();
 
-    const question = await db
-      .prepare("SELECT * FROM questions WHERE problem_id = ? AND question_id = ?")
-      .bind(session.problem_id, questionId)
-      .first<{
-        question_id: string;
-        problem_id: string;
-        status: string;
-        leased_by: string | null;
-        leased_until: string | null;
-      }>();
+    const question = await findQuestionLeaseSource(db, session.problem_id, questionId);
 
     if (!question) {
       return validatedProblem({
@@ -13904,19 +13857,40 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     const now = new Date();
-    const leaseExpiry = question.leased_until ? new Date(question.leased_until) : null;
-    const isExpired = leaseExpiry !== null && leaseExpiry.getTime() <= now.getTime();
-    if (
-      question.status === "leased" &&
-      !isExpired &&
-      question.leased_by !== auth.binding.fellowId
-    ) {
+    const createdAt = now.toISOString();
+    const activeLeases = await db
+      .prepare(`SELECT lease_id, fellow_id, sponsor_id, session_id, leased_until, parallel_safe
+        FROM leases WHERE problem_id = ? AND object_kind = 'question'
+          AND (object_id = ? OR object_ref = ?) AND status IN ('active', 'challenged')
+          AND leased_until > ? ORDER BY lease_id`)
+      .bind(session.problem_id, questionId, question.canonicalRef, createdAt)
+      .all<{
+        lease_id: string;
+        fellow_id: string;
+        sponsor_id: string;
+        session_id: string;
+        leased_until: string;
+        parallel_safe: number;
+      }>();
+    // Preserve the dedicated endpoint's renewal behavior only for the same
+    // session's sole exclusive reservation. A different session cannot take
+    // over a lease, and legacy overlaps cannot be resolved by renewal.
+    const held = activeLeases.results.length === 1 ? activeLeases.results[0] : undefined;
+    const renewal =
+      held?.fellow_id === auth.binding.fellowId &&
+      held.sponsor_id === auth.binding.sponsorId &&
+      held.session_id === sessionId &&
+      held.parallel_safe === 0
+        ? held
+        : undefined;
+    if (activeLeases.results.length > 0 && renewal === undefined) {
       return validatedProblem({
         status: 409,
         code: "QUESTION_ALREADY_LEASED",
         title: "Question already leased",
-        detail: `Question '${questionId}' is currently leased by fellow '${question.leased_by}' until ${question.leased_until}.`,
-        fixHint: "Choose an unleased question or wait until the lease expires.",
+        detail: `Question '${questionId}' already has a live reservation.`,
+        fixHint:
+          "Read the session's leases, renew from the holding session, or release the existing reservation before acquiring it here.",
         rule: "§7.5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -13928,9 +13902,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     const ttlSeconds = parsed.data.ttl_seconds ?? 7200;
-    const leasedUntil = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    const leasedUntil = new Date(now.getTime() + ttlSeconds * 1000).toISOString();
+    const leaseId = renewal?.lease_id ?? mintId("L");
     const publication = {
       question_id: questionId,
+      lease_id: leaseId,
+      object_ref: question.canonicalRef,
       leased_by: auth.binding.fellowId,
       leased_until: leasedUntil,
       objective: parsed.data.objective ?? "Answer question",
@@ -13962,8 +13939,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const eventId = mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("lease_question", claimToken);
-    const createdAt = new Date().toISOString();
-
     try {
       const write = await writeLedgerEvent(
         db,
@@ -13988,14 +13963,40 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
-          // rg73: the route's state check, repeated inside the ledger transaction.
+          // Both acquisition endpoints share leases as their live authority.
+          // The source/head and reservation checks run before the event in
+          // the same transaction, so a competing endpoint cannot slip in.
           preconditionSql:
-            " AND EXISTS (SELECT 1 FROM questions q WHERE q.problem_id = ? AND q.question_id = ? AND q.status NOT IN ('resolved', 'withdrawn') AND (q.status <> 'leased' OR q.leased_by = ? OR q.leased_until <= ?))",
+            QUESTION_LEASE_STATE_SQL +
+            ` AND NOT EXISTS (SELECT 1 FROM leases l WHERE l.problem_id = ?
+              AND (l.object_id = ? OR l.object_ref = ?)
+              AND l.status IN ('active', 'challenged') AND l.leased_until > ?
+              AND l.lease_id <> ?)` +
+            (renewal === undefined
+              ? ""
+              : ` AND EXISTS (SELECT 1 FROM leases l WHERE l.lease_id = ?
+                  AND l.fellow_id = ? AND l.sponsor_id = ? AND l.session_id = ?
+                  AND l.parallel_safe = 0 AND l.status IN ('active', 'challenged')
+                  AND l.leased_until = ? AND l.leased_until > ?)`),
           preconditionBindings: [
+            question.latestEventId,
             session.problem_id,
             questionId,
-            auth.binding.fellowId,
-            new Date().toISOString(),
+            session.problem_id,
+            questionId,
+            question.canonicalRef,
+            createdAt,
+            renewal?.lease_id ?? "",
+            ...(renewal === undefined
+              ? []
+              : [
+                  renewal.lease_id,
+                  auth.binding.fellowId,
+                  auth.binding.sponsorId,
+                  sessionId,
+                  renewal.leased_until,
+                  createdAt,
+                ]),
           ],
           statementsAfterEvent: () => [
             db
@@ -14005,6 +14006,48 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                  WHERE problem_id = ? AND question_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
               )
               .bind(auth.binding.fellowId, leasedUntil, session.problem_id, questionId, eventId),
+            db
+              .prepare(`UPDATE leases SET status = 'expired', updated_at = ?
+                WHERE problem_id = ? AND object_kind = 'question' AND object_id = ?
+                  AND status IN ('active', 'challenged') AND leased_until <= ?
+                  AND EXISTS (SELECT 1 FROM events WHERE id = ?)`)
+              .bind(createdAt, session.problem_id, questionId, createdAt, eventId),
+            renewal === undefined
+              ? db
+                  .prepare(`INSERT INTO leases (
+                    lease_id, problem_id, object_ref, object_kind, object_id,
+                    session_id, fellow_id, sponsor_id, objective, deliverable, parallel_safe,
+                    status, leased_at, leased_until, created_at, updated_at
+                  ) SELECT ?, ?, ?, 'question', ?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?
+                    WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)`)
+                  .bind(
+                    leaseId,
+                    session.problem_id,
+                    question.canonicalRef,
+                    questionId,
+                    sessionId,
+                    auth.binding.fellowId,
+                    auth.binding.sponsorId,
+                    publication.objective,
+                    publication.deliverable,
+                    createdAt,
+                    leasedUntil,
+                    createdAt,
+                    createdAt,
+                    eventId,
+                  )
+              : db
+                  .prepare(`UPDATE leases SET leased_until = ?, objective = ?, deliverable = ?,
+                    updated_at = ? WHERE lease_id = ?
+                    AND EXISTS (SELECT 1 FROM events WHERE id = ?)`)
+                  .bind(
+                    leasedUntil,
+                    publication.objective,
+                    publication.deliverable,
+                    createdAt,
+                    renewal.lease_id,
+                    eventId,
+                  ),
           ],
         },
         {},
@@ -14021,6 +14064,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           session,
           screening,
           reservationId: reservation.reservationId,
+          statementsAfterReplay: scientificContentGuards(db, question.sources),
           responseFor: () =>
             LeaseQuestionResponseSchema.parse({
               ok: true,
@@ -14062,7 +14106,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (error instanceof KraterLedgerPreconditionError)
+      if (error instanceof KraterLedgerPreconditionError || isScientificReferenceChanged(error))
         return objectStateChangedProblem("question", questionId);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
@@ -14273,6 +14317,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                  WHERE problem_id = ? AND question_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
               )
               .bind(target, session.problem_id, questionId, eventId),
+            db
+              .prepare(`UPDATE leases SET status = 'released', released_by = ?,
+                released_at = ?, updated_at = ?
+                WHERE problem_id = ? AND object_kind = 'question' AND object_id = ?
+                  AND status IN ('active', 'challenged')
+                  AND EXISTS (SELECT 1 FROM events WHERE id = ?)`)
+              .bind(
+                auth.binding.fellowId,
+                createdAt,
+                createdAt,
+                session.problem_id,
+                questionId,
+                eventId,
+              ),
           ],
         },
         {},
@@ -14555,6 +14613,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                  WHERE problem_id = ? AND question_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
               )
               .bind(session.problem_id, questionId, eventId),
+            db
+              .prepare(`UPDATE leases SET status = 'released', released_by = ?,
+                released_at = ?, updated_at = ?
+                WHERE problem_id = ? AND object_kind = 'question' AND object_id = ?
+                  AND status IN ('active', 'challenged')
+                  AND EXISTS (SELECT 1 FROM events WHERE id = ?)`)
+              .bind(
+                auth.binding.fellowId,
+                createdAt,
+                createdAt,
+                session.problem_id,
+                questionId,
+                eventId,
+              ),
           ],
         },
         {},
@@ -16793,7 +16865,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (decision.decision !== "allow") return writeRefusedProblem();
 
     const target = await resolveLeaseTarget(db, session.problem_id, parsed.data.object);
-    if (!target) {
+    const questionSource =
+      target?.kind === "question"
+        ? await findQuestionLeaseSource(db, session.problem_id, target.objectId)
+        : null;
+    if (!target || (target.kind === "question" && questionSource === null)) {
       return validatedProblem({
         status: 404,
         code: "LEASE_TARGET_NOT_FOUND",
@@ -16804,6 +16880,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           example: { object: parsed.data.object },
+        },
+      });
+    }
+
+    if (
+      questionSource !== null &&
+      (questionSource.status === "resolved" || questionSource.status === "withdrawn")
+    ) {
+      return validatedProblem({
+        status: 409,
+        code:
+          questionSource.status === "resolved"
+            ? "QUESTION_ALREADY_RESOLVED"
+            : "QUESTION_ALREADY_WITHDRAWN",
+        title: "Question is no longer open",
+        detail: `Question '${target.objectId}' is '${questionSource.status}' and cannot be leased.`,
+        fixHint: "Choose an open question from the current question board.",
+        rule: "§7.5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { object: target.canonicalRef },
         },
       });
     }
@@ -16872,7 +16969,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     const leaseId = mintId("L");
     const leasedAt = nowIso;
-    const leasedUntil = new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString();
+    const leasedUntil = new Date(now.getTime() + parsed.data.ttl_seconds * 1000).toISOString();
     const publication = {
       lease_id: leaseId,
       problem_id: session.problem_id,
@@ -16938,7 +17035,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         {
           // rg73: the route's state check, repeated inside the ledger transaction.
           preconditionSql:
-            " AND NOT EXISTS (SELECT 1 FROM leases l WHERE l.problem_id = ? AND (l.object_id = ? OR l.object_ref = ?) AND l.status IN ('active', 'challenged') AND l.leased_until > ? AND (l.fellow_id = ? OR l.parallel_safe = 0 OR ? = 0))",
+            " AND NOT EXISTS (SELECT 1 FROM leases l WHERE l.problem_id = ? AND (l.object_id = ? OR l.object_ref = ?) AND l.status IN ('active', 'challenged') AND l.leased_until > ? AND (l.fellow_id = ? OR l.parallel_safe = 0 OR ? = 0))" +
+            (questionSource === null ? "" : QUESTION_LEASE_STATE_SQL),
           preconditionBindings: [
             session.problem_id,
             target.objectId,
@@ -16946,6 +17044,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             leasedAt,
             auth.binding.fellowId,
             parsed.data.parallel_safe ? 1 : 0,
+            ...(questionSource === null
+              ? []
+              : [questionSource.latestEventId, session.problem_id, target.objectId]),
           ],
           statementsAfterEvent: () => [
             db
@@ -17007,6 +17108,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           session,
           screening,
           reservationId: reservation.reservationId,
+          statementsAfterReplay:
+            questionSource === null ? [] : scientificContentGuards(db, questionSource.sources),
           responseFor: () =>
             LeaseAcquireResponseSchema.parse({
               ok: true,
@@ -17085,7 +17188,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (error instanceof KraterLedgerPreconditionError)
+      if (error instanceof KraterLedgerPreconditionError || isScientificReferenceChanged(error))
         return objectStateChangedProblem("object", target.canonicalRef);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();

@@ -39,8 +39,10 @@ await runLocalWorkerJourney(async (context) => {
       }),
     );
   const drainAnswers = async () => {
-    for (let tick = 0; tick < 3; tick++)
-      assert.equal((await fixtures.deliverInboxTick()).failed, 0);
+    for (let tick = 0; tick < 3; tick++) {
+      const delivered = await fixtures.deliverInboxTick();
+      assert.equal(delivered.failed, 0, JSON.stringify({ stage: "inbox-delivery", ...delivered }));
+    }
   };
 
   // 1. Propose and publish problem
@@ -335,6 +337,25 @@ await runLocalWorkerJourney(async (context) => {
     404,
     "old read links still enforce current controls",
   );
+  const hiddenLeaseScreens = await fixtures.screeningCalls();
+  for (const [path, body] of [
+    [`/v1/sessions/${sessionIdB}/questions/${question1Id}/lease`, { ttl_seconds: 3600 }],
+    [
+      `/v1/sessions/${sessionIdB}/leases`,
+      {
+        object: question1Id,
+        objective: "Check the public question",
+        deliverable: "A scoped resolution",
+      },
+    ],
+  ]) {
+    await call(path, body, reviewerB, 404);
+  }
+  assert.equal(
+    await fixtures.screeningCalls(),
+    hiddenLeaseScreens,
+    "hidden question sources cannot authorize either lease endpoint",
+  );
   await questionPackControl("restore");
   assert.ok((await collaboratorPack()).items.some((item) => item.id === question1Id));
   const smallQuestionPack = await collaboratorPack("working", 800);
@@ -345,6 +366,93 @@ await runLocalWorkerJourney(async (context) => {
       ),
       "a budgeted-out question is explicitly omitted",
     );
+
+  // Current visibility must still hold inside either acquisition's ledger
+  // transaction, after screening and source verification have completed.
+  const leaseSourceState = async () => {
+    const state = await env.DB.batch([
+      env.DB.prepare("SELECT public_seq, chain_digest FROM problems WHERE id = ?").bind(problemId),
+      env.DB.prepare("SELECT id, seq FROM events WHERE problem_id = ? ORDER BY seq").bind(
+        problemId,
+      ),
+      env.DB.prepare("SELECT * FROM questions WHERE problem_id = ? AND question_id = ?").bind(
+        problemId,
+        question1Id,
+      ),
+      env.DB.prepare("SELECT * FROM leases WHERE problem_id = ? ORDER BY lease_id").bind(problemId),
+    ]);
+    return state.map((row) => row.results);
+  };
+  const sourceSequence = (
+    await env.DB.prepare("SELECT seq FROM questions WHERE question_id = ?")
+      .bind(question1Id)
+      .first()
+  ).seq;
+  for (const [index, path, body] of [
+    [0, `/v1/sessions/${sessionIdB}/questions/${question1Id}/lease`, { ttl_seconds: 3600 }],
+    [
+      1,
+      `/v1/sessions/${sessionIdB}/leases`,
+      {
+        object: question1Id,
+        objective: "Check the public question",
+        deliverable: "A scoped resolution",
+      },
+    ],
+  ]) {
+    const before = await leaseSourceState();
+    const key = `question-lease-source-race-${index}`;
+    const insertControl = `INSERT INTO content_controls (
+      control_id, problem_id, target_kind, target_ref, visibility, source,
+      reason_category, actor, reason, version, created_at
+    ) VALUES (?, ?, 'question', ?, ?, 'operator', 'privacy', 'native-lease-test',
+      'Local source availability race.', ?, ?)`;
+    await fixtures.armRaceBeforeNextBatch(
+      insertControl,
+      [
+        `CC-lease-source-hide-${index}`,
+        problemId,
+        `#${sourceSequence}`,
+        "hidden",
+        1 + index * 2,
+        new Date().toISOString(),
+      ],
+      "INSERT INTO events",
+    );
+    const refused = await call(path, body, reviewerB, 409, key);
+    assert.equal(
+      await fixtures.raceStillArmed(),
+      false,
+      "source changed after admission and before commit",
+    );
+    assert.equal(refused.code, "OBJECT_VERSION_CONFLICT");
+    assert.deepEqual(
+      await leaseSourceState(),
+      before,
+      "source loss rolls back event, lease, question and cursor together",
+    );
+    assert.equal(
+      (
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM session_write_replays WHERE idempotency_key = ?",
+        )
+          .bind(key)
+          .first()
+      ).n,
+      0,
+      "a rejected source race records no success receipt",
+    );
+    await env.DB.prepare(insertControl)
+      .bind(
+        `CC-lease-source-restore-${index}`,
+        problemId,
+        `#${sourceSequence}`,
+        "visible",
+        2 + index * 2,
+        new Date().toISOString(),
+      )
+      .run();
+  }
 
   await assertRacedWriteLeavesNoTrace({
     env,
@@ -406,6 +514,35 @@ await runLocalWorkerJourney(async (context) => {
     "lease-conflict-key",
   );
   assert.equal(conflictLeaseRes.code, "QUESTION_ALREADY_LEASED");
+  const heldQuestionLeases = (
+    await call(`/v1/sessions/${sessionIdB}/leases`, undefined, reviewerB)
+  ).leases.filter((lease) => lease.object_id === question1Id);
+  assert.equal(heldQuestionLeases.length, 1);
+  assert.equal(heldQuestionLeases[0].leased_until, leaseRes.leased_until);
+  assert.equal(
+    Date.parse(heldQuestionLeases[0].leased_until) - Date.parse(heldQuestionLeases[0].leased_at),
+    3600_000,
+  );
+  for (const [session, token, expectedCode] of [
+    [sessionIdA, authorA, "LEASED"],
+    [sessionIdB, reviewerB, "LEASE_ALREADY_EXISTS"],
+  ]) {
+    const overlap = await call(
+      `/v1/sessions/${session}/leases`,
+      {
+        object: question1Id,
+        objective: "Check the public question",
+        deliverable: "A scoped resolution",
+      },
+      token,
+      409,
+    );
+    assert.equal(
+      overlap.code,
+      expectedCode,
+      "dedicated and generic acquisition share one authority",
+    );
+  }
 
   // 8. Answer question with resolved_by_object (200). Answering is not
   // screened, so nothing but the event guard keeps a raced answer from
@@ -479,6 +616,47 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(answerRes.ok, true);
   assert.equal(answerRes.question_id, question1Id);
   assert.equal(answerRes.resolved_by_object, `${claim1Id}@1`);
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT status FROM leases WHERE lease_id = ?")
+        .bind(heldQuestionLeases[0].lease_id)
+        .first()
+    ).status,
+    "released",
+    "answer and live reservation release commit together",
+  );
+  assert.equal(
+    (
+      await call(
+        `/v1/sessions/${sessionIdB}/leases`,
+        {
+          object: question1Id,
+          objective: "Retry the completed question",
+          deliverable: "A scoped resolution",
+        },
+        reviewerB,
+        409,
+      )
+    ).code,
+    "QUESTION_ALREADY_RESOLVED",
+  );
+  assert.deepEqual(
+    await call(
+      `/v1/sessions/${sessionIdB}/questions/${question1Id}/lease`,
+      { ttl_seconds: 3600 },
+      reviewerB,
+      200,
+      "lease-idempotency-1",
+    ),
+    leaseRes,
+    "an old lease receipt replays without resurrecting a completed reservation",
+  );
+  assert.equal(
+    (await call(`/v1/sessions/${sessionIdB}/leases`, undefined, reviewerB)).leases.some(
+      (lease) => lease.object_id === question1Id,
+    ),
+    false,
+  );
   assert.ok(
     !(await collaboratorPack()).items.some((item) => item.id === question1Id),
     "answered work leaves the current unanswered-question context",
@@ -624,6 +802,37 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(forbiddenWithdraw.code, "NOT_QUESTION_AUTHOR");
   assert.equal(forbiddenWithdraw.rule, "P9");
 
+  // The inverse overlap is refused too: a generic Q reservation protects
+  // against the dedicated endpoint, and author withdrawal releases it.
+  const genericQuestionLease = (
+    await call(
+      `/v1/sessions/${sessionIdB}/leases`,
+      {
+        object: question2Id,
+        objective: "Investigate the unresolved question",
+        deliverable: "A scoped resolution",
+        ttl_seconds: 600,
+      },
+      reviewerB,
+      201,
+    )
+  ).lease;
+  assert.equal(
+    Date.parse(genericQuestionLease.leased_until) - Date.parse(genericQuestionLease.leased_at),
+    600_000,
+  );
+  assert.equal(
+    (
+      await call(
+        `/v1/sessions/${sessionIdA}/questions/${question2Id}/lease`,
+        { ttl_seconds: 600 },
+        authorA,
+        409,
+      )
+    ).code,
+    "QUESTION_ALREADY_LEASED",
+  );
+
   // Author withdraws Question 2 (200)
   const withdrawRes = await call(
     `/v1/sessions/${sessionIdA}/questions/${question2Id}/withdraw`,
@@ -634,6 +843,30 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.equal(withdrawRes.ok, true);
   assert.equal(withdrawRes.question_id, question2Id);
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT status FROM leases WHERE lease_id = ?")
+        .bind(genericQuestionLease.lease_id)
+        .first()
+    ).status,
+    "released",
+    "withdrawal releases a generic reservation on the same question",
+  );
+  assert.equal(
+    (
+      await call(
+        `/v1/sessions/${sessionIdB}/leases`,
+        {
+          object: question2Id,
+          objective: "Retry the withdrawn question",
+          deliverable: "A scoped resolution",
+        },
+        reviewerB,
+        409,
+      )
+    ).code,
+    "QUESTION_ALREADY_WITHDRAWN",
+  );
   assert.ok(
     !(await collaboratorPack()).items.some((item) => item.id === question2Id),
     "withdrawn questions leave arrival context while their public history remains readable",

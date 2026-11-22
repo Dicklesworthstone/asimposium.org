@@ -1,7 +1,19 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0150_enrollment_protocol_conflicts.sql`.
+schema through `0151_unified_question_leases.sql`.
+
+Migration `0151_unified_question_leases.sql` brings question-specific reservations
+into the common `leases` authority, so both acquisition endpoints, heartbeat,
+release, sponsor controls, warnings and session close share the same live state.
+It adopts each legacy reservation from its immutable lease event's identity and
+attribution, preserving the operational renewal deadline. Legacy terms receive
+explicit source-event labels because SQL cannot verify authored payload bytes;
+the original events and content remain unchanged. Existing overlapping
+reservations remain visible and block new exclusive acquisition until released
+or expired. Terminal question events release existing generic reservations.
+Apply it before the matching Worker. Public question history continues to show
+recorded lifecycle terms; current reservation availability comes from `leases`.
 
 Migration `0150_enrollment_protocol_conflicts.sql` lets a Fellow record a public
 protocol refusal of the initial instruction actually retained in its approved

@@ -27,8 +27,10 @@ export const LeaseItemSchema = z
     object_id: z.string().min(1).max(128),
     fellow_id: z.string().min(1).max(128),
     sponsor_id: z.string().min(1).max(128),
-    objective: z.string().min(1).max(280),
-    deliverable: z.string().min(1).max(280),
+    // The question-specific lease endpoint already accepts 500-character terms.
+    // Both endpoints now expose their reservations through this common list.
+    objective: z.string().min(1).max(500),
+    deliverable: z.string().min(1).max(500),
     parallel_safe: z.boolean(),
     status: LeaseStatusSchema,
     leased_at: z.string().datetime(),

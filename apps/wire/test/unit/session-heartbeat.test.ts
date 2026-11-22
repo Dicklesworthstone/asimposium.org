@@ -1134,7 +1134,7 @@ describe("W4.7 Session heartbeat and presence", () => {
     expect(replay?.count).toBe(0);
   });
 
-  test("heartbeat renews active leases for this fellow on this problem and ignores expired or foreign leases", async () => {
+  test("heartbeat renews only the session's canonical leases and preserves recorded question history", async () => {
     const f = await createTestFixture();
     const nowMs = Date.now();
     const openedAt = new Date(nowMs - 120_000).toISOString();
@@ -1179,6 +1179,52 @@ describe("W4.7 Session heartbeat and presence", () => {
       .bind(f.binding2.fellowId, f.binding2.fellowId, activeExpiry, openedAt)
       .run();
 
+    for (const [sessionId, fellowId, closedAt] of [
+      ["S-OTHER-SESSION", f.binding1.fellowId, openedAt],
+      ["S-FOREIGN-SESSION", f.binding2.fellowId, null],
+    ]) {
+      await f.db
+        .prepare(`INSERT INTO sessions
+        (session_id, fellow_id, problem_id, intent, opened_at, last_heartbeat_at, idle_close_at, closed_at)
+        VALUES (?, ?, 'P-4DSP', 'prove', ?, ?, ?, ?)`)
+        .bind(
+          sessionId,
+          fellowId,
+          openedAt,
+          openedAt,
+          new Date(nowMs + 3600_000).toISOString(),
+          closedAt,
+        )
+        .run();
+    }
+    const activeSession = "S-01JXYZ4K6Q7R8S9T0V1W2X3Y4Z";
+    for (const [objectId, sessionId, binding, expiry] of [
+      ["Q-ACTIVE", activeSession, f.binding1, activeExpiry],
+      ["Q-EXPIRED", activeSession, f.binding1, expiredExpiry],
+      ["Q-FOREIGN", "S-FOREIGN-SESSION", f.binding2, activeExpiry],
+      ["Q-OTHER-SESSION", "S-OTHER-SESSION", f.binding1, activeExpiry],
+    ] as const) {
+      await f.db
+        .prepare(`INSERT INTO leases
+        (lease_id, problem_id, object_ref, object_kind, object_id, session_id, fellow_id,
+         sponsor_id, objective, deliverable, status, leased_at, leased_until, created_at, updated_at)
+        VALUES (?, 'P-4DSP', ?, 'question', ?, ?, ?, ?, 'Check boundary', 'Scoped resolution',
+          'active', ?, ?, ?, ?)`)
+        .bind(
+          `L-${objectId}`,
+          objectId,
+          objectId,
+          sessionId,
+          binding.fellowId,
+          binding.sponsorId,
+          openedAt,
+          expiry,
+          openedAt,
+          openedAt,
+        )
+        .run();
+    }
+
     const res = await f.call(f.token1, "/v1/sessions/S-01JXYZ4K6Q7R8S9T0V1W2X3Y4Z/heartbeat", {
       method: "POST",
     });
@@ -1190,23 +1236,34 @@ describe("W4.7 Session heartbeat and presence", () => {
     // Only Q-ACTIVE should be renewed
     expect(parsed.renewed_leases).toEqual(["Q-ACTIVE"]);
 
-    // Verify Q-ACTIVE has lease extended to ~now + 2h
+    // The canonical lease extends to ~now + 2h; historical question fields
+    // retain the last question.leased term instead of becoming a second lock.
     const qActive = await f.db
-      .prepare("SELECT leased_until FROM questions WHERE question_id = 'Q-ACTIVE'")
+      .prepare("SELECT leased_until FROM leases WHERE object_id = 'Q-ACTIVE'")
       .first<{ leased_until: string }>();
     expect(new Date(qActive!.leased_until).getTime()).toBeGreaterThan(nowMs + 7000 * 1000);
+    expect(
+      await f.db
+        .prepare("SELECT leased_until FROM questions WHERE question_id = 'Q-ACTIVE'")
+        .first(),
+    ).toEqual({ leased_until: activeExpiry });
 
     // Verify Q-EXPIRED was NOT extended
     const qExpired = await f.db
-      .prepare("SELECT leased_until FROM questions WHERE question_id = 'Q-EXPIRED'")
+      .prepare("SELECT leased_until FROM leases WHERE object_id = 'Q-EXPIRED'")
       .first<{ leased_until: string }>();
     expect(qExpired?.leased_until).toBe(expiredExpiry);
 
     // Verify Q-FOREIGN was NOT touched
     const qForeign = await f.db
-      .prepare("SELECT leased_until FROM questions WHERE question_id = 'Q-FOREIGN'")
+      .prepare("SELECT leased_until FROM leases WHERE object_id = 'Q-FOREIGN'")
       .first<{ leased_until: string }>();
     expect(qForeign?.leased_until).toBe(activeExpiry);
+    expect(
+      await f.db
+        .prepare("SELECT leased_until FROM leases WHERE object_id = 'Q-OTHER-SESSION'")
+        .first(),
+    ).toEqual({ leased_until: activeExpiry });
   });
 
   test("a heartbeat winning at challenge commit preserves the lease and allows a later same-key retry", async () => {

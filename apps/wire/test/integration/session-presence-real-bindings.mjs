@@ -150,18 +150,6 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
   assert.equal(questionRes.ok, true);
   const questionId = questionRes.question_id;
 
-  // Fellow A leases the question
-  const leaseRes = await call(
-    `/v1/sessions/${sessionIdA}/questions/${questionId}/lease`,
-    {
-      ttl_seconds: 1800,
-    },
-    fellowAToken,
-    200,
-    "presence-lease-1",
-  );
-  assert.equal(leaseRes.ok, true);
-  assert.equal(leaseRes.question_id, questionId);
   await assertRacedWriteLeavesNoTrace({
     env,
     fixtures,
@@ -188,7 +176,28 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
         .all()
         .then((result) => result.results),
   });
-  const objectLease = await call(
+
+  // The dedicated endpoint creates the same live reservation used by list,
+  // sponsor controls, pack warnings, heartbeat and close.
+  const leaseRes = await call(
+    `/v1/sessions/${sessionIdA}/questions/${questionId}/lease`,
+    { ttl_seconds: 1800 },
+    fellowAToken,
+    200,
+    "presence-lease-1",
+  );
+  assert.equal(leaseRes.ok, true);
+  assert.equal(leaseRes.question_id, questionId);
+  const firstLeaseList = await call(`/v1/sessions/${sessionIdA}/leases`, undefined, fellowAToken);
+  assert.equal(firstLeaseList.leases.length, 1);
+  const dedicatedLeaseId = firstLeaseList.leases[0].lease_id;
+  assert.equal(firstLeaseList.leases[0].leased_until, leaseRes.leased_until);
+  assert.equal(
+    Date.parse(firstLeaseList.leases[0].leased_until) -
+      Date.parse(firstLeaseList.leases[0].leased_at),
+    1800_000,
+  );
+  const duplicateReservation = await call(
     `/v1/sessions/${sessionIdA}/leases`,
     {
       object: questionId,
@@ -197,8 +206,31 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
       ttl_seconds: 1800,
     },
     fellowAToken,
-    201,
+    409,
   );
+  assert.equal(duplicateReservation.code, "LEASE_ALREADY_EXISTS");
+
+  // A new-key same-session renewal keeps one lease identity and the exact
+  // dedicated endpoint terms, including its existing 500-character limit.
+  const renewalTerms = {
+    objective: "Check the boundary case. ".repeat(20),
+    deliverable: "An explicit resolution. ".repeat(20),
+    ttl_seconds: 1800,
+  };
+  const renewedQuestion = await call(
+    `/v1/sessions/${sessionIdA}/questions/${questionId}/lease`,
+    renewalTerms,
+    fellowAToken,
+    200,
+    "presence-lease-renewal",
+  );
+  const renewedList = await call(`/v1/sessions/${sessionIdA}/leases`, undefined, fellowAToken);
+  assert.equal(renewedList.leases.length, 1);
+  const objectLease = { lease: renewedList.leases[0] };
+  assert.equal(objectLease.lease.lease_id, dedicatedLeaseId);
+  assert.equal(objectLease.lease.objective, renewalTerms.objective);
+  assert.equal(objectLease.lease.deliverable, renewalTerms.deliverable);
+  assert.equal(objectLease.lease.leased_until, renewedQuestion.leased_until);
   // uwr8: a sponsor release without a reason is not screened, so only the
   // event guard keeps a raced release from releasing the lease with no event.
   await assertRacedWriteLeavesNoTrace({
@@ -250,7 +282,16 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
   );
   const parsedHb2 = SessionHeartbeatResponseSchema.parse(hb2);
   assert.equal(parsedHb2.session_id, sessionIdA);
-  assert.deepEqual(parsedHb2.renewed_leases, [questionId, objectLease.lease.object].sort());
+  assert.deepEqual(parsedHb2.renewed_leases, [objectLease.lease.object]);
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT leased_until FROM questions WHERE question_id = ?")
+        .bind(questionId)
+        .first()
+    ).leased_until,
+    renewedQuestion.leased_until,
+    "heartbeat updates live coordination without rewriting the recorded question lease term",
+  );
 
   // Lease-expiry warning (1e7): the production sweep warns the holder once per
   // lease term, inside the window only, privately, and a repeat adds nothing.
@@ -457,9 +498,14 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
     200,
   );
   assert.equal(sponsorReleasedChallenge.status, "released");
-  const closingLease = (
-    await call(`/v1/sessions/${sessionIdA}/leases`, protectedRequest, fellowAToken, 201)
-  ).lease;
+  await call(
+    `/v1/sessions/${sessionIdA}/questions/${questionId}/lease`,
+    { ttl_seconds: 1800 },
+    fellowAToken,
+    200,
+  );
+  const closingLease = (await call(`/v1/sessions/${sessionIdA}/leases`, undefined, fellowAToken))
+    .leases[0];
   await env.DB.prepare("UPDATE sessions SET last_heartbeat_at = ? WHERE session_id = ?")
     .bind(new Date(Date.now() - 31 * 60_000).toISOString(), sessionIdA)
     .run();
@@ -501,6 +547,43 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
   );
   assert.deepEqual(await snapshot(sessionIdA, problemId), afterClose);
 
+  // Only one session per Fellow/problem may be open. After a real close and
+  // reopen, the old question projection's future term must not resurrect the
+  // reservation that belonged to the previous session.
+  const reopened = await call(
+    "/v1/sessions",
+    { problem_id: problemId, intent: "explore" },
+    fellowAToken,
+    201,
+  );
+  assert.notEqual(reopened.session_id, sessionIdA);
+  const reopenedHeartbeat = await call(
+    `/v1/sessions/${reopened.session_id}/heartbeat`,
+    {},
+    fellowAToken,
+    200,
+  );
+  assert.deepEqual(reopenedHeartbeat.renewed_leases, []);
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT status FROM leases WHERE lease_id = ?")
+        .bind(closingLease.lease_id)
+        .first()
+    ).status,
+    "released",
+  );
+  await call(
+    `/v1/sessions/${reopened.session_id}/close`,
+    {
+      handback: "Historical question terms do not reopen a released reservation.",
+      promote: [],
+      keep: [],
+      discard: [],
+    },
+    fellowAToken,
+    201,
+  );
+
   for (const mutation of ["close", "revoke", "pause", "release"]) {
     const sponsor = `usr_heartbeat_race_${mutation}`;
     const token = await enroll(`heartbeat-race-${mutation}`, sponsor);
@@ -527,17 +610,6 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
       { ttl_seconds: 1800 },
       token,
       200,
-    );
-    await call(
-      `/v1/sessions/${id}/leases`,
-      {
-        object: question.question_id,
-        objective: "Check the boundary",
-        deliverable: "A scoped review",
-        ttl_seconds: 1800,
-      },
-      token,
-      201,
     );
     const before = await snapshot(id, problem);
     const key = `presence-race-${mutation}`;
@@ -681,6 +753,132 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
   assert.equal(resumedWork.lease.sponsor_id, sponsorB);
   assert.equal(resumedWork.lease.object, recoveryLease.object);
   assert.equal(resumedWork.lease.status, "active");
+  for (const finished of [challenger, replacementSession]) {
+    await call(
+      `/v1/sessions/${finished.session_id}/close`,
+      {
+        handback:
+          "The completed lease recovery check is handed back before beginning another task.",
+        promote: [],
+        keep: [],
+        discard: [],
+      },
+      fellowBToken,
+      201,
+    );
+  }
+  console.log(
+    JSON.stringify({
+      stage: "canonical-question-lease-lifecycle",
+      status: "pass",
+      same_session_renewal: true,
+      exact_dedicated_terms: true,
+      heartbeat_preserves_history: true,
+      sponsor_release: true,
+      close_reopen_does_not_revive: true,
+    }),
+  );
+
+  // Two real concurrent HTTP requests through different lease endpoints
+  // must elect one reservation and one event, with an exact winner replay.
+  const raceProblem = "P-QUESTION-LEASE-RACE";
+  await fixtures.seedProblem(raceProblem, sponsorA);
+  const raceSessions = await Promise.all(
+    [fellowAToken, fellowBToken].map((token) =>
+      call("/v1/sessions", { problem_id: raceProblem, intent: "explore" }, token, 201),
+    ),
+  );
+  const raceQuestion = await call(
+    `/v1/sessions/${raceSessions[0].session_id}/questions`,
+    {
+      body_md: "Which finite boundary case determines the proposed invariant?",
+    },
+    fellowAToken,
+    201,
+  );
+  const raceRequests = [
+    {
+      path: `/v1/sessions/${raceSessions[0].session_id}/questions/${raceQuestion.question_id}/lease`,
+      body: { ttl_seconds: 600 },
+      token: fellowAToken,
+      key: "question-race-dedicated",
+    },
+    {
+      path: `/v1/sessions/${raceSessions[1].session_id}/leases`,
+      body: {
+        object: raceQuestion.question_id,
+        objective: "Check the finite boundary",
+        deliverable: "A scoped resolution",
+        ttl_seconds: 600,
+      },
+      token: fellowBToken,
+      key: "question-race-generic",
+    },
+  ];
+  const raced = await Promise.all(
+    raceRequests.map((request) =>
+      call(request.path, request.body, request.token, null, request.key),
+    ),
+  );
+  assert.equal(raced.filter((result) => result.ok === true).length, 1, JSON.stringify(raced));
+  const winnerIndex = raced.findIndex((result) => result.ok === true);
+  const winner = raceRequests[winnerIndex];
+  const loser = raced[1 - winnerIndex];
+  assert.ok(
+    [
+      "LEASED",
+      "QUESTION_ALREADY_LEASED",
+      "OBJECT_VERSION_CONFLICT",
+      "SCREENING_CONTEXT_STALE",
+    ].includes(loser.code),
+  );
+  const liveRaced = await env.DB.prepare(
+    "SELECT * FROM leases WHERE problem_id = ? AND status IN ('active', 'challenged')",
+  )
+    .bind(raceProblem)
+    .all();
+  assert.equal(liveRaced.results.length, 1);
+  const raceEvents = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM events WHERE problem_id = ? AND type IN ('question.leased', 'lease.acquired')",
+  )
+    .bind(raceProblem)
+    .first();
+  assert.equal(raceEvents.n, 1);
+  assert.deepEqual(
+    await call(winner.path, winner.body, winner.token, 200, winner.key),
+    raced[winnerIndex],
+  );
+  assert.equal(
+    (
+      await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM session_write_replays WHERE idempotency_key = ?",
+      )
+        .bind(raceRequests[1 - winnerIndex].key)
+        .first()
+    ).n,
+    0,
+  );
+  for (const [index, token] of [fellowAToken, fellowBToken].entries()) {
+    await call(
+      `/v1/sessions/${raceSessions[index].session_id}/close`,
+      {
+        handback: "Concurrent question lease coordination verified.",
+        promote: [],
+        keep: [],
+        discard: [],
+      },
+      token,
+      201,
+    );
+  }
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT status FROM leases WHERE lease_id = ?")
+        .bind(liveRaced.results[0].lease_id)
+        .first()
+    ).status,
+    "released",
+  );
 
   return {
     kind: "session-presence-journey",
@@ -688,6 +886,15 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
     exact_replays: 4,
     concurrent_same_key_requests: 3,
     atomic_races: ["close", "revoke", "pause", "release"],
+    unified_question_leases: [
+      "cross-endpoint-exclusion",
+      "same-session-renewal",
+      "one-concurrent-winner",
+      "exact-replay",
+      "heartbeat",
+      "sponsor-release",
+      "close",
+    ],
     lease_challenge_screening: ["held-without-publication", "pass-with-provenance", "exact-replay"],
     challenged_lease_coordination: [
       "no-force-steal",
