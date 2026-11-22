@@ -705,19 +705,21 @@ export async function ackInboxNotices(
   let acknowledgedCount = 0;
 
   if (request.notice_ids && request.notice_ids.length > 0) {
-    const placeholders = request.notice_ids.map(() => "?").join(", ");
+    // A contract-valid page contains up to 100 IDs. Bind the collection once:
+    // one placeholder per ID plus recipient/time guards exceeds D1's limit.
+    // IN preserves set semantics for repeats without splitting the mutation.
     const updateSql = `
       UPDATE fellow_inbox_notices
       SET acknowledged_at = ?
       WHERE fellow_id = ?
-        AND id IN (${placeholders})
+        AND id IN (SELECT value FROM json_each(?))
         AND acknowledged_at IS NULL
         AND ${VISIBLE_INBOX_NOTICE_SQL}
         AND ${UNEXPIRED_INBOX_NOTICE_SQL}
     `;
     const result = await db
       .prepare(updateSql)
-      .bind(now, fellowId, ...request.notice_ids, now)
+      .bind(now, fellowId, JSON.stringify(request.notice_ids), now)
       .run();
     acknowledgedCount = result.meta?.changes ?? 0;
   } else if (request.until_seq !== undefined) {

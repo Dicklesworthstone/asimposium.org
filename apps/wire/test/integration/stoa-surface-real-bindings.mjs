@@ -182,6 +182,69 @@ await runLocalWorkerJourney(
       "expiry does not delete notice history",
     );
     console.log(JSON.stringify({ stage: "inbox-expiry", retained: 4, expired: 1 }));
+
+    // The public contract accepts a complete 100-notice page. Keep this on
+    // native D1: a per-id SQL placeholder would exceed its 100-bind limit once
+    // the recipient and captured expiry time are included.
+    const maximumPage = [];
+    for (let index = 0; index < 100; index++)
+      maximumPage.push(
+        await createInboxNotice(env.DB, {
+          fellowId: expiryFellow,
+          noticeType: "protocol_notice",
+          title: "Full-page acknowledgment check",
+        }),
+      );
+    const maximumAck = { notice_ids: maximumPage.map((notice) => notice.id) };
+    assert.equal(maximumAck.notice_ids.length, 100);
+    assert.deepEqual(
+      InboxAckResponseSchema.parse(await call("/v1/inbox/ack", maximumAck, expiryReader)),
+      { acknowledged_count: 100, unacknowledged_count: 1 },
+    );
+    assert.deepEqual(
+      await call("/v1/inbox/ack", maximumAck, expiryReader),
+      { acknowledged_count: 0, unacknowledged_count: 1 },
+      "repeating the complete page acknowledgment does not change its count",
+    );
+    const freshAckNotices = [];
+    for (let index = 0; index < 5; index++)
+      freshAckNotices.push(
+        await createInboxNotice(env.DB, {
+          fellowId: expiryFellow,
+          noticeType: "protocol_notice",
+          title: "Mixed-page acknowledgment check",
+        }),
+      );
+    const foreignAckNotice = await createInboxNotice(env.DB, {
+      fellowId: (await call("/v1/hello", undefined, reviewer)).fellow.fellow_id,
+      noticeType: "protocol_notice",
+      title: "Other Fellow acknowledgment boundary",
+    });
+    const mixedAck = {
+      notice_ids: [
+        ...freshAckNotices.map((notice) => notice.id),
+        freshAckNotices[0].id,
+        expiredNotice.id,
+        foreignAckNotice.id,
+        liveNotice.id,
+        ...Array.from({ length: 91 }, (_, index) => `NOT-stoa-absent-${index}`),
+      ],
+    };
+    assert.equal(mixedAck.notice_ids.length, 100);
+    assert.deepEqual(
+      await call("/v1/inbox/ack", mixedAck, expiryReader),
+      { acknowledged_count: 5, unacknowledged_count: 1 },
+      "duplicates, expired, already acknowledged, foreign and absent IDs add no count",
+    );
+    for (const id of [expiredNotice.id, foreignAckNotice.id, laterNotice.id])
+      assert.deepEqual(
+        await env.DB.prepare("SELECT acknowledged_at FROM fellow_inbox_notices WHERE id = ?")
+          .bind(id)
+          .first(),
+        { acknowledged_at: null },
+      );
+    console.log(JSON.stringify({ stage: "inbox-maximum-page-ack", maximum: 100, mixed: 5 }));
+
     // The existing scheduler returns the actual D1 notice page, then commits
     // credential revocation before the route can release the selected page.
     // No fabricated row, authentication response or production switch is used.

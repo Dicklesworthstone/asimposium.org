@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { InboxAckRequestSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { INSERT_INBOX_NOTICE_SQL } from "../../src/inbox/notice-write.ts";
 import {
@@ -41,6 +42,8 @@ async function fixture(
     let values: (string | number | null)[] = [];
     return {
       bind(...bound: (string | number | null)[]) {
+        // Mirror the native D1 binding ceiling; Bun SQLite alone allows more.
+        if (bound.length > 100) throw new Error("D1_ERROR: too many SQL variables");
         values = bound;
         return this;
       },
@@ -102,6 +105,102 @@ const count = (sql: Database) =>
   (sql.query("SELECT COUNT(*) AS n FROM fellow_inbox_notices").get() as { n: number }).n;
 
 describe("causal inbox delivery survives retries", () => {
+  test("acknowledges a complete 100-notice page within the native D1 parameter limit", async () => {
+    await fixture(async ({ db, sql }) => {
+      const notices = [];
+      for (let index = 0; index < 100; index++)
+        notices.push(
+          await createInboxNotice(db, {
+            ...input,
+            causedByEventId: `E-page-${index}`,
+            expiresAt: null,
+          }),
+        );
+      const unselected = await createInboxNotice(db, {
+        ...input,
+        causedByEventId: "E-unselected",
+        expiresAt: null,
+      });
+      const request = InboxAckRequestSchema.parse({
+        notice_ids: notices.map((notice) => notice.id),
+      });
+      expect(await ackInboxNotices(db, "fellow-a", request, 1000)).toEqual({
+        acknowledged_count: 100,
+        unacknowledged_count: 1,
+      });
+      expect(await ackInboxNotices(db, "fellow-a", request, 1001)).toEqual({
+        acknowledged_count: 0,
+        unacknowledged_count: 1,
+      });
+      expect(
+        sql
+          .query("SELECT acknowledged_at FROM fellow_inbox_notices WHERE id = ?")
+          .get(unselected.id),
+      ).toEqual({ acknowledged_at: null });
+      expect(count(sql)).toBe(101);
+    });
+  });
+
+  test("maximum acknowledgments count only distinct, visible, unexpired owned notices", async () => {
+    await fixture(async ({ db, sql }) => {
+      const owned = [];
+      for (let index = 0; index < 90; index++)
+        owned.push(
+          await createInboxNotice(db, {
+            ...input,
+            causedByEventId: `E-owned-${index}`,
+            expiresAt: null,
+          }),
+        );
+      const foreign = await createInboxNotice(db, {
+        ...input,
+        fellowId: "fellow-b",
+        expiresAt: null,
+      });
+      const expired = await createInboxNotice(db, input);
+      const hidden = await createInboxNotice(db, {
+        ...input,
+        problemId: "P-OTHER",
+        expiresAt: null,
+      });
+      sql.run("UPDATE problems SET status = 'private-draft' WHERE id = 'P-OTHER'");
+      const prior = await createInboxNotice(db, {
+        ...input,
+        causedByEventId: "E-already-read",
+        expiresAt: null,
+      });
+      await ackInboxNotices(db, "fellow-a", { notice_ids: [prior.id] }, 900);
+      const remaining = await createInboxNotice(db, {
+        ...input,
+        causedByEventId: "E-unselected",
+        expiresAt: null,
+      });
+      const request = InboxAckRequestSchema.parse({
+        notice_ids: [
+          ...owned.map((notice) => notice.id),
+          owned[0]?.id,
+          foreign.id,
+          expired.id,
+          hidden.id,
+          prior.id,
+          ...Array.from({ length: 5 }, (_, index) => `NOT-missing-${index}`),
+        ],
+      });
+      expect(request.notice_ids).toHaveLength(100);
+      expect(await ackInboxNotices(db, "fellow-a", request, 1000)).toEqual({
+        acknowledged_count: 90,
+        unacknowledged_count: 1,
+      });
+      for (const notice of [foreign, expired, hidden, remaining])
+        expect(
+          sql.query("SELECT acknowledged_at FROM fellow_inbox_notices WHERE id = ?").get(notice.id),
+        ).toEqual({ acknowledged_at: null });
+      expect(
+        sql.query("SELECT acknowledged_at FROM fellow_inbox_notices WHERE id = ?").get(prior.id),
+      ).toEqual({ acknowledged_at: 900 });
+    });
+  });
+
   test("expiry alone removes actions and unread debt without erasing delivery history", async () => {
     await fixture(async ({ db, sql }) => {
       const expired = await createInboxNotice(db, input);
