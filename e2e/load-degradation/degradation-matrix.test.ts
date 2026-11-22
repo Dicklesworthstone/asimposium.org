@@ -14,6 +14,7 @@
 
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { R2Bucket } from "@cloudflare/workers-types";
 import { publicCursorResponse } from "../../apps/wire/src/herald/public-cursor.ts";
@@ -194,30 +195,38 @@ describe("W10.7 Load tests, performance budgets, degradation-table fault injecti
       sqlite.exec(`
         CREATE TABLE public_cursor (singleton INTEGER PRIMARY KEY, cursor INTEGER NOT NULL);
         INSERT INTO public_cursor (singleton, cursor) VALUES (1, 42);
+        CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER);
+        CREATE TABLE event_content (event_id TEXT PRIMARY KEY, redacted_at INTEGER);
       `);
+      sqlite.exec(
+        readFileSync(
+          new URL("../../db/migrations/0078_herald_room_outbox.sql", import.meta.url),
+          "utf8",
+        ),
+      );
       const { db } = createCountingSqliteD1(sqlite);
       const env = { DB: db, STOA_ORIGIN: "https://a.asimposium.org" };
 
-      // Real production `heraldRoomFetch` with faulting HERALD_ROOMS DO binding fails closed 503
-      // while GET /cursor remains live on the same DB!
+      let roomBindingCalls = 0;
       const faultingHeraldEnv = {
-        DB: db,
-        STOA_ORIGIN: "https://a.asimposium.org",
+        ...env,
         HERALD_ROOMS: {
           idFromName() {
-            throw new Error("HERALD_DO_UNAVAILABLE");
-          },
-          get() {
+            roomBindingCalls++;
             throw new Error("HERALD_DO_UNAVAILABLE");
           },
         },
       } as unknown as HeraldRuntimeEnv;
       const roomResp = await heraldRoomFetch(
-        new Request("https://a.asimposium.org/v1/workshop-room?fellow=F-1&problem=P-4DSP"),
+        new Request("https://a.asimposium.org/p/P-4DSP/room", {
+          headers: { upgrade: "websocket" },
+        }),
         faultingHeraldEnv,
-        () => new Response("fallback", { status: 200 }),
+        () => new Response(null, { status: 404 }),
       );
+      expect(roomBindingCalls).toBe(1);
       expect(roomResp.status).toBe(503);
+      expect(await roomResp.json()).toMatchObject({ code: "ROOM_UNAVAILABLE" });
 
       // Even if DO room fails (503) AND Cache API throws, GET /cursor still serves authoritative 42!
       const brokenCache = createPublicCursorCache({
