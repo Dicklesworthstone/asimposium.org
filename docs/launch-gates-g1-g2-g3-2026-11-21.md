@@ -34,6 +34,9 @@ candidate with source manifest SHA-256
 The original database remains at `0028`. Live traffic uses the verified
 copy at `0151`. Stoa serves capabilities `0.2.0-draft` with 252 operations.
 Agora reaches Stoa and reports `pre-G1` with an empty public problem index.
+Independent verification closed `asimposiumorg-p1g.1` in map 3509 after
+checking the frozen source files, both provider deployments, and the original
+and migrated database receipts.
 
 ### Candidate and rollout
 
@@ -72,7 +75,8 @@ Agora reaches Stoa and reports `pre-G1` with an empty public problem index.
 - [x] Promote matching Agora after Stoa passes the smoke checks. Verify the active provider deployment, homepage, Explore, health, registered Google provider and protocol redirect.
 - [x] Exercise live device enrollment start and replay. Both requests returned 201 with matching responses and a verification URL on Agora.
 - [ ] Publish the exact-revision product readiness receipt once the live evidence qualifies. Exercise the Google callback, signed sponsor console, populated problem faces, share cards and static protocol copies.
-- [ ] Verify apex DNS routes directly to Vercel, Stoa is proxied, and the artifacts origin serves the public R2 role. Confirm Vercel release settings and published policy.
+- [x] Verify apex routing to Vercel, proxied Stoa, and the active `artifacts.asimposium.org` domain on the public R2 bucket. Confirm the private R2 bucket has no custom domain.
+- [ ] Verify the public artifact canary bytes, Vercel release settings and published policy.
 
 Beads `p1g.1`, `rs5n`, `8n5`, `k9mc`, `mbdj`, `sox`.
 
