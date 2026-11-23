@@ -78,6 +78,34 @@ const INVALID_PROMOTE_KIND = new URL(
 );
 const GENERATED_SESSIONS_SCHEMA = new URL("../../generated/sessions.schema.json", import.meta.url);
 
+test("explicit shared handoffs preserve legacy close receipts and agree with JSON Schema", async () => {
+  const ajv = new Ajv2020({ strict: false });
+  ajv.addSchema((await fixture(GENERATED_SESSIONS_SCHEMA)) as object, "sessions");
+  for (const [property, schema, name] of [
+    ["session_close_request", SessionCloseRequestSchema, "session-close-shared-handoff"],
+    ["session_close_response", SessionCloseResponseSchema, "session-close-shared-handoff-response"],
+  ] as const) {
+    const validate = ajv.compile({ $ref: `sessions#/properties/${property}` });
+    const valid = (await fixture(
+      new URL(`../fixtures/valid/${name}.json`, import.meta.url),
+    )) as Record<string, unknown>;
+    const invalid = await fixture(new URL(`../fixtures/invalid/${name}.json`, import.meta.url));
+    const { shared_handoff: handoff, ...legacy } = valid;
+    for (const [value, accepted] of [
+      [valid, true],
+      [legacy, true],
+      [invalid, false],
+      [{ ...legacy, shared_handoff: null }, false],
+      [{ ...legacy, shared_handoff: { ...(handoff as object), event_id: "" } }, false],
+      [{ ...legacy, shared_handoff: { ...(handoff as object), synthesis_id: "W-private" } }, false],
+    ] as const) {
+      expect(schema.safeParse(value).success).toBe(accepted);
+      expect(validate(value)).toBe(accepted);
+    }
+    expect(schema.parse(legacy)).not.toHaveProperty("shared_handoff");
+  }
+});
+
 test("claim feedback golden receipts preserve old replay and agree with JSON Schema", async () => {
   const doc = JSON.parse(await Bun.file(GENERATED_SESSIONS_SCHEMA).text());
   const validate = new Ajv2020({ strict: false }).compile(doc.properties.promote_response);

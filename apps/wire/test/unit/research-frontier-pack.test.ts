@@ -339,7 +339,7 @@ test("whole-item budget and forged instructions preserve explicit source recover
   expect(accountArrivalContextOmissions(smallInput, small)).toEqual(small);
 });
 
-test("mixed arrival families and omitted sponsor instructions settle once per finite disclosure set", async () => {
+test("mixed arrival families, shared handoff and omitted sponsor instructions settle once per finite disclosure set", async () => {
   const frontier = await read({
     hypotheses: async () => hypotheses([hypothesis()]),
     gaps: async () => gaps([gap(2)]),
@@ -365,6 +365,16 @@ test("mixed arrival families and omitted sponsor instructions settle once per fi
     stable_prefix: 49,
     why_included: "An unresolved request at the pinned scientific snapshot.",
   };
+  const sharedHandoff = {
+    kind: "shared-handoff",
+    id: "SYNTH-SHARED",
+    scope: "ledger" as const,
+    untrusted: true,
+    body: "An explicitly shared finding with its unresolved boundary. ".repeat(120),
+    tokens: 1,
+    stable_prefix: 11,
+    why_included: "Public work selected for the next arrival, after their own handback.",
+  };
   const preserved = {
     reason: "source_unavailable",
     detail: "Earlier detailed source accounting must survive arrival budget composition.",
@@ -382,7 +392,7 @@ test("mixed arrival families and omitted sponsor instructions settle once per fi
         membership: "contributor" as const,
         effective_permissions: ["workshop:read"],
       },
-      candidates: [...directives, question, ...frontier.candidates],
+      candidates: [...directives, sharedHandoff, question, ...frontier.candidates],
       action_candidates: [],
       omitted: [...frontier.omitted, preserved],
     };
@@ -395,10 +405,11 @@ test("mixed arrival families and omitted sponsor instructions settle once per fi
     expect(
       pack.omitted.filter((item) => item.reason === "budget_exceeded" && item.detail === undefined),
     ).toHaveLength(1);
-    for (const [kind, family, collection] of [
-      ["research-question", "public-questions", "questions"],
-      ["active-hypothesis", "active-hypotheses", "hypotheses"],
-      ["open-proof-gap", "open-proof-gaps", "gaps"],
+    for (const [kind, family, source] of [
+      ["research-question", "public-questions", `/p/${problem}/questions.md?through=${cursor}`],
+      ["active-hypothesis", "active-hypotheses", `/p/${problem}/hypotheses.md?through=${cursor}`],
+      ["open-proof-gap", "open-proof-gaps", `/p/${problem}/gaps.md?through=${cursor}`],
+      ["shared-handoff", "shared-handoff", `/p/${problem}/syntheses/SYNTH-SHARED.md`],
     ]) {
       const missing = input.candidates.some(
         (candidate) =>
@@ -407,7 +418,7 @@ test("mixed arrival families and omitted sponsor instructions settle once per fi
       const notices = pack.omitted.filter((item) => item.detail?.startsWith(`${family}: budget`));
       expect(notices).toHaveLength(missing ? 1 : 0);
       if (missing) {
-        expect(notices[0]?.detail).toContain(`/p/${problem}/${collection}.md?through=${cursor}`);
+        expect(notices[0]?.detail).toContain(source);
       }
     }
     const missingDirectives = directives.filter(

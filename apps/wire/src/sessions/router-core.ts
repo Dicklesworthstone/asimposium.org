@@ -346,6 +346,12 @@ import {
   type SessionCloseWorkshopPromotion,
   workshopRevisionSessionMatchesSql,
 } from "./session-close-workshop";
+import {
+  isSessionSharedHandoffChanged,
+  prepareSharedHandoff,
+  readSharedHandoffPack,
+  SessionSharedHandoffError,
+} from "./shared-handoff.ts";
 import { sponsorCanReadWorkshop, sponsorWorkshopNotFound } from "./sponsor-workshop-access.ts";
 import {
   type ClientStatementContext,
@@ -4378,6 +4384,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ? await readResearchFrontierPack(db, session.problem_id, cursor)
         : { candidates: [], omitted: [], actions: [] };
     candidates.push(...frontier.candidates);
+    const sharedHandoff =
+      !isPrivateDraft && (profile === "orient" || profile === "working")
+        ? await readSharedHandoffPack(db, session.problem_id, cursor)
+        : { candidates: [], omitted: [], actions: [] };
+    candidates.push(...sharedHandoff.candidates);
 
     const targetSection =
       targetParam === null
@@ -5008,6 +5019,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...frontier.omitted
           .filter((item) => item.reason.endsWith("_unavailable"))
           .map((item) => item.reason),
+        ...sharedHandoff.omitted
+          .filter((item) => item.reason.endsWith("_unavailable"))
+          .map((item) => item.reason),
       ],
       candidates,
       // wqlf: an exhausted grant-wide event budget makes both write
@@ -5033,6 +5047,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...orientation.actions,
         ...questions.actions,
         ...frontier.actions,
+        ...sharedHandoff.actions,
         ...directiveContext.actions,
         ...(workingMoves.primaryMove !== null && isStatementReviewMove(workingMoves.primaryMove)
           ? [
@@ -5157,6 +5172,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...orientation.omitted,
         ...questions.omitted,
         ...frontier.omitted,
+        ...sharedHandoff.omitted,
         ...targetSection.omitted,
         ...deadEndSection.omitted,
         ...(claimContentUnavailable ? [{ reason: "content_unavailable", detail: "claims" }] : []),
@@ -18001,6 +18017,31 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     );
   }
 
+  function sharedHandoffProblem(changed: boolean): Response {
+    return privateNoStore(
+      validatedProblem({
+        status: changed ? 409 : 422,
+        code: changed ? "OBJECT_VERSION_CONFLICT" : "SESSION_CLOSE_BODY_INVALID",
+        title: changed
+          ? "The shared handoff source changed during close"
+          : "The selected shared handoff is unavailable",
+        detail: changed
+          ? "No publication, workshop transition, handback, shared handoff, lease release, or session close was committed by this attempt."
+          : "A shared handoff must select an exact, readable synthesis already published by this Fellow on this problem.",
+        fixHint:
+          "Read or publish your synthesis, then copy its synthesis_id and event_id into shared_handoff and retry with a new Idempotency-Key. Omit shared_handoff to close with private resume notes only.",
+        rule: changed ? "A5" : "A2",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            handback: "Private resume notes for my next session.",
+            shared_handoff: { synthesis_id: "SYNTH-HANDOFF1", event_id: "E-HANDOFF1" },
+          },
+        },
+      }),
+    );
+  }
+
   function isSessionCloseCommitChanged(error: unknown): boolean {
     return (
       error instanceof Error &&
@@ -18092,6 +18133,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const all = [...data.promote, ...data.keep, ...data.discard];
       if (new Set(all).size !== all.length)
         return (await replay()) ?? closePublicationProblem("invalid");
+      const sharedHandoff = data.shared_handoff
+        ? await prepareSharedHandoff(db, {
+            problemId: session.problem_id,
+            fellowId: principal,
+            handoff: data.shared_handoff,
+          })
+        : undefined;
+      const sharedHandoffJson = sharedHandoff ? JSON.stringify(sharedHandoff.pin) : null;
       const publications = await readSessionClosePublications(db, {
         sessionId,
         problemId: session.problem_id,
@@ -18450,6 +18499,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           const body = SessionCloseResponseSchema.parse({
             session_id: sessionId,
             closed_at: closedAt,
+            ...(sharedHandoff ? { shared_handoff: sharedHandoff.receipt } : {}),
             promoted: settlements.flatMap((settlement, index) =>
               publications[index]?.kind === "create" || publications[index]?.kind === "revise"
                 ? [settlement.claimId]
@@ -18485,6 +18535,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             sessionReplayContext("session_close", principal, c.req.path, key, digest),
           );
           return [
+            ...(sharedHandoff?.statements ?? []),
             db
               .prepare(`UPDATE session_write_replays SET response_ciphertext = ?,
               response_initialization_vector = ?, expires_at = ?, claim_token = NULL
@@ -18521,7 +18572,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ...closeWorkshopPlan.statementsAt(closedAt),
             db
               .prepare(`UPDATE sessions
-              SET closed_at = ?, handback = ?, close_keep_json = ?, close_discard_json = ?
+              SET closed_at = ?, handback = ?, close_keep_json = ?, close_discard_json = ?,
+                shared_handoff_json = ?
               WHERE session_id = ? AND fellow_id = ? AND problem_id = ? AND closed_at IS NULL
                 AND EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})`)
               .bind(
@@ -18529,6 +18581,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 data.handback,
                 JSON.stringify(data.keep),
                 JSON.stringify(data.discard),
+                sharedHandoffJson,
                 sessionId,
                 principal,
                 problemId,
@@ -18548,6 +18601,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               WHERE session_id = ? AND fellow_id = ? AND problem_id = ?
                 AND closed_at = ? AND handback = ?
                 AND close_keep_json = ? AND close_discard_json = ?
+                AND shared_handoff_json IS ?
               ) AND NOT EXISTS (SELECT 1 FROM leases
                 WHERE session_id = ? AND status IN ('active', 'challenged'))
               THEN 1 ELSE json_extract('[]', '$[SESSION_CLOSE_COMMIT_CHANGED') END`)
@@ -18559,6 +18613,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 data.handback,
                 JSON.stringify(data.keep),
                 JSON.stringify(data.discard),
+                sharedHandoffJson,
                 sessionId,
               ),
           ];
@@ -18589,6 +18644,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleFailed();
+      if (error instanceof SessionSharedHandoffError) return sharedHandoffProblem(false);
+      if (isSessionSharedHandoffChanged(error)) return sharedHandoffProblem(true);
       if (error instanceof ReplayConflictError || error instanceof KraterIdempotencyConflictError)
         return idempotencyConflictProblem();
       if (session) {
@@ -18708,7 +18765,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         code: "SESSION_CLOSE_BODY_INVALID",
         title: "The close body does not match the contract",
         detail: "The JSON body does not match the session-close contract.",
-        fixHint: "Send {handback, promote?, keep?, discard?}; handback is ≤ 2000 chars.",
+        fixHint:
+          "Send {handback, shared_handoff?, promote?, keep?, discard?}; private handback is ≤ 2000 chars. shared_handoff selects {synthesis_id, event_id} from your published synthesis receipt.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -18721,8 +18779,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
-    // §10.4 (P7): a handback is served into later Fellows' packs; it may
-    // never carry a credential-shaped run.
+    // §10.4 (P7): private resume notes return in this Fellow's later packs;
+    // they may never carry a credential-shaped run. Sharing selects a public
+    // synthesis separately and never copies this private text.
     const handbackSecrets = scanFieldsForCredentials({ handback: parsed.data.handback });
     if (handbackSecrets.length > 0) {
       return secretShapedContentProblem(handbackSecrets, {
@@ -18780,6 +18839,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         now: Date.now(),
       });
       if (decision.decision !== "allow") return writeRefusedProblem();
+      const sharedHandoff = parsed.data.shared_handoff
+        ? await prepareSharedHandoff(db, {
+            problemId: authorizationSession.problem_id,
+            fellowId: auth.binding.fellowId,
+            handoff: parsed.data.shared_handoff,
+          })
+        : undefined;
+      const sharedHandoffJson = sharedHandoff ? JSON.stringify(sharedHandoff.pin) : null;
       const closedAt = new Date().toISOString();
       let closeWorkshopPlan: Awaited<ReturnType<typeof prepareSessionCloseWorkshopActions>>;
       try {
@@ -18841,10 +18908,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             session_id: session.session_id,
             closed_at: closedAt,
             promoted: [],
+            ...(sharedHandoff ? { shared_handoff: sharedHandoff.receipt } : {}),
           });
           return {
             value,
             statements: (sealed, claimToken) => [
+              ...(sharedHandoff?.statements ?? []),
               db
                 .prepare(
                   `INSERT INTO session_write_replays
@@ -18877,7 +18946,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               db
                 .prepare(
                   `UPDATE sessions
-                   SET closed_at = ?, handback = ?, close_keep_json = ?, close_discard_json = ?
+                   SET closed_at = ?, handback = ?, close_keep_json = ?, close_discard_json = ?,
+                     shared_handoff_json = ?
                    WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
                      AND EXISTS (
                        SELECT 1 FROM session_write_replays
@@ -18890,6 +18960,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   parsed.data.handback,
                   JSON.stringify(parsed.data.keep),
                   JSON.stringify(parsed.data.discard),
+                  sharedHandoffJson,
                   session.session_id,
                   auth.binding.fellowId,
                   auth.binding.fellowId,
@@ -18904,6 +18975,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                    WHERE session_id = ? AND status IN ('active', 'challenged')`,
                 )
                 .bind(auth.binding.fellowId, closedAt, closedAt, session.session_id),
+              ...(sharedHandoff === undefined
+                ? []
+                : [
+                    db
+                      .prepare(`SELECT CASE WHEN EXISTS (
+                        SELECT 1 FROM sessions WHERE session_id = ? AND fellow_id = ?
+                          AND problem_id = ? AND closed_at = ? AND shared_handoff_json = ?
+                      ) THEN 1 ELSE json_extract('[]', '$[SESSION_CLOSE_COMMIT_CHANGED') END`)
+                      .bind(
+                        session.session_id,
+                        auth.binding.fellowId,
+                        session.problem_id,
+                        closedAt,
+                        sharedHandoffJson,
+                      ),
+                  ]),
             ],
           };
         },
@@ -18911,6 +18998,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
     } catch (error) {
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      if (
+        error instanceof SessionSharedHandoffError ||
+        isSessionSharedHandoffChanged(error) ||
+        isSessionCloseCommitChanged(error)
+      ) {
+        const replay = await replayResponseBeforeMutablePreconditions(
+          db,
+          "session_close",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+          (raw) => SessionCloseResponseSchema.parse(JSON.parse(raw)),
+        );
+        return replay ?? sharedHandoffProblem(!(error instanceof SessionSharedHandoffError));
+      }
       if (isSessionCloseWorkshopChanged(error)) {
         return validatedProblem({
           status: 409,

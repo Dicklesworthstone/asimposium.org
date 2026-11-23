@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { DIRECTIVE_DISCLOSURES_SCHEMA_ID } from "@asimposium/contracts/directive-disclosures";
 import type {
   ScreeningPromotionDeniedResponse,
   ScreeningPromotionHoldResponse,
-} from "@asimposium/contracts/screening";
+} from "@asimposium/contracts";
+import { DIRECTIVE_DISCLOSURES_SCHEMA_ID } from "@asimposium/contracts/directive-disclosures";
 import { createApp } from "../../src/app.ts";
 import { createDirectiveDisclosureRouter } from "../../src/directives/disclosure-router.ts";
 import type { Env } from "../../src/env.ts";

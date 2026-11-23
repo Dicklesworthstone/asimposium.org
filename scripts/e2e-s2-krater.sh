@@ -399,6 +399,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0151_unified_question_leases.sql
   db/migrations/0152_sponsor_report_history.sql
   db/migrations/0153_citation_reuse_source_pins.sql
+  db/migrations/0154_session_shared_handoff.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -1051,6 +1052,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0151_unified_question_leases.sql
   0152_sponsor_report_history.sql
   0153_citation_reuse_source_pins.sql
+  0154_session_shared_handoff.sql
 )
 
 

@@ -1436,9 +1436,7 @@ describe("recorded dead-end retry conditions reach their author", () => {
         .query("SELECT seq FROM events WHERE id IN ('source-DE-ONE','E-statement') ORDER BY seq")
         .all() as { seq: number }[];
       for (const reference of ["DE-ONE", "DE-ONE@1", ...events.map((event) => "#" + event.seq)]) {
-        f.sql
-          .query("INSERT INTO content_controls VALUES ('P-DEMO',?,1,'hidden')")
-          .run(reference);
+        f.sql.query("INSERT INTO content_controls VALUES ('P-DEMO',?,1,'hidden')").run(reference);
         const hidden = await getInboxNotices(f.db, "fellow-a", { limit: 1 }, NOW);
         expect(hidden.items).toEqual([]);
         expect(hidden.next_cursor).toBeNull();
@@ -1450,9 +1448,7 @@ describe("recorded dead-end retry conditions reach their author", () => {
           expect(receipt.unacknowledged_count).toBe(0);
         }
         expect(f.notices()[0]?.acknowledged_at).toBeNull();
-        f.sql
-          .query("INSERT INTO content_controls VALUES ('P-DEMO',?,2,'visible')")
-          .run(reference);
+        f.sql.query("INSERT INTO content_controls VALUES ('P-DEMO',?,2,'visible')").run(reference);
         const restored = await getInboxNotices(f.db, "fellow-a", { limit: 1 }, NOW);
         expect(restored.items.map((item) => [item.id, item.seq])).toEqual([
           [notice.id, notice.seq],

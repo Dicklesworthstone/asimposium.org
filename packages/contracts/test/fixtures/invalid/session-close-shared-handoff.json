@@ -1,0 +1,8 @@
+{
+  "handback": "Private resume note.",
+  "shared_handoff": {
+    "synthesis_id": "SYNTH-HANDOFF1",
+    "event_id": "E-HANDOFF1",
+    "body_md": "Private text must not be accepted as a public handoff."
+  }
+}

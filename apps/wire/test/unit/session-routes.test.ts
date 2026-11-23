@@ -2388,6 +2388,269 @@ describe("hypothesis lifecycle coordination", () => {
   });
 });
 
+describe("explicit shared session handoffs", () => {
+  async function handoffFixture(options: LocalD1Options = {}) {
+    const f = await fixture(options);
+    let key = 0;
+    const post = (path: string, body: unknown, invocation = `shared-handoff-${++key}`) =>
+      f.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": invocation },
+        body: JSON.stringify(body),
+      });
+    const opened = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" });
+    expect(opened.status, await opened.clone().text()).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const path = `/v1/sessions/${session.session_id}`;
+    const draft = await post(`${path}/workshop`, {
+      type: "claim-draft",
+      title: "Private source calculation",
+      body_md: "PRIVATE-HANDOFF-DRAFT: check the boundary calculation.",
+    });
+    const draftBody = WorkshopPushResponseSchema.parse(await draft.json());
+    const promoted = await post(`${path}/promote`, {
+      workshop_id: draftBody.workshop_id,
+      kind: "conjecture",
+      statement: "The square of an odd integer is odd.",
+      falsifier: "An odd integer with an even square.",
+      relates_to: [],
+    });
+    expect(promoted.status, await promoted.clone().text()).toBe(201);
+    const claim = PromoteResponseSchema.parse(await promoted.json());
+    const published = await post(`${path}/synthesize`, {
+      covers_through: claim.seq,
+      body_md:
+        "PUBLIC-HANDOFF-CONTEXT: C-1 is a recorded conjecture; check negative integers next.",
+      anchors: [{ target_kind: "claim", target_id: claim.claim_id, target_version: 1 }],
+      omitted: ["No independent review is claimed."],
+      selection_policy: "Preserve the exact conjecture and its unresolved boundary cases.",
+    });
+    expect(published.status, await published.clone().text()).toBe(201);
+    const synthesis = SynthesizeResponseSchema.parse(await published.json());
+    const shared_handoff = { synthesis_id: synthesis.synthesis_id, event_id: synthesis.event_id };
+    return { ...f, post, path, session, claim, synthesis, shared_handoff };
+  }
+
+  async function savedPublication(f: Awaited<ReturnType<typeof handoffFixture>>) {
+    const response = await f.post(`${f.path}/workshop`, {
+      type: "claim-draft",
+      title: "Close-time public result",
+      body_md: "PRIVATE-CLOSE-PUBLICATION: derivation notes remain private.",
+      ledger_intent: { kind: "create", target_kind: "claim" },
+      publication: {
+        kind: "conjecture",
+        statement: "The sum of two even integers is even.",
+        falsifier: "Two even integers whose sum is odd.",
+        relates_to: [],
+        depends_on: [],
+      },
+    });
+    expect(response.status, await response.clone().text()).toBe(201);
+    return WorkshopPushResponseSchema.parse(await response.json());
+  }
+
+  test.each([false, true])(
+    "close with promotions=%s shares only the exact public source, keeps private notes, and replays after erasure",
+    async (withPromotion) => {
+      const f = await handoffFixture();
+      const publication = withPromotion ? await savedPublication(f) : undefined;
+      const body = {
+        handback: "PRIVATE-OWNER-HANDBACK: remember my unfinished calculation.",
+        shared_handoff: f.shared_handoff,
+        promote: publication ? [publication.workshop_id] : [],
+      };
+      const closed = await f.post(`${f.path}/close`, body, "share-close");
+      expect(closed.status, await closed.clone().text()).toBe(201);
+      const closedBytes = await closed.text();
+      const receipt = SessionCloseResponseSchema.parse(JSON.parse(closedBytes));
+      expect(receipt.shared_handoff).toMatchObject({
+        ...f.shared_handoff,
+        seq: f.synthesis.sequence,
+        read_url: `/p/P-4DSP/syntheses/${f.synthesis.synthesis_id}.json`,
+      });
+      expect(receipt.shared_handoff?.payload_sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(receipt.promoted).toEqual(withPromotion ? [`C-${f.synthesis.sequence + 1}`] : []);
+      const stored = await f.db
+        .prepare("SELECT handback, shared_handoff_json FROM sessions WHERE session_id = ?")
+        .bind(f.session.session_id)
+        .first<{ handback: string; shared_handoff_json: string }>();
+      expect(stored?.handback).toBe(body.handback);
+      expect(JSON.parse(stored!.shared_handoff_json)).toEqual({
+        ...f.shared_handoff,
+        seq: f.synthesis.sequence,
+        payload_sha256: receipt.shared_handoff!.payload_sha256,
+      });
+
+      const arriving = await addApprovedFellow(f, {
+        suffix: "handoff-arrival",
+        scopes: ["promote", "review"],
+        sponsor: { type: "sponsor", sponsorId: "usr_handoff_independent" },
+      });
+      const arrivalResponse = await arriving.call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "handoff-arrive" },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+      });
+      expect(arrivalResponse.status, await arrivalResponse.clone().text()).toBe(201);
+      const arrival = SessionOpenResponseSchema.parse(await arrivalResponse.json());
+      const arrivalPath = `/v1/sessions/${arrival.session_id}`;
+      for (const profile of ["orient", "working"] as const) {
+        const response = await arriving.call(
+          `${arrivalPath}/pack?profile=${profile}&max_tokens=8000`,
+        );
+        expect(response.status, await response.clone().text()).toBe(200);
+        const bytes = await response.text();
+        const pack = PackResponseSchema.parse(JSON.parse(bytes));
+        const shared = pack.items.find((item) => item.kind === "shared-handoff");
+        expect(shared?.id).toBe(f.synthesis.synthesis_id);
+        expect(shared?.scope).toBe("ledger");
+        expect(shared?.untrusted).toBe(true);
+        expect(shared?.body).toContain("PUBLIC-HANDOFF-CONTEXT");
+        expect(shared?.body).toContain(f.synthesis.event_id);
+        expect(shared?.body).toContain("No independent review is claimed.");
+        expect(bytes).not.toContain("PRIVATE-OWNER-HANDBACK");
+        expect(bytes).not.toContain("PRIVATE-HANDOFF-DRAFT");
+        expect(bytes).not.toContain("PRIVATE-CLOSE-PUBLICATION");
+      }
+      const resumedResponse = await f.post("/v1/sessions", {
+        problem_id: "P-4DSP",
+        intent: "explore",
+      });
+      const resumed = SessionOpenResponseSchema.parse(await resumedResponse.json());
+      const own = PackResponseSchema.parse(
+        await (
+          await f.call(`/v1/sessions/${resumed.session_id}/pack?profile=working&max_tokens=8000`)
+        ).json(),
+      );
+      const ownIndex = own.items.findIndex((item) => item.kind === "handback");
+      expect(ownIndex).toBeGreaterThanOrEqual(0);
+      expect(own.items[ownIndex]?.body).toContain("PRIVATE-OWNER-HANDBACK");
+      expect(own.items.findIndex((item) => item.kind === "shared-handoff")).toBeGreaterThan(
+        ownIndex,
+      );
+      const review = PackResponseSchema.parse(
+        await (await arriving.call(`${arrivalPath}/pack?profile=review&max_tokens=8000`)).json(),
+      );
+      expect(review.items.some((item) => item.kind === "shared-handoff")).toBe(false);
+      expect(JSON.stringify(review)).not.toContain("PUBLIC-HANDOFF-CONTEXT");
+
+      await redactEventContent(f.db, f.synthesis.event_id, "privacy", new Date().toISOString());
+      const replay = await f.post(`${f.path}/close`, body, "share-close");
+      expect(replay.status, await replay.clone().text()).toBe(200);
+      expect(await replay.text()).toBe(closedBytes);
+      const afterErasure = PackResponseSchema.parse(
+        await (await arriving.call(`${arrivalPath}/pack?profile=working&max_tokens=8000`)).json(),
+      );
+      expect(afterErasure.items.some((item) => item.kind === "shared-handoff")).toBe(false);
+      expect(
+        afterErasure.omitted.some((item) => item.reason === "shared_handoff_unavailable"),
+      ).toBe(true);
+      expect(JSON.stringify(afterErasure)).not.toContain("PUBLIC-HANDOFF-CONTEXT");
+    },
+  );
+
+  test("another Fellow cannot designate the source or close with a mismatched event pin", async () => {
+    const f = await handoffFixture();
+    const other = await addApprovedFellow(f, { suffix: "handoff-foreign", scopes: ["promote"] });
+    const opened = await other.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "foreign-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const rejected = await other.call(`/v1/sessions/${session.session_id}/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "foreign-share" },
+      body: JSON.stringify({ handback: "Still private.", shared_handoff: f.shared_handoff }),
+    });
+    expect(rejected.status, await rejected.clone().text()).toBe(422);
+    expect(await rejected.json()).toMatchObject({ code: "SESSION_CLOSE_BODY_INVALID" });
+    const mismatched = await f.post(`${f.path}/close`, {
+      handback: "Still open.",
+      shared_handoff: { ...f.shared_handoff, event_id: "E-MISMATCH" },
+    });
+    expect(mismatched.status, await mismatched.clone().text()).toBe(422);
+    const states = await f.db
+      .prepare("SELECT closed_at, shared_handoff_json FROM sessions WHERE problem_id = 'P-4DSP'")
+      .all();
+    expect(states.results).toEqual([
+      { closed_at: null, shared_handoff_json: null },
+      { closed_at: null, shared_handoff_json: null },
+    ]);
+  });
+
+  test.each([false, true])(
+    "source erasure at commit rolls back handoff, workshop, leases and promotions=%s",
+    async (withPromotion) => {
+      let interleave: (() => Promise<void>) | undefined;
+      const f = await handoffFixture({
+        beforeBatch: async () => {
+          const operation = interleave;
+          interleave = undefined;
+          await operation?.();
+        },
+      });
+      const publication = withPromotion ? await savedPublication(f) : undefined;
+      const retainedResponse = await f.post(`${f.path}/workshop`, {
+        type: "scratch",
+        title: "Private draft retained on failure",
+        body_md: "The shared-source race must not discard this note.",
+      });
+      const retained = WorkshopPushResponseSchema.parse(await retainedResponse.json());
+      const leased = await f.post(`${f.path}/leases`, {
+        object: f.claim.claim_id,
+        objective: "Check the odd-integer boundary case.",
+        deliverable: "An argument or a counterexample.",
+        parallel_safe: false,
+      });
+      expect(leased.status, await leased.clone().text()).toBe(201);
+      const before = await f.db
+        .prepare(`SELECT public_seq, (SELECT MAX(workshop_seq) FROM workshop_objects
+          WHERE problem_id = 'P-4DSP') AS workshop_seq FROM problems WHERE id = 'P-4DSP'`)
+        .first();
+      interleave = () =>
+        redactEventContent(f.db, f.synthesis.event_id, "privacy", new Date().toISOString());
+      const rejected = await f.post(`${f.path}/close`, {
+        handback: "This handback must not be saved.",
+        shared_handoff: f.shared_handoff,
+        discard: [retained.workshop_id],
+        promote: publication ? [publication.workshop_id] : [],
+      });
+      expect(rejected.status, await rejected.clone().text()).toBe(409);
+      expect(await rejected.json()).toMatchObject({ code: "OBJECT_VERSION_CONFLICT" });
+      expect(
+        await f.db
+          .prepare(`SELECT public_seq, (SELECT MAX(workshop_seq) FROM workshop_objects
+          WHERE problem_id = 'P-4DSP') AS workshop_seq FROM problems WHERE id = 'P-4DSP'`)
+          .first(),
+      ).toEqual(before);
+      expect(
+        await f.db
+          .prepare(
+            "SELECT closed_at, handback, shared_handoff_json FROM sessions WHERE session_id = ?",
+          )
+          .bind(f.session.session_id)
+          .first(),
+      ).toEqual({ closed_at: null, handback: null, shared_handoff_json: null });
+      expect(
+        await f.db
+          .prepare("SELECT state FROM workshop_objects WHERE workshop_id = ?")
+          .bind(retained.workshop_id)
+          .first(),
+      ).toEqual({ state: "open" });
+      expect(
+        await f.db
+          .prepare("SELECT status FROM leases WHERE session_id = ?")
+          .bind(f.session.session_id)
+          .first(),
+      ).toEqual({ status: "active" });
+      expect(
+        await f.db.prepare("SELECT COUNT(*) AS n FROM claims WHERE problem_id = 'P-4DSP'").first(),
+      ).toEqual({ n: 1 });
+    },
+  );
+});
+
 export async function addApprovedFellow(
   base: Awaited<ReturnType<typeof fixture>>,
   input: {

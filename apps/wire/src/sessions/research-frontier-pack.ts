@@ -271,26 +271,52 @@ export async function readResearchFrontierPack(
   };
 }
 
-/** Compose the three arrival source families and private sponsor-instruction
+/** Compose arrival source families, the selected shared handoff and private sponsor-instruction
  * disclosures together. Only newly omitted families/IDs enlarge the mandatory
- * metadata; each pass adds at least one of at most 3 + directive-count entries.
+ * metadata; each pass adds at least one of at most 4 + directive-count entries.
  * Derived generic omissions are regenerated, never fed back as input. The
  * fixed point depends on that finite set, not changing serialization bytes. */
 export function accountArrivalContextOmissions(
   input: Parameters<typeof composePack>[0],
   initial: ReturnType<typeof composePack>,
 ): ReturnType<typeof composePack> {
+  const sharedHandoff = input.candidates.find((item) => item.kind === "shared-handoff");
   const families = [
-    ["research-question", "public-questions", "questions", "whole unanswered requests"],
-    ["active-hypothesis", "active-hypotheses", "hypotheses", "whole records"],
-    ["open-proof-gap", "open-proof-gaps", "gaps", "whole records"],
-  ] as const;
+    {
+      kind: "research-question",
+      marker: "public-questions",
+      description: "whole unanswered requests",
+      source: collection(input.problem, input.cursor, "questions"),
+    },
+    {
+      kind: "active-hypothesis",
+      marker: "active-hypotheses",
+      description: "whole records",
+      source: collection(input.problem, input.cursor, "hypotheses"),
+    },
+    {
+      kind: "open-proof-gap",
+      marker: "open-proof-gaps",
+      description: "whole records",
+      source: collection(input.problem, input.cursor, "gaps"),
+    },
+    ...(sharedHandoff === undefined
+      ? []
+      : [
+          {
+            kind: "shared-handoff",
+            marker: "shared-handoff",
+            description: "whole selected synthesis",
+            source: `/p/${encodeURIComponent(input.problem)}/syntheses/${encodeURIComponent(sharedHandoff.id)}.md`,
+          },
+        ]),
+  ];
   const directives = input.candidates.filter((item) => item.kind === "sponsor-directive");
   const base = initial.omitted.filter((item) => {
     if (item.reason === "budget_exceeded") {
       if (item.detail === undefined || item.detail.startsWith("sponsor-directives: budget"))
         return false;
-      if (families.some(([, marker]) => item.detail?.startsWith(`${marker}: budget`))) return false;
+      if (families.some(({ marker }) => item.detail?.startsWith(`${marker}: budget`))) return false;
     }
     // Keep declared omissions and earlier detailed section accounting. Generic
     // permission/profile/empty markers belong to composePack's fresh output.
@@ -308,7 +334,7 @@ export function accountArrivalContextOmissions(
   for (let pass = 0; pass <= families.length + directives.length; pass++) {
     const included = new Set(pack.items.map((item) => item.id));
     let changed = false;
-    for (const [kind, marker] of families) {
+    for (const { kind, marker } of families) {
       if (
         !omittedFamilies.has(marker) &&
         input.candidates.some((item) => item.kind === kind && !included.has(item.id))
@@ -332,10 +358,10 @@ export function accountArrivalContextOmissions(
       omitted: [
         ...baseOmitted,
         ...families
-          .filter(([, marker]) => omittedFamilies.has(marker))
-          .map(([, marker, kind, description]) => ({
+          .filter(({ marker }) => omittedFamilies.has(marker))
+          .map(({ marker, source, description }) => ({
             reason: "budget_exceeded",
-            detail: `${marker}: budget omitted ${description}; read ${collection(input.problem, input.cursor, kind)}`,
+            detail: `${marker}: budget omitted ${description}; read ${source}`,
           })),
         ...(directiveIds.length === 0
           ? []

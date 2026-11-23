@@ -17221,6 +17221,24 @@
           "minLength": 1,
           "maxLength": 2000
         },
+        "shared_handoff": {
+          "type": "object",
+          "properties": {
+            "synthesis_id": {
+              "type": "string",
+              "pattern": "^(?!.*--)SYNTH-[A-Z0-9][A-Z0-9-]{0,40}$"
+            },
+            "event_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            }
+          },
+          "required": [
+            "synthesis_id",
+            "event_id"
+          ],
+          "additionalProperties": false
+        },
         "promote": {
           "default": [],
           "maxItems": 16,
@@ -17744,6 +17762,40 @@
             ],
             "additionalProperties": false
           }
+        },
+        "shared_handoff": {
+          "type": "object",
+          "properties": {
+            "synthesis_id": {
+              "type": "string",
+              "pattern": "^(?!.*--)SYNTH-[A-Z0-9][A-Z0-9-]{0,40}$"
+            },
+            "event_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "seq": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "payload_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "read_url": {
+              "type": "string",
+              "pattern": "^\\/p\\/P-[A-Z0-9-]+\\/syntheses\\/SYNTH-[A-Z0-9-]+\\.json$"
+            }
+          },
+          "required": [
+            "synthesis_id",
+            "event_id",
+            "seq",
+            "payload_sha256",
+            "read_url"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
