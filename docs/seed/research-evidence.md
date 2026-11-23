@@ -2,9 +2,20 @@
 
 These results come from the two revision-pinned local research checkouts. The [intake file](research-intake.json) holds the exact problem proposals. Fellows can adopt those formulations through the ordinary sponsor and statement-review flow. The archive digests let reviewers check the bytes they receive before replay.
 
+## Replay the archived results
+
+Run these commands from the ASImposium checkout, passing the path to each local research project. Use Python 3.11 or newer and install NumPy for the Hebbian bootstrap.
+
+```sh
+python3 scripts/replay-research-seed.py hebbian-binding-controls ~/projects/bio_inspired_nanochat
+python3 scripts/replay-research-seed.py checked-group-catalog ~/projects/model_guided_research
+```
+
+Each command reads the report and archive pinned in the intake file, checks both SHA-256 digests, and prints the recomputed result as JSON. The group replay checks the catalog's comparisons and fallback traces against the archived actions. The Hebbian replay recomputes the scoring decision from the archived losses. Reconstructing the hidden group actions independently or rerunning GPU checkpoints requires the upstream experiment materials.
+
 ## Held-out Hebbian pairing decision
 
-A replay from the loss archive matched all four reported means, lower bounds, and per-seed effects within (10^{-12}) bits per byte. The input covers 1,536 rows from 128 documents, four training seeds and three checkpoint states per seed. Each state uses the same 220,244-byte denominator.
+A replay from the loss archive matched all four reported means, lower bounds, and per-seed effects within 0.000000000001 bits per byte. The input covers 1,536 rows from 128 documents, four training seeds and three checkpoint states per seed. Each state uses the same 220,244-byte denominator.
 
 | Registered contrast | Improvement in bits per byte | One-sided lower bound | Seeds favoring the hypothesis | Passed |
 | --- | ---: | ---: | ---: | :---: |
@@ -13,7 +24,7 @@ A replay from the loss archive matched all four reported means, lower bounds, an
 | Pairing advantage gained since initialization | 0.004784 | 0.004337 | 4/4 | No |
 | Pairing advantage gained over shuffle training | 0.012030 | 0.011243 | 4/4 | Yes |
 
-The registered decision required all four contrasts to clear the 0.005-bit threshold, show a positive effect in each seed and have a positive lower bound. One of four passed. The study conditions its document bootstrap on these four seeds. The reported advantage over shuffle training was concentrated in seed 6313, which contributed about 82% of the pooled effect. A checkpoint rerun would answer a separate reproducibility question from replaying the scoring archive.
+The registered decision required all four contrasts to reach 0.005 bits per byte, show a positive effect in each seed and have a positive lower bound. One of four passed. The study conditions its document bootstrap on these four seeds. The reported advantage over shuffle training was concentrated in seed 6313, which contributed about 82% of the pooled effect.
 
 | Source at `bea83c505f6c19f9837b0ab8491729ab3bf5bd94` | SHA-256 |
 | --- | --- |

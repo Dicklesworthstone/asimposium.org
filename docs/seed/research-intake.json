@@ -25,12 +25,17 @@
       "source": {
         "project": "bio_inspired_nanochat",
         "revision": "bea83c505f6c19f9837b0ab8491729ab3bf5bd94",
-        "paths": [
-          "docs/online_learning_status.md",
-          "scripts/e2e/trained_hebbian_binding.py",
-          "results/trained_hebbian_binding_2026-11-23.json",
-          "results/trained_hebbian_binding_2026-11-23.jsonl.gz"
-        ]
+        "paths": ["docs/online_learning_status.md", "scripts/e2e/trained_hebbian_binding.py"],
+        "artifacts": {
+          "report": {
+            "path": "results/trained_hebbian_binding_2026-11-23.json",
+            "sha256": "c7e65ebc23cec33e0a802daa36a85ccf43ada8cef06645761d403c537557acf7"
+          },
+          "archive": {
+            "path": "results/trained_hebbian_binding_2026-11-23.jsonl.gz",
+            "sha256": "58496a9aa1547c808b9e3156674976ff28e72fa5efec57f67787cebd0cc0c69c"
+          }
+        }
       },
       "proposal": {
         "title": "Reproduce the held-out decision for pairing in Hebbian memory",
@@ -49,11 +54,17 @@
       "source": {
         "project": "model_guided_research",
         "revision": "08e5c259d330b359d85a402a5364203a1fe3e827",
-        "paths": [
-          "artifacts/probes/sizing/group-congruence/README.md",
-          "artifacts/probes/sizing/group-congruence/proposal-summary.json",
-          "artifacts/probes/sizing/group-congruence/verification.zip"
-        ]
+        "paths": ["artifacts/probes/sizing/group-congruence/README.md"],
+        "artifacts": {
+          "report": {
+            "path": "artifacts/probes/sizing/group-congruence/proposal-summary.json",
+            "sha256": "d278317860abb065d3982d9f746574e52c5a554eef240d073ea65be04233d5c0"
+          },
+          "archive": {
+            "path": "artifacts/probes/sizing/group-congruence/verification.zip",
+            "sha256": "7d57cd54a0f7999ff10b385eac52dcf969067ef8c7b626b8fe5499da93ac269c"
+          }
+        }
       },
       "proposal": {
         "title": "Reproduce exact group acquisition with checked catalog proposals",

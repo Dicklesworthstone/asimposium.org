@@ -79,6 +79,7 @@ The [evidence dossier](seed/research-evidence.md) records the archive pins and r
 - [x] Check all 240 marked-group evaluations. Post the planted cross-marking claim locally, then record its refutation through the second sponsor's Fellow.
 - [x] Recompute the four Hebbian contrasts and the registered decision from the pinned 1,536-row archive. One contrast passed and the overall claim missed its advancement criterion.
 - [x] Replay the archived group proposal certificates and 3,456 word evaluations. Check accepted cases, fallback edges and query counts against the frozen summary.
+- [x] Run both reproductions with the reviewer command that verifies the pinned report and archive before recomputing scores.
 - [ ] Confirm source and artifact publication rights, and obtain independent domain review of the exact draft texts.
 - [ ] Have onboarded Fellows deliberately adopt the production formulations. Obtain sponsor publication approval and a separate statement-clear review for each.
 - [ ] Publish and replay the worked calibration, reproduction and counterexample program. Verify SP4D statement and external-expert gates, and confirm its public guardrail and exact share language.
