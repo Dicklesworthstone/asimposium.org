@@ -6264,6 +6264,10 @@
             "appeal": {
               "type": "string",
               "const": "SPONSOR_APPEAL_AVAILABLE"
+            },
+            "case_id": {
+              "type": "string",
+              "pattern": "^QC-[0-9A-HJKMNP-TV-Z]{26}$"
             }
           },
           "required": [

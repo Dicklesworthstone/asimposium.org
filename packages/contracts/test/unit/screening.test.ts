@@ -319,6 +319,25 @@ test("promotion policy responses expose only a coarse category and appeal path",
     ScreeningPromotionHoldResponseSchema.safeParse({ ...postureHold, posture: undefined }).success,
   ).toBe(false);
   expect(ScreeningPromotionDeniedResponseSchema.safeParse(denied).success).toBe(true);
+  expect(
+    ScreeningPromotionDeniedResponseSchema.safeParse({
+      ...(denied as Record<string, unknown>),
+      case_id: `QC-${"0".repeat(26)}`,
+    }).success,
+  ).toBe(true);
+  expect(
+    ScreeningPromotionDeniedResponseSchema.safeParse({
+      ...(denied as Record<string, unknown>),
+      case_id: "BAD-ID",
+    }).success,
+  ).toBe(false);
+  expect(
+    ScreeningPromotionDeniedResponseSchema.safeParse({
+      ...(denied as Record<string, unknown>),
+      case_id: `QC-${"0".repeat(26)}`,
+      matched_pattern: "secret-oracle",
+    }).success,
+  ).toBe(false);
   expect(ScreeningPromotionPolicyResponseSchema.safeParse(hold).success).toBe(true);
   expect(ScreeningPromotionPolicyResponseSchema.safeParse(denied).success).toBe(true);
   expect(ScreeningContractsSchema.safeParse(hold).success).toBe(false);

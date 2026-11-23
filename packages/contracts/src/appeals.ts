@@ -55,7 +55,8 @@ export const OperatorScreeningAppealSchema = ScreeningAppealReceiptSchema.extend
   fellow_id: z.string().min(1).max(128),
   problem_id: ProblemIdSchema,
   statement: z.string().max(2000),
-  original_operator_id: z.string().min(1).max(128),
+  /** Null when the original rejection came from automated screening with no prior human operator. */
+  original_operator_id: z.string().min(1).max(128).nullable(),
 }).strict();
 export const OperatorScreeningAppealsResponseSchema = z
   .object({

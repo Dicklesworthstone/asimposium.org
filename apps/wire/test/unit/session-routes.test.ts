@@ -5356,6 +5356,7 @@ describe("session protocol routes", () => {
           code: "POLICY_DENIED",
           coarse_category: "operational-harm",
           appeal: "SPONSOR_APPEAL_AVAILABLE",
+          case_id: expect.stringMatching(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/),
         },
       },
       {

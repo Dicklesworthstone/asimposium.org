@@ -281,7 +281,8 @@ await runLocalWorkerJourney(
     before = await events();
     const denied = await call(`/v1/sessions/${session}/promote`, promoteBody(CHANGED), author, 403);
     assert.equal(denied.code, "POLICY_DENIED");
-    assert.deepEqual(Object.keys(denied).sort(), ["appeal", "coarse_category", "code"]);
+    assert.deepEqual(Object.keys(denied).sort(), ["appeal", "case_id", "coarse_category", "code"]);
+    assert.equal(denied.case_id, heldAgain.case_id);
     assert.equal(await events(), before);
 
     // 5b. asimposiumorg-qi6t: a clean screen of held bytes closes the hold in
@@ -301,6 +302,18 @@ await runLocalWorkerJourney(
           .first()
       ).state;
     assert.equal(await caseState(racedHold.case_id), "pending");
+    await fixtures.setScreenMode("reject");
+    before = await events();
+    const replayOnReject = await call(
+      `/v1/sessions/${session}/promote`,
+      promoteBody(RACED),
+      author,
+      202,
+    );
+    assert.equal(replayOnReject.code, "SCREENING_HOLD");
+    assert.equal(replayOnReject.case_id, racedHold.case_id);
+    assert.equal(await caseState(racedHold.case_id), "pending");
+    assert.equal(await events(), before, "re-screening cannot turn a pending case into a denial");
     // Three refusals put the author in quarantine-first; its sponsor clears it
     // so the clean screen can publish (the posture itself is step 8).
     assert.equal(await clearScreeningPosture(OWNER), 1, "the author was quarantine-first");
@@ -1070,8 +1083,37 @@ await runLocalWorkerJourney(
     for (const n of [1, 2, 3]) await flaggedPromote(`Outage-held statement number ${n}.`, 202);
     assert.deepEqual(await postureOf(POSTURE_OWNER), [], "provider outages never count");
     await fixtures.setScreenMode("reject");
-    for (const n of [1, 2]) await flaggedPromote(`Refused statement number ${n}.`, 403);
-    await flaggedPromote("Refused statement number 1.", 403); // the same bytes count once
+    const directDenial = await flaggedPromote("Refused statement number 1.", 403);
+    assert.deepEqual(Object.keys(directDenial).sort(), [
+      "appeal",
+      "case_id",
+      "coarse_category",
+      "code",
+    ]);
+    assert.match(directDenial.case_id, /^QC-[0-9A-HJKMNP-TV-Z]{26}$/);
+    await flaggedPromote("Refused statement number 2.", 403);
+    assert.deepEqual(await flaggedPromote("Refused statement number 1.", 403), directDenial);
+    const exactCasePath = `/v1/sponsors/screening-cases/${directDenial.case_id}`;
+    const ownCase = await sponsorCall(
+      POSTURE_OWNER,
+      "GET",
+      exactCasePath,
+      "sponsor.screening-cases.read",
+      undefined,
+      200,
+      "/v1/sponsors/screening-cases/:caseId",
+    );
+    assert.equal(ownCase.cases[0]?.case_id, directDenial.case_id);
+    assert.equal(ownCase.cases[0]?.state, "rejected");
+    const foreignAppeal = await sponsorCall(
+      OWNER,
+      "POST",
+      "/v1/sponsors/screening-appeals",
+      "sponsor.screening-appeals.submit",
+      { case_id: directDenial.case_id, statement: "Reconsider the finite mathematical candidate." },
+      404,
+    );
+    assert.equal(foreignAppeal.code, "MODERATION_TARGET_NOT_FOUND");
     const two = await postureOf(POSTURE_OWNER);
     assert.equal(await refusalCount(two[0].fellow_id), 2);
     assert.equal(two[0]?.refusals_in_window, undefined, "the sponsor sees no count");
@@ -1088,21 +1130,36 @@ await runLocalWorkerJourney(
     );
     assert.equal(preemptive.code, "SCREENING_POSTURE_NOT_ACTIVE");
     assert.equal(await refusalCount(two[0].fellow_id), 2, "nothing was reset");
+    const automatedCases = async () =>
+      (
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM screening_cases WHERE fellow_id = ? AND state = 'rejected'",
+        )
+          .bind(two[0].fellow_id)
+          .first()
+      ).n;
+    assert.equal(await automatedCases(), 2, "two distinct denials each have one durable case");
     await env.DB.prepare(
       `CREATE TRIGGER lane_fail_posture_notice BEFORE INSERT ON fellow_inbox_notices
        WHEN NEW.title = 'Your public writes now wait for review'
        BEGIN SELECT RAISE(ABORT, 'planted posture notice failure'); END`,
     ).run();
     try {
-      // The policy refusal still stands, but its failed notice cannot leave
-      // a silently engaged posture. The same bytes can retry the transition.
-      await flaggedPromote("Refused statement number 3.", 403);
+      // There can be no rejection receipt when the entire D1 batch failed.
+      // The same bytes can retry without publishing or silently engaging posture.
+      const unavailableDenial = await flaggedPromote("Refused statement number 3.", 202);
+      assert.equal(unavailableDenial.code, "SCREENING_HOLD");
+      assert.equal(unavailableDenial.coarse_category, "provider-unavailable");
+      assert.equal(unavailableDenial.case_id, undefined);
+      assert.equal(await automatedCases(), 2, "the rejected case rolled back with the refusal");
       assert.equal(await refusalCount(two[0].fellow_id), 2, "triggering refusal rolled back");
       assert.equal((await postureOf(POSTURE_OWNER))[0]?.quarantine_first, false);
     } finally {
       await env.DB.prepare("DROP TRIGGER lane_fail_posture_notice").run();
     }
-    await flaggedPromote("Refused statement number 3.", 403);
+    const durableDenial = await flaggedPromote("Refused statement number 3.", 403);
+    assert.match(durableDenial.case_id, /^QC-/);
+    assert.equal(await automatedCases(), 3);
     const three = await postureOf(POSTURE_OWNER);
     assert.equal(three[0]?.quarantine_first, true, "the third refusal flips the posture");
 

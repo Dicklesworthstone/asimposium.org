@@ -4,6 +4,119 @@ import { USER_AGENT } from "../gauntlet/local-target.mjs";
 
 export const ADMIN_OPERATORS = ["usr_agora_moderator", "usr_agora_other_moderator"];
 
+async function directScreeningAppealJourney({ browser, agora, target, problemId, record, signedInAs }) {
+  const [sponsor, operator] = ADMIN_OPERATORS;
+  const fellow = await enrollSetupFellow(target, sponsor, "automated-appeal-browser", ["promote"]);
+  const opened = await fellowPost(
+    target, "/v1/sessions", { problem_id: problemId, intent: "prove" }, fellow.token,
+  );
+  assert.equal(opened.status, 201);
+  const sessionPath = `/v1/sessions/${opened.body.session_id}`;
+  const draft = await fellowPost(target, `${sessionPath}/workshop`, {
+    type: "claim-draft",
+    title: "Finite integer addition",
+    body_md: "A private arithmetic candidate for local review.",
+  }, fellow.token);
+  assert.equal(draft.status, 201);
+  const candidate = {
+    workshop_id: draft.body.workshop_id,
+    kind: "conjecture",
+    statement: "The sum of the integers fourteen and nineteen is thirty-three.",
+    falsifier: "A direct integer calculation yielding a different sum.",
+  };
+  const publicationCount = async () => (await target.env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM events WHERE problem_id = ? AND type = 'claim.created'",
+  ).bind(problemId).first()).n;
+  const beforePublication = await publicationCount();
+  const fixtures = await target.worker.getExport();
+  await fixtures.setScreenMode("reject");
+  let refused;
+  try {
+    refused = await fellowPost(target, `${sessionPath}/promote`, candidate, fellow.token);
+  } finally {
+    await fixtures.setScreenMode("pass");
+  }
+  assert.equal(refused.status, 403);
+  assert.equal(refused.body.code, "POLICY_DENIED");
+  const caseId = refused.body.case_id;
+  assert.match(caseId, /^QC-[0-9A-HJKMNP-TV-Z]{26}$/);
+  const durable = await target.env.DB.prepare(
+    `SELECT c.state, c.decided_by,
+      (SELECT COUNT(*) FROM screening_refusals r WHERE r.fellow_id = c.fellow_id
+        AND r.problem_id = c.problem_id AND r.input_digest = c.input_digest
+        AND r.outcome = 'reject') AS refusals
+      FROM screening_cases c WHERE c.case_id = ?`,
+  ).bind(caseId).first();
+  record("screening appeal: direct denial records the exact case and private refusal", durable?.state === "rejected" &&
+    durable.decided_by === "platform:symposiarch" && durable.refusals === 1 &&
+    await publicationCount() === beforePublication &&
+    Object.keys(refused.body).sort().join(",") === "appeal,case_id,coarse_category,code");
+
+  const context = await browser.newContext();
+  try {
+    const page = await context.newPage();
+    const sponsorPage = `${agora.origin}/console/appeals?case=${encodeURIComponent(caseId)}`;
+    await signedInAs(context, operator);
+    await page.goto(sponsorPage);
+    record("screening appeal: a foreign sponsor cannot read or submit the case",
+      await page.getByRole("button", { name: "Submit human appeal" }).count() === 0 &&
+      await page.getByText(caseId, { exact: true }).count() === 0);
+
+    await signedInAs(context, sponsor);
+    await page.goto(`${agora.origin}/console/appeals`);
+    const card = page.locator("section.card").filter({ has: page.getByText(caseId, { exact: true }) });
+    await card.getByRole("button", { name: "Submit human appeal" }).waitFor();
+    await card.getByLabel("Private appeal statement").fill(
+      "The exact candidate records an ordinary finite arithmetic check that merits independent review.",
+    );
+    await card.getByRole("button", { name: "Submit human appeal" }).click();
+    await card.getByText("Your appeal is recorded.", { exact: false }).waitFor();
+    const receipt = await target.env.DB.prepare(
+      "SELECT appeal_id, state FROM screening_case_appeals WHERE case_id = ?",
+    ).bind(caseId).first();
+    assert.equal(receipt?.state, "pending");
+    record("screening appeal: the sponsor submits from the list and receives the actual pending receipt",
+      await card.getByText(receipt.appeal_id, { exact: true }).count() === 1);
+
+    const operatorPage = `${agora.origin}/admin/appeals?appeal=${encodeURIComponent(receipt.appeal_id)}`;
+    await page.goto(operatorPage);
+    record("screening appeal: the affected sponsor cannot decide even with operator access",
+      await page.getByText("A different, uninvolved operator must decide this appeal.").count() === 1 &&
+      await page.getByRole("button", { name: "Record decision", exact: true }).count() === 0);
+
+    await signedInAs(context, operator);
+    await page.goto(operatorPage);
+    record("screening appeal: an independent operator reads the original candidate and automated decision",
+      await page.getByText("automated screening rejection (no prior operator)", { exact: false }).count() === 1 &&
+      (await page.locator("pre").allTextContents()).join("\n").includes(candidate.statement));
+    await page.getByLabel("Release the exact candidate for explicit resubmission").check();
+    await page.getByLabel("Private review reason").fill(
+      "I reviewed the complete original candidate and confirmed the finite integer calculation.",
+    );
+    await page.getByLabel("I reviewed the original candidate, context, rejection and sponsor’s statement.").check();
+    await page.getByRole("button", { name: "Record decision", exact: true }).click();
+    await page.getByText("Appeal released.", { exact: false }).waitFor();
+    const decision = await target.env.DB.prepare(
+      "SELECT state, decided_by, audit_event_id FROM screening_case_appeals WHERE appeal_id = ?",
+    ).bind(receipt.appeal_id).first();
+    record("screening appeal: the browser decision records an independent audit before publication",
+      decision?.state === "released" && decision.decided_by === operator && !!decision.audit_event_id &&
+      await publicationCount() === beforePublication);
+
+    await fixtures.setScreenMode("reject");
+    let published;
+    try {
+      published = await fellowPost(target, `${sessionPath}/promote`, candidate, fellow.token);
+    } finally {
+      await fixtures.setScreenMode("pass");
+    }
+    record("screening appeal: explicit resubmission publishes the exact released candidate",
+      published.status === 201 && await publicationCount() === beforePublication + 1);
+  } finally {
+    await context.close();
+  }
+}
+
 /** Actual Next forms and signed Worker requests, with genuine local D1/R2. */
 export async function operatorModerationJourney({
   browser, agora, target, problemId, record, privateToCaches, authSecret, sessionCookie, encode,
@@ -34,6 +147,7 @@ export async function operatorModerationJourney({
   )).status;
 
   await fellowCapacityJourney({ browser, agora, target, record, privateToCaches, signedInAs });
+  await directScreeningAppealJourney({ browser, agora, target, problemId, record, signedInAs });
 
   for (const javaScriptEnabled of [true, false]) {
     const mode = javaScriptEnabled ? "js" : "no-js";

@@ -393,4 +393,208 @@ describe("human screening appeals", () => {
         decideScreeningAppeal(f.db, appellate, decision(a.appeal_id), "release"),
       ).rejects.toThrow("NOT_FOUND");
     }));
+  test("an automated rejection without attributable case ownership remains held", () =>
+    withFixture(async (f) => {
+      let screeningCalls = 0;
+      const result = await screenPublicCandidate(
+        (input) => {
+          screeningCalls++;
+          return syntheticScreeningObservation(input, {
+            decision: "reject",
+            coarse_category: "injection",
+            provider_status: "ok",
+          });
+        },
+        { DB: f.db } as Env,
+        f.input(),
+      );
+      expect(screeningCalls).toBe(1);
+      if (!(result instanceof Response)) throw new Error("Expected a screening hold");
+      expect(result.status).toBe(202);
+      expect(await result.json()).toEqual({
+        code: "SCREENING_HOLD",
+        coarse_category: "provider-unavailable",
+        appeal: "SPONSOR_APPEAL_AVAILABLE",
+      });
+      expect(f.sql.query("SELECT COUNT(*) AS n FROM screening_cases").get()).toEqual({ n: 0 });
+      expect(f.sql.query("SELECT COUNT(*) AS n FROM screening_refusals").get()).toEqual({ n: 0 });
+    }));
+  test("direct automated 403 POLICY_DENIED persists an appealable QC case atomically and supports operator release (qot3)", () =>
+    withFixture(async (f) => {
+      const candidate = f.input();
+      const rejectOnce = () =>
+        screenPublicCandidate(
+          (input) =>
+            syntheticScreeningObservation(input, {
+              decision: "reject",
+              coarse_category: "injection",
+              provider_status: "ok",
+            }),
+          { DB: f.db } as Env,
+          candidate,
+          { sponsorId: SPONSOR, route: "hypotheses" },
+        );
+      const first = await rejectOnce();
+      expect(first).toBeInstanceOf(Response);
+      const res = first as Response;
+      expect(res.status).toBe(403);
+      const rawText = await res.text();
+      // ADR-18 oracle starvation: zero pattern names, scores, or prompt excerpts.
+      expect(rawText).not.toContain("category_score_bands");
+      expect(rawText).not.toContain("matched_pattern");
+      expect(rawText).not.toContain("decision_path");
+      expect(rawText).not.toContain("prompt");
+      const body = JSON.parse(rawText) as {
+        code: string;
+        coarse_category: string;
+        appeal: string;
+        case_id?: string;
+      };
+      expect(body.code).toBe("POLICY_DENIED");
+      expect(body.coarse_category).toBe("injection");
+      expect(body.case_id).toMatch(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/);
+      const caseId = body.case_id as string;
+
+      // Retry of identical bytes returns the exact same QC case idempotently.
+      const second = await rejectOnce();
+      expect(second).toBeInstanceOf(Response);
+      expect((second as Response).status).toBe(403);
+      expect(await (second as Response).json()).toEqual(body);
+      expect(f.sql.query("SELECT COUNT(*) AS n FROM screening_cases").get()).toEqual({ n: 1 });
+      expect(f.sql.query("SELECT COUNT(*) AS n FROM screening_refusals").get()).toEqual({ n: 1 });
+      expect(
+        f.sql.query("SELECT COUNT(*) AS n FROM moderation_log WHERE action='rejected'").get(),
+      ).toEqual({ n: 1 });
+
+      // Foreign sponsor cannot view or appeal the case.
+      expect((await sponsorScreeningCases(f.db, "usr_other", caseId)).cases).toEqual([]);
+      await expect(
+        submitScreeningAppeal(
+          f.db,
+          "usr_other",
+          { case_id: caseId, statement: explanation },
+          "foreign-direct",
+        ),
+      ).rejects.toThrow("NOT_FOUND");
+
+      // Accountable sponsor sees the directly-rejected case and submits an appeal.
+      const owned = await sponsorScreeningCases(f.db, SPONSOR, caseId);
+      expect(owned.cases).toHaveLength(1);
+      expect(owned.cases[0]?.state).toBe("rejected");
+      const appeal = await submitScreeningAppeal(
+        f.db,
+        SPONSOR,
+        { case_id: caseId, statement: explanation },
+        "appeal-direct-reject",
+      );
+
+      // Operator queue shows original_operator_id: null (no prior human operator).
+      const queue = await operatorScreeningAppeals(f.db, appeal.appeal_id);
+      expect(queue.appeals).toHaveLength(1);
+      expect(queue.appeals[0]?.original_operator_id).toBeNull();
+
+      // Appealing sponsor who is also an operator cannot decide their own appeal.
+      await expect(
+        decideScreeningAppeal(f.db, SPONSOR, decision(appeal.appeal_id), "self-direct"),
+      ).rejects.toThrow("REVIEWER");
+
+      // Any uninvolved allowlisted operator can release with fresh step-up auth.
+      const released = await decideScreeningAppeal(
+        f.db,
+        original,
+        decision(appeal.appeal_id, "release"),
+        "release-direct",
+      );
+      expect(released.state).toBe("released");
+      expect(released.audit_event_id).toMatch(/^OA-/);
+
+      // Exact-byte resubmission now publishes via operator-release without re-asking the model.
+      const screened = await f.screen(candidate);
+      if (screened instanceof Response) throw new Error(`Unexpected ${screened.status}`);
+      expect(screened.provenance.decision_path).toBe("operator-release");
+      await f.write(candidate, screened);
+      expect(f.state().events).toHaveLength(1);
+
+      // Automated rejection cases cannot be used as human-reviewed egregious cases for sponsor suspension.
+      const { suspendSponsor } = await import("../../src/moderation/sponsor-suspension");
+      await expect(
+        suspendSponsor(
+          f.db,
+          SPONSOR,
+          appellate,
+          {
+            sponsor_id: SPONSOR,
+            expected_revision: 0,
+            reviewed_case_id: caseId,
+            basis: "egregious-reviewed-case",
+            reason: "Attempting suspension on an unreviewed automated rejection case.",
+            step_up_authenticated_at: Math.floor(Date.now() / 1000),
+          },
+          "suspend-auto-reject",
+        ),
+      ).rejects.toThrow("CASE");
+    }));
+
+  test("upholding an automated rejection appeal binds subsequent resubmissions against later model passes (qot3)", () =>
+    withFixture(async (f) => {
+      const candidate = f.input(
+        "For every positive integer n, an automated reject upheld by human review stays bound.",
+      );
+      const rejected = await screenPublicCandidate(
+        (input) =>
+          syntheticScreeningObservation(input, {
+            decision: "reject",
+            coarse_category: "injection",
+            provider_status: "ok",
+          }),
+        { DB: f.db } as Env,
+        candidate,
+        { sponsorId: SPONSOR, route: "hypotheses" },
+      );
+      expect(rejected).toBeInstanceOf(Response);
+      if (!(rejected instanceof Response)) throw new Error("expected Response");
+      expect(rejected.status).toBe(403);
+      const body = (await rejected.json()) as { code: string; case_id?: string };
+      expect(body.code).toBe("POLICY_DENIED");
+      const caseId = body.case_id;
+      if (!caseId) throw new Error("expected case_id");
+
+      const appeal = await submitScreeningAppeal(
+        f.db,
+        SPONSOR,
+        { case_id: caseId, statement: "Requesting human review of this direct rejection." },
+        "appeal-uphold-direct",
+      );
+      const upheld = await decideScreeningAppeal(
+        f.db,
+        appellate,
+        decision(appeal.appeal_id, "uphold"),
+        "uphold-direct",
+      );
+      expect(upheld.state).toBe("upheld");
+
+      // Even if the model would now return pass, human-upheld rejection binds deterministically.
+      let modelCalled = false;
+      const retry = await screenPublicCandidate(
+        (input) => {
+          modelCalled = true;
+          return syntheticScreeningObservation(input, {
+            decision: "pass",
+            coarse_category: "benign-context",
+            provider_status: "ok",
+          });
+        },
+        { DB: f.db } as Env,
+        candidate,
+        { sponsorId: SPONSOR, route: "hypotheses" },
+      );
+      expect(modelCalled).toBe(false);
+      expect(retry).toBeInstanceOf(Response);
+      if (!(retry instanceof Response)) throw new Error("expected Response");
+      expect(retry.status).toBe(403);
+      expect(await retry.json()).toMatchObject({
+        code: "POLICY_DENIED",
+        case_id: caseId,
+      });
+    }));
 });

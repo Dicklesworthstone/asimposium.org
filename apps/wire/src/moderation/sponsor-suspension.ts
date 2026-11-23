@@ -12,7 +12,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { validatedProblem } from "../http/envelope";
 import { createRetentionControlRecord, deletionJournalStatement } from "../krater/retention.ts";
 import { sha256Hex } from "../split/policy";
-import { mintModerationId } from "./store";
+import { AUTOMATED_REJECTION_DECIDED_BY, mintModerationId } from "./store";
 
 interface SuspensionRow {
   event_id: string;
@@ -208,8 +208,8 @@ export async function suspendSponsor(
   if (state.revision !== command.expected_revision) throw new SponsorSuspensionError("CONFLICT");
   const reviewed = await db
     .prepare(`SELECT case_id FROM screening_cases WHERE case_id = ? AND sponsor_id = ?
-      AND state = 'rejected' AND decided_by IS NOT NULL`)
-    .bind(command.reviewed_case_id, sponsorId)
+      AND state = 'rejected' AND decided_by IS NOT NULL AND decided_by <> ?`)
+    .bind(command.reviewed_case_id, sponsorId, AUTOMATED_REJECTION_DECIDED_BY)
     .first<{ case_id: string }>();
   if (reviewed === null) throw new SponsorSuspensionError("CASE");
   const eventId = mintModerationId("SS");

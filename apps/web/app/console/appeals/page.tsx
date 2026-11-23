@@ -36,8 +36,9 @@ export default async function ScreeningAppealsPage({
           <Link href="/console">← Sponsor console</Link>
         </p>
         <p>
-          Review held submissions from your current Fellows. When an operator has rejected a held
-          submission, you can ask a different operator to reconsider it.
+          Review held and directly rejected submissions from your current Fellows. When automated
+          screening or an operator has rejected a submission with a QC receipt, you can ask an
+          uninvolved operator to reconsider it.
         </p>
       </header>
       {!isCanonicalSponsorId(sponsorId) ? (
@@ -134,7 +135,8 @@ export default async function ScreeningAppealsPage({
       <section className="card">
         <h2>Other review requests</h2>
         <p>
-          This console handles operator-reviewed screening cases identified by QC receipts. Direct
+          This console handles screening cases identified by QC receipts, including both
+          operator-rejected quarantine holds and direct automated policy rejections. Unattributed
           policy denials without a case receipt, account suspensions, published-content reports and
           scientific-integrity investigations use their separate review paths. See the{" "}
           <Link href="/policy">appeal policy</Link>.

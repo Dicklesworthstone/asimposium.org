@@ -201,6 +201,8 @@ export interface ScreeningCaseRow {
   readonly decided_at: string | null;
   readonly decided_by: string | null;
   readonly decision_reason: string | null;
+  /** True when a human operator confirmed rejection (original review or upheld appeal). */
+  readonly humanConfirmedRejection?: boolean;
 }
 
 /** The case for exactly these bytes by this author on this problem, if any. */
@@ -223,6 +225,16 @@ export async function screeningCaseFor(
       .bind(row.case_id)
       .first();
     if (released) return { ...row, state: "released" };
+    if (row.decided_by === AUTOMATED_REJECTION_DECIDED_BY) {
+      const upheld = await db
+        .prepare(
+          "SELECT appeal_id FROM screening_case_appeals WHERE case_id = ? AND state = 'upheld'",
+        )
+        .bind(row.case_id)
+        .first();
+      return { ...row, humanConfirmedRejection: upheld !== null };
+    }
+    return { ...row, humanConfirmedRejection: true };
   }
   return row ?? undefined;
 }
@@ -294,6 +306,99 @@ export async function openScreeningCase(
   const existing = await screeningCaseFor(db, input.fellowId, input.problemId, input.inputDigest);
   if (existing === undefined) throw new Error("screening case vanished after a conflict");
   return { caseId: existing.case_id, state: existing.state };
+}
+
+export const AUTOMATED_REJECTION_DECIDED_BY = "platform:symposiarch" as const;
+export const AUTOMATED_REJECTION_REASON =
+  "Automated hard-policy rejection by screening model (no prior operator decision)." as const;
+
+/**
+ * Persist a durable rejected screening case for a direct automated model
+ * 403 POLICY_DENIED refusal (ADR-18 / bead asimposiumorg-rc-direct-reject-appeals-case-qot3)
+ * atomically alongside its public moderation log entry and any optional
+ * posture-refusal statements. Idempotent on `(fellow_id, problem_id, input_digest)`.
+ */
+export async function recordRejectedScreeningCase(
+  db: D1Database,
+  input: ScreeningCaseInput,
+  extraBatchStatements: readonly D1PreparedStatement[] = [],
+): Promise<{
+  readonly caseId: string;
+  readonly state: ScreeningCaseRow["state"];
+  readonly sponsorId: string;
+  readonly coarseCategory: string;
+}> {
+  const caseId = mintModerationId("QC");
+  const createdAt = new Date().toISOString();
+  const candidateJson = JSON.stringify(
+    input.contextualInput === undefined
+      ? input.candidate
+      : { kind: input.candidate.kind, statement: "", falsifier: null },
+  );
+  const contextualJson =
+    input.contextualInput === undefined ? null : JSON.stringify(input.contextualInput);
+  const [inserted] = await db.batch<{ case_id: string }>([
+    db
+      .prepare(
+        `INSERT INTO screening_cases
+           (case_id, problem_id, fellow_id, sponsor_id, route, input_digest, context_digest,
+            candidate_json, coarse_category, outcome, decision_path, provider_status,
+            model_version, policy_version, configuration_digest, state, created_at,
+            decided_at, decided_by, decision_reason, contextual_input_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'rejected', ?, ?, ?, ?, ?)
+         ON CONFLICT (fellow_id, problem_id, input_digest) DO NOTHING
+         RETURNING case_id`,
+      )
+      .bind(
+        caseId,
+        input.problemId,
+        input.fellowId,
+        input.sponsorId,
+        input.route,
+        input.inputDigest,
+        input.contextDigest,
+        candidateJson,
+        input.coarseCategory,
+        input.outcome,
+        input.decisionPath,
+        input.providerStatus,
+        input.modelVersion,
+        input.policyVersion,
+        input.configurationDigest,
+        createdAt,
+        createdAt,
+        AUTOMATED_REJECTION_DECIDED_BY,
+        AUTOMATED_REJECTION_REASON,
+        contextualJson,
+      ),
+    moderationLogStatement(
+      db,
+      {
+        action: "rejected",
+        category: input.logCategory ?? input.coarseCategory,
+        subject: "candidate",
+        problemId: input.problemId,
+        createdAt,
+      },
+      { sql: "EXISTS (SELECT 1 FROM screening_cases WHERE case_id = ?)", bindings: [caseId] },
+    ),
+    ...extraBatchStatements,
+  ]);
+  if ((inserted?.results.length ?? 0) > 0)
+    return {
+      caseId,
+      state: "rejected",
+      sponsorId: input.sponsorId,
+      coarseCategory: input.coarseCategory,
+    };
+  const existing = await screeningCaseFor(db, input.fellowId, input.problemId, input.inputDigest);
+  if (existing === undefined) throw new Error("rejected screening case vanished after a conflict");
+  return {
+    caseId: existing.case_id,
+    state: existing.state,
+    sponsorId: existing.sponsor_id,
+    coarseCategory: existing.coarse_category,
+  };
 }
 
 /** A later clean screen of the same bytes makes a pending hold moot. */

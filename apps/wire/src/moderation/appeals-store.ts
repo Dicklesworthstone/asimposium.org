@@ -9,7 +9,7 @@ import {
 import type { D1Database } from "@cloudflare/workers-types";
 import { inboxNoticeStatement } from "../inbox/notice-write";
 import { canonicalJson, sha256Hex } from "../krater/krater";
-import { mintModerationId } from "./store";
+import { AUTOMATED_REJECTION_DECIDED_BY, mintModerationId } from "./store";
 
 export class ScreeningAppealError extends Error {
   constructor(readonly code: "NOT_FOUND" | "CONFLICT" | "STEP_UP" | "REVIEWER") {
@@ -164,7 +164,10 @@ export async function operatorScreeningAppeals(db: D1Database, appealId?: string
       fellow_id: row.fellow_id,
       problem_id: row.problem_id,
       statement: row.statement,
-      original_operator_id: row.original_operator_id,
+      original_operator_id:
+        row.original_operator_id === AUTOMATED_REJECTION_DECIDED_BY
+          ? null
+          : row.original_operator_id,
     })),
   });
 }
@@ -209,7 +212,11 @@ export async function decideScreeningAppeal(
       }
     >();
   if (!row) throw new ScreeningAppealError("NOT_FOUND");
-  if (operatorId === row.sponsor_id || operatorId === row.original_operator_id)
+  if (
+    operatorId === row.sponsor_id ||
+    (row.original_operator_id !== AUTOMATED_REJECTION_DECIDED_BY &&
+      operatorId === row.original_operator_id)
+  )
     throw new ScreeningAppealError("REVIEWER");
   if (row.state !== "pending") {
     if (

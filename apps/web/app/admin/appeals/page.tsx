@@ -112,7 +112,10 @@ export default async function OperatorAppealsPage({
                           <h3>Original review</h3>
                           <p>
                             {reviewed.state} · {reviewed.item.coarse_category} ·{" "}
-                            {reviewed.decided_at}
+                            {item.original_operator_id === null
+                              ? "automated screening rejection (no prior operator)"
+                              : `operator ${item.original_operator_id}`}{" "}
+                            · {reviewed.decided_at}
                           </p>
                           <p>{reviewed.decision_reason}</p>
                           <h3>Original candidate and context</h3>

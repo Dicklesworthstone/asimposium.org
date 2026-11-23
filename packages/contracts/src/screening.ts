@@ -118,12 +118,18 @@ export const ScreeningPromotionHoldResponseSchema = z.union([
 ]);
 export type ScreeningPromotionHoldResponse = z.infer<typeof ScreeningPromotionHoldResponseSchema>;
 
-/** A hard-policy refusal has the same intentionally starved public shape. */
+/** A hard-policy refusal has the same intentionally starved public shape, plus
+ * an optional opaque case_id (QC-...) so the accountable sponsor can appeal
+ * automated rejections without learning any detector or pattern detail (ADR-18). */
 export const ScreeningPromotionDeniedResponseSchema = z
   .object({
     code: z.literal("POLICY_DENIED"),
     coarse_category: HardPolicyCategorySchema,
     appeal: z.literal(SCREENING_APPEAL_CODE),
+    case_id: z
+      .string()
+      .regex(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/)
+      .optional(),
   })
   .strict();
 export type ScreeningPromotionDeniedResponse = z.infer<

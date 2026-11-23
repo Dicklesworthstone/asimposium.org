@@ -88,6 +88,12 @@ test("owner lookup and appeal commands sign exact human route, target, body and 
     calls.push({ url: String(url), init: init ?? {} });
     return Response.json(init?.method === "GET" ? { cases: [ownCase], has_more: false } : receipt);
   }) as unknown as typeof fetch;
+  expect(
+    OperatorScreeningAppealsResponseSchema.safeParse({
+      appeals: [{ ...operatorItem, original_operator_id: null }],
+      has_more: false,
+    }).success,
+  ).toBe(true);
   expect((await stoaScreeningCases(sponsor, caseId)).ok).toBe(true);
   expect(await stoaSubmitScreeningAppeal(sponsor, command, "retain-appeal-key")).toEqual({
     ok: true,

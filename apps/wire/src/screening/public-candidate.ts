@@ -26,8 +26,13 @@ import {
   SynthesizeRequestSchema,
 } from "@asimposium/contracts";
 import type { Env } from "../env";
-import { postureOf, recordRefusal } from "../moderation/posture";
-import { openScreeningCase, type ScreeningCaseRow, screeningCaseFor } from "../moderation/store";
+import { postureOf, recordRefusal, recordRefusalStatements } from "../moderation/posture";
+import {
+  openScreeningCase,
+  recordRejectedScreeningCase,
+  type ScreeningCaseRow,
+  screeningCaseFor,
+} from "../moderation/store";
 import { scanFieldsForCredentials, secretShapedContentProblem } from "./credential-scan";
 import {
   publicationProvenance,
@@ -280,13 +285,91 @@ async function decidedCase(
   }
 }
 
-function screeningDeniedResponse(category: ScreeningCoarseCategory): Response | undefined {
+function screeningDeniedResponse(
+  category: ScreeningCoarseCategory,
+  caseId?: string,
+): Response | undefined {
   const parsed = ScreeningPromotionDeniedResponseSchema.safeParse({
     code: "POLICY_DENIED",
     coarse_category: category,
     appeal: SCREENING_APPEAL_CODE,
+    ...(caseId === undefined ? {} : { case_id: caseId }),
   });
   return parsed.success ? privateNoStore(parsed.data, 403) : undefined;
+}
+
+/**
+ * Persist a durable rejected `screening_cases` row atomically alongside the
+ * posture refusal so every direct automated 403 POLICY_DENIED rejection carries
+ * an appealable opaque `QC-...` receipt (ADR-18 / qot3).
+ */
+async function rejectWithCase(
+  env: Env,
+  input: WorkersAIPromotionInput,
+  context: ScreeningHoldContext | undefined,
+  screening: PublicationScreeningObservation,
+): Promise<Response> {
+  if (context === undefined || env.DB === undefined)
+    return screeningHoldResponse("provider-unavailable");
+  try {
+    const binding = await promotionScreeningBinding(input);
+    const inputDigest = binding.bodyDigest.slice(7);
+    const refusalStatements =
+      context.authorKind === "sponsor" || screening.coarse_category === "provider-unavailable"
+        ? []
+        : await recordRefusalStatements(env.DB, {
+            fellowId: input.fellowId,
+            sponsorId: context.sponsorId,
+            problemId: input.problemId,
+            outcome: "reject",
+            coarseCategory: screening.coarse_category,
+            inputDigest,
+          });
+    const recorded = await recordRejectedScreeningCase(
+      env.DB,
+      {
+        problemId: input.problemId,
+        fellowId: input.fellowId,
+        sponsorId: context.sponsorId,
+        route: context.route,
+        inputDigest,
+        contextDigest: binding.contextDigest.slice(7),
+        candidate: { kind: input.kind, statement: input.statement, falsifier: input.falsifier },
+        contextualInput: binding.contextualInput,
+        coarseCategory: screening.coarse_category,
+        // Retain schema-validated case outcome enum while state='rejected' +
+        // decided_by='platform:symposiarch' marks direct automated rejection.
+        outcome: "quarantine",
+        decisionPath: versionLabel(screening.decision_path),
+        providerStatus: versionLabel(screening.provider_status),
+        modelVersion: versionLabel(screening.model_version),
+        policyVersion: versionLabel(screening.policy_version),
+        configurationDigest: await hex64(
+          screening.configuration_digest,
+          "configuration-unavailable",
+        ),
+      },
+      refusalStatements,
+    );
+    // A conflicting retry cannot advertise an appeal on an undecided or
+    // superseded case, or return a case held under an earlier sponsor.
+    if (recorded.sponsorId !== context.sponsorId)
+      return screeningHoldResponse("provider-unavailable");
+    const category = ScreeningCoarseCategorySchema.safeParse(recorded.coarseCategory);
+    if (recorded.state === "pending")
+      return screeningHoldResponse(
+        category.success ? category.data : "provider-unavailable",
+        recorded.caseId,
+      );
+    if (recorded.state !== "rejected" || !category.success)
+      return screeningHoldResponse("provider-unavailable");
+    return (
+      screeningDeniedResponse(category.data, recorded.caseId) ??
+      screeningHoldResponse("provider-unavailable", recorded.caseId)
+    );
+  } catch {
+    return screeningHoldResponse("provider-unavailable");
+  }
 }
 
 /** Screen one exact public candidate. Returns private provenance to retain,
@@ -367,11 +450,12 @@ export async function screenPublicCandidate(
       return screeningHoldResponse("provider-unavailable", decided.case_id);
     }
   }
-  if (decided?.state === "rejected") {
+  if (decided?.state === "rejected" && decided.humanConfirmedRejection !== false) {
     const category = ScreeningCoarseCategorySchema.safeParse(decided.coarse_category);
+    const caseId = holdContext?.sponsorId === decided.sponsor_id ? decided.case_id : undefined;
     return (
-      (category.success ? screeningDeniedResponse(category.data) : undefined) ??
-      screeningHoldResponse("provider-unavailable", decided.case_id)
+      (category.success ? screeningDeniedResponse(category.data, caseId) : undefined) ??
+      screeningHoldResponse("provider-unavailable", caseId)
     );
   }
   // Do not buy a model decision while a required publication authority read
@@ -432,11 +516,7 @@ export async function screenPublicCandidate(
     );
   }
   if (screening.decision === "reject") {
-    await noteRefusal(env, input, holdContext, "reject", screening.coarse_category);
-    return (
-      screeningDeniedResponse(screening.coarse_category) ??
-      screeningHoldResponse("provider-unavailable")
-    );
+    return rejectWithCase(env, input, holdContext, screening);
   }
   if (
     screening.decision === "quarantine" ||

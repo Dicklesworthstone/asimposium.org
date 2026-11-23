@@ -121,31 +121,34 @@ export function screeningPostureGuardStatement(
     );
 }
 
+export interface RefusalInput {
+  readonly fellowId: string;
+  readonly sponsorId: string;
+  readonly problemId: string;
+  readonly outcome: "reject" | "quarantine";
+  readonly coarseCategory: string;
+  readonly inputDigest: string;
+}
+
 /**
- * Record one content refusal. Idempotent per (Fellow, bytes, outcome). When
- * this refusal is the one that crosses the threshold, the Fellow is told
- * privately (coarse, no detector detail) that its writes now wait for review.
+ * Build the atomic D1 statements for recording one content refusal (and its
+ * threshold-crossing Fellow notice). Returned as statements so callers like
+ * `recordRejectedScreeningCase` can commit the refusal in the exact same D1
+ * batch as the durable `screening_cases` row.
  */
-export async function recordRefusal(
+export async function recordRefusalStatements(
   db: D1Database,
-  input: {
-    readonly fellowId: string;
-    readonly sponsorId: string;
-    readonly problemId: string;
-    readonly outcome: "reject" | "quarantine";
-    readonly coarseCategory: string;
-    readonly inputDigest: string;
-  },
-): Promise<void> {
-  if (input.coarseCategory === "provider-unavailable") return;
+  input: RefusalInput,
+  now = Date.now(),
+): Promise<D1PreparedStatement[]> {
+  if (input.coarseCategory === "provider-unavailable") return [];
   // An engaged posture already holds every write; recording more refusals
   // would only let the count or its expiry reveal which writes the screen
   // refused (asimposiumorg-ij2e).
-  if ((await postureOf(db, input.fellowId)).quarantineFirst) return;
+  if ((await postureOf(db, input.fellowId)).quarantineFirst) return [];
   const refusalId = mintModerationId("SR");
-  const now = Date.now();
   const since = windowStart(now);
-  await db.batch([
+  return [
     db
       .prepare(
         `INSERT INTO screening_refusals
@@ -205,7 +208,18 @@ export async function recordRefusal(
         ],
       },
     ),
-  ]);
+  ];
+}
+
+/**
+ * Record one content refusal. Idempotent per (Fellow, bytes, outcome). When
+ * this refusal is the one that crosses the threshold, the Fellow is told
+ * privately (coarse, no detector detail) that its writes now wait for review.
+ */
+export async function recordRefusal(db: D1Database, input: RefusalInput): Promise<void> {
+  const statements = await recordRefusalStatements(db, input);
+  if (statements.length === 0) return;
+  await db.batch(statements);
 }
 
 export async function clearPosture(

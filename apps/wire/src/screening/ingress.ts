@@ -5,6 +5,7 @@ import {
 import type { Env } from "../env";
 import { screeningPostureGuardStatement } from "../moderation/posture";
 import { screeningCaseReleasedSql } from "../moderation/screening-release.ts";
+import { AUTOMATED_REJECTION_DECIDED_BY } from "../moderation/store";
 import {
   type PublicationContextGuard,
   screeningContextGuardStatement,
@@ -205,7 +206,14 @@ export function screeningDecisionGuardStatement(
           SELECT 1 FROM screening_cases c
           WHERE c.fellow_id = ?2 AND c.problem_id = ?3
             AND c.input_digest = ?4 AND c.context_digest = ?5
-            AND c.state = 'rejected') END)
+            AND c.state = 'rejected'
+            AND (
+              c.decided_by <> ?8
+              OR EXISTS (
+                SELECT 1 FROM screening_case_appeals a
+                WHERE a.case_id = c.case_id AND a.state = 'upheld'
+              )
+            )) END)
         THEN 1 ELSE json_extract('[]', '$[${SCREENING_DECISION_CHANGED_MARKER}]') END`,
     )
     .bind(
@@ -216,6 +224,7 @@ export function screeningDecisionGuardStatement(
       screened.provenance.context_digest,
       screened.provenance.review_case_id ?? null,
       screened.provenance.decision_path === "operator-release" ? 1 : 0,
+      AUTOMATED_REJECTION_DECIDED_BY,
     );
 }
 
