@@ -131,11 +131,11 @@ const S3_OWNED_STREAM_BYTES = 1_000_000;
 const S3_OWNED_OUTPUT_BYTES = 1_000_000;
 /**
  * Isolated builds retain every UTF-8 output for the parent's sentinel scan.
- * The same ceiling bounds the encoded pipe and the decoded bundle payload.
- * At 452208cb, JSON escaping alone grows 3,837,396 bundle bytes to 3,961,360
- * evidence bytes. Lossless compression fits that evidence into the existing pipe.
+ * Lossless compression keeps the encoded pipe below the fresh-result ceiling.
+ * Bound decoded bundle bytes separately so graph growth does not widen the pipe.
  */
-const S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES = 3_950_000;
+const S3_ISOLATED_BUILD_TRANSPORT_MAX_BYTES = 3_950_000;
+const S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES = 4_100_000;
 const S3_FRESH_RUNTIME_FIXED_GRACE_MS = 5_000;
 const S3_FRESH_RUNTIME_RESULT_MAX_BYTES = 8 * S3_OWNED_OUTPUT_BYTES;
 const S3_FRESH_RUNTIME_DIAGNOSTIC_MAX_BYTES = 1_024;
@@ -2106,7 +2106,7 @@ function decodeIsolatedProductionBuildOutputEvidence(stdout: string): readonly s
 }
 
 function decodeIsolatedProductionBuildTransport(encoded: string): readonly string[] {
-  if (Buffer.byteLength(encoded, "utf8") > S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES) {
+  if (Buffer.byteLength(encoded, "utf8") > S3_ISOLATED_BUILD_TRANSPORT_MAX_BYTES) {
     throw new Error("S3_ISOLATED_BUILD_OUTPUT_TRANSPORT_OVERRUN");
   }
   const compressed = Buffer.from(encoded, "base64");
@@ -2395,7 +2395,7 @@ async function isolatedProductionBundle(
   // output crosses only the existing fresh-owned, pinned-result authority;
   // the parent derives every receipt field after strictly decoding that output.
   if (
-    isolatedBuildFreshResultUpperBound(S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES) >
+    isolatedBuildFreshResultUpperBound(S3_ISOLATED_BUILD_TRANSPORT_MAX_BYTES) >
     S3_FRESH_RUNTIME_RESULT_MAX_BYTES
   ) {
     throw new Error("S3_ISOLATED_BUILD_RESULT_CAP_INVALID");
@@ -2405,8 +2405,8 @@ async function isolatedProductionBundle(
     "S3_ISOLATED_BUILD",
     {
       timeoutMs: S3_BUNDLE_TIMEOUT_MS,
-      retainedStreamBytes: S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES,
-      retainedOutputBytes: S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES,
+      retainedStreamBytes: S3_ISOLATED_BUILD_TRANSPORT_MAX_BYTES,
+      retainedOutputBytes: S3_ISOLATED_BUILD_TRANSPORT_MAX_BYTES,
     },
   );
   if (result.outcome !== "exited") {
@@ -2436,8 +2436,22 @@ async function isolatedProductionBundle(
 
 test("measured S3 graph evidence fits its explicitly reviewed capacity", () => {
   for (const bytes of [
-    3_500_001, 3_747_282, 3_750_000, 3_750_001, 3_756_005, 3_760_000, 3_781_957, 3_785_000,
-    3_785_001, 3_795_298, 3_900_000, 3_900_001, 3_902_789, 3_950_000,
+    3_500_001,
+    3_747_282,
+    3_750_000,
+    3_750_001,
+    3_756_005,
+    3_760_000,
+    3_781_957,
+    3_785_000,
+    3_785_001,
+    3_795_298,
+    3_900_000,
+    3_900_001,
+    3_902_789,
+    3_950_000,
+    3_952_669,
+    S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES,
   ]) {
     const body = "x".repeat(bytes);
     const raw = JSON.stringify([body]);
@@ -2449,13 +2463,12 @@ test("measured S3 graph evidence fits its explicitly reviewed capacity", () => {
       createHash("sha256").update(body, "utf8").digest("hex"),
     );
   }
-  // The old one-byte-over value is intentionally accepted by the capacity
-  // revision; the new exact boundary still has a one-byte-over refusal.
-  const oversized = gzipSync(JSON.stringify(["x".repeat(3_950_001)])).toString("base64");
+  const oversizedBytes = S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES + 1;
+  const oversized = gzipSync(JSON.stringify(["x".repeat(oversizedBytes)])).toString("base64");
   expect(() => decodeIsolatedProductionBuildTransport(oversized)).toThrow(
-    "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_OVERRUN:3950001",
+    `S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_OVERRUN:${oversizedBytes}`,
   );
-  const escapedOutput = "\\".repeat(S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES);
+  const escapedOutput = "\\".repeat(S3_ISOLATED_BUILD_TRANSPORT_MAX_BYTES);
   const escaped = gzipSync(JSON.stringify([escapedOutput])).toString("base64");
   expect(decodeIsolatedProductionBuildTransport(escaped)).toEqual([escapedOutput]);
   const nested = `${JSON.stringify({
@@ -2466,13 +2479,13 @@ test("measured S3 graph evidence fits its explicitly reviewed capacity", () => {
       exitCode: 0,
       stdout: escaped,
       stderr: "",
-      retainedStdoutBytes: S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES,
+      retainedStdoutBytes: S3_ISOLATED_BUILD_TRANSPORT_MAX_BYTES,
       retainedStderrBytes: 0,
-      retainedOutputBytes: S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES,
+      retainedOutputBytes: S3_ISOLATED_BUILD_TRANSPORT_MAX_BYTES,
     },
     cleanupProven: true,
   })}\n`;
-  const bound = isolatedBuildFreshResultUpperBound(S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES);
+  const bound = isolatedBuildFreshResultUpperBound(S3_ISOLATED_BUILD_TRANSPORT_MAX_BYTES);
   expect(Buffer.byteLength(nested, "utf8")).toBeLessThanOrEqual(bound);
   expect(bound).toBeLessThanOrEqual(S3_FRESH_RUNTIME_RESULT_MAX_BYTES);
 });
@@ -2501,9 +2514,7 @@ test("isolated S3 graph transport rejects malformed, incomplete, or inflated evi
     "S3_ISOLATED_BUILD_OUTPUT_TRANSPORT_INVALID",
   );
   expect(() =>
-    decodeIsolatedProductionBuildTransport(
-      "A".repeat(S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES + 1),
-    ),
+    decodeIsolatedProductionBuildTransport("A".repeat(S3_ISOLATED_BUILD_TRANSPORT_MAX_BYTES + 1)),
   ).toThrow("S3_ISOLATED_BUILD_OUTPUT_TRANSPORT_OVERRUN");
 });
 
@@ -2550,7 +2561,7 @@ test("isolated build output evidence refuses fake fields, malformed, empty, nonc
     "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_OVERRUN",
   );
   expect(
-    isolatedBuildFreshResultUpperBound(S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES),
+    isolatedBuildFreshResultUpperBound(S3_ISOLATED_BUILD_TRANSPORT_MAX_BYTES),
   ).toBeLessThanOrEqual(S3_FRESH_RUNTIME_RESULT_MAX_BYTES);
   expect(() => decodeIsolatedProductionBuildOutputEvidence('["export default {};" ]')).toThrow(
     "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_NONCANONICAL",
