@@ -71,6 +71,10 @@ export interface ScientificRow {
   /** Explicitly bounded readers must reject the whole history on overflow.
    * Missing bodies caused by this budget are not scientific withdrawals. */
   scientific_budget_exceeded?: number;
+  /** A projection cannot reroute or erase an immutable scientific event.
+   * Repeated on every selected row so filtering to an exact version cannot
+   * discard the disagreement along with the misrouted objection. */
+  source_projection_mismatch?: number;
 }
 
 export interface ScientificReadBudget {
@@ -184,11 +188,99 @@ export function prepareScientificDispositions(
     target === undefined
       ? CLAIM_HEADS_AT_CURSOR_SQL
       : "SELECT object_id AS id FROM events WHERE problem_id = ? AND seq <= ? AND object_id = ? AND type = 'claim.created' AND object_kind = 'claim' LIMIT 1";
+  // Check routing before selecting claim histories. A check over returned rows
+  // alone cannot find an objection whose projection points at another claim or
+  // version. One census at this problem/cursor detects both missing sources and
+  // disagreement with available event bytes; it never releases those bytes.
+  // Either recorded target can establish relevance. Unknown routing with no
+  // projection fails the whole snapshot; known unrelated claims remain usable.
+  // Withholding/redaction is not a mismatch: existing adverse metadata remains
+  // usable when the body is absent, and the fold retains its staleness rules.
   const query = `
-    WITH disclosure_cut(cursor) AS (VALUES (?)), selected_claims AS (
+    WITH disclosure_cut(cursor) AS (VALUES (?)),
+    scientific_scope(problem_id, target_version) AS (VALUES (?, ?)),
+    selected_claims AS (
       ${selection}
+    ),
+    projection_mismatches AS MATERIALIZED (
+      SELECT source.id
+      FROM scientific_scope scope CROSS JOIN disclosure_cut cut CROSS JOIN events source
+      LEFT JOIN reviews review ON review.source_event_id = source.id
+        AND review.problem_id = source.problem_id AND review.review_id = source.object_id
+        AND review.source_seq = source.seq AND source.object_kind = 'review'
+        AND source.type = 'review.created'
+      LEFT JOIN evidence material ON material.source_event_id = source.id
+        AND material.problem_id = source.problem_id AND material.evidence_id = source.object_id
+        AND material.source_seq = source.seq AND source.object_kind = 'evidence'
+        AND source.type = 'evidence.created'
+      LEFT JOIN event_content body ON body.event_id = source.id
+        AND body.payload_sha256 = source.payload_sha256 AND body.redacted_at IS NULL
+      WHERE source.problem_id = scope.problem_id AND source.seq <= cut.cursor
+        AND source.type IN ('review.created', 'evidence.created')
+        AND (
+          (source.type = 'review.created' AND (
+            (review.target_claim_id IN (SELECT id FROM selected_claims)
+              AND (scope.target_version IS NULL OR review.target_version <= scope.target_version))
+            OR (json_extract(CASE WHEN json_valid(body.payload_json) THEN body.payload_json ELSE '{}' END,
+                '$.target_claim_id') IN (SELECT id FROM selected_claims)
+              AND (scope.target_version IS NULL
+                OR json_type(CASE WHEN json_valid(body.payload_json) THEN body.payload_json ELSE '{}' END,
+                  '$.target_version') IS NOT 'integer'
+                OR json_extract(CASE WHEN json_valid(body.payload_json) THEN body.payload_json ELSE '{}' END,
+                  '$.target_version') <= scope.target_version))
+            OR (review.review_id IS NULL AND
+              json_type(CASE WHEN json_valid(body.payload_json) THEN body.payload_json ELSE '{}' END,
+                '$.target_claim_id') IS NOT 'text')
+          )) OR
+          (source.type = 'evidence.created' AND (
+            (material.bears_on_kind = 'claim' AND material.bears_on_id IN (SELECT id FROM selected_claims)
+              AND (scope.target_version IS NULL OR material.bears_on_version <= scope.target_version))
+            OR (json_extract(CASE WHEN json_valid(body.payload_json) THEN body.payload_json ELSE '{}' END,
+                '$.bears_on_kind') = 'claim'
+              AND json_extract(CASE WHEN json_valid(body.payload_json) THEN body.payload_json ELSE '{}' END,
+                '$.bears_on_id') IN (SELECT id FROM selected_claims)
+              AND (scope.target_version IS NULL
+                OR json_type(CASE WHEN json_valid(body.payload_json) THEN body.payload_json ELSE '{}' END,
+                  '$.bears_on_version') IS NOT 'integer'
+                OR json_extract(CASE WHEN json_valid(body.payload_json) THEN body.payload_json ELSE '{}' END,
+                  '$.bears_on_version') <= scope.target_version))
+            OR (material.evidence_id IS NULL AND
+              (json_type(CASE WHEN json_valid(body.payload_json) THEN body.payload_json ELSE '{}' END,
+                '$.bears_on_id') IS NOT 'text'
+                OR COALESCE(json_extract(CASE WHEN json_valid(body.payload_json) THEN body.payload_json ELSE '{}' END,
+                  '$.bears_on_kind'), '') NOT IN ('claim', 'hypothesis')))
+          ))
+        )
+        AND (
+          (source.type = 'review.created' AND (
+            review.review_id IS NULL OR
+            CASE WHEN json_valid(body.payload_json) THEN
+              (json_type(body.payload_json, '$.target_claim_id') = 'text'
+                AND json_extract(body.payload_json, '$.target_claim_id') IS NOT review.target_claim_id)
+              OR (json_type(body.payload_json, '$.target_version') = 'integer'
+                AND json_extract(body.payload_json, '$.target_version') IS NOT review.target_version)
+              OR (json_type(body.payload_json, '$.verdict') = 'text'
+                AND json_extract(body.payload_json, '$.verdict') IS NOT review.verdict)
+            ELSE 0 END
+          )) OR
+          (source.type = 'evidence.created' AND (
+            material.evidence_id IS NULL OR
+            CASE WHEN json_valid(body.payload_json) THEN
+              (json_type(body.payload_json, '$.bears_on_kind') = 'text'
+                AND json_extract(body.payload_json, '$.bears_on_kind') IS NOT material.bears_on_kind)
+              OR (json_type(body.payload_json, '$.bears_on_id') = 'text'
+                AND json_extract(body.payload_json, '$.bears_on_id') IS NOT material.bears_on_id)
+              OR (json_type(body.payload_json, '$.bears_on_version') = 'integer'
+                AND json_extract(body.payload_json, '$.bears_on_version') IS NOT material.bears_on_version)
+              OR (json_type(body.payload_json, '$.direction') = 'text'
+                AND json_extract(body.payload_json, '$.direction') IS NOT material.direction)
+            ELSE 0 END
+          ))
+        )
+      LIMIT 1
     )
     SELECT s.id AS claim_id, e.id AS event_id, e.seq, e.type, e.object_id, e.object_version,
+      EXISTS (SELECT 1 FROM projection_mismatches) AS source_projection_mismatch,
       CASE WHEN e.object_kind = 'claim' THEN e.object_version
         WHEN e.object_kind = 'review' THEN r.target_version
         WHEN e.object_kind = 'retraction' AND w.source_event_id IS NOT NULL THEN w.claim_version
@@ -310,12 +402,29 @@ export function prepareScientificDispositions(
     ORDER BY b.seq ASC`;
   return db
     .prepare(boundedQuery)
-    .bind(cursor, problemId, cursor, target?.claimId ?? claimLimit, problemId, cursor);
+    .bind(
+      cursor,
+      problemId,
+      target?.version ?? null,
+      problemId,
+      cursor,
+      target?.claimId ?? claimLimit,
+      problemId,
+      cursor,
+    );
 }
 
 export async function foldScientificRows(
   rows: readonly ScientificRow[],
 ): Promise<ScientificDisposition> {
+  if (
+    rows.some(
+      (row) => row.source_projection_mismatch !== undefined && row.source_projection_mismatch !== 0,
+    )
+  )
+    throw new ScientificInputError(
+      "Scientific projections disagree with the public event history.",
+    );
   if (
     rows.some(
       (row) => row.scientific_budget_exceeded !== undefined && row.scientific_budget_exceeded !== 0,

@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { DIRECTIVE_DISCLOSURES_SCHEMA_ID } from "@asimposium/contracts/directive-disclosures";
+import type {
+  ScreeningPromotionDeniedResponse,
+  ScreeningPromotionHoldResponse,
+} from "@asimposium/contracts/screening";
 import { createApp } from "../../src/app.ts";
 import { createDirectiveDisclosureRouter } from "../../src/directives/disclosure-router.ts";
 import type { Env } from "../../src/env.ts";
@@ -458,7 +462,9 @@ describe("signed sponsor disclosure and public canonical document routes", () =>
     const rejected = await publish("rejected");
     expect(rejected.status).toBe(403);
     expect(rejected.headers.get("cache-control")).toBe("private, no-store");
-    const denial = (await rejected.json()) as { case_id: string };
+    const denial = (await rejected.json()) as ScreeningPromotionDeniedResponse & {
+      case_id: string;
+    };
     expect(denial).toEqual({
       code: "POLICY_DENIED",
       coarse_category: "injection",
@@ -473,7 +479,9 @@ describe("signed sponsor disclosure and public canonical document routes", () =>
     const held = await publish("held");
     expect(held.status).toBe(202);
     expect(held.headers.get("cache-control")).toBe("private, no-store");
-    const hold = (await held.json()) as { case_id: string };
+    const hold = (await held.json()) as ScreeningPromotionHoldResponse & {
+      case_id: string;
+    };
     expect(hold).toEqual({
       code: "SCREENING_HOLD",
       coarse_category: "injection",
