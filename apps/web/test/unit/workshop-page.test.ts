@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
 import {
-  SponsorWorkshopPromotionReceiptSchema,
   SponsorWorkshopCursorResponseSchema,
+  SponsorWorkshopPromotionReceiptSchema,
   SponsorWorkshopViewSchema,
 } from "@asimposium/contracts";
 
 import {
-  loadWorkshopPage,
   loadWorkshopCursorResponse,
+  loadWorkshopPage,
   workshopPageHref,
   workshopPromotionDestination,
 } from "../../lib/workshop-page";
@@ -74,6 +74,34 @@ test("typed promotion receipts link to the exact canonical object and disclose c
     label: "DE-10",
     href: `/p/${problem}/dead-ends?include_superseded=true#DE-10`,
   });
+  const review = SponsorWorkshopPromotionReceiptSchema.parse({
+    object_kind: "review",
+    problem_id: problem,
+    seq: 11,
+    version: 1,
+    result: {
+      review_id: "R-11",
+      target_claim_id: "C-1",
+      target_version: 2,
+      tier: "T0",
+      carries_weight: true,
+    },
+  });
+  const reviewDestination = workshopPromotionDestination(review, origin);
+  expect(reviewDestination.label).toBe("R-11");
+  expect(reviewDestination.href).toBe(`/r/p/${problem}/reviews/R-11`);
+  expect(reviewDestination.assessment).toContain("Recorded independence tier: T0");
+  expect(reviewDestination.assessment).toContain("Targets C-1@2");
+  expect(reviewDestination.assessment).toContain("computed from its complete evidence");
+  if (!("object_kind" in review) || review.object_kind !== "review")
+    throw new Error("Expected saved review receipt");
+  const assertionOnly = SponsorWorkshopPromotionReceiptSchema.parse({
+    ...review,
+    result: { ...review.result, tier: "T1", carries_weight: false },
+  });
+  expect(workshopPromotionDestination(assertionOnly, origin).assessment).toContain(
+    "Assertion-only review; it carries no assessment weight.",
+  );
 });
 
 function page(seqs: number[], more = false) {
@@ -223,7 +251,9 @@ test("workshop cursor facade authenticates before reading and returns private me
   expect(response.headers.get("vary")).toBe("Cookie");
   expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
   expect(await response.json()).toEqual(data);
-  expect(calls).toEqual([{ principal: sponsor, request: { fellow_id: fellow, problem_id: problem } }]);
+  expect(calls).toEqual([
+    { principal: sponsor, request: { fellow_id: fellow, problem_id: problem } },
+  ]);
 });
 
 test("cursor facade refuses crossed identities, malformed bodies and private upstream diagnostics", async () => {

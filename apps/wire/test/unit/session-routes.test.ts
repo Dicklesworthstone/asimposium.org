@@ -8832,6 +8832,369 @@ describe("session protocol routes", () => {
     ).toEqual({ n: 0 });
   });
 
+  describe("saved review publications", () => {
+    const privateReviewNotes = "PRIVATE-SAVED-REVIEW-NOTES: unfinished calculation";
+    const pass = {
+      decision: "pass",
+      coarse_category: "benign-context",
+      provider_status: "ok",
+    } as const;
+
+    async function setup(options: LocalD1Options = {}) {
+      const f = await fixture(options);
+      let key = 0;
+      const send = (
+        client: Pick<typeof f, "call">,
+        path: string,
+        body: unknown,
+        idempotencyKey = `saved-review-${++key}`,
+      ) =>
+        client.call(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
+          body: JSON.stringify(body),
+        });
+      const authorPost = (path: string, body: unknown, idempotencyKey?: string) =>
+        send(f, path, body, idempotencyKey);
+      const authorSession = SessionOpenResponseSchema.parse(
+        await (await authorPost("/v1/sessions", { problem_id: "P-4DSP", intent: "prove" })).json(),
+      ).session_id;
+      const source = WorkshopPushResponseSchema.parse(
+        await (
+          await authorPost(`/v1/sessions/${authorSession}/workshop`, {
+            type: "claim-draft",
+            title: "Exact review target",
+            body_md: "Private author work.",
+          })
+        ).json(),
+      );
+      const claim = PromoteResponseSchema.parse(
+        await (
+          await authorPost(`/v1/sessions/${authorSession}/promote`, {
+            workshop_id: source.workshop_id,
+            kind: "conjecture",
+            statement: "The square of every odd integer has residue one modulo eight.",
+            falsifier: "An odd integer with a square of a different residue modulo eight.",
+          })
+        ).json(),
+      );
+      const reviewer = await addApprovedFellow(f, { suffix: "saved-reviewer", scopes: ["review"] });
+      const post = (path: string, body: unknown, idempotencyKey?: string) =>
+        send(reviewer, path, body, idempotencyKey);
+      const open = async () =>
+        SessionOpenResponseSchema.parse(
+          await (await post("/v1/sessions", { problem_id: "P-4DSP", intent: "review" })).json(),
+        ).session_id;
+      const session = await open();
+      await f.db
+        .prepare("UPDATE problem_memberships SET role='observer' WHERE fellow_id=?")
+        .bind(reviewer.binding.fellowId)
+        .run();
+      const review = {
+        target_claim_id: claim.claim_id,
+        target_version: 1,
+        verdict: "inform" as const,
+        basis: "Checked the four odd residue classes modulo eight.",
+        capable_of_failure: "An odd residue whose square is not congruent to one.",
+        rubric: ["quantifier scope", "finite domain completeness"],
+        body_md: "All four odd residues square to one modulo eight.",
+      };
+      const push = async (sessionId = session, client: Pick<typeof f, "call"> = reviewer) => {
+        const response = await send(client, `/v1/sessions/${sessionId}/workshop`, {
+          type: "note",
+          title: "Independent residue review",
+          body_md: privateReviewNotes,
+          ledger_intent: { kind: "create", target_kind: "review" },
+          publication: { object_kind: "review", payload: review },
+        });
+        expect(response.status, await response.clone().text()).toBe(201);
+        return WorkshopPushResponseSchema.parse(await response.json());
+      };
+      const sponsorRouter = createSessionRouter({
+        service: f.service,
+        replayProtector: f.replayProtector,
+        screenPromotion: (input) => syntheticScreeningObservation(input, pass),
+        verifiedSponsor: async (request) => ({
+          principal: f.sponsor,
+          rawBody: new Uint8Array(await request.arrayBuffer()),
+        }),
+      });
+      const sponsorPublish = (
+        fellowId: string,
+        workshopId: string,
+        version = 1,
+        idempotencyKey = `sponsor-review-${++key}`,
+      ) =>
+        sponsorRouter.fetch(
+          new Request("https://a-staging.asimposium.org/v1/sponsors/workshop/action", {
+            method: "POST",
+            headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
+            body: JSON.stringify({
+              problem_id: "P-4DSP",
+              fellow_id: fellowId,
+              workshop_id: workshopId,
+              expected_workshop_version: version,
+              action: "promote",
+            }),
+          }),
+          f.env,
+        );
+      const publicState = async () => ({
+        events: (await f.db.prepare("SELECT * FROM events ORDER BY seq").all()).results,
+        reviews: (await f.db.prepare("SELECT * FROM reviews ORDER BY review_id").all()).results,
+        head: await f.db
+          .prepare("SELECT public_seq,chain_digest FROM problems WHERE id='P-4DSP'")
+          .first(),
+        cursor: await f.db.prepare("SELECT cursor FROM public_cursor WHERE singleton=1").first(),
+      });
+      const head = (workshopId: string) =>
+        f.db
+          .prepare("SELECT state,current_version FROM workshop_objects WHERE workshop_id=?")
+          .bind(workshopId)
+          .first();
+      return {
+        ...f,
+        reviewer,
+        authorSession,
+        authorPost,
+        session,
+        post,
+        open,
+        push,
+        review,
+        sponsorPublish,
+        publicState,
+        head,
+      };
+    }
+
+    test("review-only observers recover and publish the exact saved revision with durable replay", async () => {
+      const f = await setup();
+      const draft = await f.push();
+      expect(
+        (
+          await f.post(`/v1/sessions/${f.session}/close`, {
+            handback: "Resume this independent review.",
+            keep: [draft.workshop_id],
+          })
+        ).status,
+      ).toBe(201);
+      const recovered = await f.open();
+      const path = `/v1/sessions/${recovered}/review`;
+      const selected = { workshop_id: draft.workshop_id, expected_workshop_version: 2 };
+      const before = await f.publicState();
+      expect((await f.post(path, { ...selected, verdict: "confirm" })).status).toBe(422);
+      expect((await f.post(path, { ...selected, expected_workshop_version: 1 })).status).toBe(409);
+      expect((await f.authorPost(`/v1/sessions/${f.authorSession}/review`, selected)).status).toBe(
+        404,
+      );
+      expect(await f.publicState()).toEqual(before);
+      const published = await f.post(path, selected, "saved-review-publish");
+      expect(published.status, await published.clone().text()).toBe(201);
+      const bytes = await published.text();
+      const receipt = ReviewResponseSchema.parse(JSON.parse(bytes));
+      expect(receipt).toMatchObject({
+        target_claim_id: f.review.target_claim_id,
+        target_version: 1,
+        tier: "T0",
+        carries_weight: true,
+      });
+      expect(await f.head(draft.workshop_id)).toEqual({ state: "archived", current_version: 3 });
+      const event = await f.db
+        .prepare(
+          "SELECT e.*,c.payload_json FROM events e JOIN event_content c ON c.event_id=e.id WHERE e.object_id=?",
+        )
+        .bind(receipt.review_id)
+        .first<{
+          actor_fellow_id: string;
+          actor_sponsor_id: string;
+          actor_session_id: string;
+          payload_json: string;
+        }>();
+      expect(event).toMatchObject({
+        actor_fellow_id: f.reviewer.binding.fellowId,
+        actor_sponsor_id: f.binding.sponsorId,
+        actor_session_id: recovered,
+      });
+      expect(JSON.parse(event!.payload_json)).toMatchObject({
+        target_claim_id: f.review.target_claim_id,
+        target_version: 1,
+        basis: f.review.basis,
+        body_md: f.review.body_md,
+      });
+      expect(event!.payload_json).not.toContain(privateReviewNotes);
+      expect(
+        (await f.post(`/v1/sessions/${recovered}/close`, { handback: "Review published." })).status,
+      ).toBe(201);
+      const after = await f.publicState();
+      const replay = await f.post(path, selected, "saved-review-publish");
+      expect(replay.status).toBe(200);
+      expect(await replay.text()).toBe(bytes);
+      expect(await f.publicState()).toEqual(after);
+    });
+
+    test("sponsor publication uses the review-only Fellow's source session and never overrides P1", async () => {
+      const f = await setup();
+      const draft = await f.push();
+      expect(
+        (
+          await f.post(`/v1/sessions/${f.session}/close`, {
+            handback: "Sponsor may publish the checked payload.",
+          })
+        ).status,
+      ).toBe(201);
+      const response = await f.sponsorPublish(
+        f.reviewer.binding.fellowId,
+        draft.workshop_id,
+        1,
+        "sponsor-saved-review",
+      );
+      expect(response.status, await response.clone().text()).toBe(201);
+      const bytes = await response.text();
+      const receipt = JSON.parse(bytes);
+      expect(receipt.promotion).toMatchObject({
+        object_kind: "review",
+        problem_id: "P-4DSP",
+        version: 1,
+        result: { target_claim_id: f.review.target_claim_id, tier: "T0", carries_weight: true },
+      });
+      const event = await f.db
+        .prepare(
+          "SELECT e.*,c.payload_json FROM events e JOIN event_content c ON c.event_id=e.id WHERE e.object_id=?",
+        )
+        .bind(receipt.promotion.result.review_id)
+        .first<{
+          actor_fellow_id: string;
+          actor_session_id: string;
+          writer_credential_id: string | null;
+          payload_json: string;
+        }>();
+      expect(event).toMatchObject({
+        actor_fellow_id: f.reviewer.binding.fellowId,
+        actor_session_id: f.session,
+        writer_credential_id: null,
+      });
+      expect(event!.payload_json).not.toContain(privateReviewNotes);
+      const replay = await f.sponsorPublish(
+        f.reviewer.binding.fellowId,
+        draft.workshop_id,
+        1,
+        "sponsor-saved-review",
+      );
+      expect(replay.status).toBe(200);
+      expect(await replay.text()).toBe(bytes);
+
+      const self = await f.push(f.authorSession, f);
+      const before = await f.publicState();
+      for (const response of [
+        await f.authorPost(`/v1/sessions/${f.authorSession}/review`, {
+          workshop_id: self.workshop_id,
+        }),
+        await f.sponsorPublish(f.binding.fellowId, self.workshop_id),
+        await f.authorPost(`/v1/sessions/${f.authorSession}/close`, {
+          handback: "Must refuse self review.",
+          promote: [self.workshop_id],
+        }),
+      ]) {
+        expect(response.status, await response.clone().text()).toBe(422);
+        expect(await response.json()).toMatchObject({ code: "REVIEWER_IS_AUTHOR", rule: "P1" });
+      }
+      expect(await f.publicState()).toEqual(before);
+      expect(await f.head(self.workshop_id)).toEqual({ state: "open", current_version: 1 });
+    });
+
+    test("review authority cannot promote a companion claim and the close remains atomic", async () => {
+      const f = await setup();
+      const draft = await f.push();
+      const claim = WorkshopPushResponseSchema.parse(
+        await (
+          await f.post(`/v1/sessions/${f.session}/workshop`, {
+            type: "claim-draft",
+            title: "Unauthorized companion",
+            body_md: privateReviewNotes,
+            publication: {
+              kind: "definition",
+              statement: "An odd residue is represented by an odd integer modulo eight.",
+            },
+          })
+        ).json(),
+      );
+      const before = await f.publicState();
+      const mixed = await f.post(`/v1/sessions/${f.session}/close`, {
+        handback: "A review scope cannot mint a claim.",
+        promote: [draft.workshop_id, claim.workshop_id],
+      });
+      expect(mixed.status, await mixed.clone().text()).toBe(403);
+      expect((await f.sponsorPublish(f.reviewer.binding.fellowId, claim.workshop_id)).status).toBe(
+        403,
+      );
+      expect(await f.publicState()).toEqual(before);
+      expect(await f.head(draft.workshop_id)).toEqual({ state: "open", current_version: 1 });
+      expect(await f.head(claim.workshop_id)).toEqual({ state: "open", current_version: 1 });
+      const body = {
+        handback: "Publish only the independent review.",
+        promote: [draft.workshop_id],
+        keep: [claim.workshop_id],
+      };
+      const closed = await f.post(`/v1/sessions/${f.session}/close`, body, "review-only-close");
+      expect(closed.status, await closed.clone().text()).toBe(201);
+      const bytes = await closed.text();
+      const receipt = SessionCloseResponseSchema.parse(JSON.parse(bytes));
+      expect(receipt.promoted).toEqual([]);
+      expect(receipt.publications).toHaveLength(1);
+      expect(receipt.publications?.[0]).toMatchObject({
+        workshop_id: draft.workshop_id,
+        workshop_version: 1,
+        publication: {
+          object_kind: "review",
+          result: { target_claim_id: f.review.target_claim_id, carries_weight: true },
+        },
+      });
+      expect(
+        await (await f.post(`/v1/sessions/${f.session}/close`, body, "review-only-close")).text(),
+      ).toBe(bytes);
+    });
+
+    test("a saved review edited during screening publishes no stale bytes", async () => {
+      let interleave: (() => Promise<void>) | undefined;
+      const f = await setup({
+        screenPromotion: async () => {
+          const next = interleave;
+          interleave = undefined;
+          await next?.();
+          return pass;
+        },
+      });
+      const draft = await f.push();
+      const before = await f.publicState();
+      interleave = async () => {
+        const edited = await f.post(`/v1/sessions/${f.session}/workshop`, {
+          workshop_id: draft.workshop_id,
+          base_version: 1,
+          publication: {
+            object_kind: "review",
+            payload: { ...f.review, body_md: "Updated exact review write-up." },
+          },
+        });
+        expect(edited.status, await edited.clone().text()).toBe(201);
+      };
+      const path = `/v1/sessions/${f.session}/review`;
+      const refused = await f.post(path, {
+        workshop_id: draft.workshop_id,
+        expected_workshop_version: 1,
+      });
+      expect(refused.status, await refused.clone().text()).toBe(409);
+      expect(interleave).toBeUndefined();
+      expect(await f.publicState()).toEqual(before);
+      expect(await f.head(draft.workshop_id)).toEqual({ state: "open", current_version: 2 });
+      const published = await f.post(path, {
+        workshop_id: draft.workshop_id,
+        expected_workshop_version: 2,
+      });
+      expect(published.status, await published.clone().text()).toBe(201);
+    });
+  });
+
   describe("session close publications", () => {
     const pass = {
       decision: "pass",

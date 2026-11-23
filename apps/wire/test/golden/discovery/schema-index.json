@@ -6,7 +6,7 @@
       "id": "account-export",
       "url": "https://a.asimposium.org/schemas/account-export.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 44349,
+      "body_bytes": 55579,
       "slice_url_template": "https://a.asimposium.org/schemas/account-export.v1/{property}.json",
       "slices": [
         "request",
@@ -575,7 +575,7 @@
       "id": "sessions",
       "url": "https://a.asimposium.org/schemas/sessions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 588536,
+      "body_bytes": 697766,
       "slice_url_template": "https://a.asimposium.org/schemas/sessions.v1/{property}.json",
       "slices": [
         "session_open_request",
@@ -606,6 +606,7 @@
         "session_heartbeat_request",
         "session_heartbeat_response",
         "review_request",
+        "review_submission",
         "review_response",
         "evidence_request",
         "evidence_response",

@@ -7,6 +7,7 @@ import {
   type HypothesisRequest,
   LedgerIntentSchema,
   type RecordDeadEndRequest,
+  type ReviewRequest,
   SessionCloseResponseSchema,
   WorkshopObjectIdSchema,
   WorkshopPublicationDraftSchema,
@@ -62,6 +63,12 @@ export type SessionClosePublication =
       readonly pin: SessionClosePublicationPin;
       readonly publicationJson: string;
       readonly data: RecordDeadEndRequest;
+    }
+  | {
+      readonly kind: "review";
+      readonly pin: SessionClosePublicationPin;
+      readonly publicationJson: string;
+      readonly data: ReviewRequest;
     };
 
 interface PublicationRow {
@@ -209,6 +216,8 @@ export async function readSessionClosePublications(
             return { ...saved, kind: "evidence", data: publication.data.payload };
           case "dead-end":
             return { ...saved, kind: "dead-end", data: publication.data.payload };
+          case "review":
+            return { ...saved, kind: "review", data: publication.data.payload };
         }
       }
       return {

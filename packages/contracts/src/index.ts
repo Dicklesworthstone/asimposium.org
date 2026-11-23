@@ -1304,6 +1304,8 @@ export {
   ReviewRequestSchema,
   type ReviewResponse,
   ReviewResponseSchema,
+  type ReviewSubmission,
+  ReviewSubmissionSchema,
   type ReviseRequest,
   ReviseRequestSchema,
   type ReviseResponse,

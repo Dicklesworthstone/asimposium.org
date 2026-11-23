@@ -26,7 +26,7 @@
  * public page, never does; the private response is not publicly cacheable.
  * Workshop buttons exercise real signed actions: failed low-bar promotion,
  * keep, discard/reopen, and publication of exact stored Fellow claims,
- * hypotheses and evidence, with real public record links and computed classes,
+ * hypotheses, evidence and reviews, with real public record links and computed classes,
  * including a browser reload that retains the completed archived draft.
  * A directive is issued by clicking the console's server action, lands once in
  * the Fellow's inbox (never another sponsor's Fellow, never a public face),
@@ -557,6 +557,7 @@ async function seed(target) {
     concessionClaimId: falseClaim.body.claim_id,
     claimReviewId: sameSponsorReview.body.review_id,
     claimReviewFellowId: spare.fellowId,
+    claimReviewSessionId: sameSponsorSession.body.session_id,
     concessionEvidenceId: counterexample.body.evidence_id,
     concessionEvidenceFellowId: concessionAuthor.fellowId,
     concessionBasis: conceded.claim_state.status_basis,
@@ -1301,6 +1302,7 @@ async function main() {
       concessionClaimId,
       claimReviewId,
       claimReviewFellowId,
+      claimReviewSessionId,
       concessionEvidenceId,
       concessionEvidenceFellowId,
       concessionBasis,
@@ -2725,11 +2727,18 @@ async function main() {
         publicClaim?.includes(STORED_STATEMENT) && !publicClaim.includes(PRIVATE_PUBLICATION_NOTES),
       );
 
-      const publishTypedWorkshop = async (kind, type, publicPayload, previewFields, assessment) => {
+      const publishTypedWorkshop = async (
+        kind,
+        type,
+        publicPayload,
+        previewFields,
+        assessment,
+        source = { token: authorToken, sessionId, fellowId },
+      ) => {
         const privateCanary = `PRIVATE-TYPED-${kind.toUpperCase()}-DRAFT-9K2`;
         const draft = await fellowPost(
           target,
-          `/v1/sessions/${sessionId}/workshop`,
+          `/v1/sessions/${source.sessionId}/workshop`,
           {
             type,
             title: `Sponsor ${kind} publication`,
@@ -2737,10 +2746,13 @@ async function main() {
             ledger_intent: { kind: "create", target_kind: kind },
             publication: { object_kind: kind, payload: publicPayload },
           },
-          authorToken,
+          source.token,
         );
         assert.equal(draft.status, 201, `${kind} workshop ${draft.body.code ?? ""}`);
-        await sponsorPage.goto(`${agora.origin}${workshopPath}`, { waitUntil: "load" });
+        await sponsorPage.goto(
+          `${agora.origin}/console/workshop/${source.fellowId}/${problemId}`,
+          { waitUntil: "load" },
+        );
         const card = sponsorPage
           .locator(".workshop-card")
           .filter({ hasText: draft.body.workshop_id });
@@ -2766,7 +2778,7 @@ async function main() {
             throw new Error(`${kind} publication did not complete: ${notice}`);
           });
         const link = card.getByRole("link", {
-          name: new RegExp(`^${kind === "hypothesis" ? "H" : "E"}-[0-9A-HJKMNP-TV-Z]+$`),
+          name: new RegExp(`^${kind === "hypothesis" ? "H" : kind === "review" ? "R" : "E"}-[0-9A-HJKMNP-TV-Z]+$`),
         });
         const objectId = await link.innerText();
         const href = await link.getAttribute("href");
@@ -2785,9 +2797,9 @@ async function main() {
         const publicRecord = JSON.parse(event.payload_json);
         record(
           `workshop: ${kind} publication preserves Fellow attribution and excludes private draft data`,
-          event.actor_fellow_id === fellowId &&
+          event.actor_fellow_id === source.fellowId &&
             event.actor_sponsor_id === SPONSOR &&
-            event.actor_session_id === sessionId &&
+            event.actor_session_id === source.sessionId &&
             publicRecord.body_md === publicPayload.body_md &&
             publicRecord.sponsor_promotion?.acting_sponsor_id === SPONSOR &&
             publicRecord.sponsor_promotion?.workshop_version === 1 &&
@@ -2814,6 +2826,30 @@ async function main() {
               publicFace.includes(publicPayload.falsifier) &&
               publicFace.includes(publicPayload.body_md) &&
               !publicFace.includes(privateCanary),
+          );
+        } else if (kind === "review") {
+          const receipt = await card.getByRole("status").innerText();
+          const stored = await target.env.DB.prepare(
+            "SELECT target_claim_id, target_version, reviewer_fellow_id, tier, verdict FROM reviews WHERE review_id=?",
+          ).bind(objectId).first();
+          record(
+            "workshop: a review-only Fellow's saved review retains its computed same-sponsor tier",
+            stored?.target_claim_id === publicPayload.target_claim_id &&
+              stored.target_version === publicPayload.target_version &&
+              stored.reviewer_fellow_id === source.fellowId &&
+              stored.tier === "T0" && publicRecord.tier === "T0" &&
+              stored.verdict === publicPayload.verdict &&
+              receipt.includes("Recorded independence tier: T0") &&
+              receipt.includes(`Targets ${publicPayload.target_claim_id}@${publicPayload.target_version}`),
+          );
+          const publicResponse = await sponsorPage.request.get(new URL(href, agora.origin).href);
+          const publicFace = await publicResponse.text();
+          record(
+            "workshop: the review receipt opens its complete public record without private draft data",
+            href === `/r/p/${problemId}/reviews/${objectId}` &&
+              publicResponse.status() === 200 && publicFace.includes(objectId) &&
+              publicFace.includes(publicPayload.basis) && publicFace.includes(publicPayload.body_md) &&
+              !publicFace.includes(privateCanary) && !publicFace.includes(draft.body.workshop_id),
           );
         } else {
           const receipt = await card.getByRole("status").innerText();
@@ -2902,6 +2938,65 @@ async function main() {
           locatedEvidence.body_md,
         ],
         { class: "heuristic", flag: "p5_no_detection_floor_coerced_to_heuristic" },
+      );
+      const reviewPayload = {
+        target_claim_id: sponsorClaimId,
+        target_version: 1,
+        verdict: "inform",
+        basis: "Checked the published statement against its explicit falsifier.",
+        capable_of_failure: "A case satisfying the stated falsifier would invalidate the claim.",
+        rubric: ["Verify the exact statement version", "Inspect the stated falsifier"],
+        body_md: "PUBLIC-TYPED-REVIEW-9K2: the recorded review states its checked scope and limits.",
+      };
+      const selfReview = await fellowPost(
+        target,
+        `/v1/sessions/${sessionId}/workshop`,
+        {
+          type: "note",
+          title: "Self-review must remain a private draft",
+          body_md: "PRIVATE-SELF-REVIEW-DRAFT-9K2",
+          ledger_intent: { kind: "create", target_kind: "review" },
+          publication: { object_kind: "review", payload: reviewPayload },
+        },
+        authorToken,
+      );
+      assert.equal(selfReview.status, 201, `save private self-review ${selfReview.body.code ?? ""}`);
+      await sponsorPage.goto(`${agora.origin}${workshopPath}`, { waitUntil: "load" });
+      const selfReviewCard = sponsorPage.locator(".workshop-card")
+        .filter({ hasText: selfReview.body.workshop_id });
+      const beforeSelfReview = await target.env.DB.prepare(
+        "SELECT public_seq FROM problems WHERE id=?",
+      ).bind(problemId).first();
+      await selfReviewCard.getByRole("checkbox").check();
+      await selfReviewCard.getByRole("button", { name: "Promote to Ledger", exact: true }).click();
+      await selfReviewCard.getByRole("alert").filter({ hasText: "REVIEWER_IS_AUTHOR" })
+        .waitFor({ state: "visible", timeout: 20_000 });
+      const afterSelfReview = await target.env.DB.prepare(
+        "SELECT public_seq FROM problems WHERE id=?",
+      ).bind(problemId).first();
+      const unchangedReviewDraft = await target.env.DB.prepare(
+        "SELECT state,current_version FROM workshop_objects WHERE workshop_id=?",
+      ).bind(selfReview.body.workshop_id).first();
+      record(
+        "workshop: a sponsor cannot publish a Fellow's review of its own claim",
+        afterSelfReview.public_seq === beforeSelfReview.public_seq &&
+          unchangedReviewDraft.state === "open" && unchangedReviewDraft.current_version === 1 &&
+          (await selfReviewCard.getByRole("alert").innerText()).includes("P1"),
+      );
+      await publishTypedWorkshop(
+        "review",
+        "note",
+        reviewPayload,
+        [
+          `${sponsorClaimId}@1`,
+          reviewPayload.verdict,
+          reviewPayload.basis,
+          reviewPayload.capable_of_failure,
+          ...reviewPayload.rubric,
+          reviewPayload.body_md,
+        ],
+        undefined,
+        { token: spareToken, sessionId: claimReviewSessionId, fellowId: claimReviewFellowId },
       );
       const consoleResponse = await sponsorPage.goto(`${agora.origin}/console`, {
         waitUntil: "load",

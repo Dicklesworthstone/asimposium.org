@@ -72,7 +72,7 @@ export async function refutationResolutionJourney({
   const detail = JSON.parse(initial.items.find((item) => item.kind === "claim-detail").body);
   const source = async (kind, id) => {
     const result = await env.DB.prepare(
-      "SELECT id, payload_sha256 FROM events WHERE problem_id = ? AND object_kind = ? AND object_id = ?",
+      "SELECT id, seq, payload_sha256 FROM events WHERE problem_id = ? AND object_kind = ? AND object_id = ?",
     )
       .bind(problem, kind, id)
       .first();
@@ -166,7 +166,7 @@ export async function refutationResolutionJourney({
   assert.deepEqual(resolved.claim_state.status_basis, {
     kind: "transition",
     event_id: resolutionSource.id,
-    seq: resolvedSecond.seq,
+    seq: resolutionSource.seq,
     from: "disputed",
     to: "open",
     cause: "review-created",
@@ -176,7 +176,7 @@ export async function refutationResolutionJourney({
     "Resolved counterevidence remains in the public record",
   );
   assert.ok(resolved.items.some((item) => item.id === second.evidence_id));
-  const replay = await call(`${resolver.path}/review`, mismatch(second), resolver.token, 201, key);
+  const replay = await call(`${resolver.path}/review`, mismatch(second), resolver.token, 200, key);
   assert.deepEqual(replay, resolvedSecond);
   assert.equal((await read()).cursor, resolved.cursor);
   assert.equal(
@@ -210,7 +210,7 @@ export async function refutationResolutionJourney({
       reason: "Withdrawing my mismatch assessment pending a fresh check of the input domain.",
     },
     resolver.token,
-    201,
+    200,
   );
   assert.equal(
     (await read()).claim_state.disposition,

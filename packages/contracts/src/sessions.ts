@@ -613,6 +613,12 @@ export const WorkshopPublicationDraftSchema = z.union([
       payload: RecordDeadEndRequestSchema,
     })
     .strict(),
+  z
+    .object({
+      object_kind: z.literal("review"),
+      payload: z.lazy(() => ReviewRequestSchema),
+    })
+    .strict(),
 ]);
 export type WorkshopPublicationDraft = z.infer<typeof WorkshopPublicationDraftSchema>;
 
@@ -632,7 +638,7 @@ export type LedgerIntentKind = z.infer<typeof LedgerIntentKindSchema>;
 export const LedgerCreateIntentSchema = z
   .object({
     kind: z.literal("create"),
-    target_kind: z.enum(["claim", "hypothesis", "evidence", "dead-end"]),
+    target_kind: z.enum(["claim", "hypothesis", "evidence", "dead-end", "review"]),
   })
   .strict();
 export type LedgerCreateIntent = z.infer<typeof LedgerCreateIntentSchema>;
@@ -666,7 +672,7 @@ export const WorkshopCreateRequestSchema = z
      * genuine note: recorded, ranked last, visible to the sponsor (§7.6).
      */
     force_note: z.literal(true).optional(),
-    /** Optional typed new claim, hypothesis or evidence; draft prose stays private. */
+    /** Optional typed scientific publication; draft prose stays private. */
     publication: WorkshopPublicationDraftSchema.optional(),
     /** Optional publication-ready replacement; draft prose stays private. */
     revision: ClaimRevisionSchema.optional(),
@@ -1074,6 +1080,15 @@ export const SponsorWorkshopPromotionReceiptSchema = z.union([
       result: RecordDeadEndResponseSchema,
     })
     .strict(),
+  z
+    .object({
+      object_kind: z.literal("review"),
+      problem_id: ProblemIdSchema,
+      seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      version: z.literal(1),
+      result: z.lazy(() => ReviewResponseSchema),
+    })
+    .strict(),
 ]);
 export type SponsorWorkshopPromotionReceipt = z.infer<typeof SponsorWorkshopPromotionReceiptSchema>;
 
@@ -1245,6 +1260,14 @@ export const ReviewRequestSchema = z
   })
   .strict();
 export type ReviewRequest = z.infer<typeof ReviewRequestSchema>;
+
+/** Publish either a complete review or the exact typed payload saved privately.
+ * Selecting a draft cannot replace its target, checks, verdict or evidence. */
+export const ReviewSubmissionSchema = z.union([
+  ReviewRequestSchema,
+  WorkshopPublicationRequestSchema,
+]);
+export type ReviewSubmission = z.infer<typeof ReviewSubmissionSchema>;
 
 export const ReviewResponseSchema = z
   .object({
@@ -1808,6 +1831,7 @@ export const SessionsContractsSchema = z
     session_heartbeat_request: SessionHeartbeatRequestSchema,
     session_heartbeat_response: SessionHeartbeatResponseSchema,
     review_request: ReviewRequestSchema,
+    review_submission: ReviewSubmissionSchema,
     review_response: ReviewResponseSchema,
     evidence_request: EvidenceRequestSchema,
     evidence_response: EvidenceResponseSchema,

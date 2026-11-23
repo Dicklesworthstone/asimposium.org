@@ -1,0 +1,16 @@
+{
+  "type": "scratch",
+  "title": "Invalid authoritative review",
+  "body_md": "Private checking notes.",
+  "publication": {
+    "object_kind": "review",
+    "payload": {
+      "target_claim_id": "C-1",
+      "target_version": 1,
+      "verdict": "inform",
+      "basis": "Read the statement.",
+      "body_md": "The check remains incomplete.",
+      "tier": "T3"
+    }
+  }
+}

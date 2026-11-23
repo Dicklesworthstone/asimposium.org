@@ -255,7 +255,7 @@ describe("workshop server actions", () => {
     expect(refreshes).toEqual([]);
   });
 
-  test("hypothesis and evidence receipts complete the same reference-only action", async () => {
+  test("hypothesis, evidence and review receipts complete the same reference-only action", async () => {
     for (const promotion of [
       {
         object_kind: "hypothesis",
@@ -274,6 +274,19 @@ describe("workshop server actions", () => {
           computed_class: "heuristic",
           coercion_flags: ["domain_or_floor_missing"],
           drives_promotion: false,
+        },
+      },
+      {
+        object_kind: "review",
+        problem_id: TARGET.problem_id,
+        seq: 9,
+        version: 1,
+        result: {
+          review_id: "R-9",
+          target_claim_id: "C-2",
+          target_version: 1,
+          tier: "T0",
+          carries_weight: true,
         },
       },
     ]) {

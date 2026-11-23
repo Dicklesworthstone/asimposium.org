@@ -14,7 +14,7 @@ export interface SessionCloseWorkshopPromotion {
   readonly publicationJson?: string;
   readonly revisionJson?: string;
   readonly eventId: string;
-  readonly kind?: "claim" | "hypothesis" | "evidence" | "dead-end";
+  readonly kind?: "claim" | "hypothesis" | "evidence" | "dead-end" | "review";
 }
 
 export interface SessionCloseWorkshopPlan {
@@ -141,13 +141,14 @@ export async function prepareSessionCloseWorkshopActions(
               AND e.type=CASE WHEN x.kind='dead-end' THEN 'dead_end.recorded'
                 WHEN x.kind='hypothesis' THEN 'hypothesis.created'
                 WHEN x.kind='evidence' THEN 'evidence.created'
+                WHEN x.kind='review' THEN 'review.created'
                 WHEN x.revision IS NULL THEN 'claim.created' ELSE 'claim.revised' END
               AND e.object_kind=CASE WHEN x.kind='dead-end' THEN 'dead_end' ELSE x.kind END
             WHERE w.workshop_id=x.id AND w.current_version=x.version
               AND w.state='open'
               AND ((x.kind='claim' AND w.type='claim-draft')
                 OR (x.kind='dead-end' AND w.type='dead-end-draft')
-                OR (x.kind='hypothesis' AND w.type IN ('scratch','note'))
+                OR (x.kind IN ('hypothesis','review') AND w.type IN ('scratch','note'))
                 OR (x.kind='evidence' AND w.type='evidence-draft'))
               AND (x.kind='claim' OR (x.revision IS NULL
                 AND json_extract(w.publication_json,'$.object_kind')=x.kind))

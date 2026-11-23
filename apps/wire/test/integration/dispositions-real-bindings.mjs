@@ -15,7 +15,6 @@ import { refutationResolutionJourney } from "./scientific-journey.mjs";
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
-  await refutationResolutionJourney(context);
   const { call, enroll, sponsorCall, worker, origin, userAgent } = context;
 
   function safeJsonParse(text) {
@@ -2283,6 +2282,10 @@ await runLocalWorkerJourney(async (context) => {
       rebuilt: resolutionRebuild.counts,
     }),
   );
+
+  // Its final lawful redaction deliberately makes a whole-content archive unavailable.
+  // Keep that negative control after the healthy production-cron assertions above.
+  await refutationResolutionJourney(context);
 
   console.log(
     JSON.stringify({

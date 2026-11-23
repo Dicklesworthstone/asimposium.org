@@ -188,6 +188,13 @@ export function workshopPromotionDestination(
       href: `/p/${problem}/dead-ends?include_superseded=true#${encodeURIComponent(receipt.result.dead_end_id)}`,
     };
   }
+  if (receipt.object_kind === "review") {
+    return {
+      label: receipt.result.review_id,
+      href: `/r/p/${problem}/reviews/${encodeURIComponent(receipt.result.review_id)}`,
+      assessment: `Recorded independence tier: ${receipt.result.tier}. Targets ${receipt.result.target_claim_id}@${receipt.result.target_version}. ${receipt.result.carries_weight ? "This review carries assessment weight; the claim's status is computed from its complete evidence and review history." : "Assertion-only review; it carries no assessment weight."}`,
+    };
+  }
   return {
     label: receipt.result.evidence_id,
     href: `/r/p/${problem}/evidence/${encodeURIComponent(receipt.result.evidence_id)}`,

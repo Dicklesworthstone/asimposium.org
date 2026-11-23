@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   ClaimFaceResponseSchema,
   LeaseAcquireResponseSchema,
+  ReviewResponseSchema,
   ScreeningPromotionDeniedResponseSchema,
   SessionCloseResponseSchema,
   WorkshopObjectResponseSchema,
@@ -151,6 +152,7 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
       "claim_deps",
       "hypotheses",
       "evidence",
+      "reviews",
       "dead_ends",
       "integrity_checkpoints",
       "idempotency",
@@ -462,7 +464,7 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
         `/v1/sessions/${session}/workshop`,
         {
           type:
-            kind === "hypothesis"
+            kind === "hypothesis" || kind === "review"
               ? "scratch"
               : kind === "evidence"
                 ? "evidence-draft"
@@ -500,6 +502,15 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
     what_was_examined: "The first twenty positive odd integers, with no completeness argument.",
     scope_detection_floor: "Finite observations through thirty-nine cannot establish all integers.",
   };
+  const savedReview = {
+    target_claim_id: single.body.promoted[0],
+    target_version: 1,
+    verdict: "inform",
+    basis: "Checked the four odd residue classes modulo eight.",
+    capable_of_failure: "An odd residue whose square is not congruent to one modulo eight.",
+    rubric: ["finite domain completeness", "quantifier scope"],
+    body_md: "All four odd residues square to one modulo eight; the domain reduction is explicit.",
+  };
   const typedSession = await open(typedAuthor);
   const typedDrafts = [
     await typedPush(typedSession, "hypothesis", route, "Finite residue route"),
@@ -515,6 +526,7 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
       "Odd residue definition",
       typedAuthor,
     ),
+    await typedPush(typedSession, "review", savedReview, "Independent exact residue review"),
   ];
   const typedKeep = await push(typedSession, null, "Retain private mixed notes", typedAuthor);
   const typedDiscard = await push(typedSession, null, "Discard private mixed notes", typedAuthor);
@@ -522,7 +534,8 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
   const typedKeepHistory = await history(typedKeep);
   const typedDiscardHistory = await history(typedDiscard);
   const typedRequest = {
-    handback: "Typed route, observation, negative result and definition published together.",
+    handback:
+      "Typed route, observation, negative result, definition and review published together.",
     promote: typedDrafts.map((draft) => draft.workshop_id),
     keep: [typedKeep.workshop_id],
     discard: [typedDiscard.workshop_id],
@@ -531,7 +544,7 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
   const typed = await attempt(typedSession, "close-typed-mixed", typedRequest, typedAuthor);
   assert.equal(typed.status, 201, typed.raw);
   assert.equal(typed.body.promoted.length, 1, "the legacy field remains a claim-ID list");
-  assert.equal(typed.body.publications.length, 4);
+  assert.equal(typed.body.publications.length, 5);
   const typedEvents = await rows(
     "SELECT e.*, c.payload_json FROM events e JOIN event_content c ON c.event_id=e.id WHERE e.problem_id=? AND e.seq>? ORDER BY e.seq",
     problem,
@@ -539,7 +552,13 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
   );
   assert.deepEqual(
     typedEvents.map((event) => event.type),
-    ["hypothesis.created", "evidence.created", "dead_end.recorded", "claim.created"],
+    [
+      "hypothesis.created",
+      "evidence.created",
+      "dead_end.recorded",
+      "claim.created",
+      "review.created",
+    ],
   );
   assert.equal(typed.body.promoted[0], typedEvents[3].object_id);
   const typedFellow = (await closeState(typedSession)).fellow_id;
@@ -552,7 +571,11 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
     assert.equal(entry.publication.version, 1);
     const result = entry.publication.result ?? entry.publication;
     assert.equal(
-      result.hypothesis_id ?? result.evidence_id ?? result.dead_end_id ?? result.claim_id,
+      result.hypothesis_id ??
+        result.evidence_id ??
+        result.dead_end_id ??
+        result.claim_id ??
+        result.review_id,
       event.object_id,
     );
     assert.equal(event.actor_fellow_id, typedFellow);
@@ -566,6 +589,12 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
   }
   assert.equal(typed.body.publications[1].publication.result.computed_class, "assertion");
   assert.equal(typed.body.publications[1].publication.result.drives_promotion, false);
+  assert.equal(typed.body.publications[4].publication.object_kind, "review");
+  assert.equal(
+    typed.body.publications[4].publication.result.target_claim_id,
+    savedReview.target_claim_id,
+  );
+  assert.equal(typed.body.publications[4].publication.result.carries_weight, true);
   await retainBytes(typedKeep, typedKeepHistory, "keep", "open");
   await retainBytes(typedDiscard, typedDiscardHistory, "discard", "discarded");
   const typedAfter = { public: await publicState(), private: await privateState(typedSession) };
@@ -581,9 +610,9 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
   const typedFirst = await typedPush(typedFailedSession, "hypothesis", route, "Retained route");
   const typedLast = await typedPush(
     typedFailedSession,
-    "evidence",
-    observation,
-    "Retained observation",
+    "review",
+    savedReview,
+    "Retained exact review",
   );
   const typedFailureRequest = {
     handback: "Publish both typed drafts only if all checks succeed.",
@@ -636,11 +665,10 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
         workshop_id: typedLast.workshop_id,
         base_version: typedLast.version,
         publication: {
-          object_kind: "evidence",
+          object_kind: "review",
           payload: {
-            ...observation,
-            body_md:
-              "The corrected observation still needs an independent check of the integer domain.",
+            ...savedReview,
+            body_md: "The corrected review explicitly checks the complete finite residue domain.",
           },
         },
       },
@@ -710,6 +738,215 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
   assert.equal(typedRecovered.status, 201, typedRecovered.raw);
   assert.deepEqual(typedRecovered.body.promoted, []);
   assert.equal(typedRecovered.body.publications.length, 2);
+
+  // A review-only observer can recover a saved review without a writer slot.
+  // Sponsor publication retains the Fellow's checked bytes and source session;
+  // neither route may acquire claim authority or bypass the author's P1 gate.
+  const observer = await enroll("close-saved-review-observer", sponsor, {
+    requested_scopes: ["review"],
+    problem_binding: problem,
+  });
+  const reviewOrigin = await open(observer);
+  const reviewFellow = (await closeState(reviewOrigin)).fellow_id;
+  await env.DB.prepare(
+    "UPDATE problem_memberships SET role='observer' WHERE problem_id=? AND fellow_id=?",
+  )
+    .bind(problem, reviewFellow)
+    .run();
+  const saveReview = async (session, token = observer) =>
+    WorkshopPushResponseSchema.parse(
+      await call(
+        `/v1/sessions/${session}/workshop`,
+        {
+          type: "note",
+          title: "Saved independent residue review",
+          body_md: privateBody,
+          relates_to: [savedReview.target_claim_id],
+          ledger_intent: { kind: "create", target_kind: "review" },
+          publication: { object_kind: "review", payload: savedReview },
+        },
+        token,
+        201,
+      ),
+    );
+  const retainedReview = await saveReview(reviewOrigin);
+  await call(
+    `/v1/sessions/${reviewOrigin}/close`,
+    {
+      handback: "Resume the pinned review in another session.",
+      keep: [retainedReview.workshop_id],
+    },
+    observer,
+    201,
+  );
+  const reviewResume = await open(observer);
+  const reviewRoute = `/v1/sessions/${reviewResume}/review`;
+  const reviewSelection = { workshop_id: retainedReview.workshop_id, expected_workshop_version: 2 };
+  const reviewBefore = await publicState();
+  await call(reviewRoute, { ...reviewSelection, verdict: "confirm" }, observer, 422);
+  await call(reviewRoute, { ...reviewSelection, expected_workshop_version: 1 }, observer, 409);
+  assert.deepEqual(await publicState(), reviewBefore);
+  const reviewAttempt = async () => {
+    const response = await worker.fetch(`${origin}${reviewRoute}`, {
+      method: "POST",
+      headers: {
+        "User-Agent": userAgent,
+        authorization: `Bearer ${observer}`,
+        "content-type": "application/json",
+        "idempotency-key": "saved-review-resume",
+      },
+      body: JSON.stringify(reviewSelection),
+    });
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    return { status: response.status, raw: await response.text() };
+  };
+  const resumedReview = await reviewAttempt();
+  assert.equal(resumedReview.status, 201, resumedReview.raw);
+  const reviewReceipt = ReviewResponseSchema.parse(JSON.parse(resumedReview.raw));
+  assert.equal(reviewReceipt.tier, "T0", "same-sponsor review never acquires independence");
+  assert.equal(reviewReceipt.carries_weight, true);
+  const reviewEvent = await one(
+    "SELECT e.*,c.payload_json FROM events e JOIN event_content c ON c.event_id=e.id WHERE e.object_id=?",
+    reviewReceipt.review_id,
+  );
+  assert.equal(reviewEvent.actor_fellow_id, reviewFellow);
+  assert.equal(reviewEvent.actor_session_id, reviewResume);
+  assert.equal(JSON.parse(reviewEvent.payload_json).body_md, savedReview.body_md);
+  assert.ok(!reviewEvent.payload_json.includes(privateCanary));
+  assert.equal((await head(retainedReview)).state, "archived");
+
+  const sponsorReview = await saveReview(reviewResume);
+  const companionClaim = await push(
+    reviewResume,
+    {
+      kind: "definition",
+      statement: "An odd integer has remainder one after division by two.",
+    },
+    "No claim authority",
+    observer,
+  );
+  const mixedReviewRequest = {
+    handback: "Refuse the unauthorized companion atomically.",
+    promote: [sponsorReview.workshop_id, companionClaim.workshop_id],
+  };
+  const mixedReviewBefore = {
+    public: await publicState(),
+    private: await privateState(reviewResume),
+  };
+  const refusedCompanion = await attempt(
+    reviewResume,
+    "review-cannot-promote-claim",
+    mixedReviewRequest,
+    observer,
+  );
+  assert.equal(refusedCompanion.status, 403, refusedCompanion.raw);
+  assert.deepEqual(await publicState(), mixedReviewBefore.public);
+  assert.deepEqual(await privateState(reviewResume), mixedReviewBefore.private);
+  await call(
+    `/v1/sessions/${reviewResume}/close`,
+    { handback: "Retain the review for sponsor publication." },
+    observer,
+    201,
+  );
+  const reviewReplay = await reviewAttempt();
+  assert.equal(reviewReplay.status, 200);
+  assert.equal(reviewReplay.raw, resumedReview.raw);
+  const sponsorReviewRequest = {
+    problem_id: problem,
+    fellow_id: reviewFellow,
+    workshop_id: sponsorReview.workshop_id,
+    expected_workshop_version: 1,
+    action: "promote",
+  };
+  await sponsorCall(
+    sponsor,
+    "POST",
+    "/v1/sponsors/workshop/action",
+    "workshop.action",
+    {
+      ...sponsorReviewRequest,
+      workshop_id: companionClaim.workshop_id,
+    },
+    403,
+  );
+  const sponsoredReview = await sponsorCall(
+    sponsor,
+    "POST",
+    "/v1/sponsors/workshop/action",
+    "workshop.action",
+    sponsorReviewRequest,
+    201,
+    "/v1/sponsors/workshop/action",
+    "sponsor-saved-review",
+  );
+  assert.equal(sponsoredReview.promotion.object_kind, "review");
+  assert.equal(sponsoredReview.promotion.result.tier, "T0");
+  const sponsoredReviewEvent = await one(
+    "SELECT e.*,c.payload_json FROM events e JOIN event_content c ON c.event_id=e.id WHERE e.object_id=?",
+    sponsoredReview.promotion.result.review_id,
+  );
+  assert.equal(sponsoredReviewEvent.actor_fellow_id, reviewFellow);
+  assert.equal(sponsoredReviewEvent.actor_sponsor_id, sponsor);
+  assert.equal(sponsoredReviewEvent.actor_session_id, reviewResume);
+  assert.equal(sponsoredReviewEvent.writer_credential_id, null);
+  assert.ok(!sponsoredReviewEvent.payload_json.includes(privateCanary));
+  assert.deepEqual(
+    await sponsorCall(
+      sponsor,
+      "POST",
+      "/v1/sponsors/workshop/action",
+      "workshop.action",
+      sponsorReviewRequest,
+      200,
+      "/v1/sponsors/workshop/action",
+      "sponsor-saved-review",
+    ),
+    sponsoredReview,
+  );
+
+  const selfReviewSession = await open();
+  const selfReviewDraft = await saveReview(selfReviewSession, author);
+  const selfReviewFellow = (await closeState(selfReviewSession)).fellow_id;
+  const selfBefore = {
+    public: await publicState(),
+    private: await privateState(selfReviewSession),
+  };
+  const selfDirect = await call(
+    `/v1/sessions/${selfReviewSession}/review`,
+    { workshop_id: selfReviewDraft.workshop_id },
+    author,
+    422,
+  );
+  assert.equal(selfDirect.code, "REVIEWER_IS_AUTHOR");
+  const selfSponsored = await sponsorCall(
+    sponsor,
+    "POST",
+    "/v1/sponsors/workshop/action",
+    "workshop.action",
+    {
+      problem_id: problem,
+      fellow_id: selfReviewFellow,
+      workshop_id: selfReviewDraft.workshop_id,
+      expected_workshop_version: 1,
+      action: "promote",
+    },
+    422,
+  );
+  assert.equal(selfSponsored.code, "REVIEWER_IS_AUTHOR");
+  const selfClosed = await attempt(selfReviewSession, "self-review-close", {
+    handback: "Self review must not publish.",
+    promote: [selfReviewDraft.workshop_id],
+  });
+  assert.equal(selfClosed.status, 422);
+  assert.equal(selfClosed.body.code, "REVIEWER_IS_AUTHOR");
+  assert.deepEqual(await publicState(), selfBefore.public);
+  assert.deepEqual(await privateState(selfReviewSession), selfBefore.private);
+  await call(
+    `/v1/sessions/${selfReviewSession}/close`,
+    { handback: "Independent review remains required." },
+    author,
+    201,
+  );
 
   // Keep, discard, public claims, source archival, handback and lease release share one close.
   const multiSession = await open();
@@ -1977,6 +2214,9 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
     single_and_multiple_claims: true,
     mixed_typed_publications_and_exact_receipts: true,
     mixed_typed_policy_source_and_authority_rollback: true,
+    saved_reviews_observer_recovery_and_sponsor_publication: true,
+    saved_reviews_exact_version_replay_and_private_body_isolation: true,
+    saved_reviews_p1_and_mixed_authority_refusals: true,
     mixed_public_creation_and_revision: true,
     stale_mixed_revision_before_screening: true,
     private_r2_source_and_immutable_archive: true,

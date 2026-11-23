@@ -302,6 +302,7 @@ describe("discovery generators (W1.6)", () => {
       }
     }
     for (const [suffix, property] of [
+      ["review", "review_submission"],
       ["questions", "ask_question_request"],
       ["questions/{qid}/lease", "lease_question_request"],
       ["questions/{qid}/answer", "answer_question_request"],

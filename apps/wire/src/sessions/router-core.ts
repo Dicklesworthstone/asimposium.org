@@ -78,6 +78,7 @@ import {
   type ReviewRequest,
   ReviewRequestSchema,
   ReviewResponseSchema,
+  ReviewSubmissionSchema,
   ReviseRequestSchema,
   ReviseResponseSchema,
   RUBRIC_DOMAINS,
@@ -828,11 +829,34 @@ function scientificRefusal(scope: "review" | "evidence", detail: string): Respon
 function reviewBodyInvalidProblem(
   rawBody: unknown,
   error: { issues: readonly { path: readonly PropertyKey[] }[] },
+  allowSaved = false,
 ): Response {
+  if (allowSaved && rawBody !== null && typeof rawBody === "object" && "workshop_id" in rawBody) {
+    return validatedProblem({
+      status: 422,
+      code: "REVIEW_BODY_INVALID",
+      title: "The saved review selection does not match the contract",
+      detail: "A saved selection cannot replace the review's scientific content.",
+      fixHint:
+        "Send {workshop_id, expected_workshop_version?, client_context_cursor?}. Edit the private draft first to change its target, verdict, checks or evidence, then publish with a new Idempotency-Key.",
+      rule: "A5",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/sessions.v1/review_submission.json",
+        example: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz", expected_workshop_version: 1 },
+      },
+    });
+  }
+  // A union reports its alternatives at the root. Preserve the ordinary
+  // review's precise field paths when teaching an inline submission.
+  const inline = ReviewRequestSchema.safeParse(rawBody);
   const novelty =
     rawBody !== null && typeof rawBody === "object" && "novelty" in (rawBody as object);
   const fields = [
-    ...new Set(error.issues.map((issue) => issue.path.map(String).join(".") || "(body)")),
+    ...new Set(
+      (inline.success ? error.issues : inline.error.issues).map(
+        (issue) => issue.path.map(String).join(".") || "(body)",
+      ),
+    ),
   ].slice(0, 8);
   if (novelty) {
     return validatedProblem({
@@ -1311,7 +1335,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           readonly workshopId: string;
           readonly version: number;
           readonly publicationJson: string;
-          readonly kind: "hypothesis" | "evidence" | "dead-end";
+          readonly kind: "hypothesis" | "evidence" | "dead-end" | "review";
         };
         readonly responseFor: (
           settlement: {
@@ -1735,7 +1759,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   function sponsorWorkshopAuthoritySql(
     promotion: boolean,
     afterPublication = false,
-    kind: "claim" | "hypothesis" | "evidence" | "dead-end" = "claim",
+    kind: "claim" | "hypothesis" | "evidence" | "dead-end" | "review" = "claim",
   ): string {
     return `SELECT 1 AS live FROM enrollment_fellows f
       JOIN sponsors sponsor ON sponsor.sponsor_id = f.sponsor_id
@@ -1754,11 +1778,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ${
           promotion
             ? `AND EXISTS (
-          SELECT 1 FROM json_each(grant_row.granted_scopes_json) WHERE value = 'promote'
+          SELECT 1 FROM json_each(grant_row.granted_scopes_json) WHERE value = '${kind === "review" ? "review" : "promote"}'
         ) AND EXISTS (
           SELECT 1 FROM problem_memberships m
           WHERE m.problem_id = ? AND m.fellow_id = f.fellow_id
-            AND m.role IN (${kind === "evidence" || kind === "dead-end" ? "'observer', 'contributor', 'steward'" : "'contributor', 'steward'"})
+            AND m.role IN (${kind === "evidence" || kind === "dead-end" || kind === "review" ? "'observer', 'contributor', 'steward'" : "'contributor', 'steward'"})
         ) AND (
           SELECT COUNT(*) FROM events WHERE actor_fellow_id = f.fellow_id
         ) ${afterPublication ? "<=" : "<"} COALESCE(
@@ -2539,7 +2563,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   function workshopPublicationTypes(publication: WorkshopPublicationDraft): readonly string[] {
     if (!("object_kind" in publication)) return ["claim-draft"];
     if (publication.object_kind === "dead-end") return ["dead-end-draft"];
-    return publication.object_kind === "hypothesis" ? ["scratch", "note"] : ["evidence-draft"];
+    return publication.object_kind === "hypothesis" || publication.object_kind === "review"
+      ? ["scratch", "note"]
+      : ["evidence-draft"];
   }
 
   function claimShapedNoteProblem(
@@ -6213,6 +6239,49 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         row.revision_json !== row.source_revision_json ||
         row.ledger_intent_json !== row.source_ledger_intent_json ||
         (intent !== null && (intent.kind !== "create" || intent.target_kind !== "dead-end"))
+      )
+        return workshopPublicationProblem("invalid", request.workshop_id, row.current_version);
+      return {
+        data: publication.payload,
+        workshopPublication: {
+          workshopId: row.workshop_id,
+          version: row.current_version,
+          publicationDigest: await sha256Hex(row.publication_json!),
+          publicationJson: row.publication_json!,
+        } satisfies WorkshopPublicationSource,
+      };
+    } catch {
+      return workshopPublicationProblem("invalid", request.workshop_id, row.current_version);
+    }
+  }
+
+  async function resolveWorkshopReviewPublication(
+    db: Env["DB"],
+    session: SessionRow,
+    fellowId: string,
+    request: { readonly workshop_id: string; readonly expected_workshop_version?: number },
+  ) {
+    const row = await readOwnedWorkshopPublication(db, session, fellowId, request);
+    if (row instanceof Response) return row;
+    try {
+      const publication = WorkshopPublicationDraftSchema.parse(
+        JSON.parse(row.publication_json ?? "null"),
+      );
+      const intent =
+        row.ledger_intent_json === null
+          ? null
+          : LedgerIntentSchema.parse(JSON.parse(row.ledger_intent_json));
+      if (
+        (row.type !== "scratch" && row.type !== "note") ||
+        row.revision_json !== null ||
+        !("object_kind" in publication) ||
+        publication.object_kind !== "review" ||
+        row.source_type !== row.type ||
+        row.source_version !== row.current_version ||
+        row.publication_json !== row.source_publication_json ||
+        row.revision_json !== row.source_revision_json ||
+        row.ledger_intent_json !== row.source_ledger_intent_json ||
+        (intent !== null && (intent.kind !== "create" || intent.target_kind !== "review"))
       )
         return workshopPublicationProblem("invalid", request.workshop_id, row.current_version);
       return {
@@ -9986,7 +10055,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
   interface ReviewExecutionInput {
     readonly c: Context<{ Bindings: Env }>;
-    readonly auth: Extract<Awaited<ReturnType<typeof authenticate>>, { ok: true }>;
+    readonly auth: SimpleCreateAuthority;
     readonly db: Env["DB"];
     readonly key: string;
     readonly digest: string;
@@ -9994,6 +10063,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     /** Internal reservation-derived identity; never accepted from request JSON. */
     readonly stableEventId?: string;
     readonly data: ReviewRequest;
+    readonly workshopPublication?: WorkshopPublicationSource;
     readonly cleanupOnFailure?: () => Promise<void>;
     readonly statementContext?: ClientStatementContext;
   }
@@ -10011,24 +10081,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       input.statementContext ??
       publicationStatementContext(input.c, data, session.opened_public_cursor);
 
-    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
-    const decision = authorizeFellowWrite({
-      effect: "review",
-      credential: auth.binding,
-      target: {
-        kind: "existing-problem",
-        problemId: session.problem_id,
-        publication: "published",
-        unlisted: false,
-        membershipRole,
-      },
-      usage: {
-        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
-        artifactBytesRecorded: 0,
-      },
-      now: Date.now(),
-    });
-    if (decision.decision !== "allow" || !(await simpleCreateAuthorityIsLive(input, "review"))) {
+    if (!(await simpleCreatePreflight(input, "review"))) {
       await cleanupOnFailure();
       return writeRefusedProblem();
     }
@@ -10299,8 +10352,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       statement: JSON.stringify(data),
       falsifier: null,
     };
-    const reviewId = mintId("R");
     const eventId = input.stableEventId ?? mintId("E");
+    const reviewId = input.stableEventId === undefined ? mintId("R") : `R-${eventId.slice(2)}`;
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("review", claimToken);
     const createdAt = new Date().toISOString();
@@ -10356,11 +10409,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             sessionId: session.session_id,
             modelSelfDeclared: auth.binding.model,
             harness: auth.binding.harness,
-            credentialId: auth.binding.credentialId,
+            ...(isSponsorWorkshopCreate(auth) ? {} : { credentialId: auth.binding.credentialId }),
           },
         },
         projection: {
-          preconditionSql: ` AND EXISTS (${SIMPLE_CREATE_AUTHORITY_SQL}) AND EXISTS (${targetGuard.sql})`,
+          preconditionSql: ` AND EXISTS (${simpleCreateAuthoritySql(input, "review")}) AND EXISTS (${targetGuard.sql})`,
           preconditionBindings: [
             ...simpleCreateAuthorityValues(input, "review"),
             ...targetGuard.bindings,
@@ -10408,8 +10461,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (key instanceof Response) return key;
     const rawBody = await readJsonBody(c.req.raw);
     if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
-    const parsed = ReviewRequestSchema.safeParse(rawBody);
-    if (!parsed.success) return reviewBodyInvalidProblem(rawBody, parsed.error);
+    const parsed = ReviewSubmissionSchema.safeParse(rawBody);
+    if (!parsed.success) return reviewBodyInvalidProblem(rawBody, parsed.error, true);
     const digest = await writeRequestDigest("POST /v1/sessions/:id/review", parsed.data);
     try {
       const replay = await replayResponseBeforeMutablePreconditions(
@@ -10429,8 +10482,21 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
 
+    const saved =
+      "workshop_id" in parsed.data
+        ? await resolveWorkshopReviewPublication(db, session, auth.binding.fellowId, parsed.data)
+        : undefined;
+    if (saved instanceof Response) return saved;
+    const data = saved
+      ? {
+          ...saved.data,
+          ...(parsed.data.client_context_cursor === undefined
+            ? {}
+            : { client_context_cursor: parsed.data.client_context_cursor }),
+        }
+      : ReviewRequestSchema.parse(parsed.data);
     const clientContextCursor =
-      parsed.data.client_context_cursor ??
+      data.client_context_cursor ??
       (c.req.header("asimp-client-context-cursor") !== undefined
         ? Number(c.req.header("asimp-client-context-cursor"))
         : undefined);
@@ -10449,7 +10515,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       key,
       digest,
       session,
-      data: parsed.data,
+      data,
+      workshopPublication: saved?.workshopPublication,
     });
   });
 
@@ -10568,14 +10635,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     scope: SimpleCreateScope,
   ): string {
     if (!isSponsorWorkshopCreate(input.auth)) return SIMPLE_CREATE_AUTHORITY_SQL;
-    if (scope === "review" || scope === "promote" || scope === "revise")
-      throw new Error("This prepared claim/review path requires Fellow authority.");
+    if (scope === "promote" || scope === "revise")
+      throw new Error("This prepared claim path requires Fellow authority.");
     return `SELECT 1 FROM problems p WHERE p.id = ?
       AND p.status NOT IN ('private-draft', 'resolved', 'retired')
       AND EXISTS (${sponsorWorkshopAuthoritySql(
         true,
         false,
-        scope === "evidence" ? "evidence" : scope === "dead_end" ? "dead-end" : "hypothesis",
+        scope === "review"
+          ? "review"
+          : scope === "evidence"
+            ? "evidence"
+            : scope === "dead_end"
+              ? "dead-end"
+              : "hypothesis",
       )})`;
   }
 
@@ -10699,19 +10772,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     onResponse?: (sequence: number, value: unknown) => void,
   ): KraterLedgerCommand & Pick<KraterLedgerBatchMember, "resolveForAttempt"> {
     if (isSponsorWorkshopCreate(input.auth)) {
-      if (
-        prepared.scope === "review" ||
-        prepared.scope === "promote" ||
-        prepared.scope === "revise"
-      )
-        throw new Error("Sponsor workshop claim/review commands are not admitted here.");
+      if (prepared.scope === "promote" || prepared.scope === "revise")
+        throw new Error("Sponsor workshop claim commands are not admitted here.");
       const auth = input.auth;
       const kind =
-        prepared.scope === "evidence"
-          ? "evidence"
-          : prepared.scope === "dead_end"
-            ? "dead-end"
-            : "hypothesis";
+        prepared.scope === "review"
+          ? "review"
+          : prepared.scope === "evidence"
+            ? "evidence"
+            : prepared.scope === "dead_end"
+              ? "dead-end"
+              : "hypothesis";
       return {
         ...prepared.command,
         input: {
@@ -10729,6 +10800,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           db: input.db,
           scope: "workshop_push",
           screening,
+          statementContext: prepared.statementContext,
           principal: sponsorWorkshopPrincipal(auth.binding.sponsorId, auth.binding.fellowId),
           target: input.c.req.path,
           callerKey: input.key,
@@ -10822,7 +10894,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ...workshopSource,
               expectedVersion: workshopSource.version,
               eventId: prepared.command.input.eventId,
-              kind: "dead-end",
+              kind: prepared.scope === "review" ? "review" : "dead-end",
             },
           ],
     );
@@ -10930,15 +11002,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         return writeRefusedProblem();
       if (!(await simpleCreateAuthorityIsLive(input, prepared.scope))) return writeRefusedProblem();
       if (workshopSource !== undefined) {
-        const current = await resolveWorkshopDeadEndPublication(
-          db,
-          session,
-          auth.binding.fellowId,
-          {
-            workshop_id: workshopSource.workshopId,
-            expected_workshop_version: workshopSource.version,
-          },
-        );
+        const current = await (prepared.scope === "review"
+          ? resolveWorkshopReviewPublication
+          : resolveWorkshopDeadEndPublication)(db, session, auth.binding.fellowId, {
+          workshop_id: workshopSource.workshopId,
+          expected_workshop_version: workshopSource.version,
+        });
         if (current instanceof Response) return current;
         if (
           isSessionCloseWorkshopChanged(error) ||
@@ -17911,7 +17980,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ? "Every selected id must name a workshop object owned by this Fellow and session."
             : kind === "changed"
               ? "No selected publication, workshop transition, handback, lease release, or session close was committed by this attempt."
-              : "Promote accepts one to sixteen distinct open drafts with complete typed claim, hypothesis, evidence or dead-end publications, or explicit claim replacements. Promote, keep and discard selections must be disjoint.",
+              : "Promote accepts one to sixteen distinct open drafts with complete typed claim, hypothesis, evidence, dead-end or review publications, or explicit claim replacements. Promote, keep and discard selections must be disjoint.",
         fixHint:
           kind === "not-found"
             ? "Read your current workshop and remove unavailable ids before retrying."
@@ -18179,6 +18248,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           // that identity for the evidence object too, so retries cannot mint
           // a different object for the same retained publication.
           prepared = await prepareEvidenceCreate(evidenceInput, new Set(), undefined, pin.eventId);
+        } else if (publication.kind === "review") {
+          const reviewInput: ReviewExecutionInput = { ...common, data: publication.data };
+          input = reviewInput;
+          // Reviews retain their independent Fellow and exact published
+          // target. A sibling publication cannot supply verification credit.
+          prepared = await prepareReviewCreate(reviewInput);
         } else {
           const deadEndInput: DeadEndExecutionInput = {
             ...common,
@@ -19055,7 +19130,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     const data = request.data;
     const db = c.env.DB;
-    let publicationKind: "claim" | "hypothesis" | "evidence" | "dead-end" = "claim";
+    let publicationKind: "claim" | "hypothesis" | "evidence" | "dead-end" | "review" = "claim";
     try {
       // Ownership precedes even a replay: after transfer, the old sponsor must
       // not be able to decrypt a formerly authorized private action receipt.
@@ -19307,7 +19382,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ? executeHypothesisCreate({ ...input, data: publication.data.payload })
               : publication.data.object_kind === "evidence"
                 ? executeEvidenceCreate({ ...input, data: publication.data.payload })
-                : executeDeadEndCreate({ ...input, data: publication.data.payload })),
+                : publication.data.object_kind === "review"
+                  ? executeReviewCreate({ ...input, data: publication.data.payload })
+                  : executeDeadEndCreate({ ...input, data: publication.data.payload })),
           );
         }
         const boardRefusal = await claimsBoardChangedAtCommit(db, data.problem_id, "promote");

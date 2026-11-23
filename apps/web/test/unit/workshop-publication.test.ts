@@ -42,8 +42,12 @@ test("the hypothesis preview shows the exact public route separately from privat
 
 test("negative-result previews show the exact failure, examined scope and retry conditions", async () => {
   const object = await fixture("dead-end");
-  if (!object.publication || !("object_kind" in object.publication) ||
-    object.publication.object_kind !== "dead-end") throw new Error("Expected dead-end fixture");
+  if (
+    !object.publication ||
+    !("object_kind" in object.publication) ||
+    object.publication.object_kind !== "dead-end"
+  )
+    throw new Error("Expected dead-end fixture");
   const data = object.publication.payload;
   data.supersedes_dead_end_id = "DE-2";
   data.why_it_fails = "A literal <script>alert(1)</script> does not provide a finite bound.";
@@ -65,7 +69,9 @@ test("negative-result previews show the exact failure, examined scope and retry 
   ]) {
     data.retry_when = condition;
     const variant = renderToStaticMarkup(createElement(WorkshopPublicationPreview, { object }));
-    expect(variant).toContain(condition.kind === "claim-reaches" ? "C-7 reaches corroborated" : "G-4 is closed");
+    expect(variant).toContain(
+      condition.kind === "claim-reaches" ? "C-7 reaches corroborated" : "G-4 is closed",
+    );
   }
 });
 
@@ -105,6 +111,90 @@ test("the evidence preview exposes exact targets and selection data without inve
   expect(html).not.toContain(object.body_md);
 });
 
+test("saved reviews expose the pinned assessment and declarations without private notes or invented independence", () => {
+  const object = SponsorWorkshopObjectSchema.parse({
+    workshop_id: "W-abcdefghijklmnopqrstuvwxyz",
+    workshop_seq: 7,
+    type: "note",
+    title: "Private review notes",
+    body_md: "PRIVATE_REVIEW_WORKING_NOTES",
+    relates_to: [],
+    created_at: "2026-11-22T00:00:00.000Z",
+    publication: {
+      object_kind: "review",
+      payload: {
+        target_claim_id: "C-12",
+        target_version: 3,
+        verdict: "confirm",
+        basis: "Read the reduction <script>alert(1)</script> literally.",
+        capable_of_failure: "A missing case would invalidate the reduction.",
+        rubric: ["Check the entire declared domain", "Trace every premise"],
+        body_md: "The two cases exhaust the declared domain; both preserve the invariant.",
+        client_context_cursor: 42,
+        scientific_provenance: {
+          model_family_self_declared: "review-family",
+          method: { category: "deductive", procedure: "Reconstruct the two-case argument." },
+        },
+        verification: {
+          kind: "full-write-up",
+          target_digest: `sha256:${"a".repeat(64)}`,
+          evidence: { evidence_id: "E-11", digest: `sha256:${"b".repeat(64)}` },
+          coverage: ["First case", "Second case"],
+          result: "verified",
+        },
+      },
+    },
+  });
+  const html = renderToStaticMarkup(createElement(WorkshopPublicationPreview, { object }));
+  expect(html).toContain("Stored review for publication");
+  expect(html).toContain("C-12@3");
+  expect(html).toContain("confirm");
+  expect(html).toContain("A missing case would invalidate the reduction.");
+  expect(html).toContain("Trace every premise");
+  expect(html).toContain("both preserve the invariant");
+  expect(html).toContain("Based on ledger sequence");
+  expect(html).toContain(">42<");
+  expect(html).toContain("Recorded checks and declared provenance");
+  expect(html).toContain("review-family");
+  expect(html).toContain("E-11");
+  expect(html).toContain(`sha256:${"a".repeat(64)}`);
+  expect(html).toContain(`sha256:${"b".repeat(64)}`);
+  expect(html).toContain("Second case");
+  expect(html).toContain("computes independence");
+  expect(html).toContain("&lt;script&gt;");
+  expect(html).not.toContain("<script>");
+  expect(html).not.toContain("Recorded independence tier:");
+  expect(html).not.toContain(object.body_md);
+});
+
+test("a saved review with no negative outcome warns about assertion-only standing", () => {
+  const object = SponsorWorkshopObjectSchema.parse({
+    workshop_id: "W-abcdefghijklmnopqrstuvwxyz",
+    workshop_seq: 8,
+    type: "scratch",
+    title: "Review outline",
+    body_md: "PRIVATE_ASSERTION_ONLY_NOTES",
+    relates_to: [],
+    created_at: "2026-11-22T00:00:00.000Z",
+    publication: {
+      object_kind: "review",
+      payload: {
+        target_claim_id: "C-2",
+        target_version: 1,
+        verdict: "cannot-verify",
+        basis: "The claimed argument needs its unavailable premise.",
+        body_md: "I cannot verify the argument from the stated premises.",
+      },
+    },
+  });
+  const html = renderToStaticMarkup(createElement(WorkshopPublicationPreview, { object }));
+  expect(html).toContain("C-2@1");
+  expect(html).toContain("assertion-only and carries no assessment weight");
+  expect(html).toContain("No rubric lines recorded");
+  expect(html).not.toContain("Recorded checks and declared provenance");
+  expect(html).not.toContain(object.body_md);
+});
+
 test("saved replacements show the exact revised statement, base version and review continuity", () => {
   const object = SponsorWorkshopObjectSchema.parse({
     workshop_id: "W-abcdefghijklmnopqrstuvwxyz",
@@ -129,7 +219,8 @@ test("saved replacements show the exact revised statement, base version and revi
   expect(html).toContain("Stored claim replacement");
   expect(html).toContain("Replaces C-7 at claim version 3 with version 4");
   expect(html).toContain("Existing reviews stay attached to the version they assessed.");
-  if (!object.revision?.falsifier) throw new Error("Expected a stored replacement with a falsifier.");
+  if (!object.revision?.falsifier)
+    throw new Error("Expected a stored replacement with a falsifier.");
   expect(html).toContain(object.revision.statement);
   expect(html).toContain(object.revision.falsifier);
   expect(html).not.toContain(object.body_md);

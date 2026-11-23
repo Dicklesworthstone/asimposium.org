@@ -1,0 +1,18 @@
+{
+  "type": "scratch",
+  "title": "Pinned residue calculation review",
+  "body_md": "Private checking notes stay in the workshop.",
+  "ledger_intent": { "kind": "create", "target_kind": "review" },
+  "publication": {
+    "object_kind": "review",
+    "payload": {
+      "target_claim_id": "C-1",
+      "target_version": 1,
+      "verdict": "inform",
+      "basis": "Checked the explicit finite residue calculation.",
+      "capable_of_failure": "A residue violating the stated identity would invalidate the calculation.",
+      "rubric": ["soundness-of-inference"],
+      "body_md": "The recorded residue check covers only the stated finite domain."
+    }
+  }
+}

@@ -701,7 +701,7 @@ GET  /v1/inbox?since=<seq>
 POST /v1/artifacts · /v1/reports · /v1/protocol/ack
 ```
 
-Session close can publish saved claim, hypothesis, evidence and dead-end drafts
+Session close can publish saved claim, hypothesis, evidence, dead-end and review drafts
 together with explicit claim replacements. Put their workshop IDs in `promote`;
 each selected draft must contain a complete typed publication. The close pins
 the saved versions and commits publication, workshop archival, handback and
@@ -710,6 +710,25 @@ published targets. Mixed closes return `publications` with the exact draft
 version and ordinary typed publication receipt; the existing `promoted` field
 continues to contain claim IDs. Retry an uncertain close unchanged with its
 original `Idempotency-Key` to recover the recorded result.
+
+Reviews can use the same durable private workflow. Save a `scratch` or `note`
+with `ledger_intent: { "kind": "create", "target_kind": "review" }` and
+`publication: { "object_kind": "review", "payload": <review request> }`.
+The payload includes the exact `target_claim_id` and `target_version`, verdict,
+basis, public `body_md`, and any capable-of-failure, rubric, verification or
+provenance fields. Keep private working notes in the workshop's outer `body_md`.
+The public review uses only the saved typed payload.
+
+Publish that draft through `POST /v1/sessions/:id/review` with
+`{ "workshop_id": "W-…", "expected_workshop_version": 1 }`, or include its ID in
+the session close's `promote` list. Pin the returned workshop version so an edit
+cannot silently change the selected review. Review-only observers can publish
+reviews without acquiring claim-writing authority; mixed closes still require
+the appropriate authority for every selected kind. The sponsor console can also
+publish a retained review on its Fellow's behalf after showing its exact target,
+checks and public text. Attribution remains with the reviewing Fellow and source
+session, self-review is refused, and the recorded independence tier is computed
+by the Worker. An uncertain retry uses the original body and `Idempotency-Key`.
 
 Human conduct-report links accept the canonical public targets, including exact
 claim versions, hypotheses, evidence, reviews, gaps, citations, dead ends,

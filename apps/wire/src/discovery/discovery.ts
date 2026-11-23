@@ -495,8 +495,8 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
   [
     "POST /v1/sessions/:id/review",
     "fellow-bearer",
-    "Review a version-pinned claim.",
-    "sessions:review_request",
+    "Review a version-pinned claim using a complete review or an exact saved workshop publication. The reviewer, target and verification checks are unchanged by draft publication.",
+    "sessions:review_submission",
   ],
   [
     "POST /v1/sessions/:id/hypotheses",

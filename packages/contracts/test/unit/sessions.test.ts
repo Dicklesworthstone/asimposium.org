@@ -26,6 +26,7 @@ import {
   RelationFileRequestSchema,
   ReviewRequestSchema,
   ReviewResponseSchema,
+  ReviewSubmissionSchema,
   ReviseRequestSchema,
   ReviseResponseSchema,
   SessionCloseRequestSchema,
@@ -284,6 +285,109 @@ test("typed hypothesis, evidence and dead-end drafts use the ordinary write cont
   expect(
     submit({ ...selection, retry_predicate: "Replacing a selected payload is not a publication." }),
   ).toBe(false);
+});
+
+test("saved review drafts, selections and receipts preserve strict scientific boundaries", async () => {
+  const draft = (await fixture(
+    new URL("../fixtures/valid/workshop-review-publication.json", import.meta.url),
+  )) as { publication: { object_kind: "review"; payload: Record<string, unknown> } };
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/workshop-review-publication-authority.json", import.meta.url),
+  );
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema((await fixture(GENERATED_SESSIONS_SCHEMA)) as object, "sessions");
+  const validateDraft = ajv.compile({ $ref: "sessions#/properties/workshop_push_request" });
+  const validateSubmission = ajv.compile({ $ref: "sessions#/properties/review_submission" });
+  for (const [value, valid] of [
+    [draft, true],
+    [
+      {
+        workshop_id: "W-abcdefghijklmnopqrstuvwxyz",
+        base_version: 2,
+        publication: draft.publication,
+      },
+      true,
+    ],
+    [invalid, false],
+    [
+      {
+        ...draft,
+        publication: {
+          ...draft.publication,
+          payload: { ...draft.publication.payload, target_version: 0 },
+        },
+      },
+      false,
+    ],
+    [
+      {
+        ...draft,
+        publication: {
+          ...draft.publication,
+          payload: { ...draft.publication.payload, reviewer_fellow_id: "fellow-other" },
+        },
+      },
+      false,
+    ],
+  ] as const) {
+    expect(WorkshopPushRequestSchema.safeParse(value).success).toBe(valid);
+    expect(validateDraft(value), JSON.stringify(validateDraft.errors)).toBe(valid);
+  }
+  const selection = {
+    workshop_id: "W-abcdefghijklmnopqrstuvwxyz",
+    expected_workshop_version: 2,
+    client_context_cursor: 17,
+  };
+  for (const [value, valid] of [
+    [selection, true],
+    [draft.publication.payload, true],
+    [{ ...selection, expected_workshop_version: 0 }, false],
+    [{ ...selection, verdict: "confirm" }, false],
+    [{ ...selection, target_claim_id: "C-2" }, false],
+    [{ ...selection, body_md: "An unsaved replacement." }, false],
+  ] as const) {
+    expect(ReviewSubmissionSchema.safeParse(value).success).toBe(valid);
+    expect(validateSubmission(value), JSON.stringify(validateSubmission.errors)).toBe(valid);
+  }
+  const result = {
+    review_id: "R-checked",
+    target_claim_id: "C-1",
+    target_version: 1,
+    tier: "T0",
+    carries_weight: false,
+  };
+  const receipt = {
+    schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+    action: "promote",
+    problem_id: "P-4DSP",
+    fellow_id: "fellow-reviewer",
+    workshop_id: selection.workshop_id,
+    acting_sponsor_id: "usr_reviewer",
+    promoted_workshop_version: 2,
+    promotion: { object_kind: "review", problem_id: "P-4DSP", seq: 18, version: 1, result },
+  };
+  const validateReceipt = ajv.compile({
+    $ref: "sessions#/properties/sponsor_workshop_mutation_response",
+  });
+  for (const [value, valid] of [
+    [receipt, true],
+    [{ ...receipt, promotion: { ...receipt.promotion, result: { ...result, tier: "T4" } } }, false],
+    [{ ...receipt, promotion: { ...receipt.promotion, body_md: "Private notes." } }, false],
+    [{ ...receipt, promotion: { ...receipt.promotion, object_kind: "evidence" } }, false],
+  ] as const) {
+    expect(SponsorWorkshopMutationResponseSchema.safeParse(value).success).toBe(valid);
+    expect(validateReceipt(value), JSON.stringify(validateReceipt.errors)).toBe(valid);
+  }
+  const closed = {
+    session_id: "S-abcdefghijklmnopqrstuvwxyz",
+    closed_at: "2026-11-23T00:00:00.000Z",
+    promoted: [],
+    publications: [
+      { workshop_id: selection.workshop_id, workshop_version: 2, publication: receipt.promotion },
+    ],
+  };
+  expect(SessionCloseResponseSchema.safeParse(closed).success).toBe(true);
+  expect(ajv.compile({ $ref: "sessions#/properties/session_close_response" })(closed)).toBe(true);
 });
 
 test("sponsor H/E receipts retain exact typed results and reject invented or mixed outcomes", async () => {
