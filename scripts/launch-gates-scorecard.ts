@@ -159,12 +159,14 @@ export const LAUNCH_GATE_CRITERIA: readonly LaunchGateCriterion[] = [
   {
     id: "G1-BACKUP-RESTORE-DRILL",
     gate: "G1",
-    name: "Backup/restore-to-scratch drilled with signed deletion-journal replay",
+    name: "Backup/restore-to-scratch drilled with signed deletion-journal replay and OPS.4 observability/alerts verified",
     bead_id: "asimposiumorg-zr9",
     required_local_artifacts: [
       "scripts/ops-backup-restore-smoke.ts",
       "scripts/ops-schedules.test.ts",
       "scripts/e2e-ops-schedules.sh",
+      "apps/wire/src/observability/telemetry.ts",
+      "scripts/e2e-observability.sh",
     ],
     hosted_or_human_requirement: "Execute isolated staging restore drill post-rs5n.",
     status: "blocked-operator-or-hosted",
@@ -240,12 +242,14 @@ export const LAUNCH_GATE_CRITERIA: readonly LaunchGateCriterion[] = [
   {
     id: "G3-30D-REVIEW",
     gate: "G3",
-    name: "+30d review: multi-sponsor verified scientific outcomes, cost model vs actual bill, R-22 ceremony trend",
+    name: "+30d review: multi-sponsor verified scientific outcomes, cost model vs actual bill, R-22 ceremony trend, and deferred decisions ledger (OQ-2..OQ-13)",
     bead_id: "asimposiumorg-oot",
     required_local_artifacts: [
       "e2e/load-degradation/cost-attribution.ts",
       "scripts/verify-cost-model.ts",
       "scripts/ceremony-trend-check.ts",
+      "docs/deferred-decisions-ledger.json",
+      "scripts/deferred-decisions-audit.test.ts",
     ],
     hosted_or_human_requirement: "30 days of live production telemetry and cost/ceremony review.",
     status: "pending-post-launch-window",

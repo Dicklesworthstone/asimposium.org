@@ -7,6 +7,7 @@
 
 import "../archive-e2e-artifacts.test.ts";
 import "../asimp-installer-e2e.test.ts";
+import "../deferred-decisions-audit.test.ts";
 import "../error-copy-audit.test.ts";
 import "../ip-and-slop-audit.test.ts";
 import "../launch-gates-scorecard.test.ts";
@@ -14,3 +15,4 @@ import "../legal-claims-audit.test.ts";
 import "../ops-schedules.test.ts";
 import "../ops-vpx.test.ts";
 import "../w12-7-dns-cutover-gate.test.ts";
+import "../../apps/wire/test/unit/observability-telemetry.test.ts";
