@@ -1,7 +1,12 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0151_unified_question_leases.sql`.
+schema through `0152_sponsor_report_history.sql`.
+
+Migration `0152_sponsor_report_history.sql` adds the sponsor and immutable filing
+cursor index for bounded private report history. It changes no report, decision,
+authorship or accountability. Apply it before the matching Worker so reads do
+not scan other sponsors' report histories.
 
 Migration `0151_unified_question_leases.sql` brings question-specific reservations
 into the common `leases` authority, so both acquisition endpoints, heartbeat,

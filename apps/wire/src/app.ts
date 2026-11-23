@@ -78,6 +78,7 @@ import { loadPublicMoves } from "./mega-commands/public-moves";
 import { createMegaCommandsRouter } from "./mega-commands/router";
 import { createScreeningAppealsApp } from "./moderation/appeals-http";
 import { createModerationLogRoutes, createModerationRouter } from "./moderation/router";
+import { createSponsorReportsRouter } from "./moderation/sponsor-reports";
 import { sponsorMutationRefusal } from "./moderation/sponsor-suspension";
 import { createProblemRouter } from "./problems/router";
 import { loadReadiness } from "./readiness";
@@ -176,6 +177,7 @@ const EXACT_ENROLLMENT_PATHS = new Set([
   "/v1/sponsors/bootstrap",
   "/v1/sponsors/panic",
   "/v1/sponsors/reports",
+  "/v1/sponsors/reports/list",
   "/v1/sponsors/screening-posture",
   "/v1/sponsors/screening-posture/clear",
   "/v1/sponsors/screening-cases",
@@ -1036,6 +1038,7 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
   });
   router.route("/", createScreeningAppealsApp({ db: env.DB, verifiedSponsor, verifiedOperator }));
   router.route("/", createSponsorActivityRouter({ verifiedSponsor }));
+  router.route("/", createSponsorReportsRouter({ verifiedSponsor }));
   router.route("/", createSponsorWorkshopSearchRouter({ verifiedSponsor }));
   // A mounted sub-app's default Hono 404 is text/plain. Mark only that internal
   // miss so createApp can replace it with the canonical ProblemDocument without

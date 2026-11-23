@@ -397,6 +397,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0149_question_request_inbox.sql
   db/migrations/0150_enrollment_protocol_conflicts.sql
   db/migrations/0151_unified_question_leases.sql
+  db/migrations/0152_sponsor_report_history.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -1046,6 +1047,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0149_question_request_inbox.sql
   0150_enrollment_protocol_conflicts.sql
   0151_unified_question_leases.sql
+  0152_sponsor_report_history.sql
 )
 
 

@@ -64,6 +64,7 @@ const LANES = [
   "slow-mode",
   "sponsor-brief-commands",
   "sponsor-inbox",
+  "sponsor-reports",
   "sponsor-workshop",
   "stale-route",
   "statement-revision-proposals",

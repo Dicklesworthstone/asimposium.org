@@ -181,6 +181,7 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "POST /v1/fellows/lifecycle": true,
   "POST /v1/sponsors/panic": true,
   "POST /v1/sponsors/reports": true,
+  "POST /v1/sponsors/reports/list": true,
   "GET /v1/sponsors/screening-posture": true,
   "POST /v1/sponsors/screening-posture/clear": true,
   "POST /v1/sponsors/bootstrap": true,

@@ -155,6 +155,7 @@ export async function sponsorMutationRefusal(
       "workshop.search",
       "inbox.read",
       "fellow.activity.read",
+      "sponsor.reports.list",
       "lease.list",
       "sponsor.screening-appeals.submit",
     ].includes(action)
