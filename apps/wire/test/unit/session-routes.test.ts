@@ -13138,7 +13138,9 @@ describe("session protocol routes", () => {
       expect.objectContaining({
         kind: "all",
         sql: expect.stringContaining("JOIN selected_claims s"),
-        bindings: [130, "P-4DSP", 130, 128, "P-4DSP", 130],
+        // The scientific source census has its own problem/version scope;
+        // null selects all claim versions at the same captured ledger cut.
+        bindings: [130, "P-4DSP", null, "P-4DSP", 130, 128, "P-4DSP", 130],
       }),
     ]);
     // One standalone joined read covers the bounded claim-standing section;
