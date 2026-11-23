@@ -5,6 +5,7 @@ import {
   clearPosture,
   isScreeningPostureChangedError,
   POSTURE_WINDOW_MS,
+  PostureClearanceRefusedError,
   postureOf,
   recordRefusal,
   screeningPostureGuardStatement,
@@ -71,6 +72,58 @@ async function releasedCandidate(f: Fixture) {
 }
 
 describe("publication authority is checked in the ledger transaction", () => {
+  test("legacy mixed outcomes cannot block publication or create a clearable sponsor posture", async () => {
+    setSystemTime(new Date("2026-10-25T12:00:00.000Z"));
+    const f = await publicationContextFixture();
+    try {
+      for (const [index, [digest, outcome]] of (
+        [
+          ["a", "quarantine"],
+          ["a", "reject"],
+          ["b", "quarantine"],
+        ] as const
+      ).entries()) {
+        f.sql
+          .query(`INSERT INTO screening_refusals
+            (refusal_id, fellow_id, sponsor_id, problem_id, outcome, coarse_category,
+             input_digest, created_at) VALUES (?, ?, ?, ?, ?, 'injection', ?, ?)`)
+          .run(
+            `SR-legacy-${index}`,
+            FELLOW,
+            SPONSOR,
+            PROBLEM,
+            outcome,
+            digest.repeat(64),
+            "2026-10-25T11:00:00.000Z",
+          );
+      }
+      expect(await sponsorPostures(f.db, SPONSOR)).toEqual([
+        {
+          fellow_id: FELLOW,
+          name: "context-0",
+          quarantine_first: false,
+          since: "2026-10-25T11:00:00.000Z",
+        },
+      ]);
+      await expect(
+        clearPosture(f.db, {
+          fellowId: FELLOW,
+          clearedByClass: "sponsor",
+          clearedBy: SPONSOR,
+          reason: "Two distinct refusals have not engaged this posture.",
+        }),
+      ).rejects.toBeInstanceOf(PostureClearanceRefusedError);
+      const candidate = f.input();
+      const committed = await f.write(candidate, publication(await f.screen(candidate)));
+      expect(f.state().events).toEqual([{ id: committed.eventId, seq: committed.seq }]);
+      setSystemTime(new Date(Date.now() + 4 * POSTURE_WINDOW_MS));
+      expect(await sponsorPostures(f.db, SPONSOR)).toEqual([]);
+    } finally {
+      setSystemTime();
+      f.sql.close();
+    }
+  });
+
   test("an engaged posture after screening cannot publish an event or replay receipt", async () => {
     const f = await publicationContextFixture();
     try {

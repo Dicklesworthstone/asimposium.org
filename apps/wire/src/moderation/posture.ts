@@ -40,6 +40,19 @@ export interface PostureState {
   readonly since: string | null;
 }
 
+/** A refused envelope counts once for this Fellow, even if the provider later
+ * changes its verdict. Retain historical rows for the audit trail, but derive
+ * the first occurrence before applying clearance or time windows so an old
+ * retry cannot become a fresh refusal. The expression is code-owned SQL. */
+function unclearedDistinctRefusalsSql(fellowId: string): string {
+  return `SELECT r.input_digest, MIN(r.created_at) AS created_at
+    FROM screening_refusals r WHERE r.fellow_id = ${fellowId}
+    GROUP BY r.input_digest
+    HAVING MIN(r.created_at) > COALESCE(
+      (SELECT MAX(c.created_at) FROM screening_posture_clearances c
+        WHERE c.fellow_id = r.fellow_id), '')`;
+}
+
 /** The rolling window decides when posture engages, not when it expires.
  * Find a threshold-sized cluster after the last clearance, even when all of
  * its refusals have since aged out. LAG examines consecutive refusals once;
@@ -50,11 +63,8 @@ function engagedPostureSinceSql(fellowId: string): string {
   return `SELECT MIN(cluster_start) FROM (
     SELECT r.created_at AS cluster_end,
       LAG(r.created_at, ${POSTURE_REFUSAL_THRESHOLD - 1}) OVER (
-        ORDER BY r.created_at, r.refusal_id) AS cluster_start
-    FROM screening_refusals r
-    WHERE r.fellow_id = ${fellowId} AND r.created_at > COALESCE(
-      (SELECT MAX(c.created_at) FROM screening_posture_clearances c
-        WHERE c.fellow_id = r.fellow_id), '')
+        ORDER BY r.created_at, r.input_digest) AS cluster_start
+    FROM (${unclearedDistinctRefusalsSql(fellowId)}) r
   ) WHERE cluster_start > strftime('%Y-%m-%dT%H:%M:%fZ', cluster_end,
     '-${POSTURE_WINDOW_MS / 1000} seconds')`;
 }
@@ -63,11 +73,8 @@ function engagedPostureSinceSql(fellowId: string): string {
 const COUNTING_SQL = `
   SELECT COUNT(*) AS n, MIN(r.created_at) AS since,
     (${engagedPostureSinceSql("?1")}) AS engaged_since
-    FROM screening_refusals r
-   WHERE r.fellow_id = ?1
-     AND r.created_at > ?2
-     AND r.created_at > COALESCE(
-       (SELECT MAX(c.created_at) FROM screening_posture_clearances c WHERE c.fellow_id = ?1), '')`;
+    FROM (${unclearedDistinctRefusalsSql("?1")}) r
+   WHERE r.created_at > ?2`;
 
 function windowStart(now = Date.now()): string {
   return new Date(now - POSTURE_WINDOW_MS).toISOString();
@@ -137,7 +144,7 @@ export function screeningPostureGuardStatement(
 }
 
 /**
- * Record one content refusal. Idempotent per (Fellow, bytes, outcome). When
+ * Record one content refusal. Idempotent per (Fellow, bytes), across outcomes. When
  * this refusal is the one that crosses the threshold, the Fellow is told
  * privately (coarse, no detector detail) that its writes now wait for review.
  */
@@ -166,6 +173,8 @@ export async function recordRefusal(
          (refusal_id, fellow_id, sponsor_id, problem_id, outcome, coarse_category, input_digest, created_at)
        SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
        WHERE (${engagedPostureSinceSql("?2")}) IS NULL
+         AND NOT EXISTS (SELECT 1 FROM screening_refusals prior
+           WHERE prior.fellow_id = ?2 AND prior.input_digest = ?7)
        ON CONFLICT (fellow_id, input_digest, outcome) DO NOTHING
        RETURNING refusal_id`,
       )
@@ -258,11 +267,8 @@ export async function sponsorPostures(
       `WITH postures AS MATERIALIZED (
         SELECT f.fellow_id, f.name,
           (${engagedPostureSinceSql("f.fellow_id")}) AS engaged_since,
-          (SELECT MIN(r.created_at) FROM screening_refusals r
-            WHERE r.fellow_id = f.fellow_id AND r.created_at > ?2
-              AND r.created_at > COALESCE(
-                (SELECT MAX(c.created_at) FROM screening_posture_clearances c
-                  WHERE c.fellow_id = f.fellow_id), '')) AS recent_since
+          (SELECT MIN(r.created_at) FROM (${unclearedDistinctRefusalsSql("f.fellow_id")}) r
+            WHERE r.created_at > ?2) AS recent_since
         FROM enrollment_fellows f WHERE f.sponsor_id = ?1
       ) SELECT fellow_id, name, engaged_since, recent_since FROM postures
         WHERE engaged_since IS NOT NULL OR recent_since IS NOT NULL

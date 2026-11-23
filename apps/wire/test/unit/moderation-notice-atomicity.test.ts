@@ -240,6 +240,21 @@ const refusal = (n: number) => ({
   inputDigest: n.toString(16).padStart(64, "0"),
 });
 
+// Immutable historical rows produced before refusal deduplication crossed outcomes.
+function legacyRefusal(
+  f: ReturnType<typeof fixture>,
+  id: string,
+  n: number,
+  outcome: "reject" | "quarantine",
+  createdAt: string,
+) {
+  f.sql
+    .query(`INSERT INTO screening_refusals
+      (refusal_id, fellow_id, sponsor_id, problem_id, outcome, coarse_category,
+       input_digest, created_at) VALUES (?, 'author', 'sponsor', 'P-NOTICE', ?, 'injection', ?, ?)`)
+    .run(id, outcome, refusal(n).inputDigest, createdAt);
+}
+
 describe("screening posture changes deliver their notice atomically", () => {
   test("a failed transition notice rolls back its triggering refusal, then retries once", async () => {
     const f = fixture();
@@ -318,6 +333,132 @@ describe("screening posture changes deliver their notice atomically", () => {
       expect((await postureOf(f.db, "author")).quarantineFirst).toBe(false);
       expect((await postureOf(f.db, "other")).refusalsInWindow).toBe(0);
     } finally {
+      f.sql.close();
+    }
+  });
+
+  test("concurrent outcomes for the same bytes consume one refusal per distinct envelope", async () => {
+    const f = fixture();
+    try {
+      await Promise.all(
+        Array.from({ length: 24 }, (_, n) =>
+          recordRefusal(f.db, {
+            ...refusal((n % 2) + 1),
+            outcome: n % 4 < 2 ? "quarantine" : "reject",
+          }),
+        ),
+      );
+      expect(f.count("screening_refusals")).toBe(2);
+      expect(f.count("fellow_inbox_notices")).toBe(0);
+      expect(await postureOf(f.db, "author")).toMatchObject({
+        quarantineFirst: false,
+        refusalsInWindow: 2,
+      });
+      await Promise.all(
+        Array.from({ length: 8 }, (_, n) =>
+          recordRefusal(f.db, { ...refusal(3), outcome: n % 2 === 0 ? "reject" : "quarantine" }),
+        ),
+      );
+      expect(f.count("screening_refusals")).toBe(3);
+      expect(f.count("fellow_inbox_notices")).toBe(1);
+      expect(await postureOf(f.db, "author")).toMatchObject({
+        quarantineFirst: true,
+        refusalsInWindow: 3,
+      });
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test("historical outcome duplicates remain auditable but cannot manufacture a posture", async () => {
+    const f = fixture();
+    setSystemTime(new Date("2026-10-25T12:00:00.000Z"));
+    try {
+      legacyRefusal(f, "SR-legacy-held", 1, "quarantine", "2026-10-25T11:00:00.000Z");
+      legacyRefusal(f, "SR-legacy-denied", 1, "reject", "2026-10-25T11:00:00.001Z");
+      legacyRefusal(f, "SR-legacy-other", 2, "quarantine", "2026-10-25T11:00:00.002Z");
+      expect(f.count("screening_refusals")).toBe(3);
+      expect(await postureOf(f.db, "author")).toEqual({
+        quarantineFirst: false,
+        refusalsInWindow: 2,
+        since: "2026-10-25T11:00:00.000Z",
+      });
+      await recordRefusal(f.db, refusal(2));
+      expect(f.count("screening_refusals")).toBe(3);
+      expect(f.count("fellow_inbox_notices")).toBe(0);
+      await recordRefusal(f.db, refusal(3));
+      expect(f.count("screening_refusals")).toBe(4);
+      expect(f.count("fellow_inbox_notices")).toBe(1);
+      expect(await postureOf(f.db, "author")).toEqual({
+        quarantineFirst: true,
+        refusalsInWindow: 3,
+        since: "2026-10-25T11:00:00.000Z",
+      });
+    } finally {
+      setSystemTime();
+      f.sql.close();
+    }
+  });
+
+  test("a changed outcome cannot revive bytes first refused before clearance", async () => {
+    const f = fixture();
+    setSystemTime(new Date("2026-10-01T00:00:00.000Z"));
+    try {
+      for (const n of [1, 2, 3])
+        await recordRefusal(f.db, { ...refusal(n), outcome: "quarantine" });
+      const clearance = await clearPosture(f.db, {
+        fellowId: "author",
+        clearedByClass: "sponsor",
+        clearedBy: "sponsor",
+        reason: "Reviewed the held writes and corrected the task.",
+      });
+      setSystemTime(new Date(Date.parse(clearance.clearedAt) + 1));
+      await recordRefusal(f.db, refusal(1));
+      expect(f.count("screening_refusals")).toBe(3);
+      expect((await postureOf(f.db, "author")).refusalsInWindow).toBe(0);
+      // A retained legacy duplicate after the clearance must also stay excluded:
+      // first occurrence is derived before the clearance filter is applied.
+      legacyRefusal(f, "SR-legacy-after-clearance", 1, "reject", new Date().toISOString());
+      expect(f.count("screening_refusals")).toBe(4);
+      expect(await postureOf(f.db, "author")).toEqual({
+        quarantineFirst: false,
+        refusalsInWindow: 0,
+        since: null,
+      });
+      for (const n of [4, 5]) await recordRefusal(f.db, refusal(n));
+      expect((await postureOf(f.db, "author")).quarantineFirst).toBe(false);
+      await recordRefusal(f.db, refusal(6));
+      expect((await postureOf(f.db, "author")).quarantineFirst).toBe(true);
+      expect(f.count("fellow_inbox_notices")).toBe(2);
+    } finally {
+      setSystemTime();
+      f.sql.close();
+    }
+  });
+
+  test("a changed outcome cannot restart the rolling window for previously refused bytes", async () => {
+    const f = fixture();
+    const startedAt = Date.parse("2026-10-01T00:00:00.000Z");
+    setSystemTime(new Date(startedAt));
+    try {
+      await recordRefusal(f.db, { ...refusal(1), outcome: "quarantine" });
+      setSystemTime(new Date(startedAt + POSTURE_WINDOW_MS + 1));
+      await recordRefusal(f.db, refusal(1));
+      expect(f.count("screening_refusals")).toBe(1);
+      legacyRefusal(f, "SR-legacy-after-window", 1, "reject", new Date().toISOString());
+      expect(await postureOf(f.db, "author")).toEqual({
+        quarantineFirst: false,
+        refusalsInWindow: 0,
+        since: null,
+      });
+      for (const n of [2, 3]) await recordRefusal(f.db, refusal(n));
+      expect((await postureOf(f.db, "author")).quarantineFirst).toBe(false);
+      expect(f.count("fellow_inbox_notices")).toBe(0);
+      await recordRefusal(f.db, refusal(4));
+      expect((await postureOf(f.db, "author")).quarantineFirst).toBe(true);
+      expect(f.count("fellow_inbox_notices")).toBe(1);
+    } finally {
+      setSystemTime();
       f.sql.close();
     }
   });
