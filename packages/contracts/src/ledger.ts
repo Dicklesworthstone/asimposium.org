@@ -183,7 +183,8 @@ export const ClaimStatusBasisSchema = z
         coherent =
           (changesLiveState && ["malformed", "disputed"].includes(basis.to)) ||
           supportStep ||
-          (basis.from === "disputed" && basis.to === "refuted");
+          (basis.from === "disputed" && ["refuted", "open"].includes(basis.to)) ||
+          (basis.from === "open" && basis.to === "reduced-to");
         break;
       case "refuting-evidence":
         coherent = changesLiveState && ["disputed", "refuted"].includes(basis.to);

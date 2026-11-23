@@ -805,6 +805,8 @@ export async function foldScientificRows(
     let fullWriteUp = false;
     let artifactEvidenceId: string | undefined;
     let settledRefutation: { evidenceId: string; unansweredHours: number } | undefined;
+    let resolvedRefutationEvidenceId: string | undefined;
+    let refutationCheck = false;
     if (payload.verification !== undefined && payload.verification !== null) {
       const verification = ScientificVerificationSchema.safeParse(payload.verification);
       const material = verification.success
@@ -824,6 +826,7 @@ export async function foldScientificRows(
           row.fellow_id,
           row.sponsor_id,
         );
+        refutationCheck = verification.data.kind === "refutation";
         if (
           verification.data.kind === "refutation" &&
           verification.data.result === "verified" &&
@@ -841,6 +844,17 @@ export async function foldScientificRows(
           (payload.verdict === "refute" || payload.verdict === "fails-to-reproduce")
         )
           settledRefutation = confirmedRefutation(row, material);
+        if (
+          verification.data.kind === "refutation" &&
+          verification.data.result === "mismatch" &&
+          payload.target_claim_id === row.claim_id &&
+          payload.target_version === row.target_version &&
+          !withdrawn.withdrawnEvents.has(row.event_id) &&
+          carriesWeight &&
+          tier !== "T0" &&
+          !isNegativeReview(payload)
+        )
+          resolvedRefutationEvidenceId = material.evidenceId;
       } catch (error) {
         if (!(error instanceof ScientificInputError)) throw error;
         if (!isNegativeReview(payload) && !adverseNovelty) carriesWeight = false;
@@ -851,6 +865,7 @@ export async function foldScientificRows(
     if (provenance?.method?.evidence.some((reference) => !resolve(reference, row))) {
       if (!isNegativeReview(payload) && !adverseNovelty) carriesWeight = false;
       settledRefutation = undefined;
+      resolvedRefutationEvidenceId = undefined;
       markStale(row);
     }
     if (noveltyVerdict !== undefined && carriesWeight && tier !== "T0")
@@ -861,14 +876,18 @@ export async function foldScientificRows(
     reviewFacets.push({
       targetVersion: row.target_version,
       verdict: typeof payload.verdict === "string" ? payload.verdict : "cannot-verify",
-      carriesWeight,
+      // Disproving one counterexample is not independent confirmation of the
+      // claim. The same boundary governs the disposition fold below.
+      carriesWeight: carriesWeight && !(refutationCheck && !isNegativeReview(payload)),
       tier,
     });
     timeline.push({
       kind: "review-created",
       sequence: row.seq,
       targetVersion: row.target_version,
-      carriesWeight,
+      carriesWeight:
+        resolvedRefutationEvidenceId !== undefined ||
+        (carriesWeight && !(refutationCheck && !isNegativeReview(payload))),
       verdict: typeof payload.verdict === "string" ? payload.verdict : "cannot-verify",
       rubric,
       review: {
@@ -880,6 +899,7 @@ export async function foldScientificRows(
       },
       artifactEvidenceId,
       confirmedRefutation: settledRefutation,
+      resolvedRefutationEvidenceId,
     });
   }
   const folded = computeCurrentClaimDisposition(timeline);

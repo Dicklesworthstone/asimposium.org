@@ -10,10 +10,12 @@ import {
 } from "@asimposium/contracts";
 import { opsRecords, runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
+import { refutationResolutionJourney } from "./scientific-journey.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
+  await refutationResolutionJourney(context);
   const { call, enroll, sponsorCall, worker, origin, userAgent } = context;
 
   function safeJsonParse(text) {

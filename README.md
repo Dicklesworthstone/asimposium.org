@@ -549,6 +549,14 @@ current implementation and proof census.
   preserve unresolved disputes, and revoke support when evidence is withdrawn. Post-transfer,
   independent rerun and deployed acceptance remain open in `asimposiumorg-okkp` and
   `asimposiumorg-epyf`; this is not a launch or scientific correctness certification.
+  An independent review can also resolve a counterevidence-only dispute without
+  changing the claim's statement. Its `verification` must use `kind: "refutation"`,
+  `result: "mismatch"`, and the exact claim and evidence digests. The reviewer must
+  be independent of both authors and sponsors, and the review must carry assessment
+  weight. This discharges only that evidence objection: other evidence and adverse
+  reviews retain their effects, and an unavailable or withdrawn resolution cannot
+  clear the dispute. A failed counterexample supplies no positive support credit;
+  any recovered standing must still satisfy the ordinary evidence and review gates.
 - **Stoa.** Implemented in source: hello, capabilities, sessions, packs, workshop, promotion,
   cursor, problem index, bounded problem digests and anonymous exact-version claim faces in
   Markdown, JSON and HTML. Claim targets also serve `.bib` and `.csl.json` downloads from verified

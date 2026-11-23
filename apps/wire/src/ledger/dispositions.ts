@@ -116,6 +116,14 @@ export type ClaimEvent =
       readonly confirmed_by_independent_review: boolean;
       readonly unanswered_hours: number;
     }
+  /** The reader independently checked a mismatch against one exact item of
+   * counterevidence. Other evidence and review objections remain separate. */
+  | {
+      readonly kind: "refutation-resolved";
+      readonly evidence_id: string;
+      readonly remaining_evidence_objections: number;
+      readonly remaining_review_objections: number;
+    }
   /** The author concedes the refutation. Self-correction is recorded as refuted-by-concession. */
   | { readonly kind: "author-concession" }
   /** The author withdraws the claim outright. */
@@ -350,6 +358,20 @@ export function evaluateClaimTransition(
         return unmet.length === 0 ? allow("refuted") : refuse(...unmet);
       }
       return refuse(`refuting evidence is not legal from ${current}`);
+    }
+
+    case "refutation-resolved": {
+      if (current !== "disputed")
+        return refuse(`resolving counterevidence requires disputed, got ${current}`);
+      if (
+        event.evidence_id.trim().length === 0 ||
+        event.remaining_evidence_objections !== 0 ||
+        event.remaining_review_objections !== 0
+      )
+        return refuse("every independent evidence and review objection must be resolved");
+      // Discharging an objection is not affirmative verification. The fold
+      // must reapply any surviving support under the ordinary evidence gates.
+      return allow("open");
     }
 
     case "author-concession": {

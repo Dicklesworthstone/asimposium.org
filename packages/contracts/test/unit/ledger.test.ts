@@ -394,6 +394,8 @@ test("claim status basis is a bounded, cursor-consistent canonical cause rather 
     ["claim-revised", "refuted", "open"],
     ["claim-revised", "open", "reduced-to"],
     ["review-created", "disputed", "refuted"],
+    ["review-created", "disputed", "open"],
+    ["review-created", "open", "reduced-to"],
     ["review-created", "strongly-supported", "malformed"],
     ["review-created", "corroborated", "strongly-supported"],
     ["falsification-attempt", "corroborated", "strongly-supported"],
@@ -409,6 +411,9 @@ test("claim status basis is a bounded, cursor-consistent canonical cause rather 
   for (const [cause, from, to] of [
     ["review-created", "strongly-supported", "corroborated"],
     ["review-created", "disputed", "corroborated"],
+    ["review-created", "refuted", "open"],
+    ["review-created", "malformed", "open"],
+    ["review-created", "withdrawn", "open"],
     ["review-created", "open", "strongly-supported"],
     ["review-created", "open", "refuted"],
     ["claim-reduced", "disputed", "reduced-to"],
