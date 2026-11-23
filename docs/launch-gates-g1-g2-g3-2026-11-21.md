@@ -7,9 +7,9 @@
 
 ## Honest Launch Posture Summary
 
-Every local deterministic & local real-Workerd/D1 verification surface is wired and green;
-**G1, G2, and G3 remain explicitly BLOCKED** until the operator executes the non-delegable
-hosted deployment, live OAuth/screening, legal review, and personal IP sign-off steps below.
+The November 21 snapshot below records the evidence available that day.
+The November 23 checklist records subsequent local failures, corrective work,
+and the hosted gates still needed before public launch.
 
 | Gate | Local Proof Artifacts (Present & Green) | Open Hosted / Human / Operator Blockers |
 |---|---|---|
@@ -36,9 +36,21 @@ Track individual work in the linked Beads and retire this checklist from active 
 - [x] Replay the historic `0016` and the 120 forward migrations through `0148` in isolated local Workerd. Verify that the two test identity rows survive and foreign-key checks pass.
 - [x] Capture a populated historical `0028` database with the production SQL backup code. Import it into a second empty local D1 instance and compare the logical SQL digest, schema digest and all 48 table counts.
 - [x] Advance the restored local copy through all 120 migrations while retaining the historic journal digest. Check that the active fixture still authenticates, the revoked fixture is refused and the original instance remains on `0028`.
+- [x] Re-run the copy with the three shared-worktree migrations through `0151`. Check the migration digests, credential parity, active and revoked authentication, and foreign-key integrity after all 123 forward migrations.
 - [x] Inspect live credential posture by aggregate. All six credential records are within their issued and expiry window and have no revocation timestamp. Preserve all grants and credential records through cutover.
 - [x] Dry-run the production Worker package at `0ceba020`. Confirm the exact release still needs the completed Herald configuration.
 - [x] Run the signed backup and restore journey at `0ceba020` on local Workerd, D1 and R2.
+- [x] Retain the complete Worker unit run against the shared integration worktree. It finished with 7,681 passes and 10 failures.
+- [x] Defer D1 binding access until the Herald SSE route has been validated. Re-run mounted health and live-room unit checks.
+- [x] Classify all four new write routes and the Herald Durable Object matcher. Re-run the census and its negative control.
+- [x] Document migrations 0149–0151 and check the migration head against the schema census.
+- [x] Keep the duplicate recommendation race test pinned to the exact-source read after the new advisory query.
+- [x] Re-run the S-3 production/counterfactual sentinel controls with separately bounded compressed transport and decoded bundle sizes.
+- [x] Run all eight typecheck and lint groups, the native Herald room journey, and the native three-proposal intake on the shared worktree.
+- [x] Exercise the synthesis draft on local Workerd and D1. Check sponsor-only visibility, refusal for an unrelated sponsor, one public cursor advance and identical replay, and Fellow attribution and payload digest on the public ledger.
+- [x] Dry-run the shared candidate with the production Wrangler configuration. The bundle resolves both Herald and Krater Outbox Durable Object classes.
+- [ ] Complete the full worktree UBS scan. It returned partial coverage after JavaScript and ShellCheck timeouts and a D1 dialect diagnostic. The focused Worker scan reported zero critical issues.
+- [ ] Requalify a single exact integrated commit with the complete Worker suite and obtain independent acceptance for `asimposiumorg-cuo7`.
 - [ ] Verify production Worker identity, D1 binding, private and public R2 roles, Durable Object classes, AI binding, cron and service-envelope keys.
 - [ ] Provision and confirm production checkpoint signing and backup destination bindings. Verify before enabling logs or cron that depend on them.
 - [ ] Rehearse the production-specific backup, migration and restore with a separately isolated target. Preserve real credentials and the honest `0016` receipt. The default migration runner reports `REMOTE_STAGING_ONLY` for production observation and refuses production application.
@@ -80,6 +92,7 @@ The [evidence dossier](seed/research-evidence.md) records the archive pins and r
 - [x] Recompute the four Hebbian contrasts and the registered decision from the pinned 1,536-row archive. One contrast passed and the overall claim missed its advancement criterion.
 - [x] Replay the archived group proposal certificates and 3,456 word evaluations. Check accepted cases, fallback edges and query counts against the frozen summary.
 - [x] Run both reproductions with the reviewer command that verifies the pinned report and archive before recomputing scores.
+- [x] Replay the reward timing follow-up from the pinned 48-run archive. Independently verify the feedback gains, write counts and both registered decisions at `6bb7b5a0`.
 - [ ] Confirm source and artifact publication rights, and obtain independent domain review of the exact draft texts.
 - [ ] Have onboarded Fellows deliberately adopt the production formulations. Obtain sponsor publication approval and a separate statement-clear review for each.
 - [ ] Publish and replay the worked calibration, reproduction and counterexample program. Verify SP4D statement and external-expert gates, and confirm its public guardrail and exact share language.
