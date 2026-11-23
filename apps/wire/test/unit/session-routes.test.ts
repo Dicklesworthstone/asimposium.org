@@ -5356,6 +5356,7 @@ describe("session protocol routes", () => {
           code: "POLICY_DENIED",
           coarse_category: "operational-harm",
           appeal: "SPONSOR_APPEAL_AVAILABLE",
+          case_id: expect.stringMatching(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/),
         },
       },
       {
@@ -5408,7 +5409,13 @@ describe("session protocol routes", () => {
     ] as const;
 
     for (const policyCase of cases) {
-      const { call, db } = await fixture({ screenPromotion: policyCase.screenPromotion });
+      const screened: WorkersAIPromotionInput[] = [];
+      const { call, db, binding } = await fixture({
+        screenPromotion: async (input) => {
+          screened.push(input);
+          return policyCase.screenPromotion();
+        },
+      });
       const opened = await call("/v1/sessions", {
         method: "POST",
         headers: {
@@ -5450,8 +5457,44 @@ describe("session protocol routes", () => {
       expect(response.status, policyCase.label).toBe(policyCase.status);
       expect(response.headers.get("cache-control"), policyCase.label).toBe("private, no-store");
       const responseText = await response.text();
-      expect(JSON.parse(responseText), policyCase.label).toEqual(policyCase.body);
+      const policyResponse = JSON.parse(responseText) as { case_id: string };
+      expect(policyResponse, policyCase.label).toEqual(policyCase.body);
       expect(responseText, policyCase.label).not.toContain("PRIVATE_SCREENING_EXCEPTION_CANARY");
+      expect(screened, policyCase.label).toHaveLength(1);
+      const screenedInput = screened[0];
+      assert.ok(screenedInput);
+      assert.ok(screenedInput.falsifier);
+      const screeningBinding = await promotionScreeningBinding(screenedInput);
+      const retained = await getScreeningCase(db, policyResponse.case_id);
+      assert.ok(retained);
+      expect(retained, policyCase.label).toMatchObject({
+        problem_id: "P-4DSP",
+        fellow_id: binding.fellowId,
+        sponsor_id: binding.sponsorId,
+        route: "promote",
+        input_digest: screeningBinding.bodyDigest.slice(7),
+        context_digest: screeningBinding.contextDigest.slice(7),
+        coarse_category: policyCase.body.coarse_category,
+        outcome: policyCase.label === "hard-reject" ? "quarantine" : "provider-unavailable",
+        state: "pending",
+        decided_by: null,
+        decided_at: null,
+      });
+      expect(JSON.parse(retained.contextual_input_json ?? "null"), policyCase.label).toEqual(
+        screeningBinding.contextualInput,
+      );
+      const moderationLog = await db.prepare("SELECT * FROM moderation_log ORDER BY seq").all();
+      expect(moderationLog.results, policyCase.label).toHaveLength(1);
+      expect(moderationLog.results[0], policyCase.label).toMatchObject({
+        action: "quarantined",
+        category: policyCase.body.coarse_category,
+        subject: "candidate",
+        problem_id: null,
+      });
+      for (const publicText of [responseText, JSON.stringify(moderationLog.results)]) {
+        expect(publicText, policyCase.label).not.toContain(screenedInput.statement);
+        expect(publicText, policyCase.label).not.toContain(screenedInput.falsifier);
+      }
       expect(
         await db.prepare("SELECT COUNT(*) AS count FROM claims").first<{ count: number }>(),
         policyCase.label,
