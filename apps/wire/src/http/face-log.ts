@@ -1,6 +1,9 @@
 import type { MiddlewareHandler } from "hono";
 import { containsCredentialShape } from "../../../../packages/contracts/src/diagnostic-safety.ts";
-import { prepareRedactedSinkEvent } from "../observability/telemetry.ts";
+import {
+  containsExtraSensitivePattern,
+  prepareRedactedSinkEvent,
+} from "../observability/telemetry.ts";
 
 /**
  * OPS.2a record for every public face read (W6.1 / OPS.4): route template, face,
@@ -22,6 +25,7 @@ function safeCorrelationRequestId(rawHeader: string | undefined): string {
   if (
     SAFE_REQUEST_ID_RE.test(candidate) &&
     !containsCredentialShape(candidate) &&
+    !containsExtraSensitivePattern(candidate) &&
     !/^(?:asimp_|v1\.|flow_v1\.|F-|usr_)/i.test(candidate)
   ) {
     return candidate;
@@ -47,17 +51,37 @@ export const logPublicFace: MiddlewareHandler = async (c, next) => {
       .filter((path) => path !== "*" && path !== "/*")
       .at(-1) ?? null;
   const response = c.res;
-  const { payload } = prepareRedactedSinkEvent("ops2a", {
-    facility: "OPS.2a",
-    stage: "face",
-    request_id: requestId,
-    route,
-    face: faceOf(pathname),
-    method,
-    status: response.status,
-    etag: response.headers.get("etag"),
-    cache: response.headers.get("cache-control"),
-    duration_ms: Math.max(0, Date.now() - started),
-  });
-  console.log(JSON.stringify(payload));
+  const durationMs = Math.max(0, Date.now() - started);
+  const face = faceOf(pathname);
+  try {
+    const { payload } = prepareRedactedSinkEvent("ops2a", {
+      facility: "OPS.2a",
+      stage: "face",
+      request_id: requestId,
+      route,
+      face,
+      method,
+      status: response.status,
+      etag: response.headers.get("etag"),
+      cache: response.headers.get("cache-control"),
+      duration_ms: durationMs,
+    });
+    console.log(JSON.stringify(payload));
+  } catch {
+    // Logging must never turn a completed public face read into a 500 or leak
+    // unredacted headers; emit a minimal guaranteed-safe OPS.2a fallback line.
+    console.log(
+      JSON.stringify({
+        facility: "OPS.2a",
+        stage: "face",
+        request_id: requestId,
+        route: null,
+        face,
+        method,
+        status: response.status,
+        duration_ms: durationMs,
+        log_redaction_fallback: true,
+      }),
+    );
+  }
 };

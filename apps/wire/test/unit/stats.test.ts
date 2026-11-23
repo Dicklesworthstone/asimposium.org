@@ -295,6 +295,154 @@ describe("Measured /stats.{json,md} face (asimposiumorg-rc-stats-runbooks-cost-m
       sql.close();
     }
   });
+
+  test("REGRESSION (Rule A2 + P5 + canonical reports): excludes private-draft/unlisted rows, ignores assertion-only reviews, classifies retracted claims, and counts integrity false-solved reports", async () => {
+    const sql = new Database(":memory:");
+    try {
+      sql.exec(`
+        CREATE TABLE problems (
+          id TEXT PRIMARY KEY,
+          public_seq INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active',
+          unlisted INTEGER NOT NULL DEFAULT 0,
+          sponsor_id TEXT
+        );
+        CREATE TABLE enrollment_fellows (
+          fellow_id TEXT PRIMARY KEY,
+          sponsor_id TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active'
+        );
+        CREATE TABLE sessions (
+          session_id TEXT PRIMARY KEY,
+          fellow_id TEXT NOT NULL,
+          problem_id TEXT NOT NULL,
+          opened_at TEXT NOT NULL,
+          closed_at TEXT,
+          handback TEXT
+        );
+        CREATE TABLE claims (
+          problem_id TEXT NOT NULL,
+          id TEXT NOT NULL,
+          statement TEXT NOT NULL,
+          PRIMARY KEY (problem_id, id)
+        );
+        CREATE TABLE reviews (
+          problem_id TEXT NOT NULL,
+          review_id TEXT NOT NULL,
+          target_claim_id TEXT NOT NULL,
+          tier TEXT NOT NULL,
+          verdict TEXT NOT NULL,
+          capable_of_failure TEXT,
+          PRIMARY KEY (problem_id, review_id)
+        );
+        CREATE TABLE retractions (
+          retraction_id TEXT PRIMARY KEY,
+          problem_id TEXT NOT NULL,
+          target_object TEXT NOT NULL
+        );
+        CREATE TABLE evidence (
+          problem_id TEXT NOT NULL,
+          evidence_id TEXT NOT NULL,
+          direction TEXT NOT NULL,
+          PRIMARY KEY (problem_id, evidence_id)
+        );
+        CREATE TABLE dead_ends (
+          problem_id TEXT NOT NULL,
+          dead_end_id TEXT NOT NULL,
+          retry_predicate TEXT NOT NULL,
+          PRIMARY KEY (problem_id, dead_end_id)
+        );
+        CREATE TABLE idempotency (
+          problem_id TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL,
+          PRIMARY KEY (problem_id, idempotency_key)
+        );
+        CREATE TABLE reports (
+          report_id TEXT PRIMARY KEY,
+          problem_id TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          note TEXT
+        );
+
+        INSERT INTO problems VALUES
+          ('P-PUB', 2, '2026-11-20T00:00:00.000Z', '2026-11-20T02:00:00.000Z', 'active', 0, 'usr_alpha_0001'),
+          ('P-DRAFT', 0, '2026-11-20T00:00:00.000Z', '2026-11-20T01:00:00.000Z', 'private-draft', 0, 'usr_alpha_0001'),
+          ('P-UNLIST', 1, '2026-11-20T00:00:00.000Z', '2026-11-20T01:00:00.000Z', 'active', 1, 'usr_alpha_0001');
+
+        INSERT INTO enrollment_fellows VALUES
+          ('F-01AAAAAAAAAAAAAAAAAAAAAAAA', 'usr_alpha_0001', 'active'),
+          ('F-01BBBBBBBBBBBBBBBBBBBBBBBB', 'usr_beta_0002', 'active');
+
+        -- Only P-PUB sessions should count; P-DRAFT and P-UNLIST must be excluded by Rule A2!
+        INSERT INTO sessions VALUES
+          ('S-PUB-1', 'F-01AAAAAAAAAAAAAAAAAAAAAAAA', 'P-PUB', '2026-11-20T00:10:00.000Z', '2026-11-20T00:40:00.000Z', 'Public handback'),
+          ('S-DRAFT-1', 'F-01AAAAAAAAAAAAAAAAAAAAAAAA', 'P-DRAFT', '2026-11-20T00:15:00.000Z', '2026-11-20T00:45:00.000Z', 'Private handback'),
+          ('S-UNLIST-1', 'F-01BBBBBBBBBBBBBBBBBBBBBBBB', 'P-UNLIST', '2026-11-20T00:20:00.000Z', '2026-11-20T00:50:00.000Z', 'Unlisted handback');
+
+        INSERT INTO claims VALUES
+          ('P-PUB', 'C-1', 'Public claim with only assertion-only review'),
+          ('P-PUB', 'C-2', 'Public retracted claim'),
+          ('P-DRAFT', 'C-1', 'Private draft claim never counted'),
+          ('P-UNLIST', 'C-1', 'Unlisted claim never counted');
+
+        -- R-ASSERT has NULL capable_of_failure (assertion-only per P5) -> must NOT elevate C-1 out of open!
+        -- R-DRAFT belongs to private-draft -> must NOT count anywhere!
+        INSERT INTO reviews VALUES
+          ('P-PUB', 'R-ASSERT', 'C-1', 'T2', 'confirm', NULL),
+          ('P-PUB', 'R-RET', 'C-2', 'T2', 'confirm', 'Would fail if n=2 counterexample existed'),
+          ('P-DRAFT', 'R-DRAFT', 'C-1', 'T2', 'reproduces', 'Counterexample check');
+
+        INSERT INTO retractions VALUES ('RET-1', 'P-PUB', 'C-2');
+
+        INSERT INTO evidence VALUES
+          ('P-PUB', 'E-1', 'reproduces'),
+          ('P-DRAFT', 'E-2', 'fails-to-reproduce'),
+          ('P-UNLIST', 'E-3', 'fails-to-reproduce');
+
+        INSERT INTO dead_ends VALUES
+          ('P-PUB', 'DE-1', 'Retry when lemma 2 lands'),
+          ('P-DRAFT', 'DE-2', 'Private dead end never counted');
+
+        INSERT INTO idempotency VALUES
+          ('P-PUB', 'k-pub'),
+          ('P-DRAFT', 'k-draft'),
+          ('P-UNLIST', 'k-unlist');
+
+        -- Canonical POST /v1/reports uses reason='integrity' with a note mentioning false-solved.
+        INSERT INTO reports VALUES
+          ('RP-1', 'P-PUB', 'integrity', 'Claim banner reads like a false solved announcement.'),
+          ('RP-2', 'P-PUB', 'integrity', 'Citation locator broken, not a solved issue.'),
+          ('RP-3', 'P-DRAFT', 'integrity', 'False-solved note on private draft never counted.');
+      `);
+
+      const stats = await loadPlatformStats(sqliteAsD1(sql));
+      expect(stats.collaboration.public_problems).toBe(1);
+      expect(stats.ergonomics.sessions_opened).toBe(1);
+      expect(stats.ergonomics.sessions_closed).toBe(1);
+      expect(stats.collaboration.handback_completion_rate).toEqual({
+        numerator: 1,
+        denominator: 1,
+        rate: 1,
+      });
+      expect(stats.quality.claims_total).toBe(2);
+      expect(stats.quality.claims_by_disposition).toEqual({
+        open: 1,
+        retracted: 1,
+      });
+      expect(stats.quality.reproduction_pass_rate).toEqual({
+        numerator: 1,
+        denominator: 1,
+        rate: 1,
+      });
+      expect(stats.quality.dead_ends_recorded).toBe(1);
+      expect(stats.ergonomics.idempotent_writes_recorded).toBe(1);
+      expect(stats.comprehension.false_solved_reports_recorded).toBe(1);
+    } finally {
+      sql.close();
+    }
+  });
 });
 
 describe("Fable §13.3 12 Named Operational Incident Runbooks (asimposiumorg-rc-stats-runbooks-cost-model-w4tz)", () => {

@@ -283,12 +283,51 @@ describe("W10.8 Human-plane Playwright E2E guards, redaction & planted negatives
       synthetic_only: true,
       run_id: "human-plane-003",
       kind: "network-log",
-      url: "https://staging.asimposium.org/api/check?jwt=eyJsecret&passphrase=topsecret",
-      headers: {},
+      url: "https://user:basicSecret@staging.asimposium.org/api/check?jwt=eyJsecret&passphrase=topsecret",
+      headers: { constructor: "ignore-proto-key" },
     });
     expect(redactedQuery.ok).toBe(true);
+    expect(redactedQuery.artifact?.url).not.toContain("basicSecret");
     expect(redactedQuery.artifact?.url).not.toContain("eyJsecret");
     expect(redactedQuery.artifact?.url).not.toContain("topsecret");
+
+    // Storage carrying hidden reasoning keys fails closed too.
+    const refusedStorageCot = redactHumanPlaneArtifact({
+      synthetic_only: true,
+      run_id: "human-plane-004",
+      kind: "trace",
+      url: "https://staging.asimposium.org/console",
+      headers: {},
+      storageEntries: { raw_transcript: "never retain" },
+    });
+    expect(refusedStorageCot.ok).toBe(false);
+    expect(refusedStorageCot.reason).toBe("FORBIDDEN_HIDDEN_REASONING_FIELD:raw_transcript");
+
+    // Empty privateWorkshopCanaries fails closed (anti-vacuity).
+    const vacuous = evaluateHumanPlaneCacheAndPrivacyPair({
+      ...cleanPrivacySnapshot(),
+      privateWorkshopCanaries: [],
+    });
+    expect(vacuous.ok).toBe(false);
+    expect(vacuous.violations).toContain("NO_PRIVATE_WORKSHOP_CANARY_CONFIGURED");
+
+    // Non-finite duration_ms in OPS.2a record fails closed.
+    expect(() =>
+      buildHumanPlaneOpsRecord({
+        run_id: "human-plane-001",
+        route: "/console",
+        action: "view",
+        principal: "sponsor-a",
+        synthetic_ids: {},
+        request_id: "req-nan",
+        event_id: null,
+        cursor: null,
+        renderedText: "<main>ok</main>",
+        cache_control: "private, no-store",
+        status: "pass",
+        duration_ms: Number.NaN,
+      }),
+    ).toThrow(/OPS2A_HUMAN_PLANE_INVALID_DURATION_MS/);
 
     // OPS.2a structured correlation record.
     const ops = buildHumanPlaneOpsRecord({

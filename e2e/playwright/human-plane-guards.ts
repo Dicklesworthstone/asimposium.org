@@ -71,7 +71,10 @@ export function evaluateHumanPlaneCacheAndPrivacyPair(
   const violations: string[] = [];
   const allCanaries = [...snapshot.privateWorkshopCanaries, ...snapshot.unlistedProblemCanaries];
 
-  // 1. Owner workshop MUST carry the owner's private canary (guards against vacuous pass!).
+  // 1. Owner workshop MUST carry at least one non-empty canary (guards against vacuous pass!).
+  if (snapshot.privateWorkshopCanaries.length === 0) {
+    violations.push("NO_PRIVATE_WORKSHOP_CANARY_CONFIGURED");
+  }
   const ownerSurface = snapshot.surfaces.find((s) => s.surface === "sponsor-a-workshop");
   if (!ownerSurface) {
     violations.push("OWNER_WORKSHOP_SURFACE_MISSING");
@@ -135,7 +138,13 @@ export function evaluateHumanPlaneCacheAndPrivacyPair(
         violations.push(`SESSION_COOKIE_DOMAIN_MISMATCH:${cookie.name}:${cookie.domain}`);
       }
       for (const sentOrigin of cookie.sentToOrigins) {
-        const sentHost = new URL(sentOrigin).hostname.toLowerCase();
+        let sentHost: string;
+        try {
+          sentHost = new URL(sentOrigin).hostname.toLowerCase();
+        } catch {
+          violations.push(`SESSION_COOKIE_INVALID_SENT_ORIGIN:${cookie.name}`);
+          continue;
+        }
         if (sentHost === stoaHost || sentHost.startsWith("a.") || sentHost.startsWith("a-")) {
           violations.push(`PRINCIPAL_CONFUSION_COOKIE_SENT_TO_STOA:${cookie.name}:${sentHost}`);
         }
@@ -243,10 +252,16 @@ export interface RedactedArtifactResult {
 function stripFragmentAndQuerySecrets(rawUrl: string): string {
   try {
     const parsed = new URL(rawUrl);
+    parsed.username = "";
+    parsed.password = "";
     parsed.hash = "";
     for (const key of [...parsed.searchParams.keys()]) {
-      if (/(token|secret|key|code|state|session|cookie|sig|auth|pass|cred|jwt)/i.test(key)) {
-        parsed.searchParams.set(key, "[REDACTED]");
+      const value = parsed.searchParams.get(key) ?? "";
+      if (
+        /(token|secret|key|code|state|session|cookie|sig|auth|pass|cred|jwt)/i.test(key) ||
+        containsNeverLogMaterial(value)
+      ) {
+        parsed.searchParams.delete(key);
       }
     }
     return parsed.toString();
@@ -300,15 +315,30 @@ export function redactHumanPlaneArtifact(raw: RawPlaywrightArtifact): RedactedAr
       return { ok: false, reason: `FORBIDDEN_HIDDEN_REASONING_FIELD:${forbiddenKey}` };
     }
   }
+  if (raw.storageEntries) {
+    const forbiddenStorageKey = findForbiddenReasoningKey(raw.storageEntries);
+    if (forbiddenStorageKey) {
+      return { ok: false, reason: `FORBIDDEN_HIDDEN_REASONING_FIELD:${forbiddenStorageKey}` };
+    }
+  }
 
-  const cleanHeaders: Record<string, string> = {};
+  const cleanHeaders: Record<string, string> = Object.create(null) as Record<string, string>;
   const redactedHeaders: string[] = [];
   for (const [key, value] of Object.entries(raw.headers)) {
     const lower = key.toLowerCase();
+    if (lower === "__proto__" || lower === "constructor" || lower === "prototype") {
+      redactedHeaders.push(lower);
+      continue;
+    }
     if (SENSITIVE_HEADER_KEYS.has(lower)) {
       redactedHeaders.push(lower);
     } else {
-      cleanHeaders[lower] = redactOpsText(value);
+      Object.defineProperty(cleanHeaders, lower, {
+        value: redactOpsText(value),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
     }
   }
   redactedHeaders.sort();
@@ -358,6 +388,9 @@ export function buildHumanPlaneOpsRecord(
     readonly renderedText: string;
   },
 ): HumanPlaneOpsRecord {
+  if (!Number.isFinite(input.duration_ms) || input.duration_ms < 0) {
+    throw new RangeError("OPS2A_HUMAN_PLANE_INVALID_DURATION_MS");
+  }
   const record: HumanPlaneOpsRecord = {
     facility: "OPS.2a",
     suite: "e2e-human-plane",
@@ -372,7 +405,7 @@ export function buildHumanPlaneOpsRecord(
     render_digest: createHash("sha256").update(input.renderedText).digest("hex"),
     cache_control: input.cache_control,
     status: input.status,
-    duration_ms: Math.max(0, Math.round(input.duration_ms)),
+    duration_ms: Math.round(input.duration_ms),
   };
   if (containsNeverLogMaterial(JSON.stringify(record))) {
     throw new Error("OPS2A_HUMAN_PLANE_RECORD_CONTAINS_NEVER_LOG_MATERIAL");

@@ -69,13 +69,24 @@ test("OPS.4 wiring: face-log preserves safe x-request-id and replaces credential
     { headers: { "x-request-id": badToken } },
     ENV,
   );
+  const ipRes = await createApp().request(
+    "https://a.asimposium.org/schemas/sessions.v1/promote_request.json",
+    { headers: { "x-request-id": "203.0.113.42" } },
+    ENV,
+  );
+  expect(ipRes.status).toBe(200);
   spy.mockRestore();
 
   const records = lines
     .filter((line) => line.includes('"stage":"face"'))
     .map((line) => JSON.parse(line) as Record<string, unknown>);
-  expect(records).toHaveLength(2);
+  expect(records).toHaveLength(3);
   expect(records[0]?.request_id).toBe("req-ops4-valid-42");
   expect(String(records[1]?.request_id ?? "")).not.toContain(badToken);
+  expect(String(records[2]?.request_id ?? "")).not.toContain("203.0.113.42");
+  expect(String(records[2]?.request_id ?? "")).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+  );
   expect(JSON.stringify(records)).not.toContain(badToken);
+  expect(JSON.stringify(records)).not.toContain("203.0.113.42");
 });

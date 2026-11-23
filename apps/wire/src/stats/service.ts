@@ -76,20 +76,34 @@ export async function loadPlatformStats(
   const hasScreeningCases = tables.has("screening_cases");
   const hasReports = tables.has("reports");
   const hasAppeals = tables.has("screening_case_appeals");
+  const hasRetractions = tables.has("retractions");
 
   const problemCols = hasProblems ? await listColumns(db, "problems") : new Set<string>();
   const hasProblemStatus = problemCols.has("status");
   const hasProblemSponsor = problemCols.has("sponsor_id");
   const hasProblemUnlisted = problemCols.has("unlisted");
 
-  // 1. Collaboration family
+  // 1. Collaboration family (strictly scoped to listed public problems per Rule A2)
   const publicProblemFilter = [
     hasProblemStatus ? "status <> 'private-draft'" : "1=1",
     hasProblemUnlisted ? "unlisted = 0" : "1=1",
   ].join(" AND ");
+  const publicProblemFilterAliased = [
+    hasProblemStatus ? "p.status <> 'private-draft'" : "1=1",
+    hasProblemUnlisted ? "p.unlisted = 0" : "1=1",
+  ].join(" AND ");
   const activeProblemFilter = hasProblemStatus
     ? `status IN ('active', 'sharpening', 'under-result-review') AND ${hasProblemUnlisted ? "unlisted = 0" : "1=1"}`
     : "1=1";
+  const activeProblemFilterAliased = hasProblemStatus
+    ? `p.status IN ('active', 'sharpening', 'under-result-review') AND ${hasProblemUnlisted ? "p.unlisted = 0" : "1=1"}`
+    : "1=1";
+  const publicScopedCount = (table: string, alias: string, extraWhere?: string): string => {
+    if (hasProblems) {
+      return `SELECT COUNT(*) AS value FROM ${table} ${alias} JOIN problems p ON p.id = ${alias}.problem_id WHERE ${publicProblemFilterAliased}${extraWhere ? ` AND (${extraWhere})` : ""}`;
+    }
+    return `SELECT COUNT(*) AS value FROM ${table} ${alias}${extraWhere ? ` WHERE ${extraWhere}` : ""}`;
+  };
 
   const publicProblems = hasProblems
     ? await scalarInt(db, `SELECT COUNT(*) AS value FROM problems WHERE ${publicProblemFilter}`)
@@ -107,7 +121,7 @@ export async function loadPlatformStats(
          FROM problems p
          JOIN sessions s ON s.problem_id = p.id
          JOIN enrollment_fellows f ON f.fellow_id = s.fellow_id
-         WHERE ${activeProblemFilter.replaceAll("status", "p.status").replaceAll("unlisted", "p.unlisted")}
+         WHERE ${activeProblemFilterAliased}
          GROUP BY p.id
          LIMIT 500`,
       )
@@ -123,7 +137,7 @@ export async function loadPlatformStats(
            FROM problems p
            JOIN sessions s ON s.problem_id = p.id
            JOIN enrollment_fellows f ON f.fellow_id = s.fellow_id
-           WHERE ${publicProblemFilter.replaceAll("status", "p.status").replaceAll("unlisted", "p.unlisted")}
+           WHERE ${publicProblemFilterAliased}
              AND p.sponsor_id IS NOT NULL
              AND f.sponsor_id <> p.sponsor_id
            GROUP BY p.id
@@ -140,37 +154,67 @@ export async function loadPlatformStats(
     }
   }
 
-  const sessionsOpened = hasSessions
-    ? await scalarInt(db, "SELECT COUNT(*) AS value FROM sessions")
-    : 0;
+  const sessionsOpened = hasSessions ? await scalarInt(db, publicScopedCount("sessions", "s")) : 0;
   const sessionsClosed = hasSessions
-    ? await scalarInt(db, "SELECT COUNT(*) AS value FROM sessions WHERE closed_at IS NOT NULL")
+    ? await scalarInt(db, publicScopedCount("sessions", "s", "s.closed_at IS NOT NULL"))
     : 0;
   const sessionsWithHandback = hasSessions
     ? await scalarInt(
         db,
-        "SELECT COUNT(*) AS value FROM sessions WHERE closed_at IS NOT NULL AND handback IS NOT NULL AND length(trim(handback)) > 0",
+        publicScopedCount(
+          "sessions",
+          "s",
+          "s.closed_at IS NOT NULL AND s.handback IS NOT NULL AND length(trim(s.handback)) > 0",
+        ),
       )
     : 0;
 
-  // 2. Quality & Review-Supply Depth family
-  const claimsTotal = hasClaims ? await scalarInt(db, "SELECT COUNT(*) AS value FROM claims") : 0;
+  // 2. Quality & Review-Supply Depth family (strictly scoped to listed public problems)
+  const claimsTotal = hasClaims ? await scalarInt(db, publicScopedCount("claims", "c")) : 0;
 
-  // Compute claim disposition distribution from recorded reviews/evidence/claims (aggregate only, never per actor).
+  // Compute claim disposition distribution from recorded reviews/retractions/claims
+  // (aggregate only, never per actor; assertion-only reviews without capable_of_failure move nothing per P5).
   const claimsByDisposition: Record<string, number> = {};
   let independentlyReviewedClaims = 0;
   let corroboratedAwaitingIndependence = 0;
   if (hasClaims) {
+    const retractedWholeClaims = new Set<string>();
+    if (hasRetractions) {
+      const retractionRows = await db
+        .prepare(
+          hasProblems
+            ? `SELECT r.problem_id, r.target_object
+               FROM retractions r
+               JOIN problems p ON p.id = r.problem_id
+               WHERE ${publicProblemFilterAliased} AND instr(r.target_object, '@') = 0
+               LIMIT 2000`
+            : `SELECT problem_id, target_object
+               FROM retractions
+               WHERE instr(target_object, '@') = 0
+               LIMIT 2000`,
+        )
+        .all<{ problem_id: string; target_object: string }>();
+      for (const row of retractionRows.results ?? []) {
+        retractedWholeClaims.add(`${row.problem_id}\u0000${row.target_object}`);
+      }
+    }
+
     if (hasReviews) {
+      const reviewCols = await listColumns(db, "reviews");
+      const substantiveCheck = reviewCols.has("capable_of_failure")
+        ? "AND r.capable_of_failure IS NOT NULL AND length(trim(r.capable_of_failure)) > 0"
+        : "";
       const claimReviewStats = await db
         .prepare(
           `SELECT c.problem_id, c.id,
-                  SUM(CASE WHEN r.verdict = 'confirm' AND r.tier IN ('T2', 'T3') THEN 1 ELSE 0 END) AS high_tier_confirms,
-                  SUM(CASE WHEN r.verdict = 'confirm' AND r.tier = 'T1' THEN 1 ELSE 0 END) AS t1_confirms,
+                  SUM(CASE WHEN r.verdict IN ('confirm', 'reproduces') AND r.tier IN ('T2', 'T3') ${substantiveCheck} THEN 1 ELSE 0 END) AS high_tier_confirms,
+                  SUM(CASE WHEN r.verdict IN ('confirm', 'reproduces') AND r.tier = 'T1' ${substantiveCheck} THEN 1 ELSE 0 END) AS t1_confirms,
                   SUM(CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce') THEN 1 ELSE 0 END) AS refutes,
                   COUNT(r.review_id) AS total_reviews
            FROM claims c
+           ${hasProblems ? `JOIN problems p ON p.id = c.problem_id` : ""}
            LEFT JOIN reviews r ON r.problem_id = c.problem_id AND r.target_claim_id = c.id
+           ${hasProblems ? `WHERE ${publicProblemFilterAliased}` : ""}
            GROUP BY c.problem_id, c.id
            LIMIT 2000`,
         )
@@ -187,7 +231,9 @@ export async function loadPlatformStats(
         const t1Conf = Number(row.t1_confirms ?? 0);
         const refutes = Number(row.refutes ?? 0);
         let bucket = "open";
-        if (refutes > 0 && highConf + t1Conf > 0) {
+        if (retractedWholeClaims.has(`${row.problem_id}\u0000${row.id}`)) {
+          bucket = "retracted";
+        } else if (refutes > 0 && highConf + t1Conf > 0) {
           bucket = "disputed";
         } else if (refutes > 0) {
           bucket = "refuted";
@@ -247,46 +293,55 @@ export async function loadPlatformStats(
   if (hasEvidence) {
     reproPass += await scalarInt(
       db,
-      "SELECT COUNT(*) AS value FROM evidence WHERE direction = 'reproduces'",
+      publicScopedCount("evidence", "ev", "ev.direction = 'reproduces'"),
     );
     reproFail += await scalarInt(
       db,
-      "SELECT COUNT(*) AS value FROM evidence WHERE direction = 'fails-to-reproduce'",
+      publicScopedCount("evidence", "ev", "ev.direction = 'fails-to-reproduce'"),
     );
   }
   if (hasReviews) {
     reproPass += await scalarInt(
       db,
-      "SELECT COUNT(*) AS value FROM reviews WHERE verdict = 'reproduces'",
+      publicScopedCount("reviews", "rv", "rv.verdict = 'reproduces'"),
     );
     reproFail += await scalarInt(
       db,
-      "SELECT COUNT(*) AS value FROM reviews WHERE verdict = 'fails-to-reproduce'",
+      publicScopedCount("reviews", "rv", "rv.verdict = 'fails-to-reproduce'"),
     );
   }
 
   const deadEndsRecorded = hasDeadEnds
-    ? await scalarInt(db, "SELECT COUNT(*) AS value FROM dead_ends")
+    ? await scalarInt(db, publicScopedCount("dead_ends", "de"))
     : 0;
   const deadEndsWithRetry = hasDeadEnds
     ? await scalarInt(
         db,
-        "SELECT COUNT(*) AS value FROM dead_ends WHERE length(trim(retry_predicate)) > 0",
+        publicScopedCount("dead_ends", "de", "length(trim(de.retry_predicate)) > 0"),
       )
     : 0;
 
-  // 3. Ergonomics family
+  // 3. Ergonomics family (scoped to listed public problems per Rule A2)
   const idempotentWritesRecorded = hasIdempotency
-    ? await scalarInt(db, "SELECT COUNT(*) AS value FROM idempotency")
+    ? await scalarInt(db, publicScopedCount("idempotency", "idemp"))
     : 0;
 
-  // 4. Comprehension family
-  const falseSolvedReportsRecorded = hasReports
-    ? await scalarInt(
-        db,
-        "SELECT COUNT(*) AS value FROM reports WHERE reason IN ('false-solved', 'misleading-solved-claim')",
-      )
-    : 0;
+  // 4. Comprehension family (supports both legacy reason labels and canonical POST /v1/reports `integrity`/`other` notes)
+  let falseSolvedReportsRecorded = 0;
+  if (hasReports) {
+    const reportCols = await listColumns(db, "reports");
+    const hasReportNote = reportCols.has("note");
+    const hasReportProblemId = reportCols.has("problem_id");
+    const falseSolvedPredicate = hasReportNote
+      ? `(rp.reason IN ('false-solved', 'misleading-solved-claim') OR (rp.reason IN ('integrity', 'other') AND (lower(coalesce(rp.note, '')) LIKE '%false-solved%' OR lower(coalesce(rp.note, '')) LIKE '%false solved%' OR lower(coalesce(rp.note, '')) LIKE '%misleading%solved%')))`
+      : `rp.reason IN ('false-solved', 'misleading-solved-claim')`;
+    falseSolvedReportsRecorded = await scalarInt(
+      db,
+      hasProblems && hasReportProblemId
+        ? publicScopedCount("reports", "rp", falseSolvedPredicate)
+        : `SELECT COUNT(*) AS value FROM reports rp WHERE ${falseSolvedPredicate}`,
+    );
+  }
 
   // 5. Safety family
   const quarantineCasesOpen = hasScreeningCases

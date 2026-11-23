@@ -123,19 +123,51 @@ describe("OPS.4 Observability: correlation, pre-egress scrubbing, launch alerts,
     const scrubbedCyclic = scrubObservabilityPayload(cyclic) as Record<string, unknown>;
     expect(scrubbedCyclic.self).toBe("[CIRCULAR]");
 
-    // Fresh-eyes Pass 5 regressions:
-    // 1. Embedded URLs with percent-encoded email + IPv6 + generic Bearer tokens scrub cleanly.
+    // Fresh-eyes Pass 5 & 6 regressions:
+    // 1. Embedded URLs with percent-encoded email + IPv6 (full, compressed, ::1, IPv4-mapped) + generic Bearer tokens scrub cleanly.
+    //    Meanwhile SQLite/ISO timestamps like "2026-11-23 05:44:03" and "std::io::Error" MUST NOT false-match IPv6!
     const embeddedCheck = prepareRedactedSinkEvent("sentry", {
       request_id: "req-canary-002",
-      error_message:
-        "Upstream error from 2001:db8::42 with Bearer external_provider_secret_987654 at https://a.asimposium.org/p/1?note=alice%40example.org",
+      sqlite_timestamp: "2026-11-23 05:44:03",
+      rust_symbol: "std::io::Error",
+      recorded_date: new Date("2026-11-23T05:44:03.000Z"),
+      err: new Error(
+        "Upstream error from 2001:db8::8a2e:370:7334 and ::1 and ::ffff:192.0.2.1 and 2001:0db8:85a3:0000:0000:8a2e:0370:7334 with Bearer external_provider_secret_987654 at https://a.asimposium.org/p/1?note=alice%40example.org",
+      ),
     });
     const embeddedJson = JSON.stringify(embeddedCheck.payload);
-    expect(embeddedJson).not.toContain("2001:db8::42");
+    expect(embeddedCheck.payload.sqlite_timestamp).toBe("2026-11-23 05:44:03");
+    expect(embeddedCheck.payload.rust_symbol).toBe("std::io::Error");
+    expect(embeddedCheck.payload.recorded_date).toBe("2026-11-23T05:44:03.000Z");
+    const errPayload = embeddedCheck.payload.err as Record<string, unknown>;
+    expect(errPayload.name).toBe("Error");
+    expect(String(errPayload.message)).toContain("Upstream error from");
+    expect(embeddedJson).not.toContain("2001:db8::8a2e:370:7334");
+    expect(embeddedJson).not.toContain("::1");
+    expect(embeddedJson).not.toContain("192.0.2.1");
+    expect(embeddedJson).not.toContain("2001:0db8:85a3");
     expect(embeddedJson).not.toContain("external_provider_secret_987654");
     expect(embeddedJson).not.toContain("alice");
 
-    // 2. Non-finite timings, out-of-range status codes, and actor IDs in buildOpsTelemetryRecord fail closed.
+    // 2. Non-finite timings, out-of-range status codes, invalid recorded_at, and actor IDs in buildOpsTelemetryRecord fail closed.
+    expect(() =>
+      buildOpsTelemetryRecord({
+        revision: "f713b555",
+        plane: "stoa",
+        route_template: "/stats.json",
+        principal_class: "anonymous",
+        command_or_event_kind: "stats.read",
+        status_code: 200,
+        recorded_at: "not-a-timestamp",
+        correlation: {
+          request_id: "req-bad-ts",
+          event_id: null,
+          scope_cursor: null,
+          outbox_id: null,
+        },
+        timing_ms: { total: 5 },
+      }),
+    ).toThrow(/OPS2A_INVALID_RECORDED_AT/);
     expect(() =>
       buildOpsTelemetryRecord({
         revision: "f713b555",

@@ -141,16 +141,19 @@ const EXTRA_EGRESS_SCRUB_PATTERNS: readonly RegExp[] = [
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
   // Email addresses (PII)
   /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
+  // IPv4-mapped IPv6 addresses (redact full ::ffff:a.b.c.d token before IPv4 split)
+  /(?<![A-Za-z0-9_:])::(?:ffff:)?(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![A-Za-z0-9_:.])/gi,
   // IPv4 addresses (bounded security need excluded from routine sinks)
   /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g,
-  // IPv6 addresses (requires :: or >= 3 colons so ISO timestamps like 05:44:03 never false-match)
-  /\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b|\b(?:[0-9a-f]{1,4}:){1,6}:[0-9a-f]{0,4}\b/gi,
+  // IPv6 addresses: full 8-group (7 colons) OR :: compressed (prefix+::+suffix or ::+suffix),
+  // never matching 2-colon SQLite/ISO timestamps like 05:44:03 or Rust/C++ paths like std::io.
+  /(?<![A-Za-z0-9_:])(?:(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,6}:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,5})?|::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}))(?![A-Za-z0-9_:])/gi,
   // Concrete actor identities (Fellow/Sponsor IDs must not leak into routine sinks)
   /\bF-[0-9A-HJKMNP-TV-Z]{10,}\b/gi,
   /\busr_[A-Za-z0-9_-]{6,}\b/g,
 ];
 
-function containsExtraSensitivePattern(text: string): boolean {
+export function containsExtraSensitivePattern(text: string): boolean {
   for (const pattern of EXTRA_EGRESS_SCRUB_PATTERNS) {
     pattern.lastIndex = 0;
     if (pattern.test(text)) {
@@ -246,6 +249,94 @@ export function scrubObservabilityPayload(
 
   if (Array.isArray(payload)) {
     return payload.map((item) => scrubObservabilityPayload(item, seen));
+  }
+  if (payload instanceof Date) {
+    return Number.isNaN(payload.getTime()) ? "Invalid Date" : payload.toISOString();
+  }
+  if (payload instanceof URL) {
+    return sanitizeObservabilityUrl(payload.toString());
+  }
+  if (payload instanceof Set) {
+    return [...payload].map((item) => scrubObservabilityPayload(item, seen));
+  }
+  if (payload instanceof Map) {
+    const mapOut: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    const omittedMapKeys: string[] = [];
+    for (const [rawKey, val] of payload.entries()) {
+      const key = String(rawKey);
+      if (key === "__proto__" || key === "constructor" || key === "prototype") {
+        omittedMapKeys.push(key);
+        continue;
+      }
+      if (SENSITIVE_KEY_NAMES.has(key.toLowerCase())) {
+        omittedMapKeys.push(key);
+        continue;
+      }
+      Object.defineProperty(mapOut, scrubObservabilityText(key), {
+        value: scrubObservabilityPayload(val, seen),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    if (omittedMapKeys.length > 0) {
+      Object.defineProperty(mapOut, "_omitted_sensitive_fields", {
+        value: omittedMapKeys.sort(),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    return mapOut;
+  }
+  if (payload instanceof Error) {
+    const errOut: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(errOut, "name", {
+      value: scrubObservabilityText(payload.name),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(errOut, "message", {
+      value: scrubObservabilityText(payload.message),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+    if (typeof payload.stack === "string") {
+      Object.defineProperty(errOut, "stack", {
+        value: scrubObservabilityText(payload.stack),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    const omittedErrFields: string[] = [];
+    for (const [key, val] of Object.entries(payload as unknown as Record<string, unknown>)) {
+      if (key === "__proto__" || key === "constructor" || key === "prototype") {
+        omittedErrFields.push(key);
+        continue;
+      }
+      if (SENSITIVE_KEY_NAMES.has(key.toLowerCase())) {
+        omittedErrFields.push(key);
+        continue;
+      }
+      Object.defineProperty(errOut, key, {
+        value: scrubObservabilityPayload(val, seen),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    if (omittedErrFields.length > 0) {
+      Object.defineProperty(errOut, "_omitted_sensitive_fields", {
+        value: omittedErrFields.sort(),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    return errOut;
   }
 
   const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
@@ -359,10 +450,15 @@ export function buildOpsTelemetryRecord(input: {
     throw new RangeError("OPS2A_INVALID_RETRIES: retries must be finite and non-negative");
   }
 
+  const recordedAt = input.recorded_at ?? new Date().toISOString();
+  if (!Number.isFinite(Date.parse(recordedAt))) {
+    throw new RangeError("OPS2A_INVALID_RECORDED_AT: recorded_at must be a valid timestamp");
+  }
+
   const record: OpsTelemetryRecord = {
     facility: "OPS.2a",
     schema_version: OPS_TELEMETRY_SCHEMA,
-    recorded_at: input.recorded_at ?? new Date().toISOString(),
+    recorded_at: recordedAt,
     revision: input.revision,
     plane: input.plane,
     route_template: redactPathname(input.route_template),

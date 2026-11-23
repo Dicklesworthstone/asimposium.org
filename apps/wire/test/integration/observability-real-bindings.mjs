@@ -192,6 +192,53 @@ await runLocalWorkerJourney(
     assert.ok(statsMd.includes("Rule A10") || statsMd.includes("measured"));
     assert.ok(!/\bPROVED\b|\bleaderboard\b/i.test(statsMd));
 
+    // Rule A2 live isolation proof: create a private-draft problem (never published) + session,
+    // and verify public /stats.json counts do NOT change AND IP-shaped x-request-id is replaced safely.
+    const privateDraft = await call(
+      "/v1/problems",
+      {
+        title: "Private draft never counted in public /stats",
+        statement: "Draft statement PRIVATE_STATS_A2_CANARY for internal scratch only.",
+        falsifier: "Counterexample to private draft.",
+        motivation: "Verify Rule A2 private-draft exclusion on live /stats.json.",
+        scope: "Private draft only.",
+        out_of_scope: "Public ledger.",
+        success_criteria: "Never counted publicly before publication.",
+        areas: ["number-theory"],
+      },
+      proposer,
+      201,
+      "obs4-private-draft",
+    );
+    await call(
+      "/v1/sessions",
+      { problem_id: privateDraft.problem.id, intent: "explore" },
+      proposer,
+      201,
+    );
+    const afterPrivateResp = await worker.fetch(`${origin}/stats.json`, {
+      headers: { "User-Agent": userAgent, "x-request-id": "203.0.113.99" },
+    });
+    assert.equal(afterPrivateResp.status, 200);
+    const afterPrivateText = await afterPrivateResp.text();
+    assert.ok(!afterPrivateText.includes("PRIVATE_STATS_A2_CANARY"));
+    const afterPrivateStats = PlatformStatsFaceSchema.parse(JSON.parse(afterPrivateText));
+    assert.equal(
+      afterPrivateStats.collaboration.public_problems,
+      stats.collaboration.public_problems,
+      "private-draft problem must not increment public_problems",
+    );
+    assert.equal(
+      afterPrivateStats.ergonomics.sessions_opened,
+      stats.ergonomics.sessions_opened,
+      "private-draft session must not increment public sessions_opened",
+    );
+    assert.equal(
+      afterPrivateStats.quality.claims_total,
+      stats.quality.claims_total,
+      "private-draft activity must not increment public claims_total",
+    );
+
     // Verify pre-egress redactor strips live request URL/cookie/bearer canaries cleanly.
     const redactedSink = prepareRedactedSinkEvent("sentry", {
       request_id: "req-obs4-live-stats-001",
@@ -204,11 +251,12 @@ await runLocalWorkerJourney(
     assert.ok(!redactedStr.includes("secretFragmentObs4"));
 
     // 3. Query real migrated D1 outbox & screening_cases counts into LaunchAlertEvaluator.
+    // Note: screening_cases.state enum is 'pending'|'released'|'rejected'|'superseded' (migration 0091).
     const pendingOutboxRow = await env.DB.prepare(
       "SELECT COUNT(*) AS n FROM outbox WHERE state = 'pending'",
     ).first();
-    const openQuarantineRow = await env.DB.prepare(
-      "SELECT COUNT(*) AS n FROM screening_cases WHERE state = 'open'",
+    const pendingQuarantineRow = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM screening_cases WHERE state = 'pending'",
     ).first();
     const evaluator = new LaunchAlertEvaluator();
     const t0 = Date.now();
@@ -217,7 +265,7 @@ await runLocalWorkerJourney(
       request_count: 50,
       error_5xx_count: 0,
       post_revocation_acceptances: 0,
-      quarantine_backlog_count: Number(openQuarantineRow?.n ?? 0),
+      quarantine_backlog_count: Number(pendingQuarantineRow?.n ?? 0),
       outbox_oldest_age_seconds: 0,
       d1_storage_pct: 5,
       consecutive_backup_failures: 0,
