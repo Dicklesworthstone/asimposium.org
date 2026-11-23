@@ -55,7 +55,7 @@ test("matching repeated reads deduplicate but conflicting render receipts refuse
   assert.deepEqual(publicViewWatchTargets(DIGEST, { ...DIGEST }), [DIGEST]);
   assert.deepEqual(publicViewWatchTargets(DIGEST, { ...DIGEST, etag: '"different"' }), []);
   assert.deepEqual(publicViewWatchTargets(DIGEST,
-    ...Array.from({ length: 9 }, (_, i) => target(`C-${i + 1}`))), []);
+    ...Array.from({ length: 10 }, (_, i) => target(`C-${i + 1}`))), []);
 });
 
 test("client manifest decoding stays inside the credentialless route vocabulary", () => {
@@ -180,4 +180,28 @@ test("live status describes observed freshness, never scientific certainty", () 
   assert.match(publicWatchStatusText({ status: "unavailable", reason: "http" }), /last rendered snapshot/);
   assert.match(publicWatchStatusText({ status: "paused" }), /paused/);
   assert.match(publicWatchStatusText({ status: "update-available" }), /when ready/);
+});
+
+test("a problem's research preview participates in freshness alongside every claim", async () => {
+  const rows = await loadClaimBoard(face(10), ORIGIN, async (_problem, id) => ({
+    state: "ok",
+    origin: ORIGIN,
+    data: claim(id),
+    watch: target(id),
+  }));
+  const path = "/p/P-DEMO/events.json?since=0&limit=200&through=42";
+  const receipt = publicReadWatch(path, new Headers({ etag: '"events"' })).watch;
+  assert.deepEqual(receipt, { path, etag: '"events"' });
+  const targets = claimBoardWatchTargets(DIGEST, rows, receipt);
+  assert.equal(targets.length, 10);
+  assert.deepEqual(targets.at(-1), receipt);
+  assert.deepEqual(claimBoardWatchTargets(DIGEST, rows, undefined), []);
+  assert.deepEqual(
+    claimBoardWatchTargets(DIGEST, rows, { path: "/v1/inbox", etag: '"private"' }),
+    [],
+  );
+  const invalidRows = [
+    { ...rows[0]!, standing: { state: "unavailable" as const }, watch: undefined },
+  ];
+  assert.deepEqual(claimBoardWatchTargets(DIGEST, invalidRows, receipt), []);
 });

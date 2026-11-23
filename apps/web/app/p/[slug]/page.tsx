@@ -7,6 +7,7 @@ import { notFound } from "next/navigation";
 import { ThemeToggle } from "@/app/theme-toggle";
 import { CitationOmissions, CitationSummary } from "@/components/citations-view";
 import { ProblemClaimsBoard } from "@/components/problem-claims-board";
+import { ProblemRecentResearch, recentResearchQuery } from "@/components/problem-recent-research";
 import { ProblemRoster } from "@/components/problem-roster";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
@@ -25,6 +26,7 @@ import {
   stoaFetchCitations,
   stoaFetchClaimFace,
   stoaFetchCommentary,
+  stoaFetchEventHistory,
   stoaFetchProblemFace,
 } from "@/lib/public-ledger";
 import { buildProblemShareCardData } from "@/lib/share-card";
@@ -136,7 +138,8 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
   const reviews = face.items.filter((item) => item.kind === "statement-review");
   const commentaryCursor = commentaryCursorFromQuery((await searchParams)?.commentary_cursor);
   const commentaryQuery = `?${commentaryCursor ? `cursor=${commentaryCursor}&` : ""}limit=${COMMENTARY_PAGE_SIZE}`;
-  const [claimRows, commentaryResult, citationsResult] = await Promise.all([
+  const researchQuery = recentResearchQuery(face.cursor);
+  const [claimRows, commentaryResult, citationsResult, researchResult] = await Promise.all([
     loadClaimBoard(face, result.origin, stoaFetchClaimFace),
     stoaFetchCommentary(face.problem, result.origin, {
       cursor: commentaryCursor ?? Number.NaN,
@@ -145,6 +148,11 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
     stoaFetchCitations(face.problem, result.origin, {
       through: String(face.cursor),
       limit: String(CITATIONS_PAGE_SIZE),
+    }),
+    stoaFetchEventHistory(face.problem, result.origin, {
+      since: String(researchQuery.since),
+      limit: String(researchQuery.limit),
+      through: String(face.cursor),
     }),
   ]);
 
@@ -191,7 +199,7 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
             </Link>
           </p>
           <div className="problem-counts-row quiet">
-            <span>{claimRows.length} public claims promoted</span>
+            <span>{claimRows.length} public claims in this digest preview</span>
             <span> · </span>
             <span>{reviews.length} statement reviews</span>
             {citationsResult.state === "ok" && (
@@ -219,7 +227,11 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
 
         <PublicLedgerLive
           origin={result.origin}
-          targets={claimBoardWatchTargets(result.watch, claimRows)}
+          targets={claimBoardWatchTargets(
+            result.watch,
+            claimRows,
+            researchResult.state === "ok" ? researchResult.watch : undefined,
+          )}
         />
 
         {isSingleTeam && (
@@ -347,6 +359,11 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
           </section>
         )}
 
+        <ProblemRecentResearch
+          problemId={face.problem}
+          cursor={face.cursor}
+          result={researchResult}
+        />
         <ProblemClaimsBoard rows={claimRows} cursor={face.cursor} problemId={slug} />
         <ProblemRoster roster={face.roster} problemId={face.problem} cursor={face.cursor} />
 

@@ -22,7 +22,15 @@ function descendants<T extends ts.Node>(root: ts.Node, match: (node: ts.Node) =>
 }
 
 const pages = [
-  ["app/p/[slug]/page.tsx", "result.origin", "claimBoardWatchTargets(result.watch, claimRows)"],
+  [
+    "app/p/[slug]/page.tsx",
+    "result.origin",
+    `claimBoardWatchTargets(
+            result.watch,
+            claimRows,
+            researchResult.state === "ok" ? researchResult.watch : undefined,
+          )`,
+  ],
   ["app/p/[slug]/claims/[claim]/page.tsx", "result.origin", "publicViewWatchTargets(result.watch)"],
   ["app/now/page.tsx", "nowData.origin", "publicViewWatchTargets(nowData.watch)"],
   ["app/reviews/page.tsx", "result.origin", "publicViewWatchTargets(result.watch)"],

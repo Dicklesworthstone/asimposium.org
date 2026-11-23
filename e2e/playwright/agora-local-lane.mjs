@@ -54,6 +54,7 @@ import {
 } from "../../apps/wire/src/krater/export.ts";
 import { PUBLIC_EXPORT_MAX_BYTES } from "../../apps/wire/src/ledger/event-export-snapshot.ts";
 import { HonorsResponseSchema } from "../../packages/contracts/src/honors.ts";
+import { EventTailResponseSchema } from "../../packages/contracts/src/event-tail.ts";
 import {
   ClaimFaceResponseSchema,
   ProblemFaceResponseSchema,
@@ -2032,6 +2033,78 @@ async function main() {
         `${mode} a multiple-sponsor roster does not show a single-team problem notice`,
         (await page.locator(".single-team-banner").count()) === 0,
       );
+
+      const recentResearch = page.locator('section[data-recent-research-state="ok"]');
+      const researchCursor = Number(await recentResearch.getAttribute("data-research-through"));
+      const recentRecords = recentResearch.locator("[data-research-seq]");
+      const recentSequences = await recentRecords.evaluateAll((cards) =>
+        cards.map((card) => Number(card.getAttribute("data-research-seq"))),
+      );
+      record(
+        `${mode} problem page exposes a bounded readable recent-research preview`,
+        (await recentResearch.isVisible()) &&
+          Number.isSafeInteger(researchCursor) &&
+          researchCursor >= 0 &&
+          recentSequences.length > 0 &&
+          recentSequences.length <= 20 &&
+          (await recentResearch.innerText()).includes(
+            "not a complete history or a measure of scientific progress",
+          ),
+      );
+      const researchTail = EventTailResponseSchema.parse(
+        await (
+          await fetch(
+            `${target.origin}/p/${problemId}/events.json?since=${Math.max(0, researchCursor - 200)}&limit=200&through=${researchCursor}`,
+            { headers: { "user-agent": USER_AGENT } },
+          )
+        ).json(),
+      );
+      const researchTypes = new Map([
+        ["claim.created", ["claim"]],
+        ["claim.revised", ["claim"]],
+        ["claim.reanchored", ["claim"]],
+        ["review.created", ["review"]],
+        ["evidence.created", ["evidence"]],
+        ["hypothesis.created", ["hypothesis"]],
+        ["hypothesis.killed", ["hypothesis"]],
+        ["hypothesis.narrowed", ["hypothesis"]],
+        ["hypothesis.deferred", ["hypothesis"]],
+        ["hypothesis.resumed", ["hypothesis"]],
+        ["hypothesis.superseded", ["hypothesis"]],
+        ["dead_end.recorded", ["dead_end", "dead-end"]],
+        ["object.retracted", ["retraction"]],
+      ]);
+      const expectedResearch = researchTail.events
+        .filter(
+          (entry) =>
+            entry.event !== null &&
+            entry.body_omitted === "separate_object_face" &&
+            researchTypes.get(entry.event.type)?.includes(entry.event.object_kind),
+        )
+        .slice(-20)
+        .reverse();
+      record(
+        `${mode} research preview matches visible Workerd records at its own captured cursor`,
+        researchTail.page_end.through === researchCursor &&
+          JSON.stringify(recentSequences) ===
+            JSON.stringify(expectedResearch.map((entry) => entry.seq)),
+      );
+      const firstResearch = expectedResearch[0];
+      assert.ok(firstResearch?.event, "the seeded problem has a public research event");
+      const eventHref = await recentRecords
+        .first()
+        .getByRole("link", { name: "Read this exact ledger event", exact: true })
+        .getAttribute("href");
+      assert.equal(eventHref, `/r/p/${encodeURIComponent(problemId)}/events/${firstResearch.seq}`);
+      await page.goto(`${agora.origin}${eventHref}`, { waitUntil: "load" });
+      const researchEventText = await page.textContent("body");
+      record(
+        `${mode} recent research opens the exact public event with matching provenance`,
+        researchEventText?.includes(firstResearch.event.id) &&
+          researchEventText.includes(firstResearch.event.payload_sha256),
+      );
+      await page.goto(`${agora.origin}/p/${problemId}`, { waitUntil: "load" });
+
       const participantFace = ProblemFaceResponseSchema.parse(
         await (
           await fetch(`${target.origin}/p/${problemId}.json`, {

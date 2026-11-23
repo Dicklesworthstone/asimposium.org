@@ -9,6 +9,13 @@ import {
   STAGING_STOA_ORIGIN,
 } from "@asimposium/contracts";
 import {
+  EVENT_TAIL_OMISSIONS,
+  EVENT_TAIL_SCHEMA_ID,
+  EventTailResponseSchema,
+  eventTailPath,
+  type PublicEventEnvelope,
+} from "@asimposium/contracts/event-tail";
+import {
   REVIEW_QUEUE_BOUNDARY,
   REVIEW_QUEUE_NEED_TEXT,
   REVIEW_QUEUE_SCHEMA_ID,
@@ -881,6 +888,60 @@ describe("public read failure boundaries and recovery", () => {
   });
 });
 
+function problemResearchHistory(
+  through = 42,
+  record?: (seq: number) => PublicEventEnvelope["event"],
+) {
+  const since = Math.max(0, through - 200);
+  return EventTailResponseSchema.parse({
+    schema: EVENT_TAIL_SCHEMA_ID,
+    events: Array.from({ length: through - since }, (_, index) => {
+      const seq = since + index + 1;
+      const event =
+        record === undefined
+          ? {
+              id: "EV-" + seq,
+              type: "claim.created",
+              object_kind: "claim",
+              object_id: "C-" + seq,
+              object_version: 1,
+              created_at: "2026-11-20T12:00:00.000Z",
+              payload_sha256: "a".repeat(64),
+              caused_by: null,
+              causality_omitted: "not_recorded",
+              actor: {
+                fellow_id: "F-RECORDED",
+                sponsor_id: "usr_actor",
+                session_id: "S-RECORD",
+                model_self_declared: "declared-model",
+                harness_self_declared: "declared-harness",
+              },
+              object_url: "/p/P-SP4D/claims/C-" + seq + "@1.json?through=" + through,
+            }
+          : record(seq);
+      return {
+        record: "event",
+        problem_id: "P-SP4D",
+        seq,
+        event,
+        body_omitted: event === null ? "undisclosed_event" : "separate_object_face",
+      };
+    }),
+    page_end: {
+      control: "page_end",
+      schema: EVENT_TAIL_SCHEMA_ID,
+      problem_id: "P-SP4D",
+      since,
+      through,
+      next_cursor: through,
+      has_more: false,
+      next: null,
+      poll: eventTailPath("P-SP4D", "json", { since: through, limit: 200 }),
+    },
+    omitted: EVENT_TAIL_OMISSIONS,
+  });
+}
+
 describe("ProblemPage Server Component", () => {
   const originalFetch = globalThis.fetch;
 
@@ -920,6 +981,204 @@ describe("ProblemPage Server Component", () => {
     expect(html).toContain("every bounded operator is continuous");
     expect(html).toContain("This board records claims, evidence, and review");
     expect(html).toContain("digest_fields");
+  });
+
+  test("recent research reads one bounded window at the digest cursor and renders newest records first", async () => {
+    const through = 257;
+    const history = problemResearchHistory(through);
+    history.omitted.push("CANONICAL-SOURCE-LIMIT <scope-only>");
+    const eventReads: string[] = [];
+    setMockFetch(async (input, options) => {
+      const url = String(input);
+      if (url.includes("/events.json")) {
+        eventReads.push(url);
+        expect((options as RequestInit & { next: { revalidate: number } }).next.revalidate).toBe(0);
+        return Response.json(history, { headers: { etag: '"research"' } });
+      }
+      if (
+        url.includes("/claims/") ||
+        url.includes("/citations.json") ||
+        url.includes("/commentary.json")
+      )
+        return missingProblem();
+      return Response.json({ ...MOCK_PROBLEM_FACE, cursor: through });
+    });
+    const html = renderToStaticMarkup(
+      await ProblemPage({ params: Promise.resolve({ slug: "P-SP4D" }) }),
+    );
+    expect(eventReads).toEqual([
+      PRODUCTION_STOA_ORIGIN + "/p/P-SP4D/events.json?since=57&limit=200&through=257",
+    ]);
+    expect(html).toContain("Recent public research records");
+    expect(html).toContain("Scanned sequences 58 through 257 at ledger snapshot 257");
+    expect(html.match(/data-research-seq=/g)?.length).toBe(20);
+    expect(html).toContain('data-research-seq="257"');
+    expect(html).toContain('data-research-seq="238"');
+    expect(html).not.toContain('data-research-seq="237"');
+    expect(html.indexOf('data-research-seq="257"')).toBeLessThan(
+      html.indexOf('data-research-seq="238"'),
+    );
+    expect(html).toContain('href="/r/p/P-SP4D/events/257"');
+    expect(html).toContain(
+      'href="' + PRODUCTION_STOA_ORIGIN + '/p/P-SP4D/claims/C-257@1.json?through=257"',
+    );
+    expect(html).toContain('href="/p/P-SP4D/events?since=0&amp;limit=50&amp;through=257"');
+    expect(html).toContain("2 public claims in this digest preview");
+    expect(html).not.toContain("2 public claims promoted");
+    expect(html).toContain("Source omissions and limits");
+    expect(html).toContain("CANONICAL-SOURCE-LIMIT &lt;scope-only&gt;");
+    expect(html).not.toContain("<scope-only>");
+  });
+
+  test("recent research excludes private, unavailable, process and mismatched-kind events", async () => {
+    const history = problemResearchHistory(9);
+    const entries = history.events;
+    entries[1]!.event!.type = "evidence.created";
+    entries[1]!.event!.object_kind = "workshop";
+    entries[1]!.event!.object_id = "PRIVATE-WORKSHOP-CANARY";
+    entries[2]!.event = null;
+    entries[2]!.body_omitted = "undisclosed_event";
+    entries[3]!.event!.object_id = "WITHDRAWN-CANARY";
+    entries[3]!.event!.causality_omitted = "unavailable";
+    entries[3]!.body_omitted = "content_unavailable";
+    entries[4]!.event!.type = "problem.statement-revised";
+    entries[4]!.event!.object_kind = "problem";
+    entries[4]!.event!.object_id = "PROCESS-CANARY";
+    entries[5]!.event!.type = "review.created";
+    entries[5]!.event!.object_kind = "review";
+    entries[5]!.event!.object_id = "R-6";
+    entries[5]!.event!.object_url = "/p/P-SP4D/reviews/R-6.json";
+    entries[5]!.event!.screening_notice = {
+      action: "published-with-warning",
+      notice: "screening-warning",
+      category: "dual-use-boundary",
+    };
+    entries[6]!.event!.type = "constructor";
+    entries[6]!.event!.object_id = "UNKNOWN-TYPE-CANARY";
+    entries[7]!.event!.type = "dead_end.recorded";
+    entries[7]!.event!.object_kind = "dead-end";
+    entries[7]!.event!.object_id = "D-8";
+    entries[7]!.event!.object_url = null;
+    entries[8]!.event!.type = "object.retracted";
+    entries[8]!.event!.object_kind = "retraction";
+    entries[8]!.event!.object_id = "RET-9";
+    entries[8]!.event!.object_url = null;
+    setMockFetch(async (input) =>
+      String(input).includes("/events.json")
+        ? Response.json(history)
+        : Response.json({ ...MOCK_PROBLEM_FACE, cursor: 9 }),
+    );
+    const html = renderToStaticMarkup(
+      await ProblemPage({ params: Promise.resolve({ slug: "P-SP4D" }) }),
+    );
+    expect(html.match(/data-research-seq=/g)?.length).toBe(4);
+    for (const canary of [
+      "PRIVATE-WORKSHOP-CANARY",
+      "WITHDRAWN-CANARY",
+      "PROCESS-CANARY",
+      "UNKNOWN-TYPE-CANARY",
+    ]) {
+      expect(html).not.toContain(canary);
+    }
+    for (const label of [
+      "Claim promoted",
+      "Review published",
+      "Dead end recorded",
+      "Retraction recorded",
+    ])
+      expect(html).toContain(label);
+    expect(html).toContain("Published with a screening context notice: dual-use-boundary.");
+    expect(html).toContain("not a complete history or a measure of scientific progress");
+    const retractionCard = html.match(/data-research-seq="9"[^>]*>([\s\S]*?)<\/li>/)?.[1];
+    expect(retractionCard).toContain("Retraction recorded");
+    expect(retractionCard).toContain('href="/r/p/P-SP4D/events/9"');
+    expect(retractionCard).not.toContain("Read the public source (JSON)");
+  });
+
+  test("recent research distinguishes an empty window from failed or mismatched public reads", async () => {
+    let response: Response;
+    setMockFetch(async (input) =>
+      String(input).includes("/events.json")
+        ? response.clone()
+        : Response.json(MOCK_PROBLEM_FACE),
+    );
+    for (const candidate of [
+      new Response("Unavailable", { status: 503 }),
+      Response.json(problemResearchHistory(43)),
+      Response.json({
+        ...problemResearchHistory(),
+        events: [{ ...problemResearchHistory().events[0], private_body: "PRIVATE-BODY-CANARY" }],
+      }),
+    ]) {
+      response = candidate;
+      const html = renderToStaticMarkup(
+        await ProblemPage({ params: Promise.resolve({ slug: "P-SP4D" }) }),
+      );
+      expect(html).toContain('data-recent-research-state="unavailable"');
+      expect(html).toContain("Recent research records are temporarily unavailable");
+      expect(html).toContain("every bounded operator is continuous");
+      expect(html).not.toContain("No readable research records");
+      expect(html).not.toContain("PRIVATE-BODY-CANARY");
+    }
+    response = Response.json(problemResearchHistory(42, () => null));
+    const empty = renderToStaticMarkup(
+      await ProblemPage({ params: Promise.resolve({ slug: "P-SP4D" }) }),
+    );
+    expect(empty).toContain('data-recent-research-state="ok"');
+    expect(empty).toContain(
+      "No readable research records were returned in the scanned window. Older records may exist.",
+    );
+    expect(empty).not.toContain("data-research-seq=");
+  });
+
+  test("a new problem's zero cursor is requested exactly and stays an empty successful preview", async () => {
+    const requests: string[] = [];
+    setMockFetch(async (input) => {
+      const url = String(input);
+      if (url.includes("/events.json")) {
+        requests.push(url);
+        return Response.json(problemResearchHistory(0));
+      }
+      return Response.json({ ...MOCK_PROBLEM_FACE, cursor: 0, items: [] });
+    });
+    const html = renderToStaticMarkup(
+      await ProblemPage({ params: Promise.resolve({ slug: "P-SP4D" }) }),
+    );
+    expect(requests).toEqual([
+      PRODUCTION_STOA_ORIGIN + "/p/P-SP4D/events.json?since=0&limit=200&through=0",
+    ]);
+    expect(html).toContain('data-research-through="0"');
+    expect(html).toContain("No ledger positions were returned in this window.");
+    expect(html).toContain("0 public claims in this digest preview");
+  });
+
+  test("a partial event response discloses unread positions without fetching another page", async () => {
+    const history = problemResearchHistory(257);
+    history.events = history.events.slice(0, 2);
+    history.page_end.next_cursor = 59;
+    history.page_end.has_more = true;
+    history.page_end.next = eventTailPath("P-SP4D", "json", {
+      since: 59,
+      limit: 200,
+      through: 257,
+    });
+    history.page_end.poll = eventTailPath("P-SP4D", "json", { since: 59, limit: 200 });
+    let eventReads = 0;
+    setMockFetch(async (input) => {
+      if (String(input).includes("/events.json")) {
+        eventReads++;
+        return Response.json(history);
+      }
+      return Response.json({ ...MOCK_PROBLEM_FACE, cursor: 257 });
+    });
+    const html = renderToStaticMarkup(
+      await ProblemPage({ params: Promise.resolve({ slug: "P-SP4D" }) }),
+    );
+    expect(eventReads).toBe(1);
+    expect(html).toContain("Scanned sequences 58 through 59 at ledger snapshot 257");
+    expect(html).toContain("The source returned only part of this window");
+    expect(html).toContain('href="/p/P-SP4D/events?since=59&amp;limit=200&amp;through=257"');
+    expect(html.match(/data-research-seq=/g)?.length).toBe(2);
   });
 
   test("statement-review context notices stay visible beside the exact reviewed formulation", async () => {
@@ -1100,7 +1359,7 @@ describe("ProblemPage Server Component", () => {
     expect(html).toContain("F-reviewer");
     expect(html).toContain("harness_self_declared");
     expect(html).not.toContain("/claims/SR-");
-    expect(html).toContain("2 public claims promoted");
+    expect(html).toContain("2 public claims in this digest preview");
     expect(html).not.toContain("6 public claims");
     expect(html).not.toContain("/claims/S");
     expect(html).toContain("/claims/C-1");
@@ -1148,7 +1407,7 @@ describe("ProblemPage Server Component", () => {
     expect(html).not.toContain("<script>boundaryAttack()");
     expect(html).not.toContain("<img src=x");
     expect(html).toContain("Author-supplied formulation · untrusted data");
-    expect(html).toContain("2 public claims promoted");
+    expect(html).toContain("2 public claims in this digest preview");
     expect(html).not.toContain("Recorded resolution");
     face = { ...legacy, items: [...legacy.items, ...MOCK_PROBLEM_FACE.items] };
     const historical = renderToStaticMarkup(await ProblemPage(props));

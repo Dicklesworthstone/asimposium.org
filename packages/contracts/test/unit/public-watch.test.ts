@@ -104,7 +104,7 @@ test("watch manifests are bounded, nonempty, unique and seeded from actual repre
   );
   assert.equal(
     validPublicWatchTargets(
-      Array.from({ length: 10 }, (_, i) => ({
+      Array.from({ length: 11 }, (_, i) => ({
         path: `/p/P-DEMO/claims/C-${i + 1}.json`,
         etag: '"one"',
       })),
@@ -119,4 +119,57 @@ test("retry hints cannot remove the polling floor or create unbounded sleep", ()
   assert.equal(publicWatchRetryAfter("999999"), 120_000);
   for (const value of [null, "-1", "0", "1e3", "tomorrow"])
     assert.equal(publicWatchRetryAfter(value), undefined);
+});
+
+test("event watches require one complete bounded snapshot and never permit long polling", () => {
+  for (const path of [
+    "/p/P-DEMO/events.json?since=0&limit=200&through=42",
+    "/p/P-DEMO/events.json?since=57&limit=200&through=257",
+    "/p/P-DEMO/events.json?since=0&limit=200&through=0",
+  ])
+    assert.equal(publicWatchPath(path), "face", path);
+  for (const query of [
+    "",
+    "since=0&limit=200",
+    "since=0&through=42",
+    "limit=200&through=42",
+    "since=0&limit=201&through=42",
+    "since=0&limit=0&through=0",
+    "since=0&limit=200&through=201",
+    "since=2&limit=200&through=1",
+    "since=00&limit=200&through=42",
+    "since=-1&limit=200&through=42",
+    "since=0&limit=200&through=9007199254740992",
+    "since=0&limit=200&through=42&wait=0",
+    "since=0&limit=200&through=42&wait=25",
+    "since=0&limit=200&through=42&since=1",
+    "since=0&limit=200&through=42&token=secret",
+  ])
+    assert.equal(
+      publicWatchPath("/p/P-DEMO/events.json" + (query ? "?" + query : "")),
+      undefined,
+      query,
+    );
+  for (const path of [
+    "/v1/p/P-DEMO/events.json?since=0&limit=200&through=42",
+    "/p/P-DEMO/events.ndjson?since=0&limit=200&through=42",
+    "/p/P-DEMO/events.json?since=0&limit=200&through=42#fragment",
+  ])
+    assert.equal(publicWatchPath(path), undefined, path);
+});
+
+test("a full problem preview can watch its digest, eight claim reads and recent history", () => {
+  const targets = [
+    { path: "/p/P-DEMO.json", etag: '"digest"' },
+    ...Array.from({ length: 8 }, (_, index) => ({
+      path: "/p/P-DEMO/claims/C-" + (index + 1) + ".json?through=42",
+      etag: '"claim"',
+    })),
+    { path: "/p/P-DEMO/events.json?since=0&limit=200&through=42", etag: '"events"' },
+  ];
+  assert.equal(validPublicWatchTargets(targets), true);
+  assert.equal(
+    validPublicWatchTargets([...targets, { path: "/now.json", etag: '"extra"' }]),
+    false,
+  );
 });
