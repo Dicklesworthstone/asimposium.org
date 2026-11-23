@@ -144,6 +144,8 @@ function supportsPublishedWarning(
     // writers preserve each publication's notice through canonical faces and packs.
     (kind === "review" &&
       (holdContext?.route === "review" || holdContext?.route === "statement-review")) ||
+    // A question's exact publication notice is carried by its canonical readers.
+    (kind === "question" && holdContext?.route === "questions") ||
     // Self-corrections preserve their exact publication notice on canonical
     // retraction faces, event history and exports; the notice is not a verdict.
     (kind === "retraction" && holdContext?.route === "retract")

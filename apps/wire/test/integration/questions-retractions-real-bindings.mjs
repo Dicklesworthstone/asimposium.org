@@ -425,6 +425,67 @@ await runLocalWorkerJourney(async (context) => {
     [answerNotice.id],
   );
   assert.ok(repeatedAnswerNotices[0].acknowledged_at, "delivery retry preserves acknowledgment");
+  const warningProblem = "P-QUESTION-WARNING";
+  const warningSponsor = "usr_question_warning";
+  const warningFellow = await enroll("question-warning", warningSponsor);
+  await fixtures.seedProblem(warningProblem, warningSponsor);
+  const warningSession = await call(
+    "/v1/sessions",
+    { problem_id: warningProblem, intent: "explore" },
+    warningFellow,
+    201,
+  );
+  const warningText = "Which finite cases distinguish these two arithmetic recurrences?";
+  await fixtures.setScreenMode("allow-with-warning");
+  const warned = await call(
+    `/v1/sessions/${warningSession.session_id}/questions`,
+    { body_md: warningText },
+    warningFellow,
+    201,
+    "warned-question-ask",
+  );
+  await fixtures.setScreenMode("pass");
+  const exactWarning = `target=${warned.question_id}&through=${warned.seq}`;
+  const warningBase = `${origin}/p/${warningProblem}/questions`;
+  const warningJsonUrl = `${warningBase}.json?${exactWarning}`;
+  const warnedFace = await worker.fetch(warningJsonUrl);
+  assert.equal(warnedFace.status, 200);
+  const warnedQuestion = QuestionsListResponseSchema.parse(await warnedFace.json()).questions[0];
+  assert.deepEqual(warnedQuestion.screening_notice, {
+    action: "published-with-warning",
+    category: "dual-use-boundary",
+    notice: "screening-warning",
+  });
+  for (const format of ["md", "html"]) {
+    const face = await worker.fetch(`${warningBase}.${format}?${exactWarning}`);
+    assert.equal(face.status, 200);
+    const text = await face.text();
+    const noticePosition = text.indexOf(
+      "Published with a screening context notice: dual-use-boundary",
+    );
+    assert.ok(noticePosition >= 0 && noticePosition < text.indexOf(warningText), format);
+  }
+  const controlWarning = (action) =>
+    operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+      target_id: `${warningProblem}/${warned.question_id}`,
+      target_kind: "question",
+      action,
+      reason: "Verify that current visibility controls cover the question and its notice.",
+    });
+  await controlWarning("hide");
+  const hiddenWarned = await worker.fetch(warningJsonUrl, {
+    headers: { "If-None-Match": warnedFace.headers.get("etag") },
+  });
+  assert.equal(hiddenWarned.status, 404);
+  assert.ok(!(await hiddenWarned.text()).includes("screening-warning"));
+  await controlWarning("restore");
+  const restoredWarned = await worker.fetch(warningJsonUrl);
+  assert.equal(restoredWarned.status, 200);
+  assert.deepEqual(
+    QuestionsListResponseSchema.parse(await restoredWarned.json()).questions[0],
+    warnedQuestion,
+  );
+
   console.log(
     JSON.stringify({
       stage: "question-answer-inbox",
@@ -1370,6 +1431,7 @@ await runLocalWorkerJourney(async (context) => {
       historical_pre_retraction_cut_verified: true,
       question_exact_and_snapshot_pagination_verified: true,
       question_current_controls_before_conditional_verified: true,
+      question_warning_exact_publication_verified: true,
       redaction_staleness_without_cosmetic_restore_verified: true,
       revision_cannot_restore_withdrawn_standing_verified: true,
     }),

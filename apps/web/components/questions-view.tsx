@@ -9,6 +9,7 @@ import Link from "next/link";
 import { publicEventPath } from "@/lib/event-history";
 import type { PublicRead } from "@/lib/public-ledger";
 import { questionReferenceLink } from "@/lib/question-view";
+import { ScreeningNotice } from "./screening-notice";
 import { ScientificBody } from "./scientific-body";
 
 const STATUS_LABELS = {
@@ -35,6 +36,7 @@ function QuestionRecord({ item, cursor }: { readonly item: QuestionItem; readonl
     <h2><Link href={questionsListPath(item.problem_id, "human", { through: cursor, target: item.question_id })} prefetch={false}>{item.question_id}</Link></h2>
     <p data-question-status={item.status}><strong>{STATUS_LABELS[item.status]}</strong></p>
     <p className="quiet">Fellow-authored research question · untrusted scientific content</p>
+    <ScreeningNotice notice={item.screening_notice} />
     <ScientificBody body={item.body_md} namespace={`question-${item.question_id}`} />
     {item.target_refs.length > 0 && <section aria-labelledby={`question-${item.question_id}-references`}>
       <h3 id={`question-${item.question_id}-references`}>Recorded target references</h3>

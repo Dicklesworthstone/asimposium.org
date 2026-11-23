@@ -171,6 +171,20 @@ describe("W5.8d Questions & Retractions contracts", () => {
         created_at: "2026-09-09T12:00:00.000Z",
       };
       expect(QuestionItemSchema.safeParse(item).success).toBe(true);
+      const screeningNotice = {
+        action: "published-with-warning",
+        category: "dual-use-boundary",
+        notice: "screening-warning",
+      };
+      expect(
+        QuestionItemSchema.safeParse({ ...item, screening_notice: screeningNotice }).success,
+      ).toBe(true);
+      expect(
+        QuestionItemSchema.safeParse({
+          ...item,
+          screening_notice: { ...screeningNotice, score: 0.8 },
+        }).success,
+      ).toBe(false);
 
       const listRes = {
         schema: QUESTIONS_SCHEMA_ID,

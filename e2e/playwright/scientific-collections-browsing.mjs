@@ -28,6 +28,7 @@ export async function seedScientificCollections(target, claimsFixture) {
   const { problemId, ids: claims } = claimsFixture;
   const author = await sessionFor(target, problemId, "usr_agora_questions_conflicts", "agora-research-pages");
   const resolver = await sessionFor(target, problemId, "usr_agora_resolution_pages", "agora-resolution-pages");
+  const fixtures = await target.worker.getExport();
   const conflicts = [];
   const questions = [];
   for (let index = 0; index < 9; index += 1) {
@@ -42,13 +43,19 @@ export async function seedScientificCollections(target, claimsFixture) {
     }, author.token);
     assert.equal(conflict.status, 201, `conflict ${index + 1}: ${conflict.body.code ?? ""}`);
     conflicts.push(conflict.body.conflict_id);
-    const question = await fellowPost(target, `${author.path}/questions`, {
-      body_md: `${QUESTION}\n\nResearch question ${index + 1}.`,
-      target_refs: [`${claims[index]}@1`, conflict.body.conflict_id],
-      blocking: `${claims[index]}@1`,
-    }, author.token);
-    assert.equal(question.status, 201, `question ${index + 1}: ${question.body.code ?? ""}`);
-    questions.push(question.body.question_id);
+    const warn = index === 8;
+    if (warn) await fixtures.setScreenMode("allow-with-warning");
+    try {
+      const question = await fellowPost(target, `${author.path}/questions`, {
+        body_md: `${QUESTION}\n\nResearch question ${index + 1}.`,
+        target_refs: [`${claims[index]}@1`, conflict.body.conflict_id],
+        blocking: `${claims[index]}@1`,
+      }, author.token);
+      assert.equal(question.status, 201, `question ${index + 1}: ${question.body.code ?? ""}`);
+      questions.push(question.body.question_id);
+    } finally {
+      if (warn) await fixtures.setScreenMode("pass");
+    }
   }
   const historical = await readCollection(target, conflictsListPath(problemId, "json", { limit: 8 }), ConflictsListResponseSchema);
   assert.equal(historical.conflicts.length, 8);
@@ -181,6 +188,15 @@ export async function scientificCollectionsBrowsing({ page, agora, target, fixtu
       new URL(page.url()).searchParams.get("target") === questions[8] &&
       await page.getByRole("heading", { level: 1, name: questions[8], exact: true }).count() === 1 &&
       await page.locator('[data-question-status="open"]').count() === 1);
+  const warningSource = await readCollection(
+    target,
+    questionsListPath(problemId, "json", { through: cursor, target: questions[8] }),
+    QuestionsListResponseSchema,
+  );
+  const warning = page.locator(`article[id="${questions[8]}"] [data-screening-notice="screening-warning"]`);
+  record(`${mode} questions: exact warning agrees with the canonical publication`,
+    warningSource.questions[0]?.screening_notice?.category === "dual-use-boundary" &&
+      await warning.count() === 1 && (await warning.innerText()).includes("dual-use-boundary"));
   await page.getByRole("link", { name: "Read the latest public record", exact: true }).click();
   await page.waitForURL(`${agora.origin}${questionsListPath(problemId, "human", { target: questions[8] })}`);
   const answer = page.getByRole("heading", { name: "Submitted answering work", exact: true }).locator("..");
@@ -189,6 +205,8 @@ export async function scientificCollectionsBrowsing({ page, agora, target, fixtu
       await answer.getByRole("link", { name: `${claims[8]}@1`, exact: true }).getAttribute("href") ===
         `/p/${problemId}/claims/${encodeURIComponent(`${claims[8]}@1`)}?through=${currentCursor}` &&
       (await answer.innerText()).includes("does not independently verify"));
+  record(`${mode} questions: answering keeps the original publication warning`,
+    await warning.count() === 1);
   await answer.getByRole("link", { name: `${claims[8]}@1`, exact: true }).click();
   await page.getByRole("heading", { level: 1, name: `${claims[8]}@1`, exact: true }).waitFor();
   record(`${mode} questions: submitted answer resolves to the public scientific source`,
