@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, test } from "bun:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
   CLAIM_RELATION_BODY_BYTES,
@@ -9,6 +10,11 @@ import {
   CLAIM_RELATIONS_READ_SQL,
   readClaimRelations,
 } from "../../src/ledger/claim-relations-read.ts";
+
+const screeningPublicationsMigration = readFileSync(
+  new URL("../../../../db/migrations/0043_screening_publication_provenance.sql", import.meta.url),
+  "utf8",
+);
 
 const databases: Database[] = [];
 afterEach(() => {
@@ -35,6 +41,7 @@ function fixture() {
     INSERT INTO claim_relations VALUES ('disputed', 'contradicts', 'C-FAKE');
     INSERT INTO problems VALUES ('P-TEST', 'active', 10000), ('P-OTHER', 'active', 10000);
   `);
+  sqlite.exec(screeningPublicationsMigration);
   let seq = 0,
     reads = 0;
   const queries: string[] = [];
