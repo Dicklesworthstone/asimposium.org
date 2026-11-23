@@ -1,0 +1,42 @@
+{
+  "drafts": [
+    {
+      "id": "marked-group-equality",
+      "role": "calibration",
+      "source": {
+        "project": "model_guided_research",
+        "revision": "56bee96",
+        "paths": ["scripts/group_student_probe.py", "tests/test_diagnostics_data.py"]
+      },
+      "proposal": {
+        "title": "Exact reuse of equality answers in two marked groups",
+        "statement": "For positive words u and v of length at most three over a and b, classify equality by evaluating the words in each of two fixed marked groups: S3 with a=(12), b=(23), and the additive group Z/6Z with a=1, b=2. Within either marking, two queries with the same canonical relator key have the same Boolean answer. Build the key from u times the inverse of v by free reduction, cyclic reduction and canonicalization over rotations and inversion. Test the stronger claim that answers can be reused across the two markings using the same key.",
+        "falsifier": "Within a marking, give two queries with the same key and different direct evaluations. To refute reuse across markings, give one query whose direct truth value changes when the marking changes.",
+        "motivation": "An equality oracle may charge for each query. An exact reuse rule can save queries without learning a new rule from the answers. This finite calibration separates a sound algebraic rewrite from the assumption that a cache can be shared across marked groups.",
+        "scope": "Include the empty word and all 15 words of length at most three. Enumerate all 120 unordered pairs with repetition in each marking. Evaluate S3 by permutation composition and Z/6Z by modular addition. Record the key, direct answer, and marking for each pair.",
+        "out_of_scope": "Measuring query savings at larger group orders, estimating runtime or model performance, and transferring equality answers to other presentations.",
+        "success_criteria": "Release a replayable table accounting for all 240 evaluations. A second sponsor's Fellow independently reconstructs the two evaluation functions, checks for disagreement in each within-marking key bucket, and supplies an explicit witness if cross-marking reuse fails.",
+        "areas": ["algebra", "cs-theory"]
+      }
+    },
+    {
+      "id": "hebbian-binding-controls",
+      "role": "registered-research",
+      "source": {
+        "project": "bio_inspired_nanochat",
+        "revision": "94bd312",
+        "paths": ["docs/online_learning_status.md", "scripts/e2e/trained_hebbian_binding.py"]
+      },
+      "proposal": {
+        "title": "Does matched training learn to use activation pairing in Hebbian memory?",
+        "statement": "For the registered two-layer width-192 language model, test whether preserving activation pairing during training yields a pairing-specific next-token coding benefit on held-out text. Within each of four seeds use the same initialization and 131072 training tokens for a paired-write model and a shuffled-write model. At read time compare paired, shuffled-ensemble, and frozen writes. The primary endpoint is bits per byte after the first complete chunk on the 128 prespecified held-out documents.",
+        "falsifier": "The registered positive claim fails if any of its four contrasts misses a 0.005 bits-per-byte improvement, any seed has a nonpositive contrast, or any one-sided 98.75% paired document-bootstrap lower bound is nonpositive. The four contrasts are the paired-trained paired read against its shuffled ensemble and frozen read, and its pairing benefit against the corresponding gap at initialization and after shuffled-write training. A mismatch in initialization, exposure, or read controls invalidates the measurement.",
+        "motivation": "Switching memory on and off combines information from activation pairing with effects of performing an update. A matched shuffled control preserves the write mechanism and measures whether the original pairing contributes to performance.",
+        "scope": "Use the admitted eight checkpoints with 128 updates per checkpoint. Verify checkpoint, tokenizer, and token-stream digests and reset fast state between held-out documents. Combine the probabilities of the four registered shuffled reads before computing their coding loss. Bootstrap over documents with seeds held fixed.",
+        "out_of_scope": "Long-context claims, scaling laws, performance at longer training exposures, and claims about biological synapses. Treat the associative-recall probes as descriptive.",
+        "success_criteria": "Publish matched-run receipts, per-document bit and byte counts, all four paired contrasts and their uncertainty, and the verdict under the registered rule. A second sponsor's Fellow recomputes the decision from the permitted inputs. Preserve a null or inconclusive result with the same provenance.",
+        "areas": ["cs-theory", "probability"]
+      }
+    }
+  ]
+}

@@ -57,6 +57,7 @@ const LANES = [
   "read-quota",
   "reanchor-moves",
   "relations-gaps",
+  "research-intake",
   "reviews",
   "screening-appeals",
   "secret-scan",

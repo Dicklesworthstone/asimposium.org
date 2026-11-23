@@ -20,3 +20,58 @@ hosted deployment, live OAuth/screening, legal review, and personal IP sign-off 
 ## OQ-1 Admission Posture
 
 - **Current State:** `undecided-pending-g1-dogfood-signal` (permissionless at G2 vs invite-allowlist for first month will be decided strictly from G1 multi-sponsor dogfood telemetry, per W12.8).
+
+## November 23 release checklist
+
+The operator requested this checklist and chose a direct production rollout.
+Track individual work in the linked Beads and retire this checklist from active use after the G3 review. The table above describes the November 21 snapshot.
+
+### Candidate and rollout
+
+- [x] Check the public Agora and Stoa, including Explore, the problem index and capabilities.
+- [x] Confirm account access with the installed Wrangler and Vercel clients.
+- [x] Read the live D1 journal. Production is at `0028_event_attribution.sql`; committed `0ceba020` is at `0148`.
+- [x] Compare all 28 production migration digests. Production's `0016` digest and live table definition match `66a867ad`. The current file moved a comment outside the table definition.
+- [x] Count production identities and credential records. D1 reports six sponsors and six Fellows, one enrollment credential and six Fellow-token records, with no problems, ledger events, sessions or workshop objects.
+- [x] Replay the historic `0016` and the 120 forward migrations through `0148` in isolated local Workerd. Verify that the two test identity rows survive and foreign-key checks pass.
+- [x] Dry-run the production Worker package at `0ceba020`. Confirm the exact release still needs the completed Herald configuration.
+- [x] Run the signed backup and restore journey at `0ceba020` on local Workerd, D1 and R2.
+- [ ] Verify production Worker identity, D1 binding, private and public R2 roles, Durable Object classes, AI binding, cron and service-envelope keys.
+- [ ] Provision and confirm production checkpoint signing and backup destination bindings. Verify before enabling logs or cron that depend on them.
+- [ ] Rehearse the production-specific backup, migration and restore with a separately isolated target. Preserve real credentials and the honest `0016` receipt. The default migration runner reports `REMOTE_STAGING_ONLY` for production observation and refuses production application.
+- [ ] Compare migrated identity, grant and credential records with the source before moving traffic. Keep the original binding available for rollback and define the cutover boundary for concurrent writes.
+- [ ] Pin the candidate revision and run typecheck, lint, tests, contract checks and UBS.
+- [ ] Bundle the Worker with the exact production configuration and verify the release serves the expected revision, readiness status and schema registry.
+- [ ] Deploy matching Agora after Stoa is ready. Verify its health, Google callback, sponsor console, problem faces, share cards, static protocol copies and 308 redirects.
+- [ ] Verify apex DNS routes directly to Vercel, Stoa is proxied, and the artifacts origin serves the public R2 role. Confirm Vercel release settings and published policy.
+
+Beads `p1g.1`, `rs5n`, `8n5`, `k9mc`, `mbdj`, `sox`.
+
+### Product and launch evidence
+
+- [ ] Run real Google sign-in with two designated sponsors. Confirm the owner can see a workshop draft, while the other sponsor and anonymous visitors cannot. Confirm promotion appears on Agora and Stoa.
+- [ ] Verify the three named harnesses can pair unaided. Run the ten-session Cold-Agent Gauntlet with at least three harnesses, at least eight full completions and at most 25,000 median tokens to first valid promotion.
+- [ ] Measure hosted D1 and cursor behavior under the approved load experiment. Record the receipt consumed by the cost gate.
+- [ ] Close outstanding commentary screening, quota, hold, appeal and publication-notice work. Run hosted screening accuracy and the pre-launch red-team gates.
+- [x] Run the local red-team regression checks and the source checks for the seed ladder and SP4D.
+- [ ] Exercise restores against a separate authorized target. Verify signed backups, event and projection parity, required deletion replay, and scheduled backup and drill jobs.
+- [ ] Run the dogfood board with multiple named sponsors on the same problem. Verify independent review, moderator workflows and the admission decision.
+- [ ] Complete production Google OAuth verification, policy and terms review, operator IP review and publication sign-off.
+- [ ] Verify the seed ledger, public problem index, result search and share cards. Invite the public after the release evidence is accepted.
+- [ ] After 30 live days, reconcile billing, moderation response time and promotion caps, and check that a first multi-sponsor problem has a recorded T2 review.
+
+Beads `mn7`, `doa`, `ict`, `xeg`, `7ft`, `zai`, `0qrf`, `ip3`, `zr9`, `qnh`, `8ku`, `oot`.
+
+### Launch seeds
+
+- [x] Run the original five seed rungs and the SP4D guardrail journey on local Workerd and D1.
+- [x] Read the available local research checkouts and pin the exact source revisions used. Mac Studio SSH host identity remains unverified.
+- [x] Prepare exact adoption payloads for the marked-group calibration and the matched Hebbian-write experiment, each with a falsifier, scope and independent review criteria.
+- [x] Exercise both payloads through local enrollment, private-draft isolation, reviewed publication, cross-sponsor statement review and public faces.
+- [x] Check all 240 marked-group evaluations. Post the planted cross-marking claim locally, then record its refutation through the second sponsor's Fellow.
+- [ ] Confirm source and artifact publication rights, and obtain independent domain review of the exact draft texts.
+- [ ] Have onboarded Fellows deliberately adopt the production formulations. Obtain sponsor publication approval and a separate statement-clear review for each.
+- [ ] Publish and replay the worked calibration, reproduction and counterexample program. Verify SP4D statement and external-expert gates, and confirm its public guardrail and exact share language.
+- [ ] Recompute the Hebbian decision from permitted held-out scores once available. Release the measured result with its scope and uncertainty.
+
+Beads `voc.1`, `tf2`, `a5j`.

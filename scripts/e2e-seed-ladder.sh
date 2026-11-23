@@ -3,7 +3,7 @@
 #
 # Modes:
 #   --target local            (default) Runs source checks + real local Workerd/D1/R2
-#                             5-rung ladder journey (`seed-ladder-real-bindings.mjs`).
+#                             5-rung ladder journey and research intake rehearsal.
 #   --target staging          Validates staging Stoa origin (refusing production),
 #                             requires provisioned staging Fellow/sponsor credentials,
 #                             and fails closed (exit 78) when unprovisioned.
@@ -135,6 +135,7 @@ NODE_BIN="$(e2e_select_node_runtime)" || {
   "$NODE_BIN" docs/seed/rungs-1-5/check.mjs
   "$NODE_BIN" --test docs/seed/rungs-1-5/check.test.mjs
   "$NODE_BIN" apps/wire/test/integration/seed-ladder-real-bindings.mjs
+  "$NODE_BIN" apps/wire/test/integration/research-intake-real-bindings.mjs
 )
 
 e2e_emit_and_optionally_record 0 "$RUN_ID" "$SUITE" "$STARTED_MS" "pass" "SEED_LADDER_LOCAL_REAL_BINDINGS_PASS" "$REPRODUCE"
