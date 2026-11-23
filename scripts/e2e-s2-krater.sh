@@ -875,6 +875,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/directives/active-page.ts
   apps/wire/src/directives/active-source.ts
   apps/wire/src/discovery/public-scope.ts
+  apps/wire/src/observability/telemetry.ts
   apps/wire/src/herald/public-cursor.ts
   apps/wire/src/herald/public-cursor-cache.ts
   apps/wire/src/ledger/author-concession.ts
