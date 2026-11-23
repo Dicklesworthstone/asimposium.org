@@ -557,7 +557,7 @@ await runLocalWorkerJourney(async (context) => {
     },
   );
 
-  // citation_reused impact echo (1e7, migration 0082): another Fellow citing
+  // citation_reused impact echo (1e7, source pins in migration 0153): another Fellow citing
   // the same canonical source on another public problem echoes once, privately,
   // to the first recorder; a replay adds nothing and the citer is not echoed.
   const reuseProblem = (
@@ -612,9 +612,65 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(reuseEchoes[0].caused_by_event_id, "the echo names the causing event");
   assert.deepEqual(
     reuseEchoes[0].next_actions?.map((action) => action.url),
-    [`/p/${reuseProblem}/citations/${reused.citation_id}.json`],
+    [`/p/${reuseProblem}/citations/${reused.citation_id}@1.json`],
   );
   assert.deepEqual(await reusedEchoes(reviewerB), [], "the citer is not echoed");
+
+  const reusePins = await env.DB.prepare(`SELECT pins.*, source.problem_id AS origin_problem_id,
+    source.object_id AS origin_citation_id, source.object_version AS origin_version,
+    source.payload_sha256 AS origin_event_sha256, cause.payload_sha256 AS reuse_event_sha256
+    FROM citation_reuse_notice_sources pins
+    JOIN events source ON source.id=pins.origin_event_id
+    JOIN events cause ON cause.id=pins.reuse_event_id WHERE pins.notice_id=?`)
+    .bind(reuseEchoes[0].id)
+    .first();
+  assert.ok(reusePins, "the private echo captures both exact publications");
+  assert.equal(reusePins.origin_problem_id, problemId);
+  assert.equal(reusePins.origin_citation_id, cit1Id);
+  assert.equal(reusePins.origin_version, 2);
+  assert.equal(reusePins.origin_sha256, reusePins.origin_event_sha256);
+  assert.equal(reusePins.reuse_sha256, reusePins.reuse_event_sha256);
+  assert.equal(reusePins.reuse_event_id, reuseEchoes[0].caused_by_event_id);
+  assert.ok(reuseEchoes[0].detail.includes(`${cit1Id}@2`));
+  const pinnedAction = await worker.fetch(`${origin}${reuseEchoes[0].next_actions[0].url}`);
+  assert.equal(pinnedAction.status, 200);
+  assert.equal(SingleCitationResponseSchema.parse(await pinnedAction.json()).citation.version, 1);
+
+  // Current controls on either exact source must govern both private readers,
+  // bounded pages, counts and acknowledgments, even across problem boundaries.
+  const visibleInbox = InboxResponseSchema.parse(
+    await call("/v1/inbox?limit=50", undefined, authorA),
+  );
+  for (const [controlledProblem, controlledCitation] of [
+    [problemId, cit1Id],
+    [reuseProblem, reused.citation_id],
+  ]) {
+    const controlCitation = (action) =>
+      operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+        target_id: `${controlledProblem}/${controlledCitation}`,
+        target_kind: "citation",
+        action,
+        reason: "Verify citation reuse notices retain both visible source publications.",
+      });
+    await controlCitation("hide");
+    assert.deepEqual(await reusedEchoes(authorA), []);
+    const hiddenPage = InboxResponseSchema.parse(
+      await call("/v1/inbox?limit=1", undefined, authorA),
+    );
+    assert.ok(hiddenPage.items.every((item) => item.id !== reuseEchoes[0].id));
+    assert.equal(hiddenPage.unacknowledged_count, visibleInbox.unacknowledged_count - 1);
+    const sponsorInbox = await sponsorCall(sponsorA, "POST", "/v1/sponsors/inbox", "inbox.read", {
+      fellow_id: _fellowIdA,
+      limit: 50,
+    });
+    assert.ok(sponsorInbox.items.every((item) => item.id !== reuseEchoes[0].id));
+    assert.equal(sponsorInbox.fellow_unacknowledged_count, hiddenPage.unacknowledged_count);
+    const refusedAck = await call("/v1/inbox/ack", { notice_ids: [reuseEchoes[0].id] }, authorA);
+    assert.equal(refusedAck.acknowledged_count, 0);
+    await controlCitation("restore");
+    assert.deepEqual(await reusedEchoes(authorA), reuseEchoes);
+  }
+
   // A Fellow re-citing a source it recorded first itself is not a reuse.
   const selfSession = (
     await call("/v1/sessions", { problem_id: reuseProblem, intent: "explore" }, authorA, 201)
@@ -630,6 +686,21 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(
     !JSON.stringify(await call(`/p/${reuseProblem}.json`)).includes("was cited again"),
     "an echo is private",
+  );
+
+  // A separate reusable source lets the end-of-journey redaction proof remove
+  // each side independently, without changing the frozen collection below.
+  const redactionSourcePayload = {
+    ...validDoiPayload,
+    title: "A second source for citation reuse visibility",
+    locator: "10.1234/citation-echo-redaction",
+  };
+  const redactionSource = await call(
+    `/v1/sessions/${selfSession}/citations`,
+    redactionSourcePayload,
+    authorA,
+    201,
+    "citation-echo-redaction-source",
   );
 
   // Continuations are source-head scans at one immutable cut. A correction
@@ -1125,6 +1196,49 @@ await runLocalWorkerJourney(async (context) => {
     }
   }
 
+  // Lawful permanent redaction of the cause and of a different echo's origin
+  // independently removes the private item, its count and its acknowledgment.
+  const redactionReuseSession = (
+    await call("/v1/sessions", { problem_id: problemId, intent: "explore" }, reviewerB, 201)
+  ).session_id;
+  const redactionReuse = await call(
+    `/v1/sessions/${redactionReuseSession}/citations`,
+    redactionSourcePayload,
+    reviewerB,
+    201,
+    "citation-echo-redaction-reuse",
+  );
+  const originRedactionEcho = (await reusedEchoes(authorA)).find(
+    (item) => item.problem_id === problemId && item.target_id === redactionReuse.citation_id,
+  );
+  assert.ok(originRedactionEcho, "a second independent source has a visible reuse echo");
+  const originRedactionPins = await env.DB.prepare(
+    "SELECT origin_event_id FROM citation_reuse_notice_sources WHERE notice_id=?",
+  )
+    .bind(originRedactionEcho.id)
+    .first();
+  assert.ok(originRedactionPins);
+  for (const [notice, eventId] of [
+    [reuseEchoes[0], reusePins.reuse_event_id],
+    [originRedactionEcho, originRedactionPins.origin_event_id],
+  ]) {
+    const before = InboxResponseSchema.parse(await call("/v1/inbox?limit=50", undefined, authorA));
+    assert.ok(before.items.some((item) => item.id === notice.id));
+    await fixtures.redactPublicContent(eventId);
+    const after = InboxResponseSchema.parse(await call("/v1/inbox?limit=50", undefined, authorA));
+    assert.ok(after.items.every((item) => item.id !== notice.id));
+    assert.equal(after.unacknowledged_count, before.unacknowledged_count - 1);
+    const ack = await call("/v1/inbox/ack", { notice_ids: [notice.id] }, authorA);
+    assert.equal(ack.acknowledged_count, 0);
+    const sponsorInbox = await sponsorCall(sponsorA, "POST", "/v1/sponsors/inbox", "inbox.read", {
+      fellow_id: _fellowIdA,
+      limit: 50,
+    });
+    assert.ok(sponsorInbox.items.every((item) => item.id !== notice.id));
+    assert.equal(sponsorInbox.fellow_unacknowledged_count, after.unacknowledged_count);
+  }
+  assert.deepEqual(await reusedEchoes(authorA), []);
+
   console.log(
     JSON.stringify({
       kind: "citations-real-bindings",
@@ -1136,10 +1250,24 @@ await runLocalWorkerJourney(async (context) => {
       exact_history_beyond_200_versions: true,
       signed_problem_control_frozen_faces: true,
       current_redaction_before_validators_all_formats: true,
+      citation_reuse_pinned_source_and_cause: true,
+      citation_reuse_current_controls_counts_and_ack: true,
+      citation_reuse_origin_and_cause_redaction: true,
     }),
   );
   return {
     projectionParityExpect: {
+      // Each removed immutable publication leaves its own citation head and
+      // version unavailable to replay; no unrelated drift is permitted.
+      [reuseProblem]: {
+        status: "unreplayable",
+        drift: [
+          `citation_versions:orphan_row:${reused.citation_id}@1`,
+          `citation_versions:orphan_row:${redactionSource.citation_id}@1`,
+          `citations:orphan_row:${reused.citation_id}`,
+          `citations:orphan_row:${redactionSource.citation_id}`,
+        ],
+      },
       // The redacted citation's own rows, plus the forged version 99.
       [problemId]: {
         status: "unreplayable",

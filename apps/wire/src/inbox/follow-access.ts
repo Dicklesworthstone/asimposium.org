@@ -1,4 +1,5 @@
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
+import { VISIBLE_CITATION_REUSE_NOTICE_SQL } from "./citation-reuse-notices.ts";
 import { VISIBLE_CLAIM_NOTICE_SQL } from "./claim-notices.ts";
 import { VISIBLE_HYPOTHESIS_NOTICE_SQL } from "./hypothesis-notices.ts";
 import { VISIBLE_QUESTION_ANSWER_NOTICE_SQL } from "./question-notices.ts";
@@ -45,8 +46,7 @@ export const FOLLOW_DELETE_SQL = `
  * count and acknowledgment, including the final hydration recheck.
  *
  * Notices without a structured problem and target keep their existing behavior.
- * Citation reuse has a cross-problem origin not yet recorded structurally;
- * this guard does not infer that origin from the notice's prose. */
+ * Citation reuse has its own exact cross-problem source-pair guard below. */
 const VISIBLE_RESEARCH_IMPACT_SQL = `(
   fellow_inbox_notices.notice_type <> 'impact_echo'
   OR fellow_inbox_notices.impact_kind IS NULL
@@ -157,7 +157,7 @@ export const VISIBLE_INBOX_NOTICE_SQL = `(
         )
       )
   )
-) AND ${VISIBLE_CLAIM_NOTICE_SQL} AND ${VISIBLE_HYPOTHESIS_NOTICE_SQL} AND ${VISIBLE_QUESTION_ANSWER_NOTICE_SQL} AND ${VISIBLE_RESEARCH_IMPACT_SQL}`;
+) AND ${VISIBLE_CLAIM_NOTICE_SQL} AND ${VISIBLE_HYPOTHESIS_NOTICE_SQL} AND ${VISIBLE_QUESTION_ANSWER_NOTICE_SQL} AND ${VISIBLE_RESEARCH_IMPACT_SQL} AND ${VISIBLE_CITATION_REUSE_NOTICE_SQL}`;
 
 /** Expiry ends inbox actionability, not durable history or cursor allocation.
  * Bind one captured request time after any visibility bindings. */

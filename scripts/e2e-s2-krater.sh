@@ -398,6 +398,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0150_enrollment_protocol_conflicts.sql
   db/migrations/0151_unified_question_leases.sql
   db/migrations/0152_sponsor_report_history.sql
+  db/migrations/0153_citation_reuse_source_pins.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -702,6 +703,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/inbox/store.ts
   apps/wire/src/inbox/review-invitation-link.ts
   apps/wire/src/inbox/follow-access.ts
+  apps/wire/src/inbox/citation-reuse-notices.ts
   apps/wire/src/inbox/follow-principal.ts
   apps/wire/src/inbox/ledger-notice-actions.ts
   apps/wire/src/inbox/ledger-notice-sources.ts
@@ -1048,6 +1050,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0150_enrollment_protocol_conflicts.sql
   0151_unified_question_leases.sql
   0152_sponsor_report_history.sql
+  0153_citation_reuse_source_pins.sql
 )
 
 

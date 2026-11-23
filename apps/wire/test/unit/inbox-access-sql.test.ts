@@ -8,6 +8,7 @@ import {
   INBOX_UNACKNOWLEDGED_SQL,
   VISIBLE_INBOX_NOTICE_SQL,
 } from "../../src/inbox/follow-access.ts";
+import { installCitationReuseReadSchema } from "./citation-reuse-schema.ts";
 
 // Exercise the production SQL on SQLite, not canned D1 query responses.
 // These are unit-level SQL proofs; real D1 transaction integration is separate.
@@ -36,6 +37,7 @@ function fixture(run: (db: Database) => void) {
       INSERT INTO enrollment_fellows VALUES ('fellow-a'), ('fellow-b');
       INSERT INTO problem_memberships VALUES ('P-PRIVATE', 'fellow-a');
     `);
+    installCitationReuseReadSchema(db);
     run(db);
   } finally {
     db.close();

@@ -22,6 +22,7 @@ import {
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { createInboxNotice } from "../../src/inbox/store.ts";
+import { seedCitationReuseTaxonomyNotice } from "./citation-reuse-taxonomy.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 const fixtureDatabases = new Set<Database>();
@@ -504,6 +505,15 @@ describe("W6.3 Inbox, follows, notices, and impact echoes", () => {
       "retry_trigger_fired",
     ];
     for (const echoKind of remainingEchoes) {
+      if (echoKind === "citation_reused") {
+        await seedCitationReuseTaxonomyNotice(
+          db,
+          "P-INBOX-CITATIONS",
+          fellow,
+          await enrollFellow(),
+        );
+        continue;
+      }
       await createInboxNotice(db, {
         fellowId: fellow.fellowId,
         problemId: "P-INBOX-1",

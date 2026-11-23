@@ -7,6 +7,7 @@ import type { Env } from "../../src/env.ts";
 import { createSponsorInboxRouter, readSponsorInbox } from "../../src/inbox/sponsor-inbox.ts";
 import { getInboxNotices } from "../../src/inbox/store.ts";
 import { sponsorMutationRefusal } from "../../src/moderation/sponsor-suspension.ts";
+import { installCitationReuseReadSchema } from "./citation-reuse-schema.ts";
 
 const NOW = 1_800_000_000_000;
 const FELLOW = "fellow-alice";
@@ -39,6 +40,7 @@ function fixture() {
       ('fellow-alice','usr_alice','alice-fellow'),('fellow-bob','usr_bob','bob-fellow');
     INSERT INTO problems VALUES ('P-PUBLIC','active',0),('P-PRIVATE','private-draft',0);
   `);
+  installCitationReuseReadSchema(sql);
   let afterPageRead: (() => void) | undefined;
   let reads = 0;
   const db = {
@@ -610,7 +612,9 @@ describe("sponsor inbox reads currently owned Fellow notices", () => {
           await readBoth(true);
         }
         for (const event of [source, ...(cause === null ? [] : [cause])]) {
-          f.sql.query("UPDATE event_content SET redacted_at='redacted' WHERE event_id=?").run(event);
+          f.sql
+            .query("UPDATE event_content SET redacted_at='redacted' WHERE event_id=?")
+            .run(event);
           await readBoth(false);
           f.sql.query("UPDATE event_content SET redacted_at=NULL WHERE event_id=?").run(event);
           await readBoth(true);

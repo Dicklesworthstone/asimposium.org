@@ -11,6 +11,7 @@ import {
   type NoticeCreateInput,
   notifyProblemFollowersOfStatementRevision,
 } from "../../src/inbox/store.ts";
+import { installCitationReuseReadSchema } from "./citation-reuse-schema.ts";
 
 // Real SQLite SQL and the shipped notice schema; D1 transport is an adapter.
 async function fixture(
@@ -37,6 +38,7 @@ async function fixture(
       "utf8",
     ),
   );
+  installCitationReuseReadSchema(sql);
   let failure = -1;
   function prepare(text: string) {
     let values: (string | number | null)[] = [];

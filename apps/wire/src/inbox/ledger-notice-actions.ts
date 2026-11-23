@@ -157,8 +157,8 @@ export function ledgerNoticeActions(
     return [
       {
         action: "orient",
-        url: `/p/${problemId}/citations/${targetId}.json`,
-        reason: `Read ${targetId} beside your own citation of the same source before relying on either.`,
+        url: `/p/${problemId}/citations/${targetId}@1.json`,
+        reason: `Read ${targetId}@1 beside your own citation of the same source before relying on either.`,
       },
     ];
   }
