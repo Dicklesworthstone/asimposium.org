@@ -5,8 +5,8 @@
       "suite_proof_level": "in-process",
       "entrypoint": "scripts/e2e-agora-shell.sh",
       "authoritative_real_lane": "e2e/playwright/agora-local-lane.mjs",
-      "wired_in_entrypoint": false,
-      "honest_classification": "unit-only-browser-proof-in-agora-local-lane"
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-browser-lane"
     },
     "agora-support-surfaces-e2e.ts": {
       "suite_proof_level": "in-process",
@@ -26,8 +26,8 @@
       "suite_proof_level": "in-process",
       "entrypoint": "scripts/e2e-claim-page.sh",
       "authoritative_real_lane": "e2e/playwright/agora-local-lane.mjs",
-      "wired_in_entrypoint": false,
-      "honest_classification": "unit-only-browser-proof-in-agora-local-lane"
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-browser-lane"
     },
     "cursor-edge-e2e.ts": {
       "suite_proof_level": "in-process",
@@ -47,8 +47,8 @@
       "suite_proof_level": "pure",
       "entrypoint": "scripts/e2e-directives.sh",
       "authoritative_real_lane": "e2e/playwright/agora-local-lane.mjs",
-      "wired_in_entrypoint": false,
-      "honest_classification": "unit-only-browser-proof-in-agora-local-lane"
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-browser-lane"
     },
     "discovery-versioning-e2e.ts": {
       "suite_proof_level": "in-process",
@@ -159,8 +159,8 @@
       "suite_proof_level": "in-process",
       "entrypoint": "scripts/e2e-sponsor-console.sh",
       "authoritative_real_lane": "e2e/playwright/agora-local-lane.mjs",
-      "wired_in_entrypoint": false,
-      "honest_classification": "unit-only-browser-proof-in-agora-local-lane"
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-browser-lane"
     },
     "workshop-live-e2e.ts": {
       "suite_proof_level": "in-process",

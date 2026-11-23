@@ -88,11 +88,30 @@ if ! bun test apps/web/test/unit/directive-actions.test.ts; then
   exit 1
 fi
 
-# 3. Run mock-free directives lifecycle & OPS.2a logging suite
+# 3. Check directives lifecycle & OPS.2a diagnostics in-process.
 if ! bun run scripts/suite/directives-e2e.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "DIRECTIVES_E2E_SUITE_FAILED" "$reproduce"
   exit 1
 fi
+
+# 4. Exercise real console directive server actions, Fellow inbox delivery, and acknowledgment in Chromium against local Workerd/D1.
+if ! node_binary="$(e2e_select_node_runtime)"; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GENUINE_NODE_UNAVAILABLE" "$reproduce"
+  exit 78
+fi
+browser_status=0
+"$node_binary" e2e/playwright/agora-local-lane.mjs --build || browser_status=$?
+case "$browser_status" in
+  0) ;;
+  78)
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "DIRECTIVES_BROWSER_UNAVAILABLE" "$reproduce"
+    exit 78
+    ;;
+  *)
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "DIRECTIVES_BROWSER_FAILED" "$reproduce"
+    exit 1
+    ;;
+esac
 
 e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "" "$reproduce"
 exit 0

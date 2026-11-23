@@ -82,11 +82,30 @@ if ! bun test apps/web/test/unit/console-idempotency.test.ts \
   exit 1
 fi
 
-# 2. Run Sponsor Console E2E suite with OPS.2a diagnostic logging
+# 2. Check Sponsor Console inputs and diagnostics in-process.
 if ! bun run scripts/suite/sponsor-console-e2e.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "SPONSOR_CONSOLE_E2E_SUITE_FAILED" "$reproduce"
   exit 1
 fi
+
+# 3. Exercise real authenticated Sponsor Console, S-3 split, workshop privacy, and signed actions in Chromium against local Workerd/D1.
+if ! node_binary="$(e2e_select_node_runtime)"; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GENUINE_NODE_UNAVAILABLE" "$reproduce"
+  exit 78
+fi
+browser_status=0
+"$node_binary" e2e/playwright/agora-local-lane.mjs --build || browser_status=$?
+case "$browser_status" in
+  0) ;;
+  78)
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "SPONSOR_CONSOLE_BROWSER_UNAVAILABLE" "$reproduce"
+    exit 78
+    ;;
+  *)
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "SPONSOR_CONSOLE_BROWSER_FAILED" "$reproduce"
+    exit 1
+    ;;
+esac
 
 e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "" "$reproduce"
 exit 0
