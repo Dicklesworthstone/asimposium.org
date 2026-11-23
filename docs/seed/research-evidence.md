@@ -8,6 +8,7 @@ Run these commands from the ASImposium checkout, passing the path to each local 
 
 ```sh
 python3 scripts/replay-research-seed.py hebbian-binding-controls ~/projects/bio_inspired_nanochat
+python3 scripts/replay-research-seed.py hebbian-reward-timing ~/projects/bio_inspired_nanochat
 python3 scripts/replay-research-seed.py checked-group-catalog ~/projects/model_guided_research
 ```
 
@@ -30,6 +31,28 @@ The registered decision required all four contrasts to reach 0.005 bits per byte
 | --- | --- |
 | `results/trained_hebbian_binding_2026-11-23.json` | `c7e65ebc23cec33e0a802daa36a85ccf43ada8cef06645761d403c537557acf7` |
 | `results/trained_hebbian_binding_2026-11-23.jsonl.gz` | `58496a9aa1547c808b9e3156674976ff28e72fa5efec57f67787cebd0cc0c69c` |
+
+## Follow-up on reward timing
+
+The follow-up tests a separate hypothesis about when feedback reaches a
+Hebbian write in a synthetic copy task. The replay checks 48 runs, reconstructs
+6,144 recorded feedback gains, verifies 24,576 recorded writes and checks the
+240 held-out scores used in the decision. All eight supervised starts meet the
+0.10 competence floor. Effects compare the average expected reward over updates
+32, 64, 96 and 128 on the same held-out set for each cohort.
+
+| Starting condition | Control for same-episode feedback | Improvement in percentage points | Positive seeds | Paired sign-flip p | Passed |
+| --- | --- | ---: | ---: | ---: | :---: |
+| Cold | Neutral | 0.001949 | 6/8 | 0.144531 | No |
+| Cold | One episode late | 0.000530 | 6/8 | 0.027344 | No |
+| Supervised | Neutral | 0.358337 | 7/8 | 0.019531 | No |
+| Supervised | One episode late | 0.246096 | 6/8 | 0.039063 | No |
+
+Each contrast required at least one percentage point of improvement, six
+positive seeds and a one-sided paired p-value at most 0.025. No contrast met
+the effect threshold. These are archived outcomes from the two-layer,
+width-64 model after 128 synthetic policy updates. The replay checks the
+recorded experiment and decision without running training.
 
 ## Exact group acquisition from checked catalog proposals
 

@@ -5,8 +5,10 @@ import argparse
 import gzip
 import hashlib
 import json
+import math
 from collections import Counter, defaultdict
 from io import BytesIO
+from itertools import product
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -14,6 +16,7 @@ from zipfile import ZipFile
 INTAKE = Path(__file__).resolve().parents[1] / "docs" / "seed" / "research-intake.json"
 HEBBIAN = "hebbian-binding-controls"
 GROUP = "checked-group-catalog"
+REWARD_TIMING = "hebbian-reward-timing"
 
 
 def require(condition, message):
@@ -223,20 +226,131 @@ def replay_group(report, archive):
     }
 
 
+def reward_checkpoints(run, arm):
+    checkpoints = ("0", "32", "64", "96", "128")
+    require(run["heldout"].keys() == set(checkpoints), "Incorrect reward checkpoints")
+    require(run["sites"] == 4 and len(run["train"]) == 128, "Incorrect reward run size")
+    reward_ema = None
+    dopamine = 0.0
+    for step_number, step in enumerate(run["train"], 1):
+        require(step["step"] == step_number and step["writes"] == 4, "Deferred write count differs")
+        reward = step["reward"]
+        require(0 <= reward <= 1 and (reward * 16) % 1 == 0, "Invalid batch reward")
+        previous_dopamine = dopamine
+        error = reward - (reward_ema if reward_ema is not None else 0.0)
+        dopamine = 0.8 * previous_dopamine + 0.2 * math.tanh(2 * error)
+        reward_ema = reward if reward_ema is None else 0.8 * reward_ema + 0.2 * reward
+        gain = {"aligned": 1 + dopamine, "lagged": 1 + previous_dopamine, "neutral": 1}[arm]
+        require(
+            math.isclose(step["da"], dopamine, rel_tol=0, abs_tol=1e-6)
+            and math.isclose(step["dopamine_gain"], gain, rel_tol=0, abs_tol=1e-6),
+            "Feedback schedule differs",
+        )
+    scores = []
+    for checkpoint in checkpoints:
+        record = run["heldout"][checkpoint]
+        require(record["examples"] == 512 and 0 < record["expected_reward"] < 1, "Invalid holdout")
+        scores.append(record["expected_reward"])
+    return scores
+
+
+def replay_reward_timing(report, archive):
+    traces = json.loads(gzip.decompress(archive))
+    studies = {"cold": range(410, 418), "supervised": range(40521, 47522, 1000)}
+    require(traces.keys() == studies.keys(), "Incorrect reward studies")
+    require(report["traces"]["sha256"] == hashlib.sha256(archive).hexdigest(), "Trace digest differs")
+    arms = ("aligned", "neutral", "lagged")
+    outcomes = {}
+    for cohort, seeds in studies.items():
+        study = traces[cohort]
+        runs = study["runs"]
+        require(runs.keys() == {str(seed) for seed in seeds}, "Incorrect set of reward seeds")
+        paired = []
+        for seed in seeds:
+            policies = runs[str(seed)]
+            require(policies.keys() == set(arms), "Missing or extra feedback arm")
+            require(
+                all(policies[arm]["heldout"]["0"] == policies["aligned"]["heldout"]["0"] for arm in arms),
+                "Matched policies start with different holdout scores",
+            )
+            paired.append({arm: reward_checkpoints(policies[arm], arm) for arm in arms})
+
+        contrasts = {}
+        require(study["contrasts"] == report[cohort]["contrasts"], "Summary and trace contrasts differ")
+        for control in ("neutral", "lagged"):
+            differences = [
+                math.fsum(a - b for a, b in zip(row["aligned"][1:], row[control][1:], strict=True)) / 4
+                for row in paired
+            ]
+            observed = math.fsum(differences)
+            extreme = sum(
+                math.fsum(sign * delta for sign, delta in zip(signs, differences, strict=True))
+                >= observed - 1e-14
+                for signs in product((-1, 1), repeat=len(differences))
+            )
+            mean_gain = observed / len(differences)
+            p_value = extreme / 2 ** len(differences)
+            wins = sum(delta > 0 for delta in differences)
+            passed = mean_gain >= 0.01 and p_value <= 0.025 and wins >= 6
+            expected = study["contrasts"][control]
+            require(
+                math.isclose(mean_gain, expected["mean"], rel_tol=0, abs_tol=1e-14)
+                and all(
+                    math.isclose(actual, recorded, rel_tol=0, abs_tol=1e-14)
+                    for actual, recorded in zip(differences, expected["seed_deltas"], strict=True)
+                )
+                and (p_value, wins, passed) == (expected["one_sided_p"], expected["positive_seeds"], expected["pass"]),
+                f"Registered contrast differs: {cohort} versus {control}",
+            )
+            contrasts[control] = {"mean": mean_gain, "one_sided_p": p_value, "positive_seeds": wins, "pass": passed}
+        competent = sum(row["aligned"][0] >= 0.10 for row in paired)
+        if cohort == "supervised":
+            require(
+                study["competent_initializations"] == report[cohort]["competent_initializations"] == competent
+                and study["starting_state_sha256"] == report[cohort]["starting_state_sha256"],
+                "Supervised starting evidence differs",
+            )
+        advance = all(contrast["pass"] for contrast in contrasts.values()) and (
+            cohort == "cold" or competent >= 6
+        )
+        require(advance == study["advance"] == report[cohort]["advance"], "Advancement decision differs")
+        outcomes[cohort] = {"advance": advance, "competent_starts": competent, "contrasts": contrasts}
+
+    policy_runs = sum(len(seeds) for seeds in studies.values()) * len(arms)
+    training_episodes = policy_runs * 128
+    heldout_scores = policy_runs * 5
+    require(
+        (policy_runs, training_episodes, heldout_scores)
+        == tuple(report["traces"][field] for field in ("policy_runs", "training_episodes", "archived_holdout_scores")),
+        "Reported trace counts differ",
+    )
+    return {
+        "policy_runs": policy_runs,
+        "gain_observations": training_episodes,
+        "committed_writes": training_episodes * 4,
+        "heldout_scores": heldout_scores,
+        "studies": outcomes,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("seed", choices=(HEBBIAN, GROUP))
+    replays = {HEBBIAN: replay_hebbian, GROUP: replay_group, REWARD_TIMING: replay_reward_timing}
+    parser.add_argument("seed", choices=replays)
     parser.add_argument("source_root", type=Path, help="Path to the local source project")
     args = parser.parse_args()
     try:
-        drafts = json.loads(INTAKE.read_text(encoding="utf-8"))["drafts"]
-        source = next(draft["source"] for draft in drafts if draft["id"] == args.seed)
+        intake = json.loads(INTAKE.read_text(encoding="utf-8"))
+        source = (
+            intake["followups"][args.seed]
+            if args.seed in intake["followups"]
+            else next(draft["source"] for draft in intake["drafts"] if draft["id"] == args.seed)
+        )
         root = args.source_root.resolve(strict=True)
         artifacts = {
             role: pinned_bytes(root, spec) for role, spec in source["artifacts"].items()
         }
-        replay = replay_hebbian if args.seed == HEBBIAN else replay_group
-        result = replay(json.loads(artifacts["report"]), artifacts["archive"])
+        result = replays[args.seed](json.loads(artifacts["report"]), artifacts["archive"])
     except (OSError, ValueError, KeyError, ImportError) as error:
         parser.exit(1, f"Replay refused: {error}\n")
     print(json.dumps({"seed": args.seed, "pinned_revision": source["revision"], **result}, sort_keys=True))
