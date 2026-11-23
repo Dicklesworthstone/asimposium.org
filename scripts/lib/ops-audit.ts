@@ -98,18 +98,59 @@ export function redactOpsValue(value: unknown, seen: WeakSet<object> = new WeakS
     if (Array.isArray(value)) {
       return value.map((item) => redactOpsValue(item, seen));
     }
-    const out: Record<string, unknown> = {};
+    if (value instanceof Date) {
+      return Number.isNaN(value.getTime()) ? "Invalid Date" : value.toISOString();
+    }
+    if (value instanceof Error) {
+      const errOut: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+      Object.defineProperty(errOut, "name", {
+        value: redactOpsText(value.name),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+      Object.defineProperty(errOut, "message", {
+        value: redactOpsText(value.message),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+      if (typeof value.stack === "string") {
+        Object.defineProperty(errOut, "stack", {
+          value: redactOpsText(value.stack),
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      }
+      return errOut;
+    }
+    const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     const redactedKeys: string[] = [];
     for (const [k, v] of Object.entries(value)) {
+      if (k === "__proto__" || k === "constructor" || k === "prototype") {
+        redactedKeys.push(k);
+        continue;
+      }
       const lower = k.toLowerCase();
       if (NEVER_LOG_OBJECT_KEYS.has(lower)) {
         redactedKeys.push(k);
       } else {
-        out[k] = redactOpsValue(v, seen);
+        Object.defineProperty(out, k, {
+          value: redactOpsValue(v, seen),
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
       }
     }
     if (redactedKeys.length > 0) {
-      out._redacted_fields = redactedKeys.sort();
+      Object.defineProperty(out, "_redacted_fields", {
+        value: redactedKeys.sort(),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
     }
     return out;
   }

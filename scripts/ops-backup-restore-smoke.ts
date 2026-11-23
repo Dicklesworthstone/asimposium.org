@@ -144,6 +144,21 @@ function runNegativeAuthorityProbes(
           failures.push(`STALE_AUTHORITY_LEAK: revoked token ${entry.target_id} still active`);
         }
       } else if (entry.kind === "private_draft_removal") {
+        if (entry.target_id.startsWith("P-")) {
+          if (!tables.has("problems")) {
+            failures.push("MISSING_REQUIRED_AUTHORITY_TABLE: problems");
+            continue;
+          }
+          const liveProblemDraft = db
+            .prepare("SELECT COUNT(*) AS n FROM problems WHERE id = ? AND status = 'private-draft'")
+            .get(entry.target_id) as { n: number } | null;
+          if ((liveProblemDraft?.n ?? 0) > 0) {
+            failures.push(
+              `DELETED_PRIVATE_PROBLEM_RESURRECTED: private-draft problem ${entry.target_id} still live`,
+            );
+          }
+          continue;
+        }
         if (!tables.has("workshop_objects")) {
           failures.push("MISSING_REQUIRED_AUTHORITY_TABLE: workshop_objects");
           continue;

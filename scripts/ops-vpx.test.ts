@@ -829,6 +829,60 @@ describe("OPS.5 runbook index, never-log redaction corpus, and audit-logged ops:
     expect(trfReport.failures.some((f) => f.includes("STALE_TRANSFER_PENDING_AFTER_RESTORE"))).toBe(
       true,
     );
+
+    // 5. private_draft_removal targeting a P-* private-draft problem detects resurrection in problems table.
+    const pdDbPath = join(workDir, "private-problem-resurrected.sqlite");
+    writeFileSync(pdDbPath, srcBytes);
+    const pddb = new Database(pdDbPath);
+    pddb.exec(`
+      CREATE TABLE problems (id TEXT PRIMARY KEY, status TEXT NOT NULL);
+      INSERT INTO problems VALUES ('P-ERASED-DRAFT-1', 'private-draft');
+    `);
+    pddb.close();
+    const pdEntries: RetentionControlJournal["entries"] = [
+      {
+        id: "RJ-PD-1",
+        kind: "private_draft_removal",
+        target_id: "P-ERASED-DRAFT-1",
+        recorded_at: "2026-11-21T12:16:00.000Z",
+      },
+    ];
+    const pdJournalPath = join(workDir, "pd-journal.json");
+    writeFileSync(
+      pdJournalPath,
+      JSON.stringify({
+        schema: "asimposium.retention-control-journal.v1",
+        generated_at: "2026-11-21T12:20:00.000Z",
+        snapshot_cutoff_at: "2026-11-21T12:00:00.000Z",
+        entries: pdEntries,
+        entries_sha256: createHash("sha256").update(JSON.stringify(pdEntries)).digest("hex"),
+      }),
+      "utf8",
+    );
+    const pdReport = await runBackupRestoreSmoke({
+      targetIdentifier: "scratch-rehearsal-pd",
+      exportNdjsonPath: exportPath,
+      retentionJournalPath: pdJournalPath,
+      scratchSqlitePath: pdDbPath,
+    });
+    expect(pdReport.target_quarantine_state).toBe("quarantined-stop");
+    expect(pdReport.failures.some((f) => f.includes("DELETED_PRIVATE_PROBLEM_RESURRECTED"))).toBe(
+      true,
+    );
+
+    // 6. redactOpsValue preserves redacted Error/Date shapes and omits prototype-pollution keys.
+    const errRedacted = redactOpsValue({
+      at: new Date("2026-11-23T00:00:00.000Z"),
+      err: new Error(
+        `Failed with ${["asimp", "ag", "01OPS5TEST0000000000000001", "Z".repeat(43)].join("_")}`,
+      ),
+      constructor: "drop-me",
+    }) as Record<string, unknown>;
+    expect(errRedacted.at).toBe("2026-11-23T00:00:00.000Z");
+    const errObj = errRedacted.err as Record<string, unknown>;
+    expect(errObj.name).toBe("Error");
+    expect(String(errObj.message)).not.toContain("01OPS5TEST");
+    expect(errRedacted._redacted_fields).toEqual(["constructor"]);
   });
 
   test("all 12 Fable §13.3 runbooks exist, are indexed in INDEX.md, carry rehearsal checklists, and pass P7 scan", () => {
