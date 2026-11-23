@@ -824,6 +824,7 @@ describe("OPS.2b review pipeline orchestration", () => {
     const verifiedRevision = "a".repeat(40);
     const staleRevision = "b".repeat(40);
     const inheritedReceipt = "c".repeat(64);
+    const deploymentRunId = `${"r".repeat(71)}1`;
     const argumentsByStage: Record<string, string[]> = {};
     for (const [name, nextName] of [
       ["worker_deploy", "worker_readiness"],
@@ -839,6 +840,7 @@ repository_root="$1"
 REVISION="$2"
 ARTIFACT_DIRECTORY="$3"
 trace="$4"
+RUN_ID="$5"
 STAGING_WORKER_ORIGIN="https://a-staging.asimposium.org"
 VERCEL_CLI_VERSION="59.5.0"
 USER_AGENT="asimposium-ci-command-fixture"
@@ -850,7 +852,7 @@ VERCEL_PROJECT_ID="prj_fixture"
 ci_artifact_capability_is_current() { return 0; }
 require_bearer_token() { return 0; }
 require_live_variable() { return 0; }
-bun() { return 0; }
+bun() { printf '%s\\0' "$@" > "$trace.resolver"; }
 curl_with_bearer() { return 0; }
 python3() { return 0; }
 bunx() { printf '%s\\0' "$@" > "$trace"; return 93; }
@@ -863,10 +865,11 @@ ${name}
           "-c",
           script,
           "ci-revision-command-fixture",
-          REPO_ROOT,
+          realpathSync(REPO_ROOT),
           verifiedRevision,
           paths.artifactDirectory,
           paths.tracePath,
+          deploymentRunId,
         ],
         {
           env: {
@@ -882,6 +885,18 @@ ${name}
       expect(result.status, result.stderr).toBe(93);
       const args = readFileSync(paths.tracePath, "utf8").split("\0").filter(Boolean);
       argumentsByStage[name] = args;
+      if (name === "worker_deploy") {
+        expect(
+          readFileSync(`${paths.tracePath}.resolver`, "utf8").split("\0").filter(Boolean),
+        ).toEqual([
+          join(REPO_ROOT, "infra/resolve-wrangler-deploy.mjs"),
+          "--env",
+          "staging",
+          "--write",
+          "--run-id",
+          deploymentRunId,
+        ]);
+      }
       expect(args.join("\n")).not.toContain(staleRevision);
       expect(args.join("\n")).not.toContain(inheritedReceipt);
       expect(args.join("\n")).not.toContain("ASIMPOSIUM_READINESS_RECEIPT_SHA256");
@@ -893,6 +908,9 @@ ${name}
     };
     expect(values("worker_deploy", "--var")).toEqual([
       `ASIMPOSIUM_SOURCE_REVISION:${verifiedRevision}`,
+    ]);
+    expect(values("worker_deploy", "--config")).toEqual([
+      join(REPO_ROOT, "infra", "deploy-resolved", `staging.${deploymentRunId}.wrangler.toml`),
     ]);
     for (const flag of ["--build-env", "--env"]) {
       expect(values("web_deploy", flag)).toEqual([

@@ -142,7 +142,7 @@ validated generated staging template to one ignored deploy artifact:
 ```bash
 bun infra/resolve-wrangler-deploy.mjs --env staging --check
 # Later, in an authorized staging deploy environment only:
-bun infra/resolve-wrangler-deploy.mjs --env staging --write
+bun infra/resolve-wrangler-deploy.mjs --env staging --write --run-id "$ASIMPOSIUM_DEPLOY_RUN_ID"
 ```
 
 It accepts only `ASIMP_ACCOUNT_ID` (a canonical Cloudflare account id),
@@ -150,7 +150,12 @@ It accepts only `ASIMP_ACCOUNT_ID` (a canonical Cloudflare account id),
 `ASIMP_STAGING_SERVICE_ENVELOPE_KEYS` (the two declared staging public
 verification-key records). It revalidates the generated staging bytes, derives
 the Worker custom-domain route solely from staging `worker_origin`, and writes
-only `infra/deploy-resolved/staging.wrangler.toml`. It never reads a route,
+`infra/deploy-resolved/staging.<run-id>.wrangler.toml`. The pipeline uses its
+validated run ID for both publication and Wrangler. A manual invocation that
+omits `--run-id` still selects `infra/deploy-resolved/staging.wrangler.toml`.
+Run IDs retain their full spelling. They start with an ASCII letter or digit
+and contain at most 80 ASCII letters, digits, periods, underscores or hyphens.
+The resolver never reads a route,
 origin, R2 hostname, or secret from ambient input. The public R2 hostname remains
 an R2 custom domain rather than a Worker route; `ARTIFACTS` and
 `PUBLIC_ARTIFACTS` remain distinct bindings; and the Durable Object bindings match

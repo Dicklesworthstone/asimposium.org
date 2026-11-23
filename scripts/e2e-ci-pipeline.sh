@@ -889,7 +889,7 @@ print(json.dumps({
 }
 
 worker_deploy() {
-  local config="$repository_root/infra/deploy-resolved/staging.wrangler.toml"
+  local config="$repository_root/infra/deploy-resolved/staging.${RUN_ID}.wrangler.toml"
   local raw_receipt="$ARTIFACT_DIRECTORY/wrangler-output.jsonl"
   local version_receipt="$ARTIFACT_DIRECTORY/worker-version.json"
   local safe_receipt="$ARTIFACT_DIRECTORY/worker-deployment.json"
@@ -906,7 +906,7 @@ worker_deploy() {
   export -n CLOUDFLARE_API_TOKEN
 
   ASIMP_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID" \
-    bun "$repository_root/infra/resolve-wrangler-deploy.mjs" --env staging --write
+    bun "$repository_root/infra/resolve-wrangler-deploy.mjs" --env staging --write --run-id "$RUN_ID"
   status=$?
   [[ "$status" -eq 0 ]] || return "$status"
 

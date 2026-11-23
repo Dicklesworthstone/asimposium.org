@@ -55,6 +55,16 @@ const KID = /^[A-Za-z0-9._-]{1,64}$/;
 const CANONICAL_HOSTNAME =
   /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
 const OUTPUT_BASENAME = "staging.wrangler.toml";
+// Match the artifact run ID grammar in e2e/lib/run-diagnostics.sh.
+const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
+
+function stagingOutputBasename(runId) {
+  if (runId === undefined) return OUTPUT_BASENAME;
+  if (typeof runId !== "string" || !RUN_ID_PATTERN.test(runId)) {
+    fail("INVALID_ARGUMENT", "Resolver run identifier is invalid.");
+  }
+  return `staging.${runId}.wrangler.toml`;
+}
 
 /**
  * Node's filesystem API does not expose openat(2). Bun runs this deploy tool,
@@ -634,21 +644,23 @@ function outputParent(root) {
   }
 }
 
-function openOutputAt(parentDescriptor, flags) {
+function openOutputAt(parentDescriptor, flags, basename = OUTPUT_BASENAME) {
   if (OPEN_AT_LIBRARY === undefined) {
     fail(
       "OUTPUT_PUBLICATION_UNSUPPORTED",
       "Race-safe artifact publication is unavailable on this runtime.",
     );
   }
-  const descriptor = OPEN_AT_LIBRARY.symbols.openat(parentDescriptor, OUTPUT_BASENAME_C, flags, 0);
+  const basenameC = basename === OUTPUT_BASENAME ? OUTPUT_BASENAME_C : Buffer.from(`${basename}\0`);
+  const descriptor = OPEN_AT_LIBRARY.symbols.openat(parentDescriptor, basenameC, flags, 0);
   return descriptor >= 0 ? descriptor : undefined;
 }
 
-function existingArtifact(parentDescriptor) {
+function existingArtifact(parentDescriptor, basename = OUTPUT_BASENAME) {
   const descriptor = openOutputAt(
     parentDescriptor,
     constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
+    basename,
   );
   if (descriptor === undefined) return undefined;
   try {
@@ -669,15 +681,18 @@ function existingArtifact(parentDescriptor) {
  * Publish exactly one new artifact with O_EXCL. Existing equal bytes are an
  * idempotent success; different bytes and links are refusals. We intentionally
  * never rename over, truncate, or delete an artifact: a caller must make an
- * explicit, separately authorized replacement decision.
+ * explicit, separately authorized replacement decision. When `runId` is given,
+ * publication writes to an immutable per-run filename (`staging.<runId>.wrangler.toml`)
+ * so stale historical legacy files never collide with fresh deploy runs.
  */
-export function publishResolvedStagingArtifact(root, contents, hooks = {}) {
+export function publishResolvedStagingArtifact(root, contents, hooks = {}, runId = undefined) {
   if (typeof contents !== "string" || Buffer.byteLength(contents, "utf8") > MAX_ARTIFACT_BYTES) {
     fail("OUTPUT_ARTIFACT_INVALID", "The resolved staging artifact is invalid.");
   }
+  const basename = stagingOutputBasename(runId);
   const parent = outputParent(root);
   try {
-    const prior = existingArtifact(parent.descriptor);
+    const prior = existingArtifact(parent.descriptor, basename);
     if (prior !== undefined) {
       assertNamedOutputParent(root, parent);
       if (prior === contents) return { published: false, idempotent: true };
@@ -687,9 +702,10 @@ export function publishResolvedStagingArtifact(root, contents, hooks = {}) {
     let descriptor = openOutputAt(
       parent.descriptor,
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      basename,
     );
     if (descriptor === undefined) {
-      const raced = existingArtifact(parent.descriptor);
+      const raced = existingArtifact(parent.descriptor, basename);
       if (raced === contents) {
         assertNamedOutputParent(root, parent);
         return { published: false, idempotent: true };
@@ -746,6 +762,7 @@ export function publishResolvedStagingArtifact(root, contents, hooks = {}) {
 export function parseResolverArguments(argv) {
   let environment;
   let mode;
+  let runId;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--env") {
@@ -753,6 +770,15 @@ export function parseResolverArguments(argv) {
         fail("INVALID_ARGUMENT", "Resolver arguments are invalid.");
       }
       environment = argv[index + 1];
+      index += 1;
+      continue;
+    }
+    if (argument === "--run-id") {
+      if (runId !== undefined || index + 1 >= argv.length) {
+        fail("INVALID_ARGUMENT", "Resolver arguments are invalid.");
+      }
+      runId = argv[index + 1];
+      stagingOutputBasename(runId);
       index += 1;
       continue;
     }
@@ -769,7 +795,18 @@ export function parseResolverArguments(argv) {
   if (mode !== "check" && mode !== "write") {
     fail("INVALID_ARGUMENT", "Resolver arguments are invalid.");
   }
-  return { environment, mode };
+  return runId === undefined ? { environment, mode } : { environment, mode, runId };
+}
+
+function verifiedBindingsOf(contents) {
+  const parsed = Bun.TOML.parse(contents);
+  const bindings = [
+    ...(parsed.d1_databases ?? []).map((entry) => entry.binding),
+    ...(parsed.r2_buckets ?? []).map((entry) => entry.binding),
+    ...(parsed.durable_objects?.bindings ?? []).map((entry) => entry.name),
+    ...(parsed.ai?.binding ? [parsed.ai.binding] : []),
+  ];
+  return bindings.filter((value) => typeof value === "string").sort();
 }
 
 export function resolutionDiagnostic(status, startedAt, details = {}) {
@@ -788,18 +825,30 @@ export function resolutionDiagnostic(status, startedAt, details = {}) {
 function main() {
   const startedAt = performance.now();
   try {
-    const { mode } = parseResolverArguments(process.argv.slice(2));
+    const { mode, runId } = parseResolverArguments(process.argv.slice(2));
     const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
     const resolved = resolveStagingArtifact(root, readStagingDeployInputs());
+    const verified_bindings = verifiedBindingsOf(resolved);
     if (mode === "write") {
-      const publication = publishResolvedStagingArtifact(root, resolved);
+      const publication = publishResolvedStagingArtifact(root, resolved, {}, runId);
+      const legacy_artifact_present =
+        runId !== undefined && existsSync(resolve(root, STAGING_OUTPUT_PATH));
       process.stdout.write(
-        `${JSON.stringify(resolutionDiagnostic("pass", startedAt, { mode, ...publication }))}\n`,
+        `${JSON.stringify(
+          resolutionDiagnostic("pass", startedAt, {
+            mode,
+            ...publication,
+            verified_bindings,
+            ...(runId === undefined ? {} : { run_id: runId, legacy_artifact_present }),
+          }),
+        )}\n`,
       );
       return;
     }
     process.stdout.write(
-      `${JSON.stringify(resolutionDiagnostic("pass", startedAt, { mode, resolved: true }))}\n`,
+      `${JSON.stringify(
+        resolutionDiagnostic("pass", startedAt, { mode, resolved: true, verified_bindings }),
+      )}\n`,
     );
   } catch (error) {
     const code = error instanceof DeployResolutionError ? error.code : "UNEXPECTED";

@@ -291,7 +291,10 @@ const cases = [
       );
       assert.notEqual(missing, contents);
       expectCode(() => assertStagingTemplate(report, missing), "STAGING_DURABLE_OBJECTS_INVALID");
-      const miswired = contents.replace('class_name = "HeraldRoom"', 'class_name = "KraterOutboxDrainer"');
+      const miswired = contents.replace(
+        'class_name = "HeraldRoom"',
+        'class_name = "KraterOutboxDrainer"',
+      );
       assert.notEqual(miswired, contents);
       expectCode(() => assertStagingTemplate(report, miswired), "STAGING_DURABLE_OBJECTS_INVALID");
     },
@@ -628,6 +631,56 @@ const cases = [
         "OUTPUT_ARTIFACT_EXISTS_DIFFERENT",
       );
       assert.equal(readFileSync(join(differentRoot, STAGING_OUTPUT_PATH), "utf8"), "different");
+    },
+  },
+  {
+    name: "per-run-id-publication-succeeds-alongside-stale-legacy-staging-artifact-without-deleting-it",
+    execute() {
+      const root = fixture("publication-per-run-id");
+      mkdir(join(root, "infra/deploy-resolved"));
+      writeFileSync(join(root, STAGING_OUTPUT_PATH), "# stale legacy Aug 19 artifact\n", "utf8");
+      const resolved = resolveStagingArtifact(root, inputs());
+      const runIds = [`${"r".repeat(71)}1`, `${"r".repeat(71)}2`];
+      for (const runId of runIds) {
+        const parsedArgs = parseResolverArguments([
+          "--env",
+          "staging",
+          "--write",
+          "--run-id",
+          runId,
+        ]);
+        assert.deepEqual(parsedArgs, { environment: "staging", mode: "write", runId });
+        assert.deepEqual(publishResolvedStagingArtifact(root, resolved, {}, parsedArgs.runId), {
+          published: true,
+          idempotent: false,
+        });
+        assert.deepEqual(publishResolvedStagingArtifact(root, resolved, {}, parsedArgs.runId), {
+          published: false,
+          idempotent: true,
+        });
+        assert.equal(
+          readFileSync(join(root, `infra/deploy-resolved/staging.${runId}.wrangler.toml`), "utf8"),
+          resolved,
+        );
+        expectCode(
+          () => publishResolvedStagingArtifact(root, "# a changed artifact\n", {}, runId),
+          "OUTPUT_ARTIFACT_EXISTS_DIFFERENT",
+        );
+      }
+      // Legacy file is preserved untouched (Rule 1: no deletion).
+      assert.equal(
+        readFileSync(join(root, STAGING_OUTPUT_PATH), "utf8"),
+        "# stale legacy Aug 19 artifact\n",
+      );
+      // Path-escape or invalid run ids fail closed.
+      expectCode(
+        () => parseResolverArguments(["--env", "staging", "--write", "--run-id", "../escape"]),
+        "INVALID_ARGUMENT",
+      );
+      expectCode(
+        () => parseResolverArguments(["--env", "staging", "--write", "--run-id", "r".repeat(81)]),
+        "INVALID_ARGUMENT",
+      );
     },
   },
   {
