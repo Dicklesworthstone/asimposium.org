@@ -319,6 +319,23 @@ test("promotion policy responses expose only a coarse category and appeal path",
     ScreeningPromotionHoldResponseSchema.safeParse({ ...postureHold, posture: undefined }).success,
   ).toBe(false);
   expect(ScreeningPromotionDeniedResponseSchema.safeParse(denied).success).toBe(true);
+  const retainedDenial = ScreeningPromotionDeniedResponseSchema.parse(denied);
+  expect(retainedDenial.case_id).toMatch(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/);
+  const { case_id: _caseId, ...unretainedDenial } = retainedDenial;
+  expect(ScreeningPromotionDeniedResponseSchema.safeParse(unretainedDenial).success).toBe(true);
+  expect(
+    ScreeningPromotionDeniedResponseSchema.safeParse(
+      await fixture(
+        new URL("../fixtures/invalid/screening-promotion-denied-case.json", import.meta.url),
+      ),
+    ).success,
+  ).toBe(false);
+  expect(
+    ScreeningPromotionDeniedResponseSchema.safeParse({
+      ...retainedDenial,
+      candidate: "Retained content stays private.",
+    }).success,
+  ).toBe(false);
   expect(ScreeningPromotionPolicyResponseSchema.safeParse(hold).success).toBe(true);
   expect(ScreeningPromotionPolicyResponseSchema.safeParse(denied).success).toBe(true);
   expect(ScreeningContractsSchema.safeParse(hold).success).toBe(false);

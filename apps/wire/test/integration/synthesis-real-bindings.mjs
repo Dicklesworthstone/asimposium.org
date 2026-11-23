@@ -584,7 +584,13 @@ await runLocalWorkerJourney(
       );
       check((await fixtures.screeningCalls()) === screeningBefore + 1, `${label}: screened once`);
       if (denied.code === "POLICY_DENIED") {
-        assert.deepEqual(Object.keys(denied).sort(), ["appeal", "coarse_category", "code"]);
+        assert.deepEqual(Object.keys(denied).sort(), [
+          "appeal",
+          "case_id",
+          "coarse_category",
+          "code",
+        ]);
+        assert.match(denied.case_id, /^QC-[0-9A-HJKMNP-TV-Z]{26}$/);
         assert.ok(!JSON.stringify(denied).includes("LOCAL_POLICY_CANARY"));
       }
     }

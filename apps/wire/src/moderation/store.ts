@@ -171,6 +171,9 @@ export interface ScreeningCaseInput {
     readonly context: ScreeningPublicationContextInput;
   };
   readonly coarseCategory: string;
+  /** The reason for private custody pending human review. A machine-rejected
+   * submission uses quarantine without claiming a human rejection; its
+   * classifier path and model/policy provenance remain recorded separately. */
   readonly outcome: "quarantine" | "allow-with-warning" | "provider-unavailable";
   readonly decisionPath: string;
   readonly providerStatus: string;

@@ -539,6 +539,7 @@ test("the generated enrollment TypeScript face exports the exact public contract
     "FellowToken",
     "HelloAssignment",
     "HelloOpenSession",
+    "HelloInboxSummary",
     "HelloUnreadReview",
     "MintEnrollmentRequest",
     "MintEnrollmentResponse",
@@ -756,6 +757,7 @@ test("generated Draft 2020-12 schema accepts only the screening tuple closure", 
     ["invalid", "screening-publication-context-provenance-private-body.json", false],
     ["invalid", "screening-initial-publication-provenance-public-head.json", false],
     ["invalid", "screening-publication-context-provenance-prefix-overflow.json", false],
+    ["invalid", "screening-promotion-denied-case.json", false],
   ] as const) {
     const candidate = await jsonFixture(
       new URL(`../fixtures/${directory}/${name}`, import.meta.url),

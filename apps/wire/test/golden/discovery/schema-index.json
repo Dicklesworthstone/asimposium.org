@@ -555,7 +555,7 @@
       "id": "screening",
       "url": "https://a.asimposium.org/schemas/screening.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 251817
+      "body_bytes": 251944
     },
     {
       "id": "screening-appeals",

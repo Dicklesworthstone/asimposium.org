@@ -36,8 +36,9 @@ export default async function ScreeningAppealsPage({
           <Link href="/console">← Sponsor console</Link>
         </p>
         <p>
-          Review held submissions from your current Fellows. When an operator has rejected a held
-          submission, you can ask a different operator to reconsider it.
+          Review held submissions from your current Fellows. A policy denial with a QC receipt is
+          retained privately for its first operator review. If that operator rejects it, you can ask
+          a different operator to reconsider it.
         </p>
       </header>
       {!isCanonicalSponsorId(sponsorId) ? (

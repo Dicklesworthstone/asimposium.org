@@ -124,6 +124,13 @@ export const ScreeningPromotionDeniedResponseSchema = z
     code: z.literal("POLICY_DENIED"),
     coarse_category: HardPolicyCategorySchema,
     appeal: z.literal(SCREENING_APPEAL_CODE),
+    /** Exact private candidate retained for operator review. A machine refusal
+     * is not a human rejection; the sponsor may appeal a subsequent rejection
+     * by the first operator through the existing independent-review workflow. */
+    case_id: z
+      .string()
+      .regex(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/)
+      .optional(),
   })
   .strict();
 export type ScreeningPromotionDeniedResponse = z.infer<

@@ -170,12 +170,12 @@ function versionLabel(value: string | undefined): string {
 }
 
 /**
- * Hold, and keep the work: open (or find) the private case for exactly these
+ * Keep refused work: open (or find) the private case for exactly these
  * bytes so a trained reviewer can release or reject it (Fable §7.7: "legitimate
- * work waits rather than vanishes"). Case storage failing never turns a hold
- * into a publication; it only loses the case id from the response.
+ * work waits rather than vanishes"). Case storage failing never changes the
+ * publication refusal; it only loses the case id from the response.
  */
-async function holdWithCase(
+async function retainScreeningCase(
   env: Env,
   input: WorkersAIPromotionInput,
   context: ScreeningHoldContext | undefined,
@@ -183,10 +183,8 @@ async function holdWithCase(
   outcome: "quarantine" | "allow-with-warning" | "provider-unavailable",
   observation: Partial<PublicationScreeningObservation> | undefined,
   posture?: "quarantine-first",
-): Promise<Response> {
-  if (context === undefined || env.DB === undefined) {
-    return screeningHoldResponse(category, undefined, posture);
-  }
+): Promise<string | undefined> {
+  if (context === undefined || env.DB === undefined) return undefined;
   try {
     const binding = await promotionScreeningBinding(input);
     const opened = await openScreeningCase(env.DB, {
@@ -211,10 +209,26 @@ async function holdWithCase(
         "configuration-unavailable",
       ),
     });
-    return screeningHoldResponse(category, opened.caseId, posture);
+    return opened.caseId;
   } catch {
-    return screeningHoldResponse(category, undefined, posture);
+    return undefined;
   }
+}
+
+async function holdWithCase(
+  env: Env,
+  input: WorkersAIPromotionInput,
+  context: ScreeningHoldContext | undefined,
+  category: ScreeningCoarseCategory,
+  outcome: "quarantine" | "allow-with-warning" | "provider-unavailable",
+  observation: Partial<PublicationScreeningObservation> | undefined,
+  posture?: "quarantine-first",
+): Promise<Response> {
+  return screeningHoldResponse(
+    category,
+    await retainScreeningCase(env, input, context, category, outcome, observation, posture),
+    posture,
+  );
 }
 
 /**
@@ -286,11 +300,15 @@ async function decidedCase(
   }
 }
 
-function screeningDeniedResponse(category: ScreeningCoarseCategory): Response | undefined {
+function screeningDeniedResponse(
+  category: ScreeningCoarseCategory,
+  caseId?: string,
+): Response | undefined {
   const parsed = ScreeningPromotionDeniedResponseSchema.safeParse({
     code: "POLICY_DENIED",
     coarse_category: category,
     appeal: SCREENING_APPEAL_CODE,
+    ...(caseId === undefined ? {} : { case_id: caseId }),
   });
   return parsed.success ? privateNoStore(parsed.data, 403) : undefined;
 }
@@ -376,7 +394,7 @@ export async function screenPublicCandidate(
   if (decided?.state === "rejected") {
     const category = ScreeningCoarseCategorySchema.safeParse(decided.coarse_category);
     return (
-      (category.success ? screeningDeniedResponse(category.data) : undefined) ??
+      (category.success ? screeningDeniedResponse(category.data, decided.case_id) : undefined) ??
       screeningHoldResponse("provider-unavailable", decided.case_id)
     );
   }
@@ -438,11 +456,32 @@ export async function screenPublicCandidate(
     );
   }
   if (screening.decision === "reject") {
+    const denied = screeningDeniedResponse(screening.coarse_category);
+    if (denied === undefined) {
+      return holdWithCase(
+        env,
+        input,
+        holdContext,
+        "provider-unavailable",
+        "provider-unavailable",
+        screening,
+      );
+    }
     await noteRefusal(env, input, holdContext, "reject", screening.coarse_category);
-    return (
-      screeningDeniedResponse(screening.coarse_category) ??
-      screeningHoldResponse("provider-unavailable")
+    // Refusing publication is not a final human decision. Quarantine the
+    // exact candidate privately for the existing operator queue, preserving
+    // the classifier's model/policy/path without fabricating decided_by or
+    // an operator audit. A confirmed rejection then admits the sponsor's
+    // independent appeal; a release still requires explicit resubmission.
+    const caseId = await retainScreeningCase(
+      env,
+      input,
+      holdContext,
+      screening.coarse_category,
+      "quarantine",
+      screening,
     );
+    return screeningDeniedResponse(screening.coarse_category, caseId) ?? denied;
   }
   if (
     screening.decision === "quarantine" ||
