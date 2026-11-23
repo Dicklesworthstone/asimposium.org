@@ -47,6 +47,9 @@ class_name = "KraterOutboxDrainer"
 type = "durable-object"
 storage = "sqlite"
 
+[ai]
+binding = "AI"
+
 [[rules]]
 type = "Text"
 globs = ["**/*.md", "**/*.txt"]

@@ -68,6 +68,9 @@ for (const path of ["wrangler.toml", "environments/production.deploy.wrangler.to
     assert.deepEqual(config.compatibility_flags, ["nodejs_compat", "enable_request_signal"]);
     assert.equal(config.workers_dev, false);
     assert.equal(config.durable_objects.bindings.some((binding) => binding.class_name === "HeraldRoom"), false);
+    if (path === "environments/production.deploy.wrangler.toml") {
+      assert.equal(config.ai?.binding, "AI");
+    }
   });
 }
 
