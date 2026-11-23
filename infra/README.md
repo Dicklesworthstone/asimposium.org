@@ -403,10 +403,13 @@ Implementing this consumer does not close OPS.4a: the real staging completion,
 retained exact-revision receipts, and independent rerun remain its acceptance
 requirements.
 
-## What OPS.3 does NOT yet do
+## OPS.3 deployment evidence
 
-Stated plainly so this tooling is not mistaken for a working environment. **OPS.3
-cannot close on the strength of what is here.**
+The November 23 direct production rollout deployed both planes with a verified
+D1 copy at migration `0151`. The production overlay binds that copy. Retain
+the original `asimposium-prod` database at `0028` as the pre-cutover record.
+The [release checklist](../docs/launch-gates-g1-g2-g3-2026-11-21.md#november-23-release-checklist)
+records the active versions and the hosted acceptance work still open.
 
 - **Every topology binding is emitted into the generated configs.** The roster is
   five: `DB`, `ARTIFACTS`, `PUBLIC_ARTIFACTS`, `HERALD_ROOMS`, `KRATER_OUTBOX`.
@@ -415,9 +418,8 @@ cannot close on the strength of what is here.**
   mechanism remains for future classes: a deferred binding is withheld from both
   the bindings and the exports, and the validator refuses a deferral whose class
   is already exported (`DEFERRED_CLASS_ALREADY_EXPORTED`). Migration 0078 must be
-  applied before rooms receive deliveries. The hand-resolved
-  `production.deploy.wrangler.toml` still omits `HERALD_ROOMS` until a staging
-  deploy proves room delivery.
+  applied before rooms receive deliveries. The production overlay now binds
+  both Durable Object classes and Workers AI.
 - **A Durable Object binding without an exported class fails `wrangler deploy`.**
   The validator reconciles both directions against the entrypoint: an emitted
   class must be exported, and a deferred class must not be.
@@ -425,17 +427,11 @@ cannot close on the strength of what is here.**
   bounded, exact-target staging apply path and refuses production. It cannot run
   until the ignored staging config has been resolved against an authorized,
   provisioned D1 target; source inspection is not evidence that this happened.
-- **Vercel wiring is declared, not applied.** `[vercel]` records which
-  environment each deployment target must call, and the validator enforces that
-  previews never reach production — but no Vercel project setting has been read
-  or written.
-- **Current remote resource state is not proven by this repository.** Source
-  does not establish that any D1 database, R2 bucket, Durable Object namespace,
-  custom domain, deployment, or console wiring currently exists or matches the
-  checkout. The private-canary requirement is proven only by a successful live
-  staging receipt that reads the object back through authenticated remote
-  provider storage while the public probe is absent, then removes it; no such
-  receipt is present here.
+- **Vercel targets are environment-bound.** Production Agora was promoted
+  after Stoa's public smoke checks passed. The hosted staging trigger still
+  needs its own provider evidence.
+- **The private R2 canary remains open.** Its acceptance receipt must show
+  authenticated provider readback and an absent public probe.
 
 Validating the topology proves the *contract* is coherent, and generation proves
 the deployable artifact matches it. Neither proves that any named resource

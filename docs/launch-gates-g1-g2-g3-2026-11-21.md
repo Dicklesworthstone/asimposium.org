@@ -26,6 +26,15 @@ and the hosted gates still needed before public launch.
 The operator requested this checklist and chose a direct production rollout.
 Track individual work in the linked Beads and retire this checklist from active use after the G3 review. The table above describes the November 21 snapshot.
 
+On November 23, the direct rollout activated Stoa Worker version
+`866771f5-e439-4405-aa98-13c69e872f8a` and Agora deployment
+`dpl_5APVS6vuWuRgXM6ApnFraEw4kVBZ`. Both were built from the frozen local
+candidate with source manifest SHA-256
+`9c16b322e06d9110f14674efaf8bfb613225a7ecaf8f60b57b47d124d5fca23d`.
+The original database remains at `0028`. Live traffic uses the verified
+copy at `0151`. Stoa serves capabilities `0.2.0-draft` with 252 operations.
+Agora reaches Stoa and reports `pre-G1` with an empty public problem index.
+
 ### Candidate and rollout
 
 - [x] Check the public Agora and Stoa, including Explore, the problem index and capabilities.
@@ -53,16 +62,16 @@ Track individual work in the linked Beads and retire this checklist from active 
 - [x] Dry-run the shared candidate with the production Wrangler configuration. The bundle resolves both Herald and Krater Outbox Durable Object classes.
 - [ ] Complete the full worktree UBS scan. It returned partial coverage after JavaScript and ShellCheck timeouts and a D1 dialect diagnostic. The focused Worker scan reported zero critical issues.
 - [ ] Requalify a single exact integrated commit with the complete Worker suite and obtain independent acceptance for `asimposiumorg-cuo7`.
-- [ ] Verify production Worker identity, D1 binding, private and public R2 roles, Durable Object classes, AI binding, cron and service-envelope keys.
+- [x] Verify production Worker identity, D1 binding, both R2 binding roles, Durable Object classes, AI binding, cron and configured service-envelope keys. Keep the authenticated sponsor journey open for the keys to be exercised.
 - [ ] Provision and confirm production checkpoint signing and backup destination bindings. Verify before enabling logs or cron that depend on them.
-- [ ] Rehearse the production-specific backup, migration and restore with a separately isolated target. Preserve real credentials and the honest `0016` receipt. The default migration runner reports `REMOTE_STAGING_ONLY` for production observation and refuses production application.
-- [ ] Obtain approval for the isolated provider D1 target and the production binding change.
-- [ ] Match the source snapshot to the live provider identity and D1 journal. Use a private transfer path and authenticate the snapshot before importing it.
-- [ ] Hold a production write boundary for the final source comparison. Recheck current credential and deletion state before admitting traffic on the copy.
-- [ ] Compare migrated identity, grant and credential records with the source before moving traffic. Keep the original binding available for rollback and define the cutover boundary for concurrent writes.
+- [x] Capture the live SQL snapshot with ASImposium’s backup reader. Apply the 123 forward migrations locally and preserve all authority records and historic journal entries.
+- [x] Create and verify the isolated provider D1 copy under the operator’s direct production deployment authorization. Read back all 137 tables and 151 migration entries and match the full migrated snapshot digest.
+- [x] Recheck the original SQL snapshot immediately before and after the binding switch. Both snapshots matched the original. Retain the original database and provider deployment identifiers.
 - [ ] Pin the candidate revision and run typecheck, lint, tests, contract checks and UBS.
-- [ ] Bundle the Worker with the exact production configuration and verify the release serves the expected revision, readiness status and schema registry.
-- [ ] Deploy matching Agora after Stoa is ready. Verify its health, Google callback, sponsor console, problem faces, share cards, static protocol copies and 308 redirects.
+- [x] Deploy the exact production Worker bundle. Verify the public binding health, capabilities, schema registry, cursor and problem index.
+- [x] Promote matching Agora after Stoa passes the smoke checks. Verify the active provider deployment, homepage, Explore, health, registered Google provider and protocol redirect.
+- [x] Exercise live device enrollment start and replay. Both requests returned 201 with matching responses and a verification URL on Agora.
+- [ ] Publish the exact-revision product readiness receipt once the live evidence qualifies. Exercise the Google callback, signed sponsor console, populated problem faces, share cards and static protocol copies.
 - [ ] Verify apex DNS routes directly to Vercel, Stoa is proxied, and the artifacts origin serves the public R2 role. Confirm Vercel release settings and published policy.
 
 Beads `p1g.1`, `rs5n`, `8n5`, `k9mc`, `mbdj`, `sox`.

@@ -1,10 +1,11 @@
 # Deploy-time resolution of the generated production.wrangler.toml:
 #   - the provisioned D1 id is substituted (the generated file carries the
 #     CI-time ${ASIMP_D1_DATABASE_ID_PRODUCTION} placeholder);
-#   - HERALD_ROOMS stays omitted here until a staging deploy proves room delivery
-#     (the generated configs bind it since the Worker exports HeraldRoom); the production
-#     Krater outbox binding and recovery cron are present because the current
-#     Worker already exports and uses KraterOutboxDrainer;
+#   - HERALD_ROOMS (HeraldRoom), KRATER_OUTBOX (KraterOutboxDrainer), and
+#     Workers AI ([ai] binding = "AI") are all bound to match
+#     infra/environments.toml (drift-checked by validate-environments.mjs and
+#     generate-wrangler.mjs --check; omitting AI would fail closed every
+#     production ledger promotion into 202 SCREENING_HOLD);
 #   - SERVICE_ENVELOPE_KEYS carries only PUBLIC Ed25519 verification keys
 #     (non-secret by design; the signing key lives in Vercel env).
 # Regenerate nothing over this file; when OPS.3 closes, fold this back into
@@ -14,6 +15,7 @@ main = "../../apps/wire/src/index.ts"
 compatibility_date = "2026-08-13"
 compatibility_flags = ["nodejs_compat", "enable_request_signal"]
 workers_dev = false
+preview_urls = false
 
 # Custom domain: creates the DNS record on the asimposium.org zone (proxied).
 routes = [
@@ -25,8 +27,8 @@ crons = ["*/5 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
-database_name = "asimposium-prod"
-database_id = "651aa4dd-ae3d-4e31-beb1-4c09d778eb94"
+database_name = "asimposium-prod-cutover-20261123-9c16b322"
+database_id = "96f5be90-7b31-4c9a-a8c8-c0dc918bef37"
 migrations_dir = "../../db/migrations"
 
 [[r2_buckets]]
@@ -40,8 +42,16 @@ binding = "PUBLIC_ARTIFACTS"
 bucket_name = "asimposium-public-prod"
 
 [[durable_objects.bindings]]
+name = "HERALD_ROOMS"
+class_name = "HeraldRoom"
+
+[[durable_objects.bindings]]
 name = "KRATER_OUTBOX"
 class_name = "KraterOutboxDrainer"
+
+[exports.HeraldRoom]
+type = "durable-object"
+storage = "sqlite"
 
 [exports.KraterOutboxDrainer]
 type = "durable-object"

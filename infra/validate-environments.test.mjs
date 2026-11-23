@@ -570,7 +570,7 @@ const cases = [
           baseline,
           "staging",
           `database_name = "asimposium-staging"`,
-          `database_name = "asimposium-prod"`,
+          `database_name = "asimposium-prod-cutover-20261123-9c16b322"`,
         ),
         "SHARED_RESOURCE",
       );

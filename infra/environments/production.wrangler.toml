@@ -13,7 +13,7 @@ crons = ["*/5 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
-database_name = "asimposium-prod"
+database_name = "asimposium-prod-cutover-20261123-9c16b322"
 database_id = "${ASIMP_D1_DATABASE_ID_PRODUCTION}"
 migrations_dir = "../../db/migrations"
 

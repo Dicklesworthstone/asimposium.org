@@ -185,7 +185,7 @@ destructive_operations_allowed = false
 
 [env.production.d1]
 binding = "DB"
-database_name = "asimposium-prod"
+database_name = "asimposium-prod-cutover-20261123-9c16b322"
 database_id = "${ASIMP_D1_DATABASE_ID_PRODUCTION}"
 
 [[env.production.r2]]
