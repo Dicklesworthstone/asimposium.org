@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   ClaimFaceResponseSchema,
+  EnrollmentHelloResponseSchema,
   ProblemFaceResponseSchema,
   ProposeProblemRequestSchema,
 } from "@asimposium/contracts";
@@ -73,150 +74,175 @@ assert.deepEqual(
   ["calibration", "registered-research"],
 );
 
-await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, userAgent }) => {
-  const sponsor = "usr_research_intake_author";
-  const author = await enroll("research-intake-author", sponsor);
-  const reviewer = await enroll("research-intake-reviewer", "usr_research_intake_reviewer");
-  const calibrationChecks = checkCalibration();
+await runLocalWorkerJourney(
+  async ({ call, enroll, sponsorCall, env, worker, origin, userAgent }) => {
+    const sponsor = "usr_research_intake_author";
+    const reviewerSponsor = "usr_research_intake_reviewer";
+    const author = await enroll("research-intake-author", sponsor);
+    const reviewer = await enroll("research-intake-reviewer", reviewerSponsor);
+    const calibrationChecks = checkCalibration();
 
-  for (const { id, role, proposal: input } of intake.drafts) {
-    const proposal = ProposeProblemRequestSchema.parse(input);
-    const { problem } = await call("/v1/problems", proposal, author, 201, `intake-${id}`);
-    const problemPath = `/v1/problems/${problem.id}`;
-    const publicPath = `/p/${problem.id}`;
-    const lifecycle = `/v1/sponsors/problems/${problem.id}/lifecycle`;
-    assert.equal(problem.status, "private-draft");
-    await call(`${publicPath}.json`, undefined, undefined, 404);
-    await call(problemPath, undefined, reviewer, 404);
+    for (const { id, role, proposal: input } of intake.drafts) {
+      const proposal = ProposeProblemRequestSchema.parse(input);
+      const { problem } = await call("/v1/problems", proposal, author, 201, `intake-${id}`);
+      const problemPath = `/v1/problems/${problem.id}`;
+      const publicPath = `/p/${problem.id}`;
+      const lifecycle = `/v1/sponsors/problems/${problem.id}/lifecycle`;
+      assert.equal(problem.status, "private-draft");
+      await call(`${publicPath}.json`, undefined, undefined, 404);
+      await call(problemPath, undefined, reviewer, 404);
 
-    const published = await sponsorCall(
-      sponsor,
-      "POST",
-      lifecycle,
-      "problem-lifecycle",
-      { action: "publish" },
-      200,
-    );
-    assert.equal(published.problem.status, "sharpening");
-    const authorSession = await call(
-      "/v1/sessions",
-      { problem_id: problem.id, intent: "refute" },
-      author,
-      201,
-    );
-    const reviewSession = await call(
-      "/v1/sessions",
-      { problem_id: problem.id, intent: "review" },
-      reviewer,
-      201,
-    );
-    const statementReview = {
-      statement_version: problem.current_statement_version,
-      verdict: "statement-clear",
-      basis: "Scoped input, observation and rejection criterion can be independently checked.",
-    };
-    const selfReview = await call(
-      `${problemPath}/statement-review`,
-      {
-        ...statementReview,
-        session_id: authorSession.session_id,
-      },
-      author,
-      422,
-    );
-    assert.equal(selfReview.code, "REVIEWER_IS_AUTHOR");
-    const cleared = await call(
-      `${problemPath}/statement-review`,
-      {
-        ...statementReview,
-        session_id: reviewSession.session_id,
-      },
-      reviewer,
-      200,
-    );
-    assert.equal(cleared.status, "active");
-    const current = (await call(problemPath)).problem;
-    assert.equal(current.statement, proposal.statement);
-    assert.equal(current.falsifier, proposal.falsifier);
-
-    if (role === "calibration") {
-      const workshopMarker = "private local draft of the commuting example";
-      const authorPath = `/v1/sessions/${authorSession.session_id}`;
-      const reviewerPath = `/v1/sessions/${reviewSession.session_id}`;
-      const draft = await call(
-        `${authorPath}/workshop`,
-        {
-          type: "claim-draft",
-          title: "Cross-marking equality test",
-          body_md: workshopMarker,
-          relates_to: [],
-        },
+      const published = await sponsorCall(
+        sponsor,
+        "POST",
+        lifecycle,
+        "problem-lifecycle",
+        { action: "publish" },
+        200,
+      );
+      assert.equal(published.problem.status, "sharpening");
+      const authorSession = await call(
+        "/v1/sessions",
+        { problem_id: problem.id, intent: "refute" },
         author,
         201,
       );
-      const anonymousFace = await call(`${publicPath}.json`);
-      assert.ok(!JSON.stringify(anonymousFace).includes(workshopMarker));
-      const claim = await call(
-        `${authorPath}/promote`,
-        {
-          workshop_id: draft.workshop_id,
-          kind: "conjecture",
-          statement:
-            "With the specified markings, the answer to ab = ba can be reused across both groups.",
-          falsifier: "Evaluate ab and ba in both groups and exhibit one different Boolean answer.",
-        },
-        author,
-        201,
-      );
-      const reviewQuery = new URLSearchParams({ profile: "review", target: `${claim.claim_id}@1` });
-      const reviewPack = await call(`${reviewerPath}/pack?${reviewQuery}`, undefined, reviewer);
-      assert.ok(!JSON.stringify(reviewPack).includes(workshopMarker));
-      const afterClaim = (await call(problemPath)).problem;
-      const refutation = await call(
-        `${reviewerPath}/review`,
-        {
-          target_claim_id: claim.claim_id,
-          target_version: 1,
-          verdict: "refute",
-          basis: "Direct composition gives distinct 3-cycles in S3. Both sums give 3 modulo 6.",
-          body_md:
-            "The positive words ab and ba have equal values in the additive marking but not the permutation marking.",
-          client_context_cursor: afterClaim.public_seq,
-        },
+      const reviewSession = await call(
+        "/v1/sessions",
+        { problem_id: problem.id, intent: "review" },
         reviewer,
         201,
       );
-      const reviewFace = ClaimFaceResponseSchema.parse(
-        await call(`${publicPath}/reviews/${refutation.review_id}.json`),
+      const statementReview = {
+        statement_version: problem.current_statement_version,
+        verdict: "statement-clear",
+        basis: "Scoped input, observation and rejection criterion can be independently checked.",
+      };
+      const selfReview = await call(
+        `${problemPath}/statement-review`,
+        {
+          ...statementReview,
+          session_id: authorSession.session_id,
+        },
+        author,
+        422,
       );
-      assert.equal(reviewFace.claim_state.claim_id, claim.claim_id);
-      assert.equal(reviewFace.claim_state.version, 1);
-      assert.deepEqual(
-        reviewFace.items.filter((item) => item.kind === "claim-review").map((item) => item.id),
-        [refutation.review_id],
+      assert.equal(selfReview.code, "REVIEWER_IS_AUTHOR");
+      const cleared = await call(
+        `${problemPath}/statement-review`,
+        {
+          ...statementReview,
+          session_id: reviewSession.session_id,
+        },
+        reviewer,
+        200,
       );
+      assert.equal(cleared.status, "active");
+      const current = (await call(problemPath)).problem;
+      assert.equal(current.statement, proposal.statement);
+      assert.equal(current.falsifier, proposal.falsifier);
+
+      if (role === "calibration") {
+        const workshopMarker = "private local draft of the commuting example";
+        const authorPath = `/v1/sessions/${authorSession.session_id}`;
+        const reviewerPath = `/v1/sessions/${reviewSession.session_id}`;
+        const draft = await call(
+          `${authorPath}/workshop`,
+          {
+            type: "claim-draft",
+            title: "Cross-marking equality test",
+            body_md: workshopMarker,
+            relates_to: [],
+          },
+          author,
+          201,
+        );
+        const anonymousFace = await call(`${publicPath}.json`);
+        assert.ok(!JSON.stringify(anonymousFace).includes(workshopMarker));
+        const claim = await call(
+          `${authorPath}/promote`,
+          {
+            workshop_id: draft.workshop_id,
+            kind: "conjecture",
+            statement:
+              "With the specified markings, the answer to ab = ba can be reused across both groups.",
+            falsifier:
+              "Evaluate ab and ba in both groups and exhibit one different Boolean answer.",
+          },
+          author,
+          201,
+        );
+        const reviewQuery = new URLSearchParams({
+          profile: "review",
+          target: `${claim.claim_id}@1`,
+        });
+        const reviewPack = await call(`${reviewerPath}/pack?${reviewQuery}`, undefined, reviewer);
+        assert.ok(!JSON.stringify(reviewPack).includes(workshopMarker));
+        const afterClaim = (await call(problemPath)).problem;
+        const refutationBody =
+          "The positive words ab and ba have equal values in the additive marking but not the permutation marking.";
+        const refutation = await call(
+          `${reviewerPath}/review`,
+          {
+            target_claim_id: claim.claim_id,
+            target_version: 1,
+            verdict: "refute",
+            basis: "Direct composition gives distinct 3-cycles in S3. Both sums give 3 modulo 6.",
+            body_md: refutationBody,
+            client_context_cursor: afterClaim.public_seq,
+          },
+          reviewer,
+          201,
+        );
+        const reviewFace = ClaimFaceResponseSchema.parse(
+          await call(`${publicPath}/reviews/${refutation.review_id}.json`),
+        );
+        assert.equal(reviewFace.claim_state.claim_id, claim.claim_id);
+        assert.equal(reviewFace.claim_state.version, 1);
+        const reviewItems = reviewFace.items.filter((item) => item.kind === "claim-review");
+        assert.deepEqual(
+          reviewItems.map((item) => item.id),
+          [refutation.review_id],
+        );
+        const readBack = JSON.parse(reviewItems[0].body);
+        const identity = EnrollmentHelloResponseSchema.parse(
+          await call("/v1/hello", undefined, reviewer),
+        );
+        assert.equal(readBack.verdict, "refute");
+        assert.equal(readBack.body_md, refutationBody);
+        assert.equal(readBack.fellow, identity.fellow.fellow_id);
+        assert.equal(readBack.sponsor, reviewerSponsor);
+        assert.equal(readBack.session, reviewSession.session_id);
+        const event = await env.DB.prepare(
+          "SELECT payload_sha256 FROM events WHERE problem_id = ? AND object_id = ? AND type = 'review.created'",
+        )
+          .bind(problem.id, refutation.review_id)
+          .first();
+        assert.ok(event?.payload_sha256);
+        assert.equal(readBack.content_digest, `sha256:${event.payload_sha256}`);
+      }
+
+      const face = ProblemFaceResponseSchema.parse(await call(`${publicPath}.json`));
+      assert.equal(face.problem_status, "active");
+      const markdown = await worker.fetch(`${origin}${publicPath}.md`, {
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(markdown.status, 200);
+      assert.ok((await markdown.text()).includes(proposal.title));
+
+      await call(`/v1/sessions/${authorSession.session_id}/close`, closingHandback, author, 201);
+      await call(`/v1/sessions/${reviewSession.session_id}/close`, closingHandback, reviewer, 201);
+      console.log(JSON.stringify({ stage: "research-intake", id, role, status: "pass" }));
     }
 
-    const face = ProblemFaceResponseSchema.parse(await call(`${publicPath}.json`));
-    assert.equal(face.problem_status, "active");
-    const markdown = await worker.fetch(`${origin}${publicPath}.md`, {
-      headers: { "User-Agent": userAgent },
-    });
-    assert.equal(markdown.status, 200);
-    assert.ok((await markdown.text()).includes(proposal.title));
-
-    await call(`/v1/sessions/${authorSession.session_id}/close`, closingHandback, author, 201);
-    await call(`/v1/sessions/${reviewSession.session_id}/close`, closingHandback, reviewer, 201);
-    console.log(JSON.stringify({ stage: "research-intake", id, role, status: "pass" }));
-  }
-
-  console.log(
-    JSON.stringify({
-      stage: "research-intake-summary",
-      drafts: intake.drafts.length,
-      calibration_evaluations: calibrationChecks,
-      environment: "local-workerd-d1-r2",
-      status: "pass",
-    }),
-  );
-});
+    console.log(
+      JSON.stringify({
+        stage: "research-intake-summary",
+        drafts: intake.drafts.length,
+        calibration_evaluations: calibrationChecks,
+        environment: "local-workerd-d1-r2",
+        status: "pass",
+      }),
+    );
+  },
+);
