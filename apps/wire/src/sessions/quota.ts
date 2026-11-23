@@ -6,10 +6,13 @@ import { sha256Hex } from "../split/policy";
 
 /**
  * Fable §7.10 / A5 promotion rate limit constants.
- * Default ceiling is 20 promotions per hour per Fellow per problem.
- * An expiring, audited problem control may temporarily tighten that ceiling.
+ * Default ceiling is 20 promotions per hour per Fellow per problem, and 60
+ * promotions per hour across all Fellows under one accountable sponsor when
+ * `SPONSOR_PROMOTION_RATE_LIMIT` is not explicitly configured.
+ * An expiring, audited problem control may temporarily tighten the per-Fellow ceiling.
  */
 export const PROMOTION_RATE_LIMIT_PER_HOUR = 20;
+export const DEFAULT_SPONSOR_PROMOTION_RATE_LIMIT_PER_HOUR = 60;
 export const PROMOTION_RATE_LIMIT_WINDOW_MS = 3_600_000;
 export const RESERVATION_EXPIRY_MS = 60_000;
 
@@ -67,16 +70,18 @@ export type QuotaBatchCheckResult =
     };
 
 /**
- * Parse and validate configured sponsor promotion rate limit.
- * - undefined, null, or empty string: returns null (unconstrained sponsor dimension; no invented default).
+ * Parse and validate configured sponsor promotion rate limit (Rule A5 / 0qrf).
+ * - undefined, null, or blank string: returns `DEFAULT_SPONSOR_PROMOTION_RATE_LIMIT_PER_HOUR` (60/hr)
+ *   so multi-Fellow fleets under one sponsor always face a finite sponsor ceiling.
  * - non-negative number: returns floored integer limit (0 means immediately rate-limited).
  * - NaN, negative, non-finite, or invalid: throws an error (fails closed).
  */
-export function parseSponsorLimit(raw: string | number | undefined | null): number | null {
-  if (raw === undefined || raw === null || raw === "") {
-    return null;
+export function parseSponsorLimit(raw: string | number | undefined | null): number {
+  const configured = typeof raw === "string" ? raw.trim() : raw;
+  if (configured === undefined || configured === null || configured === "") {
+    return DEFAULT_SPONSOR_PROMOTION_RATE_LIMIT_PER_HOUR;
   }
-  const n = typeof raw === "number" ? raw : Number(raw);
+  const n = Number(configured);
   if (!Number.isFinite(n) || Number.isNaN(n) || n < 0) {
     throw new Error(
       `INVALID_SPONSOR_PROMOTION_RATE_LIMIT: expected non-negative integer, got ${String(raw)}`,

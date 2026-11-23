@@ -220,6 +220,48 @@ async function runDiscovery() {
   console.log(JSON.stringify({ stage: "d1-migrated" }));
   let fixtures = await worker.getExport();
   let env = await worker.getEnv();
+
+  async function reloadSponsorLimit(limit) {
+    await server.update((options) => ({
+      ...options,
+      workers: options.workers.map((entry) => {
+        const vars = { ...entry.config.vars };
+        if (limit === undefined) delete vars.SPONSOR_PROMOTION_RATE_LIMIT;
+        else vars.SPONSOR_PROMOTION_RATE_LIMIT = limit;
+        return { ...entry, config: { ...entry.config, vars } };
+      }),
+    }));
+    fixtures = await worker.getExport();
+    env = await worker.getEnv();
+    assert.equal(env.SPONSOR_PROMOTION_RATE_LIMIT, limit);
+  }
+
+  async function referenceWriteReservations(key) {
+    const result = await env.DB.prepare(
+      "SELECT route, status FROM public_write_attempt_reservations WHERE idempotency_key = ?",
+    )
+      .bind(key)
+      .all();
+    return result.results;
+  }
+
+  async function requireExhaustedReferenceWrite(path, request, token, key) {
+    const hello = await call("/v1/hello", undefined, token);
+    const { sponsor_limit: limit, sponsor_remaining: remaining } = hello.promotion_budget;
+    const used = limit - remaining;
+    assert.ok(used > 0 && remaining > 0, "needs a partially spent sponsor budget");
+    await reloadSponsorLimit(String(used));
+    try {
+      const refused = await call(path, request, token, 429, key);
+      assert.equal(refused.code, "PROMOTION_RATE_LIMITED");
+      assert.equal(refused.limit, used);
+      assert.ok(refused.retry_after_seconds > 0);
+      assert.deepEqual(await referenceWriteReservations(key), []);
+      assert.equal(await fixtures.screeningCalls(), 0);
+    } finally {
+      await reloadSponsorLimit(String(limit));
+    }
+  }
   let key = 0;
   async function sponsorCall(sponsorId, method, path, action, body, expected = 200) {
     const raw = body === undefined ? "" : JSON.stringify(body);
@@ -717,10 +759,15 @@ async function runDiscovery() {
                   ? "conflict"
                   : undefined;
       const mode = paidKind === undefined || screenMode === "positive" ? "pass" : screenMode;
+      const replayKey = `question-discovery-${property}`;
+      if (property === "answer_question_request" && screenMode === "positive") {
+        const beforeRefusal = await state();
+        await requireExhaustedReferenceWrite(requestPath, parsed, credential, replayKey);
+        assert.deepEqual(await state(), beforeRefusal);
+      }
       await fixtures.setScreenMode(mode);
       const before = await state();
       const beforeCalls = await fixtures.screeningCalls();
-      const replayKey = `question-discovery-${property}`;
       const response = await call(
         requestPath,
         parsed,
@@ -762,9 +809,9 @@ async function runDiscovery() {
           assert.equal(leasePayload.question_id, qid);
           assert.equal(leasePayload.objective, parsed.objective ?? "Answer question");
           assert.equal(leasePayload.deliverable, parsed.deliverable ?? "Resolution artifact");
+          assert.equal(leasePayload.ttl_seconds, parsed.ttl_seconds ?? 7200);
           if (mode === "pass") {
             assert.equal(leasePayload.leased_by, response.leased_by);
-            assert.equal(leasePayload.leased_until, response.leased_until);
           }
         }
         assert.equal(screened.kind, paidKind);
@@ -777,10 +824,16 @@ async function runDiscovery() {
         );
         if (mode === "pass") {
           const row = await env.DB.prepare(
-            `SELECT s.provenance_json, e.actor_fellow_id FROM screening_publications s JOIN events e ON e.id = s.event_id WHERE e.problem_id = ? AND e.seq = ?`,
+            `SELECT s.provenance_json, e.actor_fellow_id, e.created_at FROM screening_publications s JOIN events e ON e.id = s.event_id WHERE e.problem_id = ? AND e.seq = ?`,
           )
             .bind(problem, before.seq + 1)
             .first();
+          if (paidKind === "question-lease") {
+            assert.equal(
+              Date.parse(response.leased_until) - Date.parse(row.created_at),
+              (parsed.ttl_seconds ?? 7200) * 1000,
+            );
+          }
           const provenance = ScreeningPublicationProvenanceSchema.parse(
             JSON.parse(row.provenance_json),
           );
@@ -802,6 +855,11 @@ async function runDiscovery() {
         });
         assert.deepEqual(await call(requestPath, parsed, credential, 200, replayKey), response);
         assert.deepEqual(await state(), after, "exact replay must not append another public event");
+        if (property === "answer_question_request") {
+          assert.deepEqual(await referenceWriteReservations(replayKey), [
+            { route: "answer_question", status: "settled_published" },
+          ]);
+        }
         assert.equal(
           await fixtures.screeningCalls(),
           beforeCalls + (paidKind === undefined ? 0 : 1),
@@ -1841,6 +1899,10 @@ async function runDiscovery() {
     ...reanchorTemplate.prefilled_hints,
   });
   const beforeReanchor = await publicState();
+  if (screenMode === "positive") {
+    await requireExhaustedReferenceWrite(reanchorPath, reanchorBody, author, "metadata-reanchor");
+    assert.deepEqual(await publicState(), beforeReanchor);
+  }
   const beforeReanchorScreens = await fixtures.screeningCalls();
   const reanchored = await call(reanchorPath, reanchorBody, author, 200, "metadata-reanchor");
   assert.equal(ClaimReanchorResponseSchema.parse(reanchored).reanchored, true);
@@ -1870,6 +1932,9 @@ async function runDiscovery() {
     reanchored,
   );
   assert.deepEqual(await publicState(), afterReanchor);
+  assert.deepEqual(await referenceWriteReservations("metadata-reanchor"), [
+    { route: "reanchor", status: "settled_published" },
+  ]);
   assert.equal(await fixtures.screeningCalls(), beforeReanchorScreens);
   console.log(
     JSON.stringify({
@@ -3171,15 +3236,22 @@ async function runDiscovery() {
       JSON.stringify({ stage: "search-failure-recovery", unavailableReads, exactFallbackReads }),
     );
     async function verifyQuotaRaces() {
-      for (const dimension of ["fellow", "sponsor"]) {
-        const problem = dimension === "fellow" ? "P-QUOTA-FELLOW" : "P-QUOTA-SPONSOR";
+      for (const admission of [
+        { dimension: "fellow", limit: 20, sponsorLimit: 21, actorCount: 1 },
+        { dimension: "sponsor", limit: 21, sponsorLimit: 21, actorCount: 2 },
+        { dimension: "sponsor-default", limit: 60, sponsorLimit: 60, actorCount: 4 },
+      ]) {
+        const { dimension, limit, sponsorLimit, actorCount } = admission;
+        if (dimension === "sponsor-default") await reloadSponsorLimit(undefined);
+        const problem = `P-QUOTA-${dimension.toUpperCase()}`;
         const sponsor = `usr_quota_${dimension}`;
-        const limit = dimension === "fellow" ? 20 : 21;
         const actors = [];
         await fixtures.seedProblem(problem);
-        for (let index = 0; index < (dimension === "fellow" ? 1 : 2); index++) {
+        for (let index = 0; index < actorCount; index++) {
           const token = await enroll(`quota-${dimension}-${index}`, sponsor);
           const hello = await call("/v1/hello", undefined, token);
+          assert.equal(hello.promotion_budget?.sponsor_limit, sponsorLimit, dimension);
+          assert.equal(hello.promotion_budget?.sponsor_remaining, sponsorLimit, dimension);
           const session = await call(
             "/v1/sessions",
             { problem_id: problem, intent: "prove" },
@@ -3210,6 +3282,8 @@ async function runDiscovery() {
             undefined,
             actor.token,
           );
+          assert.equal(pack.promotion_budget?.sponsor_limit, sponsorLimit, dimension);
+          assert.equal(pack.promotion_budget?.sponsor_remaining, sponsorLimit - (limit - 1));
           assert.ok(
             pack.next_actions.some((action) => action.url.endsWith("/promote")),
             "last available slot remains offered",
@@ -3346,7 +3420,9 @@ async function runDiscovery() {
           assert.ok(pack.next_actions.some((action) => action.url.endsWith("/workshop")));
           assert.ok(pack.omitted.some((item) => item.reason === "promotion_rate_limited"));
           assert.ok(pack.promotion_budget.retry_after_seconds > 0);
-          if (dimension === "sponsor") assert.equal(pack.promotion_budget.sponsor_remaining, 0);
+          assert.equal(pack.promotion_budget.sponsor_remaining, sponsorLimit - limit);
+          const hello = await call("/v1/hello", undefined, actor.token);
+          assert.equal(hello.promotion_budget?.sponsor_remaining, sponsorLimit - limit);
         }
         console.log(
           JSON.stringify({
@@ -3426,7 +3502,7 @@ async function runDiscovery() {
         });
         assert.equal(refilled.allowed, true, "Capacity must refill at the rolling-window boundary");
         assert.equal(refilled.budget.remaining, 19);
-        assert.equal(refilled.budget.sponsor_remaining, 20);
+        assert.equal(refilled.budget.sponsor_remaining, sponsorLimit - 1);
         assert.equal(await fixtures.screeningCalls(), 0);
         console.log(
           JSON.stringify({
@@ -3444,6 +3520,73 @@ async function runDiscovery() {
           }),
         );
       }
+      // A configured zero refuses a fresh sponsor before paying for screening.
+      await reloadSponsorLimit("0");
+      const disabledProblem = "P-QUOTA-DISABLED";
+      await fixtures.seedProblem(disabledProblem);
+      const disabledToken = await enroll("quota-disabled", "usr_quota_disabled");
+      const disabledHello = await call("/v1/hello", undefined, disabledToken);
+      assert.equal(disabledHello.promotion_budget?.sponsor_limit, 0);
+      assert.equal(disabledHello.promotion_budget?.sponsor_remaining, 0);
+      const disabledSession = (
+        await call(
+          "/v1/sessions",
+          { problem_id: disabledProblem, intent: "prove" },
+          disabledToken,
+          201,
+        )
+      ).session_id;
+      const disabledDraft = await call(
+        `/v1/sessions/${disabledSession}/workshop`,
+        { type: "claim-draft", title: "Private arithmetic", body_md: "A private draft." },
+        disabledToken,
+        201,
+      );
+      const disabled = await worker.fetch(`${origin}/v1/sessions/${disabledSession}/promote`, {
+        method: "POST",
+        headers: {
+          "User-Agent": userAgent,
+          authorization: `Bearer ${disabledToken}`,
+          "content-type": "application/json",
+          "idempotency-key": "quota-disabled-promotion",
+        },
+        body: JSON.stringify({
+          workshop_id: disabledDraft.workshop_id,
+          kind: "conjecture",
+          statement: "The integer two is even.",
+          falsifier: "An odd remainder after division by two.",
+        }),
+      });
+      assert.equal(disabled.status, 429);
+      const disabledProblemBody = await disabled.json();
+      assert.equal(disabledProblemBody.code, "PROMOTION_RATE_LIMITED");
+      assert.equal(disabledProblemBody.limit, 0);
+      assert.ok(Number(disabled.headers.get("retry-after")) > 0);
+      assert.equal(await fixtures.screeningCalls(), 0);
+      const disabledPack = await call(
+        `/v1/sessions/${disabledSession}/pack?profile=working`,
+        undefined,
+        disabledToken,
+      );
+      assert.equal(disabledPack.promotion_budget?.sponsor_remaining, 0);
+      assert.ok(disabledPack.next_actions.some((action) => action.url.endsWith("/workshop")));
+      assert.ok(!disabledPack.next_actions.some((action) => action.url.endsWith("/promote")));
+      const disabledEffects = await env.DB.prepare(`SELECT
+        (SELECT COUNT(*) FROM public_write_attempt_reservations WHERE problem_id = ?1) AS attempts,
+        (SELECT COUNT(*) FROM events WHERE problem_id = ?1) AS events`)
+        .bind(disabledProblem)
+        .first();
+      assert.deepEqual(disabledEffects, { attempts: 0, events: 0 });
+      console.log(
+        JSON.stringify({
+          stage: "real-d1-quota-configured-zero",
+          refusal: disabled.status,
+          promotion_limit: disabledProblemBody.limit,
+          classifier_calls: await fixtures.screeningCalls(),
+          ...disabledEffects,
+        }),
+      );
+      await reloadSponsorLimit("21");
       const refillProblem = "P-QUOTA-REFILL";
       await fixtures.seedProblem(refillProblem);
       const refillToken = await enroll("quota-refill", "usr_quota_refill");
@@ -3504,7 +3647,7 @@ async function runDiscovery() {
       fixtures = await worker.getExport();
       env = await worker.getEnv();
       assert.equal(await fixtures.screeningCalls(), 0);
-      await call(
+      const refilledClaim = await call(
         `/v1/sessions/${refillSession.session_id}/promote`,
         {
           workshop_id: refillDraft.workshop_id,
@@ -3531,6 +3674,43 @@ async function runDiscovery() {
           after_reload: "published",
           classifier_calls: 1,
           clock_boundary: "historical fixture reservations; HTTP uses actual Worker time",
+        }),
+      );
+      const beforeFailedSettlement = await publicState();
+      await env.DB.prepare(
+        `CREATE TRIGGER discovery_fail_reanchor_settlement
+         BEFORE UPDATE OF status ON public_write_attempt_reservations
+         WHEN NEW.status = 'settled_published' AND NEW.idempotency_key = 'metadata-reanchor-rollback'
+         BEGIN SELECT RAISE(ABORT, 'discovery settlement rollback'); END`,
+      ).run();
+      try {
+        await call(
+          `/v1/sessions/${refillSession.session_id}/reanchor`,
+          { claim_id: refilledClaim.claim_id, base_version: 1 },
+          refillToken,
+          500,
+          "metadata-reanchor-rollback",
+        );
+        assert.deepEqual(await publicState(), beforeFailedSettlement);
+        assert.deepEqual(await referenceWriteReservations("metadata-reanchor-rollback"), [
+          { route: "reanchor", status: "settled_failed" },
+        ]);
+        const receipt = await env.DB.prepare(
+          "SELECT 1 FROM session_write_replays WHERE scope = 'reanchor' AND idempotency_key = ?",
+        )
+          .bind("metadata-reanchor-rollback")
+          .first();
+        assert.equal(receipt, null);
+        assert.equal(await fixtures.screeningCalls(), 1);
+      } finally {
+        await env.DB.prepare("DROP TRIGGER discovery_fail_reanchor_settlement").run();
+      }
+      console.log(
+        JSON.stringify({
+          stage: "real-d1-reference-write-settlement-rollback",
+          reservation: "settled_failed",
+          appended_events: 0,
+          classifier_calls: 0,
         }),
       );
       const sameKeyProblem = "P-QUOTA-SAME-KEY";

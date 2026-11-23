@@ -5,6 +5,7 @@ import { changeProblemSlowMode } from "../../src/moderation/slow-mode";
 import {
   checkAndReserveQuota,
   checkAndReserveQuotaBatch,
+  DEFAULT_SPONSOR_PROMOTION_RATE_LIMIT_PER_HOUR,
   getRemainingBudget,
   PROMOTION_RATE_LIMIT_WINDOW_MS,
   parseSponsorLimit,
@@ -232,10 +233,11 @@ describe("temporary problem limits use existing attempt history", () => {
 });
 
 describe("pure table/property tests: parseSponsorLimit", () => {
-  test("returns null for undefined, null, or empty string", () => {
-    expect(parseSponsorLimit(undefined)).toBeNull();
-    expect(parseSponsorLimit(null)).toBeNull();
-    expect(parseSponsorLimit("")).toBeNull();
+  test("uses the finite sponsor default when the binding is absent or blank", () => {
+    expect(parseSponsorLimit(undefined)).toBe(DEFAULT_SPONSOR_PROMOTION_RATE_LIMIT_PER_HOUR);
+    expect(parseSponsorLimit(null)).toBe(DEFAULT_SPONSOR_PROMOTION_RATE_LIMIT_PER_HOUR);
+    expect(parseSponsorLimit("")).toBe(DEFAULT_SPONSOR_PROMOTION_RATE_LIMIT_PER_HOUR);
+    expect(parseSponsorLimit(" \t")).toBe(DEFAULT_SPONSOR_PROMOTION_RATE_LIMIT_PER_HOUR);
   });
 
   test("parses valid positive integer or zero", () => {
@@ -280,8 +282,8 @@ describe("pure table/property tests: checkAndReserveQuota", () => {
       limit: 20,
       remaining: 19,
       window_seconds: 3600,
-      sponsor_limit: null,
-      sponsor_remaining: null,
+      sponsor_limit: DEFAULT_SPONSOR_PROMOTION_RATE_LIMIT_PER_HOUR,
+      sponsor_remaining: DEFAULT_SPONSOR_PROMOTION_RATE_LIMIT_PER_HOUR - 1,
     });
   });
 

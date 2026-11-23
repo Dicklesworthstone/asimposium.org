@@ -12,7 +12,14 @@ import { assertRacedWriteLeavesNoTrace } from "./raced-ledger-write.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
-export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, fixtures }) {
+export async function sessionPresenceJourney({
+  call,
+  enroll,
+  sponsorCall,
+  operatorCall,
+  env,
+  fixtures,
+}) {
   const sponsorA = "usr_presence_sponsor_a";
   const sponsorB = "usr_presence_sponsor_b";
 
@@ -682,6 +689,96 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
   assert.equal(resumedWork.lease.object, recoveryLease.object);
   assert.equal(resumedWork.lease.status, "active");
 
+  // A review belongs to the lease intent. An identical retry may reach a
+  // later clock tick and acquisition may mint a fresh publication ID.
+  const reviewProblem = "P-LEASE-REVIEW-INTENT";
+  const reviewSponsor = "usr_lease_review_intent";
+  const reviewToken = await enroll("lease-review-intent", reviewSponsor);
+  await fixtures.seedProblem(reviewProblem, reviewSponsor);
+  const leaseReviewSession = await call(
+    "/v1/sessions",
+    { problem_id: reviewProblem, intent: "explore" },
+    reviewToken,
+    201,
+  );
+  const reviewBase = `/v1/sessions/${leaseReviewSession.session_id}`;
+  const reviewQuestion = await call(
+    `${reviewBase}/questions`,
+    { body_md: "Which finite cases should the reviewer calculate?", target_refs: [] },
+    reviewToken,
+    201,
+  );
+  const reviewedEffects = () =>
+    env.DB.prepare(
+      `SELECT
+         (SELECT public_seq FROM problems WHERE id = ?1) AS seq,
+         (SELECT COUNT(*) FROM screening_cases WHERE problem_id = ?1) AS cases`,
+    )
+      .bind(reviewProblem)
+      .first();
+  for (const [name, path, body, success] of [
+    [
+      "question-lease",
+      `${reviewBase}/questions/${reviewQuestion.question_id}/lease`,
+      { objective: "Check two finite cases", deliverable: "A calculation", ttl_seconds: 900 },
+      200,
+    ],
+    [
+      "object-lease",
+      `${reviewBase}/leases`,
+      {
+        object: reviewQuestion.question_id,
+        objective: "Check an independent case",
+        deliverable: "Another calculation",
+        ttl_seconds: 1800,
+      },
+      201,
+    ],
+    [
+      "fellow-release",
+      `${reviewBase}/leases/${reviewQuestion.question_id}/release`,
+      { reason: "Both finite calculations are ready for review." },
+      200,
+    ],
+  ]) {
+    const key = `lease-review-${name}`;
+    const before = await reviewedEffects();
+    await fixtures.setScreenMode("quarantine");
+    const first = await call(path, body, reviewToken, 202, key);
+    const retried = await call(path, body, reviewToken, 202, key);
+    assert.match(first.case_id, /^QC-/);
+    assert.equal(retried.case_id, first.case_id, `${name} must reopen the exact case`);
+    assert.deepEqual(await reviewedEffects(), { seq: before.seq, cases: before.cases + 1 });
+    const beforeApprovalScreens = await fixtures.screeningCalls();
+    await operatorCall("POST", "/v1/operators/quarantine/decision", "operator.quarantine.decide", {
+      case_id: first.case_id,
+      decision: "release",
+      reason: "Reviewed the scoped arithmetic coordination request.",
+    });
+    const published = await call(path, body, reviewToken, success, key);
+    const committed = await env.DB.prepare(
+      `SELECT e.created_at, c.payload_json, s.provenance_json FROM events e
+       JOIN event_content c ON c.event_id = e.id
+       JOIN screening_publications s ON s.event_id = e.id
+       WHERE e.problem_id = ? AND e.seq = ?`,
+    )
+      .bind(reviewProblem, before.seq + 1)
+      .first();
+    assert.equal(JSON.parse(committed.provenance_json).review_case_id, first.case_id);
+    if (body.ttl_seconds !== undefined) {
+      const payload = JSON.parse(committed.payload_json);
+      assert.equal(
+        Date.parse(payload.leased_until) - Date.parse(committed.created_at),
+        body.ttl_seconds * 1000,
+        name,
+      );
+    }
+    assert.deepEqual(await call(path, body, reviewToken, 200, key), published);
+    assert.deepEqual(await reviewedEffects(), { seq: before.seq + 1, cases: before.cases + 1 });
+    assert.equal(await fixtures.screeningCalls(), beforeApprovalScreens);
+  }
+  await fixtures.setScreenMode("pass");
+
   return {
     kind: "session-presence-journey",
     status: "pass",
@@ -705,6 +802,7 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
       "paused-fellow-release",
       "work-reserved-by-another-fellow",
     ],
+    lease_review_intent: ["question-lease", "object-lease", "fellow-release"],
     session_id: sessionIdA,
     problem_id: problemId,
     question_id: questionId,

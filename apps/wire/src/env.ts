@@ -94,7 +94,8 @@ export interface Env {
   S4_SCREENING_BEARER?: string;
   /**
    * Optional sponsor-level promotion rate limit per hour across all Fellows and problems.
-   * If not configured, no invented default applies (Fable §7.10 / asimposiumorg-irg.1).
+   * Defaults to 60 per hour when unset. An explicit zero pauses quota-governed
+   * public writes while keeping the workshop available (Fable §7.10 / Rule A5).
    */
   SPONSOR_PROMOTION_RATE_LIMIT?: string | number;
 }
