@@ -34,11 +34,17 @@ Track individual work in the linked Beads and retire this checklist from active 
 - [x] Compare all 28 production migration digests. Production's `0016` digest and live table definition match `66a867ad`. The current file moved a comment outside the table definition.
 - [x] Count production identities and credential records. D1 reports six sponsors and six Fellows, one enrollment credential and six Fellow-token records, with no problems, ledger events, sessions or workshop objects.
 - [x] Replay the historic `0016` and the 120 forward migrations through `0148` in isolated local Workerd. Verify that the two test identity rows survive and foreign-key checks pass.
+- [x] Capture a populated historical `0028` database with the production SQL backup code. Import it into a second empty local D1 instance and compare the logical SQL digest, schema digest and all 48 table counts.
+- [x] Advance the restored local copy through all 120 migrations while retaining the historic journal digest. Check that the active fixture still authenticates, the revoked fixture is refused and the original instance remains on `0028`.
+- [x] Inspect live credential posture by aggregate. All six credential records are within their issued and expiry window and have no revocation timestamp. Preserve all grants and credential records through cutover.
 - [x] Dry-run the production Worker package at `0ceba020`. Confirm the exact release still needs the completed Herald configuration.
 - [x] Run the signed backup and restore journey at `0ceba020` on local Workerd, D1 and R2.
 - [ ] Verify production Worker identity, D1 binding, private and public R2 roles, Durable Object classes, AI binding, cron and service-envelope keys.
 - [ ] Provision and confirm production checkpoint signing and backup destination bindings. Verify before enabling logs or cron that depend on them.
 - [ ] Rehearse the production-specific backup, migration and restore with a separately isolated target. Preserve real credentials and the honest `0016` receipt. The default migration runner reports `REMOTE_STAGING_ONLY` for production observation and refuses production application.
+- [ ] Obtain approval for the isolated provider D1 target and the production binding change.
+- [ ] Match the source snapshot to the live provider identity and D1 journal. Use a private transfer path and authenticate the snapshot before importing it.
+- [ ] Hold a production write boundary for the final source comparison. Recheck current credential and deletion state before admitting traffic on the copy.
 - [ ] Compare migrated identity, grant and credential records with the source before moving traffic. Keep the original binding available for rollback and define the cutover boundary for concurrent writes.
 - [ ] Pin the candidate revision and run typecheck, lint, tests, contract checks and UBS.
 - [ ] Bundle the Worker with the exact production configuration and verify the release serves the expected revision, readiness status and schema registry.
@@ -64,14 +70,18 @@ Beads `mn7`, `doa`, `ict`, `xeg`, `7ft`, `zai`, `0qrf`, `ip3`, `zr9`, `qnh`, `8k
 
 ### Launch seeds
 
+The [evidence dossier](seed/research-evidence.md) records the archive pins and replay scope.
+
 - [x] Run the original five seed rungs and the SP4D guardrail journey on local Workerd and D1.
 - [x] Read the available local research checkouts and pin the exact source revisions used. Mac Studio SSH host identity remains unverified.
-- [x] Prepare exact adoption payloads for the marked-group calibration and the matched Hebbian-write experiment, each with a falsifier, scope and independent review criteria.
-- [x] Exercise both payloads through local enrollment, private-draft isolation, reviewed publication, cross-sponsor statement review and public faces.
+- [x] Prepare exact adoption payloads for the marked-group calibration, the held-out Hebbian replay and the checked group catalog reproduction. Give each a falsifier, scope and independent review criteria.
+- [x] Exercise the expanded three-problem intake through local enrollment, private-draft isolation, reviewed publication, cross-sponsor statement review and public faces.
 - [x] Check all 240 marked-group evaluations. Post the planted cross-marking claim locally, then record its refutation through the second sponsor's Fellow.
+- [x] Recompute the four Hebbian contrasts and the registered decision from the pinned 1,536-row archive. One contrast passed and the overall claim missed its advancement criterion.
+- [x] Replay the archived group proposal certificates and 3,456 word evaluations. Check accepted cases, fallback edges and query counts against the frozen summary.
 - [ ] Confirm source and artifact publication rights, and obtain independent domain review of the exact draft texts.
 - [ ] Have onboarded Fellows deliberately adopt the production formulations. Obtain sponsor publication approval and a separate statement-clear review for each.
 - [ ] Publish and replay the worked calibration, reproduction and counterexample program. Verify SP4D statement and external-expert gates, and confirm its public guardrail and exact share language.
-- [ ] Recompute the Hebbian decision from permitted held-out scores once available. Release the measured result with its scope and uncertainty.
+- [ ] Publish the approved Hebbian and group reproductions with their archive pins, scope and uncertainty. Collect independent Fellow replays.
 
 Beads `voc.1`, `tf2`, `a5j`.

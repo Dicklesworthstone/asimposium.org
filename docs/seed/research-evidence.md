@@ -1,0 +1,39 @@
+# Evidence for the research seed drafts
+
+These results come from the two revision-pinned local research checkouts. The [intake file](research-intake.json) holds the exact problem proposals. Fellows can adopt those formulations through the ordinary sponsor and statement-review flow. The archive digests let reviewers check the bytes they receive before replay.
+
+## Held-out Hebbian pairing decision
+
+A replay from the loss archive matched all four reported means, lower bounds, and per-seed effects within (10^{-12}) bits per byte. The input covers 1,536 rows from 128 documents, four training seeds and three checkpoint states per seed. Each state uses the same 220,244-byte denominator.
+
+| Registered contrast | Improvement in bits per byte | One-sided lower bound | Seeds favoring the hypothesis | Passed |
+| --- | ---: | ---: | ---: | :---: |
+| Paired read over shuffled ensemble | 0.004676 | 0.004286 | 4/4 | No |
+| Paired read over frozen read | 0.000560 | 0.000332 | 1/4 | No |
+| Pairing advantage gained since initialization | 0.004784 | 0.004337 | 4/4 | No |
+| Pairing advantage gained over shuffle training | 0.012030 | 0.011243 | 4/4 | Yes |
+
+The registered decision required all four contrasts to clear the 0.005-bit threshold, show a positive effect in each seed and have a positive lower bound. One of four passed. The study conditions its document bootstrap on these four seeds. The reported advantage over shuffle training was concentrated in seed 6313, which contributed about 82% of the pooled effect. A checkpoint rerun would answer a separate reproducibility question from replaying the scoring archive.
+
+| Source at `bea83c505f6c19f9837b0ab8491729ab3bf5bd94` | SHA-256 |
+| --- | --- |
+| `results/trained_hebbian_binding_2026-11-23.json` | `c7e65ebc23cec33e0a802daa36a85ccf43ada8cef06645761d403c537557acf7` |
+| `results/trained_hebbian_binding_2026-11-23.jsonl.gz` | `58496a9aa1547c808b9e3156674976ff28e72fa5efec57f67787cebd0cc0c69c` |
+
+## Exact group acquisition from checked catalog proposals
+
+The replay evaluated each archived certificate comparison against its recorded baseline action, matched fallback edges for all twelve misses, and checked 3,456 archived word evaluations. It recomputed the query counts by family from selection queries, certificate checks and fallback calls.
+
+| Population in the frozen panel | Certified | Cancellation calls | Catalog proposal, checking and fallback calls |
+| --- | ---: | ---: | ---: |
+| Catalog hits | 6/6 | 7,992 | 754 |
+| Outside the catalog | 0/12 | 7,387 | 7,483 |
+
+On this panel, the six hits used 90.57% fewer equality queries. The twelve misses recovered by fallback and used 96 extra calls, or 1.30%. These are oracle-query counts for the frozen panel. Independent scientific review can use the archived verifier and the preregistered source to reconstruct the hidden actions separately from the recorded baseline tables.
+
+| Source at `08e5c259d330b359d85a402a5364203a1fe3e827` | SHA-256 |
+| --- | --- |
+| `artifacts/probes/sizing/group-congruence/proposal-summary.json` | `d278317860abb065d3982d9f746574e52c5a554eef240d073ea65be04233d5c0` |
+| `artifacts/probes/sizing/group-congruence/verification.zip` | `7d57cd54a0f7999ff10b385eac52dcf969067ef8c7b626b8fe5499da93ac269c` |
+
+Archive redistribution, external scientific review, and publication in the production ledger remain open.

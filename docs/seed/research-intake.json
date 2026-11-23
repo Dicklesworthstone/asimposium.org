@@ -21,21 +21,49 @@
     },
     {
       "id": "hebbian-binding-controls",
-      "role": "registered-research",
+      "role": "reproduction",
       "source": {
         "project": "bio_inspired_nanochat",
-        "revision": "94bd312",
-        "paths": ["docs/online_learning_status.md", "scripts/e2e/trained_hebbian_binding.py"]
+        "revision": "bea83c505f6c19f9837b0ab8491729ab3bf5bd94",
+        "paths": [
+          "docs/online_learning_status.md",
+          "scripts/e2e/trained_hebbian_binding.py",
+          "results/trained_hebbian_binding_2026-11-23.json",
+          "results/trained_hebbian_binding_2026-11-23.jsonl.gz"
+        ]
       },
       "proposal": {
-        "title": "Does matched training learn to use activation pairing in Hebbian memory?",
-        "statement": "For the registered two-layer width-192 language model, test whether preserving activation pairing during training yields a pairing-specific next-token coding benefit on held-out text. Within each of four seeds use the same initialization and 131072 training tokens for a paired-write model and a shuffled-write model. At read time compare paired, shuffled-ensemble, and frozen writes. The primary endpoint is bits per byte after the first complete chunk on the 128 prespecified held-out documents.",
+        "title": "Reproduce the held-out decision for pairing in Hebbian memory",
+        "statement": "Recompute the registered pairing-specific next-token coding decision for the two-layer width-192 language model. Within each of four seeds the paired-write and shuffled-write models used the same initialization and 131072 training tokens. At read time the experiment compared paired, shuffled-ensemble, and frozen writes. Use bits per byte after the first complete chunk on the 128 prespecified held-out documents.",
         "falsifier": "The registered positive claim fails if any of its four contrasts misses a 0.005 bits-per-byte improvement, any seed has a nonpositive contrast, or any one-sided 98.75% paired document-bootstrap lower bound is nonpositive. The four contrasts are the paired-trained paired read against its shuffled ensemble and frozen read, and its pairing benefit against the corresponding gap at initialization and after shuffled-write training. A mismatch in initialization, exposure, or read controls invalidates the measurement.",
         "motivation": "Switching memory on and off combines information from activation pairing with effects of performing an update. A matched shuffled control preserves the write mechanism and measures whether the original pairing contributes to performance.",
-        "scope": "Use the admitted eight checkpoints with 128 updates per checkpoint. Verify checkpoint, tokenizer, and token-stream digests and reset fast state between held-out documents. Combine the probabilities of the four registered shuffled reads before computing their coding loss. Bootstrap over documents with seeds held fixed.",
+        "scope": "Use the 1536 archived document records covering the initial model and both checkpoints for each seed. Verify the archive digest, the complete seed and arm grid, and the common byte denominators. Use the archived coding loss from the probability ensemble of four shuffled reads. Bootstrap over documents with seeds held fixed.",
         "out_of_scope": "Long-context claims, scaling laws, performance at longer training exposures, and claims about biological synapses. Treat the associative-recall probes as descriptive.",
-        "success_criteria": "Publish matched-run receipts, per-document bit and byte counts, all four paired contrasts and their uncertainty, and the verdict under the registered rule. A second sponsor's Fellow recomputes the decision from the permitted inputs. Preserve a null or inconclusive result with the same provenance.",
+        "success_criteria": "An independent Fellow reproduces all four contrasts, one-sided bounds, per-seed effects and the registered overall decision from the permitted rows. Publish the source digest and any discrepancies, with conclusions bounded to this cohort and exposure.",
         "areas": ["cs-theory", "probability"]
+      }
+    },
+    {
+      "id": "checked-group-catalog",
+      "role": "reproduction",
+      "source": {
+        "project": "model_guided_research",
+        "revision": "08e5c259d330b359d85a402a5364203a1fe3e827",
+        "paths": [
+          "artifacts/probes/sizing/group-congruence/README.md",
+          "artifacts/probes/sizing/group-congruence/proposal-summary.json",
+          "artifacts/probes/sizing/group-congruence/verification.zip"
+        ]
+      },
+      "proposal": {
+        "title": "Reproduce exact group acquisition with checked catalog proposals",
+        "statement": "Replay the comparison between cancellation and catalog proposal with exact oracle checking on the frozen 18 marked actions of order 120. The candidate library holds 57 marked S5 actions. For each proposed action, verify the edge equations against the equality oracle. After the first equation failure, use cancellation alone to recover the target.",
+        "falsifier": "An accepted proposal whose representative map disagrees with a target edge or a held-out word falsifies the recorded exact-recovery claim. A rejected case whose fallback differs from the baseline also falsifies it. A ledger count that omits any paid comparison invalidates the reported query savings.",
+        "motivation": "A catalog can help choose which hypothesis to test when equality queries are expensive. Checking the proposal through an exact oracle lets the method retain correct recovery on actions outside the catalog.",
+        "scope": "Use the six S5, six cyclic, three dihedral and three A5 times C2 cases in the frozen panel. Keep the equality oracle, known cardinality and marked generators fixed. Count selection, new certificate checks and fallback separately. Replay both outgoing edges of every final state and all 192 archived held-out words per case.",
+        "out_of_scope": "Runtime or network savings in a deployment, generalization beyond this fixed panel, and correctness when the oracle, reachability or known cardinality assumptions fail.",
+        "success_criteria": "Release a per-case certificate, the equality-query totals for both methods, and a table of any edge, held-out word or fallback disagreement. A separate Fellow replays acceptance and rejection and reports savings separately for catalog hits and misses.",
+        "areas": ["algebra", "cs-theory"]
       }
     }
   ]

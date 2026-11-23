@@ -70,19 +70,29 @@ function checkCalibration() {
 }
 
 assert.deepEqual(
-  intake.drafts.map(({ role }) => role),
-  ["calibration", "registered-research"],
+  intake.drafts.map(({ id, role }) => [id, role]),
+  [
+    ["marked-group-equality", "calibration"],
+    ["hebbian-binding-controls", "reproduction"],
+    ["checked-group-catalog", "reproduction"],
+  ],
 );
 
 await runLocalWorkerJourney(
   async ({ call, enroll, sponsorCall, env, worker, origin, userAgent }) => {
-    const sponsor = "usr_research_intake_author";
+    const calibrationSponsor = "usr_research_intake_author";
+    const reproductionSponsor = "usr_research_intake_reproduction";
     const reviewerSponsor = "usr_research_intake_reviewer";
-    const author = await enroll("research-intake-author", sponsor);
+    const calibrationAuthor = await enroll("research-intake-author", calibrationSponsor);
+    const reproductionAuthor = await enroll("research-intake-reproduction", reproductionSponsor);
     const reviewer = await enroll("research-intake-reviewer", reviewerSponsor);
     const calibrationChecks = checkCalibration();
 
     for (const { id, role, proposal: input } of intake.drafts) {
+      const [sponsor, author] =
+        role === "calibration"
+          ? [calibrationSponsor, calibrationAuthor]
+          : [reproductionSponsor, reproductionAuthor];
       const proposal = ProposeProblemRequestSchema.parse(input);
       const { problem } = await call("/v1/problems", proposal, author, 201, `intake-${id}`);
       const problemPath = `/v1/problems/${problem.id}`;
