@@ -1422,6 +1422,52 @@ describe("durable ledger-to-inbox delivery", () => {
 });
 
 describe("recorded dead-end retry conditions reach their author", () => {
+  test("a hidden retry source stays durable but is neither counted nor acknowledged", async () => {
+    await withFixture(async (f) => {
+      f.deadEnd();
+      f.statement();
+      f.fire();
+      const notice = f.notices()[0];
+      if (!notice) throw new Error("expected the durable retry echo");
+      const before = await getInboxNotices(f.db, "fellow-a", { limit: 1 }, NOW);
+      expect(before.items.map((item) => item.id)).toEqual([notice.id]);
+      expect(before.unacknowledged_count).toBe(1);
+      const events = f.sql
+        .query("SELECT seq FROM events WHERE id IN ('source-DE-ONE','E-statement') ORDER BY seq")
+        .all() as { seq: number }[];
+      for (const reference of ["DE-ONE", "DE-ONE@1", ...events.map((event) => "#" + event.seq)]) {
+        f.sql
+          .query("INSERT INTO content_controls VALUES ('P-DEMO',?,1,'hidden')")
+          .run(reference);
+        const hidden = await getInboxNotices(f.db, "fellow-a", { limit: 1 }, NOW);
+        expect(hidden.items).toEqual([]);
+        expect(hidden.next_cursor).toBeNull();
+        expect(hidden.has_more).toBe(false);
+        expect(hidden.unacknowledged_count).toBe(0);
+        for (const request of [{ notice_ids: [notice.id] }, { until_seq: notice.seq }]) {
+          const receipt = await ackInboxNotices(f.db, "fellow-a", request, NOW + 1);
+          expect(receipt.acknowledged_count).toBe(0);
+          expect(receipt.unacknowledged_count).toBe(0);
+        }
+        expect(f.notices()[0]?.acknowledged_at).toBeNull();
+        f.sql
+          .query("INSERT INTO content_controls VALUES ('P-DEMO',?,2,'visible')")
+          .run(reference);
+        const restored = await getInboxNotices(f.db, "fellow-a", { limit: 1 }, NOW);
+        expect(restored.items.map((item) => [item.id, item.seq])).toEqual([
+          [notice.id, notice.seq],
+        ]);
+        expect(restored.unacknowledged_count).toBe(1);
+      }
+      expect(
+        (await ackInboxNotices(f.db, "fellow-a", { notice_ids: [notice.id] }, NOW + 2))
+          .acknowledged_count,
+      ).toBe(1);
+      expect(f.notices()).toHaveLength(1);
+      expect(f.notices()[0]?.acknowledged_at).toBe(NOW + 2);
+    });
+  });
+
   test("commits one private echo with its trigger and never copies scientific bodies", async () => {
     await withFixture(async (f) => {
       f.deadEnd();

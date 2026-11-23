@@ -115,6 +115,7 @@ function fixture() {
         target?: string | null;
         detail?: string;
         cause?: string | null;
+        impactKind?: string;
       } = {},
     ) {
       const id = `${options.fellow ?? FELLOW}-${seq}`;
@@ -128,7 +129,7 @@ function fixture() {
           seq,
           `Notice ${seq}`,
           options.detail ?? "PRIVATE_OWN_NOTICE",
-          options.type ? null : "gap_closed",
+          options.impactKind ?? (options.type ? null : "gap_closed"),
           options.cause ?? null,
           options.target ?? null,
           options.acknowledged ?? null,
@@ -553,6 +554,138 @@ describe("sponsor inbox reads currently owned Fellow notices", () => {
       );
     } finally {
       f.sql.close();
+    }
+  });
+
+  test("source-bound impact echoes obey hides and redaction in both private readers", async () => {
+    for (const kind of ["dead_end_served", "retry_trigger_fired", "gap_closed"] as const) {
+      const f = fixture();
+      try {
+        const target = kind === "gap_closed" ? "G-1" : "DE-SOURCE";
+        const source = f.event(
+          1,
+          kind === "gap_closed" ? "gap.filed" : "dead_end.recorded",
+          target,
+          { retry_when: { kind: "statement-revised" } },
+        );
+        const cause =
+          kind === "dead_end_served"
+            ? null
+            : f.event(
+                2,
+                kind === "gap_closed" ? "gap.closed-by" : "problem.statement-revised",
+                kind === "gap_closed" ? target : "P-PUBLIC",
+                {},
+                "fellow-bob",
+              );
+        const notice = f.add(1, {
+          type: "impact_echo",
+          impactKind: kind,
+          problem: "P-PUBLIC",
+          target,
+          cause,
+          detail: "SOURCE_BOUND_IMPACT",
+        });
+        const readBoth = async (visible: boolean) => {
+          const fellow = await getInboxNotices(f.db, FELLOW, { limit: 1 }, NOW);
+          const sponsor = await f.read({ limit: 1 });
+          expect(fellow.items.map((item) => item.id)).toEqual(visible ? [notice] : []);
+          expect(sponsor?.items.map((item) => item.id)).toEqual(visible ? [notice] : []);
+          expect(fellow.unacknowledged_count).toBe(visible ? 1 : 0);
+          expect(sponsor?.fellow_unacknowledged_count).toBe(visible ? 1 : 0);
+          expect(fellow.has_more).toBe(false);
+          expect(sponsor?.has_more).toBe(false);
+          expect(fellow.next_cursor).toBe(visible ? 1 : null);
+          expect(sponsor?.next_cursor).toBe(visible ? 1 : null);
+        };
+        await readBoth(true);
+        for (const reference of [target, target + "@1", "#1", ...(cause === null ? [] : ["#2"])]) {
+          f.sql
+            .query("INSERT INTO content_controls VALUES ('P-PUBLIC',?,1,'hidden')")
+            .run(reference);
+          await readBoth(false);
+          f.sql
+            .query("INSERT INTO content_controls VALUES ('P-PUBLIC',?,2,'visible')")
+            .run(reference);
+          await readBoth(true);
+        }
+        for (const event of [source, ...(cause === null ? [] : [cause])]) {
+          f.sql.query("UPDATE event_content SET redacted_at='redacted' WHERE event_id=?").run(event);
+          await readBoth(false);
+          f.sql.query("UPDATE event_content SET redacted_at=NULL WHERE event_id=?").run(event);
+          await readBoth(true);
+        }
+      } finally {
+        f.sql.close();
+      }
+    }
+  });
+
+  test("impact echoes require their original author and exact causal target", async () => {
+    for (const scenario of ["other-author", "other-gap", "other-problem", "other-retry-target"]) {
+      const f = fixture();
+      try {
+        const retry = scenario === "other-retry-target";
+        const target = retry ? "DE-SOURCE" : "G-1";
+        f.event(
+          1,
+          retry ? "dead_end.recorded" : "gap.filed",
+          target,
+          { retry_when: { kind: "gap-closed", gap_id: "G-1" } },
+          scenario === "other-author" ? "fellow-bob" : FELLOW,
+        );
+        const cause = f.event(
+          2,
+          "gap.closed-by",
+          scenario === "other-gap" || retry ? "G-2" : "G-1",
+          {},
+          "fellow-bob",
+          scenario === "other-problem" ? "P-PRIVATE" : "P-PUBLIC",
+        );
+        f.add(1, {
+          type: "impact_echo",
+          impactKind: retry ? "retry_trigger_fired" : "gap_closed",
+          problem: "P-PUBLIC",
+          target,
+          cause,
+        });
+        expect((await getInboxNotices(f.db, FELLOW, { limit: 50 }, NOW)).items).toEqual([]);
+        const sponsor = await f.read();
+        expect(sponsor?.items).toEqual([]);
+        expect(sponsor?.fellow_unacknowledged_count).toBe(0);
+      } finally {
+        f.sql.close();
+      }
+    }
+  });
+
+  test("an impact source hidden during hydration cannot escape through either reader", async () => {
+    for (const reader of ["fellow", "sponsor"] as const) {
+      const f = fixture();
+      try {
+        f.event(1, "dead_end.recorded", "DE-SOURCE", {});
+        f.add(1, {
+          type: "impact_echo",
+          impactKind: "dead_end_served",
+          problem: "P-PUBLIC",
+          target: "DE-SOURCE",
+          detail: "HIDDEN_IMPACT_SOURCE_CANARY",
+        });
+        f.onPageRead(() =>
+          f.sql.exec("INSERT INTO content_controls VALUES ('P-PUBLIC','DE-SOURCE',1,'hidden')"),
+        );
+        if (reader === "fellow") {
+          await expect(getInboxNotices(f.db, FELLOW, { limit: 50 }, NOW)).rejects.toThrow(
+            "INBOX_PAGE_CHANGED",
+          );
+        } else {
+          const response = await f.request();
+          expect(response.status).toBe(503);
+          expect(await response.text()).not.toContain("HIDDEN_IMPACT_SOURCE_CANARY");
+        }
+      } finally {
+        f.sql.close();
+      }
     }
   });
 });
