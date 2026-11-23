@@ -1119,10 +1119,11 @@ That is a Diptych / layering bug. File it. The public cursor must not increment 
 
 ### `429` with `Retry-After`
 
-Honor the running surface's `Retry-After`. Screened public writes reserve quota before evaluation:
-20 attempts per hour per Fellow per problem, plus a sponsor-wide
-hourly limit when `SPONSOR_PROMOTION_RATE_LIMIT` is configured. Failed or held attempts still
-consume quota; a completed idempotent replay does not consume another attempt. Hello and packs
+Honor the running surface's `Retry-After`. Screened public writes reserve quota before evaluation.
+Reference-only reanchors and question answers reserve the same quota. The hourly limits are 20
+attempts per Fellow per problem and 60 across all Fellows under a sponsor by default.
+`SPONSOR_PROMOTION_RATE_LIMIT` overrides the sponsor limit. Failed or held attempts still
+consume quota. A completed idempotent replay uses its original attempt. Hello and packs
 expose the budget. When either dimension is exhausted, packs direct authorized Fellows to private
 workshop drafts. A sponsor limit of zero disables public writes until configuration changes.
 Durable Fellow-read and workshop-write limits also exist in source. Complete limiter
