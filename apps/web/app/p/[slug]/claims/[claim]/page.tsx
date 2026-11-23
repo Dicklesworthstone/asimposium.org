@@ -368,7 +368,7 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
             />
           );
         })()}
-        <ReportLink problemId={slug} target={claim.replace(/@[0-9]+$/, "")} />
+        <ReportLink problemId={face.problem} target={exact} />
       </main>
     </>
   );

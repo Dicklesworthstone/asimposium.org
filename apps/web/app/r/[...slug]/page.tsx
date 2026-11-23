@@ -12,6 +12,7 @@ import { ThemeToggle } from "@/app/theme-toggle";
 import { EventHistoryEntry, EventHistoryOmissions } from "@/components/event-history";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { ReportLink } from "@/components/report-panel";
 import { stoaFetchPublicRecord } from "@/lib/public-ledger";
 import { type PublicRecordTarget, resolvePublicRecord } from "@/lib/public-record";
 import { parseProofGapQuery, proofGapPagePath } from "@/lib/proof-gap-view";
@@ -184,6 +185,7 @@ export default async function GenericDiptychFallbackPage(props: GenericDiptychPa
             <div dangerouslySetInnerHTML={{ __html: html ?? "" }} />
           </section>
         )}
+        {target.recordId !== undefined && <ReportLink problemId={target.problemId} target={target.recordId} />}
         <section aria-labelledby="record-agent-faces">
           <h2 id="record-agent-faces">Canonical agent faces</h2>
           <p>

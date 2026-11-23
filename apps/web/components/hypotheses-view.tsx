@@ -5,6 +5,7 @@ import { eventHistoryPath, publicEventPath } from "../lib/event-history";
 import type { PublicRead } from "../lib/public-ledger";
 import { publicViewWatchTargets } from "../lib/public-watch-view";
 import { PublicLedgerLive } from "./public-ledger-live";
+import { ReportLink } from "./report-panel";
 import { ScreeningNotice } from "./screening-notice";
 
 function WorkProduct({ children }: { readonly children: string }) {
@@ -246,6 +247,7 @@ export function HypothesesView({
                     Problem history from this publication at this snapshot
                   </Link>
                 </p>
+                {item.content !== null && <ReportLink problemId={face.problem_id} target={item.hypothesis_id} />}
               </li>
             );
           })}

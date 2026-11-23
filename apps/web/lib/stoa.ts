@@ -79,6 +79,12 @@ import {
   ReportRequestSchema,
   type ReportResponse,
   ReportResponseSchema,
+  SPONSOR_REPORTS_MAX_RESPONSE_BYTES,
+  type SponsorReportsRequest,
+  SponsorReportsRequestSchema,
+  type SponsorReportsResponse,
+  SponsorReportsResponseSchema,
+  sponsorReportsMatchRequest,
   type SaveProblemBriefRequest,
   SaveProblemBriefRequestSchema,
   SaveProblemBriefResponseSchema,
@@ -1542,6 +1548,31 @@ export function stoaSponsorReport(
     body: JSON.stringify(command),
     idempotencyKey,
     parse: (value) => ReportResponseSchema.parse(value),
+  });
+}
+
+/** Read the accountable sponsor's own report history; never a public cache entry. */
+export async function stoaSponsorReports(
+  principalId: string,
+  request: SponsorReportsRequest,
+): Promise<StoaCall<SponsorReportsResponse>> {
+  const parsed = SponsorReportsRequestSchema.safeParse(request);
+  if (!parsed.success) return { ok: false, reason: "unreachable" };
+  const route = "/v1/sponsors/reports/list";
+  return callStoa({
+    method: "POST",
+    route,
+    path: route,
+    action: "sponsor.reports.list",
+    principalId,
+    body: JSON.stringify(parsed.data),
+    responseMaxBytes: SPONSOR_REPORTS_MAX_RESPONSE_BYTES,
+    parse: (value) => {
+      const page = SponsorReportsResponseSchema.parse(value);
+      if (!sponsorReportsMatchRequest(principalId, parsed.data, page))
+        throw new TypeError("Report history does not match the signed sponsor or continuation.");
+      return page;
+    },
   });
 }
 

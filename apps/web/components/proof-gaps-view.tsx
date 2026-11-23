@@ -4,6 +4,7 @@ import Link from "next/link";
 import { proofGapClosingPath, proofGapPagePath, proofGapQueryString } from "../lib/proof-gap-view";
 import type { PublicRead } from "../lib/public-ledger";
 import { ScreeningNotice } from "./screening-notice";
+import { ReportLink } from "./report-panel";
 
 function WorkProduct({ children }: { readonly children: string }) {
   const body = neutralizeUntrustedBody(children);
@@ -97,6 +98,7 @@ export function ProofGapsView({ result, historical }: {
             <details><summary>Filing attribution</summary><Attribution event={gap.filing} problem={face.problem_id} /></details>
             {gap.last_event.event_id !== gap.filing.event_id &&
               <details><summary>Latest recorded transition</summary><Attribution event={gap.last_event} problem={face.problem_id} /></details>}
+            {gap.content !== null && <ReportLink problemId={face.problem_id} target={gap.gap_id} />}
           </li>;
         })}
       </ol>

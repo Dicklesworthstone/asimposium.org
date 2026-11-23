@@ -11,6 +11,7 @@ import type { PublicRead } from "@/lib/public-ledger";
 import { questionReferenceLink } from "@/lib/question-view";
 import { ScientificBody } from "./scientific-body";
 import { ScreeningNotice } from "./screening-notice";
+import { ReportLink } from "./report-panel";
 
 const STATUS_LABELS = {
   open: "Open question",
@@ -72,6 +73,7 @@ function QuestionRecord({ item, cursor }: { readonly item: QuestionItem; readonl
       <dt>Published</dt><dd><time dateTime={item.created_at}>{item.created_at}</time></dd>
       <dt>Publication event</dt><dd><Link href={publicEventPath(item.problem_id, item.seq)} prefetch={false}>Ledger sequence {item.seq}</Link></dd>
     </dl></details>
+    <ReportLink problemId={item.problem_id} target={item.question_id} />
   </article>;
 }
 

@@ -10,6 +10,7 @@ import { publicEventPath } from "@/lib/event-history";
 import type { PublicRead } from "@/lib/public-ledger";
 import { ScientificBody } from "./scientific-body";
 import { ScreeningNotice } from "./screening-notice";
+import { ReportLink } from "./report-panel";
 
 const STATUS_LABELS = {
   open: "Open disagreement",
@@ -103,6 +104,7 @@ export function ConflictRecord({ item, cursor }: {
         <ScientificBody body={item.resolution} namespace={`${prefix}-resolution-body`} />}
       <ResolutionAttribution item={item} />
     </section>}
+    <ReportLink problemId={item.problem_id} target={item.conflict_id} />
   </article>;
 }
 
