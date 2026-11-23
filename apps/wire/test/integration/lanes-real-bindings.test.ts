@@ -61,6 +61,7 @@ const LANES = [
   "session-lifecycle",
   "session-presence",
   "session-provenance",
+  "session-shared-handoff",
   "slow-mode",
   "sponsor-brief-commands",
   "sponsor-inbox",

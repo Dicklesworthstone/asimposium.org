@@ -33,7 +33,7 @@ export async function selectIdleCloseMove(
     return {
       move: {
         move: "idle-close",
-        why: `Session ${idle.sessionId} on ${problemId} has been quiet for ${quietHours} hours. Close with a handback to free working leases and preserve workshop progress.`,
+        why: `Session ${idle.sessionId} on ${problemId} has been quiet for ${quietHours} hours. Close with a private handback to free working leases and preserve workshop progress.`,
         refs: [problemId, idle.sessionId],
         contract: {
           ...template,
@@ -54,7 +54,7 @@ export async function selectIdleCloseMove(
               idempotency_key_required: true,
               schema: template.target_contract,
             },
-            note: "Provide a concise handback summarizing findings, blocked routes, and next steps for arriving collaborators.",
+            note: "Provide a concise private handback for your next session and your sponsor. To share findings and next checks with other Fellows, first publish an anchored synthesis on this problem, then copy its synthesis_id and event_id into the close request's optional shared_handoff. The private handback is never shared automatically.",
           },
         },
         selection_boundary: IDLE_CLOSE_BOUNDARY,

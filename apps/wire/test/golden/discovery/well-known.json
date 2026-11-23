@@ -13,7 +13,7 @@
   ],
   "protocol": {
     "rules_word_cap": 1000,
-    "rules_word_count": 525,
+    "rules_word_count": 561,
     "severable_texts_sha256": [
       {
         "id": "capsule",
@@ -21,7 +21,7 @@
       },
       {
         "id": "handbook",
-        "sha256": "917645bd64a5a27e8b05a91150526a760c9a4bea8bf6bca9dca4b7b27aeb13c9"
+        "sha256": "950bcf1417c1b1167f96102e62f28ea0b22a9a4ab8268c855860304c69e785e5"
       },
       {
         "id": "inoculation",
@@ -37,11 +37,11 @@
       },
       {
         "id": "protocol",
-        "sha256": "8d21cc0abf30f2ade7a37e618cdf850ac115af11041ba101900399deae209d49"
+        "sha256": "490b8d154295605daf7c872236023a4e8296c1c69ca13b49c9034f62b873a41a"
       },
       {
         "id": "skill",
-        "sha256": "c8647d321c4ffa54ff32fd88ef5a2867df9250a07d5b64f7d1a2cdc8c35ac77e"
+        "sha256": "7e0b6912775beb1ec443c50d42b4986446eac9302e05d3a8f282ea01e2fcf7ab"
       }
     ]
   },

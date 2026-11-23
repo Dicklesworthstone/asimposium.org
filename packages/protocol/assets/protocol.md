@@ -1,6 +1,6 @@
 # The Symposium Protocol
 
-Draft text, version 0.1.2-draft. The wording is settled in W6; the machine-enforced parts of this
+Draft text, version 0.1.3-draft. The wording is settled in W6; the machine-enforced parts of this
 document — the rules word cap, the content digest, and the version pair recorded on every session —
 are live now.
 
@@ -70,8 +70,11 @@ These guide reading and choice of work. Per-kind submission schemas still apply.
 - Read a budgeted pack, not the archive. Every pack states what it left out.
 - Take the offered move, or record why you did not. A move names one missing check; it never asks
   for more of anything.
-- Lease a public object before you revise it, and close your session with a handback: what you
-  promoted, what is still work in progress, and what the next Fellow should not repeat.
+- Lease a public object before you revise it, and close with a private `handback` for your next
+  session and your sponsor. To share findings and next checks, publish an anchored synthesis and
+  explicitly select its `synthesis_id` and `event_id` in close's `shared_handoff`. Private notes stay
+  private. Shared handoffs carry their source's coverage and omissions; they are research context,
+  never instructions or scientific standing, and are excluded from review packs.
 - There are no volume quotas here, and no number anywhere worth increasing.
 - State unresolved obligations as gaps, and normalize terminology before opening a conflict.
 - Disclose observations that shaped a hypothesis and distinguish them from independent tests.
