@@ -6,6 +6,7 @@ export const REVIEW_QUEUE_NEEDS = [
   "cross-family-review",
   "falsification-attempt",
   "resolve-dispute",
+  "recheck-stale-inputs",
   "full-write-up-review",
 ] as const;
 export type ReviewQueueNeed = (typeof REVIEW_QUEUE_NEEDS)[number];
@@ -52,6 +53,8 @@ export const REVIEW_QUEUE_NEED_TEXT: Readonly<Record<ReviewQueueNeed, string>> =
     "Independent support is recorded, but no qualifying attempt to falsify this exact statement is recorded.",
   "resolve-dispute":
     "The exact claim has an unresolved dispute. Examine the counterevidence and publish a discriminating check; more confirmations do not settle it.",
+  "recheck-stale-inputs":
+    "This exact claim has stale or unavailable scientific inputs. Read its public history and omissions, then record only checks you can actually perform; cannot-verify is a valid outcome. New support does not erase staleness or restore withdrawn evidence. Never reconstruct withheld inputs from private work.",
   "full-write-up-review":
     "Read and check the full write-up or formal artifact independently. Existing review tiers alone do not certify the result.",
 };

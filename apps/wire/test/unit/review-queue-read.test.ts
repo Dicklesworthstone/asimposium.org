@@ -3,6 +3,7 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { ReviewQueueResponseSchema } from "@asimposium/contracts/review-queue";
 import { renderReviewQueueHtml, renderReviewQueueMarkdown } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
@@ -163,6 +164,42 @@ test("real SQLite: queue composes source-verified statements and exact links", a
     f.sql.close();
   }
 });
+test("real SQLite: a readable stale statement is discoverable without borrowing prior support", async () => {
+  const f = fixture();
+  try {
+    f.problem();
+    f.claim("C-1", 1);
+    const stale: ReviewQueueScience = {
+      ...f.science,
+      async fold(rows, at) {
+        return {
+          ...(await f.science.fold(rows, at)),
+          disposition: "strongly-supported",
+          stale: true,
+        };
+      },
+    };
+    const response = ReviewQueueResponseSchema.parse(await readReviewQueue(f.db, {}, stale));
+    const candidate = response.candidates[0];
+    assert.ok(candidate);
+    assert.equal(candidate.need, "recheck-stale-inputs");
+    assert.equal(candidate.stale, true);
+    assert.equal(candidate.disposition, "strongly-supported");
+    assert.equal(candidate.best_recorded_tier, "none");
+    assert.equal(candidate.read_url, "/p/P-MATH/claims/C-1@1.md?through=1000");
+    for (const render of [renderReviewQueueMarkdown, renderReviewQueueHtml]) {
+      const face = render(response);
+      assert.ok(face.includes("strongly-supported · stale"));
+      assert.ok(face.includes("cannot-verify"));
+    }
+    f.sql.exec("INSERT INTO content_controls VALUES ('P-MATH', 'C-1', 'hidden', 1)");
+    const hidden = await readReviewQueue(f.db, {}, stale);
+    assert.equal(hidden.candidates.length, 0);
+    assert.equal(hidden.omitted[0]?.reason, "content_unavailable");
+  } finally {
+    f.sql.close();
+  }
+});
 for (const mode of ["private", "unlisted", "resolved", "unpublished"] as const) {
   test(`real SQLite: ${mode} work is absent from discovery`, async () => {
     const f = fixture();
@@ -174,7 +211,16 @@ for (const mode of ["private", "unlisted", "resolved", "unpublished"] as const) 
       );
       f.claim("C-1", 1, { problem: "P-HIDDEN" });
       if (mode === "unpublished") f.sql.exec("UPDATE problems SET public_seq=0");
-      const result = await readReviewQueue(f.db, {}, f.science);
+      const result = await readReviewQueue(
+        f.db,
+        {},
+        {
+          ...f.science,
+          async fold(rows, at) {
+            return { ...(await f.science.fold(rows, at)), stale: true };
+          },
+        },
+      );
       assert.equal(result.candidates.length, 0);
       assert.equal(result.scanned, 0);
       assert.equal(JSON.stringify(result).includes("P-HIDDEN"), false);
@@ -240,6 +286,10 @@ for (const change of [
   "detach-digest",
   "hide-claim",
   "hide-problem",
+  "hide-head-version",
+  "hide-head-event",
+  "hide-author-version",
+  "hide-author-event",
 ] as const) {
   test(`real SQLite: ${change} is excluded without publishing retained bytes`, async () => {
     const f = fixture();
@@ -276,7 +326,29 @@ for (const change of [
         f.sql.exec(
           "INSERT INTO content_controls SELECT problem_id, 'problem', 'hidden', 1 FROM events LIMIT 1",
         );
-      const result = await readReviewQueue(f.db, {}, f.science);
+      const hiddenSources: Partial<Record<typeof change, string>> = {
+        "hide-head-version": "C-1@2",
+        "hide-head-event": "#4",
+        "hide-author-version": "C-1@1",
+        "hide-author-event": "#1",
+      };
+      const hiddenSource = hiddenSources[change];
+      if (hiddenSource !== undefined) {
+        f.sql
+          .prepare("INSERT INTO content_controls VALUES ('P-MATH', ?, 'hidden', 1)")
+          .run(hiddenSource);
+        f.sql.exec("INSERT INTO content_controls VALUES ('P-MATH', 'C-1', 'visible', 2)");
+      }
+      const result = await readReviewQueue(
+        f.db,
+        {},
+        {
+          ...f.science,
+          async fold(rows, at) {
+            return { ...(await f.science.fold(rows, at)), stale: true };
+          },
+        },
+      );
       assert.equal(result.candidates.length, 0);
       assert.equal(result.omitted[0]?.reason, "content_unavailable");
       assert.equal(JSON.stringify(result).includes("CANARY"), false);

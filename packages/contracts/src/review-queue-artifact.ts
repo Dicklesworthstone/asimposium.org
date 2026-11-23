@@ -19,7 +19,7 @@ export function generatedReviewQueueArtifact(): { relativePath: string; content:
     $id: REVIEW_QUEUE_SCHEMA_ID,
     title: "ASImposium public review discovery contracts",
     $comment:
-      "Runtime checks additionally enforce real canonical timestamps, complete cursor matching, unique problem-scoped claims, response/query identity and exact version/cursor-bound read links. This queue grants neither permission nor scientific standing.",
+      "Runtime checks additionally enforce real canonical timestamps, complete cursor matching, unique problem-scoped claims, response/query identity and exact version/cursor-bound read links. A stale recovery need requires stale=true and best_recorded_tier=none; strongly-supported claims appear only with that recovery need. This queue grants neither permission nor scientific standing.",
     ...z.toJSONSchema(ReviewQueueContractsSchema),
   };
   return {

@@ -506,7 +506,7 @@
       "id": "review-queue",
       "url": "https://a.asimposium.org/schemas/review-queue.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 4363,
+      "body_bytes": 4581,
       "slice_url_template": "https://a.asimposium.org/schemas/review-queue.v1/{property}.json",
       "slices": [
         "query",
@@ -677,7 +677,7 @@
       "id": "sponsor-follows",
       "url": "https://a.asimposium.org/schemas/sponsor-follows.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 23639,
+      "body_bytes": 23864,
       "slice_url_template": "https://a.asimposium.org/schemas/sponsor-follows.v1/{property}.json",
       "slices": [
         "request",

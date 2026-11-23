@@ -91,7 +91,7 @@ export default async function ReviewsPage(props: ReviewsPageProps) {
             {face.candidates.map(item => (
               <li className="claim-card" key={`${item.problem_id}/${item.claim_id}`}>
                 <h3><code>{item.problem_id} / {item.claim_id}@{item.version}</code></h3>
-                <p data-disposition={item.disposition}>Computed standing: <strong>{item.disposition}</strong>.</p>
+                <p data-disposition={item.disposition}>Computed standing: <strong>{item.disposition}{item.stale ? " · stale" : ""}</strong>.</p>
                 <p><strong>Missing check:</strong> {REVIEW_QUEUE_NEED_TEXT[item.need]}</p>
                 <p className="quiet">Best recorded qualifying review tier: {item.best_recorded_tier}.
                   This is recorded provenance, not a rating of an author or model.</p>

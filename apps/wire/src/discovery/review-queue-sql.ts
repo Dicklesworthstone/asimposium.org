@@ -1,4 +1,4 @@
-import { hiddenByContentControlSql } from "../krater/public-content";
+import { eventContentHiddenSql } from "../krater/public-content";
 import { offScopeClaimSql, offScopeProblemSql, offScopePublicationSql } from "./public-scope.ts";
 
 /** Read-only query plans. Admission order is immutable; ranking is page-local.
@@ -126,10 +126,11 @@ WHERE p.id = ? AND ${knownProblem ? "p.unlisted IN (0, 1)" : "p.unlisted = 0"}
   }
   AND p.status NOT IN ('private-draft', 'resolved', 'retired', 'archived')
   AND h.seq <= ? AND h.seq <= p.public_seq AND a.seq <= h.seq
-  -- A hidden claim or problem is content_unavailable here, so /reviews and
-  -- review moves never quote it (asimposiumorg-1rtq).
-  AND NOT ${hiddenByContentControlSql("p.id", "h.object_id")}
-  AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
+  -- Recovery requires readable statement and authorship sources, separately
+  -- from the scientific fold's stale flag. Exact version/event controls still
+  -- withhold retained bytes, including when a broader object was restored.
+  AND NOT ${eventContentHiddenSql("h")}
+  AND NOT ${eventContentHiddenSql("a")}
 LIMIT 1`;
 }
 export const REVIEW_QUEUE_METADATA_SQL = metadataSql();

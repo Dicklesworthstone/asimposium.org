@@ -47,7 +47,15 @@ export const ReviewQueueItemSchema = z
     statement: z.string().min(1).max(8192),
     screening_notice: ScreeningPublicationNoticeSchema.optional(),
     falsifier: z.string().max(8192).nullable(),
-    disposition: ClaimDispositionSchema.extract(["open", "disputed", "corroborated", "reduced-to"]),
+    disposition: ClaimDispositionSchema.extract([
+      "open",
+      "disputed",
+      "corroborated",
+      "reduced-to",
+      "strongly-supported",
+    ]),
+    // Omitted for ordinary candidates; a stale recovery must disclose this limit.
+    stale: z.literal(true).optional(),
     need: z.enum(REVIEW_QUEUE_NEEDS),
     best_recorded_tier: z.enum(REVIEW_QUEUE_TIERS),
     direct_dependents: z.number().int().min(0).max(32),
@@ -57,7 +65,20 @@ export const ReviewQueueItemSchema = z
     created_at: ProblemIndexTimestampSchema,
     read_url: z.string().min(1).max(512),
   })
-  .strict();
+  .strict()
+  .superRefine((item, context) => {
+    const recovery = item.need === "recheck-stale-inputs";
+    if (
+      recovery !== (item.stale === true) ||
+      (recovery && item.best_recorded_tier !== "none") ||
+      (item.disposition === "strongly-supported" && !recovery)
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["need"],
+        message: "stale recovery must disclose its limit without advertising verification weight",
+      });
+  });
 export type ReviewQueueItem = z.infer<typeof ReviewQueueItemSchema>;
 
 export const ReviewQueueResponseSchema = z

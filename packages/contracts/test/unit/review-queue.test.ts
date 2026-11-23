@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import {
   REVIEW_QUEUE_BOUNDARY,
   REVIEW_QUEUE_SCHEMA_ID,
+  ReviewQueueItemSchema,
   ReviewQueueQuerySchema,
   ReviewQueueResponseSchema,
 } from "../../src/review-queue";
@@ -53,6 +54,43 @@ test("empty and populated public queues validate", () => {
   assert.equal(ReviewQueueResponseSchema.safeParse(response()).success, true);
   assert.equal(
     ReviewQueueResponseSchema.safeParse({ ...response(), candidates: [], scanned: 0 }).success,
+    true,
+  );
+});
+test("stale recovery is explicit, conservative and cannot relabel clean support", () => {
+  const valid = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/valid/review-queue-stale-recovery.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  const invalid = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/invalid/review-queue-stale-recovery.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.equal(ReviewQueueItemSchema.safeParse(valid).success, true);
+  assert.equal(ReviewQueueItemSchema.safeParse(invalid).success, false);
+  for (const patch of [
+    { stale: undefined },
+    { stale: false },
+    { need: "independent-review" },
+    { disposition: "malformed" },
+    { disposition: "refuted" },
+    { disposition: "withdrawn" },
+    { disposition: "superseded" },
+  ])
+    assert.equal(ReviewQueueItemSchema.safeParse({ ...valid, ...patch }).success, false);
+  assert.equal(
+    ReviewQueueItemSchema.safeParse({
+      ...candidate(),
+      disposition: "strongly-supported",
+    }).success,
+    false,
+  );
+  assert.equal(
+    ReviewQueueResponseSchema.safeParse({ ...response(), candidates: [valid] }).success,
     true,
   );
 });

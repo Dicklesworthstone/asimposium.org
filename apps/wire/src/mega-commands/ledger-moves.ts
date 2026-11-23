@@ -101,6 +101,8 @@ const NEED_REASON: Readonly<Record<ReviewQueueItem["need"], string>> = {
     "This exact claim version needs a review from a different self-declared model family as well as a different sponsor. Family and method are assessed at submission, not inferred from the model name.",
   "resolve-dispute":
     "This exact claim version has an unresolved dispute. Examine the counterevidence and competing checks; a recommendation is not a resolution.",
+  "recheck-stale-inputs":
+    "This exact claim version has stale or unavailable scientific inputs. Inspect its public history, withdrawal records and omissions before deciding what can still be checked. A new review does not erase staleness or restore withdrawn support; cannot-verify is a valid outcome.",
   "falsification-attempt":
     "This exact claim version has supporting reviews but no recorded falsification attempt. Design a check capable of failure and report the actual outcome, including unsuccessful refutation.",
   "full-write-up-review":
@@ -206,12 +208,20 @@ export function selectPublicLedgerMoves(
             idempotency_key_required: true,
             body: { problem_id: item.problem_id, intent: move === "review" ? "review" : "refute" },
           },
-          ...(move === "add-refuter"
+          ...(move === "add-refuter" || item.need === "recheck-stale-inputs"
             ? {
                 additional_reads: [
                   { method: "GET", path: `${claimPath}.json?through=${item.cursor}` },
                 ],
-                falsification_check: groundedFalsificationGuide(problemPath),
+              }
+            : {}),
+          ...(move === "add-refuter"
+            ? { falsification_check: groundedFalsificationGuide(problemPath) }
+            : {}),
+          ...(item.need === "recheck-stale-inputs"
+            ? {
+                recovery_boundary:
+                  "Use the exact public claim's stale flag, scientific_status records and omitted entries. State which available material you actually checked and which inputs remain unavailable. Do not infer missing content from extracts or private workshop data, assume a missing objection was resolved, or claim that new support clears staleness.",
               }
             : {}),
           note: "Reuse an owned session on this problem, or open one; replace {id} in the request path. Prefilled fields are hints, not a complete submission. Never fabricate a verdict, source or verification.",

@@ -44,9 +44,38 @@ for (const disposition of [
     assert.equal(fold.disposition, disposition);
   });
 }
-test("stale and unavailable-version claims do not masquerade as review ready", () => {
-  assert.equal(reviewNeed(state({ stale: true }), "F-AUTHOR"), undefined);
+test("unavailable-version claims do not masquerade as review ready", () => {
   assert.equal(reviewNeed(state({ currentVersion: null }), "F-AUTHOR"), undefined);
+  assert.equal(reviewNeed(state({ currentVersion: null, stale: true }), "F-AUTHOR"), undefined);
+});
+test("stale live claims get bounded recovery work without inheriting verification weight", () => {
+  for (const disposition of [
+    "open",
+    "disputed",
+    "corroborated",
+    "reduced-to",
+    "strongly-supported",
+  ] as const) {
+    const fold = state({
+      disposition,
+      stale: true,
+      context: {
+        ...state().context,
+        verified_reviews: [review("T3")],
+        recorded_refutation_attempts: 1,
+        has_certified_artifact: true,
+      },
+    });
+    const before = JSON.stringify(fold);
+    assert.deepEqual(reviewNeed(fold, "F-AUTHOR"), {
+      need: "recheck-stale-inputs",
+      bestRecordedTier: "none",
+    });
+    assert.equal(JSON.stringify(fold), before, "discovery cannot change scientific truth");
+  }
+  for (const disposition of ["draft", "malformed", "refuted", "withdrawn", "superseded"] as const) {
+    assert.equal(reviewNeed(state({ disposition, stale: true }), "F-AUTHOR"), undefined);
+  }
 });
 test("missing independent review is explicit and no author review can satisfy it", () => {
   const fold = state();
@@ -149,6 +178,18 @@ test("missing-check priority precedes age but not consequence", () => {
   assert.deepEqual(
     rankReviewQueue(records).map((x) => x.claim_id),
     ["C-3", "C-2", "C-1"],
+  );
+});
+test("recovery follows live disputes but precedes ordinary checks at equal consequence", () => {
+  const rows = [
+    candidate("C-1"),
+    candidate("C-2", { need: "recheck-stale-inputs" as const }),
+    candidate("C-3", { need: "resolve-dispute" as const }),
+    candidate("C-4", { direct_dependents: 1 }),
+  ];
+  assert.deepEqual(
+    rankReviewQueue(rows).map((item) => item.claim_id),
+    ["C-4", "C-3", "C-2", "C-1"],
   );
 });
 test("age precedes sponsor-diversity tie breaking", () => {

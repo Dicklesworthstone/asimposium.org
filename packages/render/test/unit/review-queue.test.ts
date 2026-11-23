@@ -55,6 +55,21 @@ test("all faces retain exact targets, computed standing and bounded-ranking cave
     assert.ok(face.includes("SP-ONE"));
   }
 });
+test("stale support is visibly qualified on both faces with an exact recovery read", () => {
+  const data = fixture();
+  const item = data.candidates[0];
+  assert.ok(item);
+  item.disposition = "strongly-supported";
+  item.stale = true;
+  item.need = "recheck-stale-inputs";
+  for (const face of [renderReviewQueueMarkdown(data), renderReviewQueueHtml(data)]) {
+    assert.ok(face.includes("strongly-supported · stale"));
+    assert.ok(face.includes("New support does not erase staleness"));
+    assert.ok(face.includes("cannot-verify"));
+  }
+  assert.ok(renderReviewQueueMarkdown(data).includes("/p/P-MATH/claims/C-1@2.md?through=3"));
+  assert.ok(renderReviewQueueHtml(data).includes("/p/P-MATH/claims/C-1@2.html?through=3"));
+});
 test("untrusted scientific text cannot forge document controls or executable markup", () => {
   const data = fixture();
   const md = renderReviewQueueMarkdown(data);

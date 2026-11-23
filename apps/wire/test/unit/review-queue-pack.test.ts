@@ -261,6 +261,40 @@ test("pack uses canonical dependency consequence ahead of raw oldest-first order
   }
 });
 
+test("stale recovery packs keep the lost-authority boundary and exact source", async () => {
+  const f = fixture();
+  try {
+    f.claim(1);
+    const pack = await f.read(f.cursor(), {
+      loadQueue: (db, query, snapshot) =>
+        readReviewQueue(
+          db,
+          query,
+          {
+            ...science,
+            async fold(rows, at) {
+              return { ...(await science.fold(rows, at)), stale: true };
+            },
+          },
+          snapshot,
+        ),
+    });
+    assert.deepEqual(pack.targets, ["C-1@1"]);
+    const item = pack.candidates.find((candidate) => candidate.id === "C-1@1");
+    assert.ok(item);
+    assert.equal(item.untrusted, true);
+    const record = JSON.parse(item.body);
+    assert.equal(record.review_need, "recheck-stale-inputs");
+    assert.equal(record.stale, true);
+    assert.equal(record.best_recorded_tier, "none");
+    assert.equal(record.read_url, "/p/P-DEMO/claims/C-1@1.md?through=1");
+    assert.match(record.recovery_boundary, /cannot-verify/);
+    assert.match(record.recovery_boundary, /does not erase staleness/);
+  } finally {
+    f.sql.close();
+  }
+});
+
 test("review queue pack keeps the publication notice outside exact-version scientific text", async () => {
   const f = fixture();
   const receipt = JSON.parse(

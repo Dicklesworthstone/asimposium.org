@@ -55,14 +55,12 @@ async function rejected(f: Fixture, candidate = f.input()) {
 }
 async function machineDenied(f: Fixture, candidate = f.input()) {
   const response = await screenPublicCandidate(
-    async (input) => ({
-      ...(await syntheticScreeningObservation(input, {
+    (input) =>
+      syntheticScreeningObservation(input, {
         decision: "reject",
         coarse_category: "injection",
         provider_status: "ok",
-      })),
-      decision_path: "direct-content-reject" as const,
-    }),
+      }),
     { DB: f.db } as Env,
     candidate,
     { sponsorId: SPONSOR, route: "hypotheses" },
@@ -108,7 +106,7 @@ describe("human screening appeals", () => {
       ).toEqual({
         state: "pending",
         outcome: "quarantine",
-        decision_path: "direct-content-reject",
+        decision_path: "provider",
         decided_at: null,
         decided_by: null,
       });
@@ -124,7 +122,7 @@ describe("human screening appeals", () => {
       expect(await detail.json()).toMatchObject({
         state: "pending",
         candidate: { statement: candidate.statement, falsifier: candidate.falsifier },
-        item: { decision_path: "direct-content-reject" },
+        item: { decision_path: "provider" },
       });
       for (const value of [denied, own, f.sql.query("SELECT * FROM moderation_log").all()])
         expect(JSON.stringify(value)).not.toContain(candidate.statement);

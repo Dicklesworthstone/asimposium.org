@@ -280,6 +280,7 @@ export async function readReviewQueue(
       ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
       falsifier: row.falsifier,
       disposition: fold.disposition as ReviewQueueItem["disposition"],
+      ...(fold.stale ? { stale: true as const } : {}),
       need: need.need,
       best_recorded_tier: need.bestRecordedTier,
       direct_dependents: dependents.count,

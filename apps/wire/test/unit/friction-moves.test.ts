@@ -58,6 +58,27 @@ test("canonical consequence ordering wins over report arrival and source volume"
   }
 });
 
+test("stale recovery neither supplies friction work nor suppresses a fresh target", async () => {
+  const f = frictionFixture();
+  try {
+    const stale = f.claim(1, "C-1", 1, 32);
+    stale.disposition = "strongly-supported";
+    stale.stale = true;
+    stale.need = "recheck-stale-inputs";
+    stale.best_recorded_tier = "none";
+    f.report(2, stale);
+    assert.deepEqual(await f.run(), { move: null, degraded: false });
+    assert.equal(f.pages.length, 0, "stale-only work does not spend a formal-record scan");
+    const fresh = f.claim(3, "C-3", 1, 1);
+    f.report(4, fresh);
+    const result = await f.run();
+    assert.deepEqual(result.move?.refs, ["P-DEMO", "C-3@1", "E-4"]);
+    assert.equal(result.degraded, false);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
 test("the oldest report wins a same-target tie without promoting repeated reports", async () => {
   const f = frictionFixture();
   try {

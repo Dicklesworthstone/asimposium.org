@@ -1233,6 +1233,23 @@ async function retryWithPremises() {
   return f;
 }
 
+for (const target of ["C-1@1", "#1"]) {
+  test(`production recovery cannot quote an exact hidden publication: ${target}`, async () => {
+    const f = fixture();
+    await f.add(1, [], "HIDDEN_PUBLICATION_CANARY");
+    control(f, target);
+    control(f, "C-1", "visible");
+    expect((await readScientificDispositions(f.d1, "P-PACK", 1, 20)).get("C-1")).toMatchObject({
+      stale: true,
+      currentVersion: 1,
+    });
+    const queue = await loadReviewQueueAtCursor(f.d1, "P-PACK", 1);
+    expect(queue.candidates).toEqual([]);
+    expect(queue.omitted).toContainEqual({ reason: "content_unavailable", count: 1 });
+    expect(JSON.stringify(queue)).not.toContain("HIDDEN_PUBLICATION_CANARY");
+  });
+}
+
 test("production review and retry recommendations share premise standing with exact claim reads", async () => {
   // Actual SQLite queries, production adapters and scientific folds. This is
   // reader integration coverage, not a deployed D1 or write-route proof.
@@ -1257,9 +1274,19 @@ test("production review and retry recommendations share premise standing with ex
     currentVersion: 1,
   });
   const queue = await loadReviewQueueAtCursor(f.d1, "P-PACK", 6);
-  expect(queue.candidates.map((c) => c.claim_id)).not.toContain("C-3");
-  expect(queue.omitted).toContainEqual({ reason: "not_review_ready", count: 2 });
-  expect((await loadReviewQueue(f.d1)).candidates.map((c) => c.claim_id)).not.toContain("C-3");
+  expect(queue.candidates.find((c) => c.claim_id === "C-3")).toMatchObject({
+    need: "recheck-stale-inputs",
+    stale: true,
+    disposition: "disputed",
+    best_recorded_tier: "none",
+    read_url: "/p/P-PACK/claims/C-3@1.md?through=6",
+  });
+  expect(queue.omitted).not.toContainEqual({ reason: "not_review_ready", count: 2 });
+  expect((await loadReviewQueue(f.d1)).candidates.find((c) => c.claim_id === "C-3")).toMatchObject({
+    need: "recheck-stale-inputs",
+    stale: true,
+    best_recorded_tier: "none",
+  });
   const retry = await loadDeadEndRetryPage(f.d1, "P-PACK", 6);
   expect(retry.items).toEqual([]);
   expect(retry.omitted).toContain("condition_unavailable");
@@ -1307,7 +1334,7 @@ test("production formalization serves known unlisted science while discovery sta
 });
 
 for (const loss of ["hidden", "redacted", "contested"] as const) {
-  test(`production recommendations withhold a ${loss} transitive premise`, async () => {
+  test(`production recovery discloses a ${loss} premise without advertising a ready retry`, async () => {
     const f = await retryWithPremises();
     if (loss === "hidden") control(f, "C-1");
     if (loss === "redacted")
@@ -1318,9 +1345,14 @@ for (const loss of ["hidden", "redacted", "contested"] as const) {
     expect((await readPublicClaimSnapshot(f.d1, "P-PACK", through, "C-3", 1)).fold.stale).toBe(
       true,
     );
-    expect(
-      (await loadReviewQueueAtCursor(f.d1, "P-PACK", through)).candidates.map((c) => c.claim_id),
-    ).not.toContain("C-3");
+    const queue = await loadReviewQueueAtCursor(f.d1, "P-PACK", through);
+    expect(queue.candidates.find((c) => c.claim_id === "C-3")).toMatchObject({
+      need: "recheck-stale-inputs",
+      stale: true,
+      best_recorded_tier: "none",
+      read_url: `/p/P-PACK/claims/C-3@1.md?through=${through}`,
+    });
+    if (loss !== "contested") expect(queue.candidates.map((c) => c.claim_id)).not.toContain("C-1");
     const retry = await loadDeadEndRetryPage(f.d1, "P-PACK", through);
     expect(retry.items).toEqual([]);
     expect(retry.omitted).toContain("condition_unavailable");
