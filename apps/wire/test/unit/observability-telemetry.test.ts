@@ -122,6 +122,84 @@ describe("OPS.4 Observability: correlation, pre-egress scrubbing, launch alerts,
     cyclic.self = cyclic;
     const scrubbedCyclic = scrubObservabilityPayload(cyclic) as Record<string, unknown>;
     expect(scrubbedCyclic.self).toBe("[CIRCULAR]");
+
+    // Fresh-eyes Pass 5 regressions:
+    // 1. Embedded URLs with percent-encoded email + IPv6 + generic Bearer tokens scrub cleanly.
+    const embeddedCheck = prepareRedactedSinkEvent("sentry", {
+      request_id: "req-canary-002",
+      error_message:
+        "Upstream error from 2001:db8::42 with Bearer external_provider_secret_987654 at https://a.asimposium.org/p/1?note=alice%40example.org",
+    });
+    const embeddedJson = JSON.stringify(embeddedCheck.payload);
+    expect(embeddedJson).not.toContain("2001:db8::42");
+    expect(embeddedJson).not.toContain("external_provider_secret_987654");
+    expect(embeddedJson).not.toContain("alice");
+
+    // 2. Non-finite timings, out-of-range status codes, and actor IDs in buildOpsTelemetryRecord fail closed.
+    expect(() =>
+      buildOpsTelemetryRecord({
+        revision: "f713b555",
+        plane: "stoa",
+        route_template: "/stats.json",
+        principal_class: "anonymous",
+        command_or_event_kind: "stats.read",
+        status_code: 200,
+        correlation: { request_id: "req-nan", event_id: null, scope_cursor: null, outbox_id: null },
+        timing_ms: { total: Number.NaN },
+      }),
+    ).toThrow(/OPS2A_INVALID_TIMING_MS/);
+
+    expect(() =>
+      buildOpsTelemetryRecord({
+        revision: "f713b555",
+        plane: "stoa",
+        route_template: "/stats.json",
+        principal_class: "anonymous",
+        command_or_event_kind: "stats.read",
+        status_code: 999,
+        correlation: {
+          request_id: "req-bad-st",
+          event_id: null,
+          scope_cursor: null,
+          outbox_id: null,
+        },
+        timing_ms: { total: 5 },
+      }),
+    ).toThrow(/OPS2A_INVALID_STATUS_CODE/);
+
+    expect(() =>
+      buildOpsTelemetryRecord({
+        revision: "f713b555",
+        plane: "stoa",
+        route_template: "/stats.json",
+        principal_class: "fellow",
+        command_or_event_kind: "stats.read",
+        status_code: 200,
+        error_code: "usr_leaked_sponsor_id",
+        correlation: {
+          request_id: "req-actor",
+          event_id: null,
+          scope_cursor: null,
+          outbox_id: null,
+        },
+        timing_ms: { total: 5 },
+      }),
+    ).toThrow(/OPS2A_TELEMETRY_CREDENTIAL_LEAK_REFUSED/);
+
+    // 3. NaN / negative alert metrics fail closed instead of silently suppressing alerts.
+    const alertEval = new LaunchAlertEvaluator();
+    expect(() =>
+      alertEval.evaluate({
+        observed_at_ms: 1_763_760_000_000,
+        request_count: Number.NaN,
+        error_5xx_count: 5,
+        post_revocation_acceptances: 0,
+        quarantine_backlog_count: 0,
+        outbox_oldest_age_seconds: 0,
+        d1_storage_pct: 10,
+        consecutive_backup_failures: 0,
+      }),
+    ).toThrow(/ALERT_SNAPSHOT_INVALID_METRIC:request_count/);
   });
 
   test("all 6 launch alerts fire on threshold breach, dedupe inside window, recover cleanly, and link to real existing runbooks", () => {

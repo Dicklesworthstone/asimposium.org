@@ -162,12 +162,13 @@ const FORBIDDEN_ACTOR_ID_PATTERNS: readonly RegExp[] = [
 
 export class StatsAntiMetricViolationError extends Error {
   readonly code = "STATS_RULE_A10_VIOLATION";
-  constructor(
-    readonly offending_path: string,
-    readonly reason: string,
-  ) {
+  readonly offending_path: string;
+  readonly reason: string;
+  constructor(offending_path: string, reason: string) {
     super(`STATS_RULE_A10_VIOLATION at ${offending_path}: ${reason}`);
     this.name = "StatsAntiMetricViolationError";
+    this.offending_path = offending_path;
+    this.reason = reason;
   }
 }
 

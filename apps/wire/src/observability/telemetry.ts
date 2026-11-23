@@ -131,8 +131,10 @@ const SENSITIVE_QUERY_PARAM_RE =
 const EXTRA_EGRESS_SCRUB_PATTERNS: readonly RegExp[] = [
   // Presigned S3/R2 query params
   /([?&](?:X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token|X-Amz-Algorithm)=)[^&#\s]+/gi,
-  // Host-only / Secure session cookies
-  /((?:__Host-|__Secure-)?(?:authjs|next-auth|asimp)\.session(?:-token)?\s*=\s*)[^;\s,"']+/gi,
+  // Host-only / Secure session cookies (scrub entire name=value so cookie names don't trip detectors)
+  /(?:__Host-|__Secure-)?(?:authjs|next-auth|asimp)\.session(?:-token)?\s*=\s*[^;\s,"']+/gi,
+  // Generic Bearer tokens (OAuth, Resend, Cloudflare, Sentry, etc.)
+  /(\bBearer\s+)[A-Za-z0-9._~+/-]{12,}=*/gi,
   // Service envelope & key assignments
   /(\b(?:x-asimposium-service-signature|x-asimp-service-sig|x-asimp-signature|authorization|cookie|set-cookie|signing_key|seed_hex|private_key_pem)"?\s*(?:=|:)\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&]+)/gi,
   // JWT shape (three base64url segments starting with eyJ)
@@ -141,35 +143,58 @@ const EXTRA_EGRESS_SCRUB_PATTERNS: readonly RegExp[] = [
   /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
   // IPv4 addresses (bounded security need excluded from routine sinks)
   /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g,
+  // IPv6 addresses (requires :: or >= 3 colons so ISO timestamps like 05:44:03 never false-match)
+  /\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b|\b(?:[0-9a-f]{1,4}:){1,6}:[0-9a-f]{0,4}\b/gi,
   // Concrete actor identities (Fellow/Sponsor IDs must not leak into routine sinks)
   /\bF-[0-9A-HJKMNP-TV-Z]{10,}\b/gi,
   /\busr_[A-Za-z0-9_-]{6,}\b/g,
 ];
 
+function containsExtraSensitivePattern(text: string): boolean {
+  for (const pattern of EXTRA_EGRESS_SCRUB_PATTERNS) {
+    pattern.lastIndex = 0;
+    if (pattern.test(text)) {
+      pattern.lastIndex = 0;
+      return true;
+    }
+    pattern.lastIndex = 0;
+  }
+  return false;
+}
+
+const IPV4_HOSTNAME_RE = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$/;
+
+function sanitizeParsedUrl(parsed: URL): string {
+  parsed.username = "";
+  parsed.password = "";
+  parsed.hash = "";
+  if (parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]") {
+    parsed.hostname = "loopback.local";
+  } else if (IPV4_HOSTNAME_RE.test(parsed.hostname) || parsed.hostname.startsWith("[")) {
+    parsed.hostname = "ip-redacted.invalid";
+  }
+  parsed.pathname = redactPathname(parsed.pathname);
+  for (const key of [...parsed.searchParams.keys()]) {
+    if (SENSITIVE_QUERY_PARAM_RE.test(key)) {
+      parsed.searchParams.delete(key);
+    } else {
+      const val = parsed.searchParams.get(key) ?? "";
+      if (containsCredentialShape(val) || containsExtraSensitivePattern(val)) {
+        parsed.searchParams.delete(key);
+      }
+    }
+  }
+  return parsed.toString();
+}
+
 /**
- * Redacts a URL for observability egress: strips fragments (`#v1.<secret>`),
- * passes pathname through the canonical Worker `redactPathname`, and masks
+ * Redacts a URL for observability egress: strips credentials, fragments (`#v1.<secret>`),
+ * passes pathname through the canonical Worker `redactPathname`, and removes
  * secret/PII query parameters.
  */
 export function sanitizeObservabilityUrl(rawUrl: string): string {
   try {
-    const parsed = new URL(rawUrl);
-    parsed.username = "";
-    parsed.password = "";
-    parsed.hash = "";
-    parsed.pathname = redactPathname(parsed.pathname);
-    for (const key of [...parsed.searchParams.keys()]) {
-      if (SENSITIVE_QUERY_PARAM_RE.test(key)) {
-        parsed.searchParams.delete(key);
-      } else {
-        const val = parsed.searchParams.get(key) ?? "";
-        const cleaned = scrubObservabilityText(val);
-        if (cleaned !== val) {
-          parsed.searchParams.delete(key);
-        }
-      }
-    }
-    return parsed.toString();
+    return sanitizeParsedUrl(new URL(rawUrl));
   } catch {
     return scrubObservabilityText(rawUrl.replace(/#.*$/u, ""));
   }
@@ -185,22 +210,7 @@ export function scrubObservabilityText(input: string): string {
   // Sanitize embedded http(s) URLs so path segments, basic-auth, and query params get scrubbed too.
   out = out.replace(/https?:\/\/[^\s"'<>)\]]+/gi, (match) => {
     try {
-      const parsed = new URL(match);
-      parsed.username = "";
-      parsed.password = "";
-      parsed.hash = "";
-      parsed.pathname = redactPathname(parsed.pathname);
-      for (const key of [...parsed.searchParams.keys()]) {
-        if (SENSITIVE_QUERY_PARAM_RE.test(key)) {
-          parsed.searchParams.delete(key);
-        } else {
-          const val = parsed.searchParams.get(key) ?? "";
-          if (containsCredentialShape(val)) {
-            parsed.searchParams.delete(key);
-          }
-        }
-      }
-      return parsed.toString();
+      return sanitizeParsedUrl(new URL(match));
     } catch {
       return match;
     }
@@ -281,12 +291,21 @@ export function prepareRedactedSinkEvent(
 ): { readonly sink: "sentry" | "analytics" | "ops2a"; readonly payload: Record<string, unknown> } {
   const scrubbed = scrubObservabilityPayload(rawEvent) as Record<string, unknown>;
   const serialized = JSON.stringify(scrubbed);
-  if (containsCredentialShape(serialized)) {
+  if (containsCredentialShape(serialized) || containsExtraSensitivePattern(serialized)) {
     throw new Error(
-      `OBSERVABILITY_EGRESS_LEAK_REFUSED: ${sink} payload still matched credential shape after redaction`,
+      `OBSERVABILITY_EGRESS_LEAK_REFUSED: ${sink} payload still matched forbidden secret/PII shape after redaction`,
     );
   }
   return { sink, payload: scrubbed };
+}
+
+function safeNonNegativeMs(value: number): number {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new RangeError(
+      "OPS2A_INVALID_TIMING_MS: timing_ms values must be finite non-negative numbers",
+    );
+  }
+  return Math.round(value);
 }
 
 /**
@@ -316,24 +335,29 @@ export function buildOpsTelemetryRecord(input: {
       "OPS2A_RAW_QUERY_OR_FRAGMENT_FORBIDDEN: route_template must omit raw query strings and fragments",
     );
   }
-  if (!input.correlation.request_id || containsCredentialShape(input.correlation.request_id)) {
+  if (!Number.isInteger(input.status_code) || input.status_code < 100 || input.status_code > 599) {
+    throw new RangeError("OPS2A_INVALID_STATUS_CODE: status_code must be an integer in 100..599");
+  }
+  if (
+    !input.correlation.request_id ||
+    containsCredentialShape(input.correlation.request_id) ||
+    containsExtraSensitivePattern(input.correlation.request_id)
+  ) {
     throw new Error("OPS2A_INVALID_REQUEST_ID");
   }
   const safeTiming: TelemetryTimingMs = {
-    total: Math.max(0, Math.round(input.timing_ms.total)),
-    ...(input.timing_ms.d1 !== undefined
-      ? { d1: Math.max(0, Math.round(input.timing_ms.d1)) }
-      : {}),
-    ...(input.timing_ms.do !== undefined
-      ? { do: Math.max(0, Math.round(input.timing_ms.do)) }
-      : {}),
-    ...(input.timing_ms.r2 !== undefined
-      ? { r2: Math.max(0, Math.round(input.timing_ms.r2)) }
-      : {}),
+    total: safeNonNegativeMs(input.timing_ms.total),
+    ...(input.timing_ms.d1 !== undefined ? { d1: safeNonNegativeMs(input.timing_ms.d1) } : {}),
+    ...(input.timing_ms.do !== undefined ? { do: safeNonNegativeMs(input.timing_ms.do) } : {}),
+    ...(input.timing_ms.r2 !== undefined ? { r2: safeNonNegativeMs(input.timing_ms.r2) } : {}),
     ...(input.timing_ms.outbox !== undefined
-      ? { outbox: Math.max(0, Math.round(input.timing_ms.outbox)) }
+      ? { outbox: safeNonNegativeMs(input.timing_ms.outbox) }
       : {}),
   };
+  const safeRetries = input.retries ?? 0;
+  if (!Number.isFinite(safeRetries) || safeRetries < 0) {
+    throw new RangeError("OPS2A_INVALID_RETRIES: retries must be finite and non-negative");
+  }
 
   const record: OpsTelemetryRecord = {
     facility: "OPS.2a",
@@ -344,17 +368,17 @@ export function buildOpsTelemetryRecord(input: {
     route_template: redactPathname(input.route_template),
     principal_class: input.principal_class,
     command_or_event_kind: input.command_or_event_kind,
-    status_code: Math.trunc(input.status_code),
+    status_code: input.status_code,
     error_code: input.error_code ?? null,
     degraded_reason: input.degraded_reason ?? null,
     correlation: input.correlation,
     timing_ms: safeTiming,
-    retries: Math.max(0, Math.trunc(input.retries ?? 0)),
+    retries: Math.trunc(safeRetries),
     sink_ack: input.sink_ack ?? true,
   };
 
   const serialized = JSON.stringify(record);
-  if (containsCredentialShape(serialized)) {
+  if (containsCredentialShape(serialized) || containsExtraSensitivePattern(serialized)) {
     throw new Error("OPS2A_TELEMETRY_CREDENTIAL_LEAK_REFUSED");
   }
   return record;
@@ -471,13 +495,19 @@ interface ActiveAlertState {
   lastNotifiedMs: number;
 }
 
+function assertFiniteNonNegative(name: string, value: number): void {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new RangeError(`ALERT_SNAPSHOT_INVALID_METRIC:${name}`);
+  }
+}
+
 function extractAlertObservation(
   id: LaunchAlertId,
   m: LaunchAlertMetricsSnapshot,
 ): { readonly breached: boolean; readonly value: number } {
   switch (id) {
     case "ALERT_ERROR_SPIKE": {
-      const rate = m.request_count >= 20 ? m.error_5xx_count / m.request_count : 0;
+      const rate = m.request_count >= 20 ? Math.min(1, m.error_5xx_count / m.request_count) : 0;
       return { breached: rate > 0.05, value: Math.round(rate * 10_000) / 100 };
     }
     case "ALERT_REVOCATION_NOT_EFFECTIVE":
@@ -520,6 +550,15 @@ export class LaunchAlertEvaluator {
     readonly deduped: readonly LaunchAlertId[];
     readonly active_alerts: readonly LaunchAlertId[];
   } {
+    assertFiniteNonNegative("observed_at_ms", snapshot.observed_at_ms);
+    assertFiniteNonNegative("request_count", snapshot.request_count);
+    assertFiniteNonNegative("error_5xx_count", snapshot.error_5xx_count);
+    assertFiniteNonNegative("post_revocation_acceptances", snapshot.post_revocation_acceptances);
+    assertFiniteNonNegative("quarantine_backlog_count", snapshot.quarantine_backlog_count);
+    assertFiniteNonNegative("outbox_oldest_age_seconds", snapshot.outbox_oldest_age_seconds);
+    assertFiniteNonNegative("d1_storage_pct", snapshot.d1_storage_pct);
+    assertFiniteNonNegative("consecutive_backup_failures", snapshot.consecutive_backup_failures);
+
     const notifications: AlertTransitionEvent[] = [];
     const deduped: LaunchAlertId[] = [];
 
@@ -529,8 +568,9 @@ export class LaunchAlertEvaluator {
 
       if (obs.breached) {
         const dedupeMs = def.dedupe_window_seconds * 1_000;
-        const withinDedupe =
-          prev.firing && snapshot.observed_at_ms - prev.lastNotifiedMs < dedupeMs;
+        const elapsed = snapshot.observed_at_ms - prev.lastNotifiedMs;
+        // If clock stepped backwards (elapsed < 0), treat as expired dedupe rather than suppressing alerts.
+        const withinDedupe = prev.firing && elapsed >= 0 && elapsed < dedupeMs;
         if (withinDedupe) {
           deduped.push(def.id);
         } else {

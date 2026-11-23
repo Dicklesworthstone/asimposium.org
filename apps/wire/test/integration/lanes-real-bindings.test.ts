@@ -40,6 +40,7 @@ const LANES = [
   "journey-cleanup",
   "ledger-objects-integration",
   "moderation",
+  "observability",
   "private-problem-pack",
   "problem-boundaries",
   "problem-dormancy",

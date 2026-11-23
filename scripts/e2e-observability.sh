@@ -62,55 +62,20 @@ if [[ "$TARGET" != "local" ]]; then
   exit 2
 fi
 
+NODE_BIN="$(e2e_select_node_runtime)" || {
+  e2e_emit_and_optionally_record 0 "$RUN_ID" "$SUITE" "$STARTED_MS" "blocked" "GENUINE_NODE_UNAVAILABLE" "$REPRODUCE --target local"
+  exit 78
+}
+
 (
   cd "$REPO_ROOT" || exit 1
   bun test /dev/null --timeout=120000 \
     apps/wire/test/unit/observability-telemetry.test.ts \
+    apps/wire/test/unit/face-log.test.ts \
     scripts/verify-cost-model.test.ts
 
-  # Verify real /stats.json -> /stats.md semantic parity & Rule A10 zero-anti-metric enforcement.
-  bun -e '
-    import { Database } from "bun:sqlite";
-    import { loadPlatformStats } from "./apps/wire/src/stats/service.ts";
-    import { renderPlatformStatsMarkdown } from "./packages/render/src/stats.ts";
-    import { assertObservabilityBoundary, buildOpsTelemetryRecord } from "./apps/wire/src/observability/telemetry.ts";
-
-    const rawDb = new Database(":memory:");
-    const d1Adapter = {
-      prepare(sql: string) {
-        return {
-          bind(...params: unknown[]) {
-            return {
-              first: async () => rawDb.prepare(sql).get(...params) ?? null,
-              all: async () => ({ results: rawDb.prepare(sql).all(...params) }),
-            };
-          },
-          first: async () => rawDb.prepare(sql).get() ?? null,
-          all: async () => ({ results: rawDb.prepare(sql).all() }),
-        };
-      },
-    };
-    const stats = await loadPlatformStats(d1Adapter as never, "2026-11-22T00:00:00.000Z");
-    assertObservabilityBoundary("public-stats", stats);
-    const md = renderPlatformStatsMarkdown(stats);
-    if (!md.includes("Rule A10") && !md.includes("measured")) {
-      throw new Error("STATS_MD_PARITY_MISSING_MEASURED_HEADER");
-    }
-    if (/\bPROVED\b|\bleaderboard\b/i.test(md)) {
-      throw new Error("STATS_MD_ANTI_METRIC_VIOLATION");
-    }
-    const telemetry = buildOpsTelemetryRecord({
-      revision: "local",
-      plane: "stoa",
-      route_template: "/stats.md",
-      principal_class: "anonymous",
-      command_or_event_kind: "stats.read",
-      status_code: 200,
-      correlation: { request_id: "req-e2e-obs-stats", event_id: null, scope_cursor: null, outbox_id: null },
-      timing_ms: { total: 4 },
-    });
-    console.log(JSON.stringify(telemetry));
-  '
+  # Run mock-free local Workerd + migrated D1 HTTP /stats & observability lane.
+  "$NODE_BIN" apps/wire/test/integration/observability-real-bindings.mjs
 )
 
-e2e_emit_and_optionally_record 0 "$RUN_ID" "$SUITE" "$STARTED_MS" "pass" "OBSERVABILITY_LOCAL_PASS" "$REPRODUCE --target local"
+e2e_emit_and_optionally_record 0 "$RUN_ID" "$SUITE" "$STARTED_MS" "pass" "OBSERVABILITY_LOCAL_REAL_BINDINGS_PASS" "$REPRODUCE --target local"

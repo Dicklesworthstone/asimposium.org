@@ -6,6 +6,7 @@ import {
   UNAVAILABLE_UNTIL_DEPLOYED,
 } from "../../../../packages/contracts/src/stats.ts";
 import type { Env } from "../env.ts";
+import { assertObservabilityBoundary } from "../observability/telemetry.ts";
 
 type D1Database = NonNullable<Env["DB"]>;
 
@@ -388,5 +389,6 @@ export async function loadPlatformStats(
   });
 
   assertNoStatsAntiMetrics(face);
+  assertObservabilityBoundary("public-stats", face);
   return face;
 }

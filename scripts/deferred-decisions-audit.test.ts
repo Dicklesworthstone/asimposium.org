@@ -61,17 +61,25 @@ export interface DeferredDecisionReviewReport {
   readonly next_review_point: string;
 }
 
+const STRICT_UTC_ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+
 export function validateDeferredDecisionReviewReport(
   report: unknown,
   knownOqs: ReadonlySet<string>,
 ): { readonly ok: boolean; readonly errors: readonly string[] } {
   const errors: string[] = [];
-  if (report === null || typeof report !== "object") {
+  if (report === null || typeof report !== "object" || Array.isArray(report)) {
     return { ok: false, errors: ["REPORT_NOT_OBJECT"] };
   }
   const r = report as Partial<DeferredDecisionReviewReport>;
   if (r.schema !== "asimposium.deferred-decision-review.v1") errors.push("INVALID_SCHEMA");
-  if (!r.reviewed_at || Number.isNaN(Date.parse(r.reviewed_at))) errors.push("INVALID_REVIEWED_AT");
+  if (
+    !r.reviewed_at ||
+    !STRICT_UTC_ISO_RE.test(r.reviewed_at) ||
+    Number.isNaN(Date.parse(r.reviewed_at))
+  ) {
+    errors.push("INVALID_REVIEWED_AT");
+  }
   if (!r.revision || !/^[0-9a-f]{7,40}$/i.test(r.revision)) errors.push("INVALID_REVISION");
   if (!r.oq_id || !knownOqs.has(r.oq_id)) errors.push("UNKNOWN_OQ_ID");
   if (!r.trigger_observation || r.trigger_observation.trim().length < 10) {
@@ -113,6 +121,7 @@ describe("Deferred Decisions Ledger CI Gate (asimposiumorg-1zm, Fable Rev 3.1 OQ
 
   test("contains all required Fable OQs (OQ-2/4/5/6/7/8/10 + full OQ-1..13) with complete schema, real evidence paths, and valid ADR/bead links", () => {
     expect(ledger.schema).toBe("asimposium.deferred-decisions-ledger.v1");
+    expect(ledger.source_revision).toBe("3.1");
     expect(ledger.policy.batch_closure_forbidden).toBe(true);
     expect(containsNeverLogMaterial(readFileSync(ledgerPath, "utf8"))).toBe(false);
     expect(containsNeverLogMaterial(mdText)).toBe(false);
@@ -188,5 +197,30 @@ describe("Deferred Decisions Ledger CI Gate (asimposiumorg-1zm, Fable Rev 3.1 OQ
     );
     expect(leaked.ok).toBe(false);
     expect(leaked.errors).toContain("NEVER_LOG_MATERIAL_IN_REVIEW_REPORT");
+
+    // Non-object / array / non-ISO date inputs fail closed cleanly.
+    expect(validateDeferredDecisionReviewReport(null, knownOqs).errors).toContain(
+      "REPORT_NOT_OBJECT",
+    );
+    expect(validateDeferredDecisionReviewReport([], knownOqs).errors).toContain(
+      "REPORT_NOT_OBJECT",
+    );
+    const badDate = validateDeferredDecisionReviewReport(
+      {
+        schema: "asimposium.deferred-decision-review.v1",
+        reviewed_at: "May 1 2026",
+        revision: "ee310d5b",
+        oq_id: "OQ-2",
+        trigger_observation: "Checking strict ISO-8601 UTC enforcement.",
+        source_digest: "c".repeat(64),
+        reviewer: "OrangeBarn",
+        decision: "unchanged",
+        rationale: "Strict UTC timestamp required for auditability.",
+        next_review_point: "G3 +30d",
+      },
+      knownOqs,
+    );
+    expect(badDate.ok).toBe(false);
+    expect(badDate.errors).toContain("INVALID_REVIEWED_AT");
   });
 });

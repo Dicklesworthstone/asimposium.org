@@ -50,3 +50,32 @@ test("face names come from the suffix only", () => {
   expect(faceOf("/p/P-1/export.jsonl.gz")).toBe(".jsonl.gz");
   expect(faceOf("/problems")).toBe("bare");
 });
+
+test("OPS.4 wiring: face-log preserves safe x-request-id and replaces credential-shaped request headers", async () => {
+  const lines: string[] = [];
+  const spy = spyOn(console, "log").mockImplementation((line: unknown) => {
+    lines.push(String(line));
+  });
+  spies.push(spy);
+
+  await createApp().request(
+    "https://a.asimposium.org/schemas/sessions.v1/promote_request.json",
+    { headers: { "x-request-id": "req-ops4-valid-42" } },
+    ENV,
+  );
+  const badToken = ["asimp", "ag", "01JXYZ4K6QABCDEFGHJKMNPQRS"].join("_");
+  await createApp().request(
+    "https://a.asimposium.org/schemas/sessions.v1/promote_request.json",
+    { headers: { "x-request-id": badToken } },
+    ENV,
+  );
+  spy.mockRestore();
+
+  const records = lines
+    .filter((line) => line.includes('"stage":"face"'))
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  expect(records).toHaveLength(2);
+  expect(records[0]?.request_id).toBe("req-ops4-valid-42");
+  expect(String(records[1]?.request_id ?? "")).not.toContain(badToken);
+  expect(JSON.stringify(records)).not.toContain(badToken);
+});
