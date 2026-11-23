@@ -208,16 +208,45 @@ export const INTEGRITY_POLICY_DIGEST = sha256Hex(
  * Classifies an integrity-case intake strictly separating ordinary scientific
  * mistakes/disagreement from corroborated deception/misconduct indicators.
  */
+export interface IntegrityD1PreparedStatement {
+  bind(...values: unknown[]): IntegrityD1PreparedStatement;
+  first<T = Record<string, unknown>>(): Promise<T | null>;
+  all<T = Record<string, unknown>>(): Promise<{ readonly results?: T[] }>;
+  run(): Promise<{ readonly success?: boolean; readonly meta?: { readonly changes?: number } }>;
+}
+
+export interface IntegrityD1Database {
+  prepare(query: string): IntegrityD1PreparedStatement;
+}
+
+const PUBLIC_LEDGER_REF_RE =
+  /^(?:C-[0-9]+(?:@[1-9][0-9]{0,8})?|(?:R|E|H|G|L|DE|Q|CF|SYNTH)-[A-Za-z0-9-]{1,78})$/;
+const SAFE_EVENT_ID_RE = /^[A-Za-z0-9._-]{4,64}$/;
+
+function assertNonEmptyActor(actor: IntegrityActor): void {
+  if (!actor.actor_id || actor.actor_id.trim().length === 0) {
+    throw new Error("INTEGRITY_ACTOR_ID_REQUIRED");
+  }
+}
+
 export function classifyIntegrityIntake(
   input: IntegrityIntakeInput,
 ): IntegrityClassificationResult {
-  if (!input.problem_id.trim() || !input.target_ref.trim() || !input.evidence_anchor.trim()) {
+  if (
+    !input.problem_id.trim() ||
+    !input.target_ref.trim() ||
+    !input.evidence_anchor.trim() ||
+    !input.affected_fellow_id.trim() ||
+    !input.affected_sponsor_id.trim() ||
+    !input.restricted_evidence_body.trim()
+  ) {
     return {
       admissible: false,
       code: "INVALID_INTEGRITY_INTAKE",
       allegation_class: null,
       recommended_scientific_path: null,
-      reason: "Integrity intake requires problem_id, target_ref, and safe evidence_anchor.",
+      reason:
+        "Integrity intake requires problem_id, target_ref, affected_fellow_id, affected_sponsor_id, safe evidence_anchor, and restricted_evidence_body.",
     };
   }
 
@@ -446,23 +475,32 @@ export class IntegrityCaseLedger {
     return this.cases.get(caseId) ?? null;
   }
 
-  /** Only the operator/investigator or the affected sponsor (never public/unrelated sponsors) may inspect restricted details. */
+  /** Only an unconflicted operator/investigator or the affected sponsor (never public/unrelated sponsors) may inspect restricted details. */
   readRestrictedCase(caseId: string, viewer: IntegrityActor): IntegrityCaseRecord {
+    assertNonEmptyActor(viewer);
     const existing = this.cases.get(caseId);
     if (!existing) {
       throw new Error("INTEGRITY_CASE_NOT_FOUND");
     }
     if (viewer.principal_class === "operator") {
+      if (
+        viewer.actor_id === existing.affected_sponsor_id ||
+        existing.conflicted_actors.includes(viewer.actor_id)
+      ) {
+        throw new Error("INVESTIGATOR_CONFLICT_OF_INTEREST");
+      }
       return existing;
     }
     if (
       viewer.principal_class === "sponsor" &&
       viewer.sponsor_id === existing.affected_sponsor_id
     ) {
-      // Affected sponsor sees neutral explanation & anchor, never reporter identity.
+      // Affected sponsor receives neutral status & safe evidence anchor/digest only —
+      // NEVER reporter identity or raw restricted evidence body.
       return {
         ...existing,
         reporter_sponsor_id: null,
+        restricted_evidence_body: null,
       };
     }
     throw new Error("INTEGRITY_CASE_RESTRICTED_FORBIDDEN");
@@ -547,10 +585,15 @@ export class IntegrityCaseLedger {
     nowIso: string = new Date().toISOString(),
   ): IntegrityCaseRecord {
     const started = Date.now();
+    assertValidIsoTimestamp(nowIso);
+    assertNonEmptyActor(operator);
     const existing = this.cases.get(caseId);
     if (!existing) throw new Error("INTEGRITY_CASE_NOT_FOUND");
     if (operator.principal_class !== "operator") {
       throw new Error("OPERATOR_REQUIRED_FOR_INVESTIGATION");
+    }
+    if (!["intake", "under-review", "awaiting-response"].includes(existing.state)) {
+      throw new Error("INTEGRITY_CASE_ALREADY_DECIDED");
     }
     if (
       operator.actor_id === existing.affected_sponsor_id ||
@@ -595,6 +638,8 @@ export class IntegrityCaseLedger {
     nowIso: string = new Date().toISOString(),
   ): IntegrityCaseRecord {
     const started = Date.now();
+    assertValidIsoTimestamp(nowIso);
+    assertNonEmptyActor(actor);
     const existing = this.cases.get(caseId);
     if (!existing) throw new Error("INTEGRITY_CASE_NOT_FOUND");
     if (actor.principal_class !== "sponsor") {
@@ -644,7 +689,10 @@ export class IntegrityCaseLedger {
     if (!existing) throw new Error("INTEGRITY_CASE_NOT_FOUND");
     assertValidIsoTimestamp(nowIso);
     assertNoDirectDispositionMutation(input);
-    if (!input.linked_object_ref.trim() || !input.event_id.trim()) {
+    if (
+      !PUBLIC_LEDGER_REF_RE.test(input.linked_object_ref) ||
+      !SAFE_EVENT_ID_RE.test(input.event_id)
+    ) {
       throw new Error("INVALID_CORRECTION_LINK");
     }
     if (existing.correction_links.some((l) => l.event_id === input.event_id)) {
@@ -689,9 +737,11 @@ export class IntegrityCaseLedger {
     nowIso: string = new Date().toISOString(),
   ): IntegrityCaseRecord {
     const started = Date.now();
+    assertValidIsoTimestamp(nowIso);
+    assertNonEmptyActor(operator);
     const existing = this.cases.get(caseId);
     if (!existing) throw new Error("INTEGRITY_CASE_NOT_FOUND");
-    assertNoDirectDispositionMutation(decision as unknown as Record<string, unknown>);
+    assertNoDirectDispositionMutation(decision);
     if (operator.principal_class !== "operator") {
       throw new Error("OPERATOR_REQUIRED_FOR_DECISION");
     }
@@ -778,6 +828,8 @@ export class IntegrityCaseLedger {
     nowIso: string = new Date().toISOString(),
   ): IntegrityCaseRecord {
     const started = Date.now();
+    assertValidIsoTimestamp(nowIso);
+    assertNonEmptyActor(actor);
     const existing = this.cases.get(caseId);
     if (!existing) throw new Error("INTEGRITY_CASE_NOT_FOUND");
     if (actor.principal_class !== "sponsor") {
@@ -823,9 +875,11 @@ export class IntegrityCaseLedger {
     nowIso: string = new Date().toISOString(),
   ): IntegrityCaseRecord {
     const started = Date.now();
+    assertValidIsoTimestamp(nowIso);
+    assertNonEmptyActor(appellateOperator);
     const existing = this.cases.get(caseId);
     if (!existing) throw new Error("INTEGRITY_CASE_NOT_FOUND");
-    assertNoDirectDispositionMutation(decision as unknown as Record<string, unknown>);
+    assertNoDirectDispositionMutation(decision);
     if (appellateOperator.principal_class !== "operator") {
       throw new Error("OPERATOR_REQUIRED_FOR_APPEAL_DECISION");
     }
@@ -859,6 +913,722 @@ export class IntegrityCaseLedger {
       updated_at: nowIso,
     };
     this.cases.set(caseId, updated);
+    this.emitOpsLog({
+      case_id: caseId,
+      action: overturned ? "appeal-overturned" : "appeal-upheld",
+      event_id: null,
+      coarse_class: updated.allegation_class,
+      state: updated.state,
+      result: "ok",
+      duration_ms: Date.now() - started,
+    });
+    return updated;
+  }
+}
+
+interface RawIntegrityCaseRow {
+  case_id: string;
+  problem_id: string;
+  target_ref: string;
+  affected_fellow_id: string;
+  affected_sponsor_id: string;
+  intake_source: IntegrityIntakeSource;
+  reporter_sponsor_id: string | null;
+  allegation_class: IntegrityAllegationClass;
+  state: IntegrityCaseState;
+  visibility_action: IntegrityCaseRecord["visibility_action"];
+  evidence_anchor: string;
+  evidence_digest: string;
+  restricted_evidence_body: string | null;
+  minimized: number;
+  sponsor_notified_at: string;
+  sponsor_response_digest: string | null;
+  sponsor_response_submitted_by: string | null;
+  investigator_id: string | null;
+  conflicted_actors_json: string;
+  decided_by: string | null;
+  decided_at: string | null;
+  decision_rationale_digest: string | null;
+  appeal_submitted_by: string | null;
+  appeal_digest: string | null;
+  appeal_decided_by: string | null;
+  appeal_decided_at: string | null;
+  strike_handoff_json: string | null;
+  policy_version: typeof INTEGRITY_POLICY_VERSION;
+  created_at: string;
+  updated_at: string;
+}
+
+interface RawCorrectionLinkRow {
+  link_id: string;
+  kind: IntegrityCorrectionLink["kind"];
+  target_ref: string;
+  linked_object_ref: string;
+  event_id: string;
+  linked_at: string;
+}
+
+/**
+ * Real Cloudflare D1 transactional store for W9.3c Scientific-Integrity Cases.
+ * Uses conditional SQL state guards (`WHERE case_id = ? AND state IN (...)`)
+ * checking `meta.changes === 1` so racing operators/appeals fail closed with
+ * `INTEGRITY_CASE_CONCURRENT_CONFLICT` and never double-decide or leak data.
+ */
+export class D1IntegrityCaseStore {
+  private readonly db: IntegrityD1Database;
+  private readonly opsLogs: IntegrityOpsLogEvent[] = [];
+
+  constructor(db: IntegrityD1Database) {
+    this.db = db;
+  }
+
+  private emitOpsLog(input: {
+    readonly case_id: string;
+    readonly action: string;
+    readonly event_id: string | null;
+    readonly coarse_class: IntegrityAllegationClass | "non-misconduct";
+    readonly state: IntegrityCaseState | "refused";
+    readonly result: "ok" | "refused";
+    readonly duration_ms: number;
+  }): void {
+    const { payload } = prepareRedactedSinkEvent("ops2a", {
+      facility: "OPS.2a",
+      stage: "integrity-case",
+      case_id: input.case_id,
+      action: input.action,
+      event_id: input.event_id,
+      coarse_class: input.coarse_class,
+      state: input.state,
+      policy_digest: INTEGRITY_POLICY_DIGEST,
+      result: input.result,
+      duration_ms: Math.max(0, Math.round(input.duration_ms)),
+    });
+    this.opsLogs.push(payload as unknown as IntegrityOpsLogEvent);
+  }
+
+  getOpsLogs(): readonly IntegrityOpsLogEvent[] {
+    return this.opsLogs;
+  }
+
+  async ensureSchema(): Promise<void> {
+    await this.db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS scientific_integrity_cases (
+          case_id TEXT PRIMARY KEY CHECK (case_id GLOB 'IC-*'),
+          problem_id TEXT NOT NULL REFERENCES problems(id),
+          target_ref TEXT NOT NULL,
+          affected_fellow_id TEXT NOT NULL,
+          affected_sponsor_id TEXT NOT NULL,
+          intake_source TEXT NOT NULL CHECK (intake_source IN ('report', 'screening-signal', 'operator-review')),
+          reporter_sponsor_id TEXT,
+          allegation_class TEXT NOT NULL CHECK (allegation_class IN (
+            'fabricated-citation', 'forged-verifier-output', 'plagiarism',
+            'identity-model-misrepresentation', 'coordinated-review-manipulation'
+          )),
+          state TEXT NOT NULL CHECK (state IN (
+            'intake', 'under-review', 'awaiting-response', 'confirmed',
+            'dismissed-unsubstantiated', 'appealed', 'appeal-upheld', 'appeal-overturned'
+          )),
+          visibility_action TEXT NOT NULL CHECK (visibility_action IN ('none', 'neutral-notice', 'quarantine', 'restored')),
+          evidence_anchor TEXT NOT NULL,
+          evidence_digest TEXT NOT NULL CHECK (length(evidence_digest) = 64),
+          restricted_evidence_body TEXT,
+          minimized INTEGER NOT NULL DEFAULT 0 CHECK (minimized IN (0, 1)),
+          sponsor_notified_at TEXT NOT NULL,
+          sponsor_response_digest TEXT,
+          sponsor_response_submitted_by TEXT,
+          investigator_id TEXT,
+          conflicted_actors_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(conflicted_actors_json)),
+          decided_by TEXT,
+          decided_at TEXT,
+          decision_rationale_digest TEXT,
+          appeal_submitted_by TEXT,
+          appeal_digest TEXT,
+          appeal_decided_by TEXT,
+          appeal_decided_at TEXT,
+          strike_handoff_json TEXT CHECK (strike_handoff_json IS NULL OR json_valid(strike_handoff_json)),
+          policy_version TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )`,
+      )
+      .run();
+
+    await this.db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS scientific_integrity_correction_links (
+          case_id TEXT NOT NULL REFERENCES scientific_integrity_cases(case_id),
+          link_id TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('retraction', 'correction', 'superseding-claim')),
+          target_ref TEXT NOT NULL,
+          linked_object_ref TEXT NOT NULL,
+          event_id TEXT NOT NULL,
+          linked_at TEXT NOT NULL,
+          PRIMARY KEY (case_id, link_id),
+          UNIQUE (case_id, event_id)
+        )`,
+      )
+      .run();
+  }
+
+  private async hydrate(row: RawIntegrityCaseRow): Promise<IntegrityCaseRecord> {
+    const linkRows = await this.db
+      .prepare(
+        `SELECT link_id, kind, target_ref, linked_object_ref, event_id, linked_at
+         FROM scientific_integrity_correction_links
+         WHERE case_id = ?
+         ORDER BY link_id ASC`,
+      )
+      .bind(row.case_id)
+      .all<RawCorrectionLinkRow>();
+    const correctionLinks: IntegrityCorrectionLink[] = (linkRows.results ?? []).map((l) => ({
+      link_id: l.link_id,
+      kind: l.kind,
+      target_ref: l.target_ref,
+      linked_object_ref: l.linked_object_ref,
+      event_id: l.event_id,
+      linked_at: l.linked_at,
+      preserves_immutable_envelopes: true,
+    }));
+    return {
+      case_id: row.case_id,
+      problem_id: row.problem_id,
+      target_ref: row.target_ref,
+      affected_fellow_id: row.affected_fellow_id,
+      affected_sponsor_id: row.affected_sponsor_id,
+      intake_source: row.intake_source,
+      reporter_sponsor_id: row.reporter_sponsor_id,
+      allegation_class: row.allegation_class,
+      state: row.state,
+      visibility_action: row.visibility_action,
+      evidence_anchor: row.evidence_anchor,
+      evidence_digest: row.evidence_digest,
+      restricted_evidence_body: row.restricted_evidence_body,
+      minimized: row.minimized !== 0,
+      sponsor_notified_at: row.sponsor_notified_at,
+      sponsor_response_digest: row.sponsor_response_digest,
+      sponsor_response_submitted_by: row.sponsor_response_submitted_by,
+      investigator_id: row.investigator_id,
+      conflicted_actors: JSON.parse(row.conflicted_actors_json) as string[],
+      decided_by: row.decided_by,
+      decided_at: row.decided_at,
+      decision_rationale_digest: row.decision_rationale_digest,
+      appeal_submitted_by: row.appeal_submitted_by,
+      appeal_digest: row.appeal_digest,
+      appeal_decided_by: row.appeal_decided_by,
+      appeal_decided_at: row.appeal_decided_at,
+      correction_links: correctionLinks,
+      strike_handoff: row.strike_handoff_json
+        ? (JSON.parse(row.strike_handoff_json) as SponsorStrikeHandoff)
+        : null,
+      policy_version: row.policy_version,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+  }
+
+  async getCase(caseId: string): Promise<IntegrityCaseRecord | null> {
+    const row = await this.db
+      .prepare("SELECT * FROM scientific_integrity_cases WHERE case_id = ?")
+      .bind(caseId)
+      .first<RawIntegrityCaseRow>();
+    if (!row) return null;
+    return this.hydrate(row);
+  }
+
+  async readRestrictedCase(caseId: string, viewer: IntegrityActor): Promise<IntegrityCaseRecord> {
+    assertNonEmptyActor(viewer);
+    const existing = await this.getCase(caseId);
+    if (!existing) throw new Error("INTEGRITY_CASE_NOT_FOUND");
+    if (viewer.principal_class === "operator") {
+      if (
+        viewer.actor_id === existing.affected_sponsor_id ||
+        existing.conflicted_actors.includes(viewer.actor_id)
+      ) {
+        throw new Error("INVESTIGATOR_CONFLICT_OF_INTEREST");
+      }
+      return existing;
+    }
+    if (
+      viewer.principal_class === "sponsor" &&
+      viewer.sponsor_id === existing.affected_sponsor_id
+    ) {
+      return {
+        ...existing,
+        reporter_sponsor_id: null,
+        restricted_evidence_body: null,
+      };
+    }
+    throw new Error("INTEGRITY_CASE_RESTRICTED_FORBIDDEN");
+  }
+
+  async openCase(
+    input: IntegrityIntakeInput,
+    nowIso: string = new Date().toISOString(),
+  ): Promise<{
+    readonly classification: IntegrityClassificationResult;
+    readonly record: IntegrityCaseRecord | null;
+  }> {
+    const started = Date.now();
+    assertValidIsoTimestamp(nowIso);
+    assertNoDirectDispositionMutation(input);
+    const classification = classifyIntegrityIntake(input);
+    if (!classification.admissible || classification.allegation_class === null) {
+      this.emitOpsLog({
+        case_id: "IC-REFUSED",
+        action: "intake",
+        event_id: input.event_id ?? null,
+        coarse_class: "non-misconduct",
+        state: "refused",
+        result: "refused",
+        duration_ms: Date.now() - started,
+      });
+      return { classification, record: null };
+    }
+
+    const caseId = `IC-${crypto.randomUUID().replaceAll("-", "").slice(0, 16).toUpperCase()}`;
+    const initialAction = input.initial_action ?? "neutral-notice";
+    const evidenceDigest = sha256Hex(input.restricted_evidence_body);
+    const conflictedJson = JSON.stringify([...(input.conflicted_actors ?? [])]);
+
+    await this.db
+      .prepare(
+        `INSERT INTO scientific_integrity_cases (
+          case_id, problem_id, target_ref, affected_fellow_id, affected_sponsor_id,
+          intake_source, reporter_sponsor_id, allegation_class, state, visibility_action,
+          evidence_anchor, evidence_digest, restricted_evidence_body, minimized,
+          sponsor_notified_at, conflicted_actors_json, policy_version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'intake', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        caseId,
+        input.problem_id,
+        input.target_ref,
+        input.affected_fellow_id,
+        input.affected_sponsor_id,
+        input.intake_source,
+        input.reporter_sponsor_id,
+        classification.allegation_class,
+        initialAction,
+        input.evidence_anchor,
+        evidenceDigest,
+        input.restricted_evidence_body,
+        nowIso,
+        conflictedJson,
+        INTEGRITY_POLICY_VERSION,
+        nowIso,
+        nowIso,
+      )
+      .run();
+
+    const record = await this.getCase(caseId);
+    if (!record) throw new Error("INTEGRITY_CASE_PERSIST_FAILED");
+    this.emitOpsLog({
+      case_id: caseId,
+      action: "intake",
+      event_id: input.event_id ?? null,
+      coarse_class: record.allegation_class,
+      state: record.state,
+      result: "ok",
+      duration_ms: Date.now() - started,
+    });
+    return { classification, record };
+  }
+
+  async assignInvestigator(
+    caseId: string,
+    operator: IntegrityActor,
+    nowIso: string = new Date().toISOString(),
+  ): Promise<IntegrityCaseRecord> {
+    const started = Date.now();
+    assertValidIsoTimestamp(nowIso);
+    assertNonEmptyActor(operator);
+    const existing = await this.getCase(caseId);
+    if (!existing) throw new Error("INTEGRITY_CASE_NOT_FOUND");
+    if (operator.principal_class !== "operator") {
+      throw new Error("OPERATOR_REQUIRED_FOR_INVESTIGATION");
+    }
+    if (!["intake", "under-review", "awaiting-response"].includes(existing.state)) {
+      throw new Error("INTEGRITY_CASE_ALREADY_DECIDED");
+    }
+    if (
+      operator.actor_id === existing.affected_sponsor_id ||
+      operator.actor_id === existing.reporter_sponsor_id ||
+      existing.conflicted_actors.includes(operator.actor_id)
+    ) {
+      throw new Error("INVESTIGATOR_CONFLICT_OF_INTEREST");
+    }
+
+    const res = await this.db
+      .prepare(
+        `UPDATE scientific_integrity_cases
+         SET investigator_id = ?, state = 'awaiting-response', updated_at = ?
+         WHERE case_id = ? AND state IN ('intake', 'under-review', 'awaiting-response')`,
+      )
+      .bind(operator.actor_id, nowIso, caseId)
+      .run();
+    if ((res.meta?.changes ?? 0) !== 1) {
+      throw new Error("INTEGRITY_CASE_CONCURRENT_CONFLICT");
+    }
+    const updated = await this.getCase(caseId);
+    if (!updated) throw new Error("INTEGRITY_CASE_NOT_FOUND");
+    this.emitOpsLog({
+      case_id: caseId,
+      action: "assign-investigator",
+      event_id: null,
+      coarse_class: updated.allegation_class,
+      state: updated.state,
+      result: "ok",
+      duration_ms: Date.now() - started,
+    });
+    return updated;
+  }
+
+  async submitSponsorResponse(
+    caseId: string,
+    actor: IntegrityActor,
+    responseText: string,
+    nowIso: string = new Date().toISOString(),
+  ): Promise<IntegrityCaseRecord> {
+    const started = Date.now();
+    assertValidIsoTimestamp(nowIso);
+    assertNonEmptyActor(actor);
+    const existing = await this.getCase(caseId);
+    if (!existing) throw new Error("INTEGRITY_CASE_NOT_FOUND");
+    if (actor.principal_class !== "sponsor") {
+      throw new Error("HUMAN_SPONSOR_REQUIRED_FOR_RESPONSE");
+    }
+    if (actor.sponsor_id !== existing.affected_sponsor_id) {
+      throw new Error("WRONG_SPONSOR_FOR_INTEGRITY_RESPONSE");
+    }
+    if (responseText.trim().length < 10) {
+      throw new Error("INTEGRITY_RESPONSE_TOO_SHORT");
+    }
+    if (!["intake", "under-review", "awaiting-response"].includes(existing.state)) {
+      throw new Error("INTEGRITY_CASE_NOT_ACCEPTING_RESPONSE");
+    }
+
+    const res = await this.db
+      .prepare(
+        `UPDATE scientific_integrity_cases
+         SET state = 'under-review', sponsor_response_digest = ?, sponsor_response_submitted_by = ?, updated_at = ?
+         WHERE case_id = ? AND state IN ('intake', 'under-review', 'awaiting-response')`,
+      )
+      .bind(sha256Hex(responseText), actor.actor_id, nowIso, caseId)
+      .run();
+    if ((res.meta?.changes ?? 0) !== 1) {
+      throw new Error("INTEGRITY_CASE_CONCURRENT_CONFLICT");
+    }
+    const updated = await this.getCase(caseId);
+    if (!updated) throw new Error("INTEGRITY_CASE_NOT_FOUND");
+    this.emitOpsLog({
+      case_id: caseId,
+      action: "sponsor-response",
+      event_id: null,
+      coarse_class: updated.allegation_class,
+      state: updated.state,
+      result: "ok",
+      duration_ms: Date.now() - started,
+    });
+    return updated;
+  }
+
+  async linkScientificCorrection(
+    caseId: string,
+    input: {
+      readonly kind: IntegrityCorrectionLink["kind"];
+      readonly linked_object_ref: string;
+      readonly event_id: string;
+    },
+    nowIso: string = new Date().toISOString(),
+  ): Promise<IntegrityCaseRecord> {
+    const started = Date.now();
+    assertValidIsoTimestamp(nowIso);
+    assertNoDirectDispositionMutation(input);
+    const existing = await this.getCase(caseId);
+    if (!existing) throw new Error("INTEGRITY_CASE_NOT_FOUND");
+    if (
+      !PUBLIC_LEDGER_REF_RE.test(input.linked_object_ref) ||
+      !SAFE_EVENT_ID_RE.test(input.event_id)
+    ) {
+      throw new Error("INVALID_CORRECTION_LINK");
+    }
+    if (existing.correction_links.some((l) => l.event_id === input.event_id)) {
+      throw new Error("DUPLICATE_CORRECTION_LINK_EVENT");
+    }
+    const linkId = `CL-${crypto.randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase()}`;
+    try {
+      await this.db
+        .prepare(
+          `INSERT INTO scientific_integrity_correction_links (
+            case_id, link_id, kind, target_ref, linked_object_ref, event_id, linked_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          caseId,
+          linkId,
+          input.kind,
+          existing.target_ref,
+          input.linked_object_ref,
+          input.event_id,
+          nowIso,
+        )
+        .run();
+    } catch {
+      throw new Error("DUPLICATE_CORRECTION_LINK_EVENT");
+    }
+    await this.db
+      .prepare("UPDATE scientific_integrity_cases SET updated_at = ? WHERE case_id = ?")
+      .bind(nowIso, caseId)
+      .run();
+    const updated = await this.getCase(caseId);
+    if (!updated) throw new Error("INTEGRITY_CASE_NOT_FOUND");
+    this.emitOpsLog({
+      case_id: caseId,
+      action: "link-correction",
+      event_id: input.event_id,
+      coarse_class: updated.allegation_class,
+      state: updated.state,
+      result: "ok",
+      duration_ms: Date.now() - started,
+    });
+    return updated;
+  }
+
+  async resolveCase(
+    caseId: string,
+    operator: IntegrityActor,
+    decision: {
+      readonly outcome: "confirmed" | "dismissed-unsubstantiated";
+      readonly rationale: string;
+      readonly recommend_strike_review?: boolean;
+      readonly event_id?: string | null;
+    },
+    nowIso: string = new Date().toISOString(),
+  ): Promise<IntegrityCaseRecord> {
+    const started = Date.now();
+    assertValidIsoTimestamp(nowIso);
+    assertNonEmptyActor(operator);
+    assertNoDirectDispositionMutation(decision);
+    const existing = await this.getCase(caseId);
+    if (!existing) throw new Error("INTEGRITY_CASE_NOT_FOUND");
+    if (operator.principal_class !== "operator") {
+      throw new Error("OPERATOR_REQUIRED_FOR_DECISION");
+    }
+    if (
+      operator.actor_id === existing.affected_sponsor_id ||
+      operator.actor_id === existing.reporter_sponsor_id ||
+      existing.conflicted_actors.includes(operator.actor_id)
+    ) {
+      throw new Error("INVESTIGATOR_CONFLICT_OF_INTEREST");
+    }
+    if (decision.rationale.trim().length < 20) {
+      throw new Error("INTEGRITY_DECISION_RATIONALE_TOO_SHORT");
+    }
+    if (!["intake", "under-review", "awaiting-response"].includes(existing.state)) {
+      throw new Error("INTEGRITY_CASE_ALREADY_DECIDED");
+    }
+
+    const rationaleDigest = sha256Hex(decision.rationale);
+    if (decision.outcome === "dismissed-unsubstantiated") {
+      const res = await this.db
+        .prepare(
+          `UPDATE scientific_integrity_cases
+           SET state = 'dismissed-unsubstantiated',
+               visibility_action = 'restored',
+               restricted_evidence_body = NULL,
+               minimized = 1,
+               decided_by = ?,
+               decided_at = ?,
+               decision_rationale_digest = ?,
+               strike_handoff_json = NULL,
+               updated_at = ?
+           WHERE case_id = ? AND state IN ('intake', 'under-review', 'awaiting-response')`,
+        )
+        .bind(operator.actor_id, nowIso, rationaleDigest, nowIso, caseId)
+        .run();
+      if ((res.meta?.changes ?? 0) !== 1) {
+        throw new Error("INTEGRITY_CASE_CONCURRENT_CONFLICT");
+      }
+      const minimized = await this.getCase(caseId);
+      if (!minimized) throw new Error("INTEGRITY_CASE_NOT_FOUND");
+      this.emitOpsLog({
+        case_id: caseId,
+        action: "resolve-dismissed",
+        event_id: decision.event_id ?? null,
+        coarse_class: minimized.allegation_class,
+        state: minimized.state,
+        result: "ok",
+        duration_ms: Date.now() - started,
+      });
+      return minimized;
+    }
+
+    const strikeHandoff: SponsorStrikeHandoff | null = decision.recommend_strike_review
+      ? {
+          case_id: caseId,
+          affected_sponsor_id: existing.affected_sponsor_id,
+          coarse_class: existing.allegation_class,
+          rationale_digest: rationaleDigest,
+          created_at: nowIso,
+          requires_separate_strike_review: true,
+          auto_suspended: false,
+        }
+      : null;
+
+    const res = await this.db
+      .prepare(
+        `UPDATE scientific_integrity_cases
+         SET state = 'confirmed',
+             decided_by = ?,
+             decided_at = ?,
+             decision_rationale_digest = ?,
+             strike_handoff_json = ?,
+             updated_at = ?
+         WHERE case_id = ? AND state IN ('intake', 'under-review', 'awaiting-response')`,
+      )
+      .bind(
+        operator.actor_id,
+        nowIso,
+        rationaleDigest,
+        strikeHandoff ? JSON.stringify(strikeHandoff) : null,
+        nowIso,
+        caseId,
+      )
+      .run();
+    if ((res.meta?.changes ?? 0) !== 1) {
+      throw new Error("INTEGRITY_CASE_CONCURRENT_CONFLICT");
+    }
+    const confirmed = await this.getCase(caseId);
+    if (!confirmed) throw new Error("INTEGRITY_CASE_NOT_FOUND");
+    this.emitOpsLog({
+      case_id: caseId,
+      action: "resolve-confirmed",
+      event_id: decision.event_id ?? null,
+      coarse_class: confirmed.allegation_class,
+      state: confirmed.state,
+      result: "ok",
+      duration_ms: Date.now() - started,
+    });
+    return confirmed;
+  }
+
+  async submitAppeal(
+    caseId: string,
+    actor: IntegrityActor,
+    statement: string,
+    nowIso: string = new Date().toISOString(),
+  ): Promise<IntegrityCaseRecord> {
+    const started = Date.now();
+    assertValidIsoTimestamp(nowIso);
+    assertNonEmptyActor(actor);
+    const existing = await this.getCase(caseId);
+    if (!existing) throw new Error("INTEGRITY_CASE_NOT_FOUND");
+    if (actor.principal_class !== "sponsor") {
+      throw new Error("HUMAN_SPONSOR_REQUIRED_FOR_APPEAL");
+    }
+    if (actor.sponsor_id !== existing.affected_sponsor_id) {
+      throw new Error("WRONG_SPONSOR_FOR_INTEGRITY_APPEAL");
+    }
+    if (existing.state !== "confirmed") {
+      throw new Error("INTEGRITY_APPEAL_REQUIRES_CONFIRMED_CASE");
+    }
+    if (statement.trim().length < 20) {
+      throw new Error("INTEGRITY_APPEAL_STATEMENT_TOO_SHORT");
+    }
+
+    const res = await this.db
+      .prepare(
+        `UPDATE scientific_integrity_cases
+         SET state = 'appealed', appeal_submitted_by = ?, appeal_digest = ?, updated_at = ?
+         WHERE case_id = ? AND state = 'confirmed'`,
+      )
+      .bind(actor.actor_id, sha256Hex(statement), nowIso, caseId)
+      .run();
+    if ((res.meta?.changes ?? 0) !== 1) {
+      throw new Error("INTEGRITY_CASE_CONCURRENT_CONFLICT");
+    }
+    const updated = await this.getCase(caseId);
+    if (!updated) throw new Error("INTEGRITY_CASE_NOT_FOUND");
+    this.emitOpsLog({
+      case_id: caseId,
+      action: "appeal-submitted",
+      event_id: null,
+      coarse_class: updated.allegation_class,
+      state: updated.state,
+      result: "ok",
+      duration_ms: Date.now() - started,
+    });
+    return updated;
+  }
+
+  async decideAppeal(
+    caseId: string,
+    appellateOperator: IntegrityActor,
+    decision: {
+      readonly outcome: "appeal-upheld" | "appeal-overturned";
+      readonly rationale: string;
+    },
+    nowIso: string = new Date().toISOString(),
+  ): Promise<IntegrityCaseRecord> {
+    const started = Date.now();
+    assertValidIsoTimestamp(nowIso);
+    assertNonEmptyActor(appellateOperator);
+    assertNoDirectDispositionMutation(decision);
+    const existing = await this.getCase(caseId);
+    if (!existing) throw new Error("INTEGRITY_CASE_NOT_FOUND");
+    if (appellateOperator.principal_class !== "operator") {
+      throw new Error("OPERATOR_REQUIRED_FOR_APPEAL_DECISION");
+    }
+    if (existing.state !== "appealed") {
+      throw new Error("INTEGRITY_CASE_NOT_APPEALED");
+    }
+    if (
+      appellateOperator.actor_id === existing.decided_by ||
+      appellateOperator.actor_id === existing.investigator_id ||
+      appellateOperator.actor_id === existing.affected_sponsor_id ||
+      appellateOperator.actor_id === existing.reporter_sponsor_id ||
+      existing.conflicted_actors.includes(appellateOperator.actor_id)
+    ) {
+      throw new Error("APPELLATE_CONFLICT_OF_INTEREST");
+    }
+    if (decision.rationale.trim().length < 20) {
+      throw new Error("INTEGRITY_DECISION_RATIONALE_TOO_SHORT");
+    }
+
+    const overturned = decision.outcome === "appeal-overturned";
+    const res = overturned
+      ? await this.db
+          .prepare(
+            `UPDATE scientific_integrity_cases
+             SET state = 'appeal-overturned',
+                 visibility_action = 'restored',
+                 restricted_evidence_body = NULL,
+                 minimized = 1,
+                 strike_handoff_json = NULL,
+                 appeal_decided_by = ?,
+                 appeal_decided_at = ?,
+                 updated_at = ?
+             WHERE case_id = ? AND state = 'appealed'`,
+          )
+          .bind(appellateOperator.actor_id, nowIso, nowIso, caseId)
+          .run()
+      : await this.db
+          .prepare(
+            `UPDATE scientific_integrity_cases
+             SET state = 'appeal-upheld',
+                 appeal_decided_by = ?,
+                 appeal_decided_at = ?,
+                 updated_at = ?
+             WHERE case_id = ? AND state = 'appealed'`,
+          )
+          .bind(appellateOperator.actor_id, nowIso, nowIso, caseId)
+          .run();
+    if ((res.meta?.changes ?? 0) !== 1) {
+      throw new Error("INTEGRITY_CASE_CONCURRENT_CONFLICT");
+    }
+    const updated = await this.getCase(caseId);
+    if (!updated) throw new Error("INTEGRITY_CASE_NOT_FOUND");
     this.emitOpsLog({
       case_id: caseId,
       action: overturned ? "appeal-overturned" : "appeal-upheld",

@@ -182,48 +182,33 @@ export function runProjectionRebuild(opts: {
       const replayed = replayClaimProjections(initial.events);
       const replayedById = new Map(replayed.map((p) => [p.claimId, p]));
       const nowIso = new Date().toISOString();
-      const updateStmt = db.prepare(
-        `UPDATE claim_projections
-         SET source_seq = ?, projection_version = ?, build_digest = ?, stale = ?, updated_at = ?
-         WHERE problem_id = ? AND claim_id = ?`,
-      );
       const insertStmt = db.prepare(
         `INSERT INTO claim_projections (claim_id, problem_id, source_seq, projection_version, build_digest, stale, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       );
-      const deleteOrphanStmt = db.prepare(
+      const deleteStmt = db.prepare(
         "DELETE FROM claim_projections WHERE problem_id = ? AND claim_id = ?",
       );
-      const storedIds = new Set(initial.stored.map((c) => c.claimId));
 
       db.exec("BEGIN IMMEDIATE");
       try {
+        // Delete all drifted/orphan rows first so UNIQUE(problem_id, source_seq)
+        // never collides transiently when two rows swap or shift source_seq.
+        for (const claimId of before.rebuildSet) {
+          deleteStmt.run(opts.problemId, claimId);
+        }
         for (const claimId of before.rebuildSet) {
           const expected = replayedById.get(claimId);
           if (expected) {
-            if (storedIds.has(claimId)) {
-              updateStmt.run(
-                expected.sourceSeq,
-                expected.projectionVersion,
-                expected.buildDigest,
-                expected.stale ? 1 : 0,
-                nowIso,
-                opts.problemId,
-                claimId,
-              );
-            } else {
-              insertStmt.run(
-                claimId,
-                opts.problemId,
-                expected.sourceSeq,
-                expected.projectionVersion,
-                expected.buildDigest,
-                expected.stale ? 1 : 0,
-                nowIso,
-              );
-            }
-          } else {
-            deleteOrphanStmt.run(opts.problemId, claimId);
+            insertStmt.run(
+              claimId,
+              opts.problemId,
+              expected.sourceSeq,
+              expected.projectionVersion,
+              expected.buildDigest,
+              expected.stale ? 1 : 0,
+              nowIso,
+            );
           }
           appliedRebuilds.push(claimId);
         }

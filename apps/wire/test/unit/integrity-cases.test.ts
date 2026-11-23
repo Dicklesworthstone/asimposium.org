@@ -112,13 +112,23 @@ describe("W9.3c Scientific-integrity cases, neutral notices, minimization, and c
       }),
     ).toThrow(/INTEGRITY_CASE_RESTRICTED_FORBIDDEN/);
 
-    // Affected sponsor can inspect case without reporter identity leak.
+    // Affected sponsor can inspect case without reporter identity OR raw restricted evidence body leak.
     const sponsorView = ledger.readRestrictedCase(record.case_id, {
       principal_class: "sponsor",
       actor_id: "usr_int_sponsor_a",
       sponsor_id: "usr_int_sponsor_a",
     });
     expect(sponsorView.reporter_sponsor_id).toBeNull();
+    expect(sponsorView.restricted_evidence_body).toBeNull();
+    expect(sponsorView.evidence_anchor).toBe(record.evidence_anchor);
+
+    // Conflicted operator cannot inspect restricted case either!
+    expect(() =>
+      ledger.readRestrictedCase(record.case_id, {
+        principal_class: "operator",
+        actor_id: "op_conflicted_1",
+      }),
+    ).toThrow(/INVESTIGATOR_CONFLICT_OF_INTEREST/);
 
     expect(
       assertRestrictedIntegrityHeaders({
@@ -299,5 +309,26 @@ describe("W9.3c Scientific-integrity cases, neutral notices, minimization, and c
     expect(dismissed.evidence_digest).toMatch(/^[a-f0-9]{64}$/);
     expect(dismissed.strike_handoff).toBeNull();
     expect(buildPublicIntegrityNotice(dismissed).visible).toBe(false);
+
+    // Fresh-eyes Pass 2 regressions:
+    // 1. Decided case cannot be reopened by assignInvestigator.
+    expect(() =>
+      ledger.assignInvestigator(record.case_id, {
+        principal_class: "operator",
+        actor_id: "op_independent_4",
+      }),
+    ).toThrow(/INTEGRITY_CASE_ALREADY_DECIDED/);
+
+    // 2. Invalid correction object ref or invalid timestamp fails closed.
+    expect(() =>
+      ledger.linkScientificCorrection(record.case_id, {
+        kind: "correction",
+        linked_object_ref: "asimp_ag_leaked_not_an_object_id",
+        event_id: "EV-01BAD00001",
+      }),
+    ).toThrow(/INVALID_CORRECTION_LINK/);
+    expect(() => ledger.openCase(baseMisconductInput(), "not-a-valid-date")).toThrow(
+      /INVALID_INTEGRITY_TIMESTAMP/,
+    );
   });
 });

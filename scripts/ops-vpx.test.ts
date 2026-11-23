@@ -883,6 +883,86 @@ describe("OPS.5 runbook index, never-log redaction corpus, and audit-logged ops:
     expect(errObj.name).toBe("Error");
     expect(String(errObj.message)).not.toContain("01OPS5TEST");
     expect(errRedacted._redacted_fields).toEqual(["constructor"]);
+
+    // 7. Orphaned checkpoint_signatures row (missing integrity_checkpoints parent) fails closed.
+    const orphanSigPath = join(workDir, "orphan-sig.sqlite");
+    writeFileSync(orphanSigPath, srcBytes);
+    const osdb = new Database(orphanSigPath);
+    osdb.exec("DELETE FROM integrity_checkpoints WHERE problem_id = 'P-OPS5'");
+    osdb.close();
+    const orphanReport = await runEventVerify({
+      sqlitePath: orphanSigPath,
+      problemId: "P-OPS5",
+      verifyKeysJson,
+    });
+    expect(orphanReport.overall_sound).toBe(false);
+    expect(
+      orphanReport.results[0]?.failures.some((f) =>
+        f.includes("CHECKPOINT_SIGNATURE_MISSING_CHECKPOINT"),
+      ),
+    ).toBe(true);
+
+    // 8. Swapped source_seq under UNIQUE(problem_id, source_seq) heals cleanly in ops:projection-rebuild.
+    const swapPath = join(workDir, "swap-seq.sqlite");
+    writeFileSync(swapPath, srcBytes);
+    const swdb = new Database(swapPath);
+    // Insert a second claim event + swapped claim_projections with UNIQUE(problem_id, source_seq).
+    const prevChain = (
+      swdb
+        .prepare("SELECT chain_digest FROM event_chain_v2 WHERE problem_id = 'P-OPS5' AND seq = 1")
+        .get() as { chain_digest: string }
+    ).chain_digest;
+    const payload2 = JSON.stringify({ claim_id: "C-2", statement: "Second claim" });
+    const psha2 = await sha256Hex(payload2);
+    const row2 = await eventEnvelopeRowDigest({
+      eventId: "EV-2",
+      problemId: "P-OPS5",
+      seq: 2,
+      type: "claim.created",
+      objectKind: "claim",
+      objectId: "C-2",
+      objectVersion: 1,
+      payloadSha256: psha2,
+      createdAt: "2026-11-21T12:01:00.000Z",
+      actorFellowId: "F-1",
+      actorSponsorId: "SP-1",
+      actorSessionId: "S-1",
+      modelStringSelfDeclared: "test-model",
+      harness: "test-harness",
+      writerCredentialId: "CR-1",
+    });
+    const chain2 = await eventChainDigest("P-OPS5", 2, psha2, row2, prevChain);
+    const build2 = claimProjectionBuildDigestV1(row2);
+    swdb
+      .prepare(
+        `INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id, actor_session_id, model_string_self_declared, harness, writer_credential_id)
+         VALUES ('EV-2', 'P-OPS5', 2, 'claim.created', 'claim', 'C-2', 1, ?, ?, ?, '2026-11-21T12:01:00.000Z', 'F-1', 'SP-1', 'S-1', 'test-model', 'test-harness', 'CR-1')`,
+      )
+      .run(psha2, row2, chain2);
+    swdb
+      .prepare(
+        `INSERT INTO event_chain_v2 (event_id, problem_id, seq, row_digest, chain_digest, chain_version)
+         VALUES ('EV-2', 'P-OPS5', 2, ?, ?, ?)`,
+      )
+      .run(row2, chain2, KRATER_CHAIN_VERSION);
+    swdb.exec("DELETE FROM claim_projections WHERE problem_id = 'P-OPS5'");
+    swdb.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS cp_prob_seq_uniq ON claim_projections (problem_id, source_seq);
+      INSERT INTO claim_projections VALUES ('C-1', 'P-OPS5', 2, 1, 'bad-digest-1', 0, '2026-11-21T12:02:00.000Z');
+      INSERT INTO claim_projections VALUES ('C-2', 'P-OPS5', 1, 1, '${build2}', 0, '2026-11-21T12:02:00.000Z');
+    `);
+    swdb.close();
+
+    const healedSwap = runProjectionRebuild({
+      sqlitePath: swapPath,
+      problemId: "P-OPS5",
+      apply: true,
+      reason: "Healing swapped source_seq collision under UNIQUE(problem_id, source_seq)",
+      stepUpConfirm: "rebuild-projections:P-OPS5",
+    });
+    expect(healedSwap.before.sound).toBe(false);
+    expect(healedSwap.after.sound).toBe(true);
+    expect([...healedSwap.applied_rebuilds].sort()).toEqual(["C-1", "C-2"]);
   });
 
   test("all 12 Fable §13.3 runbooks exist, are indexed in INDEX.md, carry rehearsal checklists, and pass P7 scan", () => {

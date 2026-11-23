@@ -75,8 +75,8 @@ interface RawCheckpointRow {
 
 interface RawSigRow {
   checkpoint_seq: number;
-  root_chain_digest: string;
-  checkpoint_digest: string;
+  root_chain_digest: string | null;
+  checkpoint_digest: string | null;
   key_id: string;
   signature: string;
 }
@@ -225,12 +225,20 @@ export async function runEventVerify(opts: {
             `SELECT cs.checkpoint_seq, ic.root_chain_digest, ic.checkpoint_digest,
                     cs.key_id, cs.signature
              FROM checkpoint_signatures cs
-             JOIN integrity_checkpoints ic
+             LEFT JOIN integrity_checkpoints ic
                ON ic.problem_id = cs.problem_id AND ic.checkpoint_seq = cs.checkpoint_seq
              WHERE cs.problem_id = ?
              ORDER BY cs.checkpoint_seq ASC`,
           )
           .all(problemId) as RawSigRow[];
+        for (const sig of sigs) {
+          if (!sig.root_chain_digest || !sig.checkpoint_digest) {
+            signaturesValid = false;
+            failures.push(
+              `CHECKPOINT_SIGNATURE_MISSING_CHECKPOINT: seq=${sig.checkpoint_seq} kid=${sig.key_id} has no matching integrity_checkpoints row`,
+            );
+          }
+        }
         if (sigs.length > 0 && keyMap.size === 0) {
           signaturesValid = false;
           failures.push(
@@ -238,6 +246,9 @@ export async function runEventVerify(opts: {
           );
         } else {
           for (const sig of sigs) {
+            if (!sig.root_chain_digest || !sig.checkpoint_digest) {
+              continue;
+            }
             signaturesChecked += 1;
             const pubHex = keyMap.get(sig.key_id);
             if (!pubHex) {

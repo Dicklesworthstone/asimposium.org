@@ -116,13 +116,19 @@ if ! bun test /dev/null --timeout=120000 \
   exit 1
 fi
 
-# 2. Mock-free real local Workerd/D1 immutable retraction & correction linkage lane.
+# 2. Mock-free real local Workerd/D1 W9.3c integrity-case store, concurrent race, minimization & immutable-envelope lane.
+if ! "$node_binary" apps/wire/test/integration/integrity-cases-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$WRITE_ARTIFACTS" "$RUN_ID" "$SUITE" "$STARTED_MS" "fail" "INTEGRITY_CASES_REAL_BINDINGS_FAILED" "$REPRODUCE"
+  exit 1
+fi
+
+# 3. Mock-free real local Workerd/D1 immutable retraction & correction linkage lane.
 if ! "$node_binary" apps/wire/test/integration/questions-retractions-real-bindings.mjs; then
   e2e_emit_and_optionally_record "$WRITE_ARTIFACTS" "$RUN_ID" "$SUITE" "$STARTED_MS" "fail" "RETRACTIONS_REAL_BINDINGS_FAILED" "$REPRODUCE"
   exit 1
 fi
 
-# 3. Mock-free real local Workerd/D1 content-control hide/restore & strike-cascade lane.
+# 4. Mock-free real local Workerd/D1 content-control hide/restore & strike-cascade lane.
 if ! "$node_binary" apps/wire/test/integration/moderation-real-bindings.mjs; then
   e2e_emit_and_optionally_record "$WRITE_ARTIFACTS" "$RUN_ID" "$SUITE" "$STARTED_MS" "fail" "MODERATION_REAL_BINDINGS_FAILED" "$REPRODUCE"
   exit 1

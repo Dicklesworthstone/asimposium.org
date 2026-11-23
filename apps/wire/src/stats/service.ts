@@ -77,6 +77,7 @@ export async function loadPlatformStats(
   const hasReports = tables.has("reports");
   const hasAppeals = tables.has("screening_case_appeals");
   const hasRetractions = tables.has("retractions");
+  const hasClaimVersions = tables.has("claim_versions");
 
   const problemCols = hasProblems ? await listColumns(db, "problems") : new Set<string>();
   const hasProblemStatus = problemCols.has("status");
@@ -204,6 +205,17 @@ export async function loadPlatformStats(
       const substantiveCheck = reviewCols.has("capable_of_failure")
         ? "AND r.capable_of_failure IS NOT NULL AND length(trim(r.capable_of_failure)) > 0"
         : "";
+      const pinCurrentVersion = hasClaimVersions && reviewCols.has("target_version");
+      const versionJoin = pinCurrentVersion
+        ? `LEFT JOIN (
+             SELECT problem_id, claim_id, MAX(version) AS head_version
+             FROM claim_versions
+             GROUP BY problem_id, claim_id
+           ) cv ON cv.problem_id = c.problem_id AND cv.claim_id = c.id`
+        : "";
+      const versionPinClause = pinCurrentVersion
+        ? "AND (cv.head_version IS NULL OR r.target_version = cv.head_version)"
+        : "";
       const claimReviewStats = await db
         .prepare(
           `SELECT c.problem_id, c.id,
@@ -213,7 +225,8 @@ export async function loadPlatformStats(
                   COUNT(r.review_id) AS total_reviews
            FROM claims c
            ${hasProblems ? `JOIN problems p ON p.id = c.problem_id` : ""}
-           LEFT JOIN reviews r ON r.problem_id = c.problem_id AND r.target_claim_id = c.id
+           ${versionJoin}
+           LEFT JOIN reviews r ON r.problem_id = c.problem_id AND r.target_claim_id = c.id ${versionPinClause}
            ${hasProblems ? `WHERE ${publicProblemFilterAliased}` : ""}
            GROUP BY c.problem_id, c.id
            LIMIT 2000`,
@@ -249,7 +262,9 @@ export async function loadPlatformStats(
         }
       }
     } else if (claimsTotal > 0) {
-      claimsByDisposition.open = claimsTotal;
+      const retractedCount = Math.min(claimsTotal, retractedWholeClaims.size);
+      if (retractedCount > 0) claimsByDisposition.retracted = retractedCount;
+      if (claimsTotal - retractedCount > 0) claimsByDisposition.open = claimsTotal - retractedCount;
     }
   }
 

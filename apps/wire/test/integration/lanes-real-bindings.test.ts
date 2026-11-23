@@ -37,6 +37,7 @@ const LANES = [
   "full-database-backup",
   "hypotheses-evidence",
   "hypothesis-lifecycle",
+  "integrity-cases",
   "journey-cleanup",
   "ledger-objects-integration",
   "moderation",
