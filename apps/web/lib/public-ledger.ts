@@ -74,7 +74,7 @@ import {
   type ReviewQueueResponse,
   ReviewQueueResponseSchema,
 } from "@asimposium/contracts/review-queue";
-import { deadEndsMatchView } from "./dead-end-view";
+import { deadEndsMatchView, deadEndsQueryString } from "./dead-end-view";
 import { parseCitationViewQuery } from "./citation-view";
 import { eventHistoryMatchesQuery, parseEventHistoryQuery } from "./event-history";
 import { publicReadWatch } from "./public-watch-view";
@@ -115,7 +115,7 @@ export async function readPublic<T>(
   origin: string | undefined,
   schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } },
   revalidate: number,
-  missingCode?: string,
+  missingCode?: string | readonly string[],
   missingCursorCode?: "CURSOR_INVALID",
   maxBytes = PUBLIC_LEDGER_MAX_BYTES,
 ): Promise<PublicRead<T>> {
@@ -207,7 +207,9 @@ export async function readPublic<T>(
         typeof value === "object" &&
         value !== null &&
         "code" in value &&
-        value.code === (response.status === 404 ? missingCode : missingCursorCode) &&
+        (response.status === 404
+          ? (typeof missingCode === "string" ? value.code === missingCode : missingCode?.includes(String(value.code)))
+          : value.code === missingCursorCode) &&
         "status" in value &&
         value.status === response.status
       ) {
@@ -619,7 +621,7 @@ export async function stoaFetchFellowCard(
   );
 }
 
-/** Public negative evidence, with current and superseded-history views kept distinct. */
+/** Public negative evidence, with exact targets and history views kept distinct. */
 export async function stoaFetchDeadEnds(
   problemId: string,
   stoaOrigin: string | undefined = configuredStoaOrigin(),
@@ -634,16 +636,18 @@ export async function stoaFetchDeadEnds(
   }
   const includeSuperseded =
     parsed.data.include_superseded === "true" || parsed.data.include_superseded === "1";
-  const suffix = includeSuperseded ? "?include_superseded=true" : "";
+  const suffix = deadEndsQueryString(parsed.data);
   const result = await readPublic(
     `/p/${encodeURIComponent(problemId)}/dead-ends.json${suffix}`,
     stoaOrigin,
     DeadEndsListResponseSchema,
     0,
-    "PROBLEM_NOT_FOUND",
+    parsed.data.target === undefined
+      ? "PROBLEM_NOT_FOUND"
+      : ["PROBLEM_NOT_FOUND", "DEAD_END_NOT_FOUND"],
   );
   if (result.state !== "ok") return result;
-  return deadEndsMatchView(problemId, result.data, includeSuperseded)
+  return deadEndsMatchView(problemId, result.data, includeSuperseded, parsed.data.target)
     ? result
     : { state: "unavailable", reason: "invalid_response" };
 }

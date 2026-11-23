@@ -6,27 +6,28 @@ import { cache } from "react";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { ScreeningNotice } from "@/components/screening-notice";
-import { deadEndRetryLabel } from "@/lib/dead-end-view";
+import { deadEndRetryLabel, deadEndsPagePath, deadEndsQueryString } from "@/lib/dead-end-view";
 import { stoaFetchDeadEnds } from "@/lib/public-ledger";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
 
 interface DeadEndsPageProps {
   readonly params: Promise<{ readonly slug: string }>;
-  readonly searchParams?: Promise<{ readonly include_superseded?: string | string[] }>;
+  readonly searchParams?: Promise<Readonly<Record<string, string | string[] | undefined>>>;
 }
 
 // Metadata and the page share one request-scoped public read, including noindex.
-const readDeadEnds = cache((slug: string, history: boolean) =>
-  stoaFetchDeadEnds(slug, undefined, { include_superseded: history ? "true" : "false" }),
+const readDeadEnds = cache((slug: string, query: string) =>
+  stoaFetchDeadEnds(slug, undefined, Object.fromEntries(new URLSearchParams(query))),
 );
 
 async function pageInput({ params, searchParams }: DeadEndsPageProps) {
   const { slug } = await params;
-  const { include_superseded } = (await searchParams) ?? {};
-  const query = DeadEndsListQuerySchema.safeParse({ include_superseded });
+  const query = DeadEndsListQuerySchema.safeParse((await searchParams) ?? {});
   return {
     slug,
     valid: query.success,
+    target: query.success ? query.data.target : undefined,
+    queryString: query.success ? deadEndsQueryString(query.data) : "",
     history:
       query.success &&
       (query.data.include_superseded === "true" || query.data.include_superseded === "1"),
@@ -35,9 +36,9 @@ async function pageInput({ params, searchParams }: DeadEndsPageProps) {
 
 export async function generateMetadata(props: DeadEndsPageProps): Promise<Metadata> {
   const input = await pageInput(props);
-  const result = input.valid ? await readDeadEnds(input.slug, input.history) : undefined;
+  const result = input.valid ? await readDeadEnds(input.slug, input.queryString) : undefined;
   return {
-    title: `${input.slug} — Dead ends and retry conditions | ASImposium`,
+    title: `${input.slug} — ${input.target ?? "Dead ends and retry conditions"} | ASImposium`,
     description:
       "Published failed approaches, their limits, attribution and recorded retry conditions.",
     ...(result?.state !== "ok" || result.noindex
@@ -47,13 +48,16 @@ export async function generateMetadata(props: DeadEndsPageProps): Promise<Metada
 }
 
 export default async function DeadEndsPage(props: DeadEndsPageProps) {
-  const { slug, valid, history } = await pageInput(props);
-  const path = `/p/${encodeURIComponent(slug)}/dead-ends`;
+  const { slug, valid, history, target, queryString } = await pageInput(props);
+  const path = deadEndsPagePath(slug);
   if (!valid) {
     return (
       <main className="landing col problem-page" id="content">
         <h1>Choose a dead-end history view</h1>
-        <p>The history filter must be one value: true, false, 1 or 0.</p>
+        <p>
+          Choose one exact DE- target or a list view. The optional history filter must be one value:
+          true, false, 1 or 0. Historical cursors and other filters are not supported.
+        </p>
         <p>
           <Link href={path}>Read current entries</Link> ·{" "}
           <Link href={`${path}?include_superseded=true`}>Include superseded entries</Link>
@@ -61,20 +65,20 @@ export default async function DeadEndsPage(props: DeadEndsPageProps) {
       </main>
     );
   }
-  const result = await readDeadEnds(slug, history);
+  const result = await readDeadEnds(slug, queryString);
   if (result.state === "not_found") notFound();
   if (result.state === "unavailable") {
     return (
       <PublicReadUnavailable
         title={`${slug} — Dead ends`}
-        retryPath={`${path}${history ? "?include_superseded=true" : ""}`}
+        retryPath={`${path}${queryString}`}
       />
     );
   }
   const face = result.data;
   const problemPath = `/p/${encodeURIComponent(face.problem_id)}`;
   const agentPath = `${result.origin}${problemPath}/dead-ends`;
-  const suffix = history ? "?include_superseded=true" : "";
+  const suffix = queryString;
   const visibleIds = new Set(face.dead_ends.map((item) => item.dead_end_id));
 
   return (
@@ -85,7 +89,7 @@ export default async function DeadEndsPage(props: DeadEndsPageProps) {
       <main className="landing col problem-page" id="content">
         <header className="masthead">
           <Link href={problemPath}>← {face.problem_id}</Link>
-          <h1>Dead ends and retry conditions</h1>
+          <h1>{target === undefined ? "Dead ends and retry conditions" : `${target} — Dead end`}</h1>
           <p className="lede">
             Preserve what failed, the scope of the check, and what would justify trying again.
           </p>
@@ -96,14 +100,20 @@ export default async function DeadEndsPage(props: DeadEndsPageProps) {
           is not a claim that the condition has fired. This latest public view is read independently
           of the problem digest’s ledger snapshot.
         </div>
+        {target !== undefined && (
+          <p role="note">
+            This link selects one immutable publication, even after it is superseded or leaves the
+            bounded list. Its current supersession and visibility controls still apply.
+          </p>
+        )}
         <nav aria-label="Dead-end history">
-          <Link href={path} aria-current={!history ? "page" : undefined} prefetch={false}>
+          <Link href={path} aria-current={target === undefined && !history ? "page" : undefined} prefetch={false}>
             Current entries
           </Link>
           {" · "}
           <Link
             href={`${path}?include_superseded=true`}
-            aria-current={history ? "page" : undefined}
+            aria-current={target === undefined && history ? "page" : undefined}
             prefetch={false}
           >
             Include superseded entries
@@ -111,7 +121,7 @@ export default async function DeadEndsPage(props: DeadEndsPageProps) {
         </nav>
         <section aria-labelledby="dead-ends-heading">
           <h2 id="dead-ends-heading">
-            {history ? "Current and historical entries" : "Current entries"}
+            {target !== undefined ? "Exact published record" : history ? "Current and historical entries" : "Current entries"}
           </h2>
           <p className="quiet">
             Showing {face.dead_ends.length} entries in this public response. This is not a lifetime
@@ -137,7 +147,9 @@ export default async function DeadEndsPage(props: DeadEndsPageProps) {
                     {visibleIds.has(item.superseded_by) ? (
                       <a href={`#${item.superseded_by}`}>{item.superseded_by}</a>
                     ) : (
-                      <code>{item.superseded_by}</code>
+                      <Link href={deadEndsPagePath(face.problem_id, { target: item.superseded_by })} prefetch={false}>
+                        <code>{item.superseded_by}</code>
+                      </Link>
                     )}
                     . This historical record remains available for scrutiny.
                   </p>
