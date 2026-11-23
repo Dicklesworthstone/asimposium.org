@@ -36,17 +36,19 @@ Track individual work in the linked Beads and retire this checklist from active 
 - [x] Replay the historic `0016` and the 120 forward migrations through `0148` in isolated local Workerd. Verify that the two test identity rows survive and foreign-key checks pass.
 - [x] Capture a populated historical `0028` database with the production SQL backup code. Import it into a second empty local D1 instance and compare the logical SQL digest, schema digest and all 48 table counts.
 - [x] Advance the restored local copy through all 120 migrations while retaining the historic journal digest. Check that the active fixture still authenticates, the revoked fixture is refused and the original instance remains on `0028`.
-- [x] Re-run the copy with the three shared-worktree migrations through `0151`. Check the migration digests, credential parity, active and revoked authentication, and foreign-key integrity after all 123 forward migrations.
+- [x] Re-run the copy with all 123 current-worktree forward migrations through `0151`. Match the schema digest after including the five updated migration annotations. Verify the historic digests, credential parity, active and revoked authentication, and foreign-key integrity.
 - [x] Inspect live credential posture by aggregate. All six credential records are within their issued and expiry window and have no revocation timestamp. Preserve all grants and credential records through cutover.
 - [x] Dry-run the production Worker package at `0ceba020`. Confirm the exact release still needs the completed Herald configuration.
 - [x] Run the signed backup and restore journey at `0ceba020` on local Workerd, D1 and R2.
 - [x] Retain the complete Worker unit run against the shared integration worktree. It finished with 7,681 passes and 10 failures.
 - [x] Defer D1 binding access until the Herald SSE route has been validated. Re-run mounted health and live-room unit checks.
 - [x] Classify all four new write routes and the Herald Durable Object matcher. Re-run the census and its negative control.
+- [x] Classify the signed workshop room ticket in the write census, and the room ticket and signed email opt-out in capabilities disclosure. Re-run all 192 Worker contract checks, 1,060 shared contract checks and 613 renderer checks.
 - [x] Document migrations 0149–0151 and check the migration head against the schema census.
 - [x] Keep the duplicate recommendation race test pinned to the exact-source read after the new advisory query.
 - [x] Re-run the S-3 production/counterfactual sentinel controls with separately bounded compressed transport and decoded bundle sizes.
 - [x] Run all eight typecheck and lint groups, the native Herald room journey, and the native three-proposal intake on the shared worktree.
+- [x] Re-run the full root unit suite on the shared worktree. All eight groups passed, including 7,691 Worker tests with zero failures. The hosted paired-principal proof remains blocked.
 - [x] Exercise the synthesis draft on local Workerd and D1. Check sponsor-only visibility, refusal for an unrelated sponsor, one public cursor advance and identical replay, and Fellow attribution and payload digest on the public ledger.
 - [x] Dry-run the shared candidate with the production Wrangler configuration. The bundle resolves both Herald and Krater Outbox Durable Object classes.
 - [ ] Complete the full worktree UBS scan. It returned partial coverage after JavaScript and ShellCheck timeouts and a D1 dialect diagnostic. The focused Worker scan reported zero critical issues.
