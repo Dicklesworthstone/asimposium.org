@@ -500,6 +500,13 @@ export async function runLocalLoadBenchmarks(
   }
 }
 
+const FORBIDDEN_PROD_HOSTS = new Set([
+  "asimposium.org",
+  "www.asimposium.org",
+  "a.asimposium.org",
+  "artifacts.asimposium.org",
+]);
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   let live = false;
@@ -507,6 +514,15 @@ async function main(): Promise<void> {
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--live") live = true;
     else if (argv[i] === "--base-url") baseUrl = argv[++i] ?? "";
+    else if (argv[i] === "--help" || argv[i] === "-h") {
+      console.log(
+        "Usage: bun e2e/load-degradation/load-budget-runner.ts [--live --base-url https://a-staging.asimposium.org]",
+      );
+      process.exit(0);
+    } else {
+      console.error(`ERROR: unknown argument '${argv[i]}'`);
+      process.exit(2);
+    }
   }
 
   if (live) {
@@ -516,7 +532,30 @@ async function main(): Promise<void> {
           status: "blocked",
           code: "LOAD_STAGING_UNCONFIGURED",
           detail:
-            "Live staging load mode requires --base-url https://a.staging.asimposium.org (blocked on operator deploy authority asimposiumorg-rs5n).",
+            "Live staging load mode requires --base-url https://a-staging.asimposium.org (blocked on operator deploy authority asimposiumorg-rs5n).",
+        }),
+      );
+      process.exit(78);
+    }
+    let parsedHost = "";
+    try {
+      parsedHost = new URL(baseUrl).hostname.toLowerCase();
+    } catch {
+      console.error(
+        JSON.stringify({
+          status: "fail",
+          code: "LOAD_STAGING_URL_INVALID",
+          detail: "Malformed --base-url value.",
+        }),
+      );
+      process.exit(2);
+    }
+    if (FORBIDDEN_PROD_HOSTS.has(parsedHost)) {
+      console.error(
+        JSON.stringify({
+          status: "blocked",
+          code: "LOAD_PRODUCTION_ORIGIN_REFUSED",
+          detail: `Refusing to run load probe against canonical production host '${parsedHost}'.`,
         }),
       );
       process.exit(78);
