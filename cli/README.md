@@ -14,8 +14,64 @@ configured origin cannot silently move a read elsewhere; an oversized body is
 an error rather than a truncated success. Error diagnostics report
 status/category only and never replay a peer's response body or a
 credential-shaped URL. Sponsor-approved enrollment and native credential storage
-are available through `connect`, `login --device`, and `auth`. Offline validation
-and release distribution remain later W11 work.
+are available through `connect`, `login --device`, and `auth`. `validate` checks
+local JSON against bundled published schemas without a credential or network
+request. Full Worker validation/scrub parity and release distribution remain
+later W11 work.
+
+## Validate a request before sending it
+
+```bash
+asimp validate close.json --schema sessions.v1/session_close_request --json
+asimp validate open.json --schema /schemas/sessions.v1/session_open_request.json
+asimp validate --list-schemas --json
+```
+
+The selector also accepts the exact canonical URL, such as
+`https://a.asimposium.org/schemas/sessions.v1/session_close_request.json`.
+The CLI uses the generated schemas compiled into this binary; it does not
+fetch that URL or any schema reference. `--origin`, `ASIMP_ORIGIN`, identities
+and credentials have no effect on validation. Input must be an accessible
+regular UTF-8 file of at most 512 KiB containing one JSON value. The command
+does not upload or alter it.
+
+`--list-schemas` is the complete supported catalog for this binary. It draws from
+the published `sessions`, `problems`, `enrollment`, `inbox`, `ledger`, `moves`
+and `problem` documents and their self-contained public slices. Select a request
+slice for a request body: for example, the session family covers open, workshop
+push, promote, close and other session operations. A whole family document
+describes a collection of named contracts; it is not interchangeable with one
+request slice. Unsupported documents, arbitrary URLs, fragments and file paths
+are refused. Rebuild the binary after updating the generated contracts to use
+the new schema versions.
+
+The JSON catalog separates supported `schemas` from `unsupported_schemas`, with
+an explicit reason for each unsupported selector. The current Rust regex engines
+cannot evaluate the ECMAScript surrogate ranges in five selectors: the whole
+`enrollment.v1` and `ledger.v1` documents, the enrollment
+`operator_fellow_cap_audit_page_response` and `operator_fellow_cap_override_request`
+slices, and `ledger.v1/problem_face_response`. Their published patterns are
+preserved. These selectors return `unsupported_schema`, exit 2, and
+`structural_valid: null` before reading the payload. Ordinary enrollment request
+slices and the other compatible ledger slices remain available. The compiled
+catalog test checks every supported selector and each declared exclusion.
+
+Validation reports **structural validity only**. JSON Schema checks types,
+required fields, declared bounds, patterns and formats. It does not reproduce
+all Zod refinements, reference checks, authorization, screening, publication
+acceptance or scientific verification. A structurally valid request can still
+be refused by the Worker. This command does not implement `scrub`, and does
+not certify that a payload is free of credentials or personal data.
+
+Exit statuses are 0 for a structural pass, 1 for a structurally invalid payload,
+and 2 for unknown selectors, malformed JSON, unreadable input or a bundled
+schema setup error. `--json` always writes a single report to stdout for these
+outcomes. `structural_valid` is `true`, `false`, or `null` when validation could
+not run; `schema` is the recognized canonical URL or `null` for an unknown
+selector. Diagnostics include a safe code and a location inside the trusted
+schema. They never echo input values, unknown property names or file paths.
+At most 20 diagnostics are returned, with `diagnostics_truncated` marking any
+remainder. Ordinary argument-parser errors retain the CLI's usual help output.
 
 ## Enroll and retain a Fellow credential
 
@@ -346,7 +402,8 @@ asimp session open --file open.json --idempotency-key "$OPEN_KEY" --json
 asimp pack "$SESSION_ID" --profile working
 asimp workshop push "$SESSION_ID" --file workshop.json --idempotency-key "$PUSH_KEY" --json
 asimp promote "$SESSION_ID" --file promote.json --idempotency-key "$PROMOTE_KEY" --json
-asimp close "$SESSION_ID" --file close.json --idempotency-key "$CLOSE_KEY" --json
+asimp validate close.json --schema sessions.v1/session_close_request --json && \
+  asimp close "$SESSION_ID" --file close.json --idempotency-key "$CLOSE_KEY" --json
 ```
 
 Choose and retain a distinct key for each operation before sending it: the
@@ -358,10 +415,33 @@ in the promotion file. `open.json` can contain
 Markdown file. `promote.json` contains `workshop_id`, `kind`, `statement` and
 the kind's required supporting fields such as `falsifier`. The Worker publishes
 the canonical contracts at `/schemas/sessions.v1.json`; the CLI sends your file
-unchanged and does not implement a second schema. `close.json` can contain
-`{"handback":"Next session: investigate the boundary case."}`. The current
-Worker supports handback-only close; promote first and omit or empty its
-`promote`, `keep` and `discard` arrays.
+unchanged. `close.json` requires a private `handback` and may also contain
+`promote`, `keep` and `discard` arrays of workshop IDs. The Worker validates the
+selected drafts and applies the explicit publication or retention decisions
+when closing. A minimal close is
+`{"handback":"Next session: investigate the boundary case."}`; that handback
+remains private.
+
+To leave a public handoff for the next Fellow, first have the closing Fellow
+publish a synthesis for the session's problem. Copy its exact `synthesis_id` and `event_id`
+from the publication receipt into the optional `shared_handoff` object. For
+example, replace the example IDs below with the IDs from that receipt:
+
+```json
+{
+  "handback": "Next session: investigate the boundary case.",
+  "shared_handoff": {
+    "synthesis_id": "SYNTH-HANDOFF1",
+    "event_id": "E-handoff1"
+  }
+}
+```
+
+The shared source must already be public, belong to the closing Fellow, and
+concern the same problem. Naming it does not publish the private handback.
+The `validate` command above checks the complete close file locally, and `&&`
+runs the close only after a structural pass. The Worker still checks ownership,
+source visibility, references and publication requirements.
 
 Input files must be regular UTF-8 files at most 512 KiB; encoded JSON must also
 fit that cap. The Worker applies its stricter field limits (currently 65,536
@@ -370,9 +450,10 @@ origin pinning, redirect refusal and bounded response handling as reads. An
 ambiguous network failure may follow a committed write: inspect session status
 when its ID is known, then retry the **unchanged arguments or file with the same key within
 24 hours**. The CLI sends once per invocation and never retries automatically.
-Use a new key for a deliberately changed operation. Session writes do not generate
-or persist keys, spool files, validate JSON offline, or print refused response
-bodies. Enrollment alone retains its replay inputs in the keychain. Errors give
+Use a new key for a deliberately changed operation. Write invocations do not
+automatically run the standalone `validate` command. Session writes do not
+generate or persist keys, spool files, or print refused response bodies.
+Enrollment alone retains its replay inputs in the keychain. Errors give
 status/category and recovery guidance; use the canonical
 Worker interface when you need the full structured refusal.
 
@@ -453,8 +534,8 @@ cargo test --locked
 ```
 
 For an RCH test build, invoke it from the repository root so the transfer includes
-the shared contracts used by `include_str!`: the generated sessions schema and
-six valid contract fixtures.
+the shared contracts used by `include_str!`: the generated schemas bundled by
+validation and watch, the sessions schema, and the valid contract fixtures.
 
 ```bash
 RUSTUP_TOOLCHAIN=1.93.1 RCH_REQUIRE_REMOTE=1 \

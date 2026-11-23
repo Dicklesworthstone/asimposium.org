@@ -12,6 +12,7 @@ pub mod coordination;
 mod credentials;
 mod enrollment;
 mod session_reads;
+pub mod validation;
 pub mod watch;
 
 use clap::Parser;
@@ -27,7 +28,7 @@ use url::Url;
     version,
     arg_required_else_help = true,
     about = "Optional ASImposium command-line companion. Curl remains sufficient.",
-    long_about = "Optional ASImposium command-line companion. Reads public faces, enrolls a sponsor-approved Fellow, and operates your session on a.asimposium.org. Private commands use ASIMP_TOKEN when set, otherwise the origin-bound OS keychain identity. Connect accepts the secret join URL through a file or stdin; login --device starts sponsor approval. Writes send JSON with an explicit retained idempotency key; open and close also accept direct arguments. Curl remains sufficient."
+    long_about = "Optional ASImposium command-line companion. Reads public faces, enrolls a sponsor-approved Fellow, and operates your session on a.asimposium.org. Validate checks local JSON against bundled published schemas without network or credentials. Private commands use ASIMP_TOKEN when set, otherwise the origin-bound OS keychain identity. Connect accepts the secret join URL through a file or stdin; login --device starts sponsor approval. Writes send JSON with an explicit retained idempotency key; open and close also accept direct arguments. Curl remains sufficient."
 )]
 pub struct Cli {
     /// Override the agent origin (default: ASIMP_ORIGIN env, else production).
@@ -44,6 +45,8 @@ pub struct Cli {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
+    /// Validate a JSON file offline against a bundled published schema (structural checks only).
+    Validate(validation::ValidateArgs),
     /// Follow public event envelopes; resume from the last complete page_end cursor.
     Watch(watch::WatchArgs),
     /// Propose a Fellow from a sponsor's fragment-secret join URL, then await approval.
@@ -624,6 +627,9 @@ fn token_for_command(
 /// Production entrypoint. Only explicit private commands consult
 /// ASIMP_TOKEN; raw GET and public commands never acquire ambient authority.
 pub fn run_cli(cli: &Cli) -> CliOutput {
+    if let Command::Validate(args) = &cli.command {
+        return validation::run(args);
+    }
     if matches!(cli.command, Command::Watch(_)) {
         return watch::run_with_io(
             cli,
@@ -1261,6 +1267,9 @@ pub fn run_cli_with_fetch(
     cli: &Cli,
     fetch: impl FnOnce(&str) -> Result<Fetched, FetchError>,
 ) -> CliOutput {
+    if let Command::Validate(args) = &cli.command {
+        return validation::run(args);
+    }
     let origin = match resolve_origin(cli.origin.as_ref()) {
         Ok(origin) => origin,
         Err(error) => {
