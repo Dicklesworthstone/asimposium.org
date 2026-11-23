@@ -50,7 +50,5 @@
   ],
   "has_more": false,
   "next_cursor": null,
-  "omitted": [
-    "public_activity_unavailable"
-  ]
+  "omitted": ["public_activity_unavailable"]
 }

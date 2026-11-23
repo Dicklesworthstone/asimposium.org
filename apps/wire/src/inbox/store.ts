@@ -815,7 +815,7 @@ export async function unfollowProblem(
   // the same receipt, and a later restore cannot revive the removed follow.
   const removed = await db.prepare(FOLLOW_DELETE_SQL).bind(principalId, problemId).run();
   if (
-    removed.success === false ||
+    removed.success !== true ||
     !Number.isSafeInteger(removed.meta?.changes) ||
     removed.meta.changes < 0
   )

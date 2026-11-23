@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
-import { SponsorActivityResponseSchema } from "@asimposium/contracts";
+import { ProblemDocumentSchema, SponsorActivityResponseSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { Env } from "../../src/env.ts";
 import {
@@ -41,7 +41,10 @@ function fixture() {
     prepare(text: string) {
       let bindings: (string | number | null)[] = [];
       return {
-        bind(...values: (string | number | null)[]) { bindings = values; return this; },
+        bind(...values: (string | number | null)[]) {
+          bindings = values;
+          return this;
+        },
         async first() {
           reads++;
           if (reads === failedRead) throw new Error("PRIVATE_SQL_DIAGNOSTIC");
@@ -61,55 +64,105 @@ function fixture() {
       if (request.headers.get("x-test-sponsor") === "deny")
         return new Response('{"code":"WRONG_PRINCIPAL"}', { status: 403 });
       return {
-        principal: { type: "sponsor", sponsorId: request.headers.get("x-test-sponsor") ?? "usr_owner" },
+        principal: {
+          type: "sponsor",
+          sponsorId: request.headers.get("x-test-sponsor") ?? "usr_owner",
+        },
         rawBody: new Uint8Array(await request.arrayBuffer()),
       };
     },
   });
   const env = {
     DB: db,
-    get ARTIFACTS() { throw new Error("Work summaries must not read private R2"); },
+    get ARTIFACTS() {
+      throw new Error("Work summaries must not read private R2");
+    },
   } as unknown as Env;
-  const raw = (body: string, sponsor = "usr_owner", query = "") => app.request(
-    `https://a.asimposium.org${SPONSOR_ACTIVITY_ROUTE}${query}`,
-    { method: "POST", headers: { "x-test-sponsor": sponsor, "content-type": "application/json" }, body },
-    env,
-  );
+  const raw = (body: string, sponsor = "usr_owner", query = "") =>
+    app.request(
+      `https://a.asimposium.org${SPONSOR_ACTIVITY_ROUTE}${query}`,
+      {
+        method: "POST",
+        headers: { "x-test-sponsor": sponsor, "content-type": "application/json" },
+        body,
+      },
+      env,
+    );
   return {
     sql,
-    get reads() { return reads; },
-    onSnapshot(callback: () => void) { afterSnapshot = callback; },
-    failAt(read: number) { failedRead = read; },
+    get reads() {
+      return reads;
+    },
+    onSnapshot(callback: () => void) {
+      afterSnapshot = callback;
+    },
+    failAt(read: number) {
+      failedRead = read;
+    },
     problem(id: string, status = "active", fellow = SCOPE.fellow_id, title = "Finite boundary") {
       sql.query("INSERT INTO problems VALUES(?,?,?,0)").run(id, title, status);
       sql.query("INSERT INTO problem_memberships VALUES(?,?,'contributor')").run(id, fellow);
     },
-    session(id: number, options: { problem?: string; fellow?: string; handback?: string; closedAt?: string } = {}) {
-      sql.query("INSERT INTO sessions VALUES(?,?,?,'explore',?,?,?,?,?)").run(
-        sessionId(id), options.fellow ?? SCOPE.fellow_id, options.problem ?? "P-ALPHA",
-        NOW, NOW, "2026-11-23T00:00:00.000Z", options.closedAt ?? (options.handback === undefined ? null : NOW),
-        options.handback ?? null,
-      );
+    session(
+      id: number,
+      options: { problem?: string; fellow?: string; handback?: string; closedAt?: string } = {},
+    ) {
+      sql
+        .query("INSERT INTO sessions VALUES(?,?,?,'explore',?,?,?,?,?)")
+        .run(
+          sessionId(id),
+          options.fellow ?? SCOPE.fellow_id,
+          options.problem ?? "P-ALPHA",
+          NOW,
+          NOW,
+          "2026-11-23T00:00:00.000Z",
+          options.closedAt ?? (options.handback === undefined ? null : NOW),
+          options.handback ?? null,
+        );
     },
-    event(seq: number, options: {
-      problem?: string; type?: string; kind?: string; object?: string; version?: number;
-      fellow?: string; payload?: unknown;
-    } = {}) {
+    event(
+      seq: number,
+      options: {
+        problem?: string;
+        type?: string;
+        kind?: string;
+        object?: string;
+        version?: number;
+        fellow?: string;
+        payload?: unknown;
+      } = {},
+    ) {
       const problem = options.problem ?? "P-ALPHA";
       const type = options.type ?? "claim.created";
       const id = `event-${problem}-${seq}`;
-      sql.query("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?)").run(
-        id, problem, seq, type, options.kind ?? type.split(".")[0]!,
-        options.object ?? `C-${seq}`, options.version ?? 1, NOW, DIGEST, options.fellow ?? SCOPE.fellow_id,
-      );
-      sql.query("INSERT INTO event_content VALUES(?,?,NULL,?)").run(
-        id, DIGEST, JSON.stringify(options.payload ?? { statement: "PUBLIC_BODY_NOT_IN_SUMMARY" }),
-      );
+      sql
+        .query("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?)")
+        .run(
+          id,
+          problem,
+          seq,
+          type,
+          options.kind ?? type.split(".")[0]!,
+          options.object ?? `C-${seq}`,
+          options.version ?? 1,
+          NOW,
+          DIGEST,
+          options.fellow ?? SCOPE.fellow_id,
+        );
+      sql
+        .query("INSERT INTO event_content VALUES(?,?,NULL,?)")
+        .run(
+          id,
+          DIGEST,
+          JSON.stringify(options.payload ?? { statement: "PUBLIC_BODY_NOT_IN_SUMMARY" }),
+        );
       sql.query("UPDATE problems SET public_seq=MAX(public_seq,?) WHERE id=?").run(seq, problem);
       return id;
     },
     control(target: string, visibility = "hidden", version = 1, problem = "P-ALPHA") {
-      sql.query("INSERT INTO content_controls VALUES(?,?,?,?)").run(problem, target, visibility, version);
+      sql
+        .query("INSERT INTO content_controls VALUES(?,?,?,?)")
+        .run(problem, target, visibility, version);
     },
     request(body: unknown = SCOPE, sponsor = "usr_owner", query = "") {
       return raw(JSON.stringify(body), sponsor, query);
@@ -130,7 +183,12 @@ async function privateError(response: Response, status: number) {
   expect(response.status).toBe(status);
   expect(response.headers.get("cache-control")).toBe("private, no-store");
   const raw = await response.text();
-  for (const text of ["PRIVATE_HANDBACK", "PRIVATE_OTHER", "PRIVATE_SQL_DIAGNOSTIC", "PUBLIC_BODY_NOT_IN_SUMMARY"])
+  for (const text of [
+    "PRIVATE_HANDBACK",
+    "PRIVATE_OTHER",
+    "PRIVATE_SQL_DIAGNOSTIC",
+    "PUBLIC_BODY_NOT_IN_SUMMARY",
+  ])
     expect(raw).not.toContain(text);
   expect(JSON.parse(raw).assignments).toBeUndefined();
   return JSON.parse(raw);
@@ -162,12 +220,19 @@ test("current sponsorship sees actual memberships, open sessions and its Fellow'
     expect(result.assignments[1]?.latest_handback?.text).toBe("PRIVATE_HANDBACK draft");
     expect(result.omitted).toEqual(["public_activity_unavailable"]);
     const raw = JSON.stringify(result);
-    for (const marker of ["PRIVATE_OTHER", "PRIVATE_TITLE", "P-ERASED", "PUBLIC_BODY_NOT_IN_SUMMARY"])
+    for (const marker of [
+      "PRIVATE_OTHER",
+      "PRIVATE_TITLE",
+      "P-ERASED",
+      "PUBLIC_BODY_NOT_IN_SUMMARY",
+    ])
       expect(raw).not.toContain(marker);
     expect(f.reads).toBe(2);
     f.sql.exec("UPDATE enrollment_fellows SET status='paused' WHERE fellow_id='fellow-activity'");
     expect((await page(await f.request())).fellow_status).toBe("paused");
-  } finally { f.sql.close(); }
+  } finally {
+    f.sql.close();
+  }
 });
 
 test("explicit aggregate ordering keeps paginated assignments and session limits deterministic", async () => {
@@ -186,11 +251,15 @@ test("explicit aggregate ordering keeps paginated assignments and session limits
     expect(first.next_cursor).toBe("P-BETA");
     expect(first.open_sessions.map((item) => item.session_id)).toEqual([6, 5, 4, 3].map(sessionId));
     expect(first.omitted).toEqual(["assignment_limit", "session_limit"]);
-    const second = await page(await f.request({ ...SCOPE, limit: 2, after_problem_id: first.next_cursor }));
+    const second = await page(
+      await f.request({ ...SCOPE, limit: 2, after_problem_id: first.next_cursor }),
+    );
     expect(second.assignments.map((item) => item.problem_id)).toEqual(["P-CHARLIE", "P-DELTA"]);
     expect(second.next_cursor).toBeNull();
     expect(second.has_more).toBe(false);
-  } finally { f.sql.close(); }
+  } finally {
+    f.sql.close();
+  }
 });
 
 test("materiality ignores ceremony and thin dead ends, using only bounded recorded sharpening status", async () => {
@@ -199,17 +268,35 @@ test("materiality ignores ceremony and thin dead ends, using only bounded record
     f.problem("P-ALPHA");
     f.event(1);
     f.event(2, { type: "synthesis.created", kind: "synthesis" });
-    f.event(3, { type: "dead_end.recorded", kind: "dead-end", payload: { flag: "low-substance-dead-end" } });
-    f.event(4, { type: "problem.statement-revised", kind: "problem", payload: { previous_status: "active" } });
+    f.event(3, {
+      type: "dead_end.recorded",
+      kind: "dead-end",
+      payload: { flag: "low-substance-dead-end" },
+    });
+    f.event(4, {
+      type: "problem.statement-revised",
+      kind: "problem",
+      payload: { previous_status: "active" },
+    });
     expect((await page(await f.request())).assignments[0]?.last_public_increment?.seq).toBe(1);
-    f.event(5, { type: "problem.statement-reviewed", kind: "problem", payload: { previous_status: "sharpening" } });
+    f.event(5, {
+      type: "problem.statement-reviewed",
+      kind: "problem",
+      payload: { previous_status: "sharpening" },
+    });
     expect((await page(await f.request())).assignments[0]?.last_public_increment?.seq).toBe(5);
-    f.event(6, { type: "problem.statement-revised", kind: "problem", payload: { previous_status: { body: "PRIVATE_STATUS_PAYLOAD" } } });
+    f.event(6, {
+      type: "problem.statement-revised",
+      kind: "problem",
+      payload: { previous_status: { body: "PRIVATE_STATUS_PAYLOAD" } },
+    });
     const result = await page(await f.request());
     expect(result.assignments[0]?.last_public_increment?.seq).toBe(5);
     expect(result.assignments[0]?.increment_history_limited).toBe(true);
     expect(JSON.stringify(result)).not.toContain("PRIVATE_STATUS_PAYLOAD");
-  } finally { f.sql.close(); }
+  } finally {
+    f.sql.close();
+  }
 });
 
 test("a review increment follows current exact-version target visibility, restore, redaction and withdrawal", async () => {
@@ -218,7 +305,12 @@ test("a review increment follows current exact-version target visibility, restor
     try {
       f.problem("P-ALPHA");
       const claim = f.event(1, { fellow: "fellow-other", object: "C-1" });
-      const review = f.event(2, { type: "review.created", kind: "review", object: "R-2", payload: { target_claim_id: "C-1", target_version: 1 } });
+      const review = f.event(2, {
+        type: "review.created",
+        kind: "review",
+        object: "R-2",
+        payload: { target_claim_id: "C-1", target_version: 1 },
+      });
       expect((await page(await f.request())).assignments[0]?.last_public_increment?.seq).toBe(2);
       f.control(target);
       const hidden = await page(await f.request());
@@ -231,33 +323,56 @@ test("a review increment follows current exact-version target visibility, restor
       f.sql.query("UPDATE event_content SET redacted_at=NULL WHERE event_id=?").run(claim);
       f.sql.query("INSERT INTO scientific_withdrawals VALUES(?)").run(review);
       expect((await page(await f.request())).assignments[0]?.last_public_increment).toBeNull();
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   }
 });
 
 test("evidence activity requires the exact target kind and version, including unversioned hypotheses", async () => {
   for (const [kind, version, expected] of [
-    ["claim", 1, true], ["claim", 2, false], ["hypothesis", null, false],
+    ["claim", 1, true],
+    ["claim", 2, false],
+    ["hypothesis", null, false],
   ] as const) {
     const f = fixture();
     try {
       f.problem("P-ALPHA");
       f.event(1, { fellow: "fellow-other", object: "C-1" });
-      f.event(2, { type: "evidence.created", kind: "evidence", object: "E-2",
-        payload: { bears_on_kind: kind, bears_on_id: "C-1", bears_on_version: version } });
-      expect((await page(await f.request())).assignments[0]?.last_public_increment?.seq ?? null).toBe(expected ? 2 : null);
-    } finally { f.sql.close(); }
+      f.event(2, {
+        type: "evidence.created",
+        kind: "evidence",
+        object: "E-2",
+        payload: { bears_on_kind: kind, bears_on_id: "C-1", bears_on_version: version },
+      });
+      expect(
+        (await page(await f.request())).assignments[0]?.last_public_increment?.seq ?? null,
+      ).toBe(expected ? 2 : null);
+    } finally {
+      f.sql.close();
+    }
   }
   const f = fixture();
   try {
     f.problem("P-ALPHA");
-    f.event(1, { type: "hypothesis.created", kind: "hypothesis", object: "H-1", fellow: "fellow-other" });
-    f.event(2, { type: "evidence.created", kind: "evidence", object: "E-2",
-      payload: { bears_on_kind: "hypothesis", bears_on_id: "H-1", bears_on_version: null } });
+    f.event(1, {
+      type: "hypothesis.created",
+      kind: "hypothesis",
+      object: "H-1",
+      fellow: "fellow-other",
+    });
+    f.event(2, {
+      type: "evidence.created",
+      kind: "evidence",
+      object: "E-2",
+      payload: { bears_on_kind: "hypothesis", bears_on_id: "H-1", bears_on_version: null },
+    });
     expect((await page(await f.request())).assignments[0]?.last_public_increment?.seq).toBe(2);
     f.control("H-1");
     expect((await page(await f.request())).assignments[0]?.last_public_increment).toBeNull();
-  } finally { f.sql.close(); }
+  } finally {
+    f.sql.close();
+  }
 });
 
 test("a bounded materiality window reports unknown older work without inventing inactivity", async () => {
@@ -265,12 +380,15 @@ test("a bounded materiality window reports unknown older work without inventing 
   try {
     f.problem("P-ALPHA");
     f.event(1);
-    for (let seq = 2; seq <= 52; seq++) f.event(seq, { type: "session.heartbeat", kind: "session" });
+    for (let seq = 2; seq <= 52; seq++)
+      f.event(seq, { type: "session.heartbeat", kind: "session" });
     const result = await page(await f.request());
     expect(result.assignments[0]?.last_public_increment).toBeNull();
     expect(result.assignments[0]?.increment_history_limited).toBe(true);
     expect(result.omitted).toEqual(["increment_history_limited"]);
-  } finally { f.sql.close(); }
+  } finally {
+    f.sql.close();
+  }
 });
 
 test("missing, foreign and deleted sponsor authority use one non-enumerating private response", async () => {
@@ -279,10 +397,13 @@ test("missing, foreign and deleted sponsor authority use one non-enumerating pri
     f.problem("P-ALPHA");
     f.session(1, { handback: "PRIVATE_HANDBACK retained" });
     const missing = await privateError(await f.request({ fellow_id: "fellow-missing" }), 404);
+    expect(ProblemDocumentSchema.parse(missing).code).toBe("ROUTE_NOT_FOUND");
     expect(await privateError(await f.request(SCOPE, "usr_other"), 404)).toEqual(missing);
     f.sql.exec("UPDATE sponsors SET tombstoned_at='deleted' WHERE sponsor_id='usr_owner'");
     expect(await privateError(await f.request(), 404)).toEqual(missing);
-  } finally { f.sql.close(); }
+  } finally {
+    f.sql.close();
+  }
 });
 
 test("changes to custody, erasure, membership, content and handbacks withhold the captured page", async () => {
@@ -303,7 +424,9 @@ test("changes to custody, erasure, membership, content and handbacks withhold th
       f.onSnapshot(() => f.sql.exec(change));
       await privateError(await f.request(), status);
       expect(f.reads).toBe(2);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   }
 });
 
@@ -311,15 +434,24 @@ test("signature refusals and invalid bounded requests cannot reach private SQL",
   const f = fixture();
   try {
     await privateError(await f.request(SCOPE, "deny"), 403);
-    for (const body of [null, [], {}, { ...SCOPE, sponsor_id: "usr_other" }, { ...SCOPE, limit: 0 },
-      { ...SCOPE, limit: 21 }, { ...SCOPE, after_problem_id: "../private" },
-      { ...SCOPE, after_problem_id: "P-ALPHA\n" }])
+    for (const body of [
+      null,
+      [],
+      {},
+      { ...SCOPE, sponsor_id: "usr_other" },
+      { ...SCOPE, limit: 0 },
+      { ...SCOPE, limit: 21 },
+      { ...SCOPE, after_problem_id: "../private" },
+      { ...SCOPE, after_problem_id: "P-ALPHA\n" },
+    ])
       await privateError(await f.request(body), 422);
     await privateError(await f.request(SCOPE, "usr_owner", "?fellow_id=fellow-other"), 422);
     await privateError(await f.raw("{"), 422);
     await privateError(await f.raw(" ".repeat(2049) + JSON.stringify(SCOPE)), 422);
     expect(f.reads).toBe(0);
-  } finally { f.sql.close(); }
+  } finally {
+    f.sql.close();
+  }
 });
 
 test("both snapshot failures stay private and maximum safe public sequences remain readable", async () => {
@@ -330,12 +462,18 @@ test("both snapshot failures stay private and maximum safe public sequences rema
       f.session(1, { handback: "PRIVATE_HANDBACK retained" });
       f.failAt(read);
       await privateError(await f.request(), 503);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   }
   const f = fixture();
   try {
     f.problem("P-ALPHA");
     f.event(Number.MAX_SAFE_INTEGER);
-    expect((await page(await f.request())).assignments[0]?.last_public_increment?.seq).toBe(Number.MAX_SAFE_INTEGER);
-  } finally { f.sql.close(); }
+    expect((await page(await f.request())).assignments[0]?.last_public_increment?.seq).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+  } finally {
+    f.sql.close();
+  }
 });

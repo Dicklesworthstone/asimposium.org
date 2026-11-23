@@ -84,10 +84,15 @@ function migratedDb(afterRead?: (read: InboxRead) => Promise<void>): Env["DB"] {
         const statement = sqlite.prepare(query);
         if (/^\s*SELECT\b/i.test(query)) {
           const rows = statement.all(...(values as any[]));
-          return { results: rows, meta: { changes: 0, rows_read: rows.length, rows_written: 0 } };
+          return {
+            success: true,
+            results: rows,
+            meta: { changes: 0, rows_read: rows.length, rows_written: 0 },
+          };
         }
         const result = statement.run(...(values as any[]));
         return {
+          success: true,
           results: [],
           meta: { changes: result.changes, rows_read: 0, rows_written: result.changes },
         };

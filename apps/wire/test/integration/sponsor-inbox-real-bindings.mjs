@@ -139,14 +139,32 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(initialActivity.sponsor_id, owner);
   assert.equal(initialActivity.fellow_id, fellow.fellow_id);
   assert.deepEqual(await state(), beforeActivity, "work overview reads do not mutate work");
-  await sponsorCall(recipient, "POST", activityPath, "fellow.activity.read",
-    { fellow_id: fellow.fellow_id }, 404);
-  await sponsorCall(owner, "POST", activityPath, "workshop.read",
-    { fellow_id: fellow.fellow_id }, 401);
+  await sponsorCall(
+    recipient,
+    "POST",
+    activityPath,
+    "fellow.activity.read",
+    { fellow_id: fellow.fellow_id },
+    404,
+  );
+  await sponsorCall(
+    owner,
+    "POST",
+    activityPath,
+    "workshop.read",
+    { fellow_id: fellow.fellow_id },
+    401,
+  );
   await call(activityPath, { fellow_id: fellow.fellow_id }, token, 403);
   await call(activityPath, { fellow_id: fellow.fellow_id }, undefined, 403);
-  await sponsorCall(owner, "POST", activityPath, "fellow.activity.read",
-    { fellow_id: fellow.fellow_id, sponsor_id: owner }, 422);
+  await sponsorCall(
+    owner,
+    "POST",
+    activityPath,
+    "fellow.activity.read",
+    { fellow_id: fellow.fellow_id, sponsor_id: owner },
+    422,
+  );
 
   const now = () => Math.floor(Date.now() / 1000);
   const offer = await sponsorCall(
@@ -189,8 +207,14 @@ await runLocalWorkerJourney(async (context) => {
     ).code,
     "INBOX_NOT_FOUND",
   );
-  await sponsorCall(owner, "POST", activityPath, "fellow.activity.read",
-    { fellow_id: fellow.fellow_id }, 404);
+  await sponsorCall(
+    owner,
+    "POST",
+    activityPath,
+    "fellow.activity.read",
+    { fellow_id: fellow.fellow_id },
+    404,
+  );
   const transferredActivity = await activityRead(recipient);
   assert.equal(transferredActivity.sponsor_id, recipient);
   assert.equal(transferredActivity.fellow_id, fellow.fellow_id);
@@ -232,10 +256,12 @@ await runLocalWorkerJourney(async (context) => {
     visibilityToken,
     201,
   );
-  const sessionRows = async () => (
-    await env.DB.prepare("SELECT * FROM sessions WHERE fellow_id = ? ORDER BY session_id")
-      .bind(visibilityFellow).all()
-  ).results;
+  const sessionRows = async () =>
+    (
+      await env.DB.prepare("SELECT * FROM sessions WHERE fellow_id = ? ORDER BY session_id")
+        .bind(visibilityFellow)
+        .all()
+    ).results;
   const beforeSessionRead = await sessionRows();
   const privateActivity = await activityRead(visibilityOwner, visibilityFellow);
   assert.equal(privateActivity.assignments.length, 1);
@@ -245,7 +271,8 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(privateActivity.open_sessions[0].session_id, activitySession.session_id);
   assert.equal(
     privateActivity.open_sessions[0].last_heartbeat_at,
-    beforeSessionRead.find((row) => row.session_id === activitySession.session_id).last_heartbeat_at,
+    beforeSessionRead.find((row) => row.session_id === activitySession.session_id)
+      .last_heartbeat_at,
   );
   assert.deepEqual(await sessionRows(), beforeSessionRead, "reading does not keep a session alive");
   const handback = "PRIVATE_ACTIVITY_HANDBACK: examine the finite boundary next.";
@@ -258,7 +285,10 @@ await runLocalWorkerJourney(async (context) => {
   const closedActivity = await activityRead(visibilityOwner, visibilityFellow);
   assert.deepEqual(closedActivity.open_sessions, []);
   assert.equal(closedActivity.assignments[0].latest_handback.text, handback);
-  assert.equal(closedActivity.assignments[0].latest_handback.session_id, activitySession.session_id);
+  assert.equal(
+    closedActivity.assignments[0].latest_handback.session_id,
+    activitySession.session_id,
+  );
 
   await sponsorCall(
     visibilityOwner,

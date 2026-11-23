@@ -81,7 +81,7 @@ function face(records = [gap()], summary: Record<string, unknown> = {}): ClaimFa
         neutralized: [], why_included: "recorded exact or inherited obligation", body: JSON.stringify(value),
       })),
     ],
-    omitted: [], degraded: [], next_actions: [],
+    omitted: [{ reason: "workshop_excluded" }], degraded: [], next_actions: [],
   });
 }
 function panel(value: ClaimFaceResponse): string {

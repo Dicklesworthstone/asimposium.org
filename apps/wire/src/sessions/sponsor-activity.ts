@@ -125,28 +125,35 @@ SELECT f.name, f.status,
   )) AS assignments_json
 FROM owned_fellow f`;
 
-const metadataSchema = z.object({
-  seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  type: z.string().min(1).max(100),
-  object_kind: z.string().min(1).max(100),
-  created_at: z.string().datetime(),
-  available: z.union([z.literal(0), z.literal(1)]),
-  materiality_status: ProblemStatusSchema.nullable(),
-  low_substance: z.union([z.literal(0), z.literal(1)]),
-}).strict();
+const metadataSchema = z
+  .object({
+    seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    type: z.string().min(1).max(100),
+    object_kind: z.string().min(1).max(100),
+    created_at: z.string().datetime(),
+    available: z.union([z.literal(0), z.literal(1)]),
+    materiality_status: ProblemStatusSchema.nullable(),
+    low_substance: z.union([z.literal(0), z.literal(1)]),
+  })
+  .strict();
 const assignmentSnapshotSchema = SponsorActivityAssignmentSchema.omit({
   last_public_increment: true,
   increment_history_limited: true,
   latest_handback: true,
   handback_unavailable: true,
-}).extend({
-  latest_handback: z.object({
-    session_id: SponsorActivityAssignmentSchema.shape.latest_handback.unwrap().shape.session_id,
-    closed_at: z.string().datetime(),
-    text: z.string().max(2000).nullable(),
-  }).strict().nullable(),
-  events: z.array(metadataSchema).max(EVENT_SCAN_LIMIT + 1),
-}).strict();
+})
+  .extend({
+    latest_handback: z
+      .object({
+        session_id: SponsorActivityAssignmentSchema.shape.latest_handback.unwrap().shape.session_id,
+        closed_at: z.string().datetime(),
+        text: z.string().max(2000).nullable(),
+      })
+      .strict()
+      .nullable(),
+    events: z.array(metadataSchema).max(EVENT_SCAN_LIMIT + 1),
+  })
+  .strict();
 
 function lastIncrement(
   events: readonly z.infer<typeof metadataSchema>[],
@@ -157,26 +164,39 @@ function lastIncrement(
     if (event.seq >= previous) throw new Error("SPONSOR_ACTIVITY_ORDER_INVALID");
     previous = event.seq;
     const expectedKind = event.type.split(".")[0];
-    if (event.available !== 1 ||
-      (event.object_kind !== expectedKind && !(expectedKind === "dead_end" && event.object_kind === "dead-end")) ||
-      (event.type.startsWith("problem.statement-") && !ProblemStatusSchema.safeParse(event.materiality_status).success)) {
+    if (
+      event.available !== 1 ||
+      (event.object_kind !== expectedKind &&
+        !(expectedKind === "dead_end" && event.object_kind === "dead-end")) ||
+      (event.type.startsWith("problem.statement-") &&
+        !ProblemStatusSchema.safeParse(event.materiality_status).success)
+    ) {
       newerUnavailable = true;
       continue;
     }
-    if (!isObjectLevelEvent({
-      type: event.type,
-      object_kind: event.object_kind,
-      problem_status: typeof event.materiality_status === "string" ? event.materiality_status : null,
-      extract: event.low_substance === 1 ? "low-substance-dead-end" : null,
-    })) continue;
+    if (
+      !isObjectLevelEvent({
+        type: event.type,
+        object_kind: event.object_kind,
+        problem_status:
+          typeof event.materiality_status === "string" ? event.materiality_status : null,
+        extract: event.low_substance === 1 ? "low-substance-dead-end" : null,
+      })
+    )
+      continue;
     return {
       last_public_increment: SponsorActivityAssignmentSchema.shape.last_public_increment.parse({
-        seq: event.seq, type: event.type, created_at: event.created_at,
+        seq: event.seq,
+        type: event.type,
+        created_at: event.created_at,
       }),
       increment_history_limited: newerUnavailable,
     };
   }
-  return { last_public_increment: null, increment_history_limited: newerUnavailable || events.length > EVENT_SCAN_LIMIT };
+  return {
+    last_public_increment: null,
+    increment_history_limited: newerUnavailable || events.length > EVENT_SCAN_LIMIT,
+  };
 }
 
 interface Snapshot {
@@ -196,16 +216,24 @@ export async function readSponsorActivity(
   now = Date.now(),
 ): Promise<SponsorActivityResponse | undefined> {
   const request = SponsorActivityRequestSchema.parse(input);
-  const read = () => db.prepare(SNAPSHOT_SQL)
-    .bind(sponsorId, request.fellow_id, request.after_problem_id ?? "", request.limit + 1)
-    .first<Snapshot>();
+  const read = () =>
+    db
+      .prepare(SNAPSHOT_SQL)
+      .bind(sponsorId, request.fellow_id, request.after_problem_id ?? "", request.limit + 1)
+      .first<Snapshot>();
   const snapshot = await read();
   if (snapshot === null) return undefined;
-  if (new TextEncoder().encode(snapshot.sessions_json + snapshot.assignments_json).byteLength > MAX_SNAPSHOT_BYTES)
+  if (
+    new TextEncoder().encode(snapshot.sessions_json + snapshot.assignments_json).byteLength >
+    MAX_SNAPSHOT_BYTES
+  )
     throw new Error("SPONSOR_ACTIVITY_SNAPSHOT_TOO_LARGE");
-  const sessions = SponsorActivitySessionSchema.array().max(SPONSOR_ACTIVITY_SESSION_LIMIT + 1)
+  const sessions = SponsorActivitySessionSchema.array()
+    .max(SPONSOR_ACTIVITY_SESSION_LIMIT + 1)
     .parse(JSON.parse(snapshot.sessions_json));
-  const rows = assignmentSnapshotSchema.array().max(SPONSOR_ACTIVITY_MAX_LIMIT + 1)
+  const rows = assignmentSnapshotSchema
+    .array()
+    .max(SPONSOR_ACTIVITY_MAX_LIMIT + 1)
     .parse(JSON.parse(snapshot.assignments_json));
   const assignments = rows.slice(0, request.limit).map(({ events, latest_handback, ...item }) => ({
     ...item,
@@ -225,12 +253,16 @@ export async function readSponsorActivity(
     open_sessions: sessions.slice(0, SPONSOR_ACTIVITY_SESSION_LIMIT),
     assignments,
     has_more: hasMore,
-    next_cursor: hasMore ? assignments.at(-1)?.problem_id ?? null : null,
+    next_cursor: hasMore ? (assignments.at(-1)?.problem_id ?? null) : null,
     omitted: [
       ...(hasMore ? ["assignment_limit"] : []),
       ...(sessions.length > SPONSOR_ACTIVITY_SESSION_LIMIT ? ["session_limit"] : []),
-      ...(assignments.some((item) => item.public_problem === null) ? ["public_activity_unavailable"] : []),
-      ...(assignments.some((item) => item.increment_history_limited) ? ["increment_history_limited"] : []),
+      ...(assignments.some((item) => item.public_problem === null)
+        ? ["public_activity_unavailable"]
+        : []),
+      ...(assignments.some((item) => item.increment_history_limited)
+        ? ["increment_history_limited"]
+        : []),
       ...(assignments.some((item) => item.handback_unavailable) ? ["handback_unavailable"] : []),
     ],
   });
@@ -238,8 +270,12 @@ export async function readSponsorActivity(
     throw new Error("SPONSOR_ACTIVITY_PAGE_INVALID");
   const current = await read();
   if (current === null) return undefined;
-  if (current.name !== snapshot.name || current.status !== snapshot.status ||
-    current.sessions_json !== snapshot.sessions_json || current.assignments_json !== snapshot.assignments_json)
+  if (
+    current.name !== snapshot.name ||
+    current.status !== snapshot.status ||
+    current.sessions_json !== snapshot.sessions_json ||
+    current.assignments_json !== snapshot.assignments_json
+  )
     throw new Error("SPONSOR_ACTIVITY_CHANGED");
   return response;
 }
@@ -252,11 +288,16 @@ function privateResponse(response: Response): Response {
 }
 
 function unavailable(): Response {
-  return privateResponse(validatedProblem({
-    status: 503, code: "INTERNAL_ERROR", title: "Fellow work could not be read",
-    detail: "A complete work overview under current sponsorship could not be established.",
-    fixHint: "Refresh this page to inspect current recorded work. Do not share private handback text in diagnostics.",
-  }));
+  return privateResponse(
+    validatedProblem({
+      status: 503,
+      code: "INTERNAL_ERROR",
+      title: "Fellow work could not be read",
+      detail: "A complete work overview under current sponsorship could not be established.",
+      fixHint:
+        "Refresh this page to inspect current recorded work. Do not share private handback text in diagnostics.",
+    }),
+  );
 }
 
 export function createSponsorActivityRouter(
@@ -268,11 +309,18 @@ export function createSponsorActivityRouter(
     let sponsorId: string;
     let rawBody: Uint8Array;
     try {
-      const verified = await options.verifiedSponsor(c.req.raw, SPONSOR_ACTIVITY_ROUTE, "fellow.activity.read");
+      const verified = await options.verifiedSponsor(
+        c.req.raw,
+        SPONSOR_ACTIVITY_ROUTE,
+        "fellow.activity.read",
+      );
       if (verified instanceof Response) return privateResponse(verified);
-      if (verified.principal.type !== "sponsor" ||
+      if (
+        verified.principal.type !== "sponsor" ||
         !SponsorIdSchema.safeParse(verified.principal.sponsorId).success ||
-        !(verified.rawBody instanceof Uint8Array)) return unavailable();
+        !(verified.rawBody instanceof Uint8Array)
+      )
+        return unavailable();
       sponsorId = verified.principal.sponsorId;
       rawBody = verified.rawBody;
     } finally {
@@ -280,24 +328,45 @@ export function createSponsorActivityRouter(
     }
     let input: unknown;
     if (new URL(c.req.url).search === "" && rawBody.byteLength <= 2048) {
-      try { input = parseExactJsonBytes(rawBody); } catch { input = undefined; }
+      try {
+        input = parseExactJsonBytes(rawBody);
+      } catch {
+        input = undefined;
+      }
     }
     const parsed = SponsorActivityRequestSchema.safeParse(input);
-    if (!parsed.success) return privateResponse(validatedProblem({
-      status: 422, code: "SCHEMA_INVALID", title: "Invalid Fellow work request",
-      detail: "Use a bounded signed JSON request without query parameters.",
-      fixHint: "Send fellow_id and optional after_problem_id and limit; copy next_cursor for the next assignment page.",
-      rule: "A5", extensions: { schema: SPONSOR_ACTIVITY_SCHEMA_ID, example: { fellow_id: "fellow-example", limit: 10 } },
-    }));
+    if (!parsed.success)
+      return privateResponse(
+        validatedProblem({
+          status: 422,
+          code: "SCHEMA_INVALID",
+          title: "Invalid Fellow work request",
+          detail: "Use a bounded signed JSON request without query parameters.",
+          fixHint:
+            "Send fellow_id and optional after_problem_id and limit; copy next_cursor for the next assignment page.",
+          rule: "A5",
+          extensions: {
+            schema: SPONSOR_ACTIVITY_SCHEMA_ID,
+            example: { fellow_id: "fellow-example", limit: 10 },
+          },
+        }),
+      );
     const response = await readSponsorActivity(options.db ?? c.env.DB, sponsorId, parsed.data);
-    if (response === undefined) return privateResponse(validatedProblem({
-      status: 404, code: "NOT_FOUND", title: "No such Fellow work overview",
-      detail: "No Fellow visible to this sponsor matches the request.",
-      fixHint: "Choose a Fellow currently listed in your sponsor console.",
-    }));
+    if (response === undefined)
+      return privateResponse(
+        validatedProblem({
+          status: 404,
+          code: "ROUTE_NOT_FOUND",
+          title: "No such Fellow work overview",
+          detail: "No Fellow visible to this sponsor matches the request.",
+          fixHint: "Choose a Fellow currently listed in your sponsor console.",
+        }),
+      );
     const bytes = new TextEncoder().encode(JSON.stringify(response));
     if (bytes.byteLength > SPONSOR_ACTIVITY_MAX_RESPONSE_BYTES) return unavailable();
-    return privateResponse(new Response(bytes, { headers: { "content-type": "application/json; charset=utf-8" } }));
+    return privateResponse(
+      new Response(bytes, { headers: { "content-type": "application/json; charset=utf-8" } }),
+    );
   });
   return app;
 }

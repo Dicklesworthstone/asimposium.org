@@ -485,13 +485,17 @@ describe("discovery generators (W1.6)", () => {
       createEnrollmentRouter({ service }),
       createSessionRouter({ service, replayProtector }),
       createInboxRouter({ service }),
-      createSponsorActivityRouter({ verifiedSponsor: async () => new Response(null, { status: 401 }) }),
+      createSponsorActivityRouter({
+        verifiedSponsor: async () => new Response(null, { status: 401 }),
+      }),
     ].flatMap((app) => app.routes);
     expect(
       routes.some((route) => route.method === "POST" && route.path === "/v1/sponsors/inbox"),
     ).toBe(true);
     expect(
-      routes.some((route) => route.method === "POST" && route.path === "/v1/sponsors/fellow-activity"),
+      routes.some(
+        (route) => route.method === "POST" && route.path === "/v1/sponsors/fellow-activity",
+      ),
     ).toBe(true);
     const disclosed = new Set(DISCLOSED_OPERATIONS.map((op) => `${op.method} ${op.openApiPath}`));
     for (const method of ["GET", "POST", "DELETE"]) {

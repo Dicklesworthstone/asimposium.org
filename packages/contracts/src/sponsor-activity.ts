@@ -23,8 +23,16 @@ const cursor = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 export const SponsorActivityRequestSchema = z
   .object({
     fellow_id: FellowIdSchema,
-    after_problem_id: ProblemIdSchema.refine((id) => id.trim() === id, "Use a canonical continuation identifier.").optional(),
-    limit: z.number().int().min(1).max(SPONSOR_ACTIVITY_MAX_LIMIT).default(SPONSOR_ACTIVITY_DEFAULT_LIMIT),
+    after_problem_id: ProblemIdSchema.refine(
+      (id) => id.trim() === id,
+      "Use a canonical continuation identifier.",
+    ).optional(),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(SPONSOR_ACTIVITY_MAX_LIMIT)
+      .default(SPONSOR_ACTIVITY_DEFAULT_LIMIT),
   })
   .strict();
 export type SponsorActivityRequest = z.infer<typeof SponsorActivityRequestSchema>;
@@ -81,7 +89,15 @@ export const SponsorActivityResponseSchema = z
     next_cursor: ProblemIdSchema.nullable(),
     has_more: z.boolean(),
     omitted: z
-      .array(z.enum(["assignment_limit", "session_limit", "public_activity_unavailable", "increment_history_limited", "handback_unavailable"]))
+      .array(
+        z.enum([
+          "assignment_limit",
+          "session_limit",
+          "public_activity_unavailable",
+          "increment_history_limited",
+          "handback_unavailable",
+        ]),
+      )
       .max(5),
   })
   .strict()
@@ -97,20 +113,36 @@ export const SponsorActivityResponseSchema = z
       previous = item.problem_id;
       if (item.public_problem === null && item.last_public_increment !== null)
         invalid("assignments", "Unavailable public problems cannot expose public increments.");
-      if (item.last_public_increment !== null && item.public_problem !== null &&
-        item.last_public_increment.seq > item.public_problem.cursor)
+      if (
+        item.last_public_increment !== null &&
+        item.public_problem !== null &&
+        item.last_public_increment.seq > item.public_problem.cursor
+      )
         invalid("assignments", "A material increment cannot exceed its public snapshot.");
       if (item.handback_unavailable && item.latest_handback !== null)
         invalid("assignments", "An unavailable handback cannot supply text.");
     }
-    if (page.has_more !== page.omitted.includes("assignment_limit") ||
-      (page.has_more ? page.next_cursor === null || page.next_cursor !== page.assignments.at(-1)?.problem_id : page.next_cursor !== null))
+    if (
+      page.has_more !== page.omitted.includes("assignment_limit") ||
+      (page.has_more
+        ? page.next_cursor === null || page.next_cursor !== page.assignments.at(-1)?.problem_id
+        : page.next_cursor !== null)
+    )
       invalid("next_cursor", "Assignment continuation must identify the last emitted assignment.");
-    if (new Set(page.open_sessions.map((session) => session.session_id)).size !== page.open_sessions.length)
+    if (
+      new Set(page.open_sessions.map((session) => session.session_id)).size !==
+      page.open_sessions.length
+    )
       invalid("open_sessions", "Sessions must be distinct.");
     for (const [reason, present] of [
-      ["public_activity_unavailable", page.assignments.some((item) => item.public_problem === null)],
-      ["increment_history_limited", page.assignments.some((item) => item.increment_history_limited)],
+      [
+        "public_activity_unavailable",
+        page.assignments.some((item) => item.public_problem === null),
+      ],
+      [
+        "increment_history_limited",
+        page.assignments.some((item) => item.increment_history_limited),
+      ],
       ["handback_unavailable", page.assignments.some((item) => item.handback_unavailable)],
     ] as const) {
       if (page.omitted.includes(reason) !== present)
@@ -124,16 +156,32 @@ export function sponsorActivityMatchesRequest(
   request: SponsorActivityRequest,
   page: SponsorActivityResponse,
 ): boolean {
-  return page.sponsor_id === sponsor && page.fellow_id === request.fellow_id &&
+  return (
+    page.sponsor_id === sponsor &&
+    page.fellow_id === request.fellow_id &&
     page.after_problem_id === (request.after_problem_id ?? null) &&
     page.assignments.length <= request.limit &&
-    (!page.has_more || page.assignments.length === request.limit);
+    (!page.has_more || page.assignments.length === request.limit)
+  );
 }
 
 export function generateSponsorActivitySchema(): string {
-  return `${JSON.stringify({
-    ...z.toJSONSchema(z.object({ request: SponsorActivityRequestSchema, response: SponsorActivityResponseSchema }).strict(), { io: "input" }),
-    $id: SPONSOR_ACTIVITY_SCHEMA_ID,
-    description: "Current-sponsor-only work overview. Session heartbeats are recorded timestamps, not proof of current work. Assignments are current memberships in problem identifier order; refresh the first page for newly assigned earlier identifiers. Handbacks are private, untrusted Fellow work products. Public increments contain metadata only and obey current visibility. Reads do not open sessions, acknowledge notices, or change scientific standing.",
-  }, null, 2)}\n`;
+  return `${JSON.stringify(
+    {
+      ...z.toJSONSchema(
+        z
+          .object({
+            request: SponsorActivityRequestSchema,
+            response: SponsorActivityResponseSchema,
+          })
+          .strict(),
+        { io: "input" },
+      ),
+      $id: SPONSOR_ACTIVITY_SCHEMA_ID,
+      description:
+        "Current-sponsor-only work overview. Session heartbeats are recorded timestamps, not proof of current work. Assignments are current memberships in problem identifier order; refresh the first page for newly assigned earlier identifiers. Handbacks are private, untrusted Fellow work products. Public increments contain metadata only and obey current visibility. Reads do not open sessions, acknowledge notices, or change scientific standing.",
+    },
+    null,
+    2,
+  )}\n`;
 }

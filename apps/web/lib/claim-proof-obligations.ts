@@ -50,7 +50,7 @@ function body(item: FaceItem): Record<string, unknown> | null {
     return null;
   }
 }
-function exactClaim(value: unknown): value is string {
+function exactClaim(value: unknown): value is `C-${number}@${number}` {
   return (
     typeof value === "string" &&
     value.length <= 64 &&
