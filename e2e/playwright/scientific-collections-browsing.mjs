@@ -32,20 +32,20 @@ export async function seedScientificCollections(target, claimsFixture) {
   const conflicts = [];
   const questions = [];
   for (let index = 0; index < 9; index += 1) {
-    const conflict = await fellowPost(target, `${author.path}/conflicts`, {
-      claims: [{ claim_id: claims[index], version: 1 }, { claim_id: claims[(index + 1) % 9], version: 1 }],
-      aligned_definitions: ALIGNMENT,
-      aligned_scope: "Both statements concern finite sums of positive odd integers.",
-      aligned_quantifiers: "Every integer index in the common positive domain is quantified universally.",
-      smallest_disagreement: `Comparison ${index + 1} isolates whether both statements use the same initial term.`,
-      agreed_facts: ["The first positive odd integer is one."],
-      discriminating_tests: ["Compute the first three partial sums using each stated indexing convention."],
-    }, author.token);
-    assert.equal(conflict.status, 201, `conflict ${index + 1}: ${conflict.body.code ?? ""}`);
-    conflicts.push(conflict.body.conflict_id);
     const warn = index === 8;
     if (warn) await fixtures.setScreenMode("allow-with-warning");
     try {
+      const conflict = await fellowPost(target, `${author.path}/conflicts`, {
+        claims: [{ claim_id: claims[index], version: 1 }, { claim_id: claims[(index + 1) % 9], version: 1 }],
+        aligned_definitions: ALIGNMENT,
+        aligned_scope: "Both statements concern finite sums of positive odd integers.",
+        aligned_quantifiers: "Every integer index in the common positive domain is quantified universally.",
+        smallest_disagreement: `Comparison ${index + 1} isolates whether both statements use the same initial term.`,
+        agreed_facts: ["The first positive odd integer is one."],
+        discriminating_tests: ["Compute the first three partial sums using each stated indexing convention."],
+      }, author.token);
+      assert.equal(conflict.status, 201, `conflict ${index + 1}: ${conflict.body.code ?? ""}`);
+      conflicts.push(conflict.body.conflict_id);
       const question = await fellowPost(target, `${author.path}/questions`, {
         body_md: `${QUESTION}\n\nResearch question ${index + 1}.`,
         target_refs: [`${claims[index]}@1`, conflict.body.conflict_id],
@@ -66,10 +66,15 @@ export async function seedScientificCollections(target, claimsFixture) {
   assert.equal(historicalQuestions.questions.length, 8);
   assert.notEqual(historicalQuestions.next_after, null);
 
-  const resolution = await fellowPost(target, `${resolver.path}/conflicts/${conflicts[8]}/resolve`, {
-    status: "resolved", resolution: RESOLUTION,
-  }, resolver.token);
-  assert.equal(resolution.status, 200, `resolution: ${resolution.body.code ?? ""}`);
+  await fixtures.setScreenMode("allow-with-warning");
+  try {
+    const resolution = await fellowPost(target, `${resolver.path}/conflicts/${conflicts[8]}/resolve`, {
+      status: "resolved", resolution: RESOLUTION,
+    }, resolver.token);
+    assert.equal(resolution.status, 200, `resolution: ${resolution.body.code ?? ""}`);
+  } finally {
+    await fixtures.setScreenMode("pass");
+  }
   const answer = await fellowPost(target, `${resolver.path}/questions/${questions[8]}/answer`, {
     resolved_by_object: `${claims[8]}@1`,
   }, resolver.token);
@@ -82,8 +87,6 @@ export async function seedScientificCollections(target, claimsFixture) {
     reason: "The author has consolidated this request into the remaining research questions.",
   }, author.token);
   assert.equal(withdrawn.status, 200, `withdrawal: ${withdrawn.body.code ?? ""}`);
-  const current = await readCollection(target, conflictsListPath(problemId, "json", { target: conflicts[8] }), ConflictsListResponseSchema);
-  assert.equal(current.conflicts[0].resolution_event?.author_fellow_id, resolver.fellowId);
   const sourceEvents = [];
   for (const [kind, objectId] of [["conflict.normalized", conflicts[8]], ["question.asked", questions[8]]]) {
     const event = await target.env.DB.prepare(
@@ -92,8 +95,24 @@ export async function seedScientificCollections(target, claimsFixture) {
     assert.ok(event?.id, `${kind} source for current content withdrawal`);
     sourceEvents.push(event.id);
   }
+  const edge = { kind: "generalizes", source_claim_id: claims[0], source_version: 1, target: `${claims[1]}@1` };
+  let relationSeqs;
+  await fixtures.setScreenMode("allow-with-warning");
+  try {
+    const assertion = await fellowPost(target, `${resolver.path}/relations`, edge, resolver.token);
+    assert.equal(assertion.status, 201, `relation: ${assertion.body.code ?? ""}`);
+    const dispute = await fellowPost(target, `${author.path}/relations/dispute`, {
+      ...edge, reason: "The second statement retains an initial index that the first statement excludes.",
+    }, author.token);
+    assert.equal(dispute.status, 201, `relation dispute: ${dispute.body.code ?? ""}`);
+    relationSeqs = [assertion.body.seq, dispute.body.seq];
+  } finally {
+    await fixtures.setScreenMode("pass");
+  }
+  const current = await readCollection(target, conflictsListPath(problemId, "json", { target: conflicts[8] }), ConflictsListResponseSchema);
+  assert.equal(current.conflicts[0].resolution_event?.author_fellow_id, resolver.fellowId);
   return {
-    problemId, claims, conflicts, questions, sourceEvents,
+    problemId, claims, conflicts, questions, sourceEvents, relationSeqs,
     cursor: historical.cursor, currentCursor: current.cursor,
     conflictAfter: historical.next_after, questionAfter: historicalQuestions.next_after,
     resolution: current.conflicts[0].resolution_event, resolver: resolver.fellowId,
@@ -140,6 +159,17 @@ export async function scientificCollectionsBrowsing({ page, agora, target, fixtu
       new URL(page.url()).searchParams.get("target") === conflicts[8] &&
       await page.getByRole("heading", { level: 1, name: conflicts[8], exact: true }).count() === 1 &&
       await page.locator('[data-conflict-status="open"]').count() === 1);
+  const exactConflict = page.locator(`article[id="${conflicts[8]}"]`);
+  const notices = exactConflict.locator('[data-screening-notice="screening-warning"]');
+  const resolutionSection = exactConflict.locator(`section[aria-labelledby="conflict-${conflicts[8]}-resolution"]`);
+  const canonicalOpen = await readCollection(target,
+    conflictsListPath(problemId, "json", { through: cursor, target: conflicts[8] }), ConflictsListResponseSchema);
+  record(`${mode} conflicts: historical normalization has only its own warning`,
+    canonicalOpen.conflicts[0].screening_notice?.category === "dual-use-boundary" &&
+      canonicalOpen.conflicts[0].resolution_event === null &&
+      await notices.count() === 1 &&
+      (await notices.first().innerText()).includes("dual-use-boundary") &&
+      await resolutionSection.count() === 0);
   await page.getByRole("link", { name: "Read the latest public record", exact: true }).click();
   await page.waitForURL(`${agora.origin}${conflictsListPath(problemId, "human", { target: conflicts[8] })}`);
   record(`${mode} conflicts: latest resolution retains its own Fellow and source event`,
@@ -148,6 +178,14 @@ export async function scientificCollectionsBrowsing({ page, agora, target, fixtu
       await page.getByRole("link", { name: fixture.resolver, exact: true }).count() === 1 &&
       await page.getByRole("link", { name: `${fixture.resolution.event_id} · ledger sequence ${fixture.resolution.seq}`, exact: true })
         .getAttribute("href") === `/r/p/${problemId}/events/${fixture.resolution.seq}`);
+  const canonicalCurrent = await readCollection(target,
+    conflictsListPath(problemId, "json", { target: conflicts[8] }), ConflictsListResponseSchema);
+  record(`${mode} conflicts: latest record shows independent normalization and resolution notices`,
+    canonicalCurrent.conflicts[0].screening_notice?.category === "dual-use-boundary" &&
+      canonicalCurrent.conflicts[0].resolution_event?.screening_notice?.category === "dual-use-boundary" &&
+      await notices.count() === 2 &&
+      await resolutionSection.locator('[data-screening-notice="screening-warning"]').count() === 1 &&
+      (await resolutionSection.innerText()).indexOf("Screening context notice") < (await resolutionSection.innerText()).indexOf(RESOLUTION));
   await page.getByRole("link", { name: `${fixture.resolution.event_id} · ledger sequence ${fixture.resolution.seq}`, exact: true }).click();
   await page.getByText(fixture.resolution.event_id, { exact: true }).waitFor();
   record(`${mode} conflicts: resolution source link opens its real public event`,
@@ -237,6 +275,15 @@ export async function scientificCollectionsBrowsing({ page, agora, target, fixtu
   ]) {
     record(`${mode} scientific collections: problem digest exposes ${label.toLowerCase()}`,
       (await page.getByRole("link", { name: label, exact: true }).getAttribute("href"))?.startsWith(path) === true);
+  }
+  for (const [index, eventType] of ["relation.asserted", "relation.disputed"].entries()) {
+    const seq = fixture.relationSeqs[index];
+    await page.goto(`${agora.origin}/r/p/${problemId}/events/${seq}`, { waitUntil: "load" });
+    const entry = page.locator(`article[id="event-${seq}"]`);
+    const warning = entry.locator('[data-screening-notice="screening-warning"]');
+    record(`${mode} relations: ${eventType} shows its own warning on Agora`,
+      await entry.getByText(eventType, { exact: true }).count() === 1 &&
+        await warning.count() === 1 && (await warning.innerText()).includes("dual-use-boundary"));
   }
 }
 

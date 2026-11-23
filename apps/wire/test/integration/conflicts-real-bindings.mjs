@@ -256,7 +256,8 @@ await runLocalWorkerJourney(async (context) => {
   // Six distinct canary refusals crossed the quarantine-first threshold.
   assert.equal(await clearScreeningPosture(sponsorA), 1, "the author was quarantine-first");
 
-  // 6. Normalization: success (201)
+  // 6. A publishable screening warning must carry the normalization, not hold it.
+  await fixtures.setScreenMode("allow-with-warning");
   const normalized = await call(
     `/v1/sessions/${sessionIdA}/conflicts`,
     validPayload,
@@ -264,7 +265,14 @@ await runLocalWorkerJourney(async (context) => {
     201,
     "idempotent-normalize-key-1",
   );
+  await fixtures.setScreenMode("pass");
   NormalizeConflictResponseSchema.parse(normalized);
+  const warning = {
+    action: "published-with-warning",
+    category: "dual-use-boundary",
+    notice: "screening-warning",
+  };
+  const warningText = "Published with a screening context notice";
   const conflictId = normalized.conflict_id;
   assert.ok(conflictId.startsWith("CF-"));
   assert.equal(normalized.status, "open");
@@ -307,6 +315,7 @@ await runLocalWorkerJourney(async (context) => {
   const conflictsJson = ConflictsListResponseSchema.parse(await conflictsJsonRes.json());
   assert.equal(conflictsJson.conflicts.length, 1);
   const firstConflict = conflictsJson.conflicts[0];
+  assert.deepEqual(firstConflict.screening_notice, warning);
   assert.equal(firstConflict.conflict_id, conflictId);
   assert.equal(firstConflict.status, "open");
   assert.equal(firstConflict.claims[0].claim_id, claim1Id);
@@ -356,6 +365,10 @@ await runLocalWorkerJourney(async (context) => {
   const conflictsHtml = await conflictsHtmlRes.text();
   assert.ok(conflictsHtml.includes(conflictId));
   assert.ok(conflictsHtml.includes("open"));
+  for (const text of [conflictsMd, conflictsHtml]) {
+    const notice = text.indexOf(warningText);
+    assert.ok(notice >= 0 && notice < text.indexOf("Claim 1 bounds the cycle length by"));
+  }
 
   // --------------------------------------------------------------------------
   // RESOLUTION JOURNEY
@@ -440,6 +453,7 @@ await runLocalWorkerJourney(async (context) => {
   const updatedJson = ConflictsListResponseSchema.parse(await updatedJsonRes.json());
   assert.equal(updatedJson.conflicts[0].status, "resolved");
   assert.equal(updatedJson.conflicts[0].resolution, resolvePayload.resolution);
+  assert.deepEqual(updatedJson.conflicts[0].screening_notice, warning);
   assert.deepEqual(updatedJson.conflicts[0].resolution_event, {
     event_id: (
       await env.DB.prepare("SELECT id FROM events WHERE problem_id = ? AND seq = ?")
@@ -560,7 +574,9 @@ await runLocalWorkerJourney(async (context) => {
       });
       assert.equal(response.status, 404, `hidden historical conflict ${method} ${format}`);
       assert.equal(response.headers.get("cache-control"), "private, no-store");
-      assert.ok(!(await response.text()).includes(validPayload.aligned_definitions));
+      const body = await response.text();
+      assert.ok(!body.includes(validPayload.aligned_definitions));
+      assert.ok(!body.includes(warningText));
     }
   }
   const hiddenControlPageResponse = await worker.fetch(`${origin}${controlPagePath}`, {
@@ -594,6 +610,64 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.equal(restoredConflictResponse.headers.get("etag"), exactOpenResponse.headers.get("etag"));
 
+  // Resolve a plain normalization with a warning. The first conflict exercised
+  // the inverse case, so either source copying its notice to the other fails.
+  const secondPath = `/p/${problemId}/conflicts`;
+  const secondTarget = `target=${second.conflict_id}`;
+  const sourceHeaders = { "User-Agent": context.userAgent };
+  const secondBefore = await worker.fetch(
+    `${origin}${secondPath}.json?through=${second.seq}&${secondTarget}`,
+    { headers: sourceHeaders },
+  );
+  assert.equal(secondBefore.status, 200);
+  const secondOpen = ConflictsListResponseSchema.parse(await secondBefore.json());
+  assert.equal(secondOpen.conflicts[0].screening_notice, undefined);
+  await fixtures.setScreenMode("allow-with-warning");
+  const warnedResolution = await call(
+    `/v1/sessions/${sessionIdA}/conflicts/${second.conflict_id}/resolve`,
+    resolvePayload,
+    authorA,
+    200,
+    "warned-resolution",
+  );
+  await fixtures.setScreenMode("pass");
+  const secondLatest = await worker.fetch(`${origin}${secondPath}.json?${secondTarget}`, {
+    headers: sourceHeaders,
+  });
+  assert.equal(secondLatest.status, 200);
+  const settled = ConflictsListResponseSchema.parse(await secondLatest.json()).conflicts[0];
+  assert.equal(settled.screening_notice, undefined);
+  assert.deepEqual(settled.resolution_event?.screening_notice, warning);
+  const historicalSecond = await worker.fetch(
+    `${origin}${secondPath}.json?through=${second.seq}&${secondTarget}`,
+    { headers: { ...sourceHeaders, "If-None-Match": secondBefore.headers.get("etag") } },
+  );
+  assert.equal(historicalSecond.status, 304);
+  for (const format of ["md", "html"]) {
+    const response = await worker.fetch(`${origin}${secondPath}.${format}?${secondTarget}`, {
+      headers: sourceHeaders,
+    });
+    assert.equal(response.status, 200, format);
+    const text = await response.text();
+    const notice = text.indexOf(warningText);
+    assert.ok(notice > text.indexOf(settled.smallest_disagreement), format);
+    assert.ok(notice < text.indexOf(resolvePayload.resolution), format);
+    assert.equal(text.indexOf(warningText, notice + 1), -1, format);
+  }
+  for (const [seq, type] of [
+    [normalized.seq, "conflict.normalized"],
+    [warnedResolution.seq, "conflict.resolved"],
+  ]) {
+    const pack = await call(
+      `/v1/sessions/${sessionIdA}/pack?profile=full&max_tokens=8000&through=${seq}&after=${seq - 1}`,
+      undefined,
+      authorA,
+    );
+    const publication = pack.items.find((item) => item.kind === "full-event");
+    assert.deepEqual(publication?.screening_notice, warning, type);
+    assert.equal(JSON.parse(publication.body).publication.type, type);
+  }
+
   // Diptych census over this journey's item faces (lu59 / 92x).
   {
     const census = await faceCensus({
@@ -618,6 +692,7 @@ await runLocalWorkerJourney(async (context) => {
       conflict_id: conflictId,
       problem_id: problemId,
       current_conflict_controls_verified: true,
+      exact_screening_notices_verified: true,
     }),
   );
 });

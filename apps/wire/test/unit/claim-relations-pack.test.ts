@@ -26,6 +26,7 @@ function fixture() {
       actor_fellow_id TEXT, actor_sponsor_id TEXT, actor_session_id TEXT,
       model_string_self_declared TEXT, harness TEXT);
     CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE screening_publications (event_id TEXT PRIMARY KEY, provenance_json TEXT);
     CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     INSERT INTO problems VALUES ('P-PACK', 'active', 10000);
   `);
@@ -155,7 +156,13 @@ test("exact-sequence graph reads used by the public relation face return only th
   assert.equal(edgeBodies(await f.pack(d.seq, d.seq)).length, 0);
 });
 
-for (const corruption of ["missing", "tampered", "redacted", "hidden"] as const) {
+for (const corruption of [
+  "missing",
+  "tampered",
+  "redacted",
+  "hidden",
+  "invalid-receipt",
+] as const) {
   test(`an unavailable dispute is disclosed without its reason or a false clean edge: ${corruption}`, async () => {
     const f = fixture(),
       edge = await f.pair(),
@@ -174,6 +181,8 @@ for (const corruption of ["missing", "tampered", "redacted", "hidden"] as const)
       f.sqlite
         .prepare("INSERT INTO content_controls VALUES ('P-PACK', ?, 'hidden', 1)")
         .run(`#${d.seq}`);
+    if (corruption === "invalid-receipt")
+      f.sqlite.prepare("INSERT INTO screening_publications VALUES (?, '{}')").run(d.id);
     const section = await f.pack(),
       body = edgeBodies(section)[0]!;
     assert.match(body, /Status: unavailable/);
@@ -198,14 +207,18 @@ for (const target of ["problem", "C-1", "C-2@1", "#3"]) {
   });
 }
 
-test("corrupt assertion bytes do not produce an empty-graph baseline", async () => {
-  const f = fixture(),
-    edge = await f.pair();
-  f.sqlite.prepare("UPDATE event_content SET payload_json='{}' WHERE event_id=?").run(edge.id);
-  const section = await f.pack();
-  assert.deepEqual(section.candidates, []);
-  assert.ok(section.omitted.some((o) => o.reason === "content_unavailable"));
-});
+for (const corruption of ["payload", "receipt"] as const) {
+  test(`corrupt assertion ${corruption} does not produce an empty-graph baseline`, async () => {
+    const f = fixture(),
+      edge = await f.pair();
+    if (corruption === "payload")
+      f.sqlite.prepare("UPDATE event_content SET payload_json='{}' WHERE event_id=?").run(edge.id);
+    else f.sqlite.prepare("INSERT INTO screening_publications VALUES (?, '{}')").run(edge.id);
+    const section = await f.pack();
+    assert.deepEqual(section.candidates, []);
+    assert.ok(section.omitted.some((o) => o.reason === "content_unavailable"));
+  });
+}
 
 test("only a genuinely available empty scope gets the existing empty baseline", async () => {
   const f = fixture(),

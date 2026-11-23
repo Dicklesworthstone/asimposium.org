@@ -245,6 +245,7 @@ await runLocalWorkerJourney(async (context) => {
 
   // 4b. Valid claim relation: claim1 implies claim2
   const relKey1 = "rel-assert-key-1";
+  await fixtures.setScreenMode("allow-with-warning");
   const filedRel1 = await call(
     `/v1/sessions/${sessionIdA}/relations`,
     {
@@ -257,7 +258,13 @@ await runLocalWorkerJourney(async (context) => {
     201,
     relKey1,
   );
+  await fixtures.setScreenMode("pass");
   RelationFiledResponseSchema.parse(filedRel1);
+  const relationWarning = {
+    action: "published-with-warning",
+    category: "dual-use-boundary",
+    notice: "screening-warning",
+  };
   assert.equal(filedRel1.kind, "implies");
   assert.equal(filedRel1.source, `${claim1Id}@1`);
   assert.equal(filedRel1.target, `${claim2Id}@1`);
@@ -343,6 +350,12 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.ok(impliesRow);
   assert.ok(impliesRow.body.includes("This edge is an assertion, not an established implication."));
+  assert.deepEqual(impliesRow.screening_notice, relationWarning);
+  const edgePath = (seq, format = "json") => `/p/${problemId}/relations/${seq}.${format}`;
+  const warnedEdge = await call(edgePath(filedRel1.seq));
+  assert.equal(warnedEdge.items.length, 1);
+  assert.equal(warnedEdge.items[0].id, impliesRow.id);
+  assert.deepEqual(warnedEdge.items[0].screening_notice, relationWarning);
 
   // 6. Dispute Lifecycle
   // 6a. Malformed dispute body (422)
@@ -470,6 +483,8 @@ await runLocalWorkerJourney(async (context) => {
   );
 
   // 6h. ReviewerB disputes addresses-gap relation
+  const gapDisputeReason = "Claim 2 lower bound does not prove lemma 2 for odd primes.";
+  await fixtures.setScreenMode("allow-with-warning");
   const gapDisputeResp = await call(
     `/v1/sessions/${sessionIdB}/relations/dispute`,
     {
@@ -477,14 +492,67 @@ await runLocalWorkerJourney(async (context) => {
       source_claim_id: claim2Id,
       source_version: 1,
       target: gapId,
-      reason: "Claim 2 lower bound does not prove lemma 2 for odd primes.",
+      reason: gapDisputeReason,
     },
     reviewerB,
     201,
   );
+  await fixtures.setScreenMode("pass");
   RelationDisputedResponseSchema.parse(gapDisputeResp);
   assert.equal(gapDisputeResp.status, "disputed");
   assert.equal(gapDisputeResp.target, gapId);
+  const exactGap = edgePath(filedRelGap.seq);
+  const foundGap = await call(exactGap);
+  assert.equal(foundGap.items.length, 2);
+  assert.equal(foundGap.items[0].kind, "claim-relation");
+  assert.equal(foundGap.items[0].screening_notice, undefined);
+  assert.ok(!foundGap.items[0].body.includes(gapDisputeReason));
+  assert.equal(foundGap.items[1].kind, "claim-relation-dispute");
+  assert.ok(foundGap.items[1].body.includes(`"seq":${gapDisputeResp.seq},`));
+  assert.ok(foundGap.items[1].body.includes(gapDisputeReason));
+  assert.deepEqual(foundGap.items[1].screening_notice, relationWarning);
+  const gapMarkdown = await worker.fetch(`${origin}${edgePath(filedRelGap.seq, "md")}`, {
+    headers: { "User-Agent": userAgent },
+  });
+  assert.equal(gapMarkdown.status, 200);
+  const text = await gapMarkdown.text();
+  const noticeIndex = text.indexOf("Published with a screening context notice");
+  assert.ok(noticeIndex >= 0 && noticeIndex < text.indexOf(gapDisputeReason));
+  const qualifiedPack = await call(
+    `/v1/sessions/${sessionIdB}/pack?profile=claim-graph&max_tokens=8000`,
+    undefined,
+    reviewerB,
+  );
+  PackResponseSchema.parse(qualifiedPack);
+  assert.deepEqual(
+    qualifiedPack.items.find((item) => item.id === foundGap.items[1].id)?.screening_notice,
+    relationWarning,
+  );
+  // The operator HTTP command accepts whole objects. Exercise the reader's
+  // exact event policy using local D1 controls, as the result-review lane does.
+  const disputeVisibility = (visibility, version) =>
+    env.DB.prepare(`INSERT INTO content_controls
+      (control_id, problem_id, target_kind, target_ref, visibility, source,
+       reason_category, actor, reason, version, created_at)
+      VALUES (?, ?, 'event', ?, ?, 'operator', 'privacy', 'relation-warning-fixture',
+        'Exercise the public visibility of an exact warned dispute.', ?, ?)`)
+      .bind(
+        `CC-relation-warning-${version}`,
+        problemId,
+        `#${gapDisputeResp.seq}`,
+        visibility,
+        version,
+        new Date().toISOString(),
+      )
+      .run();
+  await disputeVisibility("hidden", 1);
+  const hiddenDispute = await call(exactGap);
+  assert.equal(hiddenDispute.items.length, 1);
+  assert.ok(hiddenDispute.items[0].body.includes("Status: unavailable"));
+  assert.ok(!JSON.stringify(hiddenDispute).includes(gapDisputeReason));
+  assert.equal(hiddenDispute.items[0].screening_notice, undefined);
+  await disputeVisibility("visible", 2);
+  assert.deepEqual((await call(exactGap)).items, foundGap.items);
 
   // 7. Transition / Close Proof Gap
   const openGapState = async () => ({

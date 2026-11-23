@@ -19,6 +19,10 @@ import {
   writeLedgerEvent,
 } from "../krater/krater.ts";
 import { hiddenByContentControlSql } from "../krater/public-content.ts";
+import {
+  scanFieldsForCredentials,
+  secretShapedContentProblem,
+} from "../screening/credential-scan.ts";
 import { screenWithProvider } from "../screening/provider.ts";
 import {
   WORKERS_AI_MODEL_VERSION,
@@ -508,6 +512,23 @@ export class CommentaryService {
         input.supersedes_commentary_id,
       );
       if (refused) return { ok: false, response: refused };
+    }
+
+    const credentialFields: Record<string, string | undefined> = { body: input.body };
+    for (const [index, ref] of (input.relates_to ?? []).entries()) {
+      credentialFields[`relates_to[${index}].id`] = ref.id;
+      credentialFields[`relates_to[${index}].label`] = ref.label;
+    }
+    const secrets = scanFieldsForCredentials(credentialFields);
+    if (secrets.length > 0) {
+      return {
+        ok: false,
+        response: secretShapedContentProblem(
+          secrets,
+          { problem_id: input.problem_id, body: "<the same text with the credential removed>" },
+          COMMENTARY_SCHEMA_ID,
+        ),
+      };
     }
 
     // Every human-authored public field is screened, including link labels.

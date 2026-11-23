@@ -130,6 +130,31 @@ await runLocalWorkerJourney(async (context) => {
   const bearerData = await bearerResponse.json();
   assert.equal(bearerData.code, "WRONG_PRINCIPAL");
 
+  // These inert shapes exercise the sponsor prose and reference-label paths.
+  // A rejection identifies the field without echoing the stored-looking value.
+  const syntheticCredential = ["asimp", "ag", "A".repeat(26), "B".repeat(43)].join("_");
+  const beforeCredentialControls = await publicState();
+  const screensBeforeCredentialControls = await fixtures.screeningCalls();
+  const credentialCandidates = [
+    ["body", { body: `A pasted value: ${syntheticCredential}` }],
+    [
+      "relates_to[0].label",
+      {
+        body: "Ordinary commentary with a pasted reference label.",
+        relates_to: [{ kind: "problem", id: problemId, label: syntheticCredential }],
+      },
+    ],
+  ];
+  for (const [index, [field, candidate]] of credentialCandidates.entries()) {
+    const refused = await post(sponsorA, candidate, `commentary-credential-${index}`, 422);
+    assert.equal(ProblemDocumentSchema.parse(refused).code, "SECRET_SHAPED_CONTENT");
+    assert.equal(refused.schema, "https://a.asimposium.org/schemas/commentary.v1.json");
+    assert.ok(refused.secret_findings.some((finding) => finding.path === field));
+    assert.ok(!JSON.stringify(refused).includes(syntheticCredential));
+  }
+  assert.equal(await fixtures.screeningCalls(), screensBeforeCredentialControls);
+  assert.deepEqual(await publicState(), beforeCredentialControls);
+
   // 3. Authorized sponsor posts valid commentary
   const screensBeforePost = await fixtures.screeningCalls();
   const postResult = await sponsorCall(

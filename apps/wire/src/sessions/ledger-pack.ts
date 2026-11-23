@@ -916,6 +916,7 @@ export async function readLedgerPackSection(
             ? `Status: disputed. A dispute is recorded at #${relation.dispute!.seq}.`
             : "Status: asserted at this cursor.";
       const p = relation.provenance;
+      const dispute = relation.dispute;
       const body = [
         `Asserted relation: ${relation.source} ${relation.kind} ${relation.target}`,
         `Version pins: ${relation.pins}. ${status}`,
@@ -923,8 +924,8 @@ export async function readLedgerPackSection(
         `Provenance: ${problemId}#${relation.seq}; event=${relation.event}; fellow=${p.fellow ?? "unavailable"}; sponsor=${p.sponsor ?? "unavailable"}; session=${p.session ?? "unavailable"}`,
         `Self-declared model: ${p.model_self_declared ?? "unavailable"}`,
         `Self-declared harness: ${p.harness_self_declared ?? "unavailable"}`,
-        ...(relation.dispute
-          ? [`Recorded dispute (untrusted work product): ${JSON.stringify(relation.dispute)}`]
+        ...(dispute && dispute.screening_notice === undefined
+          ? [`Recorded dispute (untrusted work product): ${JSON.stringify(dispute)}`]
           : []),
         `Source read at cursor ${cursor}: ${claimRead(relation.source)}`,
         relation.target.startsWith("C-")
@@ -942,10 +943,27 @@ export async function readLedgerPackSection(
         untrusted: true,
         tokens: 1,
         body,
+        ...(relation.screening_notice === undefined
+          ? {}
+          : { screening_notice: relation.screening_notice }),
         why_included:
           "digest-checked relation assertion and available dispute at the pack cursor; not an established implication",
         stable_prefix: 20 + index,
       });
+      if (dispute?.screening_notice !== undefined) {
+        const { screening_notice, ...attributedDispute } = dispute;
+        candidates.push({
+          kind: "claim-relation-dispute",
+          id: dispute.event,
+          scope: "ledger",
+          untrusted: true,
+          tokens: 1,
+          body: `Dispute of ${problemId}#${relation.seq} (${relation.source} ${relation.kind} ${relation.target})\n${JSON.stringify(attributedDispute)}`,
+          why_included: "the recorded dispute with its own publication notice",
+          screening_notice,
+          stable_prefix: 20 + index,
+        });
+      }
     }
     if (result.scopeAvailable && result.relations.length === 0 && omitted.length === 0) {
       candidates.push({

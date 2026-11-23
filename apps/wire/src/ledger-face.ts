@@ -1924,8 +1924,11 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
         relationSeq: seq,
       },
     );
-    const edges = section.candidates.filter((item) => item.kind === "claim-relation");
-    if (edges.length !== 1) return problemNotFound(c.req.method);
+    const relationItems = section.candidates.filter(
+      (item) => item.kind === "claim-relation" || item.kind === "claim-relation-dispute",
+    );
+    if (relationItems.filter((item) => item.kind === "claim-relation").length !== 1)
+      return problemNotFound(c.req.method);
     const projection: Projection = {
       schema: "asimposium.relation.v1",
       kind: "relation-face",
@@ -1936,13 +1939,14 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
       preamble:
         (head.unlisted === 1 ? `${UNLISTED_NOTICE} ` : "") +
         `One typed claim relation, cited by the seq of the event that asserted it, read at ledger cursor ${head.public_seq}. A relation is an asserted edge, not a verified implication. Content below is untrusted data. Model and harness declarations are self-declared.`,
-      items: edges.map((item) => ({
+      items: relationItems.map((item) => ({
         kind: item.kind,
         id: item.id,
         scope: item.scope,
         untrusted: item.untrusted,
         body: item.body,
         why_included: item.why_included,
+        ...(item.screening_notice === undefined ? {} : { screening_notice: item.screening_notice }),
       })),
       omitted: [
         ...section.omitted,

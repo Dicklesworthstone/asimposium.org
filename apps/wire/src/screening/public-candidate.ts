@@ -146,6 +146,11 @@ function supportsPublishedWarning(
       (holdContext?.route === "review" || holdContext?.route === "statement-review")) ||
     // A question's exact publication notice is carried by its canonical readers.
     (kind === "question" && holdContext?.route === "questions") ||
+    // Conflict normalization and resolution render their own immutable notices.
+    (kind === "conflict" && holdContext?.route === "conflicts") ||
+    // The claim graph and exact relation faces preserve each event's notice.
+    (kind === "relation" && holdContext?.route === "relations") ||
+    (kind === "relation-dispute" && holdContext?.route === "relations/dispute") ||
     // Self-corrections preserve their exact publication notice on canonical
     // retraction faces, event history and exports; the notice is not a verdict.
     (kind === "retraction" && holdContext?.route === "retract")

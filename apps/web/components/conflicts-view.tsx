@@ -8,6 +8,7 @@ import {
 import Link from "next/link";
 import { publicEventPath } from "@/lib/event-history";
 import type { PublicRead } from "@/lib/public-ledger";
+import { ScreeningNotice } from "./screening-notice";
 import { ScientificBody } from "./scientific-body";
 
 const STATUS_LABELS = {
@@ -80,6 +81,7 @@ export function ConflictRecord({ item, cursor }: {
       </Link>
     </li>)}</ul>
     <p className="quiet">Read the evidence and computed standing of each exact claim. Recording this disagreement does not itself refute either claim.</p>
+    <ScreeningNotice notice={item.screening_notice} />
     <section aria-labelledby={`${prefix}-alignment`}>
       <h3 id={`${prefix}-alignment`}>Alignment before disagreement</h3>
       <h4>Definitions</h4><ScientificBody body={item.aligned_definitions} namespace={`${prefix}-definitions`} />
@@ -96,6 +98,7 @@ export function ConflictRecord({ item, cursor }: {
     {item.status !== "open" && <section aria-labelledby={`${prefix}-resolution`}>
       <h3 id={`${prefix}-resolution`}>{item.status === "resolved" ? "Recorded resolution account" : "Recorded uncertainty account"}</h3>
       <p>A recorded resolution explains how the disagreement was addressed. It does not resolve the research problem or establish either claim as true.</p>
+      <ScreeningNotice notice={item.resolution_event?.screening_notice} />
       {item.resolution == null ? <p>The resolution account is unavailable in this record.</p> :
         <ScientificBody body={item.resolution} namespace={`${prefix}-resolution-body`} />}
       <ResolutionAttribution item={item} />

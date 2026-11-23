@@ -298,6 +298,36 @@ describe("W5.5 Conflicts contracts", () => {
           conflicts: [resolved],
         }).success,
       ).toBe(false);
+      const normalizationNotice = {
+        action: "published-with-warning",
+        category: "dual-use-boundary",
+        notice: "screening-warning",
+      } as const;
+      const resolutionNotice = {
+        action: "published-with-warning",
+        category: "off-topic",
+        notice: "off-scope",
+      } as const;
+      const warned = {
+        ...resolved,
+        screening_notice: normalizationNotice,
+        resolution_event: {
+          ...resolution_event,
+          screening_notice: resolutionNotice,
+        },
+      };
+      const parsed = ConflictItemSchema.parse(warned);
+      expect(parsed.screening_notice).toEqual(normalizationNotice);
+      expect(parsed.resolution_event?.screening_notice).toEqual(resolutionNotice);
+      expect(
+        ConflictItemSchema.safeParse({
+          ...warned,
+          resolution_event: {
+            ...warned.resolution_event,
+            screening_notice: { ...resolutionNotice, detector_score: 0.7 },
+          },
+        }).success,
+      ).toBe(false);
     });
 
     test("a withheld or filtered page can advance without inventing an empty collection", () => {

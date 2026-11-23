@@ -463,6 +463,7 @@ export function scanFieldsForCredentials(
 export function secretShapedContentProblem(
   findings: readonly CredentialFinding[],
   example: Record<string, unknown> = { body_md: "<the same text with the credential removed>" },
+  schema = "https://a.asimposium.org/schemas/sessions.v1.json",
 ): Response {
   const first = findings[0];
   const where =
@@ -478,7 +479,7 @@ export function secretShapedContentProblem(
       "Remove the credential and resubmit with a new Idempotency-Key. If it was a live credential, revoke it now: it was sent to this server.",
     rule: "P7",
     extensions: {
-      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      schema,
       example,
       secret_findings: findings.slice(0, 20).map((finding) => ({
         path: diagnosticPath(finding.path),

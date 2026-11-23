@@ -1,5 +1,7 @@
+import type { ScreeningPublicationNotice } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { hiddenByContentControlSql } from "../krater/public-content.ts";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 import {
   type ClaimRelationKindName,
   isClaimRelationKind,
@@ -29,12 +31,14 @@ export interface ReadClaimRelation {
   readonly pins: "current" | "superseded" | "unavailable";
   readonly status: "asserted" | "disputed" | "unavailable";
   readonly provenance: RelationProvenance;
+  readonly screening_notice?: ScreeningPublicationNotice;
   readonly dispute?: {
     readonly event: string;
     readonly seq: number;
     readonly reason: string;
     readonly refuting_evidence_id: string | null;
     readonly provenance: RelationProvenance;
+    readonly screening_notice?: ScreeningPublicationNotice;
   };
 }
 export interface ClaimRelationsRead {
@@ -116,20 +120,30 @@ sized AS MATERIALIZED (
     d.actor_fellow_id AS dispute_fellow, d.actor_sponsor_id AS dispute_sponsor,
     d.actor_session_id AS dispute_session, d.model_string_self_declared AS dispute_model,
     d.harness AS dispute_harness,
+    CASE WHEN length(CAST(asr.provenance_json AS BLOB)) > 4096 THEN ''
+      ELSE asr.provenance_json END AS assertion_screening,
+    CASE WHEN length(CAST(dsr.provenance_json AS BLOB)) > 4096 THEN ''
+      ELSE dsr.provenance_json END AS dispute_screening,
     EXISTS (SELECT 1 FROM events extra JOIN scope s ON s.id = extra.problem_id
       WHERE extra.problem_id = a.problem_id AND extra.object_id = a.object_id
         AND extra.object_kind = 'relation' AND extra.type = 'relation.disputed'
         AND extra.seq > a.seq AND extra.seq <= s.cut AND extra.id <> a.dispute_id) AS extra_dispute,
     CASE WHEN a.ordinal <= ${CLAIM_RELATION_READ_LIMIT} AND a.visible = 1 AND c.redacted_at IS NULL
       AND length(CAST(c.payload_json AS BLOB)) <= ${CLAIM_RELATION_BODY_BYTES}
-      THEN length(CAST(c.payload_json AS BLOB)) END AS assertion_bytes,
+      THEN length(CAST(c.payload_json AS BLOB))
+        + COALESCE(CASE WHEN length(CAST(asr.provenance_json AS BLOB)) <= 4096
+          THEN length(CAST(asr.provenance_json AS BLOB)) END, 0) END AS assertion_bytes,
     CASE WHEN a.ordinal <= ${CLAIM_RELATION_READ_LIMIT} AND a.visible = 1 AND dc.redacted_at IS NULL
       AND NOT ${hiddenByContentControlSql("a.problem_id", "'#' || d.seq")}
       AND length(CAST(dc.payload_json AS BLOB)) <= ${CLAIM_RELATION_BODY_BYTES}
-      THEN length(CAST(dc.payload_json AS BLOB)) END AS dispute_bytes
+      THEN length(CAST(dc.payload_json AS BLOB))
+        + COALESCE(CASE WHEN length(CAST(dsr.provenance_json AS BLOB)) <= 4096
+          THEN length(CAST(dsr.provenance_json AS BLOB)) END, 0) END AS dispute_bytes
   FROM metadata a LEFT JOIN events d ON d.id = a.dispute_id
   LEFT JOIN event_content c ON c.event_id = a.id AND c.payload_sha256 = a.payload_sha256
   LEFT JOIN event_content dc ON dc.event_id = d.id AND dc.payload_sha256 = d.payload_sha256
+  LEFT JOIN screening_publications asr ON asr.event_id = a.id
+  LEFT JOIN screening_publications dsr ON dsr.event_id = d.id
 ),
 budgeted AS MATERIALIZED (
   SELECT *, SUM(COALESCE(assertion_bytes, 0) + COALESCE(dispute_bytes, 0)) OVER (ORDER BY ordinal) AS cumulative_bytes
@@ -141,6 +155,8 @@ SELECT s.id AS scope_id, s.cut AS through, b.id AS event_id, b.seq, b.object_id,
   b.actor_session_id AS session, b.model_string_self_declared AS model, b.harness,
   b.dispute_id, b.dispute_seq, b.dispute_version, b.dispute_sha256, b.dispute_fellow, b.dispute_sponsor,
   b.dispute_session, b.dispute_model, b.dispute_harness, b.extra_dispute,
+  CASE WHEN c.event_id IS NOT NULL THEN b.assertion_screening END AS assertion_screening,
+  CASE WHEN dc.event_id IS NOT NULL THEN b.dispute_screening END AS dispute_screening,
   CASE WHEN b.assertion_bytes IS NOT NULL
     AND b.cumulative_bytes - COALESCE(b.dispute_bytes, 0) <= ${CLAIM_RELATION_TOTAL_BYTES}
     THEN c.payload_json END AS payload_json,
@@ -164,6 +180,7 @@ interface RelationRow {
   object_version: number;
   payload_sha256: string;
   payload_json: string | null;
+  assertion_screening: string | null;
   visible: number;
   assertion_count: number;
   source_head: number | null;
@@ -180,6 +197,7 @@ interface RelationRow {
   dispute_version: number;
   dispute_sha256: string;
   dispute_json: string | null;
+  dispute_screening: string | null;
   extra_dispute: number;
   dispute_fellow: string | null;
   dispute_sponsor: string | null;
@@ -250,6 +268,15 @@ function edgePayload(value: Record<string, unknown> | null, objectId: string) {
   };
 }
 
+/** Legacy absence is undefined. A corrupt receipt makes its content unavailable. */
+function relationNotice(raw: string | null): ScreeningPublicationNotice | undefined | null {
+  try {
+    return publicationScreeningNotice(raw);
+  } catch {
+    return null;
+  }
+}
+
 /** One database snapshot, no projection fallback and no per-edge reads. */
 export async function readClaimRelations(
   db: D1Database,
@@ -308,7 +335,9 @@ export async function readClaimRelations(
     previous = row.seq;
     bytes +=
       new TextEncoder().encode(row.payload_json ?? "").length +
-      new TextEncoder().encode(row.dispute_json ?? "").length;
+      new TextEncoder().encode(row.dispute_json ?? "").length +
+      new TextEncoder().encode(row.assertion_screening ?? "").length +
+      new TextEncoder().encode(row.dispute_screening ?? "").length;
     if (bytes > CLAIM_RELATION_TOTAL_BYTES)
       throw new Error("The relation snapshot exceeds its byte budget.");
     const body =
@@ -316,7 +345,8 @@ export async function readClaimRelations(
         ? await checkedBody(row.payload_json, row.payload_sha256)
         : null;
     const edge = edgePayload(body, row.object_id);
-    if (!edge) {
+    const notice = relationNotice(row.assertion_screening);
+    if (!edge || notice === null) {
       output.omitted.push({
         reason: "content_unavailable",
         detail: `typed-relations:${row.event_id}`,
@@ -352,8 +382,10 @@ export async function readClaimRelations(
         row.dispute_seq <= row.through
           ? await checkedBody(row.dispute_json, row.dispute_sha256)
           : null;
+      const disputeNotice = relationNotice(row.dispute_screening);
       if (
         payload &&
+        disputeNotice !== null &&
         edgePayload(payload, row.object_id) &&
         typeof payload.disputed_by === "string" &&
         payload.disputed_by.length > 0 &&
@@ -373,6 +405,7 @@ export async function readClaimRelations(
           reason: payload.reason,
           refuting_evidence_id:
             typeof payload.refuting_evidence_id === "string" ? payload.refuting_evidence_id : null,
+          ...(disputeNotice === undefined ? {} : { screening_notice: disputeNotice }),
           provenance: {
             fellow: row.dispute_fellow,
             sponsor: row.dispute_sponsor,
@@ -395,6 +428,7 @@ export async function readClaimRelations(
       target: edge.target,
       pins,
       status,
+      ...(notice === undefined ? {} : { screening_notice: notice }),
       provenance: {
         fellow: row.fellow,
         sponsor: row.sponsor,
