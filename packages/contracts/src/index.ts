@@ -1308,6 +1308,8 @@ export {
   ReviseRequestSchema,
   type ReviseResponse,
   ReviseResponseSchema,
+  type SessionClosePublicationReceipt,
+  SessionClosePublicationReceiptSchema,
   type SessionCloseRequest,
   SessionCloseRequestSchema,
   type SessionCloseResponse,

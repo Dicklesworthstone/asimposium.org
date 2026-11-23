@@ -29,6 +29,7 @@ import {
   ReviseRequestSchema,
   ReviseResponseSchema,
   SessionCloseRequestSchema,
+  SessionCloseResponseSchema,
   SessionHeartbeatRequestSchema,
   SessionHeartbeatResponseSchema,
   SessionIntentSchema,
@@ -494,6 +495,35 @@ test("session loop contracts pin the golden fixtures", async () => {
   );
   expect(PromoteRequestSchema.safeParse(await fixture(VALID_PROMOTE)).success).toBe(true);
   expect(SessionCloseRequestSchema.safeParse(await fixture(VALID_CLOSE)).success).toBe(true);
+});
+
+test("mixed close receipts preserve each typed result and historical claim-only receipts", async () => {
+  const valid = await fixture(
+    new URL("../fixtures/valid/session-close-mixed-response.json", import.meta.url),
+  );
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/session-close-mixed-response.json", import.meta.url),
+  );
+  const doc = (await fixture(GENERATED_SESSIONS_SCHEMA)) as {
+    properties: { session_close_response: object };
+  };
+  const validate = new Ajv2020({ strict: false, validateFormats: false }).compile(
+    doc.properties.session_close_response,
+  );
+  expect(SessionCloseResponseSchema.safeParse(valid).success).toBe(true);
+  expect(validate(valid)).toBe(true);
+  const parsed = SessionCloseResponseSchema.parse(valid);
+  const { publications: _publications, ...historical } = parsed;
+  expect(SessionCloseResponseSchema.parse(historical)).toEqual(historical);
+  expect(validate(historical)).toBe(true);
+  for (const value of [
+    invalid,
+    { ...parsed, promoted: ["H-1"] },
+    { ...parsed, publications: [] },
+  ]) {
+    expect(SessionCloseResponseSchema.safeParse(value).success).toBe(false);
+    expect(validate(value)).toBe(false);
+  }
 });
 
 test("session loop contracts refuse the invalid fixtures", async () => {

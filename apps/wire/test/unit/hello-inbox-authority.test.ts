@@ -34,7 +34,7 @@ async function fixture() {
           const hook = beforeSummary;
           beforeSummary = undefined;
           await hook?.();
-          return first<T>(columnName);
+          return columnName === undefined ? first<T>() : first<T>(columnName);
         };
       }
       return statement;

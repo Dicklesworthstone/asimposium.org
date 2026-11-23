@@ -1128,11 +1128,24 @@ export const SessionCloseRequestSchema = z
   .strict();
 export type SessionCloseRequest = z.infer<typeof SessionCloseRequestSchema>;
 
+/** A close can publish several kinds of saved research. Keep the original
+ * claim-ID list while returning each exact draft's ordinary typed receipt. */
+export const SessionClosePublicationReceiptSchema = z
+  .object({
+    workshop_id: WorkshopObjectIdSchema,
+    workshop_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    publication: SponsorWorkshopPromotionReceiptSchema,
+  })
+  .strict();
+export type SessionClosePublicationReceipt = z.infer<typeof SessionClosePublicationReceiptSchema>;
+
 export const SessionCloseResponseSchema = z
   .object({
     session_id: SessionIdSchema,
     closed_at: z.string().datetime(),
     promoted: z.array(ClaimIdSchema),
+    /** Present when a close includes non-claim research; claim-only receipts retain their shape. */
+    publications: z.array(SessionClosePublicationReceiptSchema).min(1).max(16).optional(),
   })
   .strict();
 

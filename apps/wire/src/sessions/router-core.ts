@@ -12211,6 +12211,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     input: EvidenceExecutionInput,
     pendingHypotheses: ReadonlySet<string> = new Set(),
     pendingClaim?: PendingClaimCreate,
+    evidenceId = mintId("E"),
   ): Promise<PreparedSimpleCreate | Response> {
     const { auth, db, digest, session, data } = input;
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
@@ -12477,7 +12478,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       ),
       falsifier: null,
     };
-    const evidenceId = mintId("E");
     const eventId = input.stableEventId ?? mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("evidence", claimToken);
@@ -17910,19 +17910,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           kind === "not-found"
             ? "Every selected id must name a workshop object owned by this Fellow and session."
             : kind === "changed"
-              ? "No selected claim, workshop transition, handback, lease release, or session close was committed by this attempt."
-              : "Promote accepts one to sixteen distinct open claim-drafts with a complete typed new-claim publication or explicit claim replacement. Promote, keep and discard selections must be disjoint.",
+              ? "No selected publication, workshop transition, handback, lease release, or session close was committed by this attempt."
+              : "Promote accepts one to sixteen distinct open drafts with complete typed claim, hypothesis, evidence or dead-end publications, or explicit claim replacements. Promote, keep and discard selections must be disjoint.",
         fixHint:
           kind === "not-found"
             ? "Read your current workshop and remove unavailable ids before retrying."
             : kind === "changed"
               ? "Read the current workshop revisions and retry the intended close with a new Idempotency-Key."
-              : "Save a new claim in the draft's publication field or an explicit claim replacement in its revision field, then close with owned, distinct workshop ids.",
+              : "Save the typed research payload in the draft's publication field or an explicit claim replacement in its revision field, then close with owned, distinct workshop ids. Evidence and retry conditions must name already published targets.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           example: {
-            handback: "The selected claims are ready for independent review.",
+            handback: "The selected research is ready for independent review.",
             promote: ["W-abcdefghijklmnopqrstuvwxyz"],
             keep: [],
             discard: [],
@@ -17979,7 +17979,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     let session: SessionRow | undefined;
     let reservations: readonly QuotaReservation[] = [];
     const preparedMembers: {
-      readonly input: ClaimCreateExecutionInput | FellowClaimRevisionExecutionInput;
+      readonly input: SimpleCreateInput;
       readonly prepared: PreparedSimpleCreate;
     }[] = [];
     const settleFailed = async () => {
@@ -18106,6 +18106,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
       const normalized = new Set<string>();
       const revisedClaims = new Set<string>();
+      const normalizedDeadEnds = new Set<string>();
+      const supersededDeadEnds = new Set<string>();
       for (const [index, publication] of publications.entries()) {
         const pin = owner.publications[index];
         if (!pin) throw new Error("Pending close has no publication identity");
@@ -18118,7 +18120,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           digest,
           stableEventId: pin.eventId,
         };
-        let input: ClaimCreateExecutionInput | FellowClaimRevisionExecutionInput;
+        let input: SimpleCreateInput;
         let prepared: PreparedSimpleCreate | Response;
         if (publication.kind === "revise") {
           if (revisedClaims.has(publication.data.claim_id)) {
@@ -18154,7 +18156,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           input = revisionInput;
           prepared = await prepareClaimRevisionCreate(revisionInput);
           revisedClaims.add(publication.data.claim_id);
-        } else {
+        } else if (publication.kind === "create") {
           const claimInput: ClaimCreateExecutionInput = {
             ...common,
             sessionOpenedPublicCursor: session.opened_public_cursor,
@@ -18166,11 +18168,36 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           };
           input = claimInput;
           prepared = await prepareClaimCreate(claimInput);
+        } else if (publication.kind === "hypothesis") {
+          const hypothesisInput: HypothesisExecutionInput = { ...common, data: publication.data };
+          input = hypothesisInput;
+          prepared = await prepareHypothesisCreate(hypothesisInput, `H-${pin.eventId.slice(2)}`);
+        } else if (publication.kind === "evidence") {
+          const evidenceInput: EvidenceExecutionInput = { ...common, data: publication.data };
+          input = evidenceInput;
+          // The pending close pins the event identity before screening. Use
+          // that identity for the evidence object too, so retries cannot mint
+          // a different object for the same retained publication.
+          prepared = await prepareEvidenceCreate(evidenceInput, new Set(), undefined, pin.eventId);
+        } else {
+          const deadEndInput: DeadEndExecutionInput = {
+            ...common,
+            data: publication.data,
+            workshopPublication: {
+              workshopId: pin.workshopId,
+              version: pin.version,
+              publicationJson: publication.publicationJson,
+              publicationDigest: pin.publicationDigest,
+            },
+          };
+          input = deadEndInput;
+          prepared = await prepareDeadEndCreate(deadEndInput, `DE-${pin.eventId.slice(2)}`);
         }
         if (prepared instanceof Response) return (await replay()) ?? prepared;
         const content = prepared.claimContent ?? prepared.revisionContent;
-        if (!content) throw new Error("Prepared close claim has no content");
-        if (normalized.has(content.candidateHash)) {
+        if ((publication.kind === "create" || publication.kind === "revise") && !content)
+          throw new Error("Prepared close claim has no content");
+        if (content && normalized.has(content.candidateHash)) {
           return (
             (await replay()) ??
             privateNoStore(
@@ -18189,7 +18216,34 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             )
           );
         }
-        normalized.add(content.candidateHash);
+        if (content) normalized.add(content.candidateHash);
+        if (prepared.deadEndNormHash !== undefined) {
+          const duplicate = normalizedDeadEnds.has(prepared.deadEndNormHash);
+          const predecessor = prepared.deadEndData?.supersedes_dead_end_id;
+          if (duplicate || (predecessor !== undefined && supersededDeadEnds.has(predecessor)))
+            return (
+              (await replay()) ??
+              privateNoStore(
+                validatedProblem({
+                  status: 409,
+                  code: duplicate ? "DUPLICATE_DEAD_END" : "OBJECT_VERSION_CONFLICT",
+                  title: duplicate
+                    ? "Selected drafts repeat a negative route"
+                    : "Selected drafts replace the same dead end",
+                  detail: "No selected publications or session-close actions were committed.",
+                  fixHint:
+                    "Select one complete negative result for this route and keep the other draft private.",
+                  rule: duplicate ? "P11" : "P6",
+                  extensions: {
+                    schema: "https://a.asimposium.org/schemas/dead-ends.v1.json",
+                    example: { promote: [pin.workshopId], keep: [], discard: [] },
+                  },
+                }),
+              )
+            );
+          normalizedDeadEnds.add(prepared.deadEndNormHash);
+          if (predecessor !== undefined) supersededDeadEnds.add(predecessor);
+        }
         preparedMembers.push({ input, prepared });
       }
       // Capture selected versions and the shared private-feed cursor before
@@ -18207,6 +18261,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ? { revisionJson: publication.revisionJson }
             : { publicationJson: publication.publicationJson }),
           eventId: owner.publications[index]!.eventId,
+          kind:
+            publication.kind === "create" || publication.kind === "revise"
+              ? "claim"
+              : publication.kind,
         })),
         closedAt: new Date().toISOString(),
       });
@@ -18259,6 +18317,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         return screeningContextUnavailableProblem(error);
       }
       const commands: KraterLedgerBatchMember[] = [];
+      const publicationReceipts = new Map<number, unknown>();
       for (const [index, item] of preparedMembers.entries()) {
         const reservation = reservations[index];
         if (!reservation) throw new Error("Close admission did not reserve every publication");
@@ -18292,7 +18351,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           return (await replay()) ?? screened;
         }
         commands.push({
-          ...screenedSimpleCommand(item.input, item.prepared, screened, reservation),
+          ...screenedSimpleCommand(
+            item.input,
+            item.prepared,
+            screened,
+            reservation,
+            undefined,
+            (sequence, value) => publicationReceipts.set(sequence, value),
+          ),
           causedByEventIds: [],
         });
       }
@@ -18309,7 +18375,35 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           const body = SessionCloseResponseSchema.parse({
             session_id: sessionId,
             closed_at: closedAt,
-            promoted: settlements.map((settlement) => settlement.claimId),
+            promoted: settlements.flatMap((settlement, index) =>
+              publications[index]?.kind === "create" || publications[index]?.kind === "revise"
+                ? [settlement.claimId]
+                : [],
+            ),
+            ...(publications.some(({ kind }) => kind !== "create" && kind !== "revise")
+              ? {
+                  publications: settlements.map((settlement, index) => {
+                    const publication = publications[index]!;
+                    const result = publicationReceipts.get(settlement.sequence);
+                    if (result === undefined)
+                      throw new Error("Session close publication receipt is unavailable");
+                    return {
+                      workshop_id: publication.pin.workshopId,
+                      workshop_version: publication.pin.version,
+                      publication:
+                        publication.kind === "create" || publication.kind === "revise"
+                          ? result
+                          : {
+                              object_kind: publication.kind,
+                              problem_id: problemId,
+                              seq: settlement.sequence,
+                              version: 1,
+                              result,
+                            },
+                    };
+                  }),
+                }
+              : {}),
           });
           const sealed = await options.replayProtector.seal(
             JSON.stringify(body),
@@ -18503,6 +18597,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             if (content instanceof Response) return content;
             if (error instanceof Error && /CLAIM_DEPENDENCY_CYCLE/.test(error.message))
               return content.dependencyCycleProblem();
+          }
+          if (prepared.deadEndData) {
+            const refusal = await validateDeadEndPreconditions(
+              db,
+              session.problem_id,
+              principal,
+              prepared.deadEndData,
+            );
+            if (refusal instanceof Response) return refusal;
           }
           if (prepared.targetGuard && !(await prepared.targetGuard.isLive()))
             return screeningContextStaleProblem();

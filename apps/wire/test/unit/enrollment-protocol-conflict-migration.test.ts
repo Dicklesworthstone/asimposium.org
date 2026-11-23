@@ -44,36 +44,36 @@ function history(f: Fixture) {
  * The shared fixture models parent tables and writer ports, not native D1. */
 async function legacyConflicts(f: Fixture) {
   let adaptedInserts = 0;
-  const db: D1Database = {
-    ...f.db,
-    prepare(query) {
-      const insert =
-        /^INSERT INTO protocol_conflicts \(([^)]+)\)\s+SELECT [?,]+ FROM events WHERE id = \? AND seq = \?$/.exec(
-          query,
-        );
-      if (!insert) return f.db.prepare(query);
-      const columns = insert[1]!.split(",");
-      const retained = columns
-        .map((name, index) => ({ name, index }))
-        .filter(({ name }) => !newColumns.has(name));
-      expect(columns.length - retained.length).toBe(4);
-      const statement = f.db.prepare(
-        `INSERT INTO protocol_conflicts (${retained.map(({ name }) => name).join(",")})
-          SELECT ${retained.map(() => "?").join(",")} FROM events WHERE id = ? AND seq = ?`,
+  function prepare(query: string) {
+    const insert =
+      /^INSERT INTO protocol_conflicts \(([^)]+)\)\s+SELECT [?,]+ FROM events WHERE id = \? AND seq = \?$/.exec(
+        query,
       );
-      return {
-        ...statement,
-        bind(...values) {
-          expect(values).toHaveLength(columns.length + 2);
-          adaptedInserts++;
-          return statement.bind(
-            ...retained.map(({ index }) => values[index]),
-            ...values.slice(columns.length),
-          );
-        },
-      };
+    if (!insert) return f.db.prepare(query);
+    const columns = insert[1]!.split(",");
+    const retained = columns
+      .map((name, index) => ({ name, index }))
+      .filter(({ name }) => !newColumns.has(name));
+    expect(columns.length - retained.length).toBe(4);
+    const statement = f.db.prepare(
+      `INSERT INTO protocol_conflicts (${retained.map(({ name }) => name).join(",")})
+          SELECT ${retained.map(() => "?").join(",")} FROM events WHERE id = ? AND seq = ?`,
+    );
+    const bind = statement.bind.bind(statement);
+    statement.bind = (...values) => {
+      expect(values).toHaveLength(columns.length + 2);
+      adaptedInserts++;
+      return bind(...retained.map(({ index }) => values[index]), ...values.slice(columns.length));
+    };
+    return statement;
+  }
+  const db: D1Database = new Proxy(f.db, {
+    get(target, property) {
+      if (property === "prepare") return prepare;
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
     },
-  };
+  });
   const requests = [f.directive({ problem: null, verb: "focus" }), f.directive({ verb: "forbid" })];
   const receipts = [];
   for (const [index, request] of requests.entries())
@@ -135,7 +135,9 @@ test("enrollment refusal migration preserves every legacy source, publication an
     expect(f.sql.query("PRAGMA foreign_keys").get()).toEqual({ foreign_keys: 1 });
     expect(f.sql.query("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
     const counts = { ...f.counts };
-    for (const [index, request] of requests.entries())
+    for (const [index, request] of requests.entries()) {
+      const receipt = receipts[index];
+      if (receipt === undefined) throw new Error("The legacy conflict has no original receipt.");
       expect(
         await recordProtocolConflict(
           f.options,
@@ -144,7 +146,8 @@ test("enrollment refusal migration preserves every legacy source, publication an
           request,
           `legacy-conflict-${index}`,
         ),
-      ).toEqual(receipts[index]);
+      ).toEqual(receipt);
+    }
     expect(f.counts).toEqual(counts);
     expect(history(f)).toEqual(originalHistory);
     expect(() => f.sql.exec("UPDATE protocol_conflicts SET directive_id=directive_id")).toThrow(

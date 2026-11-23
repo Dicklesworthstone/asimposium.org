@@ -43,8 +43,9 @@ async function fixture() {
   });
   const issued = await f.service.poll({ flow_handle: claim.flowHandle });
   if (issued.status !== "approved") throw new Error("Reviewer approval did not issue a token.");
-  const reviewer = await f.service.credentialBinding(issued.token);
-  if (!reviewer) throw new Error("Reviewer credential is unavailable.");
+  const reviewerBinding = await f.service.credentialBinding(issued.token);
+  if (!reviewerBinding) throw new Error("Reviewer credential is unavailable.");
+  const reviewer = reviewerBinding;
   const app = new Hono<{ Bindings: Env }>()
     .route("/", createEnrollmentRouter({ service: f.service, db: f.db }))
     .route("/", createInboxRouter({ service: f.service, db: f.db }))
@@ -60,7 +61,7 @@ async function fixture() {
   async function call(path: string, body?: unknown, token = f.token) {
     const background: Promise<unknown>[] = [];
     const response = await app.fetch(
-      new Request(new URL(path, ORIGIN), {
+      new Request(new URL(path, ORIGIN).toString(), {
         method: body === undefined ? "GET" : "POST",
         headers: {
           authorization: "Bearer " + token,
@@ -153,7 +154,7 @@ describe("hello consumes canonical unread feedback", () => {
     const inbox = InboxResponseSchema.parse(await inboxResponse.json());
     expect(inbox.items.map((item) => item.id)).toEqual([review.notice.id]);
     expect(
-      inbox.items[0]?.next_actions.some((item) => item.url.includes(`/reviews/${review.id}`)),
+      inbox.items[0]?.next_actions?.some((item) => item.url.includes(`/reviews/${review.id}`)),
     ).toBe(true);
     const triageResponse = await f.call("/v1/triage");
     expect(triageResponse.status).toBe(200);
@@ -198,8 +199,9 @@ describe("hello consumes canonical unread feedback", () => {
     const hello = await f.hello();
     expect(hello.inbox?.unacknowledged_count).toBe(1);
     expect(hello.unread_reviews).toEqual([]);
+    if (hello.inbox === undefined) throw new Error("Hello did not include its inbox summary.");
     const inbox = InboxResponseSchema.parse(await (await f.call(INBOX_PATH)).json());
-    expect(inbox.unacknowledged_count).toBe(hello.inbox?.unacknowledged_count);
+    expect(inbox.unacknowledged_count).toBe(hello.inbox.unacknowledged_count);
     expect(inbox.items.map((item) => item.title)).toEqual(["Recovery notice"]);
   });
 

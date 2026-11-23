@@ -1245,7 +1245,7 @@ describe("W4.7 Session heartbeat and presence", () => {
     expect(
       await f.db
         .prepare("SELECT leased_until FROM questions WHERE question_id = 'Q-ACTIVE'")
-        .first(),
+        .first<{ leased_until: string }>(),
     ).toEqual({ leased_until: activeExpiry });
 
     // Verify Q-EXPIRED was NOT extended
@@ -1262,7 +1262,7 @@ describe("W4.7 Session heartbeat and presence", () => {
     expect(
       await f.db
         .prepare("SELECT leased_until FROM leases WHERE object_id = 'Q-OTHER-SESSION'")
-        .first(),
+        .first<{ leased_until: string }>(),
     ).toEqual({ leased_until: activeExpiry });
   });
 

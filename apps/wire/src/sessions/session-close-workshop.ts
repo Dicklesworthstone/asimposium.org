@@ -14,7 +14,7 @@ export interface SessionCloseWorkshopPromotion {
   readonly publicationJson?: string;
   readonly revisionJson?: string;
   readonly eventId: string;
-  readonly kind?: "claim" | "dead-end";
+  readonly kind?: "claim" | "hypothesis" | "evidence" | "dead-end";
 }
 
 export interface SessionCloseWorkshopPlan {
@@ -139,13 +139,18 @@ export async function prepareSessionCloseWorkshopActions(
               ON source.workshop_id=w.workshop_id AND source.version=w.current_version
             JOIN events e ON e.id=x.event_id AND e.problem_id=w.problem_id
               AND e.type=CASE WHEN x.kind='dead-end' THEN 'dead_end.recorded'
+                WHEN x.kind='hypothesis' THEN 'hypothesis.created'
+                WHEN x.kind='evidence' THEN 'evidence.created'
                 WHEN x.revision IS NULL THEN 'claim.created' ELSE 'claim.revised' END
-              AND e.object_kind=CASE WHEN x.kind='dead-end' THEN 'dead_end' ELSE 'claim' END
+              AND e.object_kind=CASE WHEN x.kind='dead-end' THEN 'dead_end' ELSE x.kind END
             WHERE w.workshop_id=x.id AND w.current_version=x.version
               AND w.state='open'
-              AND w.type=CASE WHEN x.kind='dead-end' THEN 'dead-end-draft' ELSE 'claim-draft' END
-              AND (x.kind='claim' OR (x.kind='dead-end' AND x.revision IS NULL
-                AND json_extract(w.publication_json,'$.object_kind')='dead-end'))
+              AND ((x.kind='claim' AND w.type='claim-draft')
+                OR (x.kind='dead-end' AND w.type='dead-end-draft')
+                OR (x.kind='hypothesis' AND w.type IN ('scratch','note'))
+                OR (x.kind='evidence' AND w.type='evidence-draft'))
+              AND (x.kind='claim' OR (x.revision IS NULL
+                AND json_extract(w.publication_json,'$.object_kind')=x.kind))
               AND w.revision_json IS x.revision AND source.revision_json IS x.revision
               AND w.publication_json IS x.publication AND source.publication_json IS x.publication
               AND (x.revision IS NOT NULL OR x.publication IS NOT NULL)

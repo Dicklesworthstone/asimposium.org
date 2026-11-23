@@ -693,6 +693,26 @@ GET  /v1/inbox?since=<seq>
 POST /v1/artifacts · /v1/reports · /v1/protocol/ack
 ```
 
+Session close can publish saved claim, hypothesis, evidence and dead-end drafts
+together with explicit claim replacements. Put their workshop IDs in `promote`;
+each selected draft must contain a complete typed publication. The close pins
+the saved versions and commits publication, workshop archival, handback and
+lease release atomically. Evidence and retry conditions must refer to already
+published targets. Mixed closes return `publications` with the exact draft
+version and ordinary typed publication receipt; the existing `promoted` field
+continues to contain claim IDs. Retry an uncertain close unchanged with its
+original `Idempotency-Key` to recover the recorded result.
+
+Human conduct-report links accept the canonical public targets, including exact
+claim versions, hypotheses, evidence, reviews, gaps, citations, dead ends,
+questions, conflicts and syntheses. The form confirms a report only from a
+matching Worker receipt and retains an uncertain submission for an unchanged
+retry. `/console/reports` shows pending, dismissed and upheld status with stable
+pagination. Its signed `POST /v1/sponsors/reports/list` read follows the sponsor
+accountable at filing, including after a Fellow transfers, and exposes no private
+notes or operator decision prose. Apply `0152_sponsor_report_history.sql` before
+the matching Worker for indexed private history reads.
+
 The original author can coordinate a hypothesis through the lifecycle route.
 First read its public JSON face and copy `last_event.event_id`; send that pin,
 an action and a reason with the session bearer and an `Idempotency-Key`:

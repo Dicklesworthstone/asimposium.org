@@ -149,6 +149,9 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
       "claim_versions",
       "claim_projections",
       "claim_deps",
+      "hypotheses",
+      "evidence",
+      "dead_ends",
       "integrity_checkpoints",
       "idempotency",
     ]) {
@@ -447,6 +450,266 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
   const closed = await attempt(singleSession, "close-single-new-key", singleRequest);
   assert.equal(closed.status, 409);
   assert.equal(closed.body.code, "SESSION_CLOSED");
+
+  // The same checkpoint publishes all already-supported typed workshop kinds.
+  // A separate Fellow keeps this proof independent of the original lane's
+  // publication quota and its later retained-work recovery controls.
+  const typedSponsor = "usr_close_typed_author";
+  const typedAuthor = await enroll("close-typed-author", typedSponsor);
+  const typedPush = async (session, kind, payload, title) =>
+    WorkshopPushResponseSchema.parse(
+      await call(
+        `/v1/sessions/${session}/workshop`,
+        {
+          type:
+            kind === "hypothesis"
+              ? "scratch"
+              : kind === "evidence"
+                ? "evidence-draft"
+                : "dead-end-draft",
+          title,
+          body_md: privateBody,
+          ledger_intent: { kind: "create", target_kind: kind },
+          publication: { object_kind: kind, payload },
+        },
+        typedAuthor,
+        201,
+      ),
+    );
+  const route = {
+    route: "Reduce the odd square to its four odd residue classes modulo eight.",
+    mechanism: "Squaring each odd residue should produce residue one.",
+    falsifier: "An odd residue class whose square is not congruent to one.",
+    origin: "proposed",
+    body_md: "Check each odd residue before extending the claim to all integers.",
+  };
+  const observation = {
+    bears_on_kind: "claim",
+    bears_on_id: single.body.promoted[0],
+    bears_on_version: 1,
+    direction: "informs",
+    kind: "argument",
+    source: { kind: "model_memory" },
+    mode: "exploratory",
+    body_md: "The residue argument is a proposed check, not an independent verification.",
+  };
+  const negative = {
+    approach: "Enumerate all positive odd integers without a residue reduction.",
+    why_it_fails: "A finite enumeration cannot exhaust the unbounded integer domain.",
+    retry_predicate: "Retry after reducing the integer domain to finitely many residue classes.",
+    what_was_examined: "The first twenty positive odd integers, with no completeness argument.",
+    scope_detection_floor: "Finite observations through thirty-nine cannot establish all integers.",
+  };
+  const typedSession = await open(typedAuthor);
+  const typedDrafts = [
+    await typedPush(typedSession, "hypothesis", route, "Finite residue route"),
+    await typedPush(typedSession, "evidence", observation, "Exploratory residue observation"),
+    await typedPush(typedSession, "dead-end", negative, "Unbounded enumeration fails"),
+    await push(
+      typedSession,
+      {
+        kind: "definition",
+        statement:
+          "An odd residue class is a congruence class represented by an odd integer modulo eight.",
+      },
+      "Odd residue definition",
+      typedAuthor,
+    ),
+  ];
+  const typedKeep = await push(typedSession, null, "Retain private mixed notes", typedAuthor);
+  const typedDiscard = await push(typedSession, null, "Discard private mixed notes", typedAuthor);
+  const typedHistories = await Promise.all(typedDrafts.map(history));
+  const typedKeepHistory = await history(typedKeep);
+  const typedDiscardHistory = await history(typedDiscard);
+  const typedRequest = {
+    handback: "Typed route, observation, negative result and definition published together.",
+    promote: typedDrafts.map((draft) => draft.workshop_id),
+    keep: [typedKeep.workshop_id],
+    discard: [typedDiscard.workshop_id],
+  };
+  const typedBefore = await publicState();
+  const typed = await attempt(typedSession, "close-typed-mixed", typedRequest, typedAuthor);
+  assert.equal(typed.status, 201, typed.raw);
+  assert.equal(typed.body.promoted.length, 1, "the legacy field remains a claim-ID list");
+  assert.equal(typed.body.publications.length, 4);
+  const typedEvents = await rows(
+    "SELECT e.*, c.payload_json FROM events e JOIN event_content c ON c.event_id=e.id WHERE e.problem_id=? AND e.seq>? ORDER BY e.seq",
+    problem,
+    typedBefore.head.public_seq,
+  );
+  assert.deepEqual(
+    typedEvents.map((event) => event.type),
+    ["hypothesis.created", "evidence.created", "dead_end.recorded", "claim.created"],
+  );
+  assert.equal(typed.body.promoted[0], typedEvents[3].object_id);
+  const typedFellow = (await closeState(typedSession)).fellow_id;
+  for (const [index, event] of typedEvents.entries()) {
+    const entry = typed.body.publications[index];
+    assert.equal(entry.workshop_id, typedDrafts[index].workshop_id);
+    assert.equal(entry.workshop_version, 1);
+    assert.equal(entry.publication.seq, event.seq);
+    assert.equal(entry.publication.problem_id, problem);
+    assert.equal(entry.publication.version, 1);
+    const result = entry.publication.result ?? entry.publication;
+    assert.equal(
+      result.hypothesis_id ?? result.evidence_id ?? result.dead_end_id ?? result.claim_id,
+      event.object_id,
+    );
+    assert.equal(event.actor_fellow_id, typedFellow);
+    assert.equal(event.actor_sponsor_id, typedSponsor);
+    assert.equal(event.actor_session_id, typedSession);
+    assert.equal(event.seq, typedBefore.head.public_seq + index + 1);
+    assert.ok(!event.payload_json.includes(privateCanary));
+    assert.ok(!event.payload_json.includes(typedDrafts[index].workshop_id));
+    assert.ok(!event.payload_json.includes(typedRequest.handback));
+    await retainBytes(typedDrafts[index], typedHistories[index], "archive", "archived", event.id);
+  }
+  assert.equal(typed.body.publications[1].publication.result.computed_class, "assertion");
+  assert.equal(typed.body.publications[1].publication.result.drives_promotion, false);
+  await retainBytes(typedKeep, typedKeepHistory, "keep", "open");
+  await retainBytes(typedDiscard, typedDiscardHistory, "discard", "discarded");
+  const typedAfter = { public: await publicState(), private: await privateState(typedSession) };
+  const typedScreens = await fixtures.screeningCalls();
+  const typedReplay = await attempt(typedSession, "close-typed-mixed", typedRequest, typedAuthor);
+  assert.equal(typedReplay.status, 200);
+  assert.equal(typedReplay.raw, typed.raw, "every typed receipt replays byte-for-byte");
+  assert.equal(await fixtures.screeningCalls(), typedScreens);
+  assert.deepEqual(await publicState(), typedAfter.public);
+  assert.deepEqual(await privateState(typedSession), typedAfter.private);
+
+  const typedFailedSession = await open(typedAuthor);
+  const typedFirst = await typedPush(typedFailedSession, "hypothesis", route, "Retained route");
+  const typedLast = await typedPush(
+    typedFailedSession,
+    "evidence",
+    observation,
+    "Retained observation",
+  );
+  const typedFailureRequest = {
+    handback: "Publish both typed drafts only if all checks succeed.",
+    promote: [typedFirst.workshop_id, typedLast.workshop_id],
+  };
+  const typedFailureBefore = {
+    public: await publicState(),
+    private: await privateState(typedFailedSession),
+  };
+  const typedPolicyScreens = await fixtures.screeningCalls();
+  await fixtures.pauseScreening(2000);
+  let typedPolicyPending;
+  let typedPolicyRefusal;
+  try {
+    typedPolicyPending = attempt(
+      typedFailedSession,
+      "close-typed-policy",
+      typedFailureRequest,
+      typedAuthor,
+    );
+    await waitForScreens(typedPolicyScreens + 2);
+    await fixtures.setScreenMode("reject");
+    typedPolicyRefusal = await typedPolicyPending;
+  } finally {
+    await fixtures.resumeScreening();
+    if (typedPolicyPending) await Promise.allSettled([typedPolicyPending]);
+    await fixtures.setScreenMode("pass");
+  }
+  assert.equal(typedPolicyRefusal.status, 403);
+  assert.equal(typedPolicyRefusal.body.code, "POLICY_DENIED");
+  assert.deepEqual(await publicState(), typedFailureBefore.public);
+  assert.deepEqual(await privateState(typedFailedSession), typedFailureBefore.private);
+
+  const typedRaceScreens = await fixtures.screeningCalls();
+  await fixtures.pauseScreening(4000);
+  let typedRacePending;
+  let typedRaceRefusal;
+  let typedAfterEdit;
+  try {
+    typedRacePending = attempt(
+      typedFailedSession,
+      "close-typed-source-race",
+      typedFailureRequest,
+      typedAuthor,
+    );
+    await waitForScreens(typedRaceScreens + 1);
+    await call(
+      `/v1/sessions/${typedFailedSession}/workshop`,
+      {
+        workshop_id: typedLast.workshop_id,
+        base_version: typedLast.version,
+        publication: {
+          object_kind: "evidence",
+          payload: {
+            ...observation,
+            body_md:
+              "The corrected observation still needs an independent check of the integer domain.",
+          },
+        },
+      },
+      typedAuthor,
+      201,
+    );
+    typedAfterEdit = await privateState(typedFailedSession);
+    await fixtures.resumeScreening();
+    typedRaceRefusal = await typedRacePending;
+  } finally {
+    await fixtures.resumeScreening();
+    if (typedRacePending) await Promise.allSettled([typedRacePending]);
+  }
+  assert.equal(typedRaceRefusal.status, 409);
+  assert.equal(typedRaceRefusal.body.code, "WORKSHOP_VERSION_CONFLICT");
+  assert.deepEqual(await publicState(), typedFailureBefore.public);
+  assert.deepEqual(await privateState(typedFailedSession), typedAfterEdit);
+  const typedPinnedScreens = await fixtures.screeningCalls();
+  const typedPinnedRetry = await attempt(
+    typedFailedSession,
+    "close-typed-source-race",
+    typedFailureRequest,
+    typedAuthor,
+  );
+  assert.equal(typedPinnedRetry.status, 409);
+  assert.equal(typedPinnedRetry.body.code, "WORKSHOP_VERSION_CONFLICT");
+  assert.equal(await fixtures.screeningCalls(), typedPinnedScreens);
+
+  const typedAuthorityScreens = await fixtures.screeningCalls();
+  await fixtures.pauseScreening(4000);
+  let typedAuthorityPending;
+  let typedAuthorityRefusal;
+  try {
+    typedAuthorityPending = attempt(
+      typedFailedSession,
+      "close-typed-authority-race",
+      typedFailureRequest,
+      typedAuthor,
+    );
+    await waitForScreens(typedAuthorityScreens + 1);
+    await env.DB.prepare(
+      "UPDATE problem_memberships SET role='observer' WHERE problem_id=? AND fellow_id=?",
+    )
+      .bind(problem, typedFellow)
+      .run();
+    await fixtures.resumeScreening();
+    typedAuthorityRefusal = await typedAuthorityPending;
+  } finally {
+    await fixtures.resumeScreening();
+    if (typedAuthorityPending) await Promise.allSettled([typedAuthorityPending]);
+    await env.DB.prepare(
+      "UPDATE problem_memberships SET role='contributor' WHERE problem_id=? AND fellow_id=?",
+    )
+      .bind(problem, typedFellow)
+      .run();
+  }
+  assert.equal(typedAuthorityRefusal.status, 403);
+  assert.equal(typedAuthorityRefusal.body.code, "WRITE_REFUSED");
+  assert.deepEqual(await publicState(), typedFailureBefore.public);
+  assert.deepEqual(await privateState(typedFailedSession), typedAfterEdit);
+  const typedRecovered = await attempt(
+    typedFailedSession,
+    "close-typed-reviewed",
+    typedFailureRequest,
+    typedAuthor,
+  );
+  assert.equal(typedRecovered.status, 201, typedRecovered.raw);
+  assert.deepEqual(typedRecovered.body.promoted, []);
+  assert.equal(typedRecovered.body.publications.length, 2);
 
   // Keep, discard, public claims, source archival, handback and lease release share one close.
   const multiSession = await open();
@@ -1712,6 +1975,8 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
   assert.deepEqual(await privateState(credentialSession), revokedState.private);
   return {
     single_and_multiple_claims: true,
+    mixed_typed_publications_and_exact_receipts: true,
+    mixed_typed_policy_source_and_authority_rollback: true,
     mixed_public_creation_and_revision: true,
     stale_mixed_revision_before_screening: true,
     private_r2_source_and_immutable_archive: true,

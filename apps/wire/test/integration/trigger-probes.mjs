@@ -105,6 +105,7 @@ export async function assertLedgerTriggersRefuse(db, lane) {
   const probed = [];
   const accepted = [];
   const refusedOtherwise = [];
+  const unexpectedRefusals = [];
   let skippedTransitionRules = 0;
   const attempt = async (id, statement, message) => {
     probed.push(id);
@@ -115,7 +116,22 @@ export async function assertLedgerTriggersRefuse(db, lane) {
       // Refused, but by this trigger? A foreign key or another trigger can
       // refuse the same statement (every event has dependent rows), which would
       // hide a neutered trigger. The refusal must carry its own RAISE message.
-      if (!String(error?.message ?? error).includes(message)) refusedOtherwise.push(id);
+      if (!String(error?.message ?? error).includes(message)) {
+        refusedOtherwise.push(id);
+        // These probes contain only schema identifiers and an internal rowid,
+        // never scientific payloads or credentials. Preserve a bounded cause
+        // chain so a transport failure cannot masquerade as another DB guard.
+        const causes = [];
+        let current = error;
+        for (let depth = 0; current != null && depth < 3; depth += 1) {
+          causes.push({
+            name: typeof current?.name === "string" ? current.name.slice(0, 80) : typeof current,
+            message: String(current?.message ?? current).slice(0, 512),
+          });
+          current = current?.cause;
+        }
+        unexpectedRefusals.push({ id, causes });
+      }
     }
   };
   for (const { name, tbl_name: table, sql } of triggers) {
@@ -180,6 +196,7 @@ export async function assertLedgerTriggersRefuse(db, lane) {
       probed,
       accepted,
       refused_otherwise: refusedOtherwise,
+      unexpected_refusal_diagnostics: unexpectedRefusals,
       coverage_missing: missing,
       coverage_known: required !== undefined,
       skipped_transition_rules: skippedTransitionRules,
