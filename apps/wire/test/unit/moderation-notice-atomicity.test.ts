@@ -5,6 +5,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { inboxNoticeStatement } from "../../src/inbox/notice-write.ts";
 import {
   clearPosture,
+  POSTURE_WINDOW_MS,
   PostureClearanceRefusedError,
   postureOf,
   recordRefusal,
@@ -321,7 +322,7 @@ describe("screening posture changes deliver their notice atomically", () => {
     }
   });
 
-  test("clearance and window expiry permit new transitions, each with its own causal notice", async () => {
+  test("only explicit clearance permits another transition, even after refusals age out", async () => {
     const f = fixture();
     setSystemTime(new Date("2026-10-01T00:00:00.000Z"));
     try {
@@ -340,7 +341,22 @@ describe("screening posture changes deliver their notice atomically", () => {
       expect(f.count("fellow_inbox_notices")).toBe(2);
 
       setSystemTime(new Date("2026-10-09T00:00:00.000Z"));
-      expect((await postureOf(f.db, "author")).refusalsInWindow).toBe(0);
+      expect(await postureOf(f.db, "author")).toEqual({
+        quarantineFirst: true,
+        refusalsInWindow: 0,
+        since: new Date(Date.parse(clearance.clearedAt) + 1).toISOString(),
+      });
+      for (const n of [7, 8, 9]) await recordRefusal(f.db, refusal(n));
+      expect(f.count("screening_refusals")).toBe(6);
+      expect(f.count("fellow_inbox_notices")).toBe(2);
+      const secondClearance = await clearPosture(f.db, {
+        fellowId: "author",
+        clearedByClass: "sponsor",
+        clearedBy: "sponsor",
+        reason: "Reviewed the held work after the refusal window elapsed.",
+      });
+      expect((await postureOf(f.db, "author")).quarantineFirst).toBe(false);
+      setSystemTime(new Date(Date.parse(secondClearance.clearedAt) + 1));
       for (const n of [7, 8, 9]) await recordRefusal(f.db, refusal(n));
       expect((await postureOf(f.db, "author")).quarantineFirst).toBe(true);
       expect(f.count("screening_refusals")).toBe(9);
@@ -349,6 +365,60 @@ describe("screening posture changes deliver their notice atomically", () => {
         .all() as { seq: number; caused_by_event_id: string }[];
       expect(notices.map((notice) => notice.seq)).toEqual([1, 2, 3]);
       expect(new Set(notices.map((notice) => notice.caused_by_event_id)).size).toBe(3);
+    } finally {
+      setSystemTime();
+      f.sql.close();
+    }
+  });
+
+  test("sparse historical refusals do not quarantine until a rolling-window cluster forms", async () => {
+    const f = fixture();
+    try {
+      for (const [index, day] of [1, 9, 17, 18].entries()) {
+        setSystemTime(new Date(`2026-10-${String(day).padStart(2, "0")}T00:00:00.000Z`));
+        await recordRefusal(f.db, refusal(index + 1));
+        expect((await postureOf(f.db, "author")).quarantineFirst).toBe(false);
+      }
+      expect(f.count("fellow_inbox_notices")).toBe(0);
+      expect((await postureOf(f.db, "author")).refusalsInWindow).toBe(2);
+      setSystemTime(new Date("2026-10-20T00:00:00.000Z"));
+      await recordRefusal(f.db, refusal(5));
+      expect(await postureOf(f.db, "author")).toEqual({
+        quarantineFirst: true,
+        refusalsInWindow: 3,
+        since: "2026-10-17T00:00:00.000Z",
+      });
+      expect(f.count("fellow_inbox_notices")).toBe(1);
+    } finally {
+      setSystemTime();
+      f.sql.close();
+    }
+  });
+
+  test("the engagement window excludes an exactly seven-day-old refusal", async () => {
+    const f = fixture();
+    const start = Date.parse("2026-10-01T00:00:00.123Z");
+    try {
+      for (const [index, elapsed] of [0, POSTURE_WINDOW_MS / 2, POSTURE_WINDOW_MS].entries()) {
+        setSystemTime(new Date(start + elapsed));
+        await recordRefusal(f.db, refusal(index + 1));
+      }
+      expect(await postureOf(f.db, "author")).toEqual({
+        quarantineFirst: false,
+        refusalsInWindow: 2,
+        since: new Date(start + POSTURE_WINDOW_MS / 2).toISOString(),
+      });
+      expect(f.count("fellow_inbox_notices")).toBe(0);
+      setSystemTime(new Date(start + POSTURE_WINDOW_MS + 1));
+      await recordRefusal(f.db, refusal(4));
+      expect((await postureOf(f.db, "author")).quarantineFirst).toBe(true);
+      setSystemTime(new Date(start + 4 * POSTURE_WINDOW_MS));
+      expect(await postureOf(f.db, "author")).toEqual({
+        quarantineFirst: true,
+        refusalsInWindow: 0,
+        since: new Date(start + POSTURE_WINDOW_MS / 2).toISOString(),
+      });
+      expect(f.count("fellow_inbox_notices")).toBe(1);
     } finally {
       setSystemTime();
       f.sql.close();

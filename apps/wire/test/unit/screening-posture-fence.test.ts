@@ -1,11 +1,14 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setSystemTime, test } from "bun:test";
 import type { Env } from "../../src/env";
 import { writeLedgerEvent } from "../../src/krater/krater";
 import {
+  clearPosture,
   isScreeningPostureChangedError,
+  POSTURE_WINDOW_MS,
   postureOf,
   recordRefusal,
   screeningPostureGuardStatement,
+  sponsorPostures,
 } from "../../src/moderation/posture";
 import { decideScreeningCase } from "../../src/moderation/store";
 import type { ScreenedPublication } from "../../src/screening/ingress";
@@ -85,6 +88,56 @@ describe("publication authority is checked in the ledger transaction", () => {
       }
       expect(f.state()).toEqual(before);
     } finally {
+      f.sql.close();
+    }
+  });
+
+  test("an aged posture still holds publication and stays clearable in the sponsor console", async () => {
+    setSystemTime(new Date("2026-10-01T00:00:00.000Z"));
+    const f = await publicationContextFixture();
+    try {
+      const candidate = f.input();
+      const screened = publication(await f.screen(candidate));
+      for (const n of [1, 2, 3]) await refusal(f, n);
+      const before = f.state();
+      const active = await sponsorPostures(f.db, SPONSOR);
+      expect(active).toEqual([
+        {
+          fellow_id: FELLOW,
+          name: "context-0",
+          quarantine_first: true,
+          since: "2026-10-01T00:00:00.000Z",
+        },
+      ]);
+      setSystemTime(new Date(Date.now() + 4 * POSTURE_WINDOW_MS));
+      expect((await postureOf(f.db, FELLOW)).refusalsInWindow).toBe(0);
+      expect(await sponsorPostures(f.db, SPONSOR)).toEqual(active);
+      expect(await sponsorPostures(f.db, "another-sponsor")).toEqual([]);
+      const held = await f.screen(candidate);
+      expect(held).toBeInstanceOf(Response);
+      if (!(held instanceof Response)) throw new Error("Expected the aged posture to hold.");
+      expect(held.status).toBe(202);
+      expect(await held.json()).toMatchObject({ posture: "quarantine-first" });
+      try {
+        await f.write(candidate, screened);
+        throw new Error("An aged posture silently granted publication authority.");
+      } catch (error) {
+        expect(isScreeningPostureChangedError(error)).toBe(true);
+      }
+      expect(f.state()).toEqual(before);
+
+      await clearPosture(f.db, {
+        fellowId: FELLOW,
+        clearedByClass: "sponsor",
+        clearedBy: SPONSOR,
+        reason: "Reviewed and corrected the cause of the original refusals.",
+      });
+      expect(await sponsorPostures(f.db, SPONSOR)).toEqual([]);
+      const fresh = f.input("A fresh candidate after explicit sponsor clearance.");
+      const committed = await f.write(fresh, publication(await f.screen(fresh)));
+      expect(f.state().events).toEqual([{ id: committed.eventId, seq: committed.seq }]);
+    } finally {
+      setSystemTime();
       f.sql.close();
     }
   });
