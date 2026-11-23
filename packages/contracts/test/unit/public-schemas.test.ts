@@ -349,9 +349,16 @@ test("schema slice paths accept only registry ids and own property names", () =>
 });
 
 test("nearest slices rank distinctive tokens over request/response", () => {
-  expect(nearestPublicSchemaSlices("sessions", "workshop_request")[0]).toBe(
+  expect(nearestPublicSchemaSlices("sessions", "workshop_request")).toEqual([
+    "/schemas/sessions.v1/workshop_create_request.json",
     "/schemas/sessions.v1/workshop_push_request.json",
-  );
+    "/schemas/sessions.v1/workshop_revise_request.json",
+  ]);
+  for (const kind of ["create", "revise"] as const) {
+    expect(nearestPublicSchemaSlices("sessions", `workshop_${kind}_request`)[0]).toBe(
+      `/schemas/sessions.v1/workshop_${kind}_request.json`,
+    );
+  }
   expect(nearestPublicSchemaSlices("sessions", "close_request")[0]).toBe(
     "/schemas/sessions.v1/session_close_request.json",
   );

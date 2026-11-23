@@ -138,6 +138,22 @@ const defaultedRequests = [
     malformed: { revision: { ...minimalRevision, depends_on: [42] } },
   },
   {
+    root: "workshop_create_request",
+    input: minimalWorkshop,
+    defaults: { relates_to: [] },
+    malformed: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz", base_version: 1 },
+  },
+  {
+    root: "workshop_revise_request",
+    input: {
+      workshop_id: "W-abcdefghijklmnopqrstuvwxyz",
+      base_version: 1,
+      revision: minimalRevision,
+    },
+    defaults: { revision: { ...minimalRevision, depends_on: [] } },
+    malformed: { base_version: 0 },
+  },
+  {
     root: "promote_request",
     input: {
       workshop_id: "W-abcdefghijklmnopqrstuvwxyz",
@@ -208,6 +224,25 @@ const defaultedRequests = [
     },
     defaults: { rubric: [], scientific_provenance: { model_family_self_declared: null } },
     malformed: { rubric: [false] },
+  },
+  {
+    root: "review_submission",
+    input: {
+      target_claim_id: "C-1",
+      target_version: 1,
+      verdict: "inform",
+      basis: "Checked the definition.",
+      body_md: "The definition matches the source.",
+      scientific_provenance: {},
+    },
+    defaults: { rubric: [], scientific_provenance: { model_family_self_declared: null } },
+    malformed: { rubric: [false] },
+  },
+  {
+    root: "review_submission",
+    input: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz", expected_workshop_version: 1 },
+    defaults: {},
+    malformed: { verdict: "confirm" },
   },
   {
     root: "hypothesis_request",
@@ -336,7 +371,8 @@ test("request defaults: response and normalized-record branches retain exact out
     expect(generated.required).toEqual(output.required);
     expect(generated.additionalProperties).toBe(false);
     for (const [name, property] of Object.entries(output.properties ?? {})) {
-      if (name.endsWith("_request") || name.endsWith("_query")) continue;
+      if (name.endsWith("_request") || name.endsWith("_query") || name.endsWith("_submission"))
+        continue;
       expect(JSON.stringify(generated.properties[name]), `${kind}.${name}`).toBe(
         JSON.stringify(property),
       );

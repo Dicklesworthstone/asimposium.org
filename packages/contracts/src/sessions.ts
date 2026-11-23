@@ -1812,6 +1812,8 @@ export const SessionsContractsSchema = z
     full_pack_query: FullPackQuerySchema,
     full_pack_page: FullPackPageSchema,
     workshop_push_request: WorkshopPushRequestSchema,
+    workshop_create_request: WorkshopCreateRequestSchema,
+    workshop_revise_request: WorkshopReviseRequestSchema,
     workshop_push_response: WorkshopPushResponseSchema,
     workshop_object_response: WorkshopObjectResponseSchema,
     sponsor_workshop_request: SponsorWorkshopRequestSchema,

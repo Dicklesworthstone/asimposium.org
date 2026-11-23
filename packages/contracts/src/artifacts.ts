@@ -320,7 +320,8 @@ function formatJson(value: unknown): string {
 function requestAwareJsonSchema(schema: z.ZodObject) {
   const document = z.toJSONSchema(schema);
   for (const [name, contract] of Object.entries(schema.shape)) {
-    if (!name.endsWith("_request") && !name.endsWith("_query")) continue;
+    if (!name.endsWith("_request") && !name.endsWith("_query") && !name.endsWith("_submission"))
+      continue;
     const { $schema: _dialect, ...input } = z.toJSONSchema(contract, { io: "input" });
     if (document.properties === undefined) throw new Error("CONTRACT_PROPERTIES_MISSING");
     document.properties[name] = input;

@@ -64,6 +64,7 @@ import {
 } from "@asimposium/contracts/workshop-directory";
 import { protocolVersionPair } from "@asimposium/protocol";
 import type { ExecutionContext } from "@cloudflare/workers-types";
+import Ajv2020 from "ajv/dist/2020.js";
 import { createApp } from "../../src/app.ts";
 import {
   readDirectiveDisclosureState,
@@ -11662,6 +11663,26 @@ describe("session protocol routes", () => {
     }
   });
 
+  function assertWorkshopRecoveryContract(
+    refusal: { readonly schema: string; readonly example: unknown },
+    kind: "create" | "revise",
+  ) {
+    expect(refusal.schema).toBe(
+      `https://a.asimposium.org/schemas/sessions.v1/workshop_${kind}_request.json`,
+    );
+    const slice = getPublicSchemaSlice(new URL(refusal.schema).pathname);
+    if (slice === undefined) throw new Error("Missing workshop recovery schema");
+    expect(new TextEncoder().encode(slice.body).byteLength).toBeLessThan(32_768);
+    const document = JSON.parse(slice.body);
+    expect(document.$id).toBe(refusal.schema);
+    const ajv = new Ajv2020({ strict: false, validateFormats: false });
+    const validate = ajv.compile(document);
+    expect(validate(refusal.example), JSON.stringify(validate.errors)).toBe(true);
+    expect(
+      validate({ ...(refusal.example as Record<string, unknown>), grant_authority: true }),
+    ).toBe(false);
+  }
+
   test("claim-shaped note recovery saves a complete private draft and keeps the force_note escape", async () => {
     const { call, db } = await fixture();
     const opened = await call("/v1/sessions", {
@@ -11700,10 +11721,7 @@ describe("session protocol routes", () => {
     expect(recovery).toEqual({ ...note, type: "claim-draft" });
     expect(refusal.fix_hint).toContain("new Idempotency-Key");
     expect(refusal.fix_hint).toContain("force_note: true");
-    const recoverySchema = getPublicSchemaSlice(new URL(refusal.schema).pathname);
-    expect(recoverySchema).toBeDefined();
-    expect(recoverySchema?.body.length).toBeLessThan(32_768);
-    expect(JSON.parse(recoverySchema!.body).$id).toBe(refusal.schema);
+    assertWorkshopRecoveryContract(refusal, "create");
     expect(
       await db.prepare("SELECT COUNT(*) AS n FROM workshop_objects").first<{ n: number }>(),
     ).toEqual({ n: 0 });
@@ -11744,9 +11762,10 @@ describe("session protocol routes", () => {
     });
   });
 
-  test.each([false, true])(
-    "claim-shaped revision recovery preserves its base and inherited context (typed hypothesis: %s)",
-    async (typedHypothesis) => {
+  test.each(["none", "hypothesis", "review"] as const)(
+    "claim-shaped revision recovery preserves its base and inherited context (publication: %s)",
+    async (publicationKind) => {
+      const typedPublication = publicationKind !== "none";
       const { call, db } = await fixture();
       let key = 0;
       const post = (path: string, body: unknown) =>
@@ -11761,25 +11780,37 @@ describe("session protocol routes", () => {
       const opened = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" });
       const session = SessionOpenResponseSchema.parse(await opened.json());
       const path = `/v1/sessions/${session.session_id}/workshop`;
-      const publication = {
-        object_kind: "hypothesis",
-        payload: {
-          route: "Bound the residue count",
-          mechanism: "Enumerate the finite residues",
-          falsifier: "A missing residue",
-          origin: "proposed",
-          body_md: "Investigate whether the residue enumeration is complete.",
-        },
-      };
+      const publication =
+        publicationKind === "review"
+          ? {
+              object_kind: "review",
+              payload: {
+                target_claim_id: "C-1",
+                target_version: 1,
+                verdict: "inform",
+                basis: "Inspect the finite residue domain.",
+                body_md: "The residue check remains incomplete.",
+              },
+            }
+          : {
+              object_kind: "hypothesis",
+              payload: {
+                route: "Bound the residue count",
+                mechanism: "Enumerate the finite residues",
+                falsifier: "A missing residue",
+                origin: "proposed",
+                body_md: "Investigate whether the residue enumeration is complete.",
+              },
+            };
       const note = WorkshopPushRequestSchema.parse({
         type: "note",
         title: "An interrupted line of work",
         body_md: "The residue cases are still incomplete.",
         relates_to: ["C-context"],
-        ledger_intent: typedHypothesis
-          ? { kind: "create", target_kind: "hypothesis" }
+        ledger_intent: typedPublication
+          ? { kind: "create", target_kind: publicationKind }
           : { kind: "revise", target_id: "C-context", base_version: 7 },
-        ...(typedHypothesis ? { publication } : {}),
+        ...(typedPublication ? { publication } : {}),
       });
       const created = await post(path, note);
       expect(created.status).toBe(201);
@@ -11802,8 +11833,9 @@ describe("session protocol routes", () => {
       const recovery = WorkshopPushRequestSchema.parse(refusal.example);
       expect(recovery).toEqual({
         ...revision,
-        ...(typedHypothesis ? { force_note: true } : { type: "claim-draft" }),
+        ...(typedPublication ? { force_note: true } : { type: "claim-draft" }),
       });
+      assertWorkshopRecoveryContract(refusal, "revise");
       const before = await call(`${path}/${draft.workshop_id}`);
       expect(WorkshopObjectResponseSchema.parse(await before.json()).object).toMatchObject({
         ...note,
@@ -11818,11 +11850,11 @@ describe("session protocol routes", () => {
       const read = await call(`${path}/${draft.workshop_id}`);
       expect(WorkshopObjectResponseSchema.parse(await read.json()).object).toMatchObject({
         ...note,
-        type: typedHypothesis ? "note" : "claim-draft",
+        type: typedPublication ? "note" : "claim-draft",
         body_md: revision.body_md,
         version: 2,
       });
-      expect(await forceNoteMarker()).toEqual({ force_note: typedHypothesis ? 1 : 0 });
+      expect(await forceNoteMarker()).toEqual({ force_note: typedPublication ? 1 : 0 });
       // The override remains auditable when a later edit omits force_note.
       const continued = await post(path, {
         workshop_id: draft.workshop_id,
@@ -11831,19 +11863,23 @@ describe("session protocol routes", () => {
       });
       expect(continued.status).toBe(201);
       expect(WorkshopPushResponseSchema.parse(await continued.json()).version).toBe(3);
-      expect(await forceNoteMarker()).toEqual({ force_note: typedHypothesis ? 1 : 0 });
+      expect(await forceNoteMarker()).toEqual({ force_note: typedPublication ? 1 : 0 });
       const stale = await post(path, recovery);
       expect(stale.status).toBe(409);
       const staleProblem = ProblemDocumentSchema.parse(await stale.json());
       if (staleProblem.code !== "WORKSHOP_VERSION_CONFLICT") throw new Error("Expected stale base");
       expect(staleProblem.refetch_url).toBe(`${path}/${draft.workshop_id}`);
       expect(staleProblem.schema).toBe(refusal.schema);
+      assertWorkshopRecoveryContract(staleProblem, "revise");
       expect(await db.prepare("SELECT COUNT(*) AS n FROM claims").first<{ n: number }>()).toEqual({
         n: 0,
       });
       expect(
         await db.prepare("SELECT COUNT(*) AS n FROM hypotheses").first<{ n: number }>(),
       ).toEqual({ n: 0 });
+      expect(await db.prepare("SELECT COUNT(*) AS n FROM reviews").first<{ n: number }>()).toEqual({
+        n: 0,
+      });
     },
   );
 

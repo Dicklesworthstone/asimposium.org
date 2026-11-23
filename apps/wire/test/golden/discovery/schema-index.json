@@ -575,7 +575,7 @@
       "id": "sessions",
       "url": "https://a.asimposium.org/schemas/sessions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 697766,
+      "body_bytes": 807669,
       "slice_url_template": "https://a.asimposium.org/schemas/sessions.v1/{property}.json",
       "slices": [
         "session_open_request",
@@ -587,6 +587,8 @@
         "full_pack_query",
         "full_pack_page",
         "workshop_push_request",
+        "workshop_create_request",
+        "workshop_revise_request",
         "workshop_push_response",
         "workshop_object_response",
         "sponsor_workshop_request",

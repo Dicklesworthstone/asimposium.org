@@ -2575,7 +2575,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   ): Response {
     const publication = request.publication ?? retainedPublication;
     const intent = request.ledger_intent ?? retainedIntent;
-    // A typed hypothesis belongs in a note. Preserve that choice, including
+    // A typed hypothesis or review belongs in a note. Preserve that choice, including
     // inherited fields on revisions, rather than inventing a different payload.
     const publicationTypes =
       publication === undefined ? undefined : workshopPublicationTypes(publication);
@@ -2597,7 +2597,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           : `Your publication payload requires ${draftType}. POST the example to this workshop route with a new Idempotency-Key to preserve the complete private draft. No publication occurs.`,
       rule: "§7.6",
       extensions: {
-        schema: "https://a.asimposium.org/schemas/sessions.v1/workshop_push_request.json",
+        schema: `https://a.asimposium.org/schemas/sessions.v1/workshop_${"workshop_id" in request ? "revise" : "create"}_request.json`,
         // Preserve the complete text, links, ledger intent and revision base.
         // Never synthesize a public statement/falsifier or discard later prose.
         example: keepNote ? { ...request, force_note: true } : { ...request, type: draftType },
@@ -5383,7 +5383,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               "Refetch the current workshop object version with GET /v1/sessions/:id/workshop/:workshop_id and reapply your edit.",
             rule: "A5",
             extensions: {
-              schema: "https://a.asimposium.org/schemas/sessions.v1/workshop_push_request.json",
+              schema: "https://a.asimposium.org/schemas/sessions.v1/workshop_revise_request.json",
               current_version: currentVersion,
               suggested_action: "refetch_and_reapply",
               refetch_url: `/v1/sessions/${session.session_id}/workshop/${head.workshop_id}`,
