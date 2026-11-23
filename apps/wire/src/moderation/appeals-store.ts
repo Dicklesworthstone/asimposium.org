@@ -9,7 +9,7 @@ import {
 import type { D1Database } from "@cloudflare/workers-types";
 import { inboxNoticeStatement } from "../inbox/notice-write";
 import { canonicalJson, sha256Hex } from "../krater/krater";
-import { AUTOMATED_REJECTION_DECIDED_BY, mintModerationId } from "./store";
+import { AUTOMATED_REJECTION_DECIDED_BY, logScreeningCaseOutcome, mintModerationId } from "./store";
 
 export class ScreeningAppealError extends Error {
   constructor(readonly code: "NOT_FOUND" | "CONFLICT" | "STEP_UP" | "REVIEWER") {
@@ -91,10 +91,10 @@ export async function submitScreeningAppeal(
     digest = await sha256Hex(canonicalJson(request));
   // Replays also recheck current ownership; old sponsorship cannot read an appeal.
   const owned = await db
-    .prepare(`SELECT c.case_id FROM screening_cases c ${JOIN_OWNER}
+    .prepare(`SELECT c.coarse_category, c.decided_by FROM screening_cases c ${JOIN_OWNER}
     WHERE ${OWNED_CASE} AND c.case_id = ?2 AND c.state = 'rejected'`)
     .bind(sponsorId, request.case_id)
-    .first();
+    .first<{ coarse_category: string; decided_by: string }>();
   if (!owned) throw new ScreeningAppealError("NOT_FOUND");
   const prior = await db
     .prepare(`SELECT a.* FROM screening_case_appeals a
@@ -137,6 +137,14 @@ export async function submitScreeningAppeal(
     .first<AppealRow>();
   if (!row || row.case_id !== request.case_id || row.request_digest !== digest)
     throw new ScreeningAppealError("CONFLICT");
+  if (row.appeal_id === appealId)
+    logScreeningCaseOutcome(
+      row.case_id,
+      owned.coarse_category,
+      owned.decided_by,
+      "pending",
+      appealId,
+    );
   return receipt(row);
 }
 export async function operatorScreeningAppeals(db: D1Database, appealId?: string) {
@@ -302,5 +310,13 @@ export async function decideScreeningAppeal(
     decided.decision_key_hash !== keyHash
   )
     throw new ScreeningAppealError("CONFLICT");
+  if (decided.audit_event_id === auditId)
+    logScreeningCaseOutcome(
+      decided.case_id,
+      row.coarse_category,
+      row.original_operator_id,
+      state,
+      decided.appeal_id,
+    );
   return receipt(decided);
 }

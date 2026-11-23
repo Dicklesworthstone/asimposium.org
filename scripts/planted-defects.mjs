@@ -1660,10 +1660,16 @@ export const PLANTS = [
     id: "posture-keeps-recording-refusals",
     bead: "ij2e",
     file: "apps/wire/src/moderation/posture.ts",
-    // Refusals under an engaged posture are still recorded, so the count
-    // and its expiry tell a quarantined write from a passing one.
-    find: "  if ((await postureOf(db, input.fellowId)).quarantineFirst) return;\n",
+    // Let one refusal through after posture engages. Both the read-side
+    // check and the transaction threshold normally prevent that write.
+    find: "  if ((await postureOf(db, input.fellowId)).quarantineFirst) return [];\n",
     replace: "",
+    also: [
+      {
+        find: "                       WHERE c.fellow_id = ?2), '')) < ?10\n",
+        replace: "                       WHERE c.fellow_id = ?2), '')) < ?10 + 1\n",
+      },
+    ],
     command: LANE("moderation"),
   },
   {

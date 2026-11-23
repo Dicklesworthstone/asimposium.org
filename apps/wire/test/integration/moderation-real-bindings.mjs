@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { AdminReportDetailSchema } from "@asimposium/contracts";
-import { LOCAL_OPERATOR_ID, runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+import {
+  LOCAL_OPERATOR_ID,
+  opsRecords,
+  runLocalWorkerJourney,
+} from "./problem-lifecycle-real-bindings.mjs";
 
 // Symposiarch moderation plane (Fable §9.1 L1/L2, §7.7, §10.2) on real local
 // Workerd HTTP and D1:
@@ -24,7 +28,16 @@ import { LOCAL_OPERATOR_ID, runLocalWorkerJourney } from "./problem-lifecycle-re
 // The screen is the harness fixture switched to "quarantine"; no live model.
 
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, operatorCall, fixtures, env, clearScreeningPosture }) => {
+  async ({
+    call,
+    enroll,
+    sponsorCall,
+    operatorCall,
+    fixtures,
+    env,
+    clearScreeningPosture,
+    workerLogs,
+  }) => {
     const OWNER = "usr_mod_owner";
     const author = await enroll("mod-author", OWNER);
     const reviewer = await enroll("mod-reviewer", "usr_mod_reviewer");
@@ -1114,6 +1127,58 @@ await runLocalWorkerJourney(
       404,
     );
     assert.equal(foreignAppeal.code, "MODERATION_TARGET_NOT_FOUND");
+    const appealPath = "/v1/sponsors/screening-appeals";
+    const appeal = () =>
+      sponsorCall(
+        POSTURE_OWNER,
+        "POST",
+        appealPath,
+        "sponsor.screening-appeals.submit",
+        {
+          case_id: directDenial.case_id,
+          statement: "Reconsider the finite mathematical candidate.",
+        },
+        200,
+        appealPath,
+        "automated-rejection-appeal",
+      );
+    const filed = await appeal();
+    assert.deepEqual(await appeal(), filed);
+    const decideAppeal = () =>
+      operatorCall(
+        "POST",
+        "/v1/operators/screening-appeals/decision",
+        "operator.screening-appeals.decide",
+        {
+          appeal_id: filed.appeal_id,
+          decision: "release",
+          reason: "The claim is ordinary finite arithmetic.",
+          step_up_authenticated_at: Math.floor(Date.now() / 1000),
+        },
+        200,
+        "/v1/operators/screening-appeals/decision",
+        "automated-rejection-appeal-release",
+      );
+    const resolved = await decideAppeal();
+    assert.deepEqual(await decideAppeal(), resolved);
+    assert.equal(resolved.state, "released");
+    const screeningRecords = () => opsRecords(workerLogs(), "screening-case-outcome");
+    const coarseFields = {
+      facility: "OPS.2a",
+      stage: "screening-case-outcome",
+      case_id: directDenial.case_id,
+      coarse_category: directDenial.coarse_category,
+      decision_source: "automated-model-reject",
+    };
+    assert.deepEqual(
+      screeningRecords().filter((record) => record.case_id === directDenial.case_id),
+      [
+        { ...coarseFields, appeal_id: null, status: "rejected" },
+        { ...coarseFields, appeal_id: filed.appeal_id, status: "pending" },
+        { ...coarseFields, appeal_id: filed.appeal_id, status: "released" },
+      ],
+      "each durable screening transition logs only coarse fields, once",
+    );
     const two = await postureOf(POSTURE_OWNER);
     assert.equal(await refusalCount(two[0].fellow_id), 2);
     assert.equal(two[0]?.refusals_in_window, undefined, "the sponsor sees no count");
@@ -1144,6 +1209,7 @@ await runLocalWorkerJourney(
        WHEN NEW.title = 'Your public writes now wait for review'
        BEGIN SELECT RAISE(ABORT, 'planted posture notice failure'); END`,
     ).run();
+    const logsBeforeFailure = screeningRecords().length;
     try {
       // There can be no rejection receipt when the entire D1 batch failed.
       // The same bytes can retry without publishing or silently engaging posture.
@@ -1153,6 +1219,7 @@ await runLocalWorkerJourney(
       assert.equal(unavailableDenial.case_id, undefined);
       assert.equal(await automatedCases(), 2, "the rejected case rolled back with the refusal");
       assert.equal(await refusalCount(two[0].fellow_id), 2, "triggering refusal rolled back");
+      assert.equal(screeningRecords().length, logsBeforeFailure, "no uncommitted denial log");
       assert.equal((await postureOf(POSTURE_OWNER))[0]?.quarantine_first, false);
     } finally {
       await env.DB.prepare("DROP TRIGGER lane_fail_posture_notice").run();

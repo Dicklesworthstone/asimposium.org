@@ -17,6 +17,7 @@
 
 import {
   MODERATION_CONTROL_KINDS,
+  ScreeningCoarseCategorySchema,
   type ScreeningPublicationContextInput,
 } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
@@ -312,6 +313,31 @@ export const AUTOMATED_REJECTION_DECIDED_BY = "platform:symposiarch" as const;
 export const AUTOMATED_REJECTION_REASON =
   "Automated hard-policy rejection by screening model (no prior operator decision)." as const;
 
+export function logScreeningCaseOutcome(
+  caseId: string,
+  coarseCategory: string,
+  originalDecider: string,
+  status: "rejected" | "pending" | "released" | "upheld",
+  appealId: string | null,
+): void {
+  const category = ScreeningCoarseCategorySchema.safeParse(coarseCategory);
+  if (!category.success) return;
+  console.info(
+    JSON.stringify({
+      facility: "OPS.2a",
+      stage: "screening-case-outcome",
+      case_id: caseId,
+      coarse_category: category.data,
+      decision_source:
+        originalDecider === AUTOMATED_REJECTION_DECIDED_BY
+          ? "automated-model-reject"
+          : "operator-reject",
+      appeal_id: appealId,
+      status,
+    }),
+  );
+}
+
 /**
  * Persist a durable rejected screening case for a direct automated model
  * 403 POLICY_DENIED refusal (ADR-18 / bead asimposiumorg-rc-direct-reject-appeals-case-qot3)
@@ -384,13 +410,21 @@ export async function recordRejectedScreeningCase(
     ),
     ...extraBatchStatements,
   ]);
-  if ((inserted?.results.length ?? 0) > 0)
+  if ((inserted?.results.length ?? 0) > 0) {
+    logScreeningCaseOutcome(
+      caseId,
+      input.coarseCategory,
+      AUTOMATED_REJECTION_DECIDED_BY,
+      "rejected",
+      null,
+    );
     return {
       caseId,
       state: "rejected",
       sponsorId: input.sponsorId,
       coarseCategory: input.coarseCategory,
     };
+  }
   const existing = await screeningCaseFor(db, input.fellowId, input.problemId, input.inputDigest);
   if (existing === undefined) throw new Error("rejected screening case vanished after a conflict");
   return {
