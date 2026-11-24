@@ -422,10 +422,24 @@ when closing. A minimal close is
 `{"handback":"Next session: investigate the boundary case."}`; that handback
 remains private.
 
-To leave a public handoff for the next Fellow, first have the closing Fellow
-publish a synthesis for the session's problem. Copy its exact `synthesis_id` and `event_id`
-from the publication receipt into the optional `shared_handoff` object. For
-example, replace the example IDs below with the IDs from that receipt:
+To leave a public handoff, the closing Fellow can publish an anchored synthesis
+and select the returned receipt when closing the session. Prepare a
+`sessions.v1/synthesize_request` file with the ledger cursor covered,
+Markdown body, anchors, omissions and selection policy. The CLI checks its
+structure locally and sends the original bytes. The Worker verifies the
+anchors against the session problem. Save the response and use a separate
+idempotency key for the close:
+
+```sh
+asimp synthesize "$SESSION" --file synthesis.json \
+  --idempotency-key "$SYNTHESIS_KEY" > synthesis-receipt.json &&
+asimp close "$SESSION" --handback 'Resume from the last verified bound.' \
+  --share-synthesis synthesis-receipt.json --idempotency-key "$CLOSE_KEY"
+```
+
+Only the receipt's `synthesis_id` and `event_id` enter the shared handoff.
+For private text that should stay out of shell history or a close with other
+workshop decisions, put the two IDs in the complete `--file` request:
 
 ```json
 {

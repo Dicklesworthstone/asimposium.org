@@ -104,6 +104,12 @@ pub enum Command {
         #[command(flatten)]
         request: LedgerWriteArgs,
     },
+    /// Publish an anchored synthesis of a problem's ledger (keychain or ASIMP_TOKEN required).
+    Synthesize {
+        session: String,
+        #[command(flatten)]
+        request: LedgerWriteArgs,
+    },
     /// Submit public evidence with an explicit target (keychain or ASIMP_TOKEN required).
     Evidence {
         session: String,
@@ -165,6 +171,14 @@ pub enum Command {
         /// Deliberate handback, bounded like the Worker; use --file for private text off argv.
         #[arg(long, required_unless_present = "file", conflicts_with = "file")]
         handback: Option<String>,
+        /// Share an existing public synthesis by selecting its saved JSON publication receipt.
+        #[arg(
+            long,
+            requires = "handback",
+            conflicts_with = "file",
+            value_name = "RECEIPT_JSON"
+        )]
+        share_synthesis: Option<std::path::PathBuf>,
         /// Complete SessionCloseRequest JSON file, instead of --handback.
         #[arg(long, required_unless_present = "handback", value_name = "JSON_FILE")]
         file: Option<std::path::PathBuf>,
@@ -376,6 +390,7 @@ pub enum GapCommand {
 
 enum WriteBody<'a> {
     File(&'a std::path::Path),
+    SynthesisFile(&'a std::path::Path),
     Heartbeat,
     Promote {
         workshop: &'a str,
@@ -396,7 +411,7 @@ enum WriteBody<'a> {
         problem: &'a str,
         intent: Option<&'a str>,
     },
-    Handback(&'a str),
+    Handback(&'a str, Option<&'a std::path::Path>),
 }
 
 struct WriteRequest<'a> {
@@ -420,6 +435,7 @@ impl Command {
                 | Self::Pack { .. }
                 | Self::Workshop { .. }
                 | Self::Review { .. }
+                | Self::Synthesize { .. }
                 | Self::Evidence { .. }
                 | Self::Revise { .. }
                 | Self::Hypothesis { .. }
@@ -457,6 +473,13 @@ impl Command {
                 hypothesis_to_kill: None,
                 options,
                 body: WriteBody::Heartbeat,
+            }),
+            Self::Synthesize { session, request } => Some(WriteRequest {
+                session: Some(session),
+                action: "synthesize",
+                hypothesis_to_kill: None,
+                options: &request.options,
+                body: WriteBody::SynthesisFile(&request.file),
             }),
             Self::Review { session, request }
             | Self::Evidence { session, request }
@@ -586,6 +609,7 @@ impl Command {
             Self::Close {
                 session,
                 handback,
+                share_synthesis,
                 file,
                 options,
             } => Some(WriteRequest {
@@ -595,7 +619,7 @@ impl Command {
                 options,
                 body: match file {
                     Some(file) => WriteBody::File(file),
-                    None => WriteBody::Handback(handback.as_deref()?),
+                    None => WriteBody::Handback(handback.as_deref()?, share_synthesis.as_deref()),
                 },
             }),
             _ => None,
@@ -719,6 +743,13 @@ impl WriteBody<'_> {
     ) -> Result<String, String> {
         let value = match self {
             Self::File(path) => return read(path).map_err(str::to_owned),
+            Self::SynthesisFile(path) => {
+                let bytes = read(path).map_err(str::to_owned)?;
+                let request = serde_json::from_str(&bytes)
+                    .map_err(|_| "Synthesis input must be a UTF-8 JSON request.".to_owned())?;
+                validation::check_session_payload("synthesize_request", &request)?;
+                return Ok(bytes);
+            }
             Self::Heartbeat => serde_json::json!({}),
             Self::Promote {
                 workshop,
@@ -760,7 +791,7 @@ impl WriteBody<'_> {
                 }
                 value
             }
-            Self::Handback(text) => {
+            Self::Handback(text, receipt_path) => {
                 // Zod .trim() uses ECMAScript whitespace, and .max() measures
                 // UTF-16 code units. Rust str::trim/chars count differs for BOM,
                 // NEL, and supplementary characters; match the Worker here.
@@ -785,7 +816,18 @@ impl WriteBody<'_> {
                         "--handback has {count} UTF-16 code units after trimming; the Worker contract requires {min}–{max}. Shorten or supply a non-empty handback; its text was not sent."
                     ));
                 }
-                serde_json::json!({"handback": text})
+                let mut close = serde_json::json!({"handback": text});
+                if let Some(path) = receipt_path {
+                    let bytes = read(path).map_err(str::to_owned)?;
+                    let receipt: serde_json::Value = serde_json::from_str(&bytes)
+                        .map_err(|_| "The synthesis receipt must be valid JSON.".to_owned())?;
+                    validation::check_session_payload("synthesize_response", &receipt)?;
+                    close["shared_handoff"] = serde_json::json!({
+                        "synthesis_id": receipt["synthesis_id"], "event_id": receipt["event_id"],
+                    });
+                    validation::check_session_payload("session_close_request", &close)?;
+                }
+                close
             }
         };
         serde_json::to_string(&value)
@@ -1856,6 +1898,93 @@ mod tests {
     }
 
     #[test]
+    fn share_synthesis_projects_only_exact_publication_ids_into_close() {
+        let cli = Cli::try_parse_from([
+            "asimp",
+            "--origin",
+            "https://example.test",
+            "close",
+            "S-1",
+            "--handback",
+            "private note",
+            "--share-synthesis",
+            "receipt.json",
+            "--idempotency-key",
+            "close-1",
+        ])
+        .unwrap();
+        let receipt =
+            include_str!("../../packages/contracts/test/fixtures/valid/synthesize-response.json");
+        let published: serde_json::Value = serde_json::from_str(receipt).unwrap();
+        let output = run_cli_write(
+            &cli,
+            |_| Ok(receipt.into()),
+            |url, key, body| {
+                assert_eq!(url, "https://example.test/v1/sessions/S-1/close");
+                assert_eq!(key, "close-1");
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                    serde_json::json!({
+                        "handback": "private note",
+                        "shared_handoff": {
+                            "synthesis_id": published["synthesis_id"], "event_id": published["event_id"],
+                        }
+                    })
+                );
+                Ok(Fetched {
+                    status: 200,
+                    body: "{}".into(),
+                })
+            },
+        );
+        assert_eq!(output.exit_code, 0);
+        for invalid in [
+            "private-note-canary".to_owned(),
+            r#"{"screening_status":"pending"}"#.into(),
+            receipt.replace(
+                published["synthesis_id"].as_str().unwrap(),
+                "private-note-canary",
+            ),
+        ] {
+            let result = run_cli_write(
+                &cli,
+                |_| Ok(invalid),
+                |_, _, _| panic!("invalid receipt sent"),
+            );
+            assert_eq!(result.exit_code, 2);
+            assert!(!result.stderr.contains("private-note-canary"));
+        }
+    }
+
+    #[test]
+    fn synthesize_refuses_invalid_requests_before_publication() {
+        let cli = Cli::try_parse_from([
+            "asimp",
+            "--origin",
+            "https://example.test",
+            "synthesize",
+            "S-1",
+            "--file",
+            "synthesis.json",
+            "--idempotency-key",
+            "synthesize-1",
+        ])
+        .unwrap();
+        for invalid in [
+            "private-note-canary",
+            r#"{"body_md":"private-note-canary","anchors":[]}"#,
+        ] {
+            let result = run_cli_write(
+                &cli,
+                |_| Ok(invalid.into()),
+                |_, _, _| panic!("invalid synthesis sent"),
+            );
+            assert_eq!(result.exit_code, 2);
+            assert!(!result.stderr.contains("private-note-canary"));
+        }
+    }
+
+    #[test]
     fn typed_writes_match_existing_contract_fixtures() {
         let open: serde_json::Value = serde_json::from_str(include_str!(
             "../../packages/contracts/test/fixtures/valid/session-open.json"
@@ -1875,7 +2004,7 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&encoded).unwrap(),
             open
         );
-        let encoded = WriteBody::Handback(close["handback"].as_str().unwrap())
+        let encoded = WriteBody::Handback(close["handback"].as_str().unwrap(), None)
             .encode(|_| panic!("not a file"))
             .unwrap();
         let result: serde_json::Value = serde_json::from_str(&encoded).unwrap();
@@ -2080,6 +2209,11 @@ mod tests {
                 vec!["review", "S-123"],
                 "/v1/sessions/S-123/review",
                 "review-request.json",
+            ),
+            (
+                vec!["synthesize", "S-123"],
+                "/v1/sessions/S-123/synthesize",
+                "synthesize-request.json",
             ),
             (
                 vec!["evidence", "S-123"],

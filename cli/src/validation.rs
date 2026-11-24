@@ -210,6 +210,25 @@ fn validator(
         .build(schema)
 }
 
+/// Validate the in-memory value that will actually be used by a CLI write.
+/// Report only the trusted selector, never input data or validator details.
+pub(crate) fn check_session_payload(property: &str, value: &Value) -> Result<(), String> {
+    let selector = format!("sessions.v1/{property}");
+    let (_, schema) = resolve_schema(&selector)
+        .ok()
+        .flatten()
+        .ok_or_else(|| format!("Missing bundled schema {selector}."))?;
+    let check =
+        validator(&schema).map_err(|_| format!("Cannot compile bundled schema {selector}."))?;
+    if check.is_valid(value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Input does not match {selector}. Run asimp validate with this schema for details."
+        ))
+    }
+}
+
 fn diagnostic(schema_path: &str) -> Value {
     let (code, message) = match schema_path.rsplit('/').next().unwrap_or("") {
         "required" => ("required", "One or more required properties are missing."),

@@ -99,7 +99,7 @@ fn research_lifecycle_commands_expose_help_and_require_authenticated_files() {
 
 #[test]
 fn ledger_followup_commands_require_files_keys_and_authenticated_sessions() {
-    for verb in ["review", "evidence", "revise"] {
+    for verb in ["review", "evidence", "revise", "synthesize"] {
         let help = invoke(&[verb, "--help"]);
         assert!(help.output.status.success());
         let stdout = String::from_utf8_lossy(&help.output.stdout);
