@@ -456,7 +456,7 @@ describe("published screening warnings", () => {
         ["retraction", "questions", {}],
         ["question", "retract", {}],
         ["question-withdraw", "questions/withdraw", {}],
-        ["gap-close", "gaps/close", {}],
+        ["gap-close", "gaps", {}],
         ["retraction", "retract", { provider_status: "timeout" }],
         ["retraction", "retract", { evaluated_body_digest: `sha256:${"f".repeat(64)}` }],
         ["retraction", "retract", { evaluated_context_digest: `sha256:${"f".repeat(64)}` }],
@@ -467,6 +467,54 @@ describe("published screening warnings", () => {
       }
       expect(f.state().events).toEqual([]);
       expect(count(f, "screening_refusals")).toBe(0);
+    }));
+
+  test("gap settlement warnings require the owned writer and preserve candidate/context and refusal gates", () =>
+    withFixture(async (f) => {
+      for (const outcome of ["closed-by", "withdrawn"] as const) {
+        const input = {
+          ...candidate(f, "gap-close"),
+          statement: JSON.stringify({
+            gap_id: "G-2",
+            outcome,
+            ...(outcome === "closed-by" ? { closed_by: "C-3@1" } : {}),
+          }),
+          falsifier: null,
+        };
+        for (const category of ["dual-use-boundary", "off-topic"] as const) {
+          const receipt = published(
+            await screen(f, input, { coarse_category: category }, "gaps/close"),
+          );
+          expect(receipt.provenance.public_action).toEqual({
+            category,
+            action: "published-with-warning",
+            notice: category === "off-topic" ? "off-scope" : "screening-warning",
+          });
+        }
+        expect(count(f, "screening_cases")).toBe(0);
+      }
+      for (const route of ["gaps", "promote", "review", "unknown-gap-writer"]) {
+        const held = await screen(f, candidate(f, "gap-close"), {}, route);
+        expect(held instanceof Response && held.status).toBe(202);
+      }
+      for (const patch of [
+        { evaluated_body_digest: `sha256:${"f".repeat(64)}` },
+        { evaluated_context_digest: `sha256:${"f".repeat(64)}` },
+        { provider_status: "timeout" },
+        { coarse_category: "provider-unavailable" },
+        { decision: "quarantine" },
+      ] as const) {
+        const held = await screen(f, candidate(f, "gap-close"), patch, "gaps/close");
+        expect(held instanceof Response && held.status).toBe(202);
+      }
+      const rejected = await screen(
+        f,
+        candidate(f, "gap-close"),
+        { decision: "reject" },
+        "gaps/close",
+      );
+      expect(rejected instanceof Response && rejected.status).toBe(403);
+      expect(f.state().events).toEqual([]);
     }));
 
   test("question warnings require the exact filing writer and cannot relax screening authority", () =>

@@ -116,6 +116,41 @@ test("claim and review obligation metadata preserves warnings outside authored p
   };
   assert.throws(() => fixture([malformed]).read());
 });
+test("claim/review packs retain exact settlement warnings even when the obligation is too large", () => {
+  const warning = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  } as const;
+  for (const status of ["closed-by", "withdrawn"] as const) {
+    const record = gap(4, "C-3@1", status);
+    record.last_event = { ...record.filing, seq: 8, event_id: "EV-8" };
+    record.last_event_screening_notice = warning;
+    for (const oversized of [false, true]) {
+      if (oversized) record.content!.obligation = "é".repeat(10000);
+      const candidate = fixture([record]).read().candidates[0]!;
+      const body = JSON.parse(candidate.body);
+      assert.equal(candidate.screening_notice, undefined);
+      assert.deepEqual(body.last_event_screening_notice, warning);
+      assert.equal(body.last_event.seq, 8);
+      assert.match(
+        candidate.why_included,
+        /Recorded settlement \(#8\): Published with a screening context notice/,
+      );
+      if (oversized) assert.equal(body.content_omitted, "whole-record-size-limit");
+    }
+    record.status = "unavailable";
+    assert.ok(!JSON.stringify(fixture([record]).read().candidates).includes("screening-warning"));
+    record.status = status;
+    record.last_event_screening_notice = {
+      ...warning,
+      private_detail: "PRIVATE_CANARY",
+    } as typeof warning;
+    assert.throws(() => fixture([record]).read());
+    record.content = null;
+    assert.deepEqual(fixture([record]).read().candidates, []);
+  }
+});
 
 for (const status of ["open", "unavailable", "closed-by", "withdrawn"] as const) {
   test(`${status} is lifecycle metadata, never proof or a scientific status`, () => {

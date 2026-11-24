@@ -91,6 +91,11 @@ export function ProofGapsView({ result, historical }: {
               <h3>Missing obligation</h3><WorkProduct>{gap.content.obligation}</WorkProduct>
               <h3>What closing it would establish</h3><WorkProduct>{gap.content.closes_what}</WorkProduct>
             </>}
+            {gap.content !== null && (gap.status === "closed-by" || gap.status === "withdrawn") &&
+              gap.last_event_screening_notice !== undefined && <section aria-label="Settlement screening context">
+                <p className="quiet">Recorded settlement at sequence {gap.last_event.seq}</p>
+                <ScreeningNotice notice={gap.last_event_screening_notice} />
+              </section>}
             {gap.closed_by !== null && <p>Submitted closing reference: {closure === null ? <code>{gap.closed_by}</code> :
               <Link href={closure} prefetch={false}>{gap.closed_by}</Link>}.
               {gap.closed_by.startsWith("E-") && " Evidence is read with current visibility and withdrawal."}

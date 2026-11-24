@@ -2,11 +2,11 @@ import { afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { PRODUCTION_STOA_ORIGIN } from "@asimposium/contracts";
 import { PROOF_GAPS_SCHEMA_ID, type ProofGapRecord, type ProofGapsResponse } from "@asimposium/contracts/proof-gaps";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ProofGapsView } from "../../components/proof-gaps-view";
 import { parseProofGapQuery, proofGapClosingPath } from "../../lib/proof-gap-view";
 import { resolvePublicRecord } from "../../lib/public-record";
 
 mock.module("server-only", () => ({}));
+const { ProofGapsView } = await import("../../components/proof-gaps-view");
 const { stoaFetchProofGaps } = await import("../../lib/public-ledger");
 const { default: ProofGapsPage, generateMetadata } = await import("../../app/p/[slug]/gaps/page");
 const { default: PublicRecordPage } = await import("../../app/r/[...slug]/page");
@@ -107,6 +107,33 @@ test("proof-gap publication warnings stay separate from authored work and disapp
   expect(renderToStaticMarkup(await ProofGapsPage(props()))).toContain("Off-scope science");
   response.gaps[0]!.screening_notice = { ...warned.screening_notice, private_detail: "PRIVATE_CANARY" } as typeof warned.screening_notice;
   expect((await stoaFetchProofGaps("P-DEMO")).state).toBe("unavailable");
+});
+test("settlement context identifies its own event without qualifying the original obligation", async () => {
+  const original = gap();
+  const decision = { ...original.filing, event_id: "EV-5", seq: 5 };
+  const warning = {
+    category: "dual-use-boundary", action: "published-with-warning", notice: "screening-warning",
+  } as const;
+  for (const status of ["closed-by", "withdrawn"] as const) {
+    const record = { ...original, status, last_event: decision,
+      closed_by: status === "closed-by" ? "C-3@1" : null,
+      last_event_screening_notice: warning };
+    let response = face({ gaps: [record] });
+    globalThis.fetch = mock(async () => Response.json(response)) as unknown as typeof fetch;
+    const html = renderToStaticMarkup(await ProofGapsPage(props()));
+    expect(html).toContain('aria-label="Settlement screening context"');
+    expect(html).toContain("Recorded settlement at sequence 5");
+    expect(html).toContain("Published with a screening context notice:");
+    expect(html.indexOf("Recorded settlement at sequence 5")).toBeGreaterThan(html.indexOf("Missing obligation"));
+    response = face({ gaps: [{ ...record, status: "unavailable", closed_by: null }] });
+    expect(renderToStaticMarkup(await ProofGapsPage(props()))).not.toContain("Settlement screening context");
+    response = face({ gaps: [{ ...record, content: null, status: "unavailable", closed_by: null }] });
+    expect(renderToStaticMarkup(await ProofGapsPage(props()))).not.toContain("screening-warning");
+    response = face({ gaps: [{ ...record, last_event_screening_notice: {
+      ...warning, private_detail: "PRIVATE_CANARY",
+    } as typeof warning }] });
+    expect((await stoaFetchProofGaps("P-DEMO")).state).toBe("unavailable");
+  }
 });
 
 test("exact targets bypass the bounded list and refuse a different returned identity", async () => {

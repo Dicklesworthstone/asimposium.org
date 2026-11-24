@@ -46,6 +46,7 @@ interface Row {
   filed_body: string | null;
   last_body: string | null;
   screening_provenance_json: string | null;
+  last_screening_provenance_json: string | null;
 }
 export const PROOF_GAPS_HEAD_SQL = `SELECT id, public_seq, unlisted, status FROM problems
   WHERE id = ? AND status <> 'private-draft'
@@ -105,7 +106,11 @@ export function proofGapsSql(unowned: boolean): string {
     CASE WHEN g.admission_ordinal <= ${PAGE_SIZE} AND screening.event_id IS NOT NULL
       THEN CASE WHEN length(CAST(screening.provenance_json AS BLOB)) <= 4096
         THEN screening.provenance_json ELSE '' END
-      END AS screening_provenance_json
+      END AS screening_provenance_json,
+    CASE WHEN g.admission_ordinal <= ${PAGE_SIZE} AND last_screening.event_id IS NOT NULL
+      THEN CASE WHEN length(CAST(last_screening.provenance_json AS BLOB)) <= 4096
+        THEN last_screening.provenance_json ELSE '' END
+      END AS last_screening_provenance_json
   FROM admitted g JOIN cut ON cut.id = g.problem_id
   JOIN events h ON h.id = (SELECT n.id FROM events n WHERE n.problem_id = g.problem_id
     AND n.object_kind = 'gap' AND n.object_id = g.object_id AND n.seq <= cut.cursor
@@ -113,6 +118,7 @@ export function proofGapsSql(unowned: boolean): string {
   LEFT JOIN event_content c ON c.event_id = g.id AND c.payload_sha256 = g.payload_sha256
   LEFT JOIN event_content hc ON hc.event_id = h.id AND hc.payload_sha256 = h.payload_sha256
   LEFT JOIN screening_publications screening ON screening.event_id = g.id
+  LEFT JOIN screening_publications last_screening ON last_screening.event_id = h.id
   ORDER BY g.seq, g.id`;
 }
 export async function gapPayload(
@@ -317,9 +323,16 @@ export async function composeProofGapSnapshot(
     // The notice belongs to the filing, never a later settlement or mutable
     // gap projection. Withheld work carries neither its prose nor its notice.
     let screeningNotice: ProofGapRecord["screening_notice"];
+    let lastScreeningNotice: ProofGapRecord["last_event_screening_notice"];
     try {
       screeningNotice =
         content === null ? undefined : publicationScreeningNotice(row.screening_provenance_json);
+      // Only the verified settlement may qualify its own decision. A missing,
+      // hidden, redacted, corrupt or mismatched decision cannot lend a notice
+      // to the filing, and historical open reads never borrow a future notice.
+      if (status === "closed-by" || status === "withdrawn") {
+        lastScreeningNotice = publicationScreeningNotice(row.last_screening_provenance_json);
+      }
     } catch {
       throw new ProofGapReadError("unavailable");
     }
@@ -331,6 +344,9 @@ export async function composeProofGapSnapshot(
       content,
       closed_by: closedBy,
       ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
+      ...(lastScreeningNotice === undefined
+        ? {}
+        : { last_event_screening_notice: lastScreeningNotice }),
     });
   }
   const more = rows.length > PAGE_SIZE;

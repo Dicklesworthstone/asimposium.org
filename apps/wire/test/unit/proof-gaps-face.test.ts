@@ -1,6 +1,7 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import type { ProofGapsResponse } from "@asimposium/contracts/proof-gaps";
+import { renderProjection } from "@asimposium/render";
 import {
   PROOF_GAP_FACE_MAX_BYTES,
   proofGapPath,
@@ -75,6 +76,44 @@ test("empty and unavailable pages remain distinct", () => {
   );
   assert.equal(failed.omitted?.[0]?.reason, "content_unavailable");
   assert.deepEqual(failed.degraded, ["content_unavailable"]);
+});
+test("settlement warning context is named separately from the filing on canonical reading faces", () => {
+  const record = face().gaps[0]!;
+  const warning = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  } as const;
+  const closed = {
+    ...record,
+    status: "closed-by" as const,
+    closed_by: "C-8@2",
+    last_event: { ...record.filing, event_id: "EV-4", seq: 4 },
+    last_event_screening_notice: warning,
+  };
+  const projection = proofGapsProjection(face({ gaps: [closed] }));
+  const item = projection.items[0]!;
+  assert.equal(
+    item.screening_notice,
+    undefined,
+    "a settlement does not lend its warning to the filing",
+  );
+  assert.deepEqual(JSON.parse(item.body).last_event_screening_notice, warning);
+  for (const format of ["md", "html-fragment"] as const) {
+    const rendered = renderProjection(projection, format).body;
+    assert.match(
+      rendered,
+      /Recorded settlement \(#4\): Published with a screening context notice: dual-use-boundary/,
+    );
+  }
+  for (const gap of [
+    { ...closed, content: null },
+    { ...closed, status: "unavailable" as const },
+  ]) {
+    const hidden = proofGapsProjection(face({ gaps: [gap] }));
+    assert.ok(!JSON.stringify(hidden).includes("screening-warning"));
+    assert.ok(!hidden.items[0]!.why_included?.includes("Recorded settlement"));
+  }
 });
 test("settled records with withheld references never acquire a target link or open state", () => {
   const data = face();

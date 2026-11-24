@@ -134,9 +134,10 @@ function supportsPublishedWarning(
     // canonical faces, resume/graveyard packs, and the Fellow's private-free history.
     (kind === "dead-end" &&
       (holdContext?.route === "dead-ends" || holdContext?.route === "sponsor-workshop")) ||
-    // Gap filings carry an exact-publication notice through canonical history,
-    // claim/review obligations and formal packs. Settlements are separate kinds.
+    // Filings and settlements retain separate exact-event notices through
+    // canonical history and claim/review obligations; neither notice is proof.
     (kind === "gaps" && holdContext?.route === "gaps") ||
+    (kind === "gap-close" && holdContext?.route === "gaps/close") ||
     // Claim and statement reviews share a classifier kind. Their server-owned
     // writers preserve each publication's notice through canonical faces and packs.
     (kind === "review" &&

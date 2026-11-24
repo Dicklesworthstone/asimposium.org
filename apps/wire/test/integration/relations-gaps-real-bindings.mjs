@@ -789,6 +789,188 @@ await runLocalWorkerJourney(async (context) => {
     assert.equal(response.status, 304, "restoration returns the identical filing and its notice");
   }
 
+  // Later gap decisions have their own screening context. A fresh Fellow keeps
+  // these product writes within the ordinary Fellow/problem promotion budget.
+  const settlementAuthor = await enroll("gap-settlement-author", "usr_gap_settlement_sponsor");
+  const settlementSession = await call(
+    "/v1/sessions",
+    {
+      problem_id: problemId,
+      intent: "explore",
+    },
+    settlementAuthor,
+    201,
+  );
+  const decisionPath = `/v1/sessions/${settlementSession.session_id}/gaps/close`;
+  for (const outcome of ["closed-by", "withdrawn"]) {
+    const filing = GapFiledResponseSchema.parse(
+      await call(
+        `/v1/sessions/${settlementSession.session_id}/gaps`,
+        {
+          target_claim_id: claim1Id,
+          target_version: 1,
+          obligation: `NATIVE-SETTLEMENT-${outcome}: establish the uniform bound on each residue class.`,
+          closes_what: "The missing boundary estimate.",
+        },
+        settlementAuthor,
+        201,
+        `native-settlement-filing-${outcome}`,
+      ),
+    );
+    const transition = {
+      gap_id: filing.gap_id,
+      outcome,
+      ...(outcome === "closed-by" ? { closed_by: `${claim2Id}@1` } : {}),
+    };
+    const prior = ProofGapsResponseSchema.parse(
+      await call(`/p/${problemId}/gaps.json?through=${filing.seq}&target=${filing.gap_id}`),
+    );
+    assert.equal(prior.gaps[0].screening_notice, undefined);
+    assert.equal(prior.gaps[0].last_event_screening_notice, undefined);
+    if (outcome === "closed-by") {
+      for (const [mode, expected, code] of [
+        ["quarantine", 202, "SCREENING_HOLD"],
+        ["unavailable", 202, "SCREENING_HOLD"],
+        ["reject", 403, "POLICY_DENIED"],
+      ]) {
+        await fixtures.setScreenMode(mode);
+        const refused = await call(
+          decisionPath,
+          transition,
+          settlementAuthor,
+          expected,
+          `native-settlement-${mode}`,
+        );
+        assert.equal(refused.code, code);
+        assert.equal(
+          (
+            await env.DB.prepare("SELECT public_seq FROM problems WHERE id=?")
+              .bind(problemId)
+              .first()
+          ).public_seq,
+          filing.seq,
+          "a held or refused decision cannot close the gap",
+        );
+      }
+    }
+    await fixtures.setScreenMode("allow-with-warning");
+    const key = `native-settlement-warning-${outcome}`;
+    const decision = GapClosedResponseSchema.parse(
+      await call(decisionPath, transition, settlementAuthor, 201, key),
+    );
+    assert.equal(decision.status, outcome);
+    assert.equal(decision.seq, filing.seq + 1, "one scientific event per settlement");
+    const screenCount = await fixtures.screeningCalls();
+    assert.deepEqual(await call(decisionPath, transition, settlementAuthor, 200, key), decision);
+    assert.equal(
+      await fixtures.screeningCalls(),
+      screenCount,
+      "settlement replay does not re-screen",
+    );
+    await fixtures.setScreenMode("pass");
+    assert.deepEqual(
+      ProofGapsResponseSchema.parse(
+        await call(`/p/${problemId}/gaps.json?through=${filing.seq}&target=${filing.gap_id}`),
+      ),
+      prior,
+      "a later warning cannot qualify an earlier open obligation",
+    );
+    const decisions = [];
+    for (const extension of ["json", "md", "html"]) {
+      const url = `${origin}/p/${problemId}/gaps.${extension}?through=${decision.seq}&target=${filing.gap_id}`;
+      const response = await worker.fetch(url, { headers: { "User-Agent": userAgent } });
+      assert.equal(response.status, 200);
+      const bytes = await response.text();
+      if (extension === "json") {
+        const record = ProofGapsResponseSchema.parse(JSON.parse(bytes)).gaps[0];
+        assert.equal(record.status, outcome);
+        assert.equal(record.screening_notice, undefined);
+        assert.deepEqual(record.last_event_screening_notice, warningNotice);
+        assert.equal(record.last_event.seq, decision.seq);
+      } else {
+        assert.ok(
+          bytes.includes(
+            `Recorded settlement (#${decision.seq}): Published with a screening context notice:`,
+          ),
+        );
+      }
+      decisions.push({ url, etag: response.headers.get("etag"), bytes });
+    }
+    for (const [path, token] of warningPackUrls.slice(1)) {
+      const pack = PackResponseSchema.parse(await call(path, undefined, token));
+      const item = pack.items.find((candidate) => candidate.id === filing.gap_id);
+      assert.ok(item, `the settled obligation remains in ${path}`);
+      assert.equal(
+        item.screening_notice,
+        undefined,
+        "settlement context does not qualify the filing",
+      );
+      assert.deepEqual(JSON.parse(item.body).last_event_screening_notice, warningNotice);
+      assert.ok(item.why_included.includes(`Recorded settlement (#${decision.seq}):`));
+    }
+    const full = PackResponseSchema.parse(
+      await call(
+        `/v1/sessions/${settlementSession.session_id}/pack?profile=full&max_tokens=8000&through=${decision.seq}&after=${decision.seq - 1}`,
+        undefined,
+        settlementAuthor,
+      ),
+    );
+    const fullDecision = full.items.find((item) => item.kind === "full-event");
+    assert.deepEqual(fullDecision.screening_notice, warningNotice);
+    assert.equal(JSON.parse(fullDecision.body).publication.type, `gap.${outcome}`);
+    const receipt = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM screening_publications s JOIN events e ON e.id=s.event_id
+       WHERE e.problem_id=? AND e.object_id=? AND e.type=?`,
+    )
+      .bind(problemId, filing.gap_id, `gap.${outcome}`)
+      .first();
+    assert.equal(receipt.n, 1);
+    const controlDecision = (visibility, version) =>
+      env.DB.prepare(
+        `INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,visibility,source,
+      reason_category,actor,reason,version,created_at)
+      VALUES(?,?,'ledger-object',?,?,'operator','privacy','native-gap-test',
+      'Local settlement visibility proof.',?,?)`,
+      )
+        .bind(
+          `CC-GAP-SETTLEMENT-${decision.seq}-${version}`,
+          problemId,
+          `#${decision.seq}`,
+          visibility,
+          version,
+          new Date().toISOString(),
+        )
+        .run();
+    await controlDecision("hidden", 1);
+    for (const before of decisions) {
+      const response = await worker.fetch(before.url, {
+        headers: { "User-Agent": userAgent, "If-None-Match": before.etag },
+      });
+      assert.equal(response.status, 200);
+      const bytes = await response.text();
+      assert.ok(!bytes.includes("screening-warning"));
+      assert.ok(!bytes.includes("Recorded settlement (#"));
+    }
+    for (const [path, token] of warningPackUrls.slice(1)) {
+      const pack = PackResponseSchema.parse(await call(path, undefined, token));
+      const item = pack.items.find((candidate) => candidate.id === filing.gap_id);
+      assert.ok(item);
+      assert.equal(JSON.parse(item.body).status, "unavailable");
+      assert.ok(!JSON.stringify(item).includes("screening-warning"));
+    }
+    await controlDecision("visible", 2);
+    for (const before of decisions) {
+      const response = await worker.fetch(before.url, {
+        headers: { "User-Agent": userAgent, "If-None-Match": before.etag },
+      });
+      assert.equal(
+        response.status,
+        304,
+        "restoring the exact decision restores its notice and bytes",
+      );
+    }
+  }
+
   // Diptych census over this journey's gap and relation faces (lu59 / 92x /
   // qvzk). A relation is cited by the seq of its relation.asserted event.
   {
