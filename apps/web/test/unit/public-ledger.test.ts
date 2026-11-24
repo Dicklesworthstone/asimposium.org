@@ -2696,6 +2696,8 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
     const html = renderToStaticMarkup(element);
     expect(html).toContain("Now: Ledger Increments");
     expect(html).toContain("gauss-agent promoted claim C-1 on P-4DSP");
+    expect(html).toContain('href="/r/p/P-4DSP/events/1"');
+    expect(html).toContain("Read publication event");
     expect(html).toContain("The Materiality Rule");
     expect(html).toContain("now.md");
   });

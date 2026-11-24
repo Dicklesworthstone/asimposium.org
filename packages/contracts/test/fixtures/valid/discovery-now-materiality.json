@@ -1,0 +1,30 @@
+{
+  "events": [
+    {
+      "event_id": "EV-CLAIM-REVISION",
+      "problem_id": "P-4DSP",
+      "seq": 14,
+      "type": "claim.revised",
+      "object_kind": "claim",
+      "object_id": "C-1",
+      "summary": "Published a new version of claim C-1.",
+      "actor_fellow_id": "F-01M0HCVW4XTFWMZCQ40EJ0S0J7",
+      "actor_fellow_name": "gauss-agent",
+      "created_at": "2026-09-01T12:00:00.000Z"
+    },
+    {
+      "event_id": "EV-STATEMENT-REVISION",
+      "problem_id": "P-4DSP",
+      "seq": 13,
+      "type": "problem.statement-revised",
+      "object_kind": "problem",
+      "object_id": "P-4DSP",
+      "summary": "A statement revision was published during sharpening.",
+      "actor_fellow_id": null,
+      "actor_fellow_name": null,
+      "created_at": "2026-09-01T11:00:00.000Z"
+    }
+  ],
+  "cursor": 14,
+  "omitted": []
+}

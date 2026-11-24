@@ -5,22 +5,66 @@ import {
   type NowStripQuery,
   type NowStripResponse,
   NowStripResponseSchema,
+  ProblemGovernanceEventSchema,
+  ProblemStatementReviewEventSchema,
   parseNowPageCursor,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql } from "../krater/public-content.ts";
+import {
+  CITATION_EVENT_MAX_BYTES,
+  type CitationContentRow,
+  verifiedCitationContent,
+} from "../ledger/citation-read-integrity.ts";
+import { isObjectLevelEvent } from "../mega-commands/materiality.ts";
 import { offScopeClaimSql, offScopeProblemSql, offScopePublicationSql } from "./public-scope.ts";
 
-interface EventRow {
+interface EventRow extends CitationContentRow {
   id: string;
   problem_id: string;
   seq: number;
   type: string;
+  source_type: string;
   object_kind: string;
   object_id: string;
+  object_version: number;
   actor_fellow_id: string | null;
   actor_fellow_name: string | null;
   created_at: string;
+}
+
+const PAGE_SIZE = 20;
+const MAX_SCANNED_EVENTS = 80;
+
+/** Publication-time state is evidence only when its committed bytes and exact
+ * identity agree. Missing history never becomes a claim of process-only work. */
+async function isVerifiedMaterialEvent(row: EventRow): Promise<boolean> {
+  const payload = await verifiedCitationContent(row.problem_id, row);
+  if (payload === undefined) return false;
+  if (row.source_type === "problem.statement-revised") {
+    const parsed = ProblemGovernanceEventSchema.safeParse(payload);
+    return (
+      parsed.success &&
+      parsed.data.action === "revise-statement" &&
+      parsed.data.problem.id === row.problem_id &&
+      row.object_kind === "problem" &&
+      row.object_id === row.problem_id &&
+      parsed.data.problem.current_statement_version === row.object_version &&
+      isObjectLevelEvent({ type: row.source_type, problem_status: parsed.data.previous_status })
+    );
+  }
+  if (row.source_type === "problem.statement-reviewed") {
+    const parsed = ProblemStatementReviewEventSchema.safeParse(payload);
+    return (
+      parsed.success &&
+      parsed.data.problem_id === row.problem_id &&
+      row.object_kind === "problem" &&
+      row.object_id === row.problem_id &&
+      parsed.data.statement_version === row.object_version &&
+      isObjectLevelEvent({ type: row.source_type, problem_status: parsed.data.previous_status })
+    );
+  }
+  return isObjectLevelEvent({ type: row.source_type, extract: row.payload_json });
 }
 
 interface CursorRow {
@@ -35,7 +79,7 @@ export async function loadNowStrip(
   db: D1Database,
   query: NowStripQuery = {},
 ): Promise<NowStripResponse> {
-  const boundary = query.before === undefined ? undefined : parseNowPageCursor(query.before);
+  let boundary = query.before === undefined ? undefined : parseNowPageCursor(query.before);
   if (query.before !== undefined && boundary === undefined) throw new Error("Invalid Now cursor");
   const cursorRow = await db
     .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
@@ -55,11 +99,23 @@ export async function loadNowStrip(
       json_extract(source.payload_json, '$.bears_on_version')) END`;
 
   const events: MaterialEventItem[] = [];
-  let statement = db.prepare(
-    `SELECT
+  let scanned = 0;
+  let nextBefore: string | undefined;
+  while (scanned < MAX_SCANNED_EVENTS && events.length < PAGE_SIZE) {
+    const remaining = MAX_SCANNED_EVENTS - scanned;
+    const batchLimit = Math.min(PAGE_SIZE + 1, remaining + 1);
+    let statement = db.prepare(
+      `SELECT
            e.id,
            e.problem_id,
            e.seq,
+           p.public_seq,
+           e.type AS source_type,
+           e.payload_sha256,
+           source.payload_sha256 AS content_sha256,
+           source.redacted_at,
+           CASE WHEN length(CAST(source.payload_json AS BLOB)) <= ${CITATION_EVENT_MAX_BYTES}
+             THEN source.payload_json ELSE NULL END AS payload_json,
            CASE e.type
              WHEN 'claim.created' THEN 'claim.promoted'
              WHEN 'review.created' THEN 'review.published'
@@ -69,6 +125,7 @@ export async function loadNowStrip(
            END AS type,
            e.object_kind,
            e.object_id,
+           e.object_version,
            e.actor_fellow_id,
            f.name AS actor_fellow_name,
            e.created_at
@@ -100,11 +157,13 @@ export async function loadNowStrip(
          AND NOT ${offScopePublicationSql("e.id")}
          AND NOT ${offScopeClaimSql("p.id", targetClaim, "p.public_seq")}
          AND NOT ${offScopeClaimSql("p.id", targetClaim, "p.public_seq", targetVersion)}
-         AND (e.type <> 'problem.statement-reviewed' OR NOT ${offScopeProblemSql(
+         AND (e.type NOT IN ('problem.statement-reviewed', 'problem.statement-revised') OR NOT ${offScopeProblemSql(
            "p.id",
            "p.public_seq",
-           "CASE WHEN json_valid(source.payload_json) THEN json_extract(source.payload_json, '$.statement_version') END",
+           "e.object_version",
          )})
+         AND (e.type <> 'dead_end.recorded'
+           OR instr(source.payload_json, 'low-substance-dead-end') = 0)
          ${
            boundary === undefined
              ? ""
@@ -119,45 +178,52 @@ export async function loadNowStrip(
          AND (e.type IN (
            'problem.admitted',
            'claim.created',
+           'claim.revised',
            'evidence.created',
            'review.created',
            'hypothesis.killed',
            'dead_end.recorded'
-         ) OR (e.type = 'problem.statement-reviewed' AND EXISTS (
-           SELECT 1 FROM event_content c WHERE c.event_id = e.id
-             AND CASE WHEN json_valid(c.payload_json)
-               THEN json_extract(c.payload_json, '$.previous_status') END = 'sharpening'
-         )))
+         ) OR (e.type IN ('problem.statement-reviewed', 'problem.statement-revised')
+           AND json_extract(source.payload_json, '$.previous_status') = 'sharpening'))
          ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
-         LIMIT 21`,
-  );
-  if (boundary !== undefined) statement = statement.bind(...boundary.slice(1));
-  const eventRows = await statement.all<EventRow>();
-  const rows = eventRows.results ?? [];
+         LIMIT ${batchLimit}`,
+    );
+    if (boundary !== undefined) statement = statement.bind(...boundary.slice(1));
+    const eventRows = await statement.all<EventRow>();
+    const rows = eventRows.results ?? [];
+    if (rows.length === 0) {
+      nextBefore = undefined;
+      break;
+    }
 
-  for (const row of rows.slice(0, 20)) {
-    const summary = formatMaterialEventSummary(row);
-    events.push({
-      event_id: row.id,
-      problem_id: row.problem_id,
-      seq: row.seq,
-      type: row.type as MaterialEventType,
-      object_kind: row.object_kind,
-      object_id: row.object_id,
-      summary,
-      actor_fellow_id: row.actor_fellow_id,
-      actor_fellow_name: row.actor_fellow_name,
-      created_at: row.created_at,
-    });
+    for (const [index, row] of rows.slice(0, remaining).entries()) {
+      scanned += 1;
+      const before = encodeNowPageCursor({ ...row, event_id: row.id });
+      boundary = parseNowPageCursor(before);
+      nextBefore = index + 1 < rows.length || rows.length === batchLimit ? before : undefined;
+      if (!(await isVerifiedMaterialEvent(row))) continue;
+      const summary = formatMaterialEventSummary(row);
+      events.push({
+        event_id: row.id,
+        problem_id: row.problem_id,
+        seq: row.seq,
+        type: row.type as MaterialEventType,
+        object_kind: row.object_kind,
+        object_id: row.object_id,
+        summary,
+        actor_fellow_id: row.actor_fellow_id,
+        actor_fellow_name: row.actor_fellow_name,
+        created_at: row.created_at,
+      });
+      if (events.length === PAGE_SIZE) break;
+    }
+    if (rows.length < batchLimit || events.length === PAGE_SIZE) break;
   }
 
-  const lastEvent = events.at(-1);
   return NowStripResponseSchema.parse({
     events,
     cursor,
-    ...(rows.length > 20 && lastEvent !== undefined
-      ? { next_before: encodeNowPageCursor(lastEvent) }
-      : {}),
+    ...(nextBefore === undefined ? {} : { next_before: nextBefore }),
     omitted: [
       "process and meta events excluded by the materiality rule (Fable §9.6)",
       "withdrawn or unavailable source content and reviews or evidence whose exact targets are unavailable are excluded under current visibility controls",
@@ -165,6 +231,8 @@ export async function loadNowStrip(
       "at most 20 per page by event time descending, problem id ascending, problem sequence descending and event id ascending; problem sequences are not globally comparable",
       "live traversal, not a frozen snapshot; use next_before for older events and restart to discover newly inserted earlier entries; visibility is checked on every page",
       "material types classify ledger claim.created, review.created and evidence.created as promoted, published and filed",
+      "claim revisions and statement work published during sharpening are material; later statement revisions and low-substance dead ends are excluded",
+      "at most 80 candidate publications are checked per page; unavailable, corrupt or oversized source bodies are omitted, and continuation advances past checked positions",
     ],
   });
 }
@@ -174,6 +242,10 @@ function formatMaterialEventSummary(row: EventRow): string {
   switch (row.type) {
     case "claim.promoted":
       return `${actor} promoted claim ${row.object_id} on ${row.problem_id}`;
+    case "claim.revised":
+      return `${actor} revised claim ${row.object_id}@${row.object_version} on ${row.problem_id}`;
+    case "problem.statement-revised":
+      return `Statement of ${row.problem_id} revised to S@${row.object_version} during sharpening`;
     case "review.published":
       if (row.object_kind === "problem")
         return `${actor} reviewed the statement of ${row.problem_id}`;

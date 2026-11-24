@@ -612,20 +612,274 @@ describe("Now withdrawal on migrated SQLite (not deployed D1 proof)", () => {
         "EV-1",
         "R-1",
         "C-1",
+        "C-1",
       ]);
       visibility(raw, "#1", false);
-      expect((await loadNowStrip(db)).events.map((event) => event.object_id)).toEqual(["R-2"]);
+      expect((await loadNowStrip(db)).events.map((event) => event.object_id)).toEqual([
+        "R-2",
+        "C-1",
+      ]);
       visibility(raw, "#1", true, 2);
       expect((await loadNowStrip(db)).events.map((event) => event.object_id)).toEqual([
         "R-2",
         "EV-1",
         "R-1",
         "C-1",
+        "C-1",
       ]);
       raw.run(
         "UPDATE event_content SET payload_json='null',redacted_at='2026-09-10T00:00:00Z',redaction_reason='Fixture withdrawal' WHERE event_id='E-1'",
       );
-      expect((await loadNowStrip(db)).events.map((event) => event.object_id)).toEqual(["R-2"]);
+      expect((await loadNowStrip(db)).events.map((event) => event.object_id)).toEqual([
+        "R-2",
+        "C-1",
+      ]);
+    } finally {
+      raw.close();
+    }
+  });
+});
+
+describe("Now scientific materiality on migrated SQLite (not D1 integration proof)", () => {
+  function publish(
+    raw: Database,
+    seq: number,
+    type: string,
+    payload: unknown,
+    options: { version?: number; corrupt?: boolean; suffix?: string } = {},
+  ) {
+    const id = `EV-MATERIAL-${seq}`;
+    const body = JSON.stringify(payload) + (options.suffix ?? "");
+    const digest = createHash("sha256").update(body).digest("hex");
+    const statement = type.startsWith("problem.statement-");
+    raw.run(
+      "UPDATE problems SET public_seq=MAX(public_seq,?),chain_digest='sha256:chain' WHERE id='P-4DSP'",
+      [seq],
+    );
+    raw.run(
+      `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+        payload_sha256,row_digest,chain_digest,created_at)
+       VALUES(?,'P-4DSP',?,?,?,?,?,?,'sha256:row','sha256:chain','2026-09-10T00:00:00.000Z')`,
+      [
+        id,
+        seq,
+        type,
+        statement ? "problem" : "dead_end",
+        statement ? "P-4DSP" : `DE-${seq}`,
+        options.version ?? 1,
+        digest,
+      ],
+    );
+    raw.run("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)", [
+      id,
+      digest,
+      options.corrupt ? JSON.stringify({ previous_status: "sharpening" }) : body,
+    ]);
+    return id;
+  }
+
+  function formulation(previous_status: "sharpening" | "active", version = 2) {
+    return ProblemGovernanceEventSchema.parse({
+      action: "revise-statement",
+      acting_principal: { type: "sponsor", id: "usr_materiality" },
+      source_fellow_id: "F-materiality",
+      previous_status,
+      previous_statement_version: version - 1,
+      problem: {
+        id: "P-4DSP",
+        title: "Finite test of a formulation",
+        status: previous_status,
+        current_statement_version: version,
+        statement: "Every two-edge simple path has three vertices.",
+        falsifier: "A two-edge simple path with a different vertex count.",
+        motivation: "Separate the finite hypotheses before scientific review.",
+        updated_at: "2026-09-10T00:00:00.000Z",
+      },
+    });
+  }
+
+  const substantive = {
+    approach: "Enumerate finite residue classes.",
+    why_it_fails: "The finite check supplies no bridge to the unbounded case.",
+    retry_predicate: "An exact finite reduction is published.",
+  };
+
+  test("claim revisions and historical sharpening survive activation, while process work and thin dead ends do not", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      const revision = seedScopeClaim(raw, "P-4DSP", "C-1", 2, 2);
+      const sharpened = publish(raw, 3, "problem.statement-revised", formulation("sharpening"), {
+        version: 2,
+      });
+      const reviewed = publish(
+        raw,
+        4,
+        "problem.statement-reviewed",
+        ProblemStatementReviewEventSchema.parse({
+          session_id: `S-${"s".repeat(26)}`,
+          problem_id: "P-4DSP",
+          statement_version: 2,
+          verdict: "statement-clear",
+          basis: "The finite hypotheses and counterexample are explicit.",
+          previous_status: "sharpening",
+          status: "active",
+        }),
+        { version: 2 },
+      );
+      publish(raw, 5, "problem.statement-revised", formulation("active", 3), { version: 3 });
+      publish(
+        raw,
+        6,
+        "problem.statement-reviewed",
+        {
+          session_id: `S-${"s".repeat(26)}`,
+          problem_id: "P-4DSP",
+          statement_version: 3,
+          verdict: "statement-clear",
+          basis: "A later formulation review.",
+          previous_status: "active",
+          status: "active",
+        },
+        { version: 3 },
+      );
+      publish(raw, 7, "dead_end.recorded", { ...substantive, flags: ["low-substance-dead-end"] });
+      const negative = publish(raw, 8, "dead_end.recorded", substantive);
+      raw.run("UPDATE problems SET status='active',current_statement_version=3 WHERE id='P-4DSP'");
+      const result = await loadNowStrip(db);
+      expect(result.events.map((event) => event.event_id)).toEqual([
+        negative,
+        reviewed,
+        sharpened,
+        revision.eventId,
+        "E-1",
+      ]);
+      expect(result.events.find((event) => event.event_id === revision.eventId)).toMatchObject({
+        type: "claim.revised",
+        summary: "F-SCOPE revised claim C-1@2 on P-4DSP",
+      });
+      expect(result.events.find((event) => event.event_id === sharpened)).toMatchObject({
+        type: "problem.statement-revised",
+        summary: "Statement of P-4DSP revised to S@2 during sharpening",
+      });
+      expect(result.events.find((event) => event.event_id === sharpened)?.summary).not.toContain(
+        "A Fellow",
+      );
+      expect(result.next_before).toBeUndefined();
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("conditional materiality requires the exact verified publication and immutable identity", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      publish(raw, 2, "problem.statement-revised", formulation("sharpening"), {
+        version: 2,
+        corrupt: true,
+      });
+      publish(raw, 3, "problem.statement-revised", formulation("sharpening"), { version: 3 });
+      publish(
+        raw,
+        4,
+        "problem.statement-revised",
+        {
+          ...formulation("sharpening"),
+          problem: {
+            ...formulation("sharpening").problem,
+            id: "P-OTHER",
+          },
+        },
+        { version: 2 },
+      );
+      publish(
+        raw,
+        5,
+        "problem.statement-revised",
+        { previous_status: "sharpening" },
+        { version: 2 },
+      );
+      publish(raw, 6, "problem.statement-revised", formulation("sharpening"), {
+        version: 2,
+        suffix: " ".repeat(65_536),
+      });
+      const redacted = publish(raw, 7, "problem.statement-revised", formulation("sharpening"), {
+        version: 2,
+      });
+      raw.run(
+        "UPDATE event_content SET redacted_at='2026-09-10T00:00:00.000Z',redaction_reason='Fixture withdrawal' WHERE event_id=?",
+        [redacted],
+      );
+      const missing = publish(raw, 8, "problem.statement-revised", formulation("sharpening"), {
+        version: 2,
+      });
+      raw.run("DELETE FROM event_content WHERE event_id=?", [missing]);
+      const valid = publish(raw, 9, "problem.statement-revised", formulation("sharpening"), {
+        version: 2,
+      });
+      expect((await loadNowStrip(db)).events.map((event) => event.event_id)).toEqual([
+        valid,
+        "E-1",
+      ]);
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("thin dead ends are removed before the limit and cannot bury earlier scientific work", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      for (let seq = 2; seq <= 25; seq++)
+        seedAttributedClaim(raw, "P-4DSP", `C-${seq}`, seq, "SPON-01", "2026-08-03T00:00:00.000Z");
+      for (let seq = 26; seq <= 120; seq++)
+        publish(raw, seq, "dead_end.recorded", {
+          ...substantive,
+          flags: ["low-substance-dead-end"],
+        });
+      const first = await loadNowStrip(db);
+      expect(first.events.map((event) => event.object_id)).toEqual(
+        Array.from({ length: 20 }, (_, i) => `C-${25 - i}`),
+      );
+      expect(first.next_before).toBeDefined();
+      const second = await loadNowStrip(db, { before: first.next_before });
+      expect(second.events.map((event) => event.object_id)).toEqual([
+        "C-5",
+        "C-4",
+        "C-3",
+        "C-2",
+        "C-1",
+      ]);
+      expect(second.next_before).toBeUndefined();
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("an exhausted verification budget still continues past corrupt positions without losing older publications", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      for (let seq = 2; seq <= 91; seq++)
+        publish(raw, seq, "dead_end.recorded", substantive, { corrupt: true });
+      let reads = 0;
+      const countedDb = {
+        ...db,
+        prepare(sql: string) {
+          if (sql.includes("e.type AS source_type")) reads++;
+          return db.prepare(sql);
+        },
+      } as Env["DB"];
+      const first = await loadNowStrip(countedDb);
+      expect(reads).toBe(4);
+      expect(first.events).toEqual([]);
+      expect(first.next_before).toBeDefined();
+      expect(first.omitted.join(" ")).toContain("at most 80 candidate publications");
+      const second = await loadNowStrip(countedDb, { before: first.next_before });
+      expect(second.events.map((event) => event.event_id)).toEqual(["E-1"]);
+      expect(second.next_before).toBeUndefined();
+      expect(reads).toBe(5);
     } finally {
       raw.close();
     }

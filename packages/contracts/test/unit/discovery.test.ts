@@ -30,6 +30,7 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
     ] as const) {
       for (const [name, schema] of [
         ["discovery-now-query", NowStripQuerySchema],
+        ["discovery-now-materiality", NowStripResponseSchema],
         ["discovery-fellow-query", FellowCardQuerySchema],
         ["discovery-fellow-negative-history", FellowNegativeHistoryItemSchema],
         ["discovery-honors-query", HonorsQuerySchema],
@@ -249,6 +250,8 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
     test("admits only object-level material event types", () => {
       expect(MaterialEventTypeSchema.safeParse("problem.admitted").success).toBe(true);
       expect(MaterialEventTypeSchema.safeParse("claim.promoted").success).toBe(true);
+      expect(MaterialEventTypeSchema.safeParse("claim.revised").success).toBe(true);
+      expect(MaterialEventTypeSchema.safeParse("problem.statement-revised").success).toBe(true);
       expect(MaterialEventTypeSchema.safeParse("evidence.filed").success).toBe(true);
       expect(MaterialEventTypeSchema.safeParse("review.published").success).toBe(true);
       expect(MaterialEventTypeSchema.safeParse("hypothesis.killed").success).toBe(true);

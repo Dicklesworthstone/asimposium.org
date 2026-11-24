@@ -4,13 +4,26 @@ import {
   encodeNowPageCursor,
   NowStripResponseSchema,
 } from "@asimposium/contracts";
-import { ensureProblem, writeLedgerEvent } from "../../src/krater/krater.ts";
+import {
+  canonicalRevisionPayload,
+  ensureProblem,
+  writeLedgerEvent,
+} from "../../src/krater/krater.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Production publication plus explicit ordering/visibility fixtures on actual D1.
 // Fixture rows prove read semantics; they are not evidence of scientific validation,
 // real sponsor enrollment, Google login, deployed caching, or model screening.
-async function nowPaginationJourney({ call, enroll, sponsorCall, worker, env, origin, userAgent }) {
+async function nowPaginationJourney({
+  call,
+  enroll,
+  sponsorCall,
+  reviseStatement,
+  worker,
+  env,
+  origin,
+  userAgent,
+}) {
   const sponsor = "usr_now_pages";
   const token = await enroll("now-page-author", sponsor);
   async function publish(title, statement, falsifier) {
@@ -57,7 +70,8 @@ async function nowPaginationJourney({ call, enroll, sponsorCall, worker, env, or
       )
       .run();
   }
-  async function insert(problem, seq, type = "claim.created") {
+  let fixtureEvents = 0;
+  async function insert(problem, seq, type = "claim.created", options = {}) {
     const result = await writeLedgerEvent(
       env.DB,
       {
@@ -66,10 +80,11 @@ async function nowPaginationJourney({ call, enroll, sponsorCall, worker, env, or
         idempotencyKey: `now-${problem}-${seq}`,
         requestDigest: "0".repeat(64),
         eventType: type,
-        objectKind: "claim",
-        objectId: `C-${seq}`,
-        objectVersion: 1,
-        payloadJson: JSON.stringify({ fixture: "Now ordering", seq }),
+        objectKind: options.objectKind ?? "claim",
+        objectId: options.objectId ?? `C-${seq}`,
+        objectVersion: options.objectVersion ?? 1,
+        payloadJson:
+          options.payloadJson ?? JSON.stringify(options.payload ?? { fixture: "Now ordering", seq }),
         createdAt: time,
         attribution: {
           fellowId: "F-NOW-FIXTURE",
@@ -82,6 +97,7 @@ async function nowPaginationJourney({ call, enroll, sponsorCall, worker, env, or
       { statementsAfterEvent: () => [] },
     );
     assert.equal(result.seq, seq);
+    fixtureEvents++;
   }
   const expected = [...actual.events];
   for (const problem of problems.slice(0, 2)) {
@@ -221,18 +237,159 @@ async function nowPaginationJourney({ call, enroll, sponsorCall, worker, env, or
   const hidden = await call(`/now.json${suffix}`);
   assert.ok(hidden.events.every((e) => e.problem_id === "P-NOW-A"));
   assert.equal(hidden.next_before, undefined);
+
+  // Real Fellow-authored proposal -> sponsor review -> statement publication.
+  // Activation must not retroactively turn that sharpening work into process.
+  await reviseStatement(actualProblem, sponsor, token, {
+    statement: "Every finite simple path with n edges has exactly n + 1 distinct vertices.",
+    falsifier: "A finite simple path whose vertex count differs from its edge count plus one.",
+    motivation: "Make the finite domain explicit before scientific review.",
+  });
+  const revised = await env.DB.prepare(
+    "SELECT id,seq FROM events WHERE problem_id=? AND type='problem.statement-revised' AND object_version=2",
+  )
+    .bind(actualProblem)
+    .first();
+  assert.ok(revised);
+  const reviewer = await enroll("now-page-reviewer", "usr_now_reviewer");
+  const session = await call(
+    "/v1/sessions",
+    { problem_id: actualProblem, intent: "review" },
+    reviewer,
+    201,
+  );
+  await call(
+    `/v1/problems/${actualProblem}/statement-review`,
+    {
+      session_id: session.session_id,
+      statement_version: 2,
+      verdict: "statement-clear",
+      basis: "The finite simple-path domain and vertex-count counterexample are explicit.",
+    },
+    reviewer,
+  );
+  const activated = NowStripResponseSchema.parse(await call("/now.json"));
+  const sharpening = activated.events.find((event) => event.event_id === revised.id);
+  assert.equal(sharpening?.type, "problem.statement-revised");
+  assert.ok(sharpening.summary.includes("S@2 during sharpening"));
+  assert.ok(!sharpening.summary.includes("A Fellow"));
+  await reviseStatement(actualProblem, sponsor, token, {
+    statement:
+      "For every finite simple path, its distinct-vertex count equals its edge count plus one.",
+    falsifier: "A finite simple path with unequal vertex and edge-plus-one counts.",
+    motivation: "Restate the same finite condition after activation.",
+  });
+  const afterRevision = NowStripResponseSchema.parse(await call("/now.json"));
+  assert.ok(afterRevision.events.some((event) => event.event_id === revised.id));
+  assert.equal(
+    afterRevision.events.filter((event) => event.type === "problem.statement-revised").length,
+    1,
+  );
+  const linked = await call(
+    `/p/${actualProblem}/events.json?since=${revised.seq - 1}&limit=1&through=${revised.seq}`,
+  );
+  assert.equal(linked.events[0].event.id, revised.id);
+  assert.equal(linked.events[0].event.object_version, 2);
+  assert.equal(linked.events.length, 1);
+  for (const face of ["md", "html"]) {
+    const response = await worker.fetch(`${origin}/now.${face}`, {
+      headers: { "User-Agent": userAgent },
+    });
+    const text = await response.text();
+    const link =
+      face === "md"
+        ? `/p/${actualProblem}/events.md?since=${revised.seq - 1}&limit=1&through=${revised.seq}`
+        : `/p/${actualProblem}/events.md?since=${revised.seq - 1}&amp;limit=1&amp;through=${revised.seq}`;
+    assert.ok(text.includes(link));
+    const followed = await worker.fetch(`${origin}${link.replaceAll("&amp;", "&")}`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(followed.status, 200);
+    assert.ok((await followed.text()).includes(revised.id));
+  }
+
+  // Explicit malformed/low-substance read fixtures sit ahead of real material
+  // rows. Filtering and source validation cannot strand those older rows.
+  const materialProblem = "P-NOW-MATERIAL";
+  await ensureProblem(env.DB, materialProblem, time);
+  await env.DB.prepare("UPDATE problems SET status='active' WHERE id=?")
+    .bind(materialProblem)
+    .run();
+  await insert(materialProblem, 1, "claim.created", {
+    payload: {
+      claim_id: "C-1",
+      kind: "conjecture",
+      statement: "Every finite simple path with n edges has n + 1 vertices.",
+      falsifier: "A finite simple path with a different vertex count.",
+    },
+  });
+  await insert(materialProblem, 2, "claim.revised", {
+    objectId: "C-1",
+    objectVersion: 2,
+    payloadJson: canonicalRevisionPayload({
+      claimId: "C-1",
+      baseVersion: 1,
+      kind: "conjecture",
+      statement: "Every finite simple path with n edges has exactly n + 1 distinct vertices.",
+      falsifier: "A finite simple path with a different distinct-vertex count.",
+    }),
+  });
+  for (let seq = 3; seq <= 28; seq++)
+    await insert(materialProblem, seq, "dead_end.recorded", {
+      objectKind: "dead_end",
+      objectId: `DE-${seq}`,
+      payload: { approach: "Thin fixture", flags: ["low-substance-dead-end"] },
+    });
+  for (let seq = 29; seq <= 53; seq++)
+    await insert(materialProblem, seq, "problem.statement-revised", {
+      objectKind: "problem",
+      objectId: materialProblem,
+      objectVersion: seq,
+      payload: {
+        previous_status: "sharpening",
+        fixture: "Missing exact governance source identity",
+      },
+    });
+  const materialSeen = [];
+  let materialBefore;
+  for (let pageNumber = 0; pageNumber < 8; pageNumber++) {
+    const page = NowStripResponseSchema.parse(
+      await call(
+        `/now.json${materialBefore === undefined ? "" : `?before=${encodeURIComponent(materialBefore)}`}`,
+      ),
+    );
+    materialSeen.push(...page.events);
+    materialBefore = page.next_before;
+    if (materialBefore === undefined) break;
+  }
+  assert.equal(materialBefore, undefined, "Filtered traversal must terminate");
+  assert.equal(new Set(materialSeen.map((event) => event.event_id)).size, materialSeen.length);
+  assert.deepEqual(
+    materialSeen
+      .filter((event) => event.problem_id === materialProblem)
+      .map((event) => [event.seq, event.type]),
+    [
+      [2, "claim.revised"],
+      [1, "claim.promoted"],
+    ],
+  );
   return {
     kind: "now-pagination-real-bindings",
     status: "pass",
     pages,
     traversed_events: seen.length,
     real_publications: 2,
-    fixture_events: 49,
+    fixture_events: fixtureEvents,
     visible_fixture_events: 45,
     private_unlisted_unpublished_excluded: true,
     live_inserts: true,
     conditional_faces: paths.length,
     malformed_queries: paths.length * 5,
+    historical_sharpening_after_activation: true,
+    active_statement_revisions_excluded: true,
+    claim_revisions_discoverable: true,
+    low_substance_and_invalid_sources_do_not_strand_older_work: true,
+    publication_links_followed: 2,
   };
 }
 

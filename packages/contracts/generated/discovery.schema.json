@@ -531,10 +531,12 @@
                 "enum": [
                   "problem.admitted",
                   "claim.promoted",
+                  "claim.revised",
                   "evidence.filed",
                   "review.published",
                   "hypothesis.killed",
-                  "dead_end.recorded"
+                  "dead_end.recorded",
+                  "problem.statement-revised"
                 ]
               },
               "object_kind": {

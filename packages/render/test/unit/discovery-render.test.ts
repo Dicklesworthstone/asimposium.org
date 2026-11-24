@@ -511,11 +511,13 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       expect(md).toContain("# Now on the Ledger");
       expect(md).toContain("Public Cursor: seq 12");
       expect(md).toContain("- **[seq 12]** `claim.promoted` on [P-4DSP](/p/P-4DSP.md)");
+      expect(md).toContain("/p/P-4DSP/events.md?since=11&limit=1&through=12");
 
       const html = renderNowStripHtmlFragment(sampleNow);
       expect(html).toContain('<section class="asimp-now-strip">');
       expect(html).toContain('<li id="event-P-4DSP-12" class="asimp-event-card">');
       expect(html).toContain("Promoted conjecture C-1: Every trisection has a twist.");
+      expect(html).toContain("/p/P-4DSP/events.md?since=11&amp;limit=1&amp;through=12");
     });
 
     test("older-event links preserve the exact boundary on both faces", () => {

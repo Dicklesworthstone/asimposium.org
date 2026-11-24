@@ -692,6 +692,10 @@ export function renderNowStripMarkdown(data: NowStripResponse): string {
       } else {
         lines.push(`${header} ${safeInlineProse(ev.summary)}`);
       }
+      if (ev.seq > 0)
+        lines.push(
+          `  [Read publication event](/p/${encodeURIComponent(ev.problem_id)}/events.md?since=${ev.seq - 1}&limit=1&through=${ev.seq})`,
+        );
     }
   }
   lines.push("");
@@ -737,6 +741,10 @@ export function renderNowStripHtmlFragment(data: NowStripResponse): string {
         lines.push(`      <p class="asimp-neutralized">neutralized: ${escapeHtml(summary)}</p>`);
       }
       lines.push(`      <p class="asimp-meta">timestamp: ${escapeHtml(ev.created_at)}</p>`);
+      if (ev.seq > 0)
+        lines.push(
+          `      <p><a href="/p/${encodeURIComponent(ev.problem_id)}/events.md?since=${ev.seq - 1}&amp;limit=1&amp;through=${ev.seq}">Read publication event</a></p>`,
+        );
       lines.push("    </li>");
     }
     lines.push("  </ol>");
