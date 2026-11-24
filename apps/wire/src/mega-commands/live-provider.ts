@@ -9,6 +9,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 import type { authorizeFellowWrite, FellowCredentialBinding } from "../enrollment/service.ts";
 import { sha256Hex } from "../krater/krater.ts";
 import { hiddenByContentControlSql } from "../krater/public-content.ts";
+import { type getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
 import type { selectBackToObjectMove } from "./back-to-object-moves.ts";
 import type { selectNormalizeConflictMove } from "./conflict-moves.ts";
 import type { selectRecordDeadEndMove } from "./dead-end-moves.ts";
@@ -86,6 +87,7 @@ async function readMoveUpdates(reads: readonly MoveRead[]): Promise<MoveUpdate[]
 
 export interface LiveMovesDependencies extends LedgerMovesDependencies {
   readonly authorize: typeof authorizeFellowWrite;
+  readonly readBudget?: typeof getRemainingBudget;
   readonly now: () => number;
   readonly firstClaimTemplate: () => MoveTemplate;
   readonly hypotheses?: HypothesisMoveSource;
@@ -212,6 +214,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
     fellowBinding: FellowCredentialBinding,
     eventsRecorded: number,
     now: number,
+    quota: Pick<ProblemMovesRequest, "publicWritesLimited" | "sponsorPromotionRateLimit">,
     capturedCursor?: number,
   ) {
     const row = await db
@@ -609,11 +612,32 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
 
     let selected: MoveSelection = { moves: [], degraded: false };
     for (const update of await readMoveUpdates(reads)) selected = await update(selected);
-    const { moves: allCandidates, degraded } = selected;
+    const { moves: allCandidates } = selected;
+    let degraded = selected.degraded;
+    let limited = quota.publicWritesLimited;
+    // Working packs already observed this problem's quota. For next and triage,
+    // evaluate each admitted board separately before ranking its candidates.
+    if (limited === undefined && this.dependencies.readBudget && allCandidates.length > 0) {
+      try {
+        const budget = await this.dependencies.readBudget(db, {
+          problemId,
+          fellowId: fellowBinding.fellowId,
+          sponsorId: fellowBinding.sponsorId,
+          sponsorLimit: parseSponsorLimit(quota.sponsorPromotionRateLimit),
+          now,
+        });
+        limited = budget.remaining === 0 || budget.sponsor_remaining === 0;
+      } catch {
+        limited = true;
+        degraded = true;
+      }
+    }
 
     // Permission checks precede deduplication; different needs sharing a
     // target retain their own contracts until the common priority selection.
-    const deduplicated = uniqueMoves(filterMovesByPermissions(allCandidates, effectivePermissions));
+    const deduplicated = uniqueMoves(
+      filterMovesByPermissions(allCandidates, effectivePermissions, limited),
+    );
 
     // Scientific priority sort: ceremony breaker -> idle-close -> sharpen -> integrity -> gaps/retries -> frontier -> exploration -> synthesize
     const ranked = [...deduplicated].sort(compareMovePriority);
@@ -689,14 +713,11 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
         fellowBinding,
         await this.usage(db, fellowBinding),
         now,
+        request,
         request.capturedCursor,
       );
 
-      const permittedMoves = filterMovesByPermissions(
-        result.moves,
-        result.effectivePermissions,
-        request.publicWritesLimited,
-      );
+      const permittedMoves = result.moves;
       const primaryMove = permittedMoves[0] ?? null;
       const alternatives = permittedMoves.slice(1, 3);
       const latencyMs = Date.now() - startTime;
@@ -778,7 +799,14 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
             const id = selected[position];
             if (id === undefined) break;
             try {
-              results[position] = await this.problem(db, id, fellowBinding, eventsRecorded, now);
+              results[position] = await this.problem(
+                db,
+                id,
+                fellowBinding,
+                eventsRecorded,
+                now,
+                request,
+              );
             } catch {
               failed = true;
             }

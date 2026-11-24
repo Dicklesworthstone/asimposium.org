@@ -112,6 +112,8 @@ export function createMegaCommandsRouter(
       assignments: base.assignments ?? [],
       db,
       credential: auth,
+      sponsorPromotionRateLimit:
+        options.sponsorPromotionRateLimit ?? env.SPONSOR_PROMOTION_RATE_LIMIT,
     });
 
     let hello: typeof base;
@@ -294,6 +296,8 @@ export function createMegaCommandsRouter(
       effectivePermissions,
       db,
       credential: auth,
+      sponsorPromotionRateLimit:
+        options.sponsorPromotionRateLimit ?? env.SPONSOR_PROMOTION_RATE_LIMIT,
     });
 
     const selectedRole = movesResult.viewerRole ?? role;

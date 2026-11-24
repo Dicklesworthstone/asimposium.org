@@ -764,6 +764,61 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
     expect(parsed.selection_boundary?.toLowerCase()).toContain("triage examines at most");
   });
 
+  test("next and triage rank only moves within the Fellow's problem and sponsor budgets", async () => {
+    const { app, env, db, enrollFellow, seedPublishedProblem, seedMembership } =
+      await createTestHarness();
+    const fellow = await enrollFellow();
+    const exhausted = "P-BUDGETA";
+    const available = "P-BUDGETB";
+    for (const id of [exhausted, available]) {
+      await seedPublishedProblem(id, "A problem with no public claims", fellow);
+      await seedMembership(id, fellow.fellowId, "contributor");
+    }
+    const now = Date.now();
+    for (let i = 0; i < 20; i++) {
+      await db
+        .prepare(`INSERT INTO public_write_attempt_reservations
+        (reservation_id,fellow_id,problem_id,sponsor_id,session_id,route,idempotency_key,
+         request_digest,reserved_at,expires_at,status)
+        VALUES (?, ?, ?, ?, 'session', 'promote', ?, 'digest', ?, ?, 'settled_held')`)
+        .bind(
+          `attempt-${i}`,
+          fellow.fellowId,
+          exhausted,
+          fellow.sponsorId,
+          `key-${i}`,
+          now,
+          now + 60000,
+        )
+        .run();
+    }
+    async function read(path: string, sponsorLimit: number | string) {
+      const response = await app.fetch(
+        new Request(`https://a.asimposium.org${path}`, {
+          headers: { authorization: `Bearer ${fellow.token}` },
+        }),
+        { ...env, SPONSOR_PROMOTION_RATE_LIMIT: sponsorLimit },
+      );
+      expect(response.status).toBe(200);
+      return response.json();
+    }
+    expect(
+      ProblemNextResponseSchema.parse(await read(`/v1/p/${exhausted}/next`, 60)).primary_move,
+    ).toBeNull();
+    expect(TriageResponseSchema.parse(await read("/v1/triage", 60)).move?.refs).toEqual([
+      available,
+    ]);
+    for (const limit of [20, 0, "invalid"]) {
+      const next = ProblemNextResponseSchema.parse(await read(`/v1/p/${available}/next`, limit));
+      expect(next.primary_move).toBeNull();
+      expect(next.alternatives).toEqual([]);
+      expect(next.degraded).toBe(limit === "invalid");
+      const triage = TriageResponseSchema.parse(await read("/v1/triage", limit));
+      expect(triage.move).toBeNull();
+      expect(triage.degraded).toBe(limit === "invalid");
+    }
+  });
+
   test("GET /v1/triage with custom provider returns selected move", async () => {
     const candidate: NextMoveCandidate = {
       move: "sharpen-statement",

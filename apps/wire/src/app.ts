@@ -1032,7 +1032,6 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
   const router = createEnrollmentRouter({
     service,
     db: env.DB,
-    sponsorPromotionRateLimit: env.SPONSOR_PROMOTION_RATE_LIMIT,
     verifiedSponsor,
     verifiedOperator,
   });
@@ -1079,7 +1078,6 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
     service,
     db: env.DB,
     movesProvider: options.megaCommandsMovesProvider,
-    sponsorPromotionRateLimit: env.SPONSOR_PROMOTION_RATE_LIMIT,
   });
   megaCommandsRouter.notFound(
     () =>
