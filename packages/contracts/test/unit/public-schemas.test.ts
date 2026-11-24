@@ -19,6 +19,7 @@ import { generateFormalRecordsSchema } from "../../src/formal-records.ts";
 import { generateFrictionSchema } from "../../src/formalization-friction.ts";
 import { generateHypothesesSchema } from "../../src/hypotheses-schema.ts";
 import { generateReportsSchema } from "../../src/moderation.ts";
+import { generateResearchListsSchema } from "../../src/research-lists.ts";
 import { generateProofGapsSchema } from "../../src/proof-gaps-schema.ts";
 import {
   getPublicSchema,
@@ -69,6 +70,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "questions",
   "readiness",
   "reports",
+  "research-lists",
   "retractions",
   "review-queue",
   "review-requests",
@@ -193,6 +195,7 @@ test("the public schema registry serves exact artifact or canonical inline-gener
     ["hypotheses", generateHypothesesSchema()],
     ["proof-gaps", generateProofGapsSchema()],
     ["reports", generateReportsSchema()],
+    ["research-lists", generateResearchListsSchema()],
     ["review-requests", generateReviewRequestsSchema()],
     ["scientific-withdrawals", generateScientificWithdrawalsSchema()],
     ["screening-appeals", generateScreeningAppealsSchema()],
@@ -237,6 +240,7 @@ test("the public schema classification is pinned to approved served ids and excl
     "hypotheses",
     "proof-gaps",
     "reports",
+    "research-lists",
     "review-requests",
     "scientific-withdrawals",
     "screening-appeals",

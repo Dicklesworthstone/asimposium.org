@@ -54,6 +54,7 @@ import { generateFrictionSchema } from "./formalization-friction.ts";
 import { generateHypothesesSchema } from "./hypotheses-schema.ts";
 import { generateReportsSchema } from "./moderation.ts";
 import { generateProofGapsSchema } from "./proof-gaps-schema.ts";
+import { generateResearchListsSchema } from "./research-lists.ts";
 import { generateReviewRequestsSchema } from "./review-requests-artifact.ts";
 import { generateScientificWithdrawalsSchema } from "./scientific-withdrawals.ts";
 import { generateSponsorActivitySchema } from "./sponsor-activity.ts";
@@ -76,6 +77,7 @@ export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "hypotheses",
   "proof-gaps",
   "reports",
+  "research-lists",
   "review-requests",
   "scientific-withdrawals",
   "screening-appeals",
@@ -116,6 +118,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "questions",
   "readiness",
   "reports",
+  "research-lists",
   "retractions",
   "review-queue",
   "review-requests",
@@ -361,6 +364,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/reports.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: generateReportsSchema(),
+  }),
+  Object.freeze({
+    id: "research-lists",
+    served_at: "/schemas/research-lists.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateResearchListsSchema(),
   }),
   Object.freeze({
     id: "retractions",
