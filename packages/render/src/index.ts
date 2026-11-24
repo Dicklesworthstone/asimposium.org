@@ -87,6 +87,14 @@ export {
 } from "./public-moves.ts";
 export { MEDIA_TYPES, renderAllFaces, renderHtmlFragmentFace, renderProjection } from "./render.ts";
 export {
+  RESEARCH_LIST_NOTICE,
+  RESEARCH_LIST_OMISSIONS,
+  renderEvidenceListHtml,
+  renderEvidenceListMarkdown,
+  renderReviewListHtml,
+  renderReviewListMarkdown,
+} from "./research-lists.ts";
+export {
   renderReviewQueueHtml,
   renderReviewQueueMarkdown,
   reviewQueuePagePath,
