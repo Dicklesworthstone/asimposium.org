@@ -1,0 +1,30 @@
+{
+  "schema": "https://a.asimposium.org/schemas/integrity-cases.v1.json",
+  "problem_id": "P-INTEGRITY",
+  "notices": [
+    {
+      "case_id": "IC-00000000000000000000000001",
+      "source": {
+        "problem_id": "P-INTEGRITY",
+        "target_ref": "C-1@1",
+        "event_id": "event-integrity-source",
+        "payload_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "seq": 2
+      },
+      "state": "resolved",
+      "opened_at": "2026-10-30T12:00:00.000Z",
+      "updated_at": "2026-10-30T13:00:00.000Z",
+      "corrections": [
+        {
+          "problem_id": "P-INTEGRITY",
+          "target_ref": "C-2@1",
+          "event_id": "event-integrity-correction",
+          "payload_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "seq": 5
+        }
+      ]
+    }
+  ],
+  "has_more": false,
+  "next_after": null
+}

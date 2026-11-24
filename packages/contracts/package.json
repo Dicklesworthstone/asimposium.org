@@ -23,6 +23,7 @@
     "./formal-records": "./src/formal-records.ts",
     "./formalization-friction": "./src/formalization-friction.ts",
     "./hypotheses": "./src/hypotheses.ts",
+    "./integrity-cases": "./src/integrity-cases.ts",
     "./proof-gaps": "./src/proof-gaps.ts",
     "./questions": "./src/questions.ts",
     "./review-queue": "./src/review-queue.ts",
