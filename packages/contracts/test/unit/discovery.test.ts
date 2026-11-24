@@ -386,7 +386,7 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
       for (const unavailable of [
         { status: "unavailable" },
         { status: "unavailable", withdrawn: true },
-      ])
+      ] as const)
         expect(FellowReviewItemSchema.parse({ ...review, outcome: unavailable }).outcome).toEqual(
           unavailable,
         );
