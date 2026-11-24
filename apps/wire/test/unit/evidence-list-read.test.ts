@@ -282,28 +282,55 @@ test("corrupt, redacted, oversized and malformed records omit safely and advance
   }
 });
 
-test("source plus target transfer respects one byte budget before JavaScript decoding", async () => {
+test("byte-limited pages preserve every valid publication within their transfer budget", async () => {
   const f = fixture();
   try {
-    f.replacePayload("event-C-1-1", {
-      claim_id: "C-1",
-      kind: "definition",
-      statement: "a".repeat(64 * 1024),
+    // Each valid authored body has 65,536 characters but 196,608 UTF-8 bytes.
+    // Eight individually readable records exceed one page without a ninth
+    // lookahead, so the byte boundary itself must supply the continuation.
+    for (let n = 1; n <= 8; n++)
+      f.evidence(n, n % 2 === 0, { body_md: "界".repeat(64 * 1024) });
+    const assertTransferBudget = () => {
+      const bytes = f.transferred().reduce(
+        (total, row) =>
+          total +
+          Buffer.byteLength(typeof row.payload_json === "string" ? row.payload_json : "") +
+          Buffer.byteLength(typeof row.target_json === "string" ? row.target_json : ""),
+        0,
+      );
+      expect(bytes).toBeLessThanOrEqual(1024 * 1024);
+    };
+    const first = (await loadEvidenceList(f.db, PROBLEM)).face;
+    expect(first).toMatchObject({
+      cursor: 10,
+      count: 5,
+      scanned_through: 7,
+      next_after: 7,
+      omitted: ["page_limit"],
     });
-    for (let n = 1; n <= 9; n++) f.evidence(n, false, { body_md: "b".repeat(64 * 1024) });
-    const face = (await loadEvidenceList(f.db, PROBLEM)).face;
-    expect(face.count).toBe(7);
-    expect(face.next_after).toBe(10);
-    expect(face.omitted).toEqual(["content_unavailable", "page_limit"]);
-    const transferred = f.transferred().reduce(
-      (bytes, row) =>
-        bytes +
-        Buffer.byteLength(typeof row.payload_json === "string" ? row.payload_json : "") +
-        Buffer.byteLength(typeof row.target_json === "string" ? row.target_json : ""),
-      0,
+    expect(f.transferred()).toHaveLength(8);
+    expect(f.transferred()[5]).toMatchObject({
+      budget_deferred: 1,
+      payload_json: null,
+      target_json: null,
+    });
+    assertTransferBudget();
+    const entries = [...first.evidence];
+    let after = first.next_after;
+    let pages = 1;
+    while (after !== null) {
+      const page = (await loadEvidenceList(f.db, PROBLEM, { through: first.cursor, after })).face;
+      assertTransferBudget();
+      expect(page.cursor).toBe(first.cursor);
+      expect(page.omitted).not.toContain("content_unavailable");
+      entries.push(...page.evidence);
+      after = page.next_after;
+      expect(++pages).toBeLessThanOrEqual(2);
+    }
+    expect(pages).toBe(2);
+    expect(entries.map((entry) => entry.evidence_id)).toEqual(
+      Array.from({ length: 8 }, (_, index) => "E-" + (index + 1)),
     );
-    expect(transferred).toBeLessThanOrEqual(1024 * 1024);
-    expect(f.transferred()[8]).toMatchObject({ payload_json: null, target_json: null });
   } finally {
     f.sql.close();
   }

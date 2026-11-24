@@ -114,6 +114,8 @@ SELECT event_id, problem_id, evidence_id, seq, created_at, payload_sha256,
   fellow_id, sponsor_id, session_id, model_self_declared, harness_self_declared,
   screening_provenance, withdrawn, target_kind, target_id, target_version,
   target_event_id, target_seq, target_object_version, target_sha256,
+  CASE WHEN source_json IS NOT NULL AND target_json IS NOT NULL
+    AND payload_bytes > ${PAGE_BYTES} THEN 1 ELSE 0 END AS budget_deferred,
   CASE WHEN payload_bytes <= ${PAGE_BYTES} THEN source_json END AS payload_json,
   CASE WHEN payload_bytes <= ${PAGE_BYTES} THEN target_json END AS target_json
 FROM budgeted ORDER BY seq, event_id`;
@@ -139,6 +141,7 @@ interface Source {
   harness_self_declared: string | null;
   screening_provenance: string | null;
   withdrawn: number;
+  budget_deferred: number;
   target_kind: unknown;
   target_id: unknown;
   target_version: unknown;
@@ -183,6 +186,7 @@ async function snapshot(db: D1Database, problem: string, through: number | null,
       !sequence(row.seq, 1) ||
       row.seq <= previous ||
       row.seq > head.cursor ||
+      ![0, 1].includes(row.budget_deferred) ||
       ids.has(row.event_id)
     )
       throw new EvidenceListReadError("unavailable");
@@ -263,7 +267,17 @@ export async function loadEvidenceList(
   const evidence: EvidenceListResponse["evidence"] = [];
   const omitted = new Set<EvidenceListResponse["omitted"][number]>();
   const admitted = rows.slice(0, RESEARCH_LIST_PAGE_SIZE);
+  let scanned = after;
+  let budgetDeferred = false;
   for (const row of admitted) {
+    // This source and target each fit individually. Keep the record for the
+    // next page instead of treating this page's exhausted budget as redaction.
+    if (row.budget_deferred === 1) {
+      if (scanned === after) throw new EvidenceListReadError("unavailable");
+      budgetDeferred = true;
+      break;
+    }
+    scanned = row.seq;
     try {
       if (row.payload_json === null || !(await readableTarget(row)))
         throw new ScientificInputError("Unavailable evidence publication or target.");
@@ -311,8 +325,7 @@ export async function loadEvidenceList(
       omitted.add("content_unavailable");
     }
   }
-  const scanned = admitted.at(-1)?.seq ?? after;
-  const next = rows.length > RESEARCH_LIST_PAGE_SIZE ? scanned : null;
+  const next = budgetDeferred || rows.length > RESEARCH_LIST_PAGE_SIZE ? scanned : null;
   if (next !== null) omitted.add("page_limit");
   const face = EvidenceListResponseSchema.parse({
     schema: RESEARCH_LISTS_SCHEMA_ID,
