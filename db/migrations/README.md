@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0155_integrity_cases.sql`.
+schema through `0156_integrity_write_budget.sql`.
 
 Migration `0155_integrity_cases.sql` adds restricted scientific-integrity cases,
 append-only case actions, and atomic command receipts. Each case retains its

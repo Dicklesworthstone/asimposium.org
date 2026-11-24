@@ -229,7 +229,7 @@ const nextConfig: AgoraNextConfig = {
         destination: `${stoaOrigin}/p/:slug/claims/:claim.json`,
         permanent: true,
       },
-      ...["evidence", "reviews"].flatMap((collection) =>
+      ...["evidence", "reviews", "integrity"].flatMap((collection) =>
         ["md", "json", "html"].map((suffix) => ({
           source: `/p/:slug/${collection}.${suffix}`,
           destination: `${stoaOrigin}/p/:slug/${collection}.${suffix}`,

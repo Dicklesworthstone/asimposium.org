@@ -82,6 +82,7 @@ export function AdminModerationControl({
   targets = [],
   available = true,
   permalink = "/admin",
+  reportDismissOnly = false,
 }: {
   readonly operatorId: string;
   readonly kind: AdminModerationKind;
@@ -89,6 +90,7 @@ export function AdminModerationControl({
   readonly targets?: readonly { readonly id: string; readonly label: string }[];
   readonly available?: boolean;
   readonly permalink?: string;
+  readonly reportDismissOnly?: boolean;
 }) {
   const action =
     kind === "area"
@@ -256,7 +258,7 @@ export function AdminModerationControl({
                     Choose after reviewing the report
                   </option>
                   <option value="dismiss">Dismiss as unsubstantiated</option>
-                  <option value="uphold">Uphold the report</option>
+                  {!reportDismissOnly ? <option value="uphold">Uphold the report</option> : null}
                 </select>
               )}
             </>

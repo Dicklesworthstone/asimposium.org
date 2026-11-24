@@ -15,6 +15,10 @@ import {
   scanFieldsForCredentials,
   secretShapedContentProblem,
 } from "../screening/credential-scan.ts";
+import {
+  IntegrityWriteRateLimitedError,
+  integrityWriteRateLimitedProblem,
+} from "./integrity-quota.ts";
 import { queryIntegrityCases, readIntegrityCase } from "./integrity-read.ts";
 import {
   IntegrityCaseError,
@@ -271,6 +275,8 @@ export function createIntegrityCaseRouter(
           ),
         );
       } catch (error) {
+        if (error instanceof IntegrityWriteRateLimitedError)
+          return privateResponse(integrityWriteRateLimitedProblem(error.budget));
         if (error instanceof IntegrityCaseError) return refusal(error);
         return privateResponse(
           validatedProblem({

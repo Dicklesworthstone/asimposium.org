@@ -10,6 +10,7 @@ import {
 } from "@asimposium/contracts/integrity-cases";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { inboxNoticeStatement } from "../inbox/notice-write.ts";
+import { IntegrityWriteRateLimitedError, integrityWriteBudget } from "./integrity-quota.ts";
 import {
   IntegrityCaseError,
   type IntegritySourceWitness,
@@ -145,11 +146,18 @@ async function runCommand(
   };
   const prior = await readReceipt(db, command);
   if (prior) return prior;
+  const budget = await integrityWriteBudget(db, actor.actorClass, actor.actorId);
+  if (budget.remaining === 0) throw new IntegrityWriteRateLimitedError(budget);
   try {
     await execute(command);
   } catch (error) {
     const concurrent = await readReceipt(db, command);
     if (concurrent) return concurrent;
+    if (error instanceof Error && error.message.includes("INTEGRITY_WRITE_RATE_LIMITED")) {
+      const currentBudget = await integrityWriteBudget(db, actor.actorClass, actor.actorId);
+      if (currentBudget.remaining === 0) throw new IntegrityWriteRateLimitedError(currentBudget);
+      throw new Error("INTEGRITY_RATE_ADMISSION_UNAVAILABLE");
+    }
     throw error;
   }
   const saved = await readReceipt(db, command);

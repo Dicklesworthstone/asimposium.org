@@ -152,6 +152,18 @@
       "body_bytes": 66265
     },
     {
+      "id": "discrimination",
+      "url": "https://a.asimposium.org/schemas/discrimination.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 18545,
+      "slice_url_template": "https://a.asimposium.org/schemas/discrimination.v1/{property}.json",
+      "slices": [
+        "discrimination_request",
+        "discrimination_report",
+        "discrimination_response"
+      ]
+    },
+    {
       "id": "discovery",
       "url": "https://a.asimposium.org/schemas/discovery.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
@@ -168,18 +180,6 @@
         "fellow",
         "honors_query",
         "honors"
-      ]
-    },
-    {
-      "id": "discrimination",
-      "url": "https://a.asimposium.org/schemas/discrimination.v1.json",
-      "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 18545,
-      "slice_url_template": "https://a.asimposium.org/schemas/discrimination.v1/{property}.json",
-      "slices": [
-        "discrimination_request",
-        "discrimination_report",
-        "discrimination_response"
       ]
     },
     {

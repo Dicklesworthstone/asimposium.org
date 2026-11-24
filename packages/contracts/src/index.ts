@@ -78,7 +78,6 @@ export {
   SponsorSuspensionStatusSchema,
 } from "./admin.ts";
 export * from "./appeals.ts";
-export * from "./integrity-cases.ts";
 export {
   BATCH_PLAN_REFUSAL_CODES,
   BATCH_TEMP_ID_PATTERN,
@@ -547,6 +546,7 @@ export {
   SponsorInboxSourceRefSchema,
   sponsorInboxPageIsValid,
 } from "./inbox.ts";
+export * from "./integrity-cases.ts";
 export {
   LEASE_OBJECT_KINDS,
   LEASE_STATUSES,

@@ -911,7 +911,7 @@ describe("apex markdown redirect origin", () => {
           source, destination: `https://a-staging.asimposium.org${source}`, permanent: true,
         });
       }
-      for (const collection of ["evidence", "reviews"]) {
+      for (const collection of ["evidence", "reviews", "integrity"]) {
         for (const suffix of ["md", "json", "html"]) {
           const source = `/p/:slug/${collection}.${suffix}`;
           expect(redirects.find((redirect) => redirect.source === source)).toEqual({

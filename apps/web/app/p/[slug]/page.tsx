@@ -368,6 +368,12 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
         <ProblemClaimsBoard rows={claimRows} cursor={face.cursor} problemId={slug} />
         <ProblemRoster roster={face.roster} problemId={face.problem} cursor={face.cursor} />
 
+        <p>
+          <Link href={"/p/" + encodeURIComponent(face.problem) + "/integrity"} prefetch={false}>
+            Scientific-integrity notices and published correction references
+          </Link>
+        </p>
+
         <section aria-labelledby="evidence-and-reviews-heading">
           <h2 id="evidence-and-reviews-heading">Evidence and published reviews</h2>
           <p>
