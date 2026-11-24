@@ -1284,6 +1284,28 @@ for (const overflow of ["rows", "bytes"] as const) {
   });
 }
 
+test("review discovery isolates inconsistent scientific inputs to the affected candidates", async () => {
+  const f = fixture();
+  await f.add(1);
+  await f.add(2);
+  await scientificEvidence(f, 3, "C-2", "computation", { direction: "refutes" });
+  f.db.exec("UPDATE evidence SET direction='supports' WHERE bears_on_id='C-2'");
+  const route = createReviewQueueRoutes();
+  const request = () => route.request("/reviews.json", {}, { DB: f.d1 } as Env);
+  const partial = await request();
+  expect(partial.status).toBe(200);
+  const face = ReviewQueueResponseSchema.parse(await partial.json());
+  expect(face.candidates.map((candidate) => candidate.claim_id)).toEqual(["C-1"]);
+  expect(face.omitted).toEqual([{ reason: "content_unavailable", count: 1 }]);
+  f.db.exec("UPDATE evidence SET direction='refutes' WHERE bears_on_id='C-2'");
+  const restored = ReviewQueueResponseSchema.parse(await (await request()).json());
+  expect(restored.candidates[0]).toMatchObject({ claim_id: "C-2", need: "resolve-dispute" });
+  expect(restored.omitted).toEqual([]);
+  // An unavailable database is a failed read even if another claim is intact.
+  f.db.exec("ALTER TABLE evidence RENAME TO unavailable_evidence");
+  expect((await request()).status).toBe(500);
+});
+
 test("production review and retry recommendations share premise standing with exact claim reads", async () => {
   // Actual SQLite queries, production adapters and scientific folds. This is
   // reader integration coverage, not a deployed D1 or write-route proof.

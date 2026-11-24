@@ -254,7 +254,14 @@ export async function readReviewQueue(
       omit("scope_budget_exceeded");
       continue;
     }
-    if (!row || !(await verifiedReviewMetadata(admission, row))) {
+    // The canonical census is specific to this claim and cut. An inconsistent
+    // review/evidence projection withholds every affected candidate without
+    // hiding independent work elsewhere on this page.
+    if (
+      !row ||
+      timeline.some((entry) => (entry.source_projection_mismatch ?? 0) !== 0) ||
+      !(await verifiedReviewMetadata(admission, row))
+    ) {
       omit("content_unavailable");
       continue;
     }
