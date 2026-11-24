@@ -1363,8 +1363,39 @@ describe("scientific settlement references", () => {
       target_refs: ["C-1@1"],
       body_md: "Which recorded work product addresses the finite covering obligation?",
     });
-    const answerPath = `${f.path}/questions/${question.question_id}/answer`;
+    const questionId = String(question.question_id);
+    const answerPath = `${f.path}/questions/${questionId}/answer`;
     const evidenceId = String(f.evidence.evidence_id);
+    const questionSource = async (type: "question.asked" | "question.leased") => {
+      const row = await f.db
+        .prepare(`SELECT e.id AS event_id, c.payload_json, c.redacted_at
+          FROM events e JOIN event_content c ON c.event_id = e.id
+          WHERE e.problem_id='P-4DSP' AND e.object_kind='question'
+            AND e.object_id=? AND e.type=? ORDER BY e.seq DESC LIMIT 1`)
+        .bind(questionId, type)
+        .first<{ event_id: string; payload_json: string; redacted_at: string | null }>();
+      assert.ok(row);
+      return row;
+    };
+    const gapSource = async () => {
+      const row = await f.db
+        .prepare(`SELECT e.id AS event_id, c.payload_json, c.redacted_at
+          FROM events e JOIN event_content c ON c.event_id = e.id
+          WHERE e.problem_id='P-4DSP' AND e.object_kind='gap'
+            AND e.object_id=? AND e.type='gap.filed'`)
+        .bind(f.gap.gap_id)
+        .first<{ event_id: string; payload_json: string; redacted_at: string | null }>();
+      assert.ok(row);
+      return row;
+    };
+    const leaseQuestion = async () => {
+      const response = await send(`${f.path}/questions/${questionId}/lease`, {
+        objective: "Check the finite covering obligation.",
+        deliverable: "A published source that addresses the requested check.",
+      });
+      expect(response.status, await response.clone().text()).toBe(200);
+      return LeaseQuestionResponseSchema.parse(await response.json());
+    };
     const state = async () => ({
       events: (await f.db.prepare("SELECT id, seq, type FROM events ORDER BY seq").all()).results,
       head: await f.db
@@ -1379,6 +1410,14 @@ describe("scientific settlement references", () => {
         .prepare("SELECT status, resolved_by_object FROM questions WHERE question_id=?")
         .bind(question.question_id)
         .first(),
+      leases: (
+        await f.db
+          .prepare(
+            "SELECT lease_id, status, released_by, released_at FROM leases WHERE object_kind='question' AND object_id=? ORDER BY lease_id",
+          )
+          .bind(questionId)
+          .all()
+      ).results,
       replays: (
         await f.db
           .prepare(
@@ -1387,12 +1426,15 @@ describe("scientific settlement references", () => {
           .all()
       ).results,
     });
-    const hide = async (target: string) => {
+    const hide = async (target: string, visibility: "hidden" | "visible" = "hidden") => {
       await f.db
         .prepare(`INSERT INTO content_controls
         (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,actor,reason,version,created_at)
-        VALUES(?,'P-4DSP','ledger-object',?,'hidden','operator','privacy','settlement-fixture','Withhold this source.',1,?)`)
-        .bind(`CC-${crypto.randomUUID()}`, target, new Date().toISOString())
+        SELECT ?,'P-4DSP','ledger-object',?,?,'operator','privacy','settlement-fixture',
+          'Exercise source visibility.',COALESCE(MAX(version),0)+1,?
+        FROM content_controls WHERE problem_id='P-4DSP' AND target_kind='ledger-object'
+          AND target_ref=?`)
+        .bind(`CC-${crypto.randomUUID()}`, target, visibility, new Date().toISOString(), target)
         .run();
     };
     const withdraw = async (
@@ -1465,8 +1507,349 @@ describe("scientific settlement references", () => {
       expect(result.review_id).toMatch(/^R-/);
       return { id: result.review_id!, path, call: reviewer.call };
     };
-    return { ...f, send, answerPath, evidenceId, state, hide, withdraw, retractClaim, review };
+    return {
+      ...f,
+      send,
+      answerPath,
+      questionId,
+      questionSource,
+      gapSource,
+      leaseQuestion,
+      evidenceId,
+      state,
+      hide,
+      withdraw,
+      retractClaim,
+      review,
+    };
   }
+
+  test("unavailable question publications cannot be completed from retained projections", async () => {
+    const f = await settlementFixture();
+    // Fault-injected corruption and restoration, not permitted ledger writes.
+    await f.db.prepare("DROP TRIGGER event_content_lawful_redaction_only").run();
+    const creation = await f.questionSource("question.asked");
+    const refuse = async () => {
+      const before = await f.state();
+      const response = await f.send(f.answerPath, { resolved_by_object: f.evidenceId });
+      expect(response.status, await response.clone().text()).toBe(404);
+      expect(await response.json()).toMatchObject({ code: "QUESTION_NOT_FOUND" });
+      expect(await f.state()).toEqual(before);
+    };
+    // A retained projection cannot stand in for unreadable creation bytes.
+    for (const damage of ["payload", "redaction"] as const) {
+      await f.db
+        .prepare(
+          damage === "payload"
+            ? "UPDATE event_content SET payload_json=payload_json || ' ' WHERE event_id=?"
+            : "UPDATE event_content SET redacted_at='2026-11-24T00:00:00.000Z' WHERE event_id=?",
+        )
+        .bind(creation.event_id)
+        .run();
+      await refuse();
+      await f.db
+        .prepare("UPDATE event_content SET payload_json=?, redacted_at=? WHERE event_id=?")
+        .bind(creation.payload_json, creation.redacted_at, creation.event_id)
+        .run();
+    }
+
+    await f.leaseQuestion();
+    const latest = await f.questionSource("question.leased");
+    await f.db
+      .prepare("UPDATE event_content SET redacted_at='2026-11-24T00:00:00.000Z' WHERE event_id=?")
+      .bind(latest.event_id)
+      .run();
+    await refuse();
+    await f.db
+      .prepare("UPDATE event_content SET redacted_at=? WHERE event_id=?")
+      .bind(latest.redacted_at, latest.event_id)
+      .run();
+
+    await f.hide(f.questionId);
+    await refuse();
+    expect((await f.state()).leases).toEqual([expect.objectContaining({ status: "active" })]);
+  });
+
+  test("question completion rechecks its original and latest source before committing", async () => {
+    let interleave: (() => Promise<void>) | undefined;
+    const f = await settlementFixture({
+      beforeBatch: async () => {
+        const action = interleave;
+        interleave = undefined;
+        await action?.();
+      },
+    });
+    // Fault-injected corruption and restoration, not permitted ledger writes.
+    await f.db.prepare("DROP TRIGGER event_content_lawful_redaction_only").run();
+    await f.leaseQuestion();
+    for (const fault of [
+      "creation-content",
+      "latest-content",
+      "lifecycle-head",
+      "visibility",
+    ] as const) {
+      const altered =
+        fault === "creation-content" || fault === "latest-content"
+          ? await f.questionSource(
+              fault === "creation-content" ? "question.asked" : "question.leased",
+            )
+          : undefined;
+      let before: Awaited<ReturnType<typeof f.state>> | undefined;
+      interleave = async () => {
+        if (altered) {
+          await f.db
+            .prepare(
+              fault === "creation-content"
+                ? "UPDATE event_content SET payload_json=payload_json || ' ' WHERE event_id=?"
+                : "UPDATE event_content SET redacted_at='2026-11-24T00:00:00.000Z' WHERE event_id=?",
+            )
+            .bind(altered.event_id)
+            .run();
+        } else if (fault === "lifecycle-head") {
+          // Renewal preserves the projection's leased status but appends a new
+          // question lifecycle publication. The captured head must still match.
+          await f.leaseQuestion();
+        } else {
+          await f.hide(f.questionId);
+        }
+        before = await f.state();
+      };
+      const response = await f.send(f.answerPath, { resolved_by_object: f.evidenceId });
+      expect(interleave).toBeUndefined();
+      expect(response.status, await response.clone().text()).toBe(409);
+      expect(await response.json()).toMatchObject({ code: "OBJECT_VERSION_CONFLICT" });
+      assert.ok(before);
+      expect(await f.state()).toEqual(before);
+      expect(before.leases).toEqual([expect.objectContaining({ status: "active" })]);
+      if (altered)
+        await f.db
+          .prepare("UPDATE event_content SET payload_json=?, redacted_at=? WHERE event_id=?")
+          .bind(altered.payload_json, altered.redacted_at, altered.event_id)
+          .run();
+    }
+  });
+
+  test("unavailable gap filings cannot be settled from retained projections", async () => {
+    let screened = 0;
+    const f = await settlementFixture({
+      screenPromotion: async (input) => {
+        if (input.kind === "gap-close") screened += 1;
+        return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+      },
+    });
+    // Fault-injected corruption and restoration, not permitted ledger writes.
+    await f.db.prepare("DROP TRIGGER event_content_lawful_redaction_only").run();
+    const filing = await f.gapSource();
+    const refuse = async () => {
+      for (const body of [
+        { gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: f.evidenceId },
+        { gap_id: f.gap.gap_id, outcome: "withdrawn" },
+      ]) {
+        const before = await f.state();
+        const response = await f.send(`${f.path}/gaps/close`, body);
+        expect(response.status, await response.clone().text()).toBe(404);
+        expect(await response.json()).toMatchObject({ code: "GAP_NOT_FOUND" });
+        expect(await f.state()).toEqual(before);
+      }
+    };
+    for (const damage of ["payload", "redaction"] as const) {
+      await f.db
+        .prepare(
+          damage === "payload"
+            ? "UPDATE event_content SET payload_json=payload_json || ' ' WHERE event_id=?"
+            : "UPDATE event_content SET redacted_at='2026-11-24T00:00:00.000Z' WHERE event_id=?",
+        )
+        .bind(filing.event_id)
+        .run();
+      await refuse();
+      await f.db
+        .prepare("UPDATE event_content SET payload_json=?, redacted_at=? WHERE event_id=?")
+        .bind(filing.payload_json, filing.redacted_at, filing.event_id)
+        .run();
+    }
+    await f.hide(f.gap.gap_id);
+    await refuse();
+    expect(screened).toBe(0);
+  });
+
+  test("gap settlements recheck the filing source in the commit batch", async () => {
+    let interleave: (() => Promise<void>) | undefined;
+    let writeReady = false;
+    const f = await settlementFixture({
+      afterFirstRead: async (sql) => {
+        if (
+          interleave !== undefined &&
+          sql === "SELECT public_seq, chain_digest, chain_version FROM problems WHERE id = ?"
+        )
+          writeReady = true;
+      },
+      beforeBatch: async () => {
+        if (!writeReady) return;
+        writeReady = false;
+        const action = interleave;
+        interleave = undefined;
+        await action?.();
+      },
+    });
+    // A different Fellow isolates these source guards from the screen's
+    // existing same-Fellow publication-history checks.
+    const closer = await addApprovedFellow(f, {
+      suffix: "gap-source-closer",
+      scopes: ["promote"],
+    });
+    let key = 0;
+    const send = (path: string, body: unknown) =>
+      closer.call(path, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `gap-source-race-${++key}`,
+        },
+        body: JSON.stringify(body),
+      });
+    const opened = await send("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" });
+    expect(opened.status, await opened.clone().text()).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const path = `/v1/sessions/${session.session_id}/gaps/close`;
+    // Fault-injected corruption and restoration, not permitted ledger writes.
+    await f.db.prepare("DROP TRIGGER event_content_lawful_redaction_only").run();
+    const filing = await f.gapSource();
+    for (const fault of ["payload", "redaction", "visibility"] as const) {
+      for (const body of [
+        { gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: f.evidenceId },
+        { gap_id: f.gap.gap_id, outcome: "withdrawn" },
+      ]) {
+        let before: Awaited<ReturnType<typeof f.state>> | undefined;
+        interleave = async () => {
+          if (fault === "visibility") await f.hide(f.gap.gap_id);
+          else
+            await f.db
+              .prepare(
+                fault === "payload"
+                  ? "UPDATE event_content SET payload_json=payload_json || ' ' WHERE event_id=?"
+                  : "UPDATE event_content SET redacted_at='2026-11-24T00:00:00.000Z' WHERE event_id=?",
+              )
+              .bind(filing.event_id)
+              .run();
+          before = await f.state();
+        };
+        const response = await send(path, body);
+        expect(interleave).toBeUndefined();
+        expect(writeReady).toBe(false);
+        expect(response.status, await response.clone().text()).toBe(409);
+        expect(await response.json()).toMatchObject({ code: "OBJECT_VERSION_CONFLICT" });
+        assert.ok(before);
+        expect(await f.state()).toEqual(before);
+        if (fault === "visibility") await f.hide(f.gap.gap_id, "visible");
+        else
+          await f.db
+            .prepare("UPDATE event_content SET payload_json=?, redacted_at=? WHERE event_id=?")
+            .bind(filing.payload_json, filing.redacted_at, filing.event_id)
+            .run();
+      }
+    }
+  });
+
+  test("a concurrent gap withdrawal preserves the winning settlement without partial loser writes", async () => {
+    let interleave: (() => Promise<void>) | undefined;
+    let writeReady = false;
+    const f = await settlementFixture({
+      afterFirstRead: async (sql) => {
+        if (
+          interleave !== undefined &&
+          sql === "SELECT public_seq, chain_digest, chain_version FROM problems WHERE id = ?"
+        )
+          writeReady = true;
+      },
+      beforeBatch: async () => {
+        if (!writeReady) return;
+        writeReady = false;
+        const action = interleave;
+        interleave = undefined;
+        await action?.();
+      },
+    });
+    // Keep the winner outside the loser's same-Fellow screening history.
+    const closer = await addApprovedFellow(f, {
+      suffix: "gap-race-closer",
+      scopes: ["promote"],
+    });
+    const send = (path: string, body: unknown, key: string) =>
+      closer.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(body),
+      });
+    const opened = await send(
+      "/v1/sessions",
+      { problem_id: "P-4DSP", intent: "explore" },
+      "gap-race-session",
+    );
+    expect(opened.status, await opened.clone().text()).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const state = async () => ({
+      ...(await f.state()),
+      idempotency: (
+        await f.db
+          .prepare(
+            "SELECT problem_id, idempotency_key, request_digest, event_id, event_seq FROM idempotency ORDER BY problem_id, idempotency_key",
+          )
+          .all()
+      ).results,
+    });
+    let winnerFootprint: Awaited<ReturnType<typeof state>> | undefined;
+    interleave = async () => {
+      const winner = await f.send(
+        `${f.path}/gaps/close`,
+        { gap_id: f.gap.gap_id, outcome: "withdrawn" },
+        "gap-race-winner",
+      );
+      expect(winner.status, await winner.clone().text()).toBe(201);
+      expect(await winner.json()).toMatchObject({ gap_id: f.gap.gap_id, status: "withdrawn" });
+      winnerFootprint = await state();
+    };
+    const loser = await send(
+      `/v1/sessions/${session.session_id}/gaps/close`,
+      { gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: f.evidenceId },
+      "gap-race-loser",
+    );
+    expect(interleave).toBeUndefined();
+    expect(writeReady).toBe(false);
+    expect(loser.status, await loser.clone().text()).toBe(409);
+    expect(await loser.json()).toMatchObject({ code: "OBJECT_VERSION_CONFLICT" });
+    assert.ok(winnerFootprint);
+    expect(winnerFootprint.gap).toMatchObject({ status: "withdrawn", closed_by: null });
+    expect(await state()).toEqual(winnerFootprint);
+  });
+
+  test("settled gap history cannot be reopened by a stale projection", async () => {
+    const f = await settlementFixture();
+    const withdrawal = { gap_id: f.gap.gap_id, outcome: "withdrawn" };
+    const accepted = await f.send(`${f.path}/gaps/close`, withdrawal, "original-gap-withdrawal");
+    expect(accepted.status, await accepted.clone().text()).toBe(201);
+    const receipt = await accepted.json();
+    // Simulate a stale rebuilt projection while preserving the real terminal event.
+    await f.db
+      .prepare("UPDATE proof_gaps SET status='open', closed_by=NULL, closed_at=NULL WHERE gap_id=?")
+      .bind(f.gap.gap_id)
+      .run();
+    const before = await f.state();
+    for (const body of [
+      { gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: f.evidenceId },
+      withdrawal,
+    ]) {
+      const response = await f.send(`${f.path}/gaps/close`, body);
+      expect(response.status, await response.clone().text()).toBe(404);
+      expect(await response.json()).toMatchObject({ code: "GAP_NOT_FOUND" });
+      expect(await f.state()).toEqual(before);
+    }
+    await f.hide(f.gap.gap_id);
+    const beforeReplay = await f.state();
+    const replay = await f.send(`${f.path}/gaps/close`, withdrawal, "original-gap-withdrawal");
+    expect(replay.status, await replay.clone().text()).toBe(200);
+    expect(await replay.json()).toEqual(receipt);
+    expect(await f.state()).toEqual(beforeReplay);
+  });
 
   test("available evidence closes a gap and answers a question with durable replay", async () => {
     const f = await settlementFixture();
@@ -1478,6 +1861,8 @@ describe("scientific settlement references", () => {
     const answered = await f.send(f.answerPath, answerBody, "settlement-answer");
     expect(answered.status, await answered.clone().text()).toBe(200);
     const answerReceipt = await answered.json();
+    await f.hide(f.questionId);
+    await f.hide(f.gap.gap_id);
     await f.withdraw("evidence", f.evidenceId);
     const before = await f.state();
     const closeReplay = await f.send(`${f.path}/gaps/close`, closeBody, "settlement-close");
@@ -2178,6 +2563,306 @@ export async function fixture(options: LocalD1Options = {}) {
     sponsor,
   };
 }
+
+describe("conflict publication source integrity", () => {
+  // Real HTTP commands over migrated SQLite. Different authors keep target
+  // integrity races independent of the writer's own screening-history guard.
+  async function conflictFixture() {
+    let screens = 0;
+    let beforeScreen: (() => Promise<void>) | undefined;
+    const f = await fixture({
+      screenPromotion: async (input) => {
+        if (input.kind === "conflict") {
+          screens++;
+          const action = beforeScreen;
+          beforeScreen = undefined;
+          await action?.();
+        }
+        return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+      },
+    });
+    let counter = 0;
+    const send = (
+      path: string,
+      body: unknown,
+      key = `conflict-source-${++counter}`,
+      call = f.call,
+    ) =>
+      call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(body),
+      });
+    const open = async (call = f.call) => {
+      const response = await send(
+        "/v1/sessions",
+        { problem_id: "P-4DSP", intent: "explore" },
+        undefined,
+        call,
+      );
+      expect(response.status, await response.clone().text()).toBe(201);
+      return `/v1/sessions/${SessionOpenResponseSchema.parse(await response.json()).session_id}`;
+    };
+    const path = await open();
+    const publish = async (statement: string, falsifier: string) => {
+      const draft = await send(`${path}/workshop`, {
+        type: "claim-draft",
+        title: "Conflict source",
+        body_md: statement,
+      });
+      expect(draft.status, await draft.clone().text()).toBe(201);
+      const { workshop_id: workshopId } = WorkshopPushResponseSchema.parse(await draft.json());
+      const promoted = await send(`${path}/promote`, {
+        workshop_id: workshopId,
+        kind: "conjecture",
+        statement,
+        falsifier,
+      });
+      expect(promoted.status, await promoted.clone().text()).toBe(201);
+      return PromoteResponseSchema.parse(await promoted.json()).claim_id;
+    };
+    const claimA = await publish("Two is even.", "Two has a nonzero remainder modulo two.");
+    const claimB = await publish("Three is odd.", "Three has zero remainder modulo two.");
+    const normalizer = await addApprovedFellow(f, {
+      suffix: "conflict-normalizer",
+      scopes: ["promote"],
+    });
+    const normalizerPath = await open(normalizer.call);
+    const normalizeBody = {
+      claims: [
+        { claim_id: claimA, version: 1 },
+        { claim_id: claimB, version: 1 },
+      ],
+      aligned_definitions: "Use standard integer arithmetic.",
+      aligned_scope: "Consider positive natural numbers.",
+      aligned_quantifiers: "For every positive natural number.",
+      smallest_disagreement: "Consecutive integers have different parity.",
+      agreed_facts: ["Both supplied numbers are natural numbers."],
+      discriminating_tests: ["Compute each remainder modulo two."],
+    };
+    const normalize = (key?: string) =>
+      send(`${normalizerPath}/conflicts`, normalizeBody, key, normalizer.call);
+    const resolve = (
+      conflictId: string,
+      key?: string,
+      status: "resolved" | "persistent-uncertainty" = "resolved",
+    ) =>
+      send(
+        `${path}/conflicts/${conflictId}/resolve`,
+        { status, resolution: "The recorded modulo two calculation identifies the disagreement." },
+        key,
+      );
+    const createConflict = async () => {
+      const response = await normalize();
+      expect(response.status, await response.clone().text()).toBe(201);
+      return NormalizeConflictResponseSchema.parse(await response.json()).conflict_id;
+    };
+    const source = async (objectId: string) => {
+      const row = await f.db
+        .prepare(`SELECT e.id, e.seq FROM events e
+          WHERE e.problem_id='P-4DSP' AND e.object_id=? AND e.object_version=1
+            AND e.type IN ('claim.created', 'conflict.normalized')`)
+        .bind(objectId)
+        .first<{ id: string; seq: number }>();
+      assert.ok(row);
+      return row;
+    };
+    const hide = async (target: string) => {
+      await f.db
+        .prepare(`INSERT INTO content_controls
+          (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,actor,reason,version,created_at)
+          VALUES(?,'P-4DSP','ledger-object',?,'hidden','operator','privacy',
+            'conflict-source-fixture','Withhold the exact publication.',1,?)`)
+        .bind(`CC-${crypto.randomUUID()}`, target, new Date().toISOString())
+        .run();
+    };
+    const damage = async (
+      objectId: string,
+      fault: "version-hide" | "event-hide" | "redact" | "corrupt",
+    ) => {
+      const original = await source(objectId);
+      if (fault === "version-hide") await hide(`${objectId}@1`);
+      else if (fault === "event-hide") await hide(`#${original.seq}`);
+      else if (fault === "redact")
+        await redactEventContent(f.db, original.id, "privacy", new Date().toISOString());
+      else {
+        // Deliberate storage corruption, not a legal publication mutation.
+        await f.db.prepare("DROP TRIGGER IF EXISTS event_content_lawful_redaction_only").run();
+        await f.db
+          .prepare("UPDATE event_content SET payload_json=payload_json || ' ' WHERE event_id=?")
+          .bind(original.id)
+          .run();
+      }
+    };
+    const state = async () => ({
+      events: (await f.db.prepare("SELECT id, seq, type FROM events ORDER BY seq").all()).results,
+      head: await f.db
+        .prepare("SELECT public_seq, chain_digest FROM problems WHERE id='P-4DSP'")
+        .first(),
+      cursor: await f.db.prepare("SELECT cursor FROM public_cursor WHERE singleton=1").first(),
+      conflicts: (
+        await f.db
+          .prepare(`SELECT conflict_id, claim_a_id, claim_a_version, claim_b_id, claim_b_version,
+            status, resolution, resolved_at FROM conflicts ORDER BY conflict_id`)
+          .all()
+      ).results,
+      replays: (
+        await f.db
+          .prepare(
+            "SELECT scope, principal_scope, idempotency_key FROM session_write_replays ORDER BY scope, idempotency_key",
+          )
+          .all()
+      ).results,
+    });
+    return {
+      ...f,
+      path,
+      send,
+      claimA,
+      claimB,
+      normalize,
+      resolve,
+      createConflict,
+      damage,
+      hide,
+      state,
+      screens: () => screens,
+      beforeScreen: (action: () => Promise<void>) => {
+        beforeScreen = action;
+      },
+    };
+  }
+
+  test.each(["resolved", "persistent-uncertainty"] as const)(
+    "exact historical claims can be normalized and settled as %s with durable replay",
+    async (status) => {
+      const f = await conflictFixture();
+      const revised = await f.send(`${f.path}/revise`, {
+        claim_id: f.claimA,
+        base_version: 1,
+        kind: "conjecture",
+        statement: "Four is even.",
+        falsifier: "Four has a nonzero remainder modulo two.",
+      });
+      expect(revised.status, await revised.clone().text()).toBe(201);
+      expect(ReviseResponseSchema.parse(await revised.json()).version).toBe(2);
+      const normalized = await f.normalize("conflict-source-normalize-replay");
+      expect(normalized.status, await normalized.clone().text()).toBe(201);
+      const normalization = NormalizeConflictResponseSchema.parse(await normalized.json());
+      const resolved = await f.resolve(
+        normalization.conflict_id,
+        "conflict-source-resolve-replay",
+        status,
+      );
+      expect(resolved.status, await resolved.clone().text()).toBe(200);
+      const resolution = ResolveConflictResponseSchema.parse(await resolved.json());
+      expect(resolution.status).toBe(status);
+      await f.hide(`${f.claimA}@1`);
+      await f.hide(normalization.conflict_id);
+      const before = await f.state();
+      const screens = f.screens();
+      const normalizationReplay = await f.normalize("conflict-source-normalize-replay");
+      expect(normalizationReplay.status).toBe(200);
+      expect(await normalizationReplay.json()).toEqual(normalization);
+      const resolutionReplay = await f.resolve(
+        normalization.conflict_id,
+        "conflict-source-resolve-replay",
+        status,
+      );
+      expect(resolutionReplay.status).toBe(200);
+      expect(await resolutionReplay.json()).toEqual(resolution);
+      expect(f.screens()).toBe(screens);
+      expect(await f.state()).toEqual(before);
+    },
+  );
+
+  test.each(["version-hide", "redact", "corrupt"] as const)(
+    "normalization refuses a %s claim source before screening",
+    async (fault) => {
+      const f = await conflictFixture();
+      await f.damage(f.claimB, fault);
+      const before = await f.state();
+      const response = await f.normalize();
+      expect(response.status, await response.clone().text()).toBe(404);
+      expect(await response.json()).toMatchObject({ code: "CONFLICT_TARGET_UNKNOWN" });
+      expect(f.screens()).toBe(0);
+      expect(await f.state()).toEqual(before);
+    },
+  );
+
+  test.each(["version-hide", "event-hide", "redact", "corrupt"] as const)(
+    "resolution refuses a %s normalization source before screening",
+    async (fault) => {
+      const f = await conflictFixture();
+      const conflictId = await f.createConflict();
+      await f.damage(conflictId, fault);
+      const before = await f.state();
+      const screens = f.screens();
+      const response = await f.resolve(conflictId);
+      expect(response.status, await response.clone().text()).toBe(404);
+      expect(await response.json()).toMatchObject({ code: "CONFLICT_NOT_FOUND" });
+      expect(f.screens()).toBe(screens);
+      expect(await f.state()).toEqual(before);
+    },
+  );
+
+  test.each(["endpoint-pin", "settled-lifecycle"] as const)(
+    "a retained open projection cannot authorize resolution after %s drift",
+    async (fault) => {
+      const f = await conflictFixture();
+      const conflictId = await f.createConflict();
+      if (fault === "endpoint-pin") {
+        // Deliberate projection corruption, not a permitted conflict mutation.
+        await f.db.prepare("DROP TRIGGER conflicts_immutable_update").run();
+        await f.db
+          .prepare("UPDATE conflicts SET claim_a_version=99 WHERE conflict_id=?")
+          .bind(conflictId)
+          .run();
+      } else {
+        const settled = await f.resolve(conflictId);
+        expect(settled.status, await settled.clone().text()).toBe(200);
+        await f.db
+          .prepare(
+            "UPDATE conflicts SET status='open', resolution=NULL, resolved_at=NULL WHERE conflict_id=?",
+          )
+          .bind(conflictId)
+          .run();
+      }
+      const before = await f.state();
+      const screens = f.screens();
+      const response = await f.resolve(conflictId);
+      expect(response.status, await response.clone().text()).toBe(404);
+      expect(await response.json()).toMatchObject({ code: "CONFLICT_NOT_FOUND" });
+      expect(f.screens()).toBe(screens);
+      expect(await f.state()).toEqual(before);
+    },
+  );
+
+  for (const stage of ["normalization", "resolution"] as const) {
+    test.each(["event-hide", "corrupt"] as const)(
+      `${stage} rolls back all public effects when its exact source becomes %s during screening`,
+      async (fault) => {
+        const f = await conflictFixture();
+        const conflictId = stage === "resolution" ? await f.createConflict() : undefined;
+        let before: Awaited<ReturnType<typeof f.state>> | undefined;
+        const screens = f.screens();
+        f.beforeScreen(async () => {
+          await f.damage(conflictId ?? f.claimA, fault);
+          // A content control advances the cursor in its own transaction.
+          // The refused publication must preserve that committed state.
+          before = await f.state();
+        });
+        const response =
+          conflictId === undefined ? await f.normalize() : await f.resolve(conflictId);
+        expect(response.status, await response.clone().text()).toBe(409);
+        expect(await response.json()).toMatchObject({ code: "OBJECT_VERSION_CONFLICT" });
+        expect(f.screens()).toBe(screens + 1);
+        assert.ok(before);
+        expect(await f.state()).toEqual(before);
+      },
+    );
+  }
+});
 
 describe("hypothesis lifecycle coordination", () => {
   async function setup(options: LocalD1Options = {}) {
