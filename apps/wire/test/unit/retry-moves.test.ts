@@ -63,6 +63,13 @@ test("retry action is private investigation with no fabricated result or copied 
   assert.equal(prep.author_may_supersede, true);
 });
 
+test("anonymous discovery does not invent a Fellow or supersession authority", () => {
+  const move = retryMoveFor(item, undefined, template);
+  assert.ok(move);
+  assert.equal(move.move, "retry-dead-end");
+  assert.equal(Object.hasOwn(move.contract.preparation ?? {}, "author_may_supersede"), false);
+});
+
 test("another Fellow receives investigation, not authority to supersede someone else's negative result", () => {
   const move = retryMoveFor(item, "F-2", template)!;
   const contract = move.contract as {

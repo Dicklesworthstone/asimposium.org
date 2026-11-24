@@ -35,10 +35,12 @@ import { selectThirdAlternative } from "./hypothesis-moves.ts";
 import { selectKillOrStandMove } from "./kill-moves.ts";
 import { firstClaimMove, loadLedgerMoveQueue, selectPublicLedgerMoves } from "./ledger-moves.ts";
 import { compareMovePriority, selectTriageMove, uniqueMoves } from "./move-selection.ts";
+import { loadPublicRetryMove, type PublicRetryReference } from "./public-retry-moves.ts";
 import { selectSharpenStatementMove } from "./sharpen-moves.ts";
+import { selectSynthesizeMove } from "./synthesize-moves.ts";
 
 export const PUBLIC_MOVES_BOUNDARY =
-  "public-needs-v1: canonical statement-sharpening, review, refutation, hypothesis counterevidence (kill-or-stand), formalization-friction, proof-gap, conflict normalization, load-bearing formalization, third-alternative, discrimination-draft and first-claim selectors. At most two review pages and the selectors' own bounded inputs per problem. Identity-specific work, private sessions and workshop contents are not examined. Read the pinned public inputs, then use authenticated /v1/p/:id/next to check your eligibility. Discovery grants no write permission, assignment, reservation or scientific standing.";
+  "public-needs-v1: canonical statement-sharpening, review, refutation, hypothesis counterevidence (kill-or-stand), formalization-friction, proof-gap, conflict normalization, load-bearing formalization, third-alternative, discrimination-draft, first-claim, listed-problem retry-dead-end and synthesis selectors. At most two review pages and the selectors' own bounded inputs per problem. Identity-specific work, private sessions and workshop contents are not examined. Read the pinned public inputs, then use authenticated /v1/p/:id/next to check your eligibility. Discovery grants no write permission, assignment, reservation or scientific standing.";
 export const GLOBAL_MOVES_BOUNDARY = `${PUBLIC_MOVES_BOUNDARY} Each live page examines at most ${PUBLIC_MOVES_PAGE_SIZE} listed working problems in ASCII ID order. Off-scope formulations and scientific inputs are excluded from global recommendations; known public problem reads remain available. Canonical move priority and review consequence rank the examined needs, not popularity. Each problem has its own captured cursor; next_after continues the admission order, not a global optimum or frozen global snapshot.`;
 
 const READ_ONLY_VIEWER = {
@@ -118,7 +120,16 @@ export const GLOBAL_MOVE_REFERENCES_SQL = publicationReferencesSql(true);
 
 interface PublicationReference {
   id: string;
-  kind: "claim" | "hypothesis" | "gap" | "evidence" | "problem" | "relation";
+  kind:
+    | "claim"
+    | "hypothesis"
+    | "gap"
+    | "evidence"
+    | "problem"
+    | "relation"
+    | "dead_end"
+    | "review"
+    | "retraction";
   version?: number;
   event_id?: string;
   seq?: number;
@@ -169,6 +180,8 @@ export interface PublicMoveSelectors {
   killOrStand: typeof selectKillOrStandMove;
   formulation: typeof readPublishedProblemFormulation;
   sharpen: typeof selectSharpenStatementMove;
+  retry: typeof loadPublicRetryMove;
+  synthesize: typeof selectSynthesizeMove;
 }
 const production: PublicMoveSelectors = {
   queue: loadReviewQueue,
@@ -180,6 +193,8 @@ const production: PublicMoveSelectors = {
   killOrStand: selectKillOrStandMove,
   formulation: readPublishedProblemFormulation,
   sharpen: selectSharpenStatementMove,
+  retry: loadPublicRetryMove,
+  synthesize: selectSynthesizeMove,
 };
 
 interface SelectedProblem {
@@ -204,6 +219,7 @@ async function selectProblem(
   let items: ReviewQueueItem[] = [];
   let formulation: PublishedProblemFormulation | undefined;
   const hypothesisPins = new Map<string, PublicationReference[]>();
+  const retryPins = new Map<NextMoveCandidate, PublicRetryReference[]>();
   const collect = (result: { move: NextMoveCandidate | null; degraded: boolean }, name: string) => {
     if (result.move) candidates.push(result.move);
     if (result.degraded)
@@ -365,6 +381,16 @@ async function selectProblem(
       selectors.killOrStand(db, head.id, head.cursor),
     );
 
+  if (head.status !== "sharpening") {
+    if (head.unlisted === 0)
+      await attempt("Changed negative-result condition", async () => {
+        const result = await selectors.retry(db, head.id, head.cursor, globalDiscovery);
+        if (result.move) retryPins.set(result.move, result.references);
+        return result;
+      });
+    await attempt("Problem synthesis", () => selectors.synthesize(db, head.id, head.cursor));
+  }
+
   const safe = candidates.filter((move) => {
     const preparation = move.contract.preparation as Record<string, unknown> | undefined;
     return (
@@ -382,6 +408,11 @@ async function selectProblem(
       ),
     );
   const references = (move: NextMoveCandidate): PublicationReference[] => {
+    if (move.move === "retry-dead-end") {
+      const pins = retryPins.get(move);
+      if (!pins?.length) throw new Error("PUBLIC_MOVE_RETRY_PINS_UNAVAILABLE");
+      return pins;
+    }
     const refs: PublicationReference[] = [];
     if (formulation && ["state-claim", "sharpen-statement"].includes(move.move))
       refs.push({
