@@ -1,10 +1,13 @@
 import { PublicLedgerProblemIdSchema } from "@asimposium/contracts";
+import { claimsListQueryString, type ClaimsListResponse } from "@asimposium/contracts/claims-list";
 import Link from "next/link";
 import { auth, signIn } from "@/auth";
 import { ProblemLifecycleControl } from "@/components/problem-lifecycle-control";
 import { ProblemPublicationControl } from "@/components/problem-publication-control";
 import { ProblemResearchControl } from "@/components/problem-research-control";
 import { stoaProblemGovernance } from "@/lib/problem-governance";
+import { stoaFetchClaimsList } from "@/lib/public-ledger";
+import { parseResultClaimConsoleQuery, resultClaimConsolePath } from "@/lib/result-claim-view";
 import { stoaFetchSyntheses } from "@/lib/public-syntheses";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import { configuredStoaOrigin, stoaProblemPublicationPreview } from "@/lib/stoa";
@@ -41,15 +44,19 @@ export default async function ProblemPublicationPage({
 }) {
   const { problem: problemId } = await params;
   const query = await searchParams;
-  const synthesisQuery = parseSynthesisConsoleQuery(query);
+  const claimSelection = Object.keys(query).some((key) => ["claim", "claim_through", "claim_after"].includes(key));
+  const claimQuery = parseResultClaimConsoleQuery(claimSelection ? query : {});
+  const synthesisQuery = parseSynthesisConsoleQuery(claimSelection ? {} : query);
   const valid =
     PublicLedgerProblemIdSchema.safeParse(problemId).success &&
     typeof problemId === "string" &&
     problemId.trim() === problemId &&
-    synthesisQuery !== null;
+    synthesisQuery !== null && claimQuery !== null;
   const returnPath =
     valid && synthesisQuery !== null
-      ? synthesisConsolePath(problemId, synthesisQuery.selected, synthesisQuery.list)
+      ? claimSelection && claimQuery !== null
+        ? resultClaimConsolePath(problemId, claimQuery.selected, claimQuery.list)
+        : synthesisConsolePath(problemId, synthesisQuery.selected, synthesisQuery.list)
       : "/console";
   const session = valid ? await auth() : null;
   const principal = session?.user?.id;
@@ -86,6 +93,16 @@ export default async function ProblemPublicationPage({
       ? governance.data
       : undefined;
   let synthesisChoices: SynthesisSelectionPage | null = null;
+  let claimChoices: ClaimsListResponse | null = null;
+  if (workspace !== undefined && ["active", "dormant"].includes(workspace.problem.status) && claimQuery !== null) {
+    try {
+      const choices = await stoaFetchClaimsList(problemId, undefined,
+        Object.fromEntries(new URLSearchParams(claimsListQueryString(claimQuery.list))));
+      if (choices.state === "ok") claimChoices = choices.data;
+    } catch {
+      // The exact-identifier preview remains available when discovery is interrupted.
+    }
+  }
   if (workspace?.problem.status === "under-result-review" && synthesisQuery !== null) {
     try {
       const choices = await stoaFetchSyntheses(
@@ -131,7 +148,7 @@ export default async function ProblemPublicationPage({
       {!valid ? (
         <p role="alert">
           Choose an adopted private problem or a published problem from the sponsor console. Only a
-          synthesis identifier and the published-synthesis page cursors are supported here.
+          result claim or synthesis identifier and its collection page cursors are supported here.
         </p>
       ) : !isCanonicalSponsorId(principal) ? (
         <section className="card">
@@ -162,6 +179,8 @@ export default async function ProblemPublicationPage({
             synthesisChoices={synthesisChoices}
             synthesisQuery={synthesisQuery?.list}
             selectedSynthesis={synthesisQuery?.selected}
+            claimChoices={claimChoices}
+            selectedResultClaim={claimQuery?.selected}
           />
           <ProblemLifecycleControl
             key={`workspace:${principal}:${workspace.problem.id}`}

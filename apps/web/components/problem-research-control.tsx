@@ -1,12 +1,14 @@
 "use client";
 
 import { isTrustedStoaOrigin, type SponsorProblemGovernanceResponse } from "@asimposium/contracts";
+import type { ClaimsListResponse } from "@asimposium/contracts/claims-list";
 import { type SynthesesListQuery, synthesesListPath } from "@asimposium/contracts/syntheses";
 import Link from "next/link";
 import { useEffect, useRef, useState, useTransition } from "react";
 import {
   changeProblemResearch,
   previewProblemClosingSynthesis,
+  previewProblemResultClaim,
 } from "@/app/console/problems/[problem]/actions";
 import {
   directiveDisclosureHref,
@@ -34,6 +36,8 @@ import {
   synthesisPagePath,
   type SynthesisSelectionPage,
 } from "@/lib/synthesis-view";
+import type { ResultClaimPreview } from "@/lib/result-claim-view";
+import { ResultClaimChoices, ResultClaimReview } from "./result-claim-selection";
 import { ScreeningNotice } from "./screening-notice";
 
 export type ProblemResearchWorkspace = Pick<
@@ -200,6 +204,8 @@ export function ProblemResearchControl({
   synthesisChoices = null,
   synthesisQuery = {},
   selectedSynthesis,
+  claimChoices = null,
+  selectedResultClaim,
 }: {
   readonly sponsorId: string;
   readonly initial: ProblemResearchWorkspace;
@@ -208,10 +214,14 @@ export function ProblemResearchControl({
   readonly synthesisChoices?: SynthesisSelectionPage | null;
   readonly synthesisQuery?: SynthesesListQuery;
   readonly selectedSynthesis?: string;
+  readonly claimChoices?: ClaimsListResponse | null;
+  readonly selectedResultClaim?: string;
 }) {
   const problemId = initial.problem.id;
-  const [claimId, setClaimId] = useState("");
-  const [claimVersion, setClaimVersion] = useState("");
+  const [claimId, setClaimId] = useState(selectedResultClaim?.split("@")[0] ?? "");
+  const [claimVersion, setClaimVersion] = useState(selectedResultClaim?.split("@")[1] ?? "");
+  const [claimPreview, setClaimPreview] = useState<ResultClaimPreview | null>(null);
+  const [claimPreviewMessage, setClaimPreviewMessage] = useState<string | null>(null);
   const [synthesisId, setSynthesisId] = useState(selectedSynthesis ?? "");
   const [confirmed, setConfirmed] = useState(false);
   const [preview, setPreview] = useState<ClosingSynthesisPreview | null>(null);
@@ -355,6 +365,27 @@ export function ProblemResearchControl({
     });
   }
 
+  function loadResultClaim(id: string, version: number) {
+    if (disabled || lock.current) return;
+    lock.current = true;
+    setClaimId(id);
+    setClaimVersion(String(version));
+    setClaimPreview(null);
+    setClaimPreviewMessage(null);
+    setConfirmed(false);
+    startTransition(async () => {
+      try {
+        const reply = await previewProblemResultClaim(sponsorId, problemId, id, version);
+        if (reply.ok) setClaimPreview(reply.preview);
+        else setClaimPreviewMessage(reply.message);
+      } catch {
+        setClaimPreviewMessage("The exact claim and your current authority could not be verified. Load this preview again before requesting result review.");
+      } finally {
+        lock.current = false;
+      }
+    });
+  }
+
   return (
     <>
       <section className="card" aria-labelledby="problem-research-heading">
@@ -474,14 +505,17 @@ export function ProblemResearchControl({
             is where the independent support needed for resolution is evaluated. Entering review
             does not establish a result or satisfy the requirements for resolution.
           </p>
+          <ResultClaimChoices
+            problemId={problemId}
+            page={claimChoices}
+            selected={selectedClaim === undefined ? undefined : `${selectedClaim.claimId}@${selectedClaim.version}`}
+            disabled={disabled}
+            onSelect={loadResultClaim}
+          />
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              if (selectedClaim !== undefined)
-                submit({
-                  action: "enter-result-review",
-                  result_claim: { claim_id: selectedClaim.claimId, version: selectedClaim.version },
-                });
+              if (claimPreview !== null) submit(claimPreview.command);
             }}
           >
             <fieldset disabled={disabled}>
@@ -498,6 +532,8 @@ export function ProblemResearchControl({
                   value={claimId}
                   onChange={(event) => {
                     setClaimId(event.target.value);
+                    setClaimPreview(null);
+                    setClaimPreviewMessage(null);
                     setConfirmed(false);
                   }}
                 />
@@ -514,10 +550,18 @@ export function ProblemResearchControl({
                   value={claimVersion}
                   onChange={(event) => {
                     setClaimVersion(event.target.value);
+                    setClaimPreview(null);
+                    setClaimPreviewMessage(null);
                     setConfirmed(false);
                   }}
                 />
               </label>
+              <button type="button" className="btn-quiet" disabled={selectedClaim === undefined}
+                onClick={() => { if (selectedClaim !== undefined) loadResultClaim(selectedClaim.claimId, selectedClaim.version); }}>
+                Load the exact result claim
+              </button>
+              {claimPreviewMessage !== null && <p role="status">{claimPreviewMessage}</p>}
+              {claimPreview !== null && <ResultClaimReview preview={claimPreview} />}
               <p>
                 <Link href={directiveDisclosureHref(selectedClaim)} prefetch={false}>
                   Review your directive disclosure for this exact result
@@ -530,6 +574,7 @@ export function ProblemResearchControl({
                   type="checkbox"
                   required
                   checked={confirmed}
+                  disabled={claimPreview === null}
                   onChange={(event) => setConfirmed(event.target.checked)}
                 />{" "}
                 I confirm entering result review for{" "}
@@ -543,7 +588,7 @@ export function ProblemResearchControl({
               <button
                 type="submit"
                 className="btn-action"
-                disabled={!confirmed || selectedClaim === undefined}
+                disabled={!confirmed || claimPreview === null}
               >
                 Enter result review for this claim
               </button>

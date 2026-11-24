@@ -3,6 +3,8 @@ import { PRODUCTION_STOA_ORIGIN } from "@asimposium/contracts";
 import { payloadDigest, SERVICE_ENVELOPE_HEADER } from "../../lib/service-envelope";
 import {
   researchPreview,
+  researchClaimFace,
+  researchClaimPreview,
   researchProblem,
   researchResolutionReceipt,
   researchResolveCommand,
@@ -15,7 +17,7 @@ import {
 } from "../fixtures/problem-research";
 
 mock.module("server-only", () => ({}));
-const { stoaProblemClosingSynthesis, stoaChangeProblemResearch, MAX_PROBLEM_CLOSING_SYNTHESIS_BYTES } =
+const { stoaProblemClosingSynthesis, stoaProblemResultClaim, stoaChangeProblemResearch, MAX_PROBLEM_CLOSING_SYNTHESIS_BYTES } =
   await import("../../lib/problem-research");
 const envKeys = ["STOA_ORIGIN", "SERVICE_ENVELOPE_PRIVATE_KEY_HEX", "SERVICE_ENVELOPE_KID"] as const;
 const realFetch = globalThis.fetch;
@@ -217,4 +219,84 @@ test("a successful HTTP status is insufficient for mismatched or incomplete scie
     expect(await stoaChangeProblemResearch(researchSponsor, researchProblem, researchResolveCommand, "key"))
       .toEqual({ ok: false, reason: "unreachable" });
   }
+});
+
+test("result preview verifies current authority and reads one exact claim with no historical cursor or sponsor credential", async () => {
+  const calls: { url: string; init: RequestInit }[] = [];
+  globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
+    calls.push({ url: String(url), init: init ?? {} });
+    return Response.json(String(url).endsWith("/governance")
+      ? { ...researchWorkspace, problem: { ...researchWorkspace.problem, status: "active" } }
+      : researchClaimFace);
+  }) as unknown as typeof fetch;
+  expect(await stoaProblemResultClaim(researchSponsor, researchProblem, "C-3", 1))
+    .toEqual({ ok: true, data: researchClaimPreview });
+  expect(calls).toHaveLength(2);
+  const governance = calls[0]!;
+  expect(JSON.parse(new Headers(governance.init.headers).get(SERVICE_ENVELOPE_HEADER) ?? "{}").claims)
+    .toMatchObject({ action: "problem-governance-read", principal_id: researchSponsor });
+  const claim = calls[1]!;
+  expect(claim.url).toBe(`${PRODUCTION_STOA_ORIGIN}/p/${researchProblem}/claims/C-3%401.json`);
+  expect(claim.init).toMatchObject({ method: "GET", credentials: "omit", redirect: "error", next: { revalidate: 0 } });
+  for (const name of ["cookie", "authorization", SERVICE_ENVELOPE_HEADER])
+    expect(new Headers(claim.init.headers).has(name)).toBe(false);
+  expect(calls.some((call) => call.url.includes("/lifecycle"))).toBe(false);
+});
+
+test("result preview cannot read another sponsor's problem or use a closed lifecycle state", async () => {
+  for (const workspace of [
+    researchWorkspace,
+    { ...researchWorkspace, authority: { owner: false, steward: false, can_edit_access: true } },
+    { ...researchWorkspace, acting_sponsor_id: "usr_fedcba0987654321" },
+    { ...researchWorkspace, problem: { ...researchWorkspace.problem, id: "P-OTHER", status: "active" } },
+    { ...researchWorkspace, problem: { ...researchWorkspace.problem, status: "retired" } },
+  ]) {
+    const fetcher = mock(async () => Response.json(workspace));
+    globalThis.fetch = fetcher as unknown as typeof fetch;
+    expect((await stoaProblemResultClaim(researchSponsor, researchProblem, "C-3", 1)).ok).toBe(false);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  }
+});
+
+test("result preview refuses missing scientific text and mismatched claim or problem pins", async () => {
+  for (const face of [
+    { ...researchClaimFace, items: [] },
+    { ...researchClaimFace, problem: "P-OTHER" },
+    { ...researchClaimFace, claim_state: { ...researchClaimFace.claim_state, version: 2, latest_version: 2 } },
+    { ...researchClaimFace, items: [{ ...researchClaimFace.items[0], id: "C-4@1" }] },
+  ]) {
+    globalThis.fetch = mock(async (url: string | URL | Request) => Response.json(
+      String(url).endsWith("/governance")
+        ? { ...researchWorkspace, problem: { ...researchWorkspace.problem, status: "dormant" } }
+        : face,
+    )) as unknown as typeof fetch;
+    expect((await stoaProblemResultClaim(researchSponsor, researchProblem, "C-3", 1)).ok).toBe(false);
+  }
+});
+
+test("result preview retains exact historical text and reports newer versions without selecting them silently", async () => {
+  globalThis.fetch = mock(async (url: string | URL | Request) => Response.json(
+    String(url).endsWith("/governance")
+      ? { ...researchWorkspace, problem: { ...researchWorkspace.problem, status: "active" } }
+      : { ...researchClaimFace, claim_state: { ...researchClaimFace.claim_state, latest_version: 2,
+        stale: true, directive_disclosure: "missing", status_basis: undefined } },
+  )) as unknown as typeof fetch;
+  const result = await stoaProblemResultClaim(researchSponsor, researchProblem, "C-3", 1);
+  expect(result).toMatchObject({ ok: true, data: {
+    command: researchReviewCommand,
+    state: { version: 1, latest_version: 2, stale: true, directive_disclosure: "missing" },
+  } });
+});
+
+test("invalid result selectors are refused before signing or public I/O", async () => {
+  const fetcher = mock(async () => Response.json(researchClaimFace));
+  globalThis.fetch = fetcher as unknown as typeof fetch;
+  for (const [problem, claim, version] of [
+    ["P-RESEARCH\n", "C-3", 1], [researchProblem, "C-3\n", 1],
+    [researchProblem, "C-3", 0], [researchProblem, "C-3", Number.MAX_SAFE_INTEGER + 1],
+  ] as const) {
+    expect(await stoaProblemResultClaim(researchSponsor, problem, claim, version))
+      .toEqual({ ok: false, reason: "refused", status: 400 });
+  }
+  expect(fetcher).not.toHaveBeenCalled();
 });

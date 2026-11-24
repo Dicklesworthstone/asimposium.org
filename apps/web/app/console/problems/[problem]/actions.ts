@@ -6,9 +6,11 @@ import {
   parseProblemResearchCommand,
   type ProblemResearchActionResult,
   type ProblemResearchCommand,
+  type ProblemResultClaimPreviewResult,
   type ProblemSynthesisPreviewResult,
   stoaChangeProblemResearch,
   stoaProblemClosingSynthesis,
+  stoaProblemResultClaim,
   validProblemResearchKey,
   validProblemResearchTarget,
 } from "@/lib/problem-research";
@@ -20,6 +22,29 @@ export type {
   ProblemResearchCommand,
   ProblemSynthesisPreviewResult,
 } from "@/lib/problem-research";
+
+export async function previewProblemResultClaim(
+  expectedSponsorId: string,
+  problemId: string,
+  claimId: string,
+  version: number,
+): Promise<ProblemResultClaimPreviewResult> {
+  try {
+    const session = await auth();
+    const principalId = session?.user?.id;
+    if (!isCanonicalSponsorId(principalId) || principalId !== expectedSponsorId)
+      return { ok: false, refreshRequired: true,
+        message: "Your signed-in sponsor account changed or could not be verified. Reload under the intended account before selecting a result claim." };
+    const result = await stoaProblemResultClaim(principalId, problemId, claimId, version);
+    if (result.ok) return { ok: true, preview: result.data };
+    return { ok: false, message: result.reason === "refused"
+      ? "The current owner or steward authority, problem state and exact public claim could not be confirmed. Reload this workspace and choose an available result claim."
+      : "The complete claim could not be read. Reload or try its preview again before entering result review." };
+  } catch {
+    return { ok: false, refreshRequired: true,
+      message: "The result claim preview could not be verified. Reload under the intended sponsor account and try again." };
+  }
+}
 
 /** Re-authenticate every preview; an old rendered owner/steward card is not authority. */
 export async function previewProblemClosingSynthesis(

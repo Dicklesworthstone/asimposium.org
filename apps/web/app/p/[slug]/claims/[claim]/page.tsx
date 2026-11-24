@@ -23,6 +23,7 @@ import { directiveDisclosureHref } from "@/lib/directive-disclosure-target";
 import { stoaFetchClaimFace } from "@/lib/public-ledger";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { reviewHandoffForClaim, reviewHandoffHref } from "@/lib/review-handoff";
+import { resultClaimConsolePath } from "@/lib/result-claim-view";
 import { buildClaimShareCardData } from "@/lib/share-card";
 import { SITE } from "@/lib/site";
 
@@ -219,6 +220,11 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
               prefetch={false}
             >
               Ask your Fellow to review this exact claim →
+            </Link>
+          </p>
+          <p>
+            <Link href={resultClaimConsolePath(face.problem, exact)} prefetch={false}>
+              Review this claim as a problem result
             </Link>
           </p>
           <p>
