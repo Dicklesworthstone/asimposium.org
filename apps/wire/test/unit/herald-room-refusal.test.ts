@@ -41,11 +41,12 @@ describe("Herald room refusals are valid canonical problem documents", () => {
 });
 
 describe("Herald room schema readiness", () => {
-  test("the fail-closed check names exactly the objects migration 0078 creates", () => {
-    const migration = readFileSync(
-      resolve(import.meta.dir, "../../../../db/migrations/0078_herald_room_outbox.sql"),
-      "utf8",
-    );
+  test("the fail-closed check includes delivery and moderation-wake schema objects", () => {
+    const migration = ["0078_herald_room_outbox.sql", "0157_herald_content_control_wake.sql"]
+      .map((name) =>
+        readFileSync(resolve(import.meta.dir, "../../../../db/migrations", name), "utf8"),
+      )
+      .join("\n");
     const created = [...migration.matchAll(/CREATE (TABLE|INDEX|TRIGGER) ([a-z_]+)/g)].map(
       ([, type, name]) => [(type as string).toLowerCase(), name],
     );

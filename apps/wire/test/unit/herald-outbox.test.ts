@@ -16,6 +16,7 @@ function fixture() {
     CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER);
     CREATE TABLE events(id TEXT PRIMARY KEY, problem_id TEXT);
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY, redacted_at TEXT, payload_json TEXT);
+    CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     CREATE TABLE workshop_objects(body TEXT);
     INSERT INTO workshop_objects VALUES ('PRIVATE-WORKSHOP-CANARY');
     INSERT INTO problems VALUES ('P-DEMO', 1, 'active', 0), ('P-PRIVATE', 0, 'private-draft', 0);
@@ -24,6 +25,12 @@ function fixture() {
   sql.exec(
     readFileSync(
       new URL("../../../../db/migrations/0078_herald_room_outbox.sql", import.meta.url),
+      "utf8",
+    ),
+  );
+  sql.exec(
+    readFileSync(
+      new URL("../../../../db/migrations/0157_herald_content_control_wake.sql", import.meta.url),
       "utf8",
     ),
   );
@@ -295,6 +302,65 @@ describe("W7 coalesced transactional wake queue on real SQLite", () => {
       assert.equal(await publicRoomHead(f.db, "P-MISSING"), null);
       f.sql.exec("UPDATE problems SET public_seq=1.5 WHERE id='P-DEMO'");
       await assert.rejects(() => publicRoomHead(f.db, "P-DEMO"), /HERALD_HEAD_UNAVAILABLE/);
+    } finally {
+      f.sql.close();
+    }
+  });
+  test("whole-problem moderation hides the room head until a later restoration", async () => {
+    const f = fixture();
+    try {
+      // Object controls and another problem's control do not hide this room.
+      f.sql.exec(`INSERT INTO content_controls VALUES
+        ('P-DEMO', 'C-1', 'hidden', 1),
+        ('P-PRIVATE', 'problem', 'hidden', 1)`);
+      assert.deepEqual(await publicRoomHead(f.db, "P-DEMO"), { seq: 1 });
+      f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO', 'problem', 'hidden', 1)");
+      assert.equal(await publicRoomHead(f.db, "P-DEMO"), null);
+      f.change();
+      assert.equal(await publicRoomHead(f.db, "P-DEMO"), null, "new events cannot undo a hide");
+      f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO', 'problem', 'visible', 2)");
+      assert.deepEqual(await publicRoomHead(f.db, "P-DEMO"), { seq: 2 });
+      f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO', 'problem', 'hidden', 3)");
+      assert.equal(await publicRoomHead(f.db, "P-DEMO"), null);
+    } finally {
+      f.sql.close();
+    }
+  });
+  test("whole-problem moderation wakes idle rooms atomically without changing the event cursor", async () => {
+    const f = fixture();
+    try {
+      f.sql.exec("BEGIN");
+      f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO', 'problem', 'hidden', 1)");
+      assert.equal(f.pending().length, 1);
+      assert.equal(await publicRoomHead(f.db, "P-DEMO"), null);
+      f.sql.exec("ROLLBACK");
+      assert.equal(f.pending().length, 0);
+      assert.deepEqual(await publicRoomHead(f.db, "P-DEMO"), { seq: 1 });
+      f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO', 'problem', 'hidden', 3)");
+      assert.equal(f.pending()[0]?.generation, 1);
+      assert.equal((await deliverHeraldRooms(f.db, f.namespace, () => NOW)).delivered, 1);
+      assert.equal(f.pending().length, 0);
+      // A delayed older control must not wake or override the latest hide.
+      f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO', 'problem', 'visible', 2)");
+      assert.equal(f.pending().length, 0);
+      assert.equal(await publicRoomHead(f.db, "P-DEMO"), null);
+      f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO', 'problem', 'visible', 4)");
+      assert.equal(f.pending()[0]?.generation, 2);
+      assert.deepEqual(await publicRoomHead(f.db, "P-DEMO"), { seq: 1 });
+      assert.equal((await deliverHeraldRooms(f.db, f.namespace, () => NOW)).delivered, 1);
+      assert.equal(f.calls.length, 2);
+    } finally {
+      f.sql.close();
+    }
+  });
+  test("object, private-problem and unchanged visibility controls do not wake public rooms", () => {
+    const f = fixture();
+    try {
+      f.sql.exec(`INSERT INTO content_controls VALUES
+        ('P-DEMO', 'C-1', 'hidden', 1),
+        ('P-DEMO', 'problem', 'visible', 1),
+        ('P-PRIVATE', 'problem', 'hidden', 1)`);
+      assert.equal(f.pending().length, 0);
     } finally {
       f.sql.close();
     }

@@ -5,12 +5,12 @@ import { publicRoomRoute } from "./room-controller.ts";
 import { roomRefusal } from "./room-http.ts";
 
 /** Optional at the application boundary: legacy environments keep HTTP reads
- * and writes working while rollout applies 0078 and binds the exported room. */
+ * and writes working while rollout applies delivery migrations and binds the room. */
 export type HeraldRuntimeEnv = Env & { readonly HERALD_ROOMS?: HeraldNamespace };
 
-/** Every schema object migration 0078 creates. Without them a room would
- * accept connections that no write ever wakes (Rule A4: no fake liveness), so
- * the upgrade fails closed until the migration is applied. */
+/** The delivery objects and whole-problem moderation wake trigger. Without
+ * them a room could accept connections that writes or privacy withdrawals
+ * never wake, so upgrades fail closed until 0078 and 0157 are applied. */
 export const HERALD_ROOM_SCHEMA_OBJECTS = [
   ["table", "herald_room_outbox"],
   ["index", "herald_room_outbox_pending"],
@@ -19,9 +19,10 @@ export const HERALD_ROOM_SCHEMA_OBJECTS = [
   ["trigger", "herald_room_content_insert"],
   ["trigger", "herald_room_content_redaction"],
   ["trigger", "herald_room_content_delete"],
+  ["trigger", "herald_room_content_control_insert"],
 ] as const;
 
-// Positive results only: a database that gains 0078 is picked up on the next
+// Positive results only: a database that gains the schema is picked up on the next
 // upgrade, and a schema never loses it outside a restore (which restarts).
 const heraldSchemaReady = new WeakSet<object>();
 
