@@ -988,10 +988,12 @@ describe("face wire format", () => {
     expect(markdownBody).toContain("&quot;next_actions&quot;:");
     expect(markdownBody).toContain(`fingerprint=${face.fingerprint}`);
     expect(new TextEncoder().encode(markdownBody).byteLength).toBeLessThanOrEqual(16_000);
+    const problemQuery = queries[0];
+    if (problemQuery === undefined) throw new Error("The problem face must query its source");
     expect(queries).toEqual([
-      queries[0],
+      problemQuery,
       PUBLIC_PROBLEM_ROSTER_SQL,
-      queries[0],
+      problemQuery,
       PUBLIC_PROBLEM_ROSTER_SQL,
     ]);
     expect(bindings).toEqual([["P-4DSP"], ["P-4DSP", 7], ["P-4DSP"], ["P-4DSP", 7]]);
@@ -1147,10 +1149,12 @@ describe("face wire format", () => {
     expect(queries).toHaveLength(4);
     expect(queries[0]).toContain("LEFT JOIN claims");
     expect(queries[0]).toContain("LIMIT 201");
+    const problemQuery = queries[0];
+    if (problemQuery === undefined) throw new Error("The problem face must query its source");
     expect(queries).toEqual([
-      queries[0],
+      problemQuery,
       PUBLIC_PROBLEM_ROSTER_SQL,
-      queries[0],
+      problemQuery,
       PUBLIC_PROBLEM_ROSTER_SQL,
     ]);
     expect(bindings).toEqual([["P-BUDGET"], ["P-BUDGET", 201], ["P-BUDGET"], ["P-BUDGET", 201]]);

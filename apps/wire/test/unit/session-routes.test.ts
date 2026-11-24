@@ -2622,7 +2622,7 @@ describe("explicit shared session handoffs", () => {
         await f.db
           .prepare(`SELECT public_seq, (SELECT MAX(workshop_seq) FROM workshop_objects
           WHERE problem_id = 'P-4DSP') AS workshop_seq FROM problems WHERE id = 'P-4DSP'`)
-          .first(),
+          .first<Record<string, unknown>>(),
       ).toEqual(before);
       expect(
         await f.db
@@ -2630,22 +2630,28 @@ describe("explicit shared session handoffs", () => {
             "SELECT closed_at, handback, shared_handoff_json FROM sessions WHERE session_id = ?",
           )
           .bind(f.session.session_id)
-          .first(),
+          .first<{
+            closed_at: string | null;
+            handback: string | null;
+            shared_handoff_json: string | null;
+          }>(),
       ).toEqual({ closed_at: null, handback: null, shared_handoff_json: null });
       expect(
         await f.db
           .prepare("SELECT state FROM workshop_objects WHERE workshop_id = ?")
           .bind(retained.workshop_id)
-          .first(),
+          .first<{ state: string }>(),
       ).toEqual({ state: "open" });
       expect(
         await f.db
           .prepare("SELECT status FROM leases WHERE session_id = ?")
           .bind(f.session.session_id)
-          .first(),
+          .first<{ status: string }>(),
       ).toEqual({ status: "active" });
       expect(
-        await f.db.prepare("SELECT COUNT(*) AS n FROM claims WHERE problem_id = 'P-4DSP'").first(),
+        await f.db
+          .prepare("SELECT COUNT(*) AS n FROM claims WHERE problem_id = 'P-4DSP'")
+          .first<{ n: number }>(),
       ).toEqual({ n: 1 });
     },
   );
