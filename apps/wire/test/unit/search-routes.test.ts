@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { SearchResponseSchema } from "@asimposium/contracts";
+import { ProblemGovernanceEventSchema, SearchResponseSchema } from "@asimposium/contracts";
 import { createApp } from "../../src/app.ts";
 import type { Env } from "../../src/env.ts";
 import { renderSearchMarkdown } from "../../src/search/markdown.ts";
@@ -54,6 +54,52 @@ function localD1(sqlite: Database) {
 function createMigratedDb(): { db: Env["DB"]; raw: Database } {
   const sqlite = migratedSqlite({ strict: true });
   return { db: localD1(sqlite), raw: sqlite };
+}
+
+// A public problem projection is searchable only when its current formulation
+// has an available, digest-bound publication, just like its canonical reader.
+function seedProblemFormulation(raw: Database, problem: string, title = problem) {
+  const timestamp = "2026-09-07T00:00:00.000Z";
+  const payload = JSON.stringify(
+    ProblemGovernanceEventSchema.parse({
+      action: "publish",
+      acting_principal: { type: "sponsor", id: "usr_search" },
+      source_fellow_id: "F-statement",
+      previous_status: "private-draft",
+      previous_statement_version: 1,
+      problem: {
+        id: problem,
+        title,
+        status: "sharpening",
+        current_statement_version: 1,
+        statement: "A bounded scientific question with a concrete falsifier.",
+        falsifier: "A counterexample within the stated finite domain.",
+        motivation: "Make the scientific question independently discoverable.",
+        updated_at: timestamp,
+      },
+    }),
+  );
+  const digest = createHash("sha256").update(payload).digest("hex");
+  const eventId = `EV-${problem}-formulation`;
+  raw
+    .prepare(
+      "UPDATE problems SET public_seq=1,current_statement_version=1,title=?,chain_version=2,chain_digest='sha256:chain' WHERE id=?",
+    )
+    .run(title, problem);
+  raw
+    .prepare(`INSERT OR IGNORE INTO krater_integrity_backfill(
+      problem_id,state,legacy_event_count,completed_at,chain_version)
+      VALUES(?,'complete',0,?,2)`)
+    .run(problem, timestamp);
+  raw
+    .prepare(`INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+    payload_sha256,created_at,row_digest,chain_digest)
+    VALUES(?,?,1,'problem.admitted','problem',?,1,?,?,'sha256:row','sha256:chain')`)
+    .run(eventId, problem, problem, digest, timestamp);
+  raw
+    .prepare("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)")
+    .run(eventId, digest, payload);
+  return eventId;
 }
 
 // Publish digest-consistent SQLite sources for the search reader. These
@@ -160,8 +206,11 @@ describe("W6.8 Public Search Routes", () => {
     async (corrupt) => {
       const { db, raw } = createMigratedDb();
       const statement = `A complete historical statement. ${"x".repeat(2500)}`;
-      const payload = JSON.stringify({ claim_id: "C-1", kind: "claim", statement });
+      const payload = JSON.stringify({ claim_id: "C-1", kind: "lemma", statement });
       const digest = createHash("sha256").update(payload).digest("hex");
+      const contentDigest = `sha256:${createHash("sha256")
+        .update(JSON.stringify({ falsifier: null, kind: "lemma", statement }))
+        .digest("hex")}`;
       // SQLite projection fixture for read-side faults; production writes are
       // exercised independently by scientific-journey on real Workerd/D1.
       raw.run(`
@@ -187,8 +236,8 @@ describe("W6.8 Public Search Routes", () => {
         .run(digest, corrupt ? "{}" : payload);
       raw
         .prepare(`INSERT INTO claim_versions (problem_id, claim_id, version, kind, statement, content_digest, editor_fellow_id, created_at)
-      VALUES ('P-PIN', 'C-1', 1, 'conjecture', ?, ?, 'F-fixture', '2026-09-08T00:00:00.000Z')`)
-        .run(statement, `sha256:${digest}`);
+      VALUES ('P-PIN', 'C-1', 1, 'lemma', ?, ?, 'F-fixture', '2026-09-08T00:00:00.000Z')`)
+        .run(statement, contentDigest);
       const app = createApp();
       const env = mockEnv(db);
       const url = "https://a.asimposium.org/search.json?q=P-PIN%23C-1%401&kind=claim";
@@ -246,6 +295,7 @@ describe("W6.8 Public Search Routes", () => {
               "INSERT INTO problems (id, public_seq, created_at, updated_at) VALUES (?, 0, '2026-09-07', '2026-09-07')",
             )
             .run(`P-MATCH${suffix}`);
+          seedProblemFormulation(raw, `P-MATCH${suffix}`);
         }
         const exact = await executeSearch(db, { q: "P-MATCH", kind: "problem", limit: 2 });
         expect(exact.items.map((item) => item.id)).toEqual(["P-MATCH", "P-MATCH-A"]);
@@ -463,6 +513,8 @@ describe("W6.8 Public Search Routes", () => {
     raw.run(`INSERT INTO problems (id, public_seq, created_at, updated_at) VALUES
       ('P-TARGET', 0, '2026-09-06T00:00:00Z', '2026-09-06T00:00:00Z'),
       ('P-TARGET-OTHER', 0, '2026-09-06T00:00:00Z', '2026-09-06T00:00:00Z')`);
+    seedProblemFormulation(raw, "P-TARGET");
+    seedProblemFormulation(raw, "P-TARGET-OTHER");
     const app = createApp();
     const env = mockEnv(db);
     const url = "https://a.asimposium.org/search.json?q=P-TARGET";
@@ -599,6 +651,7 @@ describe("W6.8 Public Search Routes", () => {
       INSERT INTO problems (id, public_seq, created_at, updated_at)
       VALUES ('P-RIEMANN-01', 5, '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z')
     `);
+    seedProblemFormulation(raw, "P-RIEMANN-01");
 
     const res = await app.request("https://a.asimposium.org/search.json?q=P-RIEMANN-01", {}, env);
     expect(res.status).toBe(200);

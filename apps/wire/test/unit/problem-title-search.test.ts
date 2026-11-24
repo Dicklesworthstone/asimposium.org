@@ -19,7 +19,7 @@ describe("public problem title discovery", () => {
 
   test("finds a research title without knowing its P-ID or having a published claim", async () => {
     const f = fixture();
-    f.problem("P-A17", "active", 0, "Independent verification of graph coloring bounds");
+    f.publishedProblem("P-A17", "active", 0, "Independent verification of graph coloring bounds");
     const page = await f.page({ q: "graph coloring", kind: "problem" });
     assert.deepEqual(
       page.items.map((item) => item.id),
@@ -33,7 +33,7 @@ describe("public problem title discovery", () => {
   test("all-kind discovery still orders claims before title matches and Fellows", async () => {
     const f = fixture();
     f.claim("C-1", "test science");
-    f.problem("P-A17", "active", 0, "test research");
+    f.publishedProblem("P-A17", "active", 0, "test research");
     f.fellow("F-title-test", "test-fellow");
     const page = await f.page({ q: "test", kind: "all", limit: 50 });
     assert.deepEqual(
@@ -44,10 +44,10 @@ describe("public problem title discovery", () => {
 
   test("private, unlisted and currently hidden titles do not affect matches", async () => {
     const f = fixture();
-    f.problem("P-PUBLIC", "active", 0, "Canary topic");
-    f.problem("P-PRIVATE", "private-draft", 0, "Canary private");
-    f.problem("P-UNLISTED", "active", 1, "Canary unlisted");
-    f.problem("P-HIDDEN", "active", 0, "Canary hidden");
+    f.publishedProblem("P-PUBLIC", "active", 0, "Canary topic");
+    f.publishedProblem("P-PRIVATE", "private-draft", 0, "Canary private");
+    f.publishedProblem("P-UNLISTED", "active", 1, "Canary unlisted");
+    f.publishedProblem("P-HIDDEN", "active", 0, "Canary hidden");
     f.sqlite.exec("INSERT INTO content_controls VALUES('P-HIDDEN','problem','hidden',1)");
     const page = await f.page({ q: "canary", kind: "problem" });
     assert.deepEqual(
@@ -63,7 +63,7 @@ describe("public problem title discovery", () => {
 
   test("only the latest control governs hiding and restoration", async () => {
     const f = fixture();
-    f.problem("P-A17", "active", 0, "Restored topic");
+    f.publishedProblem("P-A17", "active", 0, "Restored topic");
     f.sqlite.exec(`INSERT INTO content_controls VALUES
       ('P-A17','problem','hidden',1), ('P-A17','problem','visible',2),
       ('P-A17','C-1','hidden',1)`);
@@ -75,8 +75,8 @@ describe("public problem title discovery", () => {
   for (const q of ["100%", "x_y", "x\\y", "' OR 1=1 --", "λ-calculus"]) {
     test(`matches the literal title query ${JSON.stringify(q)}`, async () => {
       const f = fixture();
-      f.problem("P-A17", "active", 0, `A study of ${q}`);
-      f.problem("P-B18", "active", 0, "Unrelated study of 1000 xay xy");
+      f.publishedProblem("P-A17", "active", 0, `A study of ${q}`);
+      f.publishedProblem("P-B18", "active", 0, "Unrelated study of 1000 xay xy");
       const page = await f.page({ q, kind: "problem" });
       assert.deepEqual(
         page.items.map((item) => item.id),
@@ -87,7 +87,8 @@ describe("public problem title discovery", () => {
 
   test("pages tied titles deterministically without duplicate or lost problems", async () => {
     const f = fixture();
-    for (const id of ["P-C19", "P-A17", "P-B18"]) f.problem(id, "active", 0, "Shared topic");
+    for (const id of ["P-C19", "P-A17", "P-B18"])
+      f.publishedProblem(id, "active", 0, "Shared topic");
     const query: SearchPageQuery = { q: "Shared", kind: "problem", limit: 2 };
     const first = await f.page(query);
     assert.deepEqual(
@@ -103,24 +104,27 @@ describe("public problem title discovery", () => {
     assert.equal(second.cursor, null);
   });
 
-  test("a title-only rename invalidates continuation even with unchanged sequence and timestamp", async () => {
+  test("a retained mutable title cannot change published discovery or expire its cursor", async () => {
     const f = fixture();
-    f.problem("P-A17", "active", 0, "Shared topic A");
-    f.problem("P-B18", "active", 0, "Shared topic B");
+    f.publishedProblem("P-A17", "active", 0, "Shared topic A");
+    f.publishedProblem("P-B18", "active", 0, "Shared topic B");
     const query: SearchPageQuery = { q: "Shared", kind: "problem", limit: 1 };
     const first = await f.page(query);
     assert.ok(first.cursor);
     f.sqlite.exec("UPDATE problems SET title='Shared renamed B' WHERE id='P-B18'");
-    await assert.rejects(f.page({ ...query, cursor: first.cursor }), { reason: "changed" });
+    const second = await f.page({ ...query, cursor: first.cursor });
+    assert.equal(second.items[0]?.title, "Shared topic B");
+    assert.doesNotMatch(JSON.stringify(second), /renamed/);
+    assert.equal((await f.page({ q: "renamed", kind: "problem" })).windowMatches, 0);
   });
 
-  test("a title or visibility change during page composition never serves the stale window", async () => {
+  test("a source-version or visibility change during page composition never serves the stale window", async () => {
     for (const mutation of [
-      "UPDATE problems SET title='Shared renamed A' WHERE id='P-A17'",
+      "UPDATE problems SET current_statement_version=2 WHERE id='P-A17'",
       "INSERT INTO content_controls VALUES('P-A17','problem','hidden',1)",
     ]) {
       const f = fixture();
-      f.problem("P-A17", "active", 0, "Shared topic A");
+      f.publishedProblem("P-A17", "active", 0, "Shared topic A");
       let reads = 0;
       f.setHook((sql) => {
         if (sql === SEARCH_PROBLEM_KEYS_SQL && ++reads === 2) f.sqlite.exec(mutation);
@@ -129,20 +133,18 @@ describe("public problem title discovery", () => {
     }
   });
 
-  test("null or blank historical titles fall back to their public ID", async () => {
+  test("projection-only problem rows cannot manufacture discovery matches", async () => {
     const f = fixture();
     f.problem("P-A17");
     f.problem("P-B18", "active", 0, "   ");
     const page = await f.page({ q: "P-", kind: "problem" });
-    assert.deepEqual(
-      page.items.map((item) => item.title),
-      ["P-A17", "P-B18"],
-    );
+    assert.deepEqual(page.items, []);
+    assert.equal(page.windowMatches, 0);
   });
 
   test("an exact result is not duplicated when its title also matches", async () => {
     const f = fixture();
-    f.problem("P-A17", "active", 0, "P-A17 research");
+    f.publishedProblem("P-A17", "active", 0, "P-A17 research");
     const exact = {
       kind: "problem" as const,
       id: "P-A17",
@@ -160,7 +162,7 @@ describe("public problem title discovery", () => {
   test("the 500-entry window remains bounded and discloses truncation", async () => {
     const f = fixture();
     for (let i = 0; i < 501; i++)
-      f.problem(`P-${String(i).padStart(4, "0")}`, "active", 0, "Shared topic");
+      f.publishedProblem(`P-${String(i).padStart(4, "0")}`, "active", 0, "Shared topic");
     const page = await f.page({ q: "Shared", kind: "problem", limit: 50 });
     assert.equal(page.windowMatches, 500);
     assert.equal(page.items.length, 50);

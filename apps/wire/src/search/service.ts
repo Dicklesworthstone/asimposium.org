@@ -29,19 +29,14 @@ import { executeSearchPage } from "./page";
 import {
   SEARCH_CLAIM_SOURCE_COLUMNS,
   SEARCH_CLAIM_SOURCE_SQL,
+  SEARCH_EXACT_PROBLEM_SQL,
   SEARCH_PROBLEM_FILTER_SQL,
   type SearchClaimPublication,
+  type SearchProblemPublication,
   searchProblemFilterBindings,
   verifiedSearchClaimVersion,
+  verifiedSearchProblem,
 } from "./window";
-
-interface ProblemRow {
-  readonly id: string;
-  readonly title: string;
-  readonly public_seq: number;
-  readonly created_at: string;
-  readonly updated_at: string;
-}
 
 interface ClaimRow extends SearchClaimPublication {
   readonly problem_id: string;
@@ -151,36 +146,29 @@ export async function executeSearch(
     if (exactTarget) {
       if ((filterKind === "all" || filterKind === "problem") && exactTarget.kind === "problem") {
         const problem = await db
-          .prepare(
-            `SELECT p.id, p.public_seq, p.created_at, p.updated_at,
-               CASE WHEN length(trim(p.title)) > 0 THEN p.title ELSE p.id END AS title
-             FROM problems p
-             WHERE p.id = ? AND p.status <> 'private-draft' AND p.unlisted = 0
-               AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
-               AND ${SEARCH_PROBLEM_FILTER_SQL}`,
-          )
-          .bind(exactTarget.id, ...searchProblemFilterBindings(pageQuery))
-          .first<ProblemRow>();
+          .prepare(SEARCH_EXACT_PROBLEM_SQL)
+          .bind(...searchProblemFilterBindings(pageQuery), exactTarget.id)
+          .first<SearchProblemPublication>();
 
         if (problem) {
-          const formulation = await readPublishedProblemFormulation(
-            db,
-            problem.id,
-            problem.public_seq,
+          const formulation = verifiedSearchProblem(
+            problem,
+            await readPublishedProblemFormulation(db, problem.id, problem.public_seq),
           );
+          const title = formulation.problem.title;
           found.push({
             kind: "problem",
             id: problem.id,
             url: `https://asimposium.org/p/${encodeURIComponent(problem.id)}`,
-            title: problem.title,
+            title,
             snippet:
-              `${problem.title} — Public problem ${problem.id} (sequence ${problem.public_seq}, updated ${problem.updated_at})`.slice(
+              `${title} — Public problem ${problem.id} (sequence ${problem.public_seq}, updated ${formulation.problem.updated_at})`.slice(
                 0,
                 SEARCH_SNIPPET_MAX_LENGTH,
               ),
             match_type: "exact_reference",
             score_explanation: "exact_problem_id",
-            ...(formulation?.screening_notice === undefined
+            ...(formulation.screening_notice === undefined
               ? {}
               : { screening_notice: formulation.screening_notice }),
           });

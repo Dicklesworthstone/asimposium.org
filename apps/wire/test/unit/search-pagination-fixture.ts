@@ -120,6 +120,16 @@ export function searchPaginationFixture() {
     sqlite.query("INSERT INTO event_content VALUES(?,?,?,NULL)").run(eventId, digest, payload);
     return { eventId, payload, digest, seq: n, version };
   }
+  function publishedProblem(
+    id = "P-DEMO",
+    status = "active",
+    unlisted = 0,
+    title = "Published research",
+    areas: readonly string[] = [],
+  ) {
+    problem(id, status, unlisted, title, areas);
+    return formulation(id, "A bounded scientific question with a concrete falsifier.");
+  }
   function fellow(id: string, name = "test-fellow") {
     sqlite
       .query("INSERT INTO enrollment_fellows VALUES(?,?, 'self-declared-model','harness',1)")
@@ -148,6 +158,7 @@ export function searchPaginationFixture() {
     problem,
     claim,
     formulation,
+    publishedProblem,
     fellow,
     page,
     setHook(value: typeof hook) {

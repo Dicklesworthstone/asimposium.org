@@ -19,13 +19,13 @@ afterEach(() => {
 
 test("area and current lifecycle select claims, titles and published statements before paging", async () => {
   const f = fixture();
-  f.problem("P-ACTIVE", "active", 0, "Spectral problem", ["algebra", "combinatorics"]);
+  f.publishedProblem("P-ACTIVE", "active", 0, "Spectral problem", ["algebra", "combinatorics"]);
   f.claim("C-1", "spectral bound", "P-ACTIVE");
   f.problem("P-STATEMENT", "active", 0, "Public formulation", ["algebra"]);
   f.formulation("P-STATEMENT", "The spectral bound holds for finite graphs.");
-  f.problem("P-RESOLVED", "resolved", 0, "Spectral resolved", ["algebra"]);
+  f.publishedProblem("P-RESOLVED", "resolved", 0, "Spectral resolved", ["algebra"]);
   f.claim("C-2", "spectral bound", "P-RESOLVED");
-  f.problem("P-OTHER", "active", 0, "Spectral arithmetic", ["number-theory"]);
+  f.publishedProblem("P-OTHER", "active", 0, "Spectral arithmetic", ["number-theory"]);
   f.claim("C-3", "spectral bound", "P-OTHER");
   f.fellow("F-1", "spectral-fellow");
   const result = await executeSearch(f.db, {
@@ -59,7 +59,7 @@ test("area and current lifecycle select claims, titles and published statements 
 
 test("exact IDs and canonical claim URLs obey the same problem filters", async () => {
   const f = fixture();
-  f.problem("P-EXACT", "active", 0, "A bounded claim", ["algebra"]);
+  f.publishedProblem("P-EXACT", "active", 0, "A bounded claim", ["algebra"]);
   f.claim("C-1", "bounded counterexample", "P-EXACT");
   for (const q of ["P-EXACT", "P-EXACT#C-1", "https://asimposium.org/p/P-EXACT/claims/C-1.json"]) {
     const query = {
@@ -83,7 +83,7 @@ test("matching filters cannot reveal hidden, unlisted or private sources", async
     ["P-UNLISTED", "active", 1],
     ["P-PRIVATE", "private-draft", 0],
   ] as const) {
-    f.problem(id, status, unlisted, "Private spectral canary", ["algebra"]);
+    f.publishedProblem(id, status, unlisted, "Private spectral canary", ["algebra"]);
     f.claim("C-1", "Private spectral canary", id);
   }
   f.sqlite.exec("INSERT INTO content_controls VALUES('P-HIDDEN','problem','hidden',1)");
@@ -160,8 +160,9 @@ test("Fellow matches are explicitly excluded rather than silently ignoring probl
 
 test("filtering happens before the 500-result window, including requested other-* areas", async () => {
   const f = fixture();
-  for (let n = 0; n < 501; n++) f.problem(`P-A${n}`, "resolved", 0, "Spectral result", ["algebra"]);
-  f.problem("P-ZMATCH", "active", 0, "Spectral research", ["other-network-science"]);
+  for (let n = 0; n < 501; n++)
+    f.publishedProblem(`P-A${n}`, "resolved", 0, "Spectral result", ["algebra"]);
+  f.publishedProblem("P-ZMATCH", "active", 0, "Spectral research", ["other-network-science"]);
   const result = await f.page({
     q: "spectral",
     kind: "problem",
