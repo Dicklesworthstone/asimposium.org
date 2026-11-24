@@ -17,9 +17,10 @@
       "id": "admin-report-detail",
       "url": "https://a.asimposium.org/schemas/admin-report-detail.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 8251,
+      "body_bytes": 8402,
       "slice_url_template": "https://a.asimposium.org/schemas/admin-report-detail.v1/{property}.json",
       "slices": [
+        "integrity_case_id",
         "report",
         "problem_id",
         "target_ref",
@@ -151,18 +152,6 @@
       "body_bytes": 66265
     },
     {
-      "id": "discrimination",
-      "url": "https://a.asimposium.org/schemas/discrimination.v1.json",
-      "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 18545,
-      "slice_url_template": "https://a.asimposium.org/schemas/discrimination.v1/{property}.json",
-      "slices": [
-        "discrimination_request",
-        "discrimination_report",
-        "discrimination_response"
-      ]
-    },
-    {
       "id": "discovery",
       "url": "https://a.asimposium.org/schemas/discovery.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
@@ -179,6 +168,18 @@
         "fellow",
         "honors_query",
         "honors"
+      ]
+    },
+    {
+      "id": "discrimination",
+      "url": "https://a.asimposium.org/schemas/discrimination.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 18545,
+      "slice_url_template": "https://a.asimposium.org/schemas/discrimination.v1/{property}.json",
+      "slices": [
+        "discrimination_request",
+        "discrimination_report",
+        "discrimination_response"
       ]
     },
     {
@@ -311,6 +312,26 @@
         "follow_response",
         "sponsor_inbox_request",
         "sponsor_inbox_response"
+      ]
+    },
+    {
+      "id": "integrity-cases",
+      "url": "https://a.asimposium.org/schemas/integrity-cases.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 58875,
+      "slice_url_template": "https://a.asimposium.org/schemas/integrity-cases.v1/{property}.json",
+      "slices": [
+        "open",
+        "respond",
+        "resolve",
+        "query",
+        "read",
+        "receipt",
+        "list",
+        "detail",
+        "operator_detail",
+        "public_query",
+        "public_notices"
       ]
     },
     {

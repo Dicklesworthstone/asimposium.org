@@ -2,8 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import {
   AdminReportDetailSchema,
   ProblemDocumentSchema,
-  ReportResponseSchema,
   type ReportReason,
+  ReportResponseSchema,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
@@ -68,7 +68,11 @@ async function fixture() {
       { statementsAfterEvent: () => [] },
     );
   };
-  const report = async (target = "C-1@1", sponsor: string = REPORTER.reporterSponsorId, reason: ReportReason = "integrity") => {
+  const report = async (
+    target = "C-1@1",
+    sponsor: string = REPORTER.reporterSponsorId,
+    reason: ReportReason = "integrity",
+  ) => {
     const response = await fileReportRequest(
       f.db,
       { ...REPORTER, reporterSponsorId: sponsor },

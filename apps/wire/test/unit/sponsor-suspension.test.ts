@@ -454,7 +454,10 @@ describe("reviewed sponsor suspension", () => {
         expect(
           await sponsorMutationRefusal(f.db, SPONSOR, method as string, action as string),
         ).toBeUndefined();
-      expect((await sponsorMutationRefusal(f.db, SPONSOR, "POST", "sponsor.integrity.cases.resolve"))?.status).toBe(403);
+      expect(
+        (await sponsorMutationRefusal(f.db, SPONSOR, "POST", "sponsor.integrity.cases.resolve"))
+          ?.status,
+      ).toBe(403);
       expect(await sponsorMutationRefusal(f.db, OTHER, "POST", "enrollment.mint")).toBeUndefined();
       await expect(f.service.mint(f.principal, { requested_scopes: ["review"] })).rejects.toThrow();
       for (const table of [

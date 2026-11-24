@@ -77,6 +77,11 @@ import {
   hypothesesResponses,
 } from "./hypotheses-discovery";
 import {
+  INTEGRITY_NOTICE_PUBLIC_READS,
+  integrityNoticeParameters,
+  integrityNoticeResponses,
+} from "./integrity-cases-discovery.ts";
+import {
   PROTOCOL_CONFLICT_PUBLIC_READS,
   protocolConflictResponses,
 } from "./protocol-conflicts-discovery.ts";
@@ -231,6 +236,13 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/operators/reports": true,
   "GET /v1/operators/reports/:reportId": true,
   "POST /v1/operators/reports/resolution": true,
+  "POST /v1/operators/integrity/cases/query": true,
+  "POST /v1/operators/integrity/cases/read": true,
+  "POST /v1/operators/integrity/cases/open": true,
+  "POST /v1/operators/integrity/cases/resolve": true,
+  "POST /v1/sponsors/integrity/cases/query": true,
+  "POST /v1/sponsors/integrity/cases/read": true,
+  "POST /v1/sponsors/integrity/cases/respond": true,
   "POST /v1/operators/content-control": true,
   "GET /v1/operators/problems/:problemId/slow-mode": true,
   "POST /v1/operators/problems/:problemId/slow-mode": true,
@@ -358,6 +370,7 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /p/:id/conflicts.html": "Version-pinned conflicts and their resolutions (HTML face).",
   ...CITATIONS_PUBLIC_READS,
   ...RESEARCH_LIST_PUBLIC_READS,
+  ...INTEGRITY_NOTICE_PUBLIC_READS,
   ...SCIENTIFIC_HISTORY_PUBLIC_READS,
   "GET /p/:id/relations/:target":
     "One typed claim relation (<seq>.md/.json), cited by the seq of its relation.asserted event.",
@@ -978,6 +991,8 @@ function responseFor(
   if (workshop !== undefined) return workshop;
   const citations = citationResponses(openApiPath, origins.agent);
   if (citations !== undefined) return citations;
+  const integrity = integrityNoticeResponses(openApiPath, origins.agent);
+  if (integrity !== undefined) return integrity;
   const research = researchListResponses(openApiPath, origins.agent);
   if (research !== undefined) return research;
   const collection = scientificCollectionResponses(openApiPath, origins.agent);
@@ -1332,6 +1347,7 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
       ...reviewQueueParameters(operation.openApiPath, origins.agent),
       ...citationParameters(operation.openApiPath, origins.agent),
       ...researchListParameters(operation.openApiPath, origins.agent),
+      ...integrityNoticeParameters(operation.openApiPath, origins.agent),
       ...workshopDirectoryParameters(operation.openApiPath, origins.agent, operation.method),
       ...scientificCollectionParameters(operation.openApiPath, origins.agent),
       ...scientificHistoryParameters(operation.openApiPath, origins.agent),

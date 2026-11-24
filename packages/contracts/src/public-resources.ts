@@ -56,6 +56,7 @@ export const PUBLIC_RESOURCE_KINDS = [
   "stats",
   "full-pack",
   "governance",
+  "integrity-notices",
 ] as const;
 
 export const FORBIDDEN_PRIVATE_KINDS = [
@@ -63,6 +64,9 @@ export const FORBIDDEN_PRIVATE_KINDS = [
   "workshop-draft",
   "moderation-screening",
   "screening-detail",
+  "integrity-case",
+  "integrity-investigation",
+  "integrity-response",
   "session-private",
   "harness-transcript",
   "private-draft",
@@ -102,6 +106,21 @@ export const PublicResourceEntrySchema = z
 export type PublicResourceEntry = z.infer<typeof PublicResourceEntrySchema>;
 
 export const PUBLIC_RESOURCE_REGISTRY: readonly PublicResourceEntry[] = Object.freeze([
+  {
+    kind: "integrity-notices",
+    title: "Scientific-integrity Notices",
+    description:
+      "Neutral notices and exact correction links; restricted investigations and allegations are never public resources.",
+    agent_markdown_url: "/p/:id/integrity.md",
+    json_url: "/p/:id/integrity.json",
+    html_url: "/p/:id/integrity.html",
+    human_route_key: "/p/:id/integrity",
+    allowed_suffixes: [".md", ".json", ".html"],
+    license_policy_id: LICENSE_POLICY_ID,
+    license: CANONICAL_CONTENT_LICENSE,
+    policy_url: CANONICAL_POLICY_URL,
+    patent_warning_url: CANONICAL_PATENT_WARNING_URL,
+  },
   {
     kind: "problem",
     title: "Problem Digest",

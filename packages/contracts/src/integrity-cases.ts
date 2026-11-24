@@ -4,8 +4,7 @@ import { PublicLedgerProblemIdSchema } from "./ledger.ts";
 import { ReportResponseSchema } from "./moderation.ts";
 
 /** Restricted human investigation; no case action is a scientific verdict. */
-export const INTEGRITY_CASES_SCHEMA_ID =
-  "https://a.asimposium.org/schemas/integrity-cases.v1.json";
+export const INTEGRITY_CASES_SCHEMA_ID = "https://a.asimposium.org/schemas/integrity-cases.v1.json";
 export const INTEGRITY_CASE_STEP_UP_SECONDS = 15 * 60;
 export const INTEGRITY_CASE_PAGE_LIMIT = 20;
 export const INTEGRITY_CASE_MAX_CORRECTIONS = 8;
@@ -15,7 +14,10 @@ export const INTEGRITY_CASE_PUBLIC_NOTICE =
   "This record has a scientific-integrity review notice. A notice is not a finding of misconduct and does not change scientific standing.";
 export const INTEGRITY_CASE_ID_PATTERN = /^IC-[0-9A-HJKMNP-TV-Z]{26}$/;
 export const IntegrityCaseIdSchema = z.string().length(29).regex(INTEGRITY_CASE_ID_PATTERN);
-export const IntegrityCaseActionIdSchema = z.string().length(29).regex(/^IA-[0-9A-HJKMNP-TV-Z]{26}$/);
+export const IntegrityCaseActionIdSchema = z
+  .string()
+  .length(29)
+  .regex(/^IA-[0-9A-HJKMNP-TV-Z]{26}$/);
 export const INTEGRITY_CONCERNS = [
   "fabricated-source",
   "fabricated-verification",
@@ -32,12 +34,7 @@ export const INTEGRITY_OUTCOMES = [
 export const IntegrityConcernSchema = z.enum(INTEGRITY_CONCERNS);
 export const IntegrityOutcomeSchema = z.enum(INTEGRITY_OUTCOMES);
 export const IntegrityCaseStateSchema = z.enum(["open", "resolved"]);
-export const IntegrityCaseActionKindSchema = z.enum([
-  "opened",
-  "response",
-  "appealed",
-  "resolved",
-]);
+export const IntegrityCaseActionKindSchema = z.enum(["opened", "response", "appealed", "resolved"]);
 
 const SequenceSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const RevisionSchema = SequenceSchema.min(1);
@@ -58,7 +55,9 @@ export const IntegrityTargetRefSchema = z
   .string()
   .min(1)
   .max(96)
-  .regex(/^(?:problem|C-[0-9]+@[1-9][0-9]{0,8}|(?:H|E|R|G|L|DE|Q|CF|SYNTH)-[0-9A-Za-z-]{1,78})$(?![\s\S])/);
+  .regex(
+    /^(?:problem|C-[0-9]+@[1-9][0-9]{0,8}|(?:H|E|R|G|L|DE|Q|CF|SYNTH)-[0-9A-Za-z-]{1,78})$(?![\s\S])/,
+  );
 export const IntegrityCorrectionRefSchema = z
   .object({
     problem_id: PublicLedgerProblemIdSchema,
@@ -72,7 +71,10 @@ export const IntegrityPublicationPinSchema = z
     problem_id: PublicLedgerProblemIdSchema,
     target_ref: IntegrityTargetRefSchema,
     event_id: z.string().min(1).max(128),
-    payload_sha256: z.string().length(64).regex(/^[0-9a-f]{64}$/),
+    payload_sha256: z
+      .string()
+      .length(64)
+      .regex(/^[0-9a-f]{64}$/),
     seq: RevisionSchema,
   })
   .strict();
@@ -135,7 +137,12 @@ export const IntegrityCaseCursorSchema = z
 export const IntegrityCaseQuerySchema = z
   .object({
     before: IntegrityCaseCursorSchema.optional(),
-    limit: z.number().int().min(1).max(INTEGRITY_CASE_PAGE_LIMIT).default(INTEGRITY_CASE_PAGE_LIMIT),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(INTEGRITY_CASE_PAGE_LIMIT)
+      .default(INTEGRITY_CASE_PAGE_LIMIT),
   })
   .strict();
 export const IntegrityCaseQueryRequestSchema = IntegrityCaseQuerySchema;
@@ -143,7 +150,12 @@ export const IntegrityCaseReadRequestSchema = z
   .object({
     case_id: IntegrityCaseIdSchema,
     after_revision: SequenceSchema.default(0),
-    limit: z.number().int().min(1).max(INTEGRITY_CASE_PAGE_LIMIT).default(INTEGRITY_CASE_PAGE_LIMIT),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(INTEGRITY_CASE_PAGE_LIMIT)
+      .default(INTEGRITY_CASE_PAGE_LIMIT),
   })
   .strict();
 
@@ -204,55 +216,61 @@ const ActionEnvelope = {
   actor_id: PrincipalSchema,
   created_at: TimestampSchema,
 };
-export const IntegrityCaseActionSchema = z.discriminatedUnion("kind", [
-  z
-    .object({
-      ...ActionEnvelope,
-      kind: z.literal("opened"),
-      actor_class: z.literal("operator"),
-      body: z
-        .object({ summary: SummarySchema, concern: IntegrityConcernSchema, public_notice: z.boolean() })
-        .strict(),
-    })
-    .strict(),
-  z
-    .object({
-      ...ActionEnvelope,
-      kind: z.literal("response"),
-      actor_class: z.literal("sponsor"),
-      body: z.object({ response: ResponseSchema }).strict(),
-    })
-    .strict(),
-  z
-    .object({
-      ...ActionEnvelope,
-      kind: z.literal("appealed"),
-      actor_class: z.literal("sponsor"),
-      body: z.object({ response: ResponseSchema }).strict(),
-    })
-    .strict(),
-  z
-    .object({
-      ...ActionEnvelope,
-      kind: z.literal("resolved"),
-      actor_class: z.literal("operator"),
-      body: z
-        .object({
-          outcome: IntegrityOutcomeSchema,
-          rationale: RationaleSchema,
-          corrections: CorrectionPinsSchema,
-        })
-        .strict(),
-    })
-    .strict(),
-]).superRefine((value, ctx) => {
-  if ((value.kind === "opened") !== (value.revision === 1)) {
-    ctx.addIssue({
-      code: "custom",
-      message: "The first case action opens the case; later actions cannot reopen its identity.",
-    });
-  }
-});
+export const IntegrityCaseActionSchema = z
+  .discriminatedUnion("kind", [
+    z
+      .object({
+        ...ActionEnvelope,
+        kind: z.literal("opened"),
+        actor_class: z.literal("operator"),
+        body: z
+          .object({
+            summary: SummarySchema,
+            concern: IntegrityConcernSchema,
+            public_notice: z.boolean(),
+          })
+          .strict(),
+      })
+      .strict(),
+    z
+      .object({
+        ...ActionEnvelope,
+        kind: z.literal("response"),
+        actor_class: z.literal("sponsor"),
+        body: z.object({ response: ResponseSchema }).strict(),
+      })
+      .strict(),
+    z
+      .object({
+        ...ActionEnvelope,
+        kind: z.literal("appealed"),
+        actor_class: z.literal("sponsor"),
+        body: z.object({ response: ResponseSchema }).strict(),
+      })
+      .strict(),
+    z
+      .object({
+        ...ActionEnvelope,
+        kind: z.literal("resolved"),
+        actor_class: z.literal("operator"),
+        body: z
+          .object({
+            outcome: IntegrityOutcomeSchema,
+            rationale: RationaleSchema,
+            corrections: CorrectionPinsSchema,
+          })
+          .strict(),
+      })
+      .strict(),
+  ])
+  .superRefine((value, ctx) => {
+    if ((value.kind === "opened") !== (value.revision === 1)) {
+      ctx.addIssue({
+        code: "custom",
+        message: "The first case action opens the case; later actions cannot reopen its identity.",
+      });
+    }
+  });
 
 export const IntegrityCaseReceiptSchema = z
   .object({
@@ -349,7 +367,8 @@ export function integrityCaseListMatchesQuery(
     page.cases.length > query.limit ||
     page.has_more !== (page.next_cursor !== null) ||
     (page.has_more && page.cases.length !== query.limit)
-  ) return false;
+  )
+    return false;
   let previous = query.before;
   const seen = new Set<string>();
   for (const item of page.cases) {
@@ -358,15 +377,18 @@ export function integrityCaseListMatchesQuery(
       (previous !== undefined &&
         (item.opened_at > previous.opened_at ||
           (item.opened_at === previous.opened_at && item.case_id >= previous.case_id)))
-    ) return false;
+    )
+      return false;
     seen.add(item.case_id);
     previous = item;
   }
   const last = page.cases.at(-1);
-  return page.next_cursor === null ||
+  return (
+    page.next_cursor === null ||
     (last !== undefined &&
       page.next_cursor.opened_at === last.opened_at &&
-      page.next_cursor.case_id === last.case_id);
+      page.next_cursor.case_id === last.case_id)
+  );
 }
 
 /** The ordered investigation record is complete up to its advertised revision. */
@@ -379,7 +401,8 @@ export function integrityCaseDetailMatchesRequest(
     request.after_revision > page.case.revision ||
     page.actions.length > request.limit ||
     page.has_more !== (page.next_after_revision !== null)
-  ) return false;
+  )
+    return false;
   let revision = request.after_revision;
   const ids = new Set<string>();
   for (const action of page.actions) {
@@ -388,13 +411,17 @@ export function integrityCaseDetailMatchesRequest(
       action.revision > page.case.revision ||
       ids.has(action.action_id) ||
       (action.revision === 1) !== (action.kind === "opened")
-    ) return false;
+    )
+      return false;
     revision = action.revision;
     ids.add(action.action_id);
   }
   if (page.has_more) {
-    return page.actions.length === request.limit &&
-      revision < page.case.revision && page.next_after_revision === revision;
+    return (
+      page.actions.length === request.limit &&
+      revision < page.case.revision &&
+      page.next_after_revision === revision
+    );
   }
   return revision === page.case.revision;
 }
@@ -416,7 +443,10 @@ export const IntegrityCasesContractsSchema = z
   .strict();
 export function generateIntegrityCasesSchema(): string {
   return `${JSON.stringify(
-    { $id: INTEGRITY_CASES_SCHEMA_ID, ...z.toJSONSchema(IntegrityCasesContractsSchema, { io: "input" }) },
+    {
+      $id: INTEGRITY_CASES_SCHEMA_ID,
+      ...z.toJSONSchema(IntegrityCasesContractsSchema, { io: "input" }),
+    },
     null,
     2,
   )}\n`;
@@ -444,8 +474,9 @@ export type IntegrityCaseAction = z.infer<typeof IntegrityCaseActionSchema>;
 export type IntegrityCaseReceipt = z.infer<typeof IntegrityCaseReceiptSchema>;
 export type IntegrityCaseListResponse = z.infer<typeof IntegrityCaseListResponseSchema>;
 export type IntegrityCaseDetailResponse = z.infer<typeof IntegrityCaseDetailResponseSchema>;
-export type OperatorIntegrityCaseDetailResponse =
-  z.infer<typeof OperatorIntegrityCaseDetailResponseSchema>;
+export type OperatorIntegrityCaseDetailResponse = z.infer<
+  typeof OperatorIntegrityCaseDetailResponseSchema
+>;
 export type PublicIntegrityNotice = z.infer<typeof PublicIntegrityNoticeSchema>;
 export type PublicIntegrityNoticesQuery = z.infer<typeof PublicIntegrityNoticesQuerySchema>;
 export type PublicIntegrityNoticesResponse = z.infer<typeof PublicIntegrityNoticesResponseSchema>;

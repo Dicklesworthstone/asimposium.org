@@ -3,13 +3,18 @@ import { ProblemDocumentSchema } from "@asimposium/contracts";
 import { createIntegrityCaseRouter } from "../../src/moderation/integrity-http.ts";
 import { openIntegrityCase } from "../../src/moderation/integrity-store.ts";
 import {
-  integrityCaseFixture, INTEGRITY_OPERATOR, INTEGRITY_RESPONSE,
-  openRequest, SPONSOR,
+  INTEGRITY_OPERATOR,
+  INTEGRITY_RESPONSE,
+  integrityCaseFixture,
+  openRequest,
+  SPONSOR,
 } from "../support/integrity-cases.ts";
 
 type Fixture = Awaited<ReturnType<typeof integrityCaseFixture>>;
 const fixtures: Fixture[] = [];
-afterEach(() => { for (const f of fixtures.splice(0)) f.sql.close(); });
+afterEach(() => {
+  for (const f of fixtures.splice(0)) f.sql.close();
+});
 async function setup() {
   const f = await integrityCaseFixture();
   fixtures.push(f);
@@ -29,7 +34,11 @@ test("private integrity HTTP binds each signed action and preserves sponsor-only
     verifiedOperator: async (request, route, action) => {
       verified.push(`${route} ${action}`);
       return {
-        principal: { type: "operator", operatorId: INTEGRITY_OPERATOR, serviceEnvelopeKid: "fixture" },
+        principal: {
+          type: "operator",
+          operatorId: INTEGRITY_OPERATOR,
+          serviceEnvelopeKid: "fixture",
+        },
         rawBody: new Uint8Array(await request.arrayBuffer()),
       };
     },
@@ -43,13 +52,14 @@ test("private integrity HTTP binds each signed action and preserves sponsor-only
   });
   async function post(path: string, body: unknown, expected: number, key = "http-integrity") {
     const response = await app.request(`https://a.asimposium.org${path}`, {
-      method: "POST", headers: { "content-type": "application/json", "idempotency-key": key },
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": key },
       body: JSON.stringify(body),
     });
     expect(response.status).toBe(expected);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
-    const data = await response.json() as Record<string, unknown>;
+    const data = (await response.json()) as Record<string, unknown>;
     if (expected >= 400) expect(ProblemDocumentSchema.safeParse(data).success).toBe(true);
     return data;
   }
@@ -59,7 +69,11 @@ test("private integrity HTTP binds each signed action and preserves sponsor-only
   expect(detail.report_id).toBeUndefined();
   sponsorId = "usr_integrity_other";
   await post(`${SPONSOR_PATH}/read`, read, 404);
-  const responseBody = { case_id: opened.case_id, expected_revision: 1, response: INTEGRITY_RESPONSE };
+  const responseBody = {
+    case_id: opened.case_id,
+    expected_revision: 1,
+    response: INTEGRITY_RESPONSE,
+  };
   await post(`${SPONSOR_PATH}/respond`, responseBody, 404, "foreign");
   sponsorId = SPONSOR;
   const replied = await post(`${SPONSOR_PATH}/respond`, responseBody, 200, "own");
@@ -86,11 +100,14 @@ test("only authenticated signed bytes are parsed, never the unsigned transport b
     }),
   });
   const response = await app.request(`https://a.asimposium.org${SPONSOR_PATH}/read`, {
-    method: "POST", headers: { "content-type": "application/json" },
+    method: "POST",
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({ case_id: `IC-${"0".repeat(26)}`, sponsor_id: "usr_foreign" }),
   });
   expect(response.status).toBe(200);
-  expect((await response.json() as { case: { case_id: string } }).case.case_id).toBe(opened.case_id);
+  expect(((await response.json()) as { case: { case_id: string } }).case.case_id).toBe(
+    opened.case_id,
+  );
 });
 
 test("missing authority, wrong human role, schema drift and stale operator auth fail privately", async () => {
@@ -98,7 +115,8 @@ test("missing authority, wrong human role, schema drift and stale operator auth 
   const unavailable = createIntegrityCaseRouter({ db: f.db });
   const send = (app: ReturnType<typeof createIntegrityCaseRouter>, path: string, body: unknown) =>
     app.request(`https://a.asimposium.org${path}`, {
-      method: "POST", headers: { "content-type": "application/json", "idempotency-key": "refusal" },
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "refusal" },
       body: JSON.stringify(body),
     });
   const missing = await send(unavailable, `${OPERATOR_PATH}/open`, openRequest(f.reportId));
@@ -107,19 +125,37 @@ test("missing authority, wrong human role, schema drift and stale operator auth 
   const app = createIntegrityCaseRouter({
     db: f.db,
     verifiedOperator: async (request) => ({
-      principal: { type: "operator", operatorId: INTEGRITY_OPERATOR, serviceEnvelopeKid: "fixture" },
+      principal: {
+        type: "operator",
+        operatorId: INTEGRITY_OPERATOR,
+        serviceEnvelopeKid: "fixture",
+      },
       rawBody: new Uint8Array(await request.arrayBuffer()),
     }),
     verifiedSponsor: async (request) => ({
-      principal: { type: "operator", operatorId: INTEGRITY_OPERATOR, serviceEnvelopeKid: "fixture" },
+      principal: {
+        type: "operator",
+        operatorId: INTEGRITY_OPERATOR,
+        serviceEnvelopeKid: "fixture",
+      },
       rawBody: new Uint8Array(await request.arrayBuffer()),
     }),
   });
   for (const [path, body, status, code] of [
     [`${SPONSOR_PATH}/query`, {}, 403, "WRONG_PRINCIPAL"],
     [`${OPERATOR_PATH}/query?limit=20`, {}, 422, "SCHEMA_INVALID"],
-    [`${OPERATOR_PATH}/open`, { ...openRequest(f.reportId), subject_sponsor_id: SPONSOR }, 422, "SCHEMA_INVALID"],
-    [`${OPERATOR_PATH}/open`, { ...openRequest(f.reportId), auth_issued_at: 0 }, 403, "STEP_UP_REQUIRED"],
+    [
+      `${OPERATOR_PATH}/open`,
+      { ...openRequest(f.reportId), subject_sponsor_id: SPONSOR },
+      422,
+      "SCHEMA_INVALID",
+    ],
+    [
+      `${OPERATOR_PATH}/open`,
+      { ...openRequest(f.reportId), auth_issued_at: 0 },
+      403,
+      "STEP_UP_REQUIRED",
+    ],
   ] as const) {
     const response = await send(app, path, body);
     expect(response.status).toBe(status);
@@ -134,14 +170,20 @@ test("fresh operator authentication can renew a retry without replacing its acce
   const app = createIntegrityCaseRouter({
     db: f.db,
     verifiedOperator: async (request) => ({
-      principal: { type: "operator", operatorId: INTEGRITY_OPERATOR, serviceEnvelopeKid: "fixture" },
+      principal: {
+        type: "operator",
+        operatorId: INTEGRITY_OPERATOR,
+        serviceEnvelopeKid: "fixture",
+      },
       rawBody: new Uint8Array(await request.arrayBuffer()),
     }),
   });
-  const send = (body: unknown) => app.request(`https://a.asimposium.org${OPERATOR_PATH}/open`, {
-    method: "POST", headers: { "content-type": "application/json", "idempotency-key": "fresh-retry" },
-    body: JSON.stringify(body),
-  });
+  const send = (body: unknown) =>
+    app.request(`https://a.asimposium.org${OPERATOR_PATH}/open`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "fresh-retry" },
+      body: JSON.stringify(body),
+    });
   const request = openRequest(f.reportId);
   const first = await send({ ...request, auth_issued_at: request.auth_issued_at - 1 });
   expect(first.status).toBe(200);

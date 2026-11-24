@@ -298,10 +298,7 @@ function fixture() {
   };
 }
 
-async function communityHold(
-  f: ReturnType<typeof fixture>,
-  reasons = ["spam", "spam", "spam"],
-) {
+async function communityHold(f: ReturnType<typeof fixture>, reasons = ["spam", "spam", "spam"]) {
   const reports = [];
   for (const reason of reasons) reports.push(await f.report(reason));
   expect((await f.control())?.source).toBe("community-reports");

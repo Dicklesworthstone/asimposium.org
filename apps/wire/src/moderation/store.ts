@@ -869,7 +869,14 @@ export async function resolveReport(
   command?: OperatorCommand,
 ): Promise<
   | { readonly ok: true; readonly auditEventId: string; readonly resolvedAt: string }
-  | { readonly ok: false; readonly reason: "not-found" | "not-pending" | "integrity-case-required" | "integrity-case-owned" }
+  | {
+      readonly ok: false;
+      readonly reason:
+        | "not-found"
+        | "not-pending"
+        | "integrity-case-required"
+        | "integrity-case-owned";
+    }
 > {
   const report = await db
     .prepare(

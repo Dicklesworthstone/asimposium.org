@@ -18,6 +18,8 @@ test("private report detail Zod and generated schema agree on exact sources and 
   const validate = new Ajv2020({ strict: false, validateFormats: false }).compile(schema);
   for (const [directory, name, valid] of [
     ["valid", "admin-report-detail", true],
+    ["valid", "admin-report-integrity-case", true],
+    ["invalid", "admin-report-integrity-case-id", false],
     ["invalid", "admin-report-detail-unavailable-body", false],
   ] as const) {
     const value = await fixture(directory, name);
@@ -79,4 +81,21 @@ test("report notes stay bounded and private detail never widens the operator que
   expect(AdminReportItemSchema.safeParse({ ...detail.report, source: detail.source }).success).toBe(
     false,
   );
+});
+
+test("an attached integrity case is a link, not a second investigation payload", async () => {
+  const detail = await fixture("valid", "admin-report-integrity-case");
+  expect(AdminReportDetailSchema.parse(detail).integrity_case_id).toBe(detail.integrity_case_id);
+  expect(
+    AdminReportDetailSchema.safeParse({
+      ...detail,
+      integrity_case: { summary: "Private case history stays on its dedicated face." },
+    }).success,
+  ).toBe(false);
+  expect(
+    AdminReportItemSchema.safeParse({
+      ...detail.report,
+      integrity_case_id: detail.integrity_case_id,
+    }).success,
+  ).toBe(false);
 });

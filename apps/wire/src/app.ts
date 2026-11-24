@@ -79,6 +79,8 @@ import type { MegaCommandsMoveProvider } from "./mega-commands/provider";
 import { loadPublicMoves } from "./mega-commands/public-moves";
 import { createMegaCommandsRouter } from "./mega-commands/router";
 import { createScreeningAppealsApp } from "./moderation/appeals-http";
+import { createIntegrityCaseRouter } from "./moderation/integrity-http.ts";
+import { createIntegrityNoticeRoutes } from "./moderation/integrity-notices-http.ts";
 import { createModerationLogRoutes, createModerationRouter } from "./moderation/router";
 import { createSponsorReportsRouter } from "./moderation/sponsor-reports";
 import { sponsorMutationRefusal } from "./moderation/sponsor-suspension";
@@ -170,6 +172,10 @@ const EXACT_ENROLLMENT_PATHS = new Set([
   "/v1/operators/quarantine/decision",
   "/v1/operators/reports",
   "/v1/operators/reports/resolution",
+  "/v1/operators/integrity/cases/query",
+  "/v1/operators/integrity/cases/read",
+  "/v1/operators/integrity/cases/open",
+  "/v1/operators/integrity/cases/resolve",
   "/v1/operators/screening-appeals",
   "/v1/operators/screening-appeals/decision",
   "/v1/operators/content-control",
@@ -180,6 +186,9 @@ const EXACT_ENROLLMENT_PATHS = new Set([
   "/v1/sponsors/panic",
   "/v1/sponsors/reports",
   "/v1/sponsors/reports/list",
+  "/v1/sponsors/integrity/cases/query",
+  "/v1/sponsors/integrity/cases/read",
+  "/v1/sponsors/integrity/cases/respond",
   "/v1/sponsors/screening-posture",
   "/v1/sponsors/screening-posture/clear",
   "/v1/sponsors/screening-cases",
@@ -1038,6 +1047,7 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
     verifiedOperator,
   });
   router.route("/", createScreeningAppealsApp({ db: env.DB, verifiedSponsor, verifiedOperator }));
+  router.route("/", createIntegrityCaseRouter({ db: env.DB, verifiedSponsor, verifiedOperator }));
   router.route("/", createSponsorActivityRouter({ verifiedSponsor }));
   router.route("/", createSponsorReportsRouter({ verifiedSponsor }));
   router.route("/", createSponsorWorkshopSearchRouter({ verifiedSponsor }));
@@ -1536,6 +1546,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // Mount before the broad legacy digest/quarantine matcher can consume them.
   app.route("/", createHypothesesRoutes());
   app.route("/", createStatementRoutes());
+  app.route("/", createIntegrityNoticeRoutes());
   app.route("/", createEvidenceListRoutes());
   app.route("/", createReviewListRoutes());
 

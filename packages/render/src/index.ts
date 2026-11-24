@@ -50,6 +50,12 @@ export {
   renderHypothesisEvidenceMarkdown,
 } from "./hypothesis-evidence.ts";
 export {
+  integrityNoticeEventPath,
+  integrityNoticesPath,
+  renderIntegrityNoticesHtml,
+  renderIntegrityNoticesMarkdown,
+} from "./integrity-notices.ts";
+export {
   bucketizePackBudget,
   type ComposedPack,
   type ComposedPackItem,

@@ -3,8 +3,8 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql } from "../krater/public-content.ts";
 import {
   captureReportSource,
-  readOperatorReportDetail,
   REPORT_SOURCE_PIN_AVAILABLE_SQL,
+  readOperatorReportDetail,
   reportSourcePinBindings,
 } from "./report-detail.ts";
 import { resolveReportTarget } from "./target.ts";
@@ -73,8 +73,7 @@ export async function readIntegrityReportSource(
   reportId: string,
 ): Promise<IntegrityReportSource> {
   const detail = await readOperatorReportDetail(db, reportId);
-  if (!detail || detail.report.category !== "integrity")
-    throw new IntegrityCaseError("NOT_FOUND");
+  if (!detail || detail.report.category !== "integrity") throw new IntegrityCaseError("NOT_FOUND");
   if (detail.report.status !== "pending") throw new IntegrityCaseError("CONFLICT");
   if (detail.source.state !== "available" || !detail.source.sponsor_id)
     throw new IntegrityCaseError("SOURCE_UNAVAILABLE");
@@ -117,11 +116,9 @@ export async function readIntegrityCorrection(
   db: D1Database,
   reference: { problem_id: string; target_ref: string },
 ): Promise<IntegritySourceWitness> {
-  if (/^C-[0-9]+$/.test(reference.target_ref))
-    throw new IntegrityCaseError("SOURCE_UNAVAILABLE");
+  if (/^C-[0-9]+$/.test(reference.target_ref)) throw new IntegrityCaseError("SOURCE_UNAVAILABLE");
   const target = await resolveReportTarget(db, reference.problem_id, reference.target_ref);
-  if (!target || target.targetKind === "problem")
-    throw new IntegrityCaseError("SOURCE_UNAVAILABLE");
+  if (!target) throw new IntegrityCaseError("SOURCE_UNAVAILABLE");
   const source = await captureReportSource(
     db,
     reference.problem_id,
@@ -150,7 +147,9 @@ export async function readIntegrityCorrection(
       target_ref:
         target.targetKind === "claim"
           ? `${row.object_id}@${row.object_version}`
-          : row.object_id,
+          : target.targetKind === "problem"
+            ? "problem"
+            : row.object_id,
       event_id: source.eventId,
       payload_sha256: source.digest,
       seq: row.seq,
@@ -194,8 +193,10 @@ export async function requireUnconflictedIntegrityOperator(
   fellows: readonly (string | null)[],
 ) {
   const guard = integrityConflictGuard(operatorId, sponsors, fellows);
-  const row = await db.prepare(`SELECT 1 AS ok WHERE ${guard.sql}`)
-    .bind(...guard.bindings).first<{ ok: number }>();
+  const row = await db
+    .prepare(`SELECT 1 AS ok WHERE ${guard.sql}`)
+    .bind(...guard.bindings)
+    .first<{ ok: number }>();
   if (row?.ok !== 1) throw new IntegrityCaseError("REVIEWER");
   return guard;
 }

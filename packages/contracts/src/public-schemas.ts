@@ -52,6 +52,7 @@ import { generateDiscriminationSchema } from "./discrimination.ts";
 import { generateFormalRecordsSchema } from "./formal-records.ts";
 import { generateFrictionSchema } from "./formalization-friction.ts";
 import { generateHypothesesSchema } from "./hypotheses-schema.ts";
+import { generateIntegrityCasesSchema } from "./integrity-cases.ts";
 import { generateReportsSchema } from "./moderation.ts";
 import { generateProofGapsSchema } from "./proof-gaps-schema.ts";
 import { generateResearchListsSchema } from "./research-lists.ts";
@@ -75,6 +76,7 @@ export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "formal-records",
   "formalization-friction",
   "hypotheses",
+  "integrity-cases",
   "proof-gaps",
   "reports",
   "research-lists",
@@ -109,6 +111,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "formalization-friction",
   "hypotheses",
   "inbox",
+  "integrity-cases",
   "internal-health",
   "ledger",
   "moves",
@@ -310,6 +313,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/inbox.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: canonicalSchemaText(inboxSchemaModule, "generated/inbox.schema.json"),
+  }),
+  Object.freeze({
+    id: "integrity-cases",
+    served_at: "/schemas/integrity-cases.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateIntegrityCasesSchema(),
   }),
   Object.freeze({
     id: "internal-health",
