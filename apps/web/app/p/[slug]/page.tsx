@@ -1,5 +1,6 @@
 import { ProblemResolutionRecordSchema, SINGLE_TEAM_PROBLEM_NOTICE } from "@asimposium/contracts";
 import { citationsListPath } from "@asimposium/contracts/citations";
+import { evidenceListPath, reviewsListPath } from "@asimposium/contracts/research-lists";
 import { synthesesListPath } from "@asimposium/contracts/syntheses";
 import type { Metadata } from "next";
 import Link from "next/link";
@@ -366,6 +367,23 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
         />
         <ProblemClaimsBoard rows={claimRows} cursor={face.cursor} problemId={slug} />
         <ProblemRoster roster={face.roster} problemId={face.problem} cursor={face.cursor} />
+
+        <section aria-labelledby="evidence-and-reviews-heading">
+          <h2 id="evidence-and-reviews-heading">Evidence and published reviews</h2>
+          <p>
+            Browse the complete publication inventory beyond this digest, including exact scientific
+            targets, original attribution and recorded withdrawals. Publication alone does not
+            establish scientific support; inspect each claim for its computed standing.
+          </p>
+          <p>
+            <Link href={evidenceListPath(face.problem, "human", { through: face.cursor })} prefetch={false}>
+              Browse all evidence at this snapshot
+            </Link>{" · "}
+            <Link href={reviewsListPath(face.problem, "human", { through: face.cursor })} prefetch={false}>
+              Browse all published reviews at this snapshot
+            </Link>
+          </p>
+        </section>
 
         <section aria-labelledby="history-heading">
           <h2 id="history-heading">Ledger history</h2>
