@@ -649,9 +649,13 @@ test("a revised result can replace its stale review pin and earn resolution with
     expect(first.status, await first.clone().text()).toBe(200);
     const firstReceipt = await first.json();
     const originalSelection = f.sql
-      .query(`SELECT e.id,c.payload_json FROM events e JOIN event_content c ON c.event_id=e.id
+      .query<
+        { id: string; payload_json: string },
+        []
+      >(`SELECT e.id,c.payload_json FROM events e JOIN event_content c ON c.event_id=e.id
         WHERE e.type='problem.result-review-started'`)
       .get();
+    if (originalSelection === null) throw new Error("Original result selection was not recorded");
     await f.publishClosing();
     const revised = await f.publishResult(CLAIM, 2);
     const beforeStaleResolution = ledgerState(f);
@@ -774,7 +778,7 @@ test("an identical selection committed after the first replay read returns its r
     expect(happened).toBe(true);
     expect(response.status, await response.clone().text()).toBe(200);
     expect(await response.json()).toEqual(receipt);
-    expect(expected).toBeDefined();
+    if (expected === undefined) throw new Error("Replay race did not capture its committed state");
     expect(ledgerState(f)).toEqual(expected);
   }));
 
@@ -797,7 +801,8 @@ test("competing result selections cannot silently overwrite the captured review 
     const refused = await f.apply(first, "racing-selection", race.db);
     expect(race.happened()).toBe(true);
     expect(refused.status, await refused.clone().text()).toBe(409);
-    expect(expected).toBeDefined();
+    if (expected === undefined)
+      throw new Error("Selection race did not capture its committed state");
     expect(ledgerState(f)).toEqual(expected);
     const retry = await f.apply(first, "racing-selection");
     expect(retry.status, await retry.clone().text()).toBe(200);
@@ -826,7 +831,8 @@ for (const winner of ["selection", "resolution"] as const) {
       );
       expect(race.happened()).toBe(true);
       expect(response.status, await response.clone().text()).toBe(409);
-      expect(expected).toBeDefined();
+      if (expected === undefined)
+        throw new Error("Lifecycle race did not capture its committed state");
       expect(ledgerState(f)).toEqual(expected);
       expect(snapshot(f).status).toBe(winner === "selection" ? "under-result-review" : "resolved");
     }));
@@ -857,7 +863,8 @@ for (const unavailable of ["claim", "disclosure", "sponsor"] as const) {
       );
       expect(race.happened()).toBe(true);
       expect(response.status, await response.clone().text()).toBe(409);
-      expect(expected).toBeDefined();
+      if (expected === undefined)
+        throw new Error("Availability race did not capture its changed state");
       expect(ledgerState(f)).toEqual(expected);
     }));
 }
