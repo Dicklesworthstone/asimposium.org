@@ -21,6 +21,11 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { sha256Hex } from "../krater/krater.ts";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 import { publicationScreeningNotice } from "../screening/publication-notice.ts";
+import {
+  checkedScientificPayload,
+  type ScientificContentIdentity,
+  ScientificInputError,
+} from "./scientific-checks.ts";
 
 /**
  * W5.5 / Fable §6.1, ADR-21:
@@ -125,6 +130,101 @@ const CONFLICT_READ_BYTES = 4_194_304;
 const CONFLICT_UNAVAILABLE = "Some conflict content or lifecycle history is unavailable.";
 const publicProblemSql = `status <> 'private-draft'
   AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
+
+export interface ConflictResolutionSource extends ScientificContentIdentity {
+  readonly conflictId: string;
+}
+
+/** Resolve an open normalization from its immutable publication before paid
+ * screening. A retained projection cannot authorize settlement after the
+ * source is withheld, corrupted, or replaced by another lifecycle event. */
+export async function findConflictResolutionSource(
+  db: D1Database,
+  problemId: string,
+  conflictId: string,
+): Promise<ConflictResolutionSource | null> {
+  const row = await db
+    .prepare(`SELECT e.id AS event_id, e.payload_sha256, c.payload_json,
+      e.actor_fellow_id AS fellow_id,
+      cf.claim_a_id, cf.claim_a_version, cf.claim_b_id, cf.claim_b_version
+    FROM conflicts cf JOIN problems p ON p.id = cf.problem_id
+    JOIN events e ON e.problem_id = cf.problem_id AND e.seq = cf.seq
+      AND e.object_id = cf.conflict_id AND e.object_kind = 'conflict'
+      AND e.type = 'conflict.normalized' AND e.object_version = 1
+    JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+      AND c.redacted_at IS NULL
+    WHERE cf.problem_id = ? AND cf.conflict_id = ? AND cf.status = 'open'
+      AND p.status <> 'private-draft' AND e.seq <= p.public_seq
+      AND NOT ${eventContentHiddenSql("e")}
+      AND length(CAST(c.payload_json AS BLOB)) <= ${CONFLICT_CONTENT_BYTES}
+      AND NOT EXISTS (SELECT 1 FROM events other
+        WHERE other.problem_id = e.problem_id AND other.object_id = e.object_id
+          AND other.object_kind = 'conflict' AND other.seq <= p.public_seq AND other.id <> e.id)`)
+    .bind(problemId, conflictId)
+    .first<{
+      event_id: string;
+      payload_sha256: string;
+      payload_json: string;
+      fellow_id: string | null;
+      claim_a_id: string;
+      claim_a_version: number;
+      claim_b_id: string;
+      claim_b_version: number;
+    }>();
+  if (row === null) return null;
+  try {
+    const payload = await checkedScientificPayload(row);
+    const parsed = NormalizeConflictRequestSchema.safeParse({
+      claims: payload.claims,
+      aligned_definitions: payload.aligned_definitions,
+      aligned_scope: payload.aligned_scope,
+      aligned_quantifiers: payload.aligned_quantifiers,
+      smallest_disagreement: payload.smallest_disagreement,
+      agreed_facts: payload.agreed_facts,
+      discriminating_tests: payload.discriminating_tests,
+    });
+    if (!parsed.success) return null;
+    const [claimA, claimB] = parsed.data.claims;
+    if (
+      claimA === undefined ||
+      claimB === undefined ||
+      payload.conflict_id !== conflictId ||
+      payload.problem_id !== problemId ||
+      payload.status !== "open" ||
+      typeof row.fellow_id !== "string" ||
+      payload.author_fellow_id !== row.fellow_id ||
+      claimA.claim_id !== row.claim_a_id ||
+      claimA.version !== row.claim_a_version ||
+      claimB.claim_id !== row.claim_b_id ||
+      claimB.version !== row.claim_b_version
+    )
+      return null;
+    return {
+      conflictId,
+      eventId: row.event_id,
+      payloadDigest: row.payload_sha256,
+      payloadJson: row.payload_json,
+      problemId,
+    };
+  } catch (error) {
+    if (error instanceof ScientificInputError) return null;
+    throw error;
+  }
+}
+
+/** Run before the settlement event in the same transaction. Source-byte guards
+ * separately enforce current visibility and exact content in that batch. */
+export const CONFLICT_RESOLUTION_STATE_SQL = ` AND EXISTS (
+  SELECT 1 FROM conflicts cf JOIN problems p ON p.id = cf.problem_id
+  JOIN events source ON source.id = ? AND source.problem_id = cf.problem_id
+    AND source.seq = cf.seq AND source.object_id = cf.conflict_id
+    AND source.object_kind = 'conflict' AND source.type = 'conflict.normalized'
+    AND source.object_version = 1
+  WHERE cf.problem_id = ? AND cf.conflict_id = ? AND cf.status = 'open'
+    AND p.status <> 'private-draft' AND source.seq <= p.public_seq
+    AND NOT EXISTS (SELECT 1 FROM events newer
+      WHERE newer.problem_id = cf.problem_id AND newer.object_id = cf.conflict_id
+        AND newer.object_kind = 'conflict' AND newer.seq > source.seq))`;
 
 interface ConflictReadRow {
   conflict_id: string;
