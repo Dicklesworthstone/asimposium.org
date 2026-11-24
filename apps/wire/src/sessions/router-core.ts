@@ -180,7 +180,11 @@ import {
   prepareAuthorConcession,
 } from "../ledger/author-concession.ts";
 import { computeCitationCanonicalAndHash, validateCitationSubstance } from "../ledger/citations";
-import { validateConflictSubstance } from "../ledger/conflicts";
+import {
+  CONFLICT_RESOLUTION_STATE_SQL,
+  findConflictResolutionSource,
+  validateConflictSubstance,
+} from "../ledger/conflicts";
 import { echoServedDeadEnds } from "../ledger/dead-end-served-echo";
 import {
   loadFiredDeadEndTriggers,
@@ -271,6 +275,7 @@ import { readClaimGraphPack } from "./claim-graph-pack";
 import { readDigestPack } from "./digest.ts";
 import { readFormalRecordSection } from "./formal-pack";
 import { FullPackSourceUnavailableError, readFullPack } from "./full-pack.ts";
+import { findOpenGapSource, gapSettlementGuards } from "./gap-settlements.ts";
 import { readHypothesisKillSource } from "./hypothesis-kill-admission.ts";
 import {
   HypothesisLifecycleError,
@@ -8938,12 +8943,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       .prepare("SELECT status FROM proof_gaps WHERE problem_id = ? AND gap_id = ?")
       .bind(session.problem_id, parsed.data.gap_id)
       .first<{ status: string }>();
-    if (gapRow === null || gapRow === undefined) {
+    const gapSource =
+      gapRow?.status === "open"
+        ? await findOpenGapSource(db, session.problem_id, parsed.data.gap_id)
+        : null;
+    if (
+      gapRow === null ||
+      gapRow === undefined ||
+      (gapRow.status === "open" && gapSource === null)
+    ) {
       return validatedProblem({
         status: 404,
         code: "GAP_NOT_FOUND",
-        title: "No such gap on this problem",
-        detail: `Gap ${parsed.data.gap_id} does not exist on this problem.`,
+        title: "The gap publication is unavailable",
+        detail: `No available open gap publication matches ${parsed.data.gap_id} on this problem.`,
         fixHint: "Check the id against your pack's open obligations.",
         rule: "A5",
         extensions: {
@@ -8957,7 +8970,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
-    if (gapRow.status !== "open") {
+    if (gapSource === null || gapRow.status !== "open") {
       return validatedProblem({
         status: 409,
         code: "GAP_ALREADY_SETTLED",
@@ -9071,8 +9084,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           credentialId: auth.binding.credentialId,
           session,
           reservationId: reservation.reservationId,
-          statementsAfterReplay:
-            dischargeSource === null ? [] : settlementReferenceGuards(db, dischargeSource),
+          statementsAfterReplay: [
+            ...gapSettlementGuards(db, gapSource, eventId),
+            ...(dischargeSource === null ? [] : settlementReferenceGuards(db, dischargeSource)),
+          ],
           responseFor: (settlement) =>
             GapClosedResponseSchema.parse({
               gap_id: parsed.data.gap_id,
@@ -9115,7 +9130,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
       if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
       if (isScientificReferenceChanged(error))
-        return objectStateChangedProblem("gap discharge source", closedByRef ?? parsed.data.gap_id);
+        return objectStateChangedProblem("gap or discharge source", parsed.data.gap_id);
       // The settle race lost: re-read the gap; if it is no longer open, the
       // concurrent transition won and nothing was double-written.
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -14297,15 +14312,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     });
     if (decision.decision !== "allow") return writeRefusedProblem();
 
-    const question = await db
-      .prepare("SELECT * FROM questions WHERE problem_id = ? AND question_id = ?")
-      .bind(session.problem_id, questionId)
-      .first<{
-        question_id: string;
-        problem_id: string;
-        status: string;
-        resolved_by_object: string | null;
-      }>();
+    const question = await findQuestionLeaseSource(db, session.problem_id, questionId);
 
     if (!question) {
       return validatedProblem({
@@ -14329,7 +14336,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         status: 409,
         code: "QUESTION_ALREADY_RESOLVED",
         title: "Question already resolved",
-        detail: `Question '${questionId}' has already been resolved by '${question.resolved_by_object}'.`,
+        detail: `Question '${questionId}' has already been resolved.`,
         fixHint: "Answer an open or leased question.",
         rule: "§7.5",
         extensions: {
@@ -14415,10 +14422,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
-          // rg73: the route's state check, repeated inside the ledger transaction.
-          preconditionSql:
-            " AND EXISTS (SELECT 1 FROM questions q WHERE q.problem_id = ? AND q.question_id = ? AND q.status NOT IN ('resolved', 'withdrawn'))",
-          preconditionBindings: [session.problem_id, questionId],
+          // The same published question must still be open at commit. A
+          // projection row alone cannot authorize a new lifecycle event.
+          preconditionSql: QUESTION_LEASE_STATE_SQL,
+          preconditionBindings: [question.latestEventId, session.problem_id, questionId],
           statementsAfterEvent: () => [
             db
               .prepare(
@@ -14455,7 +14462,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           kraterIdempotencyKey,
           credentialId: auth.binding.credentialId,
           session,
-          statementsAfterReplay: settlementReferenceGuards(db, answerSource),
+          statementsAfterReplay: [
+            ...scientificContentGuards(db, question.sources),
+            ...settlementReferenceGuards(db, answerSource),
+          ],
           responseFor: () =>
             AnswerQuestionResponseSchema.parse({
               ok: true,
@@ -14495,7 +14505,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       if (isScientificReferenceChanged(error))
-        return objectStateChangedProblem("question answer source", target);
+        return objectStateChangedProblem("question or answer source", questionId);
       if (error instanceof KraterLedgerPreconditionError)
         return objectStateChangedProblem("question", questionId);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
@@ -15414,48 +15424,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    const rowA = await db
-      .prepare(
-        "SELECT claim_id, version FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = ?",
-      )
-      .bind(session.problem_id, claimA.claim_id, claimA.version)
-      .first<{ claim_id: string; version: number }>();
-
-    if (!rowA) {
-      return validatedProblem({
-        status: 404,
-        code: "CONFLICT_TARGET_UNKNOWN",
-        title: "Conflicting claim target not found",
-        detail: `Claim '${claimA.claim_id}@${claimA.version}' does not exist on problem '${session.problem_id}'.`,
-        fixHint: "Verify claim ID and version against GET /p/:id.json.",
-        rule: "ADR-21",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: CONFLICT_NORMALIZE_EXAMPLE,
-        },
-      });
-    }
-
-    const rowB = await db
-      .prepare(
-        "SELECT claim_id, version FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = ?",
-      )
-      .bind(session.problem_id, claimB.claim_id, claimB.version)
-      .first<{ claim_id: string; version: number }>();
-
-    if (!rowB) {
-      return validatedProblem({
-        status: 404,
-        code: "CONFLICT_TARGET_UNKNOWN",
-        title: "Conflicting claim target not found",
-        detail: `Claim '${claimB.claim_id}@${claimB.version}' does not exist on problem '${session.problem_id}'.`,
-        fixHint: "Verify claim ID and version against GET /p/:id.json.",
-        rule: "ADR-21",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: CONFLICT_NORMALIZE_EXAMPLE,
-        },
-      });
+    const claimSources: ScientificClaim[] = [];
+    for (const claim of [claimA, claimB]) {
+      try {
+        claimSources.push(
+          await readScientificClaim(db, session.problem_id, claim.claim_id, claim.version),
+        );
+      } catch (error) {
+        if (!(error instanceof ScientificInputError)) throw error;
+        return validatedProblem({
+          status: 404,
+          code: "CONFLICT_TARGET_UNKNOWN",
+          title: "Conflicting claim target not found",
+          detail: `Claim '${claim.claim_id}@${claim.version}' is unavailable on problem '${session.problem_id}'.`,
+          fixHint: "Verify claim ID and version against GET /p/:id.json.",
+          rule: "ADR-21",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: CONFLICT_NORMALIZE_EXAMPLE,
+          },
+        });
+      }
     }
 
     const existingConflict = await db
@@ -15613,6 +15602,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           credentialId: auth.binding.credentialId,
           session,
           reservationId: reservation.reservationId,
+          statementsAfterReplay: scientificContentGuards(db, claimSources),
           responseFor: ({ sequence }) =>
             NormalizeConflictResponseSchema.parse({
               ok: true,
@@ -15655,6 +15645,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isScientificReferenceChanged(error))
+        return objectStateChangedProblem(
+          "claim sources",
+          `${claimA.claim_id}@${claimA.version}, ${claimB.claim_id}@${claimB.version}`,
+        );
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -15768,6 +15763,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    const conflictSource = await findConflictResolutionSource(db, session.problem_id, conflictId);
+    if (conflictSource === null) {
+      return validatedProblem({
+        status: 404,
+        code: "CONFLICT_NOT_FOUND",
+        title: "Conflict not found",
+        detail: `Conflict '${conflictId}' was not found on problem '${session.problem_id}'.`,
+        fixHint: "Check the conflict ID against GET /p/:id/conflicts.json.",
+        rule: "ADR-21",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: CONFLICT_RESOLVE_EXAMPLE,
+        },
+      });
+    }
+
     const screened = await screenWithQuota(
       c.env,
       {
@@ -15826,10 +15837,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
-          // rg73: the route's state check, repeated inside the ledger transaction.
-          preconditionSql:
-            " AND EXISTS (SELECT 1 FROM conflicts cf WHERE cf.problem_id = ? AND cf.conflict_id = ? AND cf.status = 'open')",
-          preconditionBindings: [session.problem_id, conflictId],
+          preconditionSql: CONFLICT_RESOLUTION_STATE_SQL,
+          preconditionBindings: [conflictSource.eventId, session.problem_id, conflictId],
           statementsAfterEvent: () => [
             db
               .prepare(
@@ -15861,6 +15870,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           credentialId: auth.binding.credentialId,
           session,
           reservationId: reservation.reservationId,
+          statementsAfterReplay: scientificContentGuards(db, [conflictSource]),
           responseFor: ({ sequence }) =>
             ResolveConflictResponseSchema.parse({
               ok: true,
@@ -15903,7 +15913,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (error instanceof KraterLedgerPreconditionError)
+      if (error instanceof KraterLedgerPreconditionError || isScientificReferenceChanged(error))
         return objectStateChangedProblem("conflict", conflictId);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
