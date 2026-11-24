@@ -18,6 +18,7 @@ export {
   renderCommentaryMarkdown,
 } from "./commentary.ts";
 export {
+  fellowReviewOutcomeText,
   renderAreaDetailHtmlFragment,
   renderAreaDetailMarkdown,
   renderAreasIndexHtmlFragment,

@@ -1,4 +1,8 @@
-import { RetractionKindSchema } from "@asimposium/contracts";
+import {
+  ClaimDependencyPinsSchema,
+  type FellowReviewOutcome,
+  RetractionKindSchema,
+} from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 import {
@@ -13,7 +17,13 @@ import {
 } from "../ledger/claim-dependency-closure.ts";
 import { distinctSupportingReviews } from "../ledger/dispositions.ts";
 import { checkedScientificPayload, ScientificInputError } from "../ledger/scientific-checks.ts";
+import { withPremiseStaleness } from "../ledger/scientific-dependencies.ts";
 import { foldScientificRows } from "../ledger/scientific-disposition.ts";
+import {
+  isNegativeReview,
+  scientificInputEffects,
+} from "../ledger/scientific-withdrawal-effects.ts";
+import { claimInputStatuses } from "../sessions/claim-input-status.ts";
 
 // These are whole-record budgets, not silently truncated lifetime totals.
 // Large or unverifiable histories leave their calibration outcome unavailable.
@@ -55,6 +65,7 @@ export interface FellowCalibrationOutcomes {
   readonly selfCorrected: number | null;
   readonly externallyRefuted: number | null;
   readonly survivingReviews: number | null;
+  readonly reviewOutcomes: ReadonlyMap<string, FellowReviewOutcome>;
   readonly omitted: readonly string[];
 }
 
@@ -175,7 +186,10 @@ async function correctionOutcomes(db: D1Database, rows: readonly Source[]) {
 async function reviewSurvival(db: D1Database, rows: readonly Source[], fellow: string) {
   if (rows.length === 0) return null;
   if (rows.length > SOURCE_LIMIT) throw new ScientificInputError("Review history is bounded.");
-  const groups = new Map<string, { source: Source; reviews: Set<string> }>();
+  const groups = new Map<
+    string,
+    { source: Source; reviews: Map<string, Source>; confirming: boolean }
+  >();
   for (const row of rows) {
     if (row.payload_json === null || !row.sponsor_id || !row.session_id)
       throw new ScientificInputError("Review attribution is unavailable.");
@@ -187,86 +201,212 @@ async function reviewSurvival(db: D1Database, rows: readonly Source[], fellow: s
       row.target_version === null
     )
       throw new ScientificInputError("Review target is unavailable.");
-    if (payload.verdict !== "confirm" && payload.verdict !== "reproduces") continue;
     const key = `${row.problem_id}/${row.target_claim_id}@${row.target_version}`;
     let group = groups.get(key);
     if (!group) {
-      group = { source: row, reviews: new Set() };
+      group = { source: row, reviews: new Map(), confirming: false };
       groups.set(key, group);
     }
-    group.reviews.add(row.object_id);
+    if (group.reviews.has(row.object_id))
+      throw new ScientificInputError("Review source is duplicated.");
+    group.reviews.set(row.object_id, row);
+    if (payload.verdict === "confirm" || payload.verdict === "reproduces") group.confirming = true;
   }
-  if (groups.size === 0) return null;
-  if (groups.size > TARGET_LIMIT)
+  const confirming = [...groups.values()].filter((group) => group.confirming);
+  if (confirming.length > TARGET_LIMIT)
     throw new ScientificInputError("Review targets exceed the budget.");
+  // Preserve the aggregate's existing target budget. Other verdicts fill the
+  // remaining slots for per-review readback, without extra per-item queries.
+  const selected = [
+    ...confirming,
+    ...[...groups.values()].filter((group) => !group.confirming),
+  ].slice(0, TARGET_LIMIT);
 
   let surviving = 0;
+  let survivalUnavailable = false;
+  const outcomes = new Map<string, FellowReviewOutcome>();
   const checks: ReleaseCheck[] = [];
-  for (const { source, reviews } of groups.values()) {
-    const version = source.target_version;
-    if (version === null) throw new ScientificInputError("Review version is unavailable.");
-    const target = `${source.target_claim_id}@${version}`;
-    const batch = await db.batch([
-      prepareDependencyClosure(db, source.problem_id, source.cursor, target),
-      prepareDependencyAssessment(db, source.problem_id, source.cursor, target),
-    ]);
-    if (batch.length !== 2 || !batch[0]?.success || !batch[1]?.success)
-      throw new Error("Calibration scientific snapshot failed.");
-    const publications = batch[0].results as DependencyClosureRow[];
-    const science = batch[1].results as DependencyScientificRow[];
-    const closure = await composeDependencyClosure(publications, source.problem_id, target);
-    const assessments = await composeDependencyAssessment(
-      publications,
-      closure,
-      science,
-      source.problem_id,
-      target,
-      source.cursor,
-    );
-    const root = assessments.get(target);
-    if (!closure.complete || !root?.standing.complete)
-      throw new ScientificInputError("Review outcome history is unavailable.");
-    const contents = new Map<string, Record<string, unknown>>();
-    const witnesses: Witness[] = [];
-    for (const row of science) {
-      if (row.payload_json === null)
-        throw new ScientificInputError("Review scientific source is unavailable.");
-      const payload = await checkedScientificPayload({ ...row, payload_json: row.payload_json });
-      contents.set(row.event_id, payload);
-      witnesses.push({
-        event: row.event_id,
-        problem: source.problem_id,
-        cursor: source.cursor,
-        seq: row.seq,
-        digest: row.payload_sha256,
-        body: row.payload_json,
+  for (const group of selected) {
+    const { source, reviews } = group;
+    const fencedWithdrawals = new Set<string>();
+    try {
+      const version = source.target_version;
+      if (version === null) throw new ScientificInputError("Review version is unavailable.");
+      const target = `${source.target_claim_id}@${version}`;
+      const batch = await db.batch([
+        prepareDependencyClosure(db, source.problem_id, source.cursor, target),
+        prepareDependencyAssessment(db, source.problem_id, source.cursor, target),
+      ]);
+      if (batch.length !== 2 || !batch[0]?.success || !batch[1]?.success)
+        throw new Error("Calibration scientific snapshot failed.");
+      const publications = batch[0].results as DependencyClosureRow[];
+      const science = batch[1].results as DependencyScientificRow[];
+      const inputStatuses = await claimInputStatuses(
+        science,
+        source.problem_id,
+        target,
+        source.cursor,
+      );
+      const withdrawalWitnesses: Witness[] = [];
+      const withdrawnReviews: string[] = [];
+      for (const review of reviews.values()) {
+        const status = inputStatuses.forRecord(
+          review.event_id,
+          review.object_id,
+          "review",
+          review.payload_sha256,
+        );
+        if (status.withdrawal !== "withdrawn" || !status.withdrawal_event) continue;
+        const withdrawal = science.find((row) => row.event_id === status.withdrawal_event?.id);
+        if (!withdrawal?.payload_json) continue;
+        await checkedScientificPayload({ ...withdrawal, payload_json: withdrawal.payload_json });
+        withdrawalWitnesses.push({
+          event: withdrawal.event_id,
+          problem: source.problem_id,
+          cursor: source.cursor,
+          seq: withdrawal.seq,
+          digest: withdrawal.payload_sha256,
+          body: withdrawal.payload_json,
+        });
+        withdrawnReviews.push(`${review.problem_id}/${review.object_id}`);
+      }
+      // A stale target may prevent the full scientific check below. Register
+      // each withdrawal's exact source fence before retaining any display fact.
+      // Withheld explanations remove this display fact, never restore support.
+      if (withdrawalWitnesses.length > 0) {
+        checks.push({
+          statement: recheck(db, withdrawalWitnesses),
+          expected: new Set(withdrawalWitnesses.map((item) => item.event)).size,
+        });
+        for (const key of withdrawnReviews) {
+          fencedWithdrawals.add(key);
+          outcomes.set(key, { status: "unavailable", withdrawn: true });
+        }
+      }
+      const closure = await composeDependencyClosure(publications, source.problem_id, target);
+      const assessments = await composeDependencyAssessment(
+        publications,
+        closure,
+        science,
+        source.problem_id,
+        target,
+        source.cursor,
+      );
+      const root = assessments.get(target);
+      if (
+        !closure.complete ||
+        !root?.standing.complete ||
+        root.standing.disposition === null ||
+        root.standing.disposition === "draft" ||
+        root.standing.review_state === null ||
+        root.standing.latest_version === null
+      )
+        throw new ScientificInputError("Review outcome history is unavailable.");
+      const contents = new Map<string, Record<string, unknown>>();
+      const witnesses: Witness[] = [];
+      for (const row of science) {
+        if (row.payload_json === null)
+          throw new ScientificInputError("Review scientific source is unavailable.");
+        const payload = await checkedScientificPayload({ ...row, payload_json: row.payload_json });
+        contents.set(row.event_id, payload);
+        witnesses.push({
+          event: row.event_id,
+          problem: source.problem_id,
+          cursor: source.cursor,
+          seq: row.seq,
+          digest: row.payload_sha256,
+          body: row.payload_json,
+        });
+      }
+      const timeline = science
+        .filter((row) => row.claim_id === source.target_claim_id && row.target_version <= version)
+        .map((row) => {
+          const statement = contents.get(row.event_id)?.statement;
+          return { ...row, statement: typeof statement === "string" ? statement : null };
+        });
+      const fold = await foldScientificRows(timeline);
+      if (fold.stale || fold.currentVersion !== version)
+        throw new ScientificInputError("Review scientific standing is stale.");
+      const publication = publications[0];
+      const pins = ClaimDependencyPinsSchema.safeParse(
+        publication && contents.get(publication.event_id)?.dependency_pins,
+      );
+      if (!pins.success) throw new ScientificInputError("Review premise history is unavailable.");
+      const state = withPremiseStaleness(fold, pins.data, assessments, closure.complete);
+      const effects = scientificInputEffects(timeline, contents);
+      // An old version, inactive or contested premise cannot earn current
+      // support. Exact historical standing still remains readable below.
+      const retained = new Set(
+        (root.chain.complete ? distinctSupportingReviews(fold.context.verified_reviews) : [])
+          .filter((review) => {
+            const original = reviews.get(review.review_id);
+            const verdict = original && contents.get(original.event_id)?.verdict;
+            return (
+              review.reviewer_id === fellow &&
+              review.tier !== "T0" &&
+              (verdict === "confirm" || verdict === "reproduces")
+            );
+          })
+          .map((review) => review.review_id),
+      );
+      surviving += retained.size;
+      for (const review of reviews.values()) {
+        const original = timeline.find((row) => row.event_id === review.event_id);
+        const payload = contents.get(review.event_id);
+        if (
+          original?.type !== "review.created" ||
+          !payload ||
+          original.object_id !== review.object_id ||
+          original.seq !== review.seq ||
+          original.payload_sha256 !== review.payload_sha256 ||
+          original.payload_json !== review.payload_json ||
+          original.fellow_id !== review.fellow_id ||
+          original.sponsor_id !== review.sponsor_id
+        )
+          throw new ScientificInputError("Review outcome does not match its source.");
+        outcomes.set(`${review.problem_id}/${review.object_id}`, {
+          status: "available",
+          through: source.cursor,
+          disposition: root.standing.disposition,
+          review_state: root.standing.review_state,
+          latest_version: root.standing.latest_version,
+          stale: state.stale,
+          withdrawn: effects.withdrawnEvents.has(review.event_id),
+          contribution: isNegativeReview(payload)
+            ? "adverse-finding"
+            : retained.has(review.object_id)
+              ? "independent-support"
+              : payload.verdict === "confirm" || payload.verdict === "reproduces"
+                ? "no-current-support"
+                : "recorded",
+        });
+      }
+      checks.push({
+        statement: recheck(db, witnesses),
+        expected: new Set(witnesses.map((item) => item.event)).size,
       });
+    } catch (error) {
+      if (!(error instanceof ScientificInputError)) throw error;
+      if (group.confirming) survivalUnavailable = true;
+      // A known withdrawal survives a stale target only when its exact
+      // publication is covered by the final release transaction.
+      for (const review of reviews.values()) {
+        const key = `${review.problem_id}/${review.object_id}`;
+        if (fencedWithdrawals.has(key))
+          outcomes.set(key, { status: "unavailable", withdrawn: true });
+        else outcomes.delete(key);
+      }
     }
-    checks.push({
-      statement: recheck(db, witnesses),
-      expected: new Set(witnesses.map((item) => item.event)).size,
-    });
-    // An old version, inactive or contested premise cannot earn current support.
-    // This is the same dependency policy used by claim faces and honors.
-    if (!root.chain.complete) continue;
-    const timeline = science
-      .filter((row) => row.claim_id === source.target_claim_id && row.target_version <= version)
-      .map((row) => {
-        const statement = contents.get(row.event_id)?.statement;
-        return { ...row, statement: typeof statement === "string" ? statement : null };
-      });
-    const fold = await foldScientificRows(timeline);
-    if (fold.stale || fold.currentVersion !== source.target_version)
-      throw new ScientificInputError("Review scientific standing is stale.");
-    surviving += distinctSupportingReviews(fold.context.verified_reviews).filter(
-      (review) =>
-        review.reviewer_id === fellow && review.tier !== "T0" && reviews.has(review.review_id),
-    ).length;
   }
   // Recheck admission sources too, including non-confirming reviews whose
   // availability determines whether this is a complete calibration record.
   checks.push({ statement: recheck(db, rows.map(witness)), expected: rows.length });
-  return { surviving, checks };
+  return {
+    surviving: survivalUnavailable || confirming.length === 0 ? null : surviving,
+    unavailable: survivalUnavailable,
+    outcomes,
+    checks,
+  };
 }
 
 /** Fable §9.5: calibration is scientific readback, not a count of verdict labels.
@@ -293,6 +433,10 @@ export async function loadFellowCalibration(
   }
   try {
     reviews = await reviewSurvival(db, batch[1].results as Source[], fellow);
+    if (reviews?.unavailable)
+      omitted.push(
+        "review survival unavailable: complete current scientific support was not established within the read budget",
+      );
   } catch (error) {
     if (!(error instanceof ScientificInputError)) throw error;
     omitted.push(
@@ -339,6 +483,7 @@ export async function loadFellowCalibration(
     selfCorrected: corrections?.selfCorrected ?? null,
     externallyRefuted: corrections?.externallyRefuted ?? null,
     survivingReviews: reviews?.surviving ?? null,
+    reviewOutcomes: reviews?.outcomes ?? new Map(),
     omitted,
   };
 }

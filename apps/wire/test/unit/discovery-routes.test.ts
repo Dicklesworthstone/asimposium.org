@@ -2356,14 +2356,15 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     seedScopeClaim(raw, "P-CALIBRATION", "C-2", 2);
     const app = createApp();
     const env = mockEnv(db);
+    let lastCard: ReturnType<typeof FellowCardResponseSchema.parse> | undefined;
     const readSurvivingReviews = async () => {
       const response = await app.fetch(
         new Request("https://a.asimposium.org/a/gauss-agent.json"),
         env,
       );
       expect(response.status).toBe(200);
-      return FellowCardResponseSchema.parse(await response.json()).calibration
-        .reviews_verified_survival;
+      lastCard = FellowCardResponseSchema.parse(await response.json());
+      return lastCard.calibration.reviews_verified_survival;
     };
     const review = {
       target_claim_id: "C-2",
@@ -2377,6 +2378,12 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     seedCalibrationPublication(raw, "P-CALIBRATION", 3, "review", "R-LABEL", review);
     // The previous implementation credited this verdict without any check that could fail.
     expect(await readSurvivingReviews()).toBe(0);
+    expect(lastCard?.reviews.find((item) => item.review_id === "R-LABEL")?.outcome).toMatchObject({
+      status: "available",
+      through: 3,
+      contribution: "no-current-support",
+      withdrawn: false,
+    });
     seedCalibrationPublication(raw, "P-CALIBRATION", 4, "review", "R-IMPRESSION", {
       ...review,
       basis: "Looks right.",
@@ -2392,6 +2399,15 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
         "I enumerated the finite cases for the pinned version and checked its conclusion independently; a violating input would refute this confirmation.",
     });
     expect(await readSurvivingReviews()).toBe(1);
+    expect(lastCard?.reviews.find((item) => item.review_id === "R-CHECK")?.outcome).toMatchObject({
+      status: "available",
+      through: 5,
+      disposition: "open",
+      review_state: "independently-checked",
+      latest_version: 1,
+      stale: false,
+      contribution: "independent-support",
+    });
     // A recorded objection contests the exact version even without positive weight.
     seedCalibrationPublication(raw, "P-CALIBRATION", 6, "review", "R-OBJECTION", {
       ...review,
@@ -2400,10 +2416,77 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
       body_md: "The boundary input still needs a check before the conclusion can be accepted.",
     });
     expect(await readSurvivingReviews()).toBe(0);
+    expect(
+      lastCard?.reviews.find((item) => item.review_id === "R-OBJECTION")?.outcome,
+    ).toMatchObject({
+      status: "available",
+      through: 6,
+      disposition: "open",
+      review_state: "contested",
+      contribution: "adverse-finding",
+    });
+    expect(lastCard?.reviews.find((item) => item.review_id === "R-CHECK")?.outcome).toMatchObject({
+      contribution: "no-current-support",
+    });
     raw.run(
       "UPDATE event_content SET payload_json='{}',redacted_at='2026-09-10T00:00:00Z',redaction_reason='Fixture lawful removal' WHERE event_id='E-CAL-R-OBJECTION'",
     );
     expect(await readSurvivingReviews()).toBeNull();
+    expect(lastCard?.reviews.find((item) => item.review_id === "R-CHECK")?.outcome).toEqual({
+      status: "unavailable",
+    });
+  });
+
+  test("Fellow review outcomes keep the reviewed version after revision and link its captured cut", async () => {
+    const { db, raw } = createMigratedDb();
+    seedDiscoveryData(raw);
+    seedScopeProblem(raw, "P-CALIBRATION");
+    seedScopeClaim(raw, "P-CALIBRATION", "C-2", 2);
+    seedCalibrationPublication(raw, "P-CALIBRATION", 3, "review", "R-CHECK", {
+      target_claim_id: "C-2",
+      target_version: 1,
+      verdict: "confirm",
+      tier: "T1",
+      basis: "Every finite case was checked independently.",
+      capable_of_failure: "A finite input violating the conclusion would refute it.",
+      body_md:
+        "I enumerated the finite cases for the pinned version and checked its conclusion independently; a violating input would refute this confirmation.",
+    });
+    seedScopeClaim(raw, "P-CALIBRATION", "C-2", 4, 2);
+    const card = await loadFellowCard(db, "gauss-agent");
+    expect(card?.calibration.reviews_verified_survival).toBe(0);
+    expect(card?.reviews.find((item) => item.review_id === "R-CHECK")?.outcome).toEqual({
+      status: "available",
+      through: 4,
+      disposition: "open",
+      review_state: "independently-checked",
+      latest_version: 2,
+      stale: false,
+      withdrawn: false,
+      contribution: "no-current-support",
+    });
+    const app = createApp();
+    const target = await app.fetch(
+      new Request("https://a.asimposium.org/p/P-CALIBRATION/claims/C-2@1.json?through=4"),
+      mockEnv(db),
+    );
+    expect(target.status).toBe(200);
+    const face = (await target.json()) as {
+      claim_state: { disposition: string; review_state: string };
+    };
+    expect(face.claim_state.disposition).toBe("open");
+    expect(face.claim_state.review_state).toBe("independently-checked");
+    for (const face of ["md", "html"]) {
+      const response = await app.fetch(
+        new Request(`https://a.asimposium.org/a/gauss-agent.${face}`),
+        mockEnv(db),
+      );
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).toContain("A newer version v2 exists");
+      expect(body).toContain("/p/P-CALIBRATION/claims/C-2@1.md?through=4");
+      expect(body).not.toContain("This review retains independent scientific support.");
+    }
   });
 
   test.each(["problem", "P-4DSP"])(
@@ -2483,6 +2566,7 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
       expect(batches).toBe(3);
       expect(current.selfCorrected).toBe(change === "correction hide" ? null : 1);
       expect(current.survivingReviews).toBe(change === "new review" ? null : 1);
+      expect(current.reviewOutcomes.size).toBe(change === "new review" ? 0 : 1);
       expect(current.omitted).toContain(
         "calibration outcomes affected by changed public sources are unavailable; retry the current Fellow card",
       );
@@ -2515,6 +2599,7 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
       }
       const outcome = await loadFellowCalibration(db, "F-01M0HCVW4XTFWMZCQ40EJ0S0J7");
       expect(outcome.survivingReviews).toBeNull();
+      expect(outcome.reviewOutcomes.size).toBe(0);
       expect(outcome.omitted).toContain(
         "review survival unavailable: complete current scientific support was not established within the read budget",
       );

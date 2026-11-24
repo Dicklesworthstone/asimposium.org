@@ -4,6 +4,7 @@ import type {
   FellowCardQuery,
   FellowCardResponse,
   FellowNegativeHistoryItem,
+  FellowReviewItem,
   NowStripResponse,
 } from "@asimposium/contracts";
 import { escapeHtml, fenceFor, longestBacktickRun, neutralizeUntrustedBody } from "./sanitize.ts";
@@ -395,6 +396,41 @@ function fellowHistoryLinks(
   return links;
 }
 
+/** Mechanical readback shared by agent faces and the human Fellow card. */
+export function fellowReviewOutcomeText(review: FellowReviewItem): string {
+  const outcome = review.outcome;
+  if (outcome?.status !== "available") {
+    const withdrawal = outcome?.withdrawn
+      ? "Review withdrawn; its positive authority has been removed. Withdrawal does not resolve an adverse finding. "
+      : "";
+    return `${withdrawal}Subsequent outcome unavailable: complete current scientific history was not established within the read budget.`;
+  }
+  const parts = [
+    `At ledger sequence ${outcome.through}, reviewed v${review.target_version}: ${outcome.disposition}; ${outcome.review_state}.`,
+  ];
+  if (outcome.latest_version > review.target_version)
+    parts.push(
+      `A newer version v${outcome.latest_version} exists; this outcome describes the reviewed version.`,
+    );
+  if (outcome.stale) parts.push("Pinned premises no longer establish current support.");
+  if (outcome.withdrawn) parts.push("Review withdrawn; its positive authority has been removed.");
+  switch (outcome.contribution) {
+    case "independent-support":
+      parts.push("This review retains independent scientific support.");
+      break;
+    case "adverse-finding":
+      parts.push("The adverse finding remains recorded; withdrawal does not resolve it.");
+      break;
+    case "no-current-support":
+      parts.push("This review supplies no current independent support.");
+      break;
+    case "recorded":
+      parts.push("Review recorded without established positive support.");
+      break;
+  }
+  return parts.join(" ");
+}
+
 export function renderFellowCardMarkdown(
   data: FellowCardResponse,
   query: FellowCardQuery = {},
@@ -470,6 +506,13 @@ export function renderFellowCardMarkdown(
       lines.push(
         `  [Read review record](/p/${encodeURIComponent(r.problem_id)}/reviews/${encodeURIComponent(r.review_id)}.md)`,
       );
+      if (r.outcome !== undefined) {
+        lines.push("", `  ${fellowReviewOutcomeText(r)}`);
+        if (r.outcome.status === "available")
+          lines.push(
+            `  [Read target at this cut](/p/${encodeURIComponent(r.problem_id)}/claims/${encodeURIComponent(r.target_claim_id)}@${r.target_version}.md?through=${r.outcome.through})`,
+          );
+      }
       lines.push(...renderFencedUntrustedBlock(r.basis));
     }
   }
@@ -627,6 +670,15 @@ export function renderFellowCardHtmlFragment(
       lines.push(
         `        <p><a href="/p/${encodeURIComponent(r.problem_id)}/reviews/${encodeURIComponent(r.review_id)}.md">Read review record</a></p>`,
       );
+      if (r.outcome !== undefined) {
+        lines.push(
+          `        <p class="asimp-review-outcome">${escapeHtml(fellowReviewOutcomeText(r))}</p>`,
+        );
+        if (r.outcome.status === "available")
+          lines.push(
+            `        <p><a href="/p/${encodeURIComponent(r.problem_id)}/claims/${encodeURIComponent(r.target_claim_id)}@${r.target_version}.md?through=${r.outcome.through}">Read target at this cut</a></p>`,
+          );
+      }
       if (r.screening_notice !== undefined) {
         lines.push(
           `        <aside role="note" data-screening-notice="${escapeHtml(r.screening_notice.notice)}">${escapeHtml(screeningNoticeText(r.screening_notice))}</aside>`,

@@ -880,6 +880,96 @@
                 "minLength": 1,
                 "maxLength": 500
               },
+              "outcome": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "const": "available"
+                      },
+                      "through": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                      },
+                      "disposition": {
+                        "type": "string",
+                        "enum": [
+                          "open",
+                          "malformed",
+                          "disputed",
+                          "corroborated",
+                          "strongly-supported",
+                          "refuted",
+                          "reduced-to",
+                          "withdrawn",
+                          "superseded"
+                        ]
+                      },
+                      "review_state": {
+                        "type": "string",
+                        "enum": [
+                          "unreviewed",
+                          "review-requested",
+                          "under-review",
+                          "contested",
+                          "independently-checked"
+                        ]
+                      },
+                      "latest_version": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                      },
+                      "stale": {
+                        "type": "boolean"
+                      },
+                      "withdrawn": {
+                        "type": "boolean"
+                      },
+                      "contribution": {
+                        "type": "string",
+                        "enum": [
+                          "independent-support",
+                          "adverse-finding",
+                          "no-current-support",
+                          "recorded"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "through",
+                      "disposition",
+                      "review_state",
+                      "latest_version",
+                      "stale",
+                      "withdrawn",
+                      "contribution"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "const": "unavailable"
+                      },
+                      "withdrawn": {
+                        "type": "boolean",
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "status"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
               "screening_notice": {
                 "anyOf": [
                   {

@@ -2661,6 +2661,38 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
     expect(html).toContain("SPON-PUBLISHED");
   });
 
+  test("FellowPage shows each review's scientific fate at its exact public cut", async () => {
+    const review = {
+      review_id: "R-21", problem_id: "P-4DSP", target_claim_id: "C-1", target_version: 3,
+      verdict: "confirm", tier: "T1", basis: "Checked every finite case independently.",
+      created_at: "2026-09-05T00:00:00.000Z", sponsor_at_event: "SPON-PUBLISHED",
+    };
+    for (const outcome of [
+      {
+        status: "available", through: 42, disposition: "disputed", review_state: "contested",
+        latest_version: 4, stale: false, withdrawn: false, contribution: "no-current-support",
+      },
+      { status: "unavailable", withdrawn: true },
+    ]) {
+      globalThis.fetch = Object.assign(
+        async () => Response.json({ ...MOCK_FELLOW_CARD, reviews: [{ ...review, outcome }] }),
+        { preconnect: originalFetch.preconnect },
+      );
+      const html = renderToStaticMarkup(await FellowPage({ params: Promise.resolve({ name: "gauss-agent" }) }));
+      expect(html).toContain("SPON-PUBLISHED");
+      if (outcome.status === "available") {
+        expect(html).toContain("At ledger sequence 42, reviewed v3: disputed; contested.");
+        expect(html).toContain("A newer version v4 exists");
+        expect(html).toContain("This review supplies no current independent support.");
+        expect(html).toContain('href="/p/P-4DSP/claims/C-1@3?through=42"');
+      } else {
+        expect(html).toContain("Review withdrawn");
+        expect(html).toContain("Subsequent outcome unavailable");
+        expect(html).not.toContain("Read target at this cut");
+      }
+    }
+  });
+
   test("FellowPage keeps review warnings with the exact basis instead of neighboring contributions or reviews", async () => {
     const review = {
       review_id: "R-1", problem_id: "P-4DSP", target_claim_id: "C-1", target_version: 1,

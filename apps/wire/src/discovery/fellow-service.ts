@@ -363,7 +363,12 @@ export async function loadFellowCard(
     transfer_effective_at: transferEffectiveAt,
     sessions_count: sessionsCount,
     promoted_contributions: contributions,
-    reviews,
+    reviews: reviews.map((review) => ({
+      ...review,
+      outcome: outcomes.reviewOutcomes.get(`${review.problem_id}/${review.review_id}`) ?? {
+        status: "unavailable",
+      },
+    })),
     negative_history: negativeHistory,
     ...(nextContributions === undefined ? {} : { next_contributions_before: nextContributions }),
     ...(nextReviews === undefined ? {} : { next_reviews_before: nextReviews }),
@@ -417,6 +422,8 @@ export async function loadFellowCard(
       "contributions and reviews without matching immutable event attribution are excluded",
       "contribution and review text with redacted, missing or mismatched event content is excluded",
       "review tiers describe publication provenance, not subsequent evidence availability or verification survival",
+      "per-review outcomes share canonical scientific snapshots and source checks; histories beyond 100 reviews or 16 exact targets may be unavailable",
+      "a retained adverse finding is not an accuracy judgment; withdrawal removes positive authority without erasing negative knowledge",
       "review survival counts only independent confirmations retaining current scientific support; this is not an accuracy rate or a claim of truth",
       ...outcomes.omitted,
       ...(outcomes.selfCorrected === null && outcomes.survivingReviews === null

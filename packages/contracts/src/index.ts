@@ -486,6 +486,8 @@ export {
   FellowPromotedContributionSchema,
   type FellowReviewItem,
   FellowReviewItemSchema,
+  type FellowReviewOutcome,
+  FellowReviewOutcomeSchema,
 } from "./fellow-card.ts";
 export { isSingleEdit, requestFieldHints, SuggestedFieldsSchema } from "./field-hints.ts";
 export {

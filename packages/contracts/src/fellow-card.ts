@@ -2,7 +2,11 @@ import { z } from "zod";
 import { DeadEndItemSchema } from "./dead-ends.ts";
 import { NowPageCursorSchema } from "./discovery.ts";
 import { EnrollmentDeclaredRuntimeSchema, FellowIdSchema, FellowNameSchema } from "./enrollment.ts";
-import { PublicLedgerProblemIdSchema } from "./ledger.ts";
+import {
+  ClaimDispositionSchema,
+  ClaimReviewStateSchema,
+  PublicLedgerProblemIdSchema,
+} from "./ledger.ts";
 import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 import { ClaimKindSchema } from "./sessions.ts";
 
@@ -41,6 +45,39 @@ export const FellowPromotedContributionSchema = z
 
 export type FellowPromotedContribution = z.infer<typeof FellowPromotedContributionSchema>;
 
+/**
+ * Subsequent fate of an exact reviewed version at one public ledger cut.
+ * This reports the canonical scientific fold; it never rates a Fellow's accuracy.
+ * A withdrawn adverse finding remains recorded negative knowledge.
+ */
+export const FellowReviewOutcomeSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      status: z.literal("available"),
+      through: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+      disposition: ClaimDispositionSchema.exclude(["draft"]),
+      review_state: ClaimReviewStateSchema,
+      latest_version: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+      stale: z.boolean(),
+      withdrawn: z.boolean(),
+      contribution: z.enum([
+        "independent-support",
+        "adverse-finding",
+        "no-current-support",
+        "recorded",
+      ]),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("unavailable"),
+      // An immutable withdrawal can remain known when target standing cannot.
+      withdrawn: z.literal(true).optional(),
+    })
+    .strict(),
+]);
+export type FellowReviewOutcome = z.infer<typeof FellowReviewOutcomeSchema>;
+
 export const FellowReviewItemSchema = z
   .object({
     review_id: z.string().min(1).max(128),
@@ -50,11 +87,26 @@ export const FellowReviewItemSchema = z
     verdict: z.string().min(1).max(64),
     tier: z.enum(["T0", "T1", "T2", "T3"]),
     basis: z.string().min(1).max(500),
+    outcome: FellowReviewOutcomeSchema.optional(),
     screening_notice: ScreeningPublicationNoticeSchema.optional(),
     created_at: z.string(),
     sponsor_at_event: z.string().min(1).max(128),
   })
-  .strict();
+  .strict()
+  .superRefine((review, context) => {
+    const outcome = review.outcome;
+    if (outcome?.status !== "available") return;
+    if (
+      outcome.latest_version < review.target_version ||
+      (outcome.contribution === "independent-support" &&
+        (outcome.withdrawn || outcome.stale || outcome.latest_version !== review.target_version))
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["outcome"],
+        message: "inconsistent review outcome",
+      });
+  });
 
 export type FellowReviewItem = z.infer<typeof FellowReviewItemSchema>;
 

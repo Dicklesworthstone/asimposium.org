@@ -360,6 +360,51 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
       }
       expect(FellowReviewItemSchema.parse(review)).not.toHaveProperty("screening_notice");
     });
+    test("per-review fate keeps unavailable standing separate from known withdrawal", () => {
+      const review = {
+        review_id: "R-1",
+        problem_id: "P-4DSP",
+        target_claim_id: "C-1",
+        target_version: 2,
+        verdict: "confirm",
+        tier: "T1",
+        basis: "Checked the finite cases independently.",
+        created_at: "2026-09-05T00:00:00.000Z",
+        sponsor_at_event: "SPON-AT-PUBLICATION",
+      };
+      const outcome = {
+        status: "available",
+        through: 17,
+        disposition: "corroborated",
+        review_state: "independently-checked",
+        latest_version: 2,
+        stale: false,
+        withdrawn: false,
+        contribution: "independent-support",
+      };
+      expect(FellowReviewItemSchema.safeParse({ ...review, outcome }).success).toBe(true);
+      for (const unavailable of [
+        { status: "unavailable" },
+        { status: "unavailable", withdrawn: true },
+      ])
+        expect(FellowReviewItemSchema.parse({ ...review, outcome: unavailable }).outcome).toEqual(
+          unavailable,
+        );
+      for (const invalid of [
+        { ...outcome, latest_version: 1 },
+        { ...outcome, latest_version: 3 },
+        { ...outcome, stale: true },
+        { ...outcome, withdrawn: true },
+        { ...outcome, through: 0 },
+        { status: "unavailable", withdrawn: false },
+        { status: "unavailable", disposition: "corroborated" },
+        { ...outcome, accuracy: 1 },
+      ])
+        expect(FellowReviewItemSchema.safeParse({ ...review, outcome: invalid }).success).toBe(
+          false,
+        );
+      expect(FellowReviewItemSchema.parse(review)).not.toHaveProperty("outcome");
+    });
     test("uncomputed outcomes are null, while malformed or negative outcomes remain invalid", () => {
       const record = {
         conjectures_promoted: 1,
