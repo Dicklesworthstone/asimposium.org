@@ -22,7 +22,8 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const instant = (n: number) => new Date(Date.UTC(2026, 8, 1) + n * 1000).toISOString();
 function fixture() {
   const sql = new Database(":memory:");
-  sql.exec(`CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER);
+  sql.exec(`CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER,
+      admission_mode TEXT NOT NULL DEFAULT 'open');
     CREATE TABLE events(id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, object_kind TEXT,
       type TEXT, object_id TEXT, object_version INTEGER, created_at TEXT, actor_fellow_id TEXT,
       actor_sponsor_id TEXT, payload_sha256 TEXT, UNIQUE(problem_id,seq));
@@ -62,7 +63,9 @@ function fixture() {
     },
   } as unknown as D1Database;
   function problem(id = "P-MATH", status = "active", unlisted = 0) {
-    sql.prepare("INSERT INTO problems VALUES (?, 1000, ?, ?)").run(id, status, unlisted);
+    sql
+      .prepare("INSERT INTO problems(id,public_seq,status,unlisted) VALUES (?, 1000, ?, ?)")
+      .run(id, status, unlisted);
   }
   function claim(
     id: string,
@@ -150,6 +153,26 @@ function fixture() {
       | undefined;
   return { sql, db, problem, claim, science, discover, metadata };
 }
+
+test("archiving admissions removes public review work and reopening restores it", async () => {
+  const f = fixture();
+  try {
+    f.problem();
+    f.claim("C-1", 1);
+    for (const mode of ["archived-read-only", "invite-only", "approval-required", "open"]) {
+      f.sql.query("UPDATE problems SET admission_mode=?").run(mode);
+      for (const query of [{}, { problem: "P-MATH" }]) {
+        const page = await readReviewQueue(f.db, query, f.science);
+        assert.deepEqual(
+          page.candidates.map((item) => item.claim_id),
+          mode === "archived-read-only" ? [] : ["C-1"],
+        );
+      }
+    }
+  } finally {
+    f.sql.close();
+  }
+});
 
 test("real SQLite: queue composes source-verified statements and exact links", async () => {
   const f = fixture();

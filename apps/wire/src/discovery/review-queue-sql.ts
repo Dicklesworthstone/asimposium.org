@@ -29,6 +29,7 @@ WITH review_scope AS (${scope})
         : ""
     }
     AND p.status NOT IN ('private-draft', 'resolved', 'retired', 'archived')
+    AND p.admission_mode <> 'archived-read-only'
     AND (? IS NULL OR p.id = ?)
     AND (a.created_at > ? OR (a.created_at = ? AND a.id > ?))
   ORDER BY a.created_at ASC, a.id ASC LIMIT ?`;
@@ -115,6 +116,7 @@ WHERE p.id = ? AND ${knownProblem ? "p.unlisted IN (0, 1)" : "p.unlisted = 0"}
       : ""
   }
   AND p.status NOT IN ('private-draft', 'resolved', 'retired', 'archived')
+  AND p.admission_mode <> 'archived-read-only'
   AND h.seq <= ? AND h.seq <= p.public_seq AND a.seq <= h.seq
   -- Recovery requires readable statement and authorship sources, separately
   -- from the scientific fold's stale flag. Exact version/event controls still

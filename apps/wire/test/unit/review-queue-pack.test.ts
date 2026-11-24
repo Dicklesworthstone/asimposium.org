@@ -47,8 +47,8 @@ function templateFor(move: "review" | "add-refuter"): MoveTemplate {
 function fixture() {
   const sql = new Database(":memory:");
   sql.exec(`
-    CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER);
-    INSERT INTO problems VALUES('P-DEMO',0,'active',0),('P-OTHER',0,'active',1);
+    CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER, admission_mode TEXT NOT NULL DEFAULT 'open');
+    INSERT INTO problems(id,public_seq,status,unlisted) VALUES('P-DEMO',0,'active',0),('P-OTHER',0,'active',1);
     CREATE TABLE events(id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, object_kind TEXT,
       object_id TEXT, object_version INTEGER, type TEXT, payload_sha256 TEXT, created_at TEXT,
       actor_fellow_id TEXT, actor_sponsor_id TEXT);

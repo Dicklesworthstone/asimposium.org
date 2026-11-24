@@ -245,6 +245,29 @@ function fixture() {
   return { sqlite, db, problem, event, hide, items, calls, selectors, claim, offScope };
 }
 
+test("archived admissions stop recommendations even while the scientific status is active", async () => {
+  const f = fixture();
+  f.problem("P-DEMO", { claim: "C-1" });
+  f.items.set("P-DEMO", [f.claim("P-DEMO", "C-1")]);
+  const named = () => loadPublicProblemMoves(f.db, "P-DEMO", { selectors: f.selectors });
+  const global = () => loadPublicMoves(f.db, {}, { selectors: f.selectors });
+  const mode = (admission: string) =>
+    f.sqlite.query("UPDATE problems SET admission_mode=? WHERE id='P-DEMO'").run(admission);
+  expect((await named())?.primary_move?.move).toBe("review");
+  mode("archived-read-only");
+  expect(await named()).toMatchObject({ primary_move: null, alternatives: [], degraded: false });
+  expect((await global()).discovery).toMatchObject({ problems: [], scanned: 0, degraded: false });
+  mode("invite-only");
+  expect((await global()).discovery.problems[0]?.primary_move?.move).toBe("review");
+  const queue = f.selectors.queue;
+  f.selectors.queue = async (...args) => {
+    const page = await queue(...args);
+    mode("archived-read-only");
+    return page;
+  };
+  expect(await named()).toMatchObject({ primary_move: null, alternatives: [], degraded: true });
+});
+
 test("global conflict discovery skips off-scope assertions and claims before choosing a pair", async () => {
   const f = fixture();
   const id = "P-DEMO";

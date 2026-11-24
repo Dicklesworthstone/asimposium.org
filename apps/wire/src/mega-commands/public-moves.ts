@@ -56,12 +56,13 @@ interface MoveHead {
   id: string;
   cursor: number;
   status: string;
+  admission_mode: string;
   unlisted: number;
   has_claims: number;
   current_statement_version: number;
   controls_revision: number;
 }
-const HEAD_COLUMNS = `p.id, p.public_seq AS cursor, p.status, p.unlisted, p.current_statement_version,
+const HEAD_COLUMNS = `p.id, p.public_seq AS cursor, p.status, p.admission_mode, p.unlisted, p.current_statement_version,
   EXISTS (SELECT 1 FROM events e WHERE e.problem_id = p.id AND e.seq <= p.public_seq
     AND e.object_kind = 'claim' AND e.type IN ('claim.created','claim.revised')) AS has_claims,
   COALESCE((SELECT MAX(cc.rowid) FROM content_controls cc WHERE cc.problem_id = p.id),0)
@@ -72,6 +73,7 @@ export const PUBLIC_MOVE_HEAD_SQL = `SELECT ${HEAD_COLUMNS} FROM problems p
 export const PUBLIC_MOVE_DISCOVERY_SQL = `SELECT ${HEAD_COLUMNS} FROM problems p
   WHERE p.id > ? AND p.unlisted = 0
     AND p.status IN ('active','dormant','under-result-review','sharpening')
+    AND p.admission_mode <> 'archived-read-only'
     AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
     AND NOT ${offScopeProblemSql("p.id", "p.public_seq")}
   ORDER BY p.id COLLATE BINARY LIMIT ?`;
@@ -134,7 +136,8 @@ function validHead(row: MoveHead): boolean {
     row.current_statement_version >= 1 &&
     (row.unlisted === 0 || row.unlisted === 1) &&
     (row.has_claims === 0 || row.has_claims === 1) &&
-    typeof row.status === "string"
+    typeof row.status === "string" &&
+    ["open", "approval-required", "invite-only", "archived-read-only"].includes(row.admission_mode)
   );
 }
 
@@ -191,7 +194,10 @@ async function selectProblem(
   selectors: PublicMoveSelectors,
   globalDiscovery = false,
 ): Promise<SelectedProblem> {
-  if (!["active", "dormant", "under-result-review", "sharpening"].includes(head.status))
+  if (
+    head.admission_mode === "archived-read-only" ||
+    !["active", "dormant", "under-result-review", "sharpening"].includes(head.status)
+  )
     return { face: emptyProblem(head), items: [] };
   const omissions: MoveDiscoveryOmission[] = [];
   const candidates: NextMoveCandidate[] = [];
