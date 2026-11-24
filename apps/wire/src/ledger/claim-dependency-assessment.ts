@@ -60,15 +60,87 @@ selected_claims AS MATERIALIZED (
   WHERE ordinal <= 64 AND payload_json IS NOT NULL GROUP BY claim_id
 ),
 projection_gaps AS MATERIALIZED (
-  SELECT e.id FROM events e JOIN problems p ON p.id = e.problem_id, input
-  LEFT JOIN evidence x ON x.source_event_id = e.id AND x.problem_id = e.problem_id
-    AND x.evidence_id = e.object_id AND x.source_seq = e.seq
-  LEFT JOIN reviews r ON r.source_event_id = e.id AND r.problem_id = e.problem_id
-    AND r.review_id = e.object_id AND r.source_seq = e.seq
-  WHERE e.problem_id = json_extract(j, '$.problem') AND e.seq <= p.public_seq
-    AND e.seq <= json_extract(j, '$.cursor')
-    AND ((e.type = 'evidence.created' AND x.evidence_id IS NULL)
-      OR (e.type = 'review.created' AND r.review_id IS NULL))
+  -- Inspect both recorded targets before the selected-claim join can discard
+  -- a misrouted objection. A later version or unrelated claim cannot poison
+  -- this exact dependency snapshot. Unknown routing fails closed.
+  SELECT source.id FROM events source JOIN problems p ON p.id = source.problem_id, input
+  LEFT JOIN reviews review ON review.source_event_id = source.id
+    AND review.problem_id = source.problem_id AND review.review_id = source.object_id
+    AND review.source_seq = source.seq AND source.object_kind = 'review'
+    AND source.type = 'review.created'
+  LEFT JOIN evidence material ON material.source_event_id = source.id
+    AND material.problem_id = source.problem_id AND material.evidence_id = source.object_id
+    AND material.source_seq = source.seq AND source.object_kind = 'evidence'
+    AND source.type = 'evidence.created'
+  LEFT JOIN event_content body ON body.event_id = source.id
+    AND body.payload_sha256 = source.payload_sha256 AND body.redacted_at IS NULL
+  WHERE source.problem_id = json_extract(j, '$.problem') AND source.seq <= p.public_seq
+    AND source.seq <= json_extract(j, '$.cursor')
+    AND source.type IN ('review.created', 'evidence.created')
+    AND (
+      (source.type = 'review.created' AND (
+        EXISTS (SELECT 1 FROM selected_claims selected
+          WHERE selected.claim_id = review.target_claim_id
+            AND review.target_version <= selected.max_version)
+        OR EXISTS (SELECT 1 FROM selected_claims selected
+          WHERE selected.claim_id = json_extract(
+            CASE WHEN json_valid(body.payload_json) THEN body.payload_json ELSE '{}' END,
+            '$.target_claim_id')
+          AND (json_type(CASE WHEN json_valid(body.payload_json)
+              THEN body.payload_json ELSE '{}' END, '$.target_version') IS NOT 'integer'
+            OR json_extract(CASE WHEN json_valid(body.payload_json)
+              THEN body.payload_json ELSE '{}' END, '$.target_version') <= selected.max_version))
+        OR (review.review_id IS NULL AND
+          json_type(CASE WHEN json_valid(body.payload_json) THEN body.payload_json ELSE '{}' END,
+            '$.target_claim_id') IS NOT 'text')
+      )) OR
+      (source.type = 'evidence.created' AND (
+        EXISTS (SELECT 1 FROM selected_claims selected
+          WHERE material.bears_on_kind = 'claim' AND selected.claim_id = material.bears_on_id
+            AND material.bears_on_version <= selected.max_version)
+        OR EXISTS (SELECT 1 FROM selected_claims selected
+          WHERE json_extract(CASE WHEN json_valid(body.payload_json)
+              THEN body.payload_json ELSE '{}' END, '$.bears_on_kind') = 'claim'
+            AND selected.claim_id = json_extract(CASE WHEN json_valid(body.payload_json)
+              THEN body.payload_json ELSE '{}' END, '$.bears_on_id')
+            AND (json_type(CASE WHEN json_valid(body.payload_json)
+                THEN body.payload_json ELSE '{}' END, '$.bears_on_version') IS NOT 'integer'
+              OR json_extract(CASE WHEN json_valid(body.payload_json)
+                THEN body.payload_json ELSE '{}' END, '$.bears_on_version') <= selected.max_version))
+        OR (material.evidence_id IS NULL AND
+          (json_type(CASE WHEN json_valid(body.payload_json) THEN body.payload_json ELSE '{}' END,
+              '$.bears_on_id') IS NOT 'text'
+            OR COALESCE(json_extract(CASE WHEN json_valid(body.payload_json)
+              THEN body.payload_json ELSE '{}' END, '$.bears_on_kind'), '')
+              NOT IN ('claim', 'hypothesis')))
+      ))
+    )
+    AND (
+      (source.type = 'review.created' AND (
+        review.review_id IS NULL OR
+        CASE WHEN json_valid(body.payload_json) THEN
+          (json_type(body.payload_json, '$.target_claim_id') = 'text'
+            AND json_extract(body.payload_json, '$.target_claim_id') IS NOT review.target_claim_id)
+          OR (json_type(body.payload_json, '$.target_version') = 'integer'
+            AND json_extract(body.payload_json, '$.target_version') IS NOT review.target_version)
+          OR (json_type(body.payload_json, '$.verdict') = 'text'
+            AND json_extract(body.payload_json, '$.verdict') IS NOT review.verdict)
+        ELSE 0 END
+      )) OR
+      (source.type = 'evidence.created' AND (
+        material.evidence_id IS NULL OR
+        CASE WHEN json_valid(body.payload_json) THEN
+          (json_type(body.payload_json, '$.bears_on_kind') = 'text'
+            AND json_extract(body.payload_json, '$.bears_on_kind') IS NOT material.bears_on_kind)
+          OR (json_type(body.payload_json, '$.bears_on_id') = 'text'
+            AND json_extract(body.payload_json, '$.bears_on_id') IS NOT material.bears_on_id)
+          OR (json_type(body.payload_json, '$.bears_on_version') = 'integer'
+            AND json_extract(body.payload_json, '$.bears_on_version') IS NOT material.bears_on_version)
+          OR (json_type(body.payload_json, '$.direction') = 'text'
+            AND json_extract(body.payload_json, '$.direction') IS NOT material.direction)
+        ELSE 0 END
+      ))
+    )
   LIMIT 1
 ),
 source_rows AS (

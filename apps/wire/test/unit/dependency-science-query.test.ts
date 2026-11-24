@@ -3,12 +3,18 @@ import { afterEach, test } from "bun:test";
 import assert from "node:assert/strict";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
+  composeDependencyAssessment,
   DEPENDENCY_SCIENCE_ITEM_BYTES,
   DEPENDENCY_SCIENCE_ROW_LIMIT,
   DEPENDENCY_SCIENCE_TOTAL_BYTES,
   type DependencyScientificRow,
   prepareDependencyAssessment,
 } from "../../src/ledger/claim-dependency-assessment";
+import {
+  composeDependencyClosure,
+  type DependencyClosureRow,
+  prepareDependencyClosure,
+} from "../../src/ledger/claim-dependency-closure";
 import { installEmptyDirectiveDisclosureTables } from "../support/directive-disclosure-read.ts";
 
 const databases: Database[] = [];
@@ -130,6 +136,77 @@ function fixture() {
       .results;
   const chain = async () => claim(2, [await claim(1)]);
   return { db, d1, claim, evidence, addEvent, read, chain };
+}
+
+async function addObjection(
+  f: ReturnType<typeof fixture>,
+  kind: "evidence" | "review",
+  claim = "C-1",
+  version = 1,
+  problem = "P-READ",
+) {
+  const object = kind === "evidence" ? "E-objection" : "R-objection";
+  const review = {
+    target_claim_id: claim,
+    target_version: version,
+    verdict: "refute",
+    basis: "Checked the counterexample against every assumption.",
+    body_md: "The counterexample satisfies the assumptions and violates the conclusion.",
+    capable_of_failure: "A failed assumption would invalidate this counterexample.",
+    rubric: [],
+  };
+  const payload =
+    kind === "evidence"
+      ? {
+          bears_on_kind: "claim",
+          bears_on_id: claim,
+          bears_on_version: version,
+          kind: "computation",
+          direction: "refutes",
+          mode: "confirmatory",
+          computed_class: "computation",
+          body_md: "A bounded counterexample violates the exact claim.",
+        }
+      : review;
+  const source = await f.addEvent(kind, `${kind}.created`, object, 1, payload, problem);
+  f.db
+    .prepare("UPDATE events SET actor_fellow_id='F-check', actor_sponsor_id='S-check' WHERE id=?")
+    .run(source.event);
+  if (kind === "evidence")
+    f.db
+      .prepare("INSERT INTO evidence VALUES (?, ?, ?, ?, 'claim', ?, ?, 'refutes')")
+      .run(object, problem, source.event, source.seq, claim, version);
+  else
+    f.db
+      .prepare("INSERT INTO reviews VALUES (?, ?, ?, ?, ?, ?, 'refute', ?, '[]', ?, ?)")
+      .run(
+        object,
+        problem,
+        source.event,
+        source.seq,
+        claim,
+        version,
+        review.capable_of_failure,
+        review.basis,
+        review.body_md,
+      );
+  return source;
+}
+
+async function assessChain(f: ReturnType<typeof fixture>) {
+  const cursor = 10000;
+  const publications = (
+    await prepareDependencyClosure(f.d1, "P-READ", cursor, "C-2@1").all<DependencyClosureRow>()
+  ).results;
+  const closure = await composeDependencyClosure(publications, "P-READ", "C-2@1");
+  return composeDependencyAssessment(
+    publications,
+    closure,
+    await f.read("C-2@1", cursor),
+    "P-READ",
+    "C-2@1",
+    cursor,
+  );
 }
 
 test("science query reads both root and exact pinned premise evidence", async () => {
@@ -386,6 +463,131 @@ test("science query does not turn a detached projection into evidence", async ()
   assert.equal(rows.length, 2);
   assert.ok(rows.every((r) => r.scan_complete === 0));
 });
+
+for (const kind of ["evidence", "review"] as const) {
+  test(`misrouted ${kind} cannot turn a contested premise into a healthy dependency`, async () => {
+    const f = fixture();
+    await f.chain();
+    const source = await addObjection(f, kind);
+    const before = await assessChain(f);
+    assert.equal(before.get("C-1@1")?.standing.disposition, "disputed");
+    assert.equal(before.get("C-2@1")?.chain.complete, false);
+
+    const column = kind === "evidence" ? "bears_on_id" : "target_claim_id";
+    const table = kind === "evidence" ? "evidence" : "reviews";
+    f.db.prepare(`UPDATE ${table} SET ${column}='C-99' WHERE source_event_id=?`).run(source.event);
+    const rows = await f.read();
+    assert.ok(rows.length > 0);
+    assert.ok(rows.every((row) => row.scan_complete === 0));
+    assert.ok(rows.every((row) => row.event_id !== source.event));
+    const after = await assessChain(f);
+    assert.equal(after.get("C-1@1")?.standing.complete, false);
+    assert.equal(after.get("C-1@1")?.standing.disposition, null);
+    assert.equal(after.get("C-2@1")?.chain.complete, false);
+    assert.equal(after.get("C-2@1")?.chain.ceiling, null);
+    assert.ok((await f.read("C-2@1", 2)).every((row) => row.scan_complete === 1));
+  });
+
+  test(`a ${kind} projection cannot move an objection beyond the pinned version`, async () => {
+    const f = fixture();
+    await f.chain();
+    const source = await addObjection(f, kind);
+    const column = kind === "evidence" ? "bears_on_version" : "target_version";
+    const table = kind === "evidence" ? "evidence" : "reviews";
+    f.db.prepare(`UPDATE ${table} SET ${column}=2 WHERE source_event_id=?`).run(source.event);
+    const rows = await f.read();
+    assert.ok(rows.length > 0);
+    assert.ok(rows.every((row) => row.scan_complete === 0));
+    assert.ok(rows.every((row) => row.event_id !== source.event));
+  });
+
+  for (const defect of ["detached", "misrouted"] as const) {
+    test(`unrelated ${defect} ${kind} leaves the selected graph readable`, async () => {
+      const f = fixture();
+      await f.chain();
+      await f.claim(3);
+      const source = await addObjection(f, kind, "C-3");
+      const column = kind === "evidence" ? "bears_on_id" : "target_claim_id";
+      const table = kind === "evidence" ? "evidence" : "reviews";
+      f.db
+        .prepare(
+          defect === "detached"
+            ? `UPDATE ${table} SET source_seq=999 WHERE source_event_id=?`
+            : `UPDATE ${table} SET ${column}='C-99' WHERE source_event_id=?`,
+        )
+        .run(source.event);
+      const rows = await f.read();
+      assert.deepEqual(
+        rows.map((row) => row.object_id),
+        ["C-1", "C-2"],
+      );
+      assert.ok(rows.every((row) => row.scan_complete === 1));
+      assert.equal((await assessChain(f)).get("C-2@1")?.chain.complete, true);
+    });
+  }
+
+  test(`a later-version ${kind} mismatch stays outside an earlier publication pin`, async () => {
+    const f = fixture();
+    await f.chain();
+    await f.claim(1, [], 2);
+    const source = await addObjection(f, kind, "C-1", 2);
+    const column = kind === "evidence" ? "bears_on_id" : "target_claim_id";
+    const table = kind === "evidence" ? "evidence" : "reviews";
+    f.db.prepare(`UPDATE ${table} SET ${column}='C-99' WHERE source_event_id=?`).run(source.event);
+    const rows = await f.read();
+    assert.deepEqual(
+      rows.map((row) => row.object_id),
+      ["C-1", "C-2"],
+    );
+    assert.ok(rows.every((row) => row.scan_complete === 1));
+    assert.ok(rows.every((row) => row.target_version === 1));
+  });
+
+  test(`unknown missing ${kind} routing fails closed without exposing its body`, async () => {
+    const f = fixture();
+    await f.chain();
+    const source = await addObjection(f, kind);
+    const table = kind === "evidence" ? "evidence" : "reviews";
+    f.db.prepare(`UPDATE ${table} SET source_seq=999 WHERE source_event_id=?`).run(source.event);
+    f.db.prepare("UPDATE event_content SET redacted_at='now' WHERE event_id=?").run(source.event);
+    const rows = await f.read();
+    assert.deepEqual(
+      rows.map((row) => row.object_id),
+      ["C-1", "C-2"],
+    );
+    assert.ok(rows.every((row) => row.scan_complete === 0));
+  });
+
+  test(`withheld ${kind} retains its envelope without a projection mismatch`, async () => {
+    const f = fixture();
+    await f.chain();
+    const source = await addObjection(f, kind);
+    f.db.prepare("UPDATE event_content SET redacted_at='now' WHERE event_id=?").run(source.event);
+    const rows = await f.read();
+    assert.ok(rows.every((row) => row.scan_complete === 1));
+    assert.equal(rows.find((row) => row.event_id === source.event)?.payload_json, null);
+    assert.equal((await assessChain(f)).get("C-2@1")?.chain.complete, false);
+  });
+}
+
+for (const [table, column, value] of [
+  ["evidence", "bears_on_kind", "hypothesis"],
+  ["evidence", "direction", "supports"],
+  ["reviews", "verdict", "confirm"],
+] as const) {
+  test(`the scientific census detects a changed ${table}.${column}`, async () => {
+    const f = fixture();
+    await f.chain();
+    const source = await addObjection(f, table === "evidence" ? "evidence" : "review");
+    f.db
+      .prepare(`UPDATE ${table} SET ${column}=? WHERE source_event_id=?`)
+      .run(value, source.event);
+    const rows = await f.read();
+    assert.ok(rows.length > 0);
+    assert.ok(rows.every((row) => row.scan_complete === 0));
+    assert.equal((await assessChain(f)).get("C-2@1")?.chain.complete, false);
+  });
+}
 
 for (const target of ["C-1", "C-1@0", "C-1@1\n", "C-1@9007199254740992"]) {
   test(`science query refuses a noncanonical exact target ${JSON.stringify(target)}`, () => {
