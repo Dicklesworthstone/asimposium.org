@@ -34,7 +34,8 @@
     "./public-watch": "./src/public-watch.ts",
     "./public-schemas": "./src/public-schemas.ts",
     "./workshop-directory": "./src/workshop-directory.ts",
-    "./workshop-search": "./src/workshop-search.ts"
+    "./workshop-search": "./src/workshop-search.ts",
+    "./research-lists": "./src/research-lists.ts"
   },
   "scripts": {
     "generate": "bun run src/generate.ts",
