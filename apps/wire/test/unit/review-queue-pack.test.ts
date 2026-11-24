@@ -23,7 +23,9 @@ const viewer = { fellowId: "F-READER", sponsorId: "SP-READER" };
 const emptyInvitations = async (): Promise<LedgerPackSection> => ({ candidates: [], omitted: [] });
 const science: ReviewQueueScience = {
   prepare(db, _problem, _cursor, _limit, target) {
-    return db.prepare("SELECT ? AS target_version").bind(target.version);
+    return db
+      .prepare("SELECT ? AS target_version, 0 AS scientific_budget_exceeded")
+      .bind(target.version);
   },
   async fold(rows) {
     return {

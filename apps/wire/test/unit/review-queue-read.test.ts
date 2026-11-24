@@ -121,7 +121,9 @@ function fixture() {
   // The production service injects the real prepareScientificDispositions/foldScientificRows.
   const science: ReviewQueueScience = {
     prepare: (db, _p, _c, _n, target) =>
-      db.prepare("SELECT ? AS target_version").bind(target.version),
+      db
+        .prepare("SELECT ? AS target_version, 0 AS scientific_budget_exceeded")
+        .bind(target.version),
     fold: async (rows) => ({
       disposition: "open",
       currentVersion: rows[0]?.target_version ?? null,
@@ -418,10 +420,14 @@ test("real SQLite: only exact, available, committed dependency pins affect ranki
     f.sql
       .prepare("UPDATE event_content SET redacted_at='removed' WHERE event_id=?")
       .run(hidden.event_id);
+    f.claim("C-6", 6, { pins: [premise] });
+    f.sql.exec("INSERT INTO content_controls VALUES ('P-MATH', 'C-6@1', 'hidden', 1)");
     const result = await readReviewQueue(f.db, {}, f.science);
     assert.equal(result.candidates[0]?.claim_id, "C-1");
     assert.equal(result.candidates[0]?.direct_dependents, 1);
     assert.equal(result.candidates.find((x) => x.claim_id === "C-2")?.direct_dependents, 0);
+    f.sql.exec("INSERT INTO content_controls VALUES ('P-MATH', 'C-6@1', 'visible', 2)");
+    assert.equal((await readReviewQueue(f.db, {}, f.science)).candidates[0]?.direct_dependents, 2);
   } finally {
     f.sql.close();
   }
@@ -440,21 +446,23 @@ test("real SQLite: old dependent versions and malformed pins do not invent conse
     f.sql.close();
   }
 });
-test("real SQLite: oversized histories are omitted before scientific replay starts", async () => {
+test("real SQLite: an oversized scientific timeline is never partially folded", async () => {
   const f = fixture();
   try {
     f.problem();
     f.claim("C-1", 1);
-    f.sql.prepare("UPDATE event_content SET payload_json=?").run("x".repeat(1024 * 1024 + 1));
     let replayed = 0;
     const result = await readReviewQueue(
       f.db,
       {},
       {
         ...f.science,
-        prepare(...args) {
+        prepare(db) {
+          return db.prepare("SELECT 1 AS target_version, 1 AS scientific_budget_exceeded");
+        },
+        fold(...args) {
           replayed += 1;
-          return f.science.prepare(...args);
+          return f.science.fold(...args);
         },
       },
     );

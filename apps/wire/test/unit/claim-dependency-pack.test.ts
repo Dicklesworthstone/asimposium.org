@@ -1,8 +1,10 @@
 import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { ClaimFaceResponseSchema } from "@asimposium/contracts";
+import { ReviewQueueResponseSchema } from "@asimposium/contracts/review-queue";
 import { type Projection, renderAllFaces } from "@asimposium/render";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
+import { createReviewQueueRoutes } from "../../src/discovery/review-queue-router.ts";
 import {
   loadReviewQueue,
   loadReviewQueueAtCursor,
@@ -1247,6 +1249,38 @@ for (const target of ["C-1@1", "#1"]) {
     expect(queue.candidates).toEqual([]);
     expect(queue.omitted).toContainEqual({ reason: "content_unavailable", count: 1 });
     expect(JSON.stringify(queue)).not.toContain("HIDDEN_PUBLICATION_CANARY");
+  });
+}
+
+for (const overflow of ["rows", "bytes"] as const) {
+  test(`public review discovery keeps quiet claims when another history exceeds its ${overflow} budget`, async () => {
+    const f = fixture();
+    await f.add(1);
+    await f.add(2);
+    // Record enough science on C-2 to exhaust its own complete history.
+    // The two cases independently cross the row and total byte limits.
+    const last = overflow === "rows" ? 514 : 102;
+    for (let seq = 3; seq <= last; seq++) {
+      await scientificEvidence(
+        f,
+        seq,
+        "C-2",
+        "computation",
+        overflow === "bytes" ? { body_md: "x".repeat(12 * 1024) } : {},
+      );
+    }
+    await scientificEvidence(f, last + 1, "C-1", "computation", { direction: "refutes" });
+
+    const response = await createReviewQueueRoutes().request("/reviews.json", {}, {
+      DB: f.d1,
+    } as Env);
+    expect(response.status).toBe(200);
+    const face = ReviewQueueResponseSchema.parse(await response.json());
+    expect(face.candidates).toMatchObject([{ claim_id: "C-1", need: "resolve-dispute" }]);
+    expect(face.omitted).toEqual([{ reason: "scope_budget_exceeded", count: 1 }]);
+    const historical = await loadReviewQueueAtCursor(f.d1, "P-PACK", 2);
+    expect(historical.candidates.map((row) => row.claim_id)).toEqual(["C-1", "C-2"]);
+    expect(historical.omitted).toEqual([]);
   });
 }
 

@@ -11,7 +11,11 @@ import {
 } from "@asimposium/contracts/review-queue";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { claimContentDigest } from "../krater/claim-version";
-import type { ScientificDisposition, ScientificRow } from "../ledger/scientific-disposition";
+import type {
+  ScientificDisposition,
+  ScientificReadBudget,
+  ScientificRow,
+} from "../ledger/scientific-disposition";
 import { publicationScreeningNotice } from "../screening/publication-notice";
 import {
   type ReviewQueueSnapshot,
@@ -23,8 +27,6 @@ import {
   REVIEW_QUEUE_DISCOVERY_METADATA_SQL,
   REVIEW_QUEUE_KNOWN_PROBLEM_METADATA_SQL,
   REVIEW_QUEUE_MAX_DEPENDENTS,
-  REVIEW_QUEUE_MAX_SCOPE_BYTES,
-  REVIEW_QUEUE_MAX_SCOPE_EVENTS,
   REVIEW_QUEUE_METADATA_SQL,
 } from "./review-queue-sql";
 
@@ -36,8 +38,6 @@ export interface ReviewAdmission {
   created_at: string;
   head_id: string;
   version: number;
-  scope_events: number;
-  scope_bytes: number;
 }
 export interface ReviewMetadata {
   problem_id: string;
@@ -71,12 +71,22 @@ export interface ReviewQueueScience {
     cursor: number,
     limit: number,
     target: { claimId: string; version: number },
+    budget?: ScientificReadBudget,
   ): D1PreparedStatement;
   fold(
     rows: readonly ScientificRow[],
     at: { db: D1Database; problem: string; through: number; claim: string },
   ): Promise<ScientificDisposition>;
 }
+
+// The complete scientific history of this statement must fit before the
+// evaluator receives any bodies. Other claims and coordination traffic on
+// the same problem never consume its review budget.
+const REVIEW_HISTORY_BUDGET = {
+  maxRows: 512,
+  maxPayloadBytes: 1024 * 1024,
+  maxTotalPayloadBytes: 1024 * 1024,
+};
 
 async function digest(text: string): Promise<string> {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
@@ -198,31 +208,20 @@ export async function readReviewQueue(
   const counts = new Map<ReviewQueueResponse["omitted"][number]["reason"], number>();
   const omit = (reason: ReviewQueueResponse["omitted"][number]["reason"]) =>
     counts.set(reason, (counts.get(reason) ?? 0) + 1);
-  const admitted: ReviewAdmission[] = [];
   for (const row of scanned) {
     reviewQueueAfter(row.created_at, row.admission_id);
     if (
       !Number.isSafeInteger(row.cursor) ||
       row.cursor < 1 ||
       !Number.isSafeInteger(row.version) ||
-      row.version < 1 ||
-      !Number.isSafeInteger(row.scope_events) ||
-      row.scope_events < 1 ||
-      !Number.isSafeInteger(row.scope_bytes) ||
-      row.scope_bytes < 0
+      row.version < 1
     ) {
       throw new Error("REVIEW_QUEUE_DISCOVERY_INVALID");
     }
-    if (
-      row.scope_events > REVIEW_QUEUE_MAX_SCOPE_EVENTS ||
-      row.scope_bytes > REVIEW_QUEUE_MAX_SCOPE_BYTES
-    ) {
-      omit("scope_budget_exceeded");
-    } else admitted.push(row);
   }
   // Captured cuts prevent a later append increasing these guarded histories.
   // Metadata and scientific inputs share one read transaction. No per-review I/O.
-  const statements = admitted.flatMap((row) => [
+  const statements = scanned.flatMap((row) => [
     db
       .prepare(
         snapshot?.includeUnlisted === true
@@ -232,17 +231,29 @@ export async function readReviewQueue(
             : REVIEW_QUEUE_METADATA_SQL,
       )
       .bind(row.cursor, row.cursor, row.cursor, row.head_id, row.problem_id, row.cursor),
-    science.prepare(db, row.problem_id, row.cursor, 1, {
-      claimId: row.claim_id,
-      version: row.version,
-    }),
+    science.prepare(
+      db,
+      row.problem_id,
+      row.cursor,
+      1,
+      { claimId: row.claim_id, version: row.version },
+      REVIEW_HISTORY_BUDGET,
+    ),
   ]);
   const snapshots = statements.length === 0 ? [] : await db.batch(statements);
   if (snapshots.length !== statements.length) throw new Error("REVIEW_QUEUE_SNAPSHOT_INVALID");
   const candidates: ReviewQueueItem[] = [];
-  for (const [index, admission] of admitted.entries()) {
+  for (const [index, admission] of scanned.entries()) {
     const row = snapshots[index * 2]?.results[0] as ReviewMetadata | undefined;
     const timeline = snapshots[index * 2 + 1]?.results as ScientificRow[] | undefined;
+    if (!Array.isArray(timeline)) throw new Error("REVIEW_QUEUE_SNAPSHOT_INVALID");
+    if (
+      timeline.length > REVIEW_HISTORY_BUDGET.maxRows ||
+      timeline.some((entry) => entry.scientific_budget_exceeded !== 0)
+    ) {
+      omit("scope_budget_exceeded");
+      continue;
+    }
     if (!row || !(await verifiedReviewMetadata(admission, row))) {
       omit("content_unavailable");
       continue;
@@ -254,7 +265,6 @@ export async function readReviewQueue(
       omit("content_unavailable");
       continue;
     }
-    if (!Array.isArray(timeline)) throw new Error("REVIEW_QUEUE_SNAPSHOT_INVALID");
     const fold = await science.fold(
       timeline.filter((row) => row.target_version <= admission.version),
       { db, problem: admission.problem_id, through: admission.cursor, claim: admission.claim_id },

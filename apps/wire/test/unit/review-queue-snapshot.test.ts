@@ -98,10 +98,10 @@ test("a captured queue keeps the earlier head instead of borrowing a later revis
     f.add(3, { claim: "C-1", version: 2 });
     const old = await f.read(2);
     assert.deepEqual(
-      old.map((r) => [r.claim_id, r.version, r.cursor, r.scope_events]),
+      old.map((r) => [r.claim_id, r.version, r.cursor]),
       [
-        ["C-1", 1, 2, 2],
-        ["C-2", 1, 2, 2],
+        ["C-1", 1, 2],
+        ["C-2", 1, 2],
       ],
     );
     const live = await readReviewAdmissions(f.db, { problem: "P-DEMO" });
@@ -127,7 +127,7 @@ test("pagination retains the same cut across new admissions and revisions", asyn
       second.map((r) => r.claim_id),
       ["C-9", "C-10", "C-11", "C-12"],
     );
-    assert.ok(second.every((r) => r.cursor === 12 && r.version === 1 && r.scope_events === 12));
+    assert.ok(second.every((r) => r.cursor === 12 && r.version === 1));
     const current = await readReviewAdmissions(f.db, { problem: "P-DEMO", after });
     assert.ok(current.some((r) => r.claim_id === "C-13"));
     assert.equal(current.find((r) => r.claim_id === "C-10")?.version, 2);
@@ -136,17 +136,22 @@ test("pagination retains the same cut across new admissions and revisions", asyn
   }
 });
 
-test("scope byte and event budgets count the captured ledger, not later traffic", async () => {
+test("large unrelated histories preserve admission order at current and captured cuts", async () => {
   const f = fixture();
   try {
     f.add(1, { body: "é" });
     for (let seq = 2; seq <= 514; seq++) f.add(seq, { body: "x".repeat(2200) });
     const frozen = await f.read(1);
-    assert.equal(frozen[0]?.scope_events, 1);
-    assert.equal(frozen[0]?.scope_bytes, 2);
+    assert.deepEqual(
+      frozen.map((row) => row.claim_id),
+      ["C-1"],
+    );
     const live = await readReviewAdmissions(f.db, { problem: "P-DEMO" });
-    assert.equal(live[0]?.scope_events, 513);
-    assert.ok(live[0]!.scope_bytes > 1024 * 1024);
+    assert.deepEqual(
+      live.map((row) => row.claim_id),
+      Array.from({ length: 9 }, (_, i) => `C-${i + 1}`),
+    );
+    assert.ok(live.every((row) => row.cursor === 514));
   } finally {
     f.sqlite.close();
   }
@@ -234,8 +239,6 @@ test("unavailable bodies remain admissions rather than changing page traversal",
     f.sqlite.query("UPDATE event_content SET payload_json=NULL").run();
     const rows = await f.read(10);
     assert.equal(rows.length, 9);
-    assert.equal(rows[0]?.scope_events, 10);
-    assert.equal(rows[0]?.scope_bytes, 0);
     const eighth = rows[7]!;
     assert.deepEqual(
       (await f.read(10, reviewQueueAfter(eighth.created_at, eighth.admission_id))).map(
