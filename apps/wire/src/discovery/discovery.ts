@@ -81,6 +81,11 @@ import {
   protocolConflictResponses,
 } from "./protocol-conflicts-discovery.ts";
 import {
+  RESEARCH_LIST_PUBLIC_READS,
+  researchListParameters,
+  researchListResponses,
+} from "./research-lists-discovery.ts";
+import {
   REVIEW_QUEUE_PUBLIC_READS,
   reviewQueueParameters,
   reviewQueueResponses,
@@ -352,6 +357,7 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /p/:id/conflicts.md": "Version-pinned conflicts and their resolutions (Markdown face).",
   "GET /p/:id/conflicts.html": "Version-pinned conflicts and their resolutions (HTML face).",
   ...CITATIONS_PUBLIC_READS,
+  ...RESEARCH_LIST_PUBLIC_READS,
   ...SCIENTIFIC_HISTORY_PUBLIC_READS,
   "GET /p/:id/relations/:target":
     "One typed claim relation (<seq>.md/.json), cited by the seq of its relation.asserted event.",
@@ -972,6 +978,8 @@ function responseFor(
   if (workshop !== undefined) return workshop;
   const citations = citationResponses(openApiPath, origins.agent);
   if (citations !== undefined) return citations;
+  const research = researchListResponses(openApiPath, origins.agent);
+  if (research !== undefined) return research;
   const collection = scientificCollectionResponses(openApiPath, origins.agent);
   if (collection !== undefined) return collection;
   const history = scientificHistoryResponses(openApiPath, origins.agent);
@@ -1323,6 +1331,7 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
       ...eventTailParameters(operation.openApiPath, origins.agent),
       ...reviewQueueParameters(operation.openApiPath, origins.agent),
       ...citationParameters(operation.openApiPath, origins.agent),
+      ...researchListParameters(operation.openApiPath, origins.agent),
       ...workshopDirectoryParameters(operation.openApiPath, origins.agent, operation.method),
       ...scientificCollectionParameters(operation.openApiPath, origins.agent),
       ...scientificHistoryParameters(operation.openApiPath, origins.agent),

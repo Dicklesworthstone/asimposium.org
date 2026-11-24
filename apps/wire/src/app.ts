@@ -70,7 +70,9 @@ import { createInboxRouter } from "./inbox/router";
 import { createCheckpointFaceRoutes } from "./krater/checkpoint-face.ts";
 import { hiddenByContentControlSql } from "./krater/public-content";
 import { createEventTailRoutes } from "./ledger/event-tail-router";
+import { createEvidenceListRoutes } from "./ledger/evidence-list-http.ts";
 import { createHypothesesRoutes } from "./ledger/hypotheses-router";
+import { createReviewListRoutes } from "./ledger/reviews-list-router.ts";
 import { createStatementRoutes } from "./ledger/statements-router.ts";
 import { createLedgerFaceRoutes } from "./ledger-face";
 import type { MegaCommandsMoveProvider } from "./mega-commands/provider";
@@ -1534,6 +1536,8 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // Mount before the broad legacy digest/quarantine matcher can consume them.
   app.route("/", createHypothesesRoutes());
   app.route("/", createStatementRoutes());
+  app.route("/", createEvidenceListRoutes());
+  app.route("/", createReviewListRoutes());
 
   // Let only contracted problem and exact-claim faces reach D1. The digest's
   // regex parameter can consume slashes, so unknown nested paths must be

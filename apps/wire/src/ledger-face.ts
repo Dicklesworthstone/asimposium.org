@@ -35,6 +35,7 @@ import {
   claimsListPath,
 } from "@asimposium/contracts/claims-list";
 import { FormalRecordsQuerySchema } from "@asimposium/contracts/formal-records";
+import { evidenceListPath, reviewsListPath } from "@asimposium/contracts/research-lists";
 import { statementVersionPath } from "@asimposium/contracts/statements";
 import {
   type ComposedPack,
@@ -967,6 +968,18 @@ async function loadProblemFace(
       },
       {
         method: "GET",
+        url: evidenceListPath(first.problem_id, "json", { through: first.public_seq }),
+        why: "browse all evidence publications and their exact targets at this digest cursor",
+        public_read: true,
+      },
+      {
+        method: "GET",
+        url: reviewsListPath(first.problem_id, "json", { through: first.public_seq }),
+        why: "browse completed reviews and their recorded independence at this digest cursor",
+        public_read: true,
+      },
+      {
+        method: "GET",
         url: `/p/${encodeURIComponent(first.problem_id)}/full.md?through=${first.public_seq}`,
         why: "read the paginated public ledger through this digest cursor",
         public_read: true,
@@ -1291,6 +1304,18 @@ async function loadProblemFullFace(
           method: "GET",
           url: `/p/${requestedProblemId}/claims.json?through=${through}`,
           why: "Read current claim versions and their computed standing at this frozen cursor.",
+          public_read: true,
+        },
+        {
+          method: "GET",
+          url: evidenceListPath(requestedProblemId, "json", { through }),
+          why: "Read evidence publications and exact targets at this frozen cursor.",
+          public_read: true,
+        },
+        {
+          method: "GET",
+          url: reviewsListPath(requestedProblemId, "json", { through }),
+          why: "Read completed reviews and recorded independence at this frozen cursor.",
           public_read: true,
         },
         {
