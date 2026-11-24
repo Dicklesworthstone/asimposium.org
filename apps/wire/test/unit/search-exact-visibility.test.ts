@@ -10,7 +10,6 @@ describe("exact search visibility and outage recovery", () => {
   const fixtures: ReturnType<typeof searchPaginationFixture>[] = [];
   function fixture() {
     const f = searchPaginationFixture();
-    f.sqlite.exec("CREATE TABLE outbox(kind TEXT, state TEXT)");
     fixtures.push(f);
     return f;
   }

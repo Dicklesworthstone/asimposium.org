@@ -100,37 +100,47 @@ export async function executeSearch(
   }
   const sourceCursor = cursorResult.cursor;
 
-  // The lexical index is filled from the outbox after each public write, so
-  // it can trail source_cursor. Say so rather than imply it is current (A4).
-  // Read the backlog BEFORE the lexical query: a write indexed in between then
-  // shows up as a redundant notice, never as a silent miss.
-  let indexLag: SearchOmission | null = null;
-  try {
-    const pending = await db
-      .prepare(
-        "SELECT COUNT(*) AS n FROM outbox WHERE kind = 'search.index' AND state <> 'delivered'",
-      )
-      .first<{ n: number }>();
-    if ((pending?.n ?? 0) > 0) {
-      indexLag = {
-        reason: "index_pending",
-        detail: `${pending?.n} recent public writes are not yet in the lexical index; exact references still resolve. Retry shortly for full text matches.`,
-      };
-    }
-  } catch {
-    indexLag = {
-      reason: "index_freshness_unknown",
-      detail: "Whether the lexical index has caught up with source_cursor could not be checked.",
-    };
-  }
-
-  // 2. Exact reference resolution (higher precedence than lexical search).
-  // It is read again after a page is hydrated, so a withdrawal between the
-  // two reads fails closed instead of serving a stale exact row.
   const exactTarget = parseExactReference(request.q);
   const pinnedClaim = exactTarget?.kind === "claim" && exactTarget.version !== undefined;
   // A version-pinned reference is a single result; no cursor was ever issued for it.
   if (pinnedClaim && request.cursor !== undefined) throw new SearchContinuationError("invalid");
+
+  // Only claim text depends on the async index. Scope the lag signal to
+  // discoverable current publications and the requested problem filters,
+  // just like lexical results. A queue-wide count would leak hidden work.
+  let indexLag: SearchOmission | null = null;
+  if (!pinnedClaim && (filterKind === "claim" || filterKind === "all")) {
+    try {
+      const pending = await db
+        .prepare(
+          `SELECT 1 FROM outbox job
+           JOIN events e ON e.id = job.event_id AND e.problem_id = job.problem_id
+             AND e.payload_sha256 = job.payload_sha256
+             AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')
+           JOIN claims ON claims.problem_id = e.problem_id AND claims.id = e.object_id
+             AND claims.source_seq = e.seq AND claims.payload_sha256 = e.payload_sha256
+           JOIN problems p ON p.id = e.problem_id AND p.status <> 'private-draft' AND p.unlisted = 0
+           WHERE job.kind = 'search.index' AND job.state = 'pending'
+             AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} AND ${SEARCH_PROBLEM_FILTER_SQL}
+           LIMIT 1`,
+        )
+        .bind(...searchProblemFilterBindings(pageQuery))
+        .first();
+      if (pending !== null) {
+        indexLag = {
+          reason: "index_pending",
+          detail:
+            "Indexing is pending for public claims within these filters. Full text matches may be incomplete. Exact references still resolve.",
+        };
+      }
+    } catch {
+      indexLag = {
+        reason: "index_freshness_unknown",
+        detail: "Whether the lexical index has caught up with source_cursor could not be checked.",
+      };
+    }
+  }
+
   const resolveExact = async (): Promise<SearchResultItem[]> => {
     const found: SearchResultItem[] = [];
     if (exactTarget) {

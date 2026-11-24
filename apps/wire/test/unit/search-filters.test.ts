@@ -10,7 +10,6 @@ import { searchPaginationFixture } from "./search-pagination-fixture.ts";
 const fixtures: ReturnType<typeof searchPaginationFixture>[] = [];
 function fixture() {
   const f = searchPaginationFixture();
-  f.sqlite.exec("CREATE TABLE outbox(kind TEXT, state TEXT)");
   fixtures.push(f);
   return f;
 }
@@ -107,6 +106,44 @@ test("matching filters cannot reveal hidden, unlisted or private sources", async
     }
   }
   assert.equal((await executeSearch(f.db, { ...base, q: "spectral" })).items.length, 0);
+});
+
+test("claim-index lag reports only current discoverable work within the selected filters", async () => {
+  const f = fixture();
+  const id = "P-QUEUED";
+  f.problem(id, "active", 0, "Spectral paths", ["algebra"]);
+  const event = f.claim("C-1", "spectral bound", id);
+  f.sqlite
+    .query(`INSERT INTO outbox
+    SELECT id,problem_id,payload_sha256,'search.index','pending' FROM events WHERE id=?`)
+    .run(event);
+  const base = { q: "spectral", kind: "claim" as const, limit: 20 };
+  async function pending(query: Parameters<typeof executeSearch>[1] = base) {
+    const result = await executeSearch(f.db, query);
+    assert.ok(!result.omitted.some((item) => item.reason === "index_freshness_unknown"));
+    return result.omitted.some((item) => item.reason === "index_pending");
+  }
+  assert.equal(await pending(), true);
+  assert.equal(await pending({ ...base, area: "analysis" }), false);
+  assert.equal(await pending({ ...base, status: "dormant" }), false);
+  for (const kind of ["problem", "fellow"] as const)
+    assert.equal(await pending({ ...base, kind }), false);
+  for (const change of [
+    "UPDATE problems SET unlisted=1",
+    "UPDATE problems SET status='private-draft'",
+    "INSERT INTO content_controls VALUES('P-QUEUED','problem','hidden',1)",
+    "INSERT INTO content_controls VALUES('P-QUEUED','C-1@1','hidden',1)",
+    "INSERT INTO content_controls VALUES('P-QUEUED','#1','hidden',1)",
+    "UPDATE event_content SET redacted_at='now'",
+    "UPDATE claims SET source_seq=2",
+    "UPDATE outbox SET payload_sha256='obsolete'",
+    "UPDATE outbox SET state='delivered'",
+  ]) {
+    f.sqlite.exec("SAVEPOINT before_change");
+    f.sqlite.exec(change);
+    assert.equal(await pending(), false, change);
+    f.sqlite.exec("ROLLBACK TO before_change; RELEASE before_change");
+  }
 });
 
 test("Fellow matches are explicitly excluded rather than silently ignoring problem filters", async () => {

@@ -10,7 +10,8 @@ import { executeSearchPage } from "../../src/search/page.ts";
  * full migration lineage, enrollment authorization or the HTTP contract. */
 export function searchPaginationFixture() {
   const sqlite = new Database(":memory:");
-  sqlite.exec(`CREATE TABLE public_cursor(singleton INTEGER PRIMARY KEY, cursor INTEGER);
+  sqlite.exec(`CREATE TABLE outbox(event_id TEXT,problem_id TEXT,payload_sha256 TEXT,kind TEXT,state TEXT);
+    CREATE TABLE public_cursor(singleton INTEGER PRIMARY KEY, cursor INTEGER);
     INSERT INTO public_cursor VALUES(1,1000);
     CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER, updated_at TEXT, created_at TEXT, title TEXT,
       current_statement_version INTEGER NOT NULL DEFAULT 1, areas TEXT NOT NULL DEFAULT '[]');
