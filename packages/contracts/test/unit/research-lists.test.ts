@@ -5,14 +5,18 @@ import {
   generateResearchListsSchema,
   RESEARCH_LISTS_SCHEMA_ID,
   ResearchListQuerySchema,
-  researchListMatchesQuery,
   ReviewListResponseSchema,
+  researchListMatchesQuery,
   reviewsListPath,
 } from "../../src/research-lists.ts";
 import fixtures from "../fixtures/research-lists.json";
 
 const { evidence: evidenceFixture, reviews: reviewsFixture, query: queryFixture } = fixtures.valid;
-const { evidence: invalidEvidence, reviews: invalidReviews, query: invalidQuery } = fixtures.invalid;
+const {
+  evidence: invalidEvidence,
+  reviews: invalidReviews,
+  query: invalidQuery,
+} = fixtures.invalid;
 
 test("research directory fixtures preserve exact targets, attribution and recorded tiers", () => {
   const evidence = EvidenceListResponseSchema.parse(evidenceFixture);
@@ -78,12 +82,18 @@ test("empty withheld pages can progress while impossible ranges and duplicate pu
   const evidence = evidenceFixture.evidence[0];
   const review = reviewsFixture.reviews[0];
   if (!evidence || !review) throw new Error("Fixtures must have source publications");
-  expect(EvidenceListResponseSchema.safeParse({
-    ...evidenceFixture, evidence: [evidence, evidence],
-  }).success).toBe(false);
-  expect(ReviewListResponseSchema.safeParse({
-    ...reviewsFixture, reviews: [review, review],
-  }).success).toBe(false);
+  expect(
+    EvidenceListResponseSchema.safeParse({
+      ...evidenceFixture,
+      evidence: [evidence, evidence],
+    }).success,
+  ).toBe(false);
+  expect(
+    ReviewListResponseSchema.safeParse({
+      ...reviewsFixture,
+      reviews: [review, review],
+    }).success,
+  ).toBe(false);
 });
 
 test("collection sources cannot be rebound to another problem or private target", () => {
@@ -100,13 +110,22 @@ test("collection sources cannot be rebound to another problem or private target"
     { publication: { ...evidence.publication, seq: 41 } },
     { publication: { ...evidence.publication, email: "private@example.invalid" } },
   ])
-    expect(EvidenceListResponseSchema.safeParse({
-      ...evidenceFixture, count: 1, evidence: [{ ...evidence, ...patch }],
-    }).success, JSON.stringify(patch)).toBe(false);
+    expect(
+      EvidenceListResponseSchema.safeParse({
+        ...evidenceFixture,
+        count: 1,
+        evidence: [{ ...evidence, ...patch }],
+      }).success,
+      JSON.stringify(patch),
+    ).toBe(false);
   for (const tier of [-1, 4, "T2", "unknown"])
-    expect(ReviewListResponseSchema.safeParse({
-      ...reviewsFixture, count: 1, reviews: [{ ...review, independence_tier: tier }],
-    }).success).toBe(false);
+    expect(
+      ReviewListResponseSchema.safeParse({
+        ...reviewsFixture,
+        count: 1,
+        reviews: [{ ...review, independence_tier: tier }],
+      }).success,
+    ).toBe(false);
 });
 
 test("upstream faces bind to the requested problem, snapshot and continuation", () => {

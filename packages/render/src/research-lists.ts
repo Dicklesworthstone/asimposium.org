@@ -123,31 +123,48 @@ function pageLinks(collection: Collection, format: "md" | "html") {
     },
     ...(face.next_after === null
       ? []
-      : [{
-          label: "Next publications at this snapshot",
-          url: path(face.problem_id, format, { through: face.cursor, after: face.next_after }),
-        }]),
+      : [
+          {
+            label: "Next publications at this snapshot",
+            url: path(face.problem_id, format, { through: face.cursor, after: face.next_after }),
+          },
+        ]),
     { label: "Start from the latest public snapshot", url: path(face.problem_id, format) },
   ];
 }
 
 function range(face: Face): string {
-  return "Public cursor: " + face.cursor + ". Publications after: " + face.after +
-    ". Scanned through: " + face.scanned_through + ". Readable records: " + face.count + ".";
+  return (
+    "Public cursor: " +
+    face.cursor +
+    ". Publications after: " +
+    face.after +
+    ". Scanned through: " +
+    face.scanned_through +
+    ". Readable records: " +
+    face.count +
+    "."
+  );
 }
 
 function markdown(collection: Collection): string {
   const { face, title, entries, segment } = collection;
   const lines = [
-    "<!-- asimp face=md schema=asimposium.research-lists.v1 problem=" + face.problem_id +
-      " cursor=" + face.cursor + " -->",
+    "<!-- asimp face=md schema=asimposium.research-lists.v1 problem=" +
+      face.problem_id +
+      " cursor=" +
+      face.cursor +
+      " -->",
     "",
     "# " + title + " — " + safeInlineProse(face.problem_id),
     "",
     RESEARCH_LIST_NOTICE,
     "",
     ...(segment === "reviews"
-      ? ["These are published reviews, including historical targets and withdrawals. Open review opportunities are listed separately at [/reviews.md](/reviews.md).", ""]
+      ? [
+          "These are published reviews, including historical targets and withdrawals. Open review opportunities are listed separately at [/reviews.md](/reviews.md).",
+          "",
+        ]
       : []),
     range(face),
     "",
@@ -163,18 +180,32 @@ function markdown(collection: Collection): string {
     }
     lines.push(
       "",
-      "[Exact source (current reader)](" + entry.read_url.replace(/\.json$/, ".md") +
-        ") · [Source JSON](" + entry.read_url + ")",
+      "[Exact source (current reader)](" +
+        entry.read_url.replace(/\.json$/, ".md") +
+        ") · [Source JSON](" +
+        entry.read_url +
+        ")",
       "",
     );
   }
   if (entries.length === 0)
-    lines.push("No readable records were returned in this range. Consult omissions and continuation; this is not proof that no publications exist.", "");
+    lines.push(
+      "No readable records were returned in this range. Consult omissions and continuation; this is not proof that no publications exist.",
+      "",
+    );
   if (face.omitted.length > 0)
-    lines.push("## Omissions and limits", "",
-      ...face.omitted.map((reason) => "- " + RESEARCH_LIST_OMISSIONS[reason]), "");
-  lines.push("## Continue reading", "",
-    ...pageLinks(collection, "md").map((link) => "[" + link.label + "](" + link.url + ")"), "");
+    lines.push(
+      "## Omissions and limits",
+      "",
+      ...face.omitted.map((reason) => "- " + RESEARCH_LIST_OMISSIONS[reason]),
+      "",
+    );
+  lines.push(
+    "## Continue reading",
+    "",
+    ...pageLinks(collection, "md").map((link) => "[" + link.label + "](" + link.url + ")"),
+    "",
+  );
   return lines.join("\n");
 }
 
@@ -189,7 +220,9 @@ function html(collection: Collection): string {
     "<h2>" + title + " — " + textHtml(face.problem_id) + "</h2>",
     "<p>" + RESEARCH_LIST_NOTICE + "</p>",
     ...(segment === "reviews"
-      ? ['<p>These are published reviews, including historical targets and withdrawals. <a href="/reviews.html">Open review opportunities</a> are listed separately.</p>']
+      ? [
+          '<p>These are published reviews, including historical targets and withdrawals. <a href="/reviews.html">Open review opportunities</a> are listed separately.</p>',
+        ]
       : []),
     "<p>" + range(face) + "</p>",
   ];
@@ -199,23 +232,35 @@ function html(collection: Collection): string {
       lines.push("<dt>" + label + "</dt><dd>" + textHtml(value) + "</dd>");
     lines.push("</dl>");
     if (entry.basis !== undefined)
-      lines.push("<h4>Authored basis (untrusted data)</h4><pre>" + textHtml(entry.basis) + "</pre>");
+      lines.push(
+        "<h4>Authored basis (untrusted data)</h4><pre>" + textHtml(entry.basis) + "</pre>",
+      );
     lines.push(
-      '<p><a href="' + escapeHtml(entry.read_url.replace(/\.json$/, ".md")) +
-        '">Exact source (current reader)</a> · <a href="' + escapeHtml(entry.read_url) +
+      '<p><a href="' +
+        escapeHtml(entry.read_url.replace(/\.json$/, ".md")) +
+        '">Exact source (current reader)</a> · <a href="' +
+        escapeHtml(entry.read_url) +
         '">Source JSON</a></p></article>',
     );
   }
   if (entries.length === 0)
-    lines.push("<p>No readable records were returned in this range. Consult omissions and continuation; this is not proof that no publications exist.</p>");
+    lines.push(
+      "<p>No readable records were returned in this range. Consult omissions and continuation; this is not proof that no publications exist.</p>",
+    );
   if (face.omitted.length > 0)
-    lines.push("<h3>Omissions and limits</h3><ul>" +
-      face.omitted.map((reason) => "<li>" + RESEARCH_LIST_OMISSIONS[reason] + "</li>").join("") +
-      "</ul>");
-  lines.push('<nav aria-label="' + title + ' pages">',
-    ...pageLinks(collection, "html").map((link) =>
-      '<p><a href="' + escapeHtml(link.url) + '">' + link.label + "</a></p>"),
-    "</nav></section>", "");
+    lines.push(
+      "<h3>Omissions and limits</h3><ul>" +
+        face.omitted.map((reason) => "<li>" + RESEARCH_LIST_OMISSIONS[reason] + "</li>").join("") +
+        "</ul>",
+    );
+  lines.push(
+    '<nav aria-label="' + title + ' pages">',
+    ...pageLinks(collection, "html").map(
+      (link) => '<p><a href="' + escapeHtml(link.url) + '">' + link.label + "</a></p>",
+    ),
+    "</nav></section>",
+    "",
+  );
   return lines.join("\n");
 }
 

@@ -8,10 +8,7 @@
       "scanned_through": 20,
       "next_after": 20,
       "count": 2,
-      "omitted": [
-        "content_unavailable",
-        "page_limit"
-      ],
+      "omitted": ["content_unavailable", "page_limit"],
       "evidence": [
         {
           "evidence_id": "E-1",
@@ -70,10 +67,7 @@
       "scanned_through": 20,
       "next_after": 20,
       "count": 2,
-      "omitted": [
-        "content_unavailable",
-        "page_limit"
-      ],
+      "omitted": ["content_unavailable", "page_limit"],
       "reviews": [
         {
           "review_id": "R-1",
@@ -137,10 +131,7 @@
       "scanned_through": 20,
       "next_after": 20,
       "count": 1,
-      "omitted": [
-        "content_unavailable",
-        "page_limit"
-      ],
+      "omitted": ["content_unavailable", "page_limit"],
       "evidence": [
         {
           "evidence_id": "E-1",
@@ -199,10 +190,7 @@
       "scanned_through": 20,
       "next_after": 0,
       "count": 2,
-      "omitted": [
-        "content_unavailable",
-        "page_limit"
-      ],
+      "omitted": ["content_unavailable", "page_limit"],
       "reviews": [
         {
           "review_id": "R-1",

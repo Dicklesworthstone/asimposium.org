@@ -188,7 +188,9 @@ test("all evidence remains traversable beyond 200 events at the captured cut", a
     expect(entries.every((entry) => !("computed_class" in entry) && !("standing" in entry))).toBe(
       true,
     );
-    expect((await loadEvidenceList(f.db, PROBLEM, { through: 209, after: 207 })).face.count).toBe(1);
+    expect((await loadEvidenceList(f.db, PROBLEM, { through: 209, after: 207 })).face.count).toBe(
+      1,
+    );
   } finally {
     f.sql.close();
   }
@@ -241,9 +243,7 @@ test("hidden or damaged hypothesis targets never disclose evidence affinity", as
     f.visible("H-1@1", "hidden");
     expect((await loadEvidenceList(f.db, PROBLEM)).face.evidence).toEqual([]);
     f.visible("H-1@1", "visible");
-    f.sql
-      .query("UPDATE event_content SET payload_json='{}' WHERE event_id='event-H-1-1'")
-      .run();
+    f.sql.query("UPDATE event_content SET payload_json='{}' WHERE event_id='event-H-1-1'").run();
     const broken = (await loadEvidenceList(f.db, PROBLEM)).face;
     expect(broken.evidence).toEqual([]);
     expect(broken.omitted).toContain("content_unavailable");
@@ -288,16 +288,17 @@ test("byte-limited pages preserve every valid publication within their transfer 
     // Each valid authored body has 65,536 characters but 196,608 UTF-8 bytes.
     // Eight individually readable records exceed one page without a ninth
     // lookahead, so the byte boundary itself must supply the continuation.
-    for (let n = 1; n <= 8; n++)
-      f.evidence(n, n % 2 === 0, { body_md: "界".repeat(64 * 1024) });
+    for (let n = 1; n <= 8; n++) f.evidence(n, n % 2 === 0, { body_md: "界".repeat(64 * 1024) });
     const assertTransferBudget = () => {
-      const bytes = f.transferred().reduce(
-        (total, row) =>
-          total +
-          Buffer.byteLength(typeof row.payload_json === "string" ? row.payload_json : "") +
-          Buffer.byteLength(typeof row.target_json === "string" ? row.target_json : ""),
-        0,
-      );
+      const bytes = f
+        .transferred()
+        .reduce(
+          (total, row) =>
+            total +
+            Buffer.byteLength(typeof row.payload_json === "string" ? row.payload_json : "") +
+            Buffer.byteLength(typeof row.target_json === "string" ? row.target_json : ""),
+          0,
+        );
       expect(bytes).toBeLessThanOrEqual(1024 * 1024);
     };
     const first = (await loadEvidenceList(f.db, PROBLEM)).face;
@@ -340,7 +341,10 @@ test("withdrawals are source-bound history, not deletion or a rewritten earlier 
   const f = fixture();
   try {
     const source = f.evidence(1, true);
-    const withdrawal = f.event("retraction", "RET-1", { target_object: "E-1", reason: "Correction" });
+    const withdrawal = f.event("retraction", "RET-1", {
+      target_object: "E-1",
+      reason: "Correction",
+    });
     f.sql
       .query("INSERT INTO scientific_withdrawals VALUES(?,?,?,?,?,'evidence','E-1',?,?)")
       .run(
@@ -352,9 +356,9 @@ test("withdrawals are source-bound history, not deletion or a rewritten earlier 
         source.eventId,
         source.digest,
       );
-    expect((await loadEvidenceList(f.db, PROBLEM, { through: 3 })).face.evidence[0]?.withdrawn).toBe(
-      false,
-    );
+    expect(
+      (await loadEvidenceList(f.db, PROBLEM, { through: 3 })).face.evidence[0]?.withdrawn,
+    ).toBe(false);
     expect((await loadEvidenceList(f.db, PROBLEM)).face.evidence[0]?.withdrawn).toBe(true);
     f.sql.query("UPDATE scientific_withdrawals SET source_sha256=?").run("0".repeat(64));
     expect((await loadEvidenceList(f.db, PROBLEM)).face.evidence[0]?.withdrawn).toBe(false);
@@ -483,7 +487,11 @@ test("current privacy is rechecked before a conditional reply and unlisted reads
 test("claim target identity follows the shared contract, including legacy zero identifiers", async () => {
   const f = fixture();
   try {
-    f.event("claim", "C-0", { claim_id: "C-0", kind: "definition", statement: "Legacy identifier." });
+    f.event("claim", "C-0", {
+      claim_id: "C-0",
+      kind: "definition",
+      statement: "Legacy identifier.",
+    });
     f.evidence(1, false, { bears_on_id: "C-0" });
     const face = (await loadEvidenceList(f.db, PROBLEM)).face;
     expect(face.evidence[0]?.bears_on).toEqual({ kind: "claim", id: "C-0", version: 1 });
@@ -494,27 +502,35 @@ test("claim target identity follows the shared contract, including legacy zero i
   }
 });
 
-test.each([1, 2])("claim version %s requires its matching creation or revision event type", async (version) => {
-  const f = fixture();
-  try {
-    if (version === 2)
-      f.event("claim", "C-1", {
-        claim_id: "C-1",
-        kind: "definition",
-        statement: "Second version.",
-        base_version: 1,
-      }, 2);
-    f.sql
-      .query("UPDATE events SET type=? WHERE object_id='C-1' AND object_version=?")
-      .run(version === 1 ? "claim.revised" : "claim.created", version);
-    f.evidence(1, false, { bears_on_version: version });
-    const face = (await loadEvidenceList(f.db, PROBLEM)).face;
-    expect(face.evidence).toEqual([]);
-    expect(face.omitted).toEqual(["content_unavailable"]);
-  } finally {
-    f.sql.close();
-  }
-});
+test.each([1, 2])(
+  "claim version %s requires its matching creation or revision event type",
+  async (version) => {
+    const f = fixture();
+    try {
+      if (version === 2)
+        f.event(
+          "claim",
+          "C-1",
+          {
+            claim_id: "C-1",
+            kind: "definition",
+            statement: "Second version.",
+            base_version: 1,
+          },
+          2,
+        );
+      f.sql
+        .query("UPDATE events SET type=? WHERE object_id='C-1' AND object_version=?")
+        .run(version === 1 ? "claim.revised" : "claim.created", version);
+      f.evidence(1, false, { bears_on_version: version });
+      const face = (await loadEvidenceList(f.db, PROBLEM)).face;
+      expect(face.evidence).toEqual([]);
+      expect(face.omitted).toEqual(["content_unavailable"]);
+    } finally {
+      f.sql.close();
+    }
+  },
+);
 
 test.each(["event-E-1-1", "event-C-1-1"])(
   "duplicate immutable admission %s is withheld without poisoning unrelated evidence",
@@ -524,10 +540,14 @@ test.each(["event-E-1-1", "event-C-1-1"])(
       f.evidence(1);
       f.evidence(2, true);
       f.sql
-        .query("INSERT INTO events SELECT id || '-duplicate',problem_id,5,type,object_kind,object_id,object_version,created_at,payload_sha256,actor_fellow_id,actor_sponsor_id,actor_session_id,model_string_self_declared,harness FROM events WHERE id=?")
+        .query(
+          "INSERT INTO events SELECT id || '-duplicate',problem_id,5,type,object_kind,object_id,object_version,created_at,payload_sha256,actor_fellow_id,actor_sponsor_id,actor_session_id,model_string_self_declared,harness FROM events WHERE id=?",
+        )
         .run(sourceId);
       f.sql
-        .query("INSERT INTO event_content SELECT event_id || '-duplicate',payload_sha256,payload_json,redacted_at FROM event_content WHERE event_id=?")
+        .query(
+          "INSERT INTO event_content SELECT event_id || '-duplicate',payload_sha256,payload_json,redacted_at FROM event_content WHERE event_id=?",
+        )
         .run(sourceId);
       f.sql.query("UPDATE problems SET public_seq=5").run();
       const face = (await loadEvidenceList(f.db, PROBLEM)).face;

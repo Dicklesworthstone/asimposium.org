@@ -19,7 +19,6 @@ import { generateFormalRecordsSchema } from "../../src/formal-records.ts";
 import { generateFrictionSchema } from "../../src/formalization-friction.ts";
 import { generateHypothesesSchema } from "../../src/hypotheses-schema.ts";
 import { generateReportsSchema } from "../../src/moderation.ts";
-import { generateResearchListsSchema } from "../../src/research-lists.ts";
 import { generateProofGapsSchema } from "../../src/proof-gaps-schema.ts";
 import {
   getPublicSchema,
@@ -30,6 +29,7 @@ import {
   PUBLIC_SCHEMA_EXCLUSIONS,
   PUBLIC_SCHEMA_IDS,
 } from "../../src/public-schemas.ts";
+import { generateResearchListsSchema } from "../../src/research-lists.ts";
 import { generateReviewRequestsSchema } from "../../src/review-requests-artifact.ts";
 import { generateScientificWithdrawalsSchema } from "../../src/scientific-withdrawals.ts";
 import { generateSponsorActivitySchema } from "../../src/sponsor-activity.ts";

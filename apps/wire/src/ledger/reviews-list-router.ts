@@ -18,7 +18,8 @@ function refusal(kind: "query" | "not-found" | "unavailable", method: string): R
           title: "Invalid completed review collection query",
           detail:
             "Use one canonical nonnegative through cursor and optional after sequence. after requires through and cannot exceed it. Unknown parameters and future cursors are refused.",
-          fixHint: "Follow the next link unchanged, or omit both parameters to start a current page.",
+          fixHint:
+            "Follow the next link unchanged, or omit both parameters to start a current page.",
           rule: "A5",
           extensions: {
             schema: RESEARCH_LISTS_SCHEMA_ID,

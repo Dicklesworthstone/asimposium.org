@@ -1,11 +1,15 @@
 /** Complete evidence and completed-review directories share a frozen problem cursor. */
 export const RESEARCH_LIST_PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
-  "GET /p/:id/evidence": "Redirect to the canonical evidence directory, preserving its snapshot and continuation.",
-  "GET /p/:id/evidence.json": "Public evidence publications, exact targets and immutable attribution at one snapshot (JSON).",
+  "GET /p/:id/evidence":
+    "Redirect to the canonical evidence directory, preserving its snapshot and continuation.",
+  "GET /p/:id/evidence.json":
+    "Public evidence publications, exact targets and immutable attribution at one snapshot (JSON).",
   "GET /p/:id/evidence.md": "Public evidence publications with bounded continuation (Markdown).",
   "GET /p/:id/evidence.html": "Public evidence publications with bounded continuation (HTML).",
-  "GET /p/:id/reviews": "Redirect to the canonical completed-review directory, preserving its snapshot and continuation.",
-  "GET /p/:id/reviews.json": "Completed public reviews with exact claim versions and publication-time independence (JSON).",
+  "GET /p/:id/reviews":
+    "Redirect to the canonical completed-review directory, preserving its snapshot and continuation.",
+  "GET /p/:id/reviews.json":
+    "Completed public reviews with exact claim versions and publication-time independence (JSON).",
   "GET /p/:id/reviews.md": "Completed public reviews with bounded continuation (Markdown).",
   "GET /p/:id/reviews.html": "Completed public reviews with bounded continuation (HTML).",
 });
@@ -73,7 +77,8 @@ export function researchListResponses(
           schema: { type: "string" },
         },
         Link: {
-          description: "Schema, canonical and optional next-page URLs. Follow continuations unchanged.",
+          description:
+            "Schema, canonical and optional next-page URLs. Follow continuations unchanged.",
           schema: { type: "string" },
         },
       },

@@ -3,10 +3,10 @@ import {
   EnrollmentHelloResponseSchema,
   InboxResponseSchema,
   PackResponseSchema,
-  ReviewListResponseSchema,
   ReviewResponseSchema,
   TriageResponseSchema,
 } from "@asimposium/contracts";
+import { ReviewListResponseSchema } from "@asimposium/contracts/research-lists";
 import { faceCensus } from "./face-census.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
@@ -438,13 +438,19 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(initialCollection.count, 4);
   assert.equal(initialCollection.next_after, null);
   for (const submitted of [revT0, revT1, revT2, revNoWeight]) {
-    const entry = initialCollection.reviews.find((review) => review.review_id === submitted.review_id);
+    const entry = initialCollection.reviews.find(
+      (review) => review.review_id === submitted.review_id,
+    );
     assert.ok(entry, "every completed review is discoverable, including assertion-only feedback");
     assert.deepEqual(entry.target, { claim_id: claimId, version: 1 });
     assert.equal(entry.independence_tier, Number(submitted.tier.slice(1)));
     assert.equal(entry.withdrawn, false);
     assert.equal(entry.read_url, `/p/${problemId}/reviews/${submitted.review_id}.json`);
-    assert.equal(entry.read_url.includes("?"), false, "exact review readers do not take a list cursor");
+    assert.equal(
+      entry.read_url.includes("?"),
+      false,
+      "exact review readers do not take a list cursor",
+    );
   }
   assert.equal(JSON.stringify(initialCollection).includes(privateWorkshopNotes), false);
   const cachedCollection = await context.worker.fetch(`${context.origin}${pinnedCollectionPath}`, {

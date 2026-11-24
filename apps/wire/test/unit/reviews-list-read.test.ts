@@ -148,8 +148,7 @@ test("a raw payload budget defers readable reviews without losing their continua
     // Each body satisfies the authored review's 64Ki-character limit and the
     // single-source byte cap. Together these eight publications exceed 1MiB.
     const body = "界".repeat(64 * 1024);
-    for (let i = 1; i <= 8; i++)
-      await appendReviewsListFixture(db, PROBLEM, i, { body_md: body });
+    for (let i = 1; i <= 8; i++) await appendReviewsListFixture(db, PROBLEM, i, { body_md: body });
     const first = (await loadReviewsList(db, PROBLEM)).face;
     expect(first).toMatchObject({ count: 5, cursor: 9, scanned_through: 6, next_after: 6 });
     expect(first.omitted).toEqual(["page_limit"]);

@@ -211,8 +211,7 @@ export async function loadReviewsList(
     if (head.cursor > head.public_seq || after > head.cursor)
       throw new ReviewsListReadError("query");
     const rows = result[1]?.results as unknown as Source[];
-    if (rows.length > RESEARCH_LIST_PAGE_SIZE + 1)
-      throw new ReviewsListReadError("unavailable");
+    if (rows.length > RESEARCH_LIST_PAGE_SIZE + 1) throw new ReviewsListReadError("unavailable");
     return { head, rows };
   };
   const { head, rows } = await snapshot(query.through ?? null);

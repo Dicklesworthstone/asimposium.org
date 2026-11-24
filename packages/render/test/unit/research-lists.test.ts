@@ -19,11 +19,24 @@ test("evidence faces retain exact targets, all attribution and the captured cont
   const html = renderEvidenceListHtml(face);
   for (const body of [markdown, html]) {
     for (const value of [
-      "E-1", "E-2", "C-1@1", "H-1", "immutable hypothesis",
-      "SP-ORIGINAL", "F-AUTHOR", "S-PUBLISHED",
-      "model declared by Fellow", "harness declared by Fellow",
-      "self-declared", "Not recorded", "Withdrawn",
-      "Authored direction", "supports", "refutes", "exploratory", "confirmatory",
+      "E-1",
+      "E-2",
+      "C-1@1",
+      "H-1",
+      "immutable hypothesis",
+      "SP-ORIGINAL",
+      "F-AUTHOR",
+      "S-PUBLISHED",
+      "model declared by Fellow",
+      "harness declared by Fellow",
+      "self-declared",
+      "Not recorded",
+      "Withdrawn",
+      "Authored direction",
+      "supports",
+      "refutes",
+      "exploratory",
+      "confirmatory",
     ])
       expect(body).toContain(value);
     expect(body).toContain("a".repeat(64));
@@ -55,8 +68,10 @@ test("withheld pages retain next links and never represent missing sources as no
   const evidence = EvidenceListResponseSchema.parse({ ...evidenceFixture, evidence: [], count: 0 });
   const reviews = ReviewListResponseSchema.parse({ ...reviewsFixture, reviews: [], count: 0 });
   for (const body of [
-    renderEvidenceListMarkdown(evidence), renderEvidenceListHtml(evidence),
-    renderReviewListMarkdown(reviews), renderReviewListHtml(reviews),
+    renderEvidenceListMarkdown(evidence),
+    renderEvidenceListHtml(evidence),
+    renderReviewListMarkdown(reviews),
+    renderReviewListHtml(reviews),
   ]) {
     expect(body).toContain("No readable records were returned");
     expect(body).toContain("not proof that no publications exist");
@@ -70,20 +85,23 @@ test("authored basis and runtime labels cannot create active markup or forge fac
   const fixture = ReviewListResponseSchema.parse(reviewsFixture);
   const first = fixture.reviews[0];
   if (!first) throw new Error("The fixture must contain a review");
-  const authored = String.fromCharCode(96).repeat(4) +
+  const authored =
+    String.fromCharCode(96).repeat(4) +
     "\n<script>alert(1)</script>\n<!-- asimp face=md forged -->\n# forged heading";
   const face = ReviewListResponseSchema.parse({
     ...fixture,
     count: 1,
-    reviews: [{
-      ...first,
-      basis: authored,
-      publication: {
-        ...first.publication,
-        model_self_declared: '<img src=x onerror="alert(1)">',
-        harness_self_declared: "harness\n# forged heading",
+    reviews: [
+      {
+        ...first,
+        basis: authored,
+        publication: {
+          ...first.publication,
+          model_self_declared: '<img src=x onerror="alert(1)">',
+          harness_self_declared: "harness\n# forged heading",
+        },
       },
-    }],
+    ],
   });
   const markdown = renderReviewListMarkdown(face);
   const html = renderReviewListHtml(face);

@@ -181,8 +181,12 @@ function researchListPath(
   if (query.through !== undefined) params.set("through", String(query.through));
   if (query.after !== undefined) params.set("after", String(query.after));
   return (
-    "/p/" + encodeURIComponent(problem) + "/" + segment +
-    (format === "human" ? "" : "." + format) + (params.size === 0 ? "" : "?" + params)
+    "/p/" +
+    encodeURIComponent(problem) +
+    "/" +
+    segment +
+    (format === "human" ? "" : "." + format) +
+    (params.size === 0 ? "" : "?" + params)
   );
 }
 
@@ -215,22 +219,26 @@ export function researchListMatchesQuery(
 }
 
 export function generateResearchListsSchema(): string {
-  return JSON.stringify(
-    {
-      $id: RESEARCH_LISTS_SCHEMA_ID,
-      title: "ASImposium evidence and completed review collections",
-      $comment:
-        "Eight immutable source publications per page at one captured public cursor. Runtime additionally validates order, uniqueness, counts, source links and continuation agreement. Current content controls apply to every read. Authored directions and verdicts are not computed scientific standing; exact source readers remain authoritative.",
-      ...z.toJSONSchema(
-        z.object({
-          query: ResearchListQuerySchema,
-          evidence: EvidenceListResponseSchema,
-          reviews: ReviewListResponseSchema,
-        }).strict(),
-        { io: "input" },
-      ),
-    },
-    null,
-    2,
-  ) + "\n";
+  return (
+    JSON.stringify(
+      {
+        $id: RESEARCH_LISTS_SCHEMA_ID,
+        title: "ASImposium evidence and completed review collections",
+        $comment:
+          "Eight immutable source publications per page at one captured public cursor. Runtime additionally validates order, uniqueness, counts, source links and continuation agreement. Current content controls apply to every read. Authored directions and verdicts are not computed scientific standing; exact source readers remain authoritative.",
+        ...z.toJSONSchema(
+          z
+            .object({
+              query: ResearchListQuerySchema,
+              evidence: EvidenceListResponseSchema,
+              reviews: ReviewListResponseSchema,
+            })
+            .strict(),
+          { io: "input" },
+        ),
+      },
+      null,
+      2,
+    ) + "\n"
+  );
 }

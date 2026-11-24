@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
-import {
-  ContractProblemSchema,
-  HypothesisEvidenceItemResponseSchema,
-} from "@asimposium/contracts";
+import { ContractProblemSchema, HypothesisEvidenceItemResponseSchema } from "@asimposium/contracts";
 import { EvidenceListResponseSchema } from "@asimposium/contracts/research-lists";
 import { ensureProblem } from "../../src/krater/krater.ts";
 import { appendClaimsListFixture } from "../support/claims-list-fixture.ts";
@@ -22,8 +19,9 @@ const directory = "/p/" + problem + "/evidence";
 // fixtures. This proves inventory reads, not screening or scientific admission.
 async function evidenceListJourney({ call, worker, env, origin, userAgent }) {
   await ensureProblem(env.DB, problem, EVIDENCE_LIST_TIME);
-  await env.DB
-    .prepare("UPDATE problems SET title='Evidence history fixture',status='active' WHERE id=?")
+  await env.DB.prepare(
+    "UPDATE problems SET title='Evidence history fixture',status='active' WHERE id=?",
+  )
     .bind(problem)
     .run();
   await appendClaimsListFixture(env.DB, problem, 1);
@@ -54,17 +52,31 @@ async function evidenceListJourney({ call, worker, env, origin, userAgent }) {
   assert.equal(pinned, directory + ".json?through=207&after=0");
   assert.ok(etag);
   assert.ok(
-    firstResponse.headers.get("link").includes(directory + '.json?through=207&after=10>; rel="next"'),
+    firstResponse.headers
+      .get("link")
+      .includes(directory + '.json?through=207&after=10>; rel="next"'),
   );
   assert.deepEqual(first.evidence[0].bears_on, { kind: "claim", id: "C-1", version: 1 });
   assert.deepEqual(first.evidence[1].bears_on, { kind: "hypothesis", id: "H-1" });
   assert.equal(first.evidence[0].publication.fellow_id, EVIDENCE_LIST_ATTRIBUTION.fellowId);
   assert.equal(first.evidence[0].publication.sponsor_id, EVIDENCE_LIST_ATTRIBUTION.sponsorId);
   assert.equal(first.evidence[0].publication.session_id, EVIDENCE_LIST_ATTRIBUTION.sessionId);
-  assert.equal(first.evidence[0].publication.model_self_declared, EVIDENCE_LIST_ATTRIBUTION.modelSelfDeclared);
-  assert.equal(first.evidence[0].publication.harness_self_declared, EVIDENCE_LIST_ATTRIBUTION.harness);
-  assert.ok(first.evidence.every((entry) => entry.kind === "negative-result" && entry.mode === "exploratory"));
-  assert.ok(first.evidence.every((entry) => !("computed_class" in entry) && !("standing" in entry)));
+  assert.equal(
+    first.evidence[0].publication.model_self_declared,
+    EVIDENCE_LIST_ATTRIBUTION.modelSelfDeclared,
+  );
+  assert.equal(
+    first.evidence[0].publication.harness_self_declared,
+    EVIDENCE_LIST_ATTRIBUTION.harness,
+  );
+  assert.ok(
+    first.evidence.every(
+      (entry) => entry.kind === "negative-result" && entry.mode === "exploratory",
+    ),
+  );
+  assert.ok(
+    first.evidence.every((entry) => !("computed_class" in entry) && !("standing" in entry)),
+  );
 
   const exact = HypothesisEvidenceItemResponseSchema.parse(await call(first.evidence[1].read_url));
   assert.equal(exact.evidence_id, first.evidence[1].evidence_id);
@@ -100,7 +112,10 @@ async function evidenceListJourney({ call, worker, env, origin, userAgent }) {
   const later = EvidenceListResponseSchema.parse(
     await call(directory + ".json?through=209&after=207"),
   );
-  assert.deepEqual(later.evidence.map((entry) => entry.evidence_id), ["E-206"]);
+  assert.deepEqual(
+    later.evidence.map((entry) => entry.evidence_id),
+    ["E-206"],
+  );
 
   for (const format of ["json", "md", "html"]) {
     const path = directory + "." + format + "?through=207&after=0";
@@ -108,7 +123,9 @@ async function evidenceListJourney({ call, worker, env, origin, userAgent }) {
     assert.equal(response.status, 200);
     const body = await response.text();
     assert.ok(body.includes("E-1"));
-    assert.ok(response.headers.get("link").includes(directory + "." + format + "?through=207&after=10"));
+    assert.ok(
+      response.headers.get("link").includes(directory + "." + format + "?through=207&after=10"),
+    );
     const head = await fetch(path, { method: "HEAD" });
     assert.equal(head.status, 200);
     assert.equal(await head.text(), "");
@@ -118,7 +135,14 @@ async function evidenceListJourney({ call, worker, env, origin, userAgent }) {
     });
     assert.equal(conditional.status, 304);
   }
-  for (const query of ["?after=0", "?through=999", "?through=207&after=208", "?through=0207", "?through=207&through=207", "?through=207&unknown=1"]) {
+  for (const query of [
+    "?after=0",
+    "?through=999",
+    "?through=207&after=208",
+    "?through=0207",
+    "?through=207&through=207",
+    "?through=207&unknown=1",
+  ]) {
     const response = await fetch(directory + ".json" + query);
     assert.equal(response.status, 400);
     assert.equal(ContractProblemSchema.parse(await response.json()).code, "CURSOR_INVALID");
@@ -130,9 +154,18 @@ async function evidenceListJourney({ call, worker, env, origin, userAgent }) {
   async function control(kind, target, visibility) {
     const version = (versions.get(target) ?? 0) + 1;
     versions.set(target, version);
-    await env.DB
-      .prepare("INSERT INTO content_controls (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,actor,reason,version,created_at) VALUES(?,?,?,?,?,'operator','privacy','operator','Inventory read fixture.',?,?)")
-      .bind("CC-EVIDENCE-" + ++controlSerial, problem, kind, target, visibility, version, EVIDENCE_LIST_TIME)
+    await env.DB.prepare(
+      "INSERT INTO content_controls (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,actor,reason,version,created_at) VALUES(?,?,?,?,?,'operator','privacy','operator','Inventory read fixture.',?,?)",
+    )
+      .bind(
+        "CC-EVIDENCE-" + ++controlSerial,
+        problem,
+        kind,
+        target,
+        visibility,
+        version,
+        EVIDENCE_LIST_TIME,
+      )
       .run();
   }
   await control("evidence", "E-1", "hidden");
