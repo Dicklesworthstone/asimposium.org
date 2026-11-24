@@ -2029,6 +2029,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
         untrusted: item.untrusted,
         body: item.body,
         why_included: item.why_included,
+        ...(item.screening_notice === undefined ? {} : { screening_notice: item.screening_notice }),
       })),
       omitted: [
         ...section.omitted,

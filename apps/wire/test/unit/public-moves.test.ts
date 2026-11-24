@@ -454,7 +454,7 @@ test("public synthesis uses the canonical 200-event threshold and pins its read 
   f.sqlite.query("UPDATE problems SET public_seq=200 WHERE id='P-DEMO'").run();
   const due = await read();
   expect(due?.primary_move?.move).toBe("synthesize");
-  expect(due?.primary_move?.contract.prefilled_hints?.covers_through).toBe(200);
+  expect(due?.primary_move?.contract.prefilled_hints).toMatchObject({ covers_through: 200 });
   expect(due?.primary_move?.contract.preparation).toMatchObject({
     captured_cursor: 200,
     read_first: { path: "/p/P-DEMO/full.md?through=200" },

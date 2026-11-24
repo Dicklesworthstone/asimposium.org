@@ -1,5 +1,7 @@
+import type { ScreeningPublicationNotice } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { hiddenByContentControlSql } from "../krater/public-content.ts";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 import {
   type ClaimRelationKindName,
   isClaimRelationKind,
@@ -29,12 +31,15 @@ export interface ReadClaimRelation {
   readonly pins: "current" | "superseded" | "unavailable";
   readonly status: "asserted" | "disputed" | "unavailable";
   readonly provenance: RelationProvenance;
+  /** The assertion's exact publication, never a qualification of its dispute. */
+  readonly screening_notice?: ScreeningPublicationNotice;
   readonly dispute?: {
     readonly event: string;
     readonly seq: number;
     readonly reason: string;
     readonly refuting_evidence_id: string | null;
     readonly provenance: RelationProvenance;
+    readonly screening_notice?: ScreeningPublicationNotice;
   };
 }
 export interface ClaimRelationsRead {
@@ -145,13 +150,21 @@ SELECT s.id AS scope_id, s.cut AS through, b.id AS event_id, b.seq, b.object_id,
     AND b.cumulative_bytes - COALESCE(b.dispute_bytes, 0) <= ${CLAIM_RELATION_TOTAL_BYTES}
     THEN c.payload_json END AS payload_json,
   CASE WHEN b.dispute_bytes IS NOT NULL AND b.cumulative_bytes <= ${CLAIM_RELATION_TOTAL_BYTES}
-    THEN dc.payload_json END AS dispute_json
+    THEN dc.payload_json END AS dispute_json,
+  CASE WHEN b.ordinal <= ${CLAIM_RELATION_READ_LIMIT} AND screening.event_id IS NOT NULL
+    THEN CASE WHEN length(CAST(screening.provenance_json AS BLOB)) <= 4096
+      THEN screening.provenance_json ELSE '' END END AS screening_provenance_json,
+  CASE WHEN b.ordinal <= ${CLAIM_RELATION_READ_LIMIT} AND dispute_screening.event_id IS NOT NULL
+    THEN CASE WHEN length(CAST(dispute_screening.provenance_json AS BLOB)) <= 4096
+      THEN dispute_screening.provenance_json ELSE '' END END AS dispute_screening_provenance_json
 FROM scope s LEFT JOIN budgeted b ON b.problem_id = s.id
 LEFT JOIN event_content c ON c.event_id = b.id AND c.payload_sha256 = b.payload_sha256
   AND b.assertion_bytes IS NOT NULL
   AND b.cumulative_bytes - COALESCE(b.dispute_bytes, 0) <= ${CLAIM_RELATION_TOTAL_BYTES}
 LEFT JOIN event_content dc ON dc.event_id = b.dispute_id AND dc.payload_sha256 = b.dispute_sha256
   AND b.dispute_bytes IS NOT NULL AND b.cumulative_bytes <= ${CLAIM_RELATION_TOTAL_BYTES}
+LEFT JOIN screening_publications screening ON screening.event_id = b.id
+LEFT JOIN screening_publications dispute_screening ON dispute_screening.event_id = b.dispute_id
 ORDER BY b.ordinal`;
 
 interface RelationRow {
@@ -164,6 +177,7 @@ interface RelationRow {
   object_version: number;
   payload_sha256: string;
   payload_json: string | null;
+  screening_provenance_json: string | null;
   visible: number;
   assertion_count: number;
   source_head: number | null;
@@ -180,6 +194,7 @@ interface RelationRow {
   dispute_version: number;
   dispute_sha256: string;
   dispute_json: string | null;
+  dispute_screening_provenance_json: string | null;
   extra_dispute: number;
   dispute_fellow: string | null;
   dispute_sponsor: string | null;
@@ -323,6 +338,9 @@ export async function readClaimRelations(
       });
       continue;
     }
+    // Receipts qualify only readable, hash-verified publications. In particular,
+    // a later dispute never supplies or replaces the assertion's notice.
+    const screeningNotice = publicationScreeningNotice(row.screening_provenance_json);
     const pins =
       row.source_available !== 1 ||
       row.target_available !== 1 ||
@@ -367,6 +385,7 @@ export async function readClaimRelations(
               payload.refuting_evidence_id))
       ) {
         status = "disputed";
+        const disputeNotice = publicationScreeningNotice(row.dispute_screening_provenance_json);
         dispute = {
           event: row.dispute_id,
           seq: row.dispute_seq,
@@ -380,6 +399,7 @@ export async function readClaimRelations(
             model_self_declared: row.dispute_model,
             harness_self_declared: row.dispute_harness,
           },
+          ...(disputeNotice === undefined ? {} : { screening_notice: disputeNotice }),
         };
       } else
         output.omitted.push({
@@ -402,6 +422,7 @@ export async function readClaimRelations(
         model_self_declared: row.model,
         harness_self_declared: row.harness,
       },
+      ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
       ...(dispute ? { dispute } : {}),
     });
   }

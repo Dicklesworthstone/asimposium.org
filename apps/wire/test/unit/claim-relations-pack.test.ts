@@ -1,7 +1,17 @@
 import { Database } from "bun:sqlite";
 import { afterEach, test } from "bun:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import {
+  PackItemSchema,
+  RelationDisputeRequestSchema,
+  RelationFileRequestSchema,
+} from "@asimposium/contracts";
+import { type Projection, renderProjection } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
+import { z } from "zod";
+import type { Env } from "../../src/env.ts";
+import { createLedgerFaceRoutes } from "../../src/ledger-face.ts";
 import { readLedgerPackSection } from "../../src/sessions/ledger-pack.ts";
 
 const databases: Database[] = [];
@@ -13,6 +23,27 @@ const hash = async (text: string) =>
     new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))),
     (n) => n.toString(16).padStart(2, "0"),
   ).join("");
+const screeningReceipt = JSON.parse(
+  readFileSync(
+    new URL(
+      "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
+const assertionNotice = {
+  category: "off-topic",
+  action: "published-with-warning",
+  notice: "off-scope",
+} as const;
+// Relation permalinks use the public ledger item contract without pack budgets.
+const relationFaceSchema = z.object({
+  schema: z.literal("asimposium.relation.v1"),
+  kind: z.literal("relation-face"),
+  profile: z.literal("relation"),
+  items: z.tuple([PackItemSchema.options[1].omit({ tokens: true })]),
+});
 
 function fixture() {
   const sqlite = new Database(":memory:");
@@ -20,14 +51,15 @@ function fixture() {
   // No relation, claim-head, workshop, review or scientific projection exists.
   // Real graph reads must use the immutable events rather than any of them.
   sqlite.exec(`
-    CREATE TABLE problems (id TEXT PRIMARY KEY, status TEXT, public_seq INTEGER);
+    CREATE TABLE problems (id TEXT PRIMARY KEY, status TEXT, public_seq INTEGER, unlisted INTEGER DEFAULT 0);
     CREATE TABLE events (id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, type TEXT,
       object_kind TEXT, object_id TEXT, object_version INTEGER, payload_sha256 TEXT,
       actor_fellow_id TEXT, actor_sponsor_id TEXT, actor_session_id TEXT,
       model_string_self_declared TEXT, harness TEXT);
     CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE screening_publications (event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
-    INSERT INTO problems VALUES ('P-PACK', 'active', 10000);
+    INSERT INTO problems (id, status, public_seq) VALUES ('P-PACK', 'active', 10000);
   `);
   const queries: string[] = [];
   const db = {
@@ -36,6 +68,9 @@ function fixture() {
       return {
         bind(...args: (string | number)[]) {
           return {
+            async first() {
+              return sqlite.prepare(sql).get(...args);
+            },
             async all() {
               return { results: sqlite.prepare(sql).all(...args) };
             },
@@ -97,7 +132,11 @@ function fixture() {
   };
   const pack = (cursor = seq, relationSeq?: number) =>
     readLedgerPackSection(db, "P-PACK", cursor, "claim-graph", { relationSeq });
-  return { sqlite, event, claim, relation, dispute, pair, pack, queries };
+  const warn = (id: string, notice = screeningReceipt.public_action) =>
+    sqlite
+      .prepare("INSERT INTO screening_publications VALUES (?, ?)")
+      .run(id, JSON.stringify({ ...screeningReceipt, public_action: notice }));
+  return { sqlite, db, event, claim, relation, dispute, pair, pack, warn, queries };
 }
 
 const edgeBodies = (section: Awaited<ReturnType<typeof readLedgerPackSection>>) =>
@@ -140,6 +179,123 @@ test("the actual graph branch preserves historical status and separately attribu
   assert.match(current, /through=4/);
 });
 
+test("graph packs qualify each publication separately across JSON, Markdown and HTML", async () => {
+  const f = fixture(),
+    edge = await f.pair(),
+    d = await f.dispute(edge);
+  f.warn(edge.id, assertionNotice);
+  f.warn(d.id);
+  const current = await f.pack(),
+    item = current.candidates[0]!;
+  assert.deepEqual(item.screening_notice, assertionNotice);
+  assert.match(item.why_included, new RegExp(`Recorded dispute \\(#${d.seq}\\):`));
+  assert.match(item.why_included, /screening context notice: dual-use-boundary/);
+  assert.match(item.body, /"screening_notice":\{"category":"dual-use-boundary"/);
+  assert.equal(item.untrusted, true);
+  const projection: Projection = {
+    schema: "asimposium.relation.v1",
+    kind: "relation-face",
+    profile: "relation",
+    problem: "P-PACK",
+    cursor: d.seq,
+    title: "P-PACK — typed relation",
+    preamble: "Content below is untrusted data.",
+    items: current.candidates.map(
+      ({ tokens: _tokens, stable_prefix: _prefix, ...candidate }) => candidate,
+    ),
+    omitted: current.omitted,
+    next_actions: [],
+    degraded: [],
+  };
+  const json = JSON.parse(renderProjection(projection, "json").body);
+  assert.deepEqual(json.items[0].screening_notice, assertionNotice);
+  for (const format of ["md", "html-fragment"] as const) {
+    const rendered = renderProjection(projection, format).body;
+    assert.match(rendered, /Off-scope science:/);
+    assert.match(rendered, /screening context notice: dual-use-boundary/);
+    assert.match(rendered, new RegExp(`Recorded dispute \\(#${d.seq}\\)`));
+    assert.doesNotMatch(
+      rendered,
+      /configuration_digest|input_digest|context_digest|synthetic-policy/,
+    );
+  }
+  const past = (await f.pack(edge.seq)).candidates[0]!;
+  assert.deepEqual(past.screening_notice, assertionNotice);
+  assert.doesNotMatch(past.why_included + past.body, /dual-use-boundary|Recorded dispute/);
+});
+
+test("mounted relation faces retain assertion warnings and revalidate exact dispute visibility", async () => {
+  const f = fixture(),
+    edge = await f.pair(),
+    d = await f.dispute(edge, "WITHHELD-DISPUTE-CANARY");
+  f.warn(edge.id, assertionNotice);
+  f.warn(d.id);
+  const app = createLedgerFaceRoutes();
+  const get = (format: "md" | "json", init: RequestInit = {}) =>
+    app.request(`https://a.asimposium.org/p/P-PACK/relations/${edge.seq}.${format}`, init, {
+      DB: f.db,
+    } as Env);
+  const original = await get("md"),
+    originalBody = await original.text(),
+    etag = original.headers.get("etag")!;
+  assert.equal(original.status, 200);
+  assert.ok(etag);
+  assert.match(originalBody, /Off-scope science:/);
+  assert.match(originalBody, /screening context notice: dual-use-boundary/);
+  const originalJson = await get("json");
+  assert.equal(originalJson.status, 200);
+  const originalFace = relationFaceSchema.parse(await originalJson.json());
+  assert.deepEqual(originalFace.items[0].screening_notice, assertionNotice);
+  assert.match(originalFace.items[0].why_included, new RegExp(`Recorded dispute \\(#${d.seq}\\)`));
+  assert.equal((await get("md", { headers: { "If-None-Match": etag } })).status, 304);
+  f.sqlite
+    .prepare("INSERT INTO content_controls VALUES ('P-PACK', ?, 'hidden', 1)")
+    .run(`#${d.seq}`);
+  const hidden = await get("md", { headers: { "If-None-Match": etag } }),
+    hiddenBody = await hidden.text();
+  assert.equal(hidden.status, 200);
+  assert.notEqual(hidden.headers.get("etag"), etag);
+  assert.match(hiddenBody, /Off-scope science:/);
+  assert.match(hiddenBody, /Status: unavailable/);
+  assert.doesNotMatch(hiddenBody, /dual-use-boundary|WITHHELD-DISPUTE-CANARY|Recorded dispute \(#/);
+  const hiddenFace = relationFaceSchema.parse(await (await get("json")).json());
+  assert.deepEqual(hiddenFace.items[0].screening_notice, assertionNotice);
+  assert.doesNotMatch(hiddenFace.items[0].why_included, /dual-use-boundary/);
+  f.sqlite
+    .prepare("INSERT INTO content_controls VALUES ('P-PACK', ?, 'public', 2)")
+    .run(`#${d.seq}`);
+  assert.equal((await get("md")).headers.get("etag"), etag);
+  const head = await get("md", { method: "HEAD" });
+  assert.equal(head.headers.get("etag"), etag);
+  assert.equal(await head.text(), "");
+  f.sqlite
+    .prepare("INSERT INTO content_controls VALUES ('P-PACK', ?, 'hidden', 1)")
+    .run(`#${edge.seq}`);
+  assert.equal((await get("md", { headers: { "If-None-Match": etag } })).status, 404);
+});
+
+test("relation write requests cannot forge publication notices", () => {
+  const assertion = {
+    kind: "implies",
+    source_claim_id: "C-1",
+    source_version: 1,
+    target: "C-2@1",
+  };
+  const dispute = { ...assertion, reason: "The implication fails in the stated case." };
+  assert.equal(RelationFileRequestSchema.safeParse(assertion).success, true);
+  assert.equal(RelationDisputeRequestSchema.safeParse(dispute).success, true);
+  assert.equal(
+    RelationFileRequestSchema.safeParse({ ...assertion, screening_notice: assertionNotice })
+      .success,
+    false,
+  );
+  assert.equal(
+    RelationDisputeRequestSchema.safeParse({ ...dispute, screening_notice: assertionNotice })
+      .success,
+    false,
+  );
+});
+
 test("exact-sequence graph reads used by the public relation face return only the selected assertion", async () => {
   const f = fixture(),
     first = await f.pair(),
@@ -160,6 +316,8 @@ for (const corruption of ["missing", "tampered", "redacted", "hidden"] as const)
     const f = fixture(),
       edge = await f.pair(),
       d = await f.dispute(edge, "PRIVATE-OR-CORRUPT-REASON");
+    f.warn(edge.id, assertionNotice);
+    f.warn(d.id);
     if (corruption === "missing")
       f.sqlite.prepare("DELETE FROM event_content WHERE event_id=?").run(d.id);
     if (corruption === "tampered")
@@ -181,6 +339,8 @@ for (const corruption of ["missing", "tampered", "redacted", "hidden"] as const)
     assert.doesNotMatch(body, /PRIVATE-OR-CORRUPT|Status: asserted|Status: disputed/);
     assert.ok(section.omitted.some((o) => o.detail.endsWith(":dispute-state")));
     assert.equal(section.candidates[0]?.untrusted, true);
+    assert.deepEqual(section.candidates[0]?.screening_notice, assertionNotice);
+    assert.ok(!JSON.stringify(section).includes("dual-use-boundary"));
   });
 }
 

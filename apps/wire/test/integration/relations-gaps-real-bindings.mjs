@@ -9,7 +9,9 @@ import {
   RelationDisputedResponseSchema,
   RelationFiledResponseSchema,
 } from "@asimposium/contracts";
+import { EventTailResponseSchema } from "@asimposium/contracts/event-tail";
 import { ProofGapsResponseSchema } from "@asimposium/contracts/proof-gaps";
+import { renderAllFaces } from "@asimposium/render";
 import { faceCensus } from "./face-census.mjs";
 import { assertFullPackPublication } from "./full-pack-publication.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
@@ -969,6 +971,318 @@ await runLocalWorkerJourney(async (context) => {
         "restoring the exact decision restores its notice and bytes",
       );
     }
+  }
+
+  // Assertions and independent disputes retain separate event-bound notices.
+  // Fresh principals exercise normal quotas; only the screening provider is
+  // a fixture. Writes, immutable receipts, reads and controls use real D1/R2.
+  {
+    const relationAuthor = await enroll("rel-warning-author", "usr_rel_warning_author");
+    const relationReviewer = await enroll("rel-warning-reviewer", "usr_rel_warning_reviewer");
+    const authorSession = await call(
+      "/v1/sessions",
+      { problem_id: problemId, intent: "explore" },
+      relationAuthor,
+      201,
+    );
+    const reviewerSession = await call(
+      "/v1/sessions",
+      { problem_id: problemId, intent: "review" },
+      relationReviewer,
+      201,
+    );
+    const assertionPath = `/v1/sessions/${authorSession.session_id}/relations`;
+    const disputePath = `/v1/sessions/${reviewerSession.session_id}/relations/dispute`;
+    const graphPath = `/v1/sessions/${reviewerSession.session_id}/pack?profile=claim-graph&max_tokens=8000`;
+    const relationBody = {
+      kind: "contradicts",
+      source_claim_id: claim1Id,
+      source_version: 1,
+      target: `${claim2Id}@1`,
+    };
+    const relationLine = `Asserted relation: ${claim1Id}@1 contradicts ${claim2Id}@1`;
+    const scientificState = async () => ({
+      head: await env.DB.prepare("SELECT public_seq, chain_digest FROM problems WHERE id=?")
+        .bind(problemId)
+        .first(),
+      events: await env.DB.prepare(
+        "SELECT COUNT(*) AS count, MAX(seq) AS seq FROM events WHERE problem_id=?",
+      )
+        .bind(problemId)
+        .first(),
+    });
+    const beforeAssertion = await scientificState();
+    await fixtures.setScreenMode("quarantine");
+    const heldAssertion = await call(
+      assertionPath,
+      relationBody,
+      relationAuthor,
+      202,
+      "native-relation-warning-held",
+    );
+    assert.equal(heldAssertion.code, "SCREENING_HOLD");
+    assert.deepEqual(await scientificState(), beforeAssertion);
+    const heldGraph = PackResponseSchema.parse(await call(graphPath, undefined, relationReviewer));
+    assert.ok(!heldGraph.items.some((item) => item.body.includes(relationLine)));
+
+    await fixtures.setScreenMode("allow-with-warning");
+    const assertionKey = "native-relation-warning-assertion";
+    const assertion = RelationFiledResponseSchema.parse(
+      await call(assertionPath, relationBody, relationAuthor, 201, assertionKey),
+    );
+    assert.equal(assertion.seq, beforeAssertion.head.public_seq + 1);
+    const afterAssertion = await scientificState();
+    const assertionScreens = await fixtures.screeningCalls();
+    await fixtures.setScreenMode("reject");
+    assert.deepEqual(
+      await call(assertionPath, relationBody, relationAuthor, 200, assertionKey),
+      assertion,
+    );
+    assert.equal(await fixtures.screeningCalls(), assertionScreens);
+    assert.deepEqual(await scientificState(), afterAssertion);
+
+    const disputeBody = {
+      ...relationBody,
+      reason:
+        "NATIVE-RELATION-WARNING: these bounds use different cycle conventions; a shared example is needed before asserting contradiction.",
+    };
+    const selfRefusal = await call(
+      `${assertionPath}/dispute`,
+      disputeBody,
+      relationAuthor,
+      422,
+      "native-relation-warning-self-dispute",
+    );
+    assert.equal(selfRefusal.code, "REVIEWER_IS_AUTHOR");
+    assert.equal(await fixtures.screeningCalls(), assertionScreens);
+    assert.deepEqual(await scientificState(), afterAssertion);
+
+    const frozenAssertionPath = `/v1/sessions/${authorSession.session_id}/pack?profile=full&max_tokens=8000&through=${assertion.seq}&after=${assertion.seq - 1}`;
+    const frozenAssertion = PackResponseSchema.parse(
+      await call(frozenAssertionPath, undefined, relationAuthor),
+    );
+    const assertionItem = frozenAssertion.items.find((item) => item.id === `FULL-${assertion.seq}`);
+    assert.ok(assertionItem);
+    assert.deepEqual(assertionItem.screening_notice, warningNotice);
+    const assertionRecord = JSON.parse(assertionItem.body);
+    assert.equal(assertionRecord.publication.type, "relation.asserted");
+    assert.equal(assertionRecord.content_omitted, null);
+    assert.deepEqual(assertionRecord.content, {
+      kind: relationBody.kind,
+      source: assertion.source,
+      target: assertion.target,
+    });
+
+    await fixtures.setScreenMode("unavailable");
+    const heldDispute = await call(
+      disputePath,
+      disputeBody,
+      relationReviewer,
+      202,
+      "native-relation-warning-provider-unavailable",
+    );
+    assert.equal(heldDispute.code, "SCREENING_HOLD");
+    assert.deepEqual(await scientificState(), afterAssertion);
+    const graphBeforeDispute = PackResponseSchema.parse(
+      await call(graphPath, undefined, relationReviewer),
+    );
+    const undisputedItem = graphBeforeDispute.items.find(
+      (item) => item.id === assertionRecord.publication.id,
+    );
+    assert.deepEqual(undisputedItem?.screening_notice, warningNotice);
+    assert.ok(undisputedItem.body.includes("Status: asserted at this cursor."));
+    assert.ok(!undisputedItem.body.includes(disputeBody.reason));
+
+    await fixtures.setScreenMode("allow-with-warning");
+    const disputeKey = "native-relation-warning-dispute";
+    const dispute = RelationDisputedResponseSchema.parse(
+      await call(disputePath, disputeBody, relationReviewer, 201, disputeKey),
+    );
+    assert.equal(dispute.seq, assertion.seq + 1);
+    const afterDispute = await scientificState();
+    const disputeScreens = await fixtures.screeningCalls();
+    await fixtures.setScreenMode("reject");
+    assert.deepEqual(
+      await call(disputePath, disputeBody, relationReviewer, 200, disputeKey),
+      dispute,
+    );
+    assert.equal(await fixtures.screeningCalls(), disputeScreens);
+    assert.deepEqual(await scientificState(), afterDispute);
+    await fixtures.setScreenMode("pass");
+    assert.deepEqual(
+      PackResponseSchema.parse(await call(frozenAssertionPath, undefined, relationAuthor)),
+      frozenAssertion,
+      "a later dispute cannot alter an assertion's frozen publication or notice",
+    );
+
+    const receipts = await env.DB.prepare(
+      `SELECT e.id,e.seq,e.type,e.actor_fellow_id,e.actor_sponsor_id,s.provenance_json
+       FROM events e JOIN screening_publications s ON s.event_id=e.id
+       WHERE e.problem_id=? AND e.seq IN (?,?) ORDER BY e.seq`,
+    )
+      .bind(problemId, assertion.seq, dispute.seq)
+      .all();
+    assert.deepEqual(
+      receipts.results.map((row) => [row.seq, row.type]),
+      [
+        [assertion.seq, "relation.asserted"],
+        [dispute.seq, "relation.disputed"],
+      ],
+      "one independent immutable screening receipt per scientific event",
+    );
+    const [assertionReceipt, disputeReceipt] = receipts.results;
+    assert.notEqual(assertionReceipt.id, disputeReceipt.id);
+    assert.notEqual(assertionReceipt.actor_fellow_id, disputeReceipt.actor_fellow_id);
+    assert.notEqual(assertionReceipt.actor_sponsor_id, disputeReceipt.actor_sponsor_id);
+    for (const row of receipts.results) {
+      const receipt = JSON.parse(row.provenance_json);
+      assert.equal(receipt.outcome, "allow-with-warning");
+      assert.deepEqual(receipt.public_action, warningNotice);
+    }
+
+    const disputePrefix = "Recorded dispute (untrusted work product): ";
+    const disputeWarning = `Recorded dispute (#${dispute.seq}): Published with a screening context notice:`;
+    const assertRelationContext = (item, visible) => {
+      assert.ok(item);
+      assert.deepEqual(item.screening_notice, warningNotice);
+      assert.ok(item.body.includes(relationLine));
+      if (visible) {
+        assert.ok(
+          item.body.includes(`Status: disputed. A dispute is recorded at #${dispute.seq}.`),
+        );
+        const recorded = item.body.split("\n").find((line) => line.startsWith(disputePrefix));
+        assert.ok(recorded);
+        const nested = JSON.parse(recorded.slice(disputePrefix.length));
+        assert.equal(nested.event, disputeReceipt.id);
+        assert.equal(nested.seq, dispute.seq);
+        assert.equal(nested.reason, disputeBody.reason);
+        assert.equal(nested.provenance.sponsor, "usr_rel_warning_reviewer");
+        assert.deepEqual(nested.screening_notice, warningNotice);
+        assert.ok(item.why_included.includes(disputeWarning));
+      } else {
+        assert.ok(item.body.includes("Status: unavailable."));
+        assert.ok(!item.body.includes(disputePrefix));
+        assert.ok(!item.body.includes(disputeBody.reason));
+        assert.ok(!item.why_included.includes("Recorded dispute"));
+      }
+    };
+    const graph = PackResponseSchema.parse(await call(graphPath, undefined, relationReviewer));
+    assertRelationContext(
+      graph.items.find((item) => item.id === assertionReceipt.id),
+      true,
+    );
+    // The shared renderer consumes the native canonical pack. This checks HTML
+    // rendering, without pretending the JSON-only pack has an HTML HTTP route.
+    const graphFaces = renderAllFaces(graph);
+    for (const format of ["md", "html-fragment"]) {
+      const bytes = graphFaces[format].body;
+      assert.ok(bytes.includes(disputeWarning));
+      assert.ok(bytes.indexOf(disputeWarning) < bytes.indexOf(disputeBody.reason));
+    }
+
+    const fullPath = `/v1/sessions/${authorSession.session_id}/pack?profile=full&max_tokens=8000&through=${dispute.seq}&after=${assertion.seq - 1}`;
+    const full = PackResponseSchema.parse(await call(fullPath, undefined, relationAuthor));
+    assert.equal(fullControl(full).records, 2);
+    for (const receipt of receipts.results) {
+      const item = full.items.find((candidate) => candidate.id === `FULL-${receipt.seq}`);
+      assert.ok(item);
+      assert.deepEqual(item.screening_notice, warningNotice);
+      const record = JSON.parse(item.body);
+      assert.equal(record.publication.id, receipt.id);
+      assert.equal(record.publication.type, receipt.type);
+      assert.equal(record.content_omitted, null);
+    }
+    const tailPath = `/p/${problemId}/events.json?since=${assertion.seq - 1}&through=${dispute.seq}&limit=2`;
+    const tail = EventTailResponseSchema.parse(await call(tailPath));
+    assert.deepEqual(
+      tail.events.map((entry) => entry.event.id),
+      receipts.results.map((row) => row.id),
+    );
+    for (const entry of tail.events) assert.deepEqual(entry.event.screening_notice, warningNotice);
+
+    const faces = [];
+    for (const extension of ["json", "md"]) {
+      const url = `${origin}/p/${problemId}/relations/${assertion.seq}.${extension}`;
+      const response = await worker.fetch(url, { headers: { "User-Agent": userAgent } });
+      assert.equal(response.status, 200);
+      const bytes = await response.text();
+      if (extension === "json") assertRelationContext(JSON.parse(bytes).items[0], true);
+      else {
+        assert.ok(bytes.includes(disputeWarning));
+        assert.ok(
+          bytes.indexOf("Published with a screening context notice:") < bytes.indexOf(relationLine),
+        );
+      }
+      assert.ok(response.headers.get("etag"));
+      faces.push({ url, extension, etag: response.headers.get("etag") });
+    }
+    const controlDispute = (visibility, version) =>
+      env.DB.prepare(
+        `INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,visibility,source,
+         reason_category,actor,reason,version,created_at)
+         VALUES(?,?,'ledger-object',?,?,'operator','privacy','native-relation-test',
+           'Local independent dispute visibility proof.',?,?)`,
+      )
+        .bind(
+          `CC-RELATION-WARNING-${dispute.seq}-${version}`,
+          problemId,
+          `#${dispute.seq}`,
+          visibility,
+          version,
+          new Date().toISOString(),
+        )
+        .run();
+    await controlDispute("hidden", 1);
+    for (const before of faces) {
+      const response = await worker.fetch(before.url, {
+        headers: { "User-Agent": userAgent, "If-None-Match": before.etag },
+      });
+      assert.equal(
+        response.status,
+        200,
+        "current visibility precedes a relation's conditional read",
+      );
+      assert.notEqual(response.headers.get("etag"), before.etag);
+      const bytes = await response.text();
+      if (before.extension === "json") assertRelationContext(JSON.parse(bytes).items[0], false);
+      else {
+        assert.ok(bytes.includes("Published with a screening context notice:"));
+        assert.ok(bytes.includes(relationLine));
+        assert.ok(!bytes.includes(disputeWarning));
+        assert.ok(!bytes.includes(disputeBody.reason));
+      }
+    }
+    const hiddenGraph = PackResponseSchema.parse(
+      await call(graphPath, undefined, relationReviewer),
+    );
+    assertRelationContext(
+      hiddenGraph.items.find((item) => item.id === assertionReceipt.id),
+      false,
+    );
+    const hiddenFull = PackResponseSchema.parse(await call(fullPath, undefined, relationAuthor));
+    const hiddenAssertion = hiddenFull.items.find((item) => item.id === `FULL-${assertion.seq}`);
+    const hiddenDispute = hiddenFull.items.find((item) => item.id === `FULL-${dispute.seq}`);
+    assert.deepEqual(hiddenAssertion.screening_notice, warningNotice);
+    assert.equal(hiddenDispute.screening_notice, undefined);
+    assert.equal(JSON.parse(hiddenDispute.body).content, null);
+    assert.equal(JSON.parse(hiddenDispute.body).content_omitted, "content_unavailable");
+    assert.ok(!hiddenDispute.body.includes(disputeBody.reason));
+    const hiddenTail = EventTailResponseSchema.parse(await call(tailPath));
+    assert.deepEqual(hiddenTail.events[0].event.screening_notice, warningNotice);
+    assert.equal(hiddenTail.events[1].event.screening_notice, undefined);
+    assert.equal(hiddenTail.events[1].body_omitted, "content_unavailable");
+    await controlDispute("visible", 2);
+    for (const before of faces) {
+      const response = await worker.fetch(before.url, {
+        headers: { "User-Agent": userAgent, "If-None-Match": before.etag },
+      });
+      assert.equal(response.status, 304, "restoring the dispute restores both exact notices");
+    }
+    assert.deepEqual(
+      PackResponseSchema.parse(await call(fullPath, undefined, relationAuthor)),
+      full,
+    );
+    assert.deepEqual(EventTailResponseSchema.parse(await call(tailPath)), tail);
   }
 
   // Diptych census over this journey's gap and relation faces (lu59 / 92x /

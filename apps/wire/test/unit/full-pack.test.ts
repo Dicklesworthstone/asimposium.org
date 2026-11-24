@@ -809,6 +809,90 @@ describe("full public ledger packs", () => {
     }
   });
 
+  test("relation assertions and disputes keep separate exact-event notices in frozen full packs", async () => {
+    const f = fixture();
+    try {
+      const relation = { kind: "implies", source: "C-1@1", target: "C-2@3" };
+      const id = "C-1@1-implies-C-2@3";
+      await f.append("relation.asserted", "relation", id, relation);
+      await f.append("relation.disputed", "relation", id, {
+        ...relation,
+        disputed_by: "F-REVIEWER",
+        reason: "RELATION-DISPUTE-CANARY: the zero case refutes this implication.",
+      });
+      f.sql.exec(
+        "UPDATE events SET actor_fellow_id='F-REVIEWER', actor_sponsor_id='usr_reviewer' WHERE seq=2",
+      );
+      await f.append("relation.asserted", "relation", "C-2@3-implies-C-1@1", {
+        kind: "implies",
+        source: "C-2@3",
+        target: "C-1@1",
+      });
+      const receipt = await Bun.file(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+          import.meta.url,
+        ),
+      ).json();
+      const assertionNotice = {
+        category: "off-topic",
+        action: "published-with-warning",
+        notice: "off-scope",
+      } as const;
+      f.sql
+        .prepare("INSERT INTO screening_publications VALUES (?, ?)")
+        .run("EVENT-1", JSON.stringify({ ...receipt, public_action: assertionNotice }));
+      f.sql
+        .prepare("INSERT INTO screening_publications VALUES (?, ?)")
+        .run("EVENT-2", JSON.stringify(receipt));
+      const result = await f.read();
+      expect(result.records.map((record) => record.seq)).toEqual([1, 2, 3]);
+      expect(result.records[0].content).toEqual(relation);
+      expect(result.records[0].publication.screening_notice).toEqual(assertionNotice);
+      expect(result.records[1].content.reason).toContain("RELATION-DISPUTE-CANARY");
+      expect(result.records[1].publication.actor.fellow_id).toBe("F-REVIEWER");
+      expect(result.records[1].publication.screening_notice).toEqual(receipt.public_action);
+      expect(result.records[2].publication.screening_notice).toBeUndefined();
+      const items = result.face.items.filter((item) => item.scope === "ledger");
+      expect(items.find((item) => item.id === "FULL-1")?.screening_notice).toEqual(assertionNotice);
+      expect(items.find((item) => item.id === "FULL-2")?.screening_notice).toEqual(
+        receipt.public_action,
+      );
+      expect(items.find((item) => item.id === "FULL-3")?.screening_notice).toBeUndefined();
+      for (const format of ["md", "html-fragment"] as const) {
+        const rendered = renderProjection(composedPackToProjection(result.pack), format).body;
+        expect(rendered).toContain("Off-scope science:");
+        expect(rendered).toContain("screening context notice: dual-use-boundary");
+        expect(rendered).not.toContain("configuration_digest");
+        expect(rendered).not.toContain("input_digest");
+      }
+      const historical = await f.read({ through: 1 });
+      expect(historical.records).toHaveLength(1);
+      expect(historical.records[0].publication.screening_notice).toEqual(assertionNotice);
+      expect(historical.body).not.toContain("dual-use-boundary");
+      expect(historical.body).not.toContain("RELATION-DISPUTE-CANARY");
+      f.control("#2", "hidden");
+      const hidden = await f.read({ through: 3 });
+      expect(hidden.records[1].content).toBeNull();
+      expect(hidden.records[1].content_omitted).toBe("content_unavailable");
+      expect(hidden.body).not.toContain("dual-use-boundary");
+      expect(hidden.body).not.toContain("RELATION-DISPUTE-CANARY");
+      expect(hidden.records[0].publication.screening_notice).toEqual(assertionNotice);
+      f.sql
+        .prepare("UPDATE screening_publications SET provenance_json=? WHERE event_id='EVENT-2'")
+        .run(JSON.stringify({ private_detail: "PRIVATE-RELATION-RECEIPT" }));
+      expect((await f.read({ through: 3 })).body).toBe(hidden.body);
+      f.control("#2", "visible");
+      await expect(f.read()).rejects.toThrow("PUBLIC_SCREENING_RECEIPT_UNAVAILABLE");
+      f.sql
+        .prepare("UPDATE screening_publications SET provenance_json=? WHERE event_id='EVENT-2'")
+        .run(JSON.stringify(receipt));
+      expect((await f.read({ through: 3 })).body).toBe(result.body);
+    } finally {
+      f.sql.close();
+    }
+  });
+
   test("dormancy receipts retain the platform decision and its exact quiet interval", async () => {
     const f = fixture();
     try {

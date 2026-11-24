@@ -4205,7 +4205,7 @@ describe("session protocol routes", () => {
         const url = new URL(next, "https://a-staging.asimposium.org");
         expect(url.searchParams.get("target")).toBe("C-1@1");
         expect(url.searchParams.get("through")).toBe(String(pack.cursor));
-        const pageResponse = await publicRoutes.fetch(new Request(url), f.env);
+        const pageResponse = await publicRoutes.fetch(new Request(url.href), f.env);
         expect(pageResponse.status, await pageResponse.clone().text()).toBe(200);
         const bytes = await pageResponse.text();
         expect(bytes).not.toContain("PRIVATE-RESEARCH-RECOVERY");

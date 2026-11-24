@@ -150,7 +150,11 @@ function supportsPublishedWarning(
     (kind === "question" && holdContext?.route === "questions") ||
     // Normalization and resolution accounts retain their own event-bound
     // notice on canonical conflict faces, historical cuts and full packs.
-    (kind === "conflict" && holdContext?.route === "conflicts")
+    (kind === "conflict" && holdContext?.route === "conflicts") ||
+    // Graph assertions and objections carry distinct notices in their exact
+    // relation face and graph packs; an edge remains an assertion, not proof.
+    (kind === "relation" && holdContext?.route === "relations") ||
+    (kind === "relation-dispute" && holdContext?.route === "relations/dispute")
   );
 }
 

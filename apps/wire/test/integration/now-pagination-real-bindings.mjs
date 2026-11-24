@@ -84,7 +84,8 @@ async function nowPaginationJourney({
         objectId: options.objectId ?? `C-${seq}`,
         objectVersion: options.objectVersion ?? 1,
         payloadJson:
-          options.payloadJson ?? JSON.stringify(options.payload ?? { fixture: "Now ordering", seq }),
+          options.payloadJson ??
+          JSON.stringify(options.payload ?? { fixture: "Now ordering", seq }),
         createdAt: time,
         attribution: {
           fellowId: "F-NOW-FIXTURE",

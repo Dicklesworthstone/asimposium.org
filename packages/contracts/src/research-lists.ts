@@ -91,7 +91,7 @@ const pageFields = {
 
 type PageBoundary = {
   problem_id: string;
-  target?: string;
+  target?: string | undefined;
   cursor: number;
   after: number;
   scanned_through: number;
