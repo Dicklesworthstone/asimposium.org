@@ -45,16 +45,18 @@ test("completed reviews traverse beyond 200 without mutable projections or movin
   }
 });
 
-test("publication attribution and recorded tiers survive profile edits; legacy tiers stay unknown", async () => {
+test("publication attribution comes from events and legacy review tiers remain unknown", async () => {
   const { db, sql } = await publicationContextFixture();
   try {
     await appendClaimsListFixture(db, PROBLEM, 1);
     for (let tier = 0; tier <= 3; tier++)
       await appendReviewsListFixture(db, PROBLEM, tier + 1, { tier: `T${tier}` });
     await appendReviewsListFixture(db, PROBLEM, 5, { independence_policy: undefined, tier: "T3" });
-    sql
-      .query("UPDATE enrollment_fellows SET model=?,harness=? WHERE fellow_id='F-CONTEXT'")
-      .run("MUTABLE_MODEL_MUST_NOT_LEAK", "MUTABLE_HARNESS_MUST_NOT_LEAK");
+    expect(() =>
+      sql
+        .query("UPDATE enrollment_fellows SET model=?,harness=? WHERE fellow_id='F-CONTEXT'")
+        .run("MUTABLE_MODEL_MUST_NOT_LEAK", "MUTABLE_HARNESS_MUST_NOT_LEAK"),
+    ).toThrow("Fellow identity is immutable");
     const face = (await loadReviewsList(db, PROBLEM)).face;
     expect(face.reviews.map((review) => review.independence_tier)).toEqual([0, 1, 2, 3, null]);
     expect(face.reviews[0]?.publication).toMatchObject({
@@ -139,19 +141,33 @@ test("missing and later parents cannot authorize a review; oversized source byte
   }
 });
 
-test("a raw payload page budget withholds excess bodies while retaining a usable continuation", async () => {
+test("a raw payload budget defers readable reviews without losing their continuation", async () => {
   const { db, sql } = await publicationContextFixture();
   try {
     await appendClaimsListFixture(db, PROBLEM, 1);
-    for (let i = 1; i <= 9; i++)
-      await appendReviewsListFixture(db, PROBLEM, i, { extra: "x".repeat(220_000) });
+    // Each body satisfies the authored review's 64Ki-character limit and the
+    // single-source byte cap. Together these eight publications exceed 1MiB.
+    const body = "界".repeat(64 * 1024);
+    for (let i = 1; i <= 8; i++)
+      await appendReviewsListFixture(db, PROBLEM, i, { body_md: body });
     const first = (await loadReviewsList(db, PROBLEM)).face;
-    expect(first.count).toBe(4);
-    expect(first.next_after).toBe(9);
-    expect(first.omitted).toEqual(["content_unavailable", "page_limit"]);
-    const second = (await loadReviewsList(db, PROBLEM, { through: first.cursor, after: 9 })).face;
-    expect(second.reviews.map((review) => review.review_id)).toEqual(["R-9"]);
-    expect(second.next_after).toBeNull();
+    expect(first).toMatchObject({ count: 5, cursor: 9, scanned_through: 6, next_after: 6 });
+    expect(first.omitted).toEqual(["page_limit"]);
+    const ids = first.reviews.map((review) => review.review_id);
+    let after = first.next_after;
+    let pages = 1;
+    while (after !== null) {
+      const page = (await loadReviewsList(db, PROBLEM, { through: first.cursor, after })).face;
+      expect(page.cursor).toBe(first.cursor);
+      expect(page.after).toBe(after);
+      expect(page.count).toBeGreaterThan(0);
+      expect(page.omitted).not.toContain("content_unavailable");
+      ids.push(...page.reviews.map((review) => review.review_id));
+      after = page.next_after;
+      expect(++pages).toBeLessThanOrEqual(2);
+    }
+    expect(ids).toEqual(Array.from({ length: 8 }, (_, i) => `R-${i + 1}`));
+    expect(pages).toBe(2);
   } finally {
     sql.close();
   }
@@ -234,7 +250,9 @@ test("a hide during response composition fails closed instead of serving a stale
       batch: async (statements: Parameters<D1Database["batch"]>[0]) => {
         if (++batches === 2)
           sql
-            .query("UPDATE event_content SET redacted_at=?,redaction_reason='privacy' WHERE event_id=?")
+            .query(
+              "UPDATE event_content SET redacted_at=?,redaction_reason='privacy' WHERE event_id=?",
+            )
             .run("2026-10-28T12:00:00.000Z", `EV-${PROBLEM}-REVIEW-1`);
         return db.batch(statements);
       },

@@ -53,6 +53,7 @@ interface Source {
   harness: string | null;
   screening_provenance_json: string | null;
   withdrawn: number;
+  budget_deferred: number;
   target_id: string | null;
   target_version: number | null;
   target_seq: number | null;
@@ -138,6 +139,10 @@ SELECT event_id, problem_id, review_id, seq, object_version, admissions, created
   CASE WHEN ordinal <= ${RESEARCH_LIST_PAGE_SIZE} AND visible = 1 AND target_visible = 1
     AND payload_bytes BETWEEN 1 AND ${REVIEWS_LIST_SOURCE_BYTES}
     AND target_bytes BETWEEN 1 AND ${REVIEWS_LIST_SOURCE_BYTES}
+    AND cumulative_bytes > ${REVIEWS_LIST_PAGE_BYTES} THEN 1 ELSE 0 END AS budget_deferred,
+  CASE WHEN ordinal <= ${RESEARCH_LIST_PAGE_SIZE} AND visible = 1 AND target_visible = 1
+    AND payload_bytes BETWEEN 1 AND ${REVIEWS_LIST_SOURCE_BYTES}
+    AND target_bytes BETWEEN 1 AND ${REVIEWS_LIST_SOURCE_BYTES}
     AND cumulative_bytes <= ${REVIEWS_LIST_PAGE_BYTES} THEN payload_json END AS payload_json,
   CASE WHEN ordinal <= ${RESEARCH_LIST_PAGE_SIZE} AND visible = 1 AND target_visible = 1
     AND payload_bytes BETWEEN 1 AND ${REVIEWS_LIST_SOURCE_BYTES}
@@ -214,15 +219,24 @@ export async function loadReviewsList(
   let scanned = after;
   const reviews: ReviewListEntry[] = [];
   const omitted = new Set<ReviewListResponse["omitted"][number]>();
+  let budgetDeferred = false;
   for (const row of rows.slice(0, RESEARCH_LIST_PAGE_SIZE)) {
     if (
       row.problem_id !== problem ||
       !safeSequence(row.seq, 1) ||
       row.seq <= scanned ||
       row.seq > head.cursor ||
-      ![0, 1].includes(row.withdrawn)
+      ![0, 1].includes(row.withdrawn) ||
+      ![0, 1].includes(row.budget_deferred)
     )
       throw new ReviewsListReadError("unavailable");
+    if (row.budget_deferred === 1) {
+      // Leave the first deferred publication for the next request. Each source
+      // and parent is at most half the page budget, so it fits on a fresh page.
+      if (scanned === after) throw new ReviewsListReadError("unavailable");
+      budgetDeferred = true;
+      break;
+    }
     scanned = row.seq;
     const [payload, target] = await Promise.all([
       checkedPayload(row.payload_json, row.payload_sha256),
@@ -292,7 +306,7 @@ export async function loadReviewsList(
       ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
     });
   }
-  const next = rows.length > RESEARCH_LIST_PAGE_SIZE ? scanned : null;
+  const next = budgetDeferred || rows.length > RESEARCH_LIST_PAGE_SIZE ? scanned : null;
   if (next !== null) omitted.add("page_limit");
   const face = ReviewListResponseSchema.parse({
     schema: RESEARCH_LISTS_SCHEMA_ID,
