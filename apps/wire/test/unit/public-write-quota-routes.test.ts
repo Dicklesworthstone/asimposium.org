@@ -666,6 +666,31 @@ describe("SQLite-backed unit checks: mounted public-write budgets", () => {
     expect(harness.getClassifierInvocations()).toBe(0);
   });
 
+  test("unreadable public quota preserves private drafting and marks recommendation coverage incomplete", async () => {
+    const harness = await createQuotaTestHarness({ sponsorLimit: "invalid" });
+    const fellow = await harness.registerFellow("quota-unavailable");
+    const opened = await fellow.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "unknown-quota-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    expect(opened.status).toBe(201);
+    const { session_id } = (await opened.json()) as { session_id: string };
+    for (const profile of ["working", "digest"]) {
+      const res = await fellow.call(`/v1/sessions/${session_id}/pack?profile=${profile}`);
+      expect(res.status).toBe(200);
+      const pack = PackResponseSchema.parse(await res.json());
+      expect(pack.promotion_budget).toBeUndefined();
+      expect(pack.omitted.some((item) => item.reason === "promotion_budget_unavailable")).toBe(
+        true,
+      );
+      expect(pack.degraded).toContain("promotion_budget_unavailable");
+      expect(pack.next_actions.some((action) => action.url.endsWith("/promote"))).toBe(false);
+      if (profile === "working")
+        expect(pack.next_actions.some((action) => action.url.endsWith("/workshop"))).toBe(true);
+    }
+  });
+
   test("exhausted sponsor quota suppresses mutable pack promotion while public archives and private work stay usable", async () => {
     const harness = await createQuotaTestHarness({ sponsorLimit: 1 });
     // An actual publication by a different Fellow consumes the shared sponsor
@@ -738,6 +763,11 @@ describe("SQLite-backed unit checks: mounted public-write budgets", () => {
       const pack = PackResponseSchema.parse(await response.json());
       expect(pack.next_actions.some((action) => action.url.endsWith("/promote"))).toBe(false);
       expect(JSON.stringify(pack)).not.toContain("PRIVATE_QUOTA_SOURCE_WORKSHOP");
+      expect(
+        pack.next_actions.some(
+          (action) => action.method === "POST" && action.url.endsWith("/review"),
+        ),
+      ).toBe(false);
       if (profile === "full") {
         // The immutable archive intentionally excludes live quota/workshop
         // guidance. It remains readable without minting a write permission.

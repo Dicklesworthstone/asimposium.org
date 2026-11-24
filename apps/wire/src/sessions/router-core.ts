@@ -4336,6 +4336,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         });
     }
 
+    const promotionLimited =
+      promotionBudget === undefined ||
+      promotionBudget.remaining === 0 ||
+      promotionBudget.sponsor_remaining === 0;
     if (profile === "digest") {
       const digest = await readDigestPack({
         db,
@@ -4344,8 +4348,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         credential: auth.binding,
         role: membership,
         cursor,
-        promotionLimited:
-          promotionBudget?.remaining === 0 || promotionBudget?.sponsor_remaining === 0,
+        promotionLimited,
+        quotaUnavailable: promotionBudget === undefined,
       });
       return composePackResponse({
         schema: "asimposium.pack.v1",
@@ -4866,12 +4870,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     ) {
       actionPermissions.push("promote:write");
     }
-    const promotionLimited =
-      promotionBudget?.remaining === 0 || promotionBudget?.sponsor_remaining === 0;
     const promotionRecovery =
-      promotionBudget?.sponsor_limit === 0
-        ? "Sponsor public writes are disabled; continue drafting in your private workshop."
-        : `Promotion rate limit reached; continue drafting privately and recheck the budget after ${promotionBudget?.retry_after_seconds ?? 3600}s.`;
+      promotionBudget === undefined
+        ? "Public-write capacity could not be checked. Continue drafting privately and refresh the pack before publishing."
+        : promotionBudget.sponsor_limit === 0
+          ? "Sponsor public writes are disabled; continue drafting in your private workshop."
+          : `Promotion rate limit reached; continue drafting privately and recheck the budget after ${promotionBudget?.retry_after_seconds ?? 3600}s.`;
     const reviewAllowed =
       publicWritesAvailable &&
       authorizeFellowWrite({
@@ -4913,7 +4917,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           true,
         ).isLive());
     }
-    const reviewTemplate = targetedReview ? getMoveTemplate("review") : undefined;
+    const reviewTemplate =
+      targetedReview && !promotionLimited ? getMoveTemplate("review") : undefined;
     if (
       protocolConflictAvailable &&
       !promotionLimited &&
@@ -5015,6 +5020,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       promotion_budget: promotionBudget,
       degraded: [
         ...(workingMoves.degraded ? ["canonical-moves-incomplete"] : []),
+        ...(promotionBudget === undefined ? ["promotion_budget_unavailable"] : []),
         ...orientation.omitted
           .filter((item) => item.reason.endsWith("_unavailable"))
           .map((item) => item.reason),
@@ -5195,7 +5201,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...(promotionLimited
           ? [
               {
-                reason: "promotion_rate_limited",
+                reason:
+                  promotionBudget === undefined
+                    ? "promotion_budget_unavailable"
+                    : "promotion_rate_limited",
                 detail: promotionRecovery,
               },
             ]
