@@ -116,20 +116,41 @@ function fields(entry: Entry): readonly (readonly [string, string])[] {
 function pageLinks(collection: Collection, format: "md" | "html") {
   const { face, segment } = collection;
   const path = segment === "evidence" ? evidenceListPath : reviewsListPath;
+  const target = face.target === undefined ? {} : { target: face.target };
   return [
     {
       label: "Canonical JSON for this page",
-      url: path(face.problem_id, "json", { through: face.cursor, after: face.after }),
+      url: path(face.problem_id, "json", { through: face.cursor, after: face.after, ...target }),
     },
     ...(face.next_after === null
       ? []
       : [
           {
             label: "Next publications at this snapshot",
-            url: path(face.problem_id, format, { through: face.cursor, after: face.next_after }),
+            url: path(face.problem_id, format, {
+              through: face.cursor,
+              after: face.next_after,
+              ...target,
+            }),
           },
         ]),
-    { label: "Start from the latest public snapshot", url: path(face.problem_id, format) },
+    ...(face.after === 0
+      ? []
+      : [
+          {
+            label: "First publications at this snapshot",
+            url: path(face.problem_id, format, { through: face.cursor, after: 0, ...target }),
+          },
+        ]),
+    { label: "Start from the latest public snapshot", url: path(face.problem_id, format, target) },
+    ...(face.target === undefined
+      ? []
+      : [
+          {
+            label: "All targets at this snapshot",
+            url: path(face.problem_id, format, { through: face.cursor }),
+          },
+        ]),
   ];
 }
 
@@ -168,6 +189,14 @@ function markdown(collection: Collection): string {
       : []),
     range(face),
     "",
+    ...(face.target === undefined
+      ? []
+      : [
+          "Exact claim version: **" + safeInlineProse(face.target) + "**.",
+          "",
+          "Filtered pages scan the problem's publication history. A page can contain no matching records and still have a next-page link; continue at the same target and snapshot.",
+          "",
+        ]),
   ];
   for (const entry of entries) {
     lines.push("## " + safeInlineProse(entry.id), "");
@@ -225,6 +254,12 @@ function html(collection: Collection): string {
         ]
       : []),
     "<p>" + range(face) + "</p>",
+    ...(face.target === undefined
+      ? []
+      : [
+          "<p>Exact claim version: <strong>" + textHtml(face.target) + "</strong>.</p>",
+          "<p>Filtered pages scan the problem's publication history. A page can contain no matching records and still have a next-page link; continue at the same target and snapshot.</p>",
+        ]),
   ];
   for (const entry of entries) {
     lines.push("<article><h3>" + textHtml(entry.id) + "</h3><dl>");

@@ -73,6 +73,55 @@ test("publication attribution comes from events and legacy review tiers remain u
   }
 });
 
+test("exact claim review filters preserve late inputs across unmatched and withheld admissions", async () => {
+  const { db, sql } = await publicationContextFixture();
+  try {
+    await appendClaimsListFixture(db, PROBLEM, 1);
+    await appendClaimsListFixture(db, PROBLEM, 1, 2);
+    await appendClaimsListFixture(db, PROBLEM, 2);
+    for (let i = 1; i <= 24; i++)
+      await appendReviewsListFixture(db, PROBLEM, i, { target_claim_id: "C-2" });
+    await appendReviewsListFixture(db, PROBLEM, 25);
+    await appendReviewsListFixture(db, PROBLEM, 26, { target_version: 2 });
+    await appendReviewsListFixture(db, PROBLEM, 27);
+    await appendReviewsListFixture(db, PROBLEM, 28);
+    sql
+      .query("UPDATE event_content SET redacted_at=?,redaction_reason='privacy' WHERE event_id=?")
+      .run("2026-11-24T12:00:00.000Z", `EV-${PROBLEM}-REVIEW-27`);
+    const captured = await loadReviewsList(db, PROBLEM, { target: "C-1@1" });
+    const first = captured.face;
+    expect(first).toMatchObject({ target: "C-1@1", count: 0, reviews: [] });
+    expect(first.next_after).not.toBeNull();
+    expect(first.omitted).toEqual(["page_limit"]);
+    await appendReviewsListFixture(db, PROBLEM, 29);
+    await captured.assertCurrent();
+    const ids: string[] = [];
+    let after = first.next_after;
+    let pages = 1;
+    while (after !== null) {
+      const page = (
+        await loadReviewsList(db, PROBLEM, { through: first.cursor, after, target: "C-1@1" })
+      ).face;
+      expect(page.target).toBe("C-1@1");
+      expect(page.cursor).toBe(first.cursor);
+      expect(page.scanned_through).toBeGreaterThan(after);
+      ids.push(...page.reviews.map((entry) => entry.review_id));
+      after = page.next_after;
+      expect(++pages).toBeLessThanOrEqual(4);
+    }
+    expect(ids).toEqual(["R-25", "R-28"]);
+    const revised = (
+      await loadReviewsList(db, PROBLEM, { through: first.cursor, after: 27, target: "C-1@2" })
+    ).face;
+    expect(revised.reviews.map((entry) => entry.review_id)).toEqual(["R-26"]);
+    await expect(loadReviewsList(db, PROBLEM, { target: "C-1" })).rejects.toMatchObject({
+      code: "query",
+    });
+  } finally {
+    sql.close();
+  }
+});
+
 test("hidden admissions advance, and exact parent controls and corrupt source hashes suppress summaries", async () => {
   const { db, sql } = await publicationContextFixture();
   try {
@@ -192,6 +241,23 @@ test("review HTTP faces pin continuations, validate cursors, and honor current c
     const head = await request(path, { method: "HEAD" });
     expect(head.headers.get("etag")).toBe(etag);
     expect(await head.text()).toBe("");
+    const filteredPath = `${path}&target=C-1%401`;
+    const filtered = await request(filteredPath);
+    expect(filtered.status).toBe(200);
+    expect(ReviewListResponseSchema.parse(await filtered.json()).target).toBe("C-1@1");
+    expect(filtered.headers.get("content-location")).toBe(filteredPath);
+    expect(filtered.headers.get("link")).toContain(
+      '/reviews.json?through=10&after=9&target=C-1%401>; rel="next"',
+    );
+    expect(filtered.headers.get("etag")).not.toBe(etag);
+    const filteredNext = await request(
+      `/p/${PROBLEM}/reviews.json?through=10&after=9&target=C-1%401`,
+    );
+    expect(
+      ReviewListResponseSchema.parse(await filteredNext.json()).reviews.map(
+        (review) => review.review_id,
+      ),
+    ).toEqual(["R-9"]);
     for (const query of [
       "through=11",
       "after=0",
@@ -201,6 +267,10 @@ test("review HTTP faces pin continuations, validate cursors, and honor current c
       "limit=200",
       "through=9007199254740992",
       "through=-1",
+      "target=C-1",
+      "target=H-1",
+      "target=C-1%400",
+      "target=C-1%401&target=C-1%402",
     ]) {
       const response = await request(`/p/${PROBLEM}/reviews.json?${query}`);
       expect(response.status, query).toBe(400);

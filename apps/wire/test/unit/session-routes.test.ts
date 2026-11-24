@@ -59,6 +59,10 @@ import {
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import { getPublicSchemaSlice } from "@asimposium/contracts/public-schemas";
 import {
+  EvidenceListResponseSchema,
+  ReviewListResponseSchema,
+} from "@asimposium/contracts/research-lists";
+import {
   WorkshopDirectoryResponseSchema,
   workshopDirectoryPath,
 } from "@asimposium/contracts/workshop-directory";
@@ -98,8 +102,10 @@ import { diffProjections } from "../../src/krater/projection-replay.ts";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../../src/krater/public-content.ts";
 import { CLAIM_RELATIONS_READ_SQL } from "../../src/ledger/claim-relations-read.ts";
 import { EVENT_TAIL_SELECT } from "../../src/ledger/event-tail-read.ts";
+import { createEvidenceListRoutes } from "../../src/ledger/evidence-list-http.ts";
 import { loadPublicHypothesisItem } from "../../src/ledger/hypotheses-service.ts";
 import { proofGapsSql } from "../../src/ledger/proof-gaps-read.ts";
+import { createReviewListRoutes } from "../../src/ledger/reviews-list-router.ts";
 import { findScientificClaim } from "../../src/ledger/scientific-checks.ts";
 import { readScientificDispositions } from "../../src/ledger/scientific-disposition.ts";
 import { createMegaCommandsRouter } from "../../src/mega-commands/router.ts";
@@ -4077,6 +4083,149 @@ describe("session protocol routes", () => {
     const redacted = (await get("profile=review&target=C-1@1&max_tokens=8000")).pack;
     expect(redacted.omitted).toContainEqual({ reason: "content_unavailable", detail: "C-1@1" });
     expect(redacted.items.some((item) => item.kind.startsWith("claim-"))).toBe(false);
+  });
+
+  test("targeted packs recover evidence and reviews beyond twenty admissions at their captured cursor", async () => {
+    const f = await fixture();
+    let key = 0;
+    const post = async (path: string, body: unknown, caller = f.call) => {
+      const response = await caller(path, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `research-recovery-${++key}`,
+        },
+        body: JSON.stringify(body),
+      });
+      expect(response.status, await response.clone().text()).toBe(201);
+      return response.json();
+    };
+    const session = SessionOpenResponseSchema.parse(
+      await post("/v1/sessions", { problem_id: "P-4DSP", intent: "prove" }),
+    );
+    const path = `/v1/sessions/${session.session_id}`;
+    const draft = WorkshopPushResponseSchema.parse(
+      await post(`${path}/workshop`, {
+        type: "claim-draft",
+        title: "Research recovery",
+        body_md: "PRIVATE-RESEARCH-RECOVERY",
+      }),
+    );
+    await post(`${path}/promote`, {
+      workshop_id: draft.workshop_id,
+      kind: "conjecture",
+      statement: "Two is even.",
+      falsifier: "A nonzero remainder after dividing two by two.",
+    });
+    const reviewer = await addApprovedFellow(f, {
+      suffix: "recovery-reviewer",
+      scopes: ["review"],
+    });
+    const reviewSession = SessionOpenResponseSchema.parse(
+      await post("/v1/sessions", { problem_id: "P-4DSP", intent: "review" }, reviewer.call),
+    );
+    // Several contributors reach the pack bound without bypassing each
+    // Fellow's ordinary publication quota.
+    const supplemental = await addApprovedFellow(f, {
+      suffix: "recovery-supplement",
+      scopes: ["promote", "review"],
+    });
+    const supplementalSession = SessionOpenResponseSchema.parse(
+      await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" }, supplemental.call),
+    );
+    const supplementalPath = `/v1/sessions/${supplementalSession.session_id}`;
+    const evidence = async (number: number, version = 1) =>
+      EvidenceResponseSchema.parse(
+        await post(
+          `${number <= 18 ? path : supplementalPath}/evidence`,
+          {
+            bears_on_kind: "claim",
+            bears_on_id: "C-1",
+            bears_on_version: version,
+            direction: "informs",
+            kind: "argument",
+            source: { kind: "model_memory" },
+            mode: "exploratory",
+            body_md: `Recorded evidence ${number} for version ${version}.`,
+          },
+          number <= 18 ? f.call : supplemental.call,
+        ),
+      );
+    const review = async (number: number, version = 1) =>
+      ReviewResponseSchema.parse(
+        await post(
+          `${number <= 18 ? `/v1/sessions/${reviewSession.session_id}` : supplementalPath}/review`,
+          {
+            target_claim_id: "C-1",
+            target_version: version,
+            verdict: "inform",
+            basis: `Check ${number} of the exact version ${version}.`,
+            capable_of_failure: "A nonzero remainder would fail this check.",
+            rubric: [],
+            body_md: `Recorded review ${number} for version ${version}.`,
+          },
+          number <= 18 ? reviewer.call : supplemental.call,
+        ),
+      );
+    const expected = { evidence: [] as string[], reviews: [] as string[] };
+    for (let number = 1; number <= 21; number++) {
+      expected.evidence.push((await evidence(number)).evidence_id);
+      expected.reviews.push((await review(number)).review_id);
+    }
+    const response = await f.call(`${path}/pack?profile=claim&target=C-1@1&max_tokens=8000`);
+    expect(response.status, await response.clone().text()).toBe(200);
+    const pack = PackResponseSchema.parse(await response.json());
+    for (const kind of ["claim-evidence", "claim-review"])
+      expect(pack.omitted).toContainEqual({ reason: "candidate_limit", detail: `C-1@1:${kind}` });
+    expect(pack.items.some((item) => item.id === expected.evidence.at(-1))).toBe(false);
+    expect(pack.items.some((item) => item.id === expected.reviews.at(-1))).toBe(false);
+    await evidence(22);
+    await review(22);
+    await post(`${path}/revise`, {
+      claim_id: "C-1",
+      base_version: 1,
+      kind: "conjecture",
+      statement: "Four is even.",
+      falsifier: "A nonzero remainder after dividing four by two.",
+    });
+    await evidence(23, 2);
+    await review(23, 2);
+    const publicRoutes = createEvidenceListRoutes();
+    publicRoutes.route("/", createReviewListRoutes());
+    for (const kind of ["evidence", "reviews"] as const) {
+      const action = pack.next_actions.find((item) =>
+        item.url.startsWith(`/p/P-4DSP/${kind}.json?`),
+      );
+      expect(action?.method).toBe("GET");
+      if (action === undefined) throw new Error(`Missing ${kind} recovery action.`);
+      const ids: string[] = [];
+      let next: string | undefined = action.url;
+      let pages = 0;
+      while (next !== undefined) {
+        const url = new URL(next, "https://a-staging.asimposium.org");
+        expect(url.searchParams.get("target")).toBe("C-1@1");
+        expect(url.searchParams.get("through")).toBe(String(pack.cursor));
+        const pageResponse = await publicRoutes.fetch(new Request(url), f.env);
+        expect(pageResponse.status, await pageResponse.clone().text()).toBe(200);
+        const bytes = await pageResponse.text();
+        expect(bytes).not.toContain("PRIVATE-RESEARCH-RECOVERY");
+        const page =
+          kind === "evidence"
+            ? EvidenceListResponseSchema.parse(JSON.parse(bytes))
+            : ReviewListResponseSchema.parse(JSON.parse(bytes));
+        expect(page.target).toBe("C-1@1");
+        expect(page.cursor).toBe(pack.cursor);
+        ids.push(
+          ...("evidence" in page
+            ? page.evidence.map((item) => item.evidence_id)
+            : page.reviews.map((item) => item.review_id)),
+        );
+        next = pageResponse.headers.get("link")?.match(/<([^>]+)>; rel="next"/)?.[1];
+        expect(next === undefined).toBe(page.next_after === null);
+        expect(++pages).toBeLessThanOrEqual(3);
+      }
+      expect(ids).toEqual(expected[kind]);
+    }
   });
 
   test("review packs serve canonical rubrics with exact budget omissions and a larger read", async () => {

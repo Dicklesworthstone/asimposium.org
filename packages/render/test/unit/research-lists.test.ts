@@ -81,6 +81,47 @@ test("withheld pages retain next links and never represent missing sources as no
   }
 });
 
+test("exact claim filters survive empty pages, continuations, format changes and restarts", () => {
+  const selection = { target: "C-1@1", after: 1, count: 0 };
+  const evidence = EvidenceListResponseSchema.parse({
+    ...evidenceFixture,
+    ...selection,
+    evidence: [],
+  });
+  const reviews = ReviewListResponseSchema.parse({
+    ...reviewsFixture,
+    ...selection,
+    reviews: [],
+  });
+  for (const [kind, face, markdown, html] of [
+    ["evidence", evidence, renderEvidenceListMarkdown(evidence), renderEvidenceListHtml(evidence)],
+    ["reviews", reviews, renderReviewListMarkdown(reviews), renderReviewListHtml(reviews)],
+  ] as const) {
+    const first = `/p/P-RESEARCH/${kind}`;
+    expect(markdown).toContain("Exact claim version: **C-1@1**");
+    expect(html).toContain("Exact claim version: <strong>C-1@1</strong>");
+    for (const body of [markdown, html]) {
+      expect(body).toContain("no matching records and still have a next-page link");
+      expect(body).toContain("not proof that no publications exist");
+      expect(body).toContain("All targets at this snapshot");
+      expect(body).not.toContain("SP-ORIGINAL");
+    }
+    expect(markdown).toContain(`${first}.json?through=40&after=1&target=C-1%401`);
+    expect(markdown).toContain(`${first}.md?through=40&after=${face.next_after}&target=C-1%401`);
+    expect(markdown).toContain(`${first}.md?through=40&after=0&target=C-1%401`);
+    expect(markdown).toContain(`${first}.md?target=C-1%401`);
+    expect(markdown).toContain(`[All targets at this snapshot](${first}.md?through=40)`);
+    expect(html).toContain(`${first}.json?through=40&amp;after=1&amp;target=C-1%401`);
+    expect(html).toContain(
+      `${first}.html?through=40&amp;after=${face.next_after}&amp;target=C-1%401`,
+    );
+    expect(html).toContain(`${first}.html?through=40&amp;after=0&amp;target=C-1%401`);
+    expect(html).toContain(`${first}.html?target=C-1%401`);
+    // Canonical HTML faces prohibit form submission with their content security policy.
+    expect(html).not.toContain("<form");
+  }
+});
+
 test("authored basis and runtime labels cannot create active markup or forge face structure", () => {
   const fixture = ReviewListResponseSchema.parse(reviewsFixture);
   const first = fixture.reviews[0];

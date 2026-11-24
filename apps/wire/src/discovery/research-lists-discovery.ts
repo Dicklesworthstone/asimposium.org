@@ -25,9 +25,11 @@ export function researchListParameters(path: string, origin: string): readonly u
     through:
       "Captured public problem cursor. Keep the same snapshot on every continuation. Later publications are excluded; current visibility and content controls still apply.",
     after:
-      "Exclusive publication sequence from next_after. Requires the original through cursor and cannot exceed it. At most eight admissions are examined per page. Withheld publications still advance; an empty page can have a continuation.",
+      "Exclusive publication sequence from next_after. Requires the original through cursor and cannot exceed it. At most eight admissions are examined per page. Unmatched and withheld publications still advance; an empty page can have a continuation.",
+    target:
+      "Optional exact claim version, such as C-1@2. Bare claim IDs are refused. Only verified publications about that version are returned. Preserve this filter and through on every continuation, including empty pages; scan positions also include unmatched or withheld admissions.",
   };
-  return ["through", "after"].map((name) => ({
+  return ["through", "after", "target"].map((name) => ({
     name,
     in: "query",
     required: false,
@@ -68,7 +70,7 @@ export function researchListResponses(
   return {
     "200": {
       description:
-        "At most eight verified public publications in sequence order at one frozen cursor. Original attribution, exact targets and authored direction or verdict are preserved; these are not computed scientific standing. Follow next_after or rel=next even on an empty page; omitted explains withheld sources and bounded reads.",
+        "At most eight verified public publications in sequence order at one frozen cursor, optionally filtered to an exact claim version. Original attribution, exact targets and authored direction or verdict are preserved; these are not computed scientific standing. Follow next_after or rel=next with the same target even on an empty page; omitted explains withheld sources and bounded reads.",
       content,
       headers: {
         ETag: { schema: { type: "string" } },
@@ -89,7 +91,7 @@ export function researchListResponses(
     },
     "400": {
       description:
-        "CURSOR_INVALID: unsupported, repeated, noncanonical or incompatible query parameters, or a future cursor.",
+        "CURSOR_INVALID: unsupported, repeated, noncanonical or incompatible query parameters, an invalid exact claim target, or a future cursor.",
       content: error,
     },
     "404": {

@@ -89,7 +89,8 @@ export function ResearchListView(props: ResearchListViewProps) {
   const face = result.data;
   const title = kind === "evidence" ? "Evidence" : "Published reviews";
   const path = kind === "evidence" ? evidenceListPath : reviewsListPath;
-  const query = { through: face.cursor, after: face.after };
+  const target = face.target === undefined ? {} : { target: face.target };
+  const query = { through: face.cursor, after: face.after, ...target };
   const otherPath = kind === "evidence" ? reviewsListPath : evidenceListPath;
   return <>
     <a className="skip" href="#content">Skip to content</a>
@@ -109,12 +110,24 @@ export function ResearchListView(props: ResearchListViewProps) {
         Current public visibility controls still apply. Item links open current public context;
         claim target links retain this inventory&apos;s snapshot.
       </p>
+      {face.target !== undefined && <p role="note">
+        Exact claim version: <Link href={`/p/${encodeURIComponent(face.problem_id)}/claims/${encodeURIComponent(face.target)}?through=${face.cursor}`} prefetch={false}>{face.target}</Link>.
+        {" "}Filtered pages scan the problem&apos;s publication history. A page can contain no matching
+        records and still have a next-page link; continue at the same target and snapshot.
+      </p>}
+      <form method="get" action={path(face.problem_id, "human")} aria-label="Filter publications by exact claim version">
+        <input type="hidden" name="through" value={face.cursor} />
+        <label htmlFor="research-claim-target">Exact claim version</label>{" "}
+        <input id="research-claim-target" name="target" defaultValue={face.target ?? ""} placeholder="C-1@2" required />{" "}
+        <button type="submit">Filter this snapshot</button>
+      </form>
       {result.noindex && <p role="note">This public record is unlisted. A guessable URL is not private.</p>}
       <nav aria-label="Research collection views">
         <Link href={path(face.problem_id, "human", query)} prefetch={false}>Link to this ledger snapshot</Link>
-        {historical && <> · <Link href={path(face.problem_id, "human")} prefetch={false}>Read the latest {kind}</Link></>}
-        {face.after > 0 && <> · <Link href={path(face.problem_id, "human", { through: face.cursor, after: 0 })} prefetch={false}>First {kind} at this snapshot</Link></>}
-        {" · "}<Link href={otherPath(face.problem_id, "human", { through: face.cursor })} prefetch={false}>Read {kind === "evidence" ? "published reviews" : "evidence"} at this snapshot</Link>
+        {historical && <> · <Link href={path(face.problem_id, "human", target)} prefetch={false}>Read the latest {kind}</Link></>}
+        {face.after > 0 && <> · <Link href={path(face.problem_id, "human", { through: face.cursor, after: 0, ...target })} prefetch={false}>First {kind} at this snapshot</Link></>}
+        {" · "}<Link href={otherPath(face.problem_id, "human", { through: face.cursor, ...target })} prefetch={false}>Read {kind === "evidence" ? "published reviews" : "evidence"} at this snapshot</Link>
+        {face.target !== undefined && <> · <Link href={path(face.problem_id, "human", { through: face.cursor })} prefetch={false}>All targets at this snapshot</Link></>}
       </nav>
       {kind === "reviews" && <p className="quiet">
         These are completed review publications, including recorded withdrawals. To find work still
@@ -122,13 +135,15 @@ export function ResearchListView(props: ResearchListViewProps) {
       </p>}
       {face.count === 0 && <p>{face.omitted.includes("content_unavailable")
         ? "No readable publications were returned on this page. Withheld or unavailable records do not establish that no work was published. Continue when a next page is available."
-        : "No publications were returned in this range at the selected snapshot."}</p>}
+        : face.target !== undefined
+          ? "No matching publications were returned in this range. Follow the next page when available to continue inspecting this exact claim version."
+          : "No publications were returned in this range at the selected snapshot."}</p>}
       <ol className="research-list">
         {props.kind === "evidence"
           ? props.result.data.evidence.map((item) => <EvidenceEntry key={item.evidence_id} problem={face.problem_id} cursor={face.cursor} evidence={item} origin={result.origin} />)
           : props.result.data.reviews.map((item) => <ReviewEntry key={item.review_id} problem={face.problem_id} cursor={face.cursor} review={item} origin={result.origin} />)}
       </ol>
-      {face.next_after !== null && <p><Link href={path(face.problem_id, "human", { through: face.cursor, after: face.next_after })} prefetch={false}>Next {kind} at this snapshot</Link></p>}
+      {face.next_after !== null && <p><Link href={path(face.problem_id, "human", { ...query, after: face.next_after })} prefetch={false}>Next {kind} at this snapshot</Link></p>}
       {face.omitted.length > 0 && <section aria-labelledby="research-omissions-heading">
         <h2 id="research-omissions-heading">Omissions and limits</h2>
         <ul>{face.omitted.map((reason) => <li key={reason}>{reason === "page_limit"

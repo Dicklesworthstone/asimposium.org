@@ -15,10 +15,21 @@ const querySequence = z
   .transform(Number)
   .pipe(sequence);
 
+/** Research inputs belong to one immutable claim version, never its moving head. */
+export const ResearchClaimTargetSchema = z
+  .string()
+  .max(64)
+  .regex(/^C-[0-9]+@[1-9][0-9]*$(?![\s\S])/)
+  .refine((target) => Number.isSafeInteger(Number(target.split("@")[1])));
+
 /** A continuation must retain its original snapshot, including the zero cursor.
  * Repeated query parameters are rejected by each HTTP transport before parsing. */
 export const ResearchListQuerySchema = z
-  .object({ through: querySequence.optional(), after: querySequence.optional() })
+  .object({
+    through: querySequence.optional(),
+    after: querySequence.optional(),
+    target: ResearchClaimTargetSchema.optional(),
+  })
   .strict()
   .superRefine((query, context) => {
     if (query.after !== undefined && query.through === undefined)
@@ -69,6 +80,7 @@ export type ReviewListEntry = z.infer<typeof ReviewListEntrySchema>;
 const pageFields = {
   schema: z.literal(RESEARCH_LISTS_SCHEMA_ID),
   problem_id: PublicLedgerProblemIdSchema,
+  target: ResearchClaimTargetSchema.optional(),
   cursor: sequence,
   after: sequence,
   scanned_through: sequence,
@@ -79,6 +91,7 @@ const pageFields = {
 
 type PageBoundary = {
   problem_id: string;
+  target?: string;
   cursor: number;
   after: number;
   scanned_through: number;
@@ -90,6 +103,7 @@ type SourceEntry = {
   id: string;
   publication: ResearchPublication;
   read_url: string;
+  claimTarget: string | null;
 };
 
 function validatePage(
@@ -119,6 +133,8 @@ function validatePage(
   const events = new Set<string>();
   let previous = face.after;
   for (const entry of entries) {
+    if (face.target !== undefined && entry.claimTarget !== face.target)
+      reject(segment, "Every publication must match the requested exact claim version.");
     if (
       ids.has(entry.id) ||
       events.has(entry.publication.event_id) ||
@@ -148,7 +164,12 @@ export const EvidenceListResponseSchema = z
   .superRefine((face, context) =>
     validatePage(
       face,
-      face.evidence.map((entry) => ({ ...entry, id: entry.evidence_id })),
+      face.evidence.map((entry) => ({
+        ...entry,
+        id: entry.evidence_id,
+        claimTarget:
+          entry.bears_on.kind === "claim" ? `${entry.bears_on.id}@${entry.bears_on.version}` : null,
+      })),
       "evidence",
       context,
     ),
@@ -164,7 +185,11 @@ export const ReviewListResponseSchema = z
   .superRefine((face, context) =>
     validatePage(
       face,
-      face.reviews.map((entry) => ({ ...entry, id: entry.review_id })),
+      face.reviews.map((entry) => ({
+        ...entry,
+        id: entry.review_id,
+        claimTarget: `${entry.target.claim_id}@${entry.target.version}`,
+      })),
       "reviews",
       context,
     ),
@@ -180,6 +205,7 @@ function researchListPath(
   const params = new URLSearchParams();
   if (query.through !== undefined) params.set("through", String(query.through));
   if (query.after !== undefined) params.set("after", String(query.after));
+  if (query.target !== undefined) params.set("target", query.target);
   return (
     "/p/" +
     encodeURIComponent(problem) +
@@ -213,6 +239,7 @@ export function researchListMatchesQuery(
 ): boolean {
   return (
     face.problem_id === problem &&
+    face.target === query.target &&
     face.after === (query.after ?? 0) &&
     (query.through === undefined || face.cursor === query.through)
   );
@@ -225,7 +252,7 @@ export function generateResearchListsSchema(): string {
         $id: RESEARCH_LISTS_SCHEMA_ID,
         title: "ASImposium evidence and completed review collections",
         $comment:
-          "Eight immutable source publications per page at one captured public cursor. Runtime additionally validates order, uniqueness, counts, source links and continuation agreement. Current content controls apply to every read. Authored directions and verdicts are not computed scientific standing; exact source readers remain authoritative.",
+          "Eight immutable source admissions per page at one captured public cursor. Optional target filters verified publications to one exact claim version; keep target and through unchanged on continuations, including empty pages. Unmatched and unavailable admissions still advance the scan. Runtime additionally validates order, uniqueness, counts, target agreement, source links and continuation agreement. Current content controls apply to every read. Authored directions and verdicts are not computed scientific standing; exact source readers remain authoritative.",
         ...z.toJSONSchema(
           z
             .object({

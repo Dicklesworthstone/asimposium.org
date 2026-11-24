@@ -96,6 +96,65 @@ test("empty withheld pages can progress while impossible ranges and duplicate pu
   ).toBe(false);
 });
 
+test("exact claim filters stay bound to matching publications and every continuation", () => {
+  expect(fixtures.invalid.target_query.expected_code).toBe("CURSOR_INVALID");
+  expect(ResearchListQuerySchema.parse(fixtures.valid.target_query)).toEqual({
+    through: 40,
+    after: 20,
+    target: "C-1@1",
+  });
+  for (const target of [
+    "C-1",
+    "H-1",
+    "C-1@0",
+    "C-1@01",
+    "C-1@-1",
+    "C-1@1@2",
+    "C-1@9007199254740992",
+    "C-1@1\n",
+    "C-1@1&through=0",
+    ["C-1@1", "C-2@1"],
+  ])
+    expect(ResearchListQuerySchema.safeParse({ target }).success, JSON.stringify(target)).toBe(
+      false,
+    );
+  const evidence = EvidenceListResponseSchema.parse({
+    ...evidenceFixture,
+    target: "C-1@1",
+    evidence: [evidenceFixture.evidence[0]],
+    count: 1,
+  });
+  const reviews = ReviewListResponseSchema.parse({ ...reviewsFixture, target: "C-1@1" });
+  for (const [schema, face] of [
+    [EvidenceListResponseSchema, evidence],
+    [ReviewListResponseSchema, reviews],
+  ] as const) {
+    expect(schema.safeParse({ ...face, target: "C-1@2" }).success).toBe(false);
+    expect(schema.safeParse({ ...face, target: "C-2@1" }).success).toBe(false);
+    expect(researchListMatchesQuery("P-RESEARCH", { through: 40, target: "C-1@1" }, face)).toBe(
+      true,
+    );
+    expect(researchListMatchesQuery("P-RESEARCH", { through: 40 }, face)).toBe(false);
+    expect(researchListMatchesQuery("P-RESEARCH", { through: 40, target: "C-1@2" }, face)).toBe(
+      false,
+    );
+  }
+  expect(
+    EvidenceListResponseSchema.safeParse({ ...evidenceFixture, target: "C-1@1" }).success,
+  ).toBe(false);
+  expect(
+    researchListMatchesQuery(
+      "P-RESEARCH",
+      { target: "C-1@1" },
+      EvidenceListResponseSchema.parse(evidenceFixture),
+    ),
+  ).toBe(false);
+  for (const path of [evidenceListPath, reviewsListPath])
+    expect(path("P-RESEARCH", "json", { through: 40, after: 20, target: "C-1@1" })).toEndWith(
+      "?through=40&after=20&target=C-1%401",
+    );
+});
+
 test("collection sources cannot be rebound to another problem or private target", () => {
   const evidence = evidenceFixture.evidence[0];
   const review = reviewsFixture.reviews[0];

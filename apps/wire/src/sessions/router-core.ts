@@ -112,6 +112,7 @@ import {
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
 import { eventTailCursor } from "@asimposium/contracts/event-tail";
+import { evidenceListPath, reviewsListPath } from "@asimposium/contracts/research-lists";
 import {
   WORKSHOP_DIRECTORY_MAX_RESPONSE_BYTES,
   WORKSHOP_DIRECTORY_SCHEMA_ID,
@@ -5043,6 +5044,29 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // wqlf: an exhausted grant-wide event budget makes both write
       // affordances unusable, so the pack must not advertise them.
       action_candidates: [
+        ...(targetParam !== null &&
+        targetSection.candidates.some((item) => item.kind === "claim-detail")
+          ? [
+              {
+                method: "GET" as const,
+                url: evidenceListPath(session.problem_id, "json", {
+                  target: targetParam,
+                  through: cursor,
+                }),
+                why: "Read all available evidence for this exact claim version at the pack cursor, including records beyond the pack limit. Follow next_after until null, even across empty pages.",
+                public_read: true,
+              },
+              {
+                method: "GET" as const,
+                url: reviewsListPath(session.problem_id, "json", {
+                  target: targetParam,
+                  through: cursor,
+                }),
+                why: "Read all available completed reviews for this exact claim version at the pack cursor. Follow next_after until null, even across empty pages; unavailable sources remain omissions.",
+                public_read: true,
+              },
+            ]
+          : []),
         ...(reviewTemplate?.availability === "available"
           ? [
               {

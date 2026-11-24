@@ -1,4 +1,5 @@
 import { ClaimFaceQuerySchema, type ClaimFaceResponse } from "@asimposium/contracts";
+import { evidenceListPath, reviewsListPath } from "@asimposium/contracts/research-lists";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -361,6 +362,16 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
           <h2 id="records-heading">
             Published statement, premises, obligations, evidence and reviews
           </h2>
+          <p>
+            This claim view contains a bounded selection. Browse the publication directories for
+            this exact version at the same ledger snapshot:{" "}
+            <Link href={evidenceListPath(face.problem, "human", { through: face.cursor, target: exact })} prefetch={false}>
+              All evidence for {exact}
+            </Link>{" · "}
+            <Link href={reviewsListPath(face.problem, "human", { through: face.cursor, target: exact })} prefetch={false}>
+              All published reviews for {exact}
+            </Link>.
+          </p>
           {face.items.length === 0 && (
             <p>Published content is unavailable; see the omissions below.</p>
           )}

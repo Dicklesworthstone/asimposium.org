@@ -6,6 +6,7 @@ import {
 import {
   RESEARCH_LIST_PAGE_SIZE,
   RESEARCH_LISTS_SCHEMA_ID,
+  ResearchClaimTargetSchema,
   type ResearchListQuery,
   ResearchPublicationSchema,
   type ReviewListEntry,
@@ -189,6 +190,7 @@ export async function loadReviewsList(
   const after = query.after ?? 0;
   if (
     !safeSequence(after) ||
+    (query.target !== undefined && !ResearchClaimTargetSchema.safeParse(query.target).success) ||
     (query.through !== undefined && !safeSequence(query.through)) ||
     (query.after !== undefined && (query.through === undefined || after > query.through))
   )
@@ -287,6 +289,13 @@ export async function loadReviewsList(
       omitted.add("content_unavailable");
       continue;
     }
+    // Selection follows canonical byte/schema verification. Keep the scan
+    // positions of other or withheld targets, including on an empty page.
+    if (
+      query.target !== undefined &&
+      `${authored.data.target_claim_id}@${authored.data.target_version}` !== query.target
+    )
+      continue;
     const independence =
       row.target_sponsor_id === null || row.actor_sponsor_id === null
         ? null
@@ -310,6 +319,7 @@ export async function loadReviewsList(
   const face = ReviewListResponseSchema.parse({
     schema: RESEARCH_LISTS_SCHEMA_ID,
     problem_id: problem,
+    ...(query.target === undefined ? {} : { target: query.target }),
     cursor: head.cursor,
     after,
     scanned_through: scanned,

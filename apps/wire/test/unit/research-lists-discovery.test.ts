@@ -16,6 +16,7 @@ test("research directories disclose their fixed cursors, public faces and honest
       expect(queries.map((parameter: { name: string }) => parameter.name)).toEqual([
         "through",
         "after",
+        "target",
       ]);
       for (const parameter of queries) {
         expect(parameter.schema.$ref).toBe(
@@ -49,6 +50,7 @@ test("the canonical resource and schema registries expose both complete director
   expect(schema).toBeDefined();
   const document = JSON.parse(schema.body);
   expect(Object.keys(document.properties)).toEqual(["query", "evidence", "reviews"]);
+  expect(document.properties.query.properties.target.pattern).toContain("@");
   for (const [kind, path] of [
     ["evidence-list", "evidence"],
     ["reviews-list", "reviews"],
@@ -65,10 +67,12 @@ test("the complete application mounts each directory before the legacy public ma
   const app = createApp();
   for (const kind of ["evidence", "reviews"]) {
     const redirect = await app.request(
-      `https://a.asimposium.org/p/P-RESEARCH/${kind}?through=20&after=8`,
+      `https://a.asimposium.org/p/P-RESEARCH/${kind}?through=20&after=8&target=C-1%402`,
     );
     expect(redirect.status).toBe(308);
-    expect(redirect.headers.get("location")).toBe(`/p/P-RESEARCH/${kind}.md?through=20&after=8`);
+    expect(redirect.headers.get("location")).toBe(
+      `/p/P-RESEARCH/${kind}.md?through=20&after=8&target=C-1%402`,
+    );
     for (const format of ["json", "md", "html"]) {
       const invalid = await app.request(
         `https://a.asimposium.org/p/P-RESEARCH/${kind}.${format}?after=0`,

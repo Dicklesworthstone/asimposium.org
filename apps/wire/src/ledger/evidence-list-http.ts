@@ -24,7 +24,7 @@ function refusal(method: string, kind: "query" | "not-found" | "unavailable"): R
           code: "CURSOR_INVALID" as const,
           title: "Invalid evidence collection cursor",
           detail:
-            "Use canonical nonnegative through and after cursors. Every after cursor requires its original through cursor. Unknown, repeated and future cursors are refused.",
+            "Use canonical nonnegative through and after cursors and an optional exact claim target such as C-1@2. Every after cursor requires its original through cursor; keep target unchanged. Unknown, repeated and future cursors and invalid targets are refused.",
           fixHint: "Start at the evidence collection and follow its next link unchanged.",
         }
       : kind === "not-found"
@@ -91,7 +91,11 @@ export function createEvidenceListRoutes(): Hono<{ Bindings: Env }> {
           .join("");
         const etag = `"evidence-list-${format}-${hash}"`;
         const path = (after = face.after) =>
-          evidenceListPath(problem, format, { through: face.cursor, after });
+          evidenceListPath(problem, format, {
+            through: face.cursor,
+            after,
+            ...(face.target === undefined ? {} : { target: face.target }),
+          });
         const next = face.next_after === null ? null : path(face.next_after);
         const headers = new Headers({
           "content-type": MEDIA[format],

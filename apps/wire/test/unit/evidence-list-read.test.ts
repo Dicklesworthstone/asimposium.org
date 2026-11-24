@@ -217,6 +217,99 @@ test("an entirely hidden page advances without disclosing any hidden publication
   }
 });
 
+test("exact claim evidence filters reach later inputs across empty pages at the original cut", async () => {
+  const f = fixture();
+  try {
+    for (let n = 1; n <= 24; n++) f.evidence(n, true);
+    f.event(
+      "claim",
+      "C-1",
+      { claim_id: "C-1", kind: "definition", statement: "A revised claim.", base_version: 1 },
+      2,
+    );
+    f.event("claim", "C-2", { claim_id: "C-2", kind: "definition", statement: "Another claim." });
+    f.evidence(25);
+    f.evidence(26, false, { bears_on_version: 2 });
+    f.evidence(27, false, { bears_on_id: "C-2" });
+    f.evidence(28);
+    f.evidence(29);
+    f.visible("E-28", "hidden");
+    const captured = await loadEvidenceList(f.db, PROBLEM, { target: "C-1@1" });
+    const first = captured.face;
+    expect(first).toMatchObject({ target: "C-1@1", count: 0, evidence: [], next_after: 10 });
+    expect(first.omitted).toEqual(["page_limit"]);
+    f.evidence(30);
+    await captured.assertCurrent();
+    const ids: string[] = [];
+    let after = first.next_after;
+    let pages = 1;
+    while (after !== null) {
+      const page = (
+        await loadEvidenceList(f.db, PROBLEM, { through: first.cursor, after, target: "C-1@1" })
+      ).face;
+      expect(page.target).toBe("C-1@1");
+      expect(page.cursor).toBe(first.cursor);
+      expect(page.scanned_through).toBeGreaterThan(after);
+      ids.push(...page.evidence.map((entry) => entry.evidence_id));
+      after = page.next_after;
+      expect(++pages).toBeLessThanOrEqual(4);
+    }
+    expect(ids).toEqual(["E-25", "E-29"]);
+    const revised = (
+      await loadEvidenceList(f.db, PROBLEM, { through: first.cursor, after: 26, target: "C-1@2" })
+    ).face;
+    expect(revised.evidence.map((entry) => entry.evidence_id)).toEqual(["E-26"]);
+    f.visible("C-1@1", "hidden");
+    const hidden = (
+      await loadEvidenceList(f.db, PROBLEM, { through: first.cursor, after: 26, target: "C-1@1" })
+    ).face;
+    expect(hidden.evidence).toEqual([]);
+    expect(hidden.omitted).toContain("content_unavailable");
+    expect(JSON.stringify(hidden)).not.toContain("E-25");
+    await expect(loadEvidenceList(f.db, PROBLEM, { target: "C-1" })).rejects.toMatchObject({
+      code: "query",
+    });
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("filtered evidence links retain the exact target and reject ambiguous selectors", async () => {
+  const f = fixture();
+  try {
+    for (let n = 1; n <= 9; n++) f.evidence(n);
+    for (const format of ["json", "md", "html"] as const) {
+      const path = `/p/${PROBLEM}/evidence.${format}?through=11&after=0&target=C-1%401`;
+      const response = await f.request(path);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-location")).toBe(path);
+      expect(response.headers.get("link")).toContain(
+        `/evidence.${format}?through=11&after=10&target=C-1%401>; rel="next"`,
+      );
+      const etag = response.headers.get("etag");
+      if (etag === null) throw new Error("A filtered evidence page must carry an ETag");
+      expect((await f.request(path, { headers: { "if-none-match": etag } })).status).toBe(304);
+      if (format === "json")
+        expect(EvidenceListResponseSchema.parse(await response.json()).target).toBe("C-1@1");
+    }
+    for (const query of [
+      "target=C-1",
+      "target=C-1%400",
+      "target=H-1",
+      "target=C-1%401&target=C-1%402",
+    ])
+      expect((await f.request(`/p/${PROBLEM}/evidence.json?${query}`)).status, query).toBe(400);
+    const next = await f.request(`/p/${PROBLEM}/evidence.json?through=11&after=10&target=C-1%401`);
+    expect(
+      EvidenceListResponseSchema.parse(await next.json()).evidence.map(
+        (entry) => entry.evidence_id,
+      ),
+    ).toEqual(["E-9"]);
+  } finally {
+    f.sql.close();
+  }
+});
+
 test.each(["C-1", "C-1@1", "#1", "E-1", "E-1@1", "#3"])(
   "current exact source control %s overrides an old cut",
   async (target) => {

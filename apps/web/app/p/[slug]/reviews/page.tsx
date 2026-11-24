@@ -26,7 +26,7 @@ export async function generateMetadata(props: ReviewsPageProps): Promise<Metadat
   const { slug, query } = await pageInput(props);
   const result = query === null ? undefined : await readReviews(slug, reviewsListPath(slug, "json", query));
   return {
-    title: `${slug} — Published reviews | ASImposium`,
+    title: `${slug} — Published reviews${query?.target === undefined ? "" : ` for ${query.target}`} | ASImposium`,
     description: "Published claim reviews, recorded independence and original attribution at one ledger snapshot.",
     ...(result?.state !== "ok" || result.noindex ? { robots: { index: false, follow: false } } : {}),
   };
@@ -36,7 +36,7 @@ export default async function ReviewsPage(props: ReviewsPageProps) {
   const { slug, query } = await pageInput(props);
   if (query === null) return <main className="landing col problem-page" id="content">
     <h1>Invalid reviews view</h1>
-    <p>Use one non-negative through cursor and an optional after cursor. A continuation requires its original snapshot, and after cannot exceed through.</p>
+    <p>Use an optional exact claim target such as C-1@2, one non-negative through cursor and an optional after cursor. A continuation keeps its target and original snapshot; after cannot exceed through. Bare claims and repeated query values are invalid.</p>
     <p><Link href={reviewsListPath(slug, "human")}>Read current published reviews</Link></p>
   </main>;
   const result = await readReviews(slug, reviewsListPath(slug, "json", query));

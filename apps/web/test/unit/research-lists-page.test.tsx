@@ -107,6 +107,59 @@ test("a completely withheld historical page keeps the continuation for both inve
   }
 });
 
+test("an exact claim filter is retained by every collection link and the server-rendered filter form", async () => {
+  const calls: string[] = [];
+  globalThis.fetch = mock(async (url: string | URL | Request) => {
+    calls.push(String(url));
+    const selection = { target: "C-3@2", after: 12, scanned_through: 20, next_after: 20, count: 0 };
+    return Response.json(String(url).includes("/evidence")
+      ? evidenceFace({ ...selection, evidence: [] })
+      : reviewFace({ ...selection, reviews: [] }));
+  }) as unknown as typeof fetch;
+  for (const [kind, Page, metadata] of [
+    ["evidence", EvidencePage, evidenceMetadata], ["reviews", ReviewsPage, reviewMetadata],
+  ] as const) {
+    const query = { through: "40", after: "12", target: "C-3@2" };
+    const html = renderToStaticMarkup(await Page(props(query)));
+    expect(calls.at(-1)).toBe(`${PRODUCTION_STOA_ORIGIN}/p/P-DEMO/${kind}.json?through=40&after=12&target=C-3%402`);
+    expect(html).toContain("Exact claim version:");
+    expect(html).toContain('href="/p/P-DEMO/claims/C-3%402?through=40"');
+    expect(html).toContain("No matching publications were returned in this range");
+    expect(html).toContain("no matching records and still have a next-page link");
+    expect(html).toContain(`href="/p/P-DEMO/${kind}?through=40&amp;after=20&amp;target=C-3%402"`);
+    expect(html).toContain(`href="/p/P-DEMO/${kind}?through=40&amp;after=0&amp;target=C-3%402"`);
+    expect(html).toContain(`href="/p/P-DEMO/${kind}?target=C-3%402"`);
+    expect(html).toContain(`href="/p/P-DEMO/${kind === "evidence" ? "reviews" : "evidence"}?through=40&amp;target=C-3%402"`);
+    expect(html).toContain(`href="/p/P-DEMO/${kind}?through=40"`);
+    for (const format of ["md", "json"]) {
+      expect(html).toContain(`${PRODUCTION_STOA_ORIGIN}/p/P-DEMO/${kind}.${format}?through=40&amp;after=12&amp;target=C-3%402`);
+    }
+    expect(html).toContain(`action="/p/P-DEMO/${kind}"`);
+    expect(html).toContain('name="through" value="40"');
+    const targetInput = html.match(/<input\b[^>]*name="target"[^>]*>/)?.[0];
+    expect(targetInput).toContain('value="C-3@2"');
+    expect(targetInput).toContain('required=""');
+    expect(html).not.toContain('name="after"');
+    expect((await metadata(props(query))).title).toContain("for C-3@2");
+  }
+});
+
+test("filtered readers reject an omitted or substituted target, and unfiltered reads reject a hidden filter", async () => {
+  let response: unknown;
+  globalThis.fetch = mock(async () => Response.json(response)) as unknown as typeof fetch;
+  for (const [makeFace, read] of [[evidenceFace, stoaFetchEvidenceList], [reviewFace, stoaFetchReviewsList]] as const) {
+    for (const target of [undefined, "C-3@1", "C-4@2"]) {
+      response = makeFace(target === undefined ? {} : { target });
+      expect(await read("P-DEMO", undefined, { through: "40", target: "C-3@2" }))
+        .toEqual({ state: "unavailable", reason: "invalid_response" });
+    }
+    response = makeFace({ target: "C-3@2" });
+    expect((await read("P-DEMO", undefined, { through: "40", target: "C-3@2" })).state).toBe("ok");
+    expect(await read("P-DEMO", undefined, { through: "40" }))
+      .toEqual({ state: "unavailable", reason: "invalid_response" });
+  }
+});
+
 test("typed readers reject source substitution, incorrect cuts and malformed collections", async () => {
   let response: unknown;
   globalThis.fetch = mock(async () => Response.json(response)) as unknown as typeof fetch;
@@ -130,7 +183,10 @@ test("invalid or repeated query parameters make no request and stay out of index
   const request = mock(async () => Response.json(evidenceFace()));
   globalThis.fetch = request as unknown as typeof fetch;
   for (const query of [{ through: ["40", "41"] }, { through: "040" }, { after: "12" },
-    { through: "4", after: "5" }, { after: "9007199254740992" }, { private: "true" }]) {
+    { through: "4", after: "5" }, { after: "9007199254740992" }, { private: "true" },
+    { target: "C-3" }, { target: "C-3@0" }, { target: "H-3@2" },
+    { target: ["C-3@2", "C-4@2"] }, { target: " C-3@2" },
+    { target: "C-3@9007199254740992" }]) {
     expect(renderToStaticMarkup(await EvidencePage(props(query)))).toContain("Invalid evidence view");
     expect(renderToStaticMarkup(await ReviewsPage(props(query)))).toContain("Invalid reviews view");
     expect((await evidenceMetadata(props(query))).robots).toEqual({ index: false, follow: false });
@@ -149,11 +205,12 @@ test("unlisted and unavailable inventories preserve source policy and exact retr
     expect((await metadata(props())).robots).toEqual({ index: false, follow: false });
     expect(renderToStaticMarkup(await Page(props()))).toContain("This public record is unlisted");
     globalThis.fetch = mock(async () => Response.json({ code: "ROUTE_NOT_FOUND" }, { status: 404 })) as unknown as typeof fetch;
-    const html = renderToStaticMarkup(await Page(props({ through: "40", after: "12" })));
+    const html = renderToStaticMarkup(await Page(props({ through: "40", after: "12", target: "C-3@2" })));
     expect(html).toContain("Public ledger data is temporarily unavailable");
     expect(html).toContain(`action="/p/P-DEMO/${kind}"`);
     expect(html).toContain('name="through" value="40"');
     expect(html).toContain('name="after" value="12"');
+    expect(html).toContain('name="target" value="C-3@2"');
     expect(html).not.toContain("No publications were returned");
     globalThis.fetch = mock(async () => Response.json({ code: "PROBLEM_NOT_FOUND", status: 404 }, { status: 404 })) as unknown as typeof fetch;
     await expect(Page(props())).rejects.toThrow("NEXT_HTTP_ERROR_FALLBACK;404");

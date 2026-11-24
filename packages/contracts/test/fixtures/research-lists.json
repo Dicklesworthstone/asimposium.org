@@ -120,6 +120,11 @@
     "query": {
       "through": "40",
       "after": "20"
+    },
+    "target_query": {
+      "through": "40",
+      "after": "20",
+      "target": "C-1@1"
     }
   },
   "invalid": {
@@ -243,6 +248,12 @@
     "query": {
       "input": {
         "after": "20"
+      },
+      "expected_code": "CURSOR_INVALID"
+    },
+    "target_query": {
+      "input": {
+        "target": "C-1"
       },
       "expected_code": "CURSOR_INVALID"
     }

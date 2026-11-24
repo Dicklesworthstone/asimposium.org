@@ -17,9 +17,9 @@ function refusal(kind: "query" | "not-found" | "unavailable", method: string): R
           code: "CURSOR_INVALID",
           title: "Invalid completed review collection query",
           detail:
-            "Use one canonical nonnegative through cursor and optional after sequence. after requires through and cannot exceed it. Unknown parameters and future cursors are refused.",
+            "Use canonical nonnegative through and after cursors and an optional exact claim target such as C-1@2. after requires through and cannot exceed it; keep target unchanged. Unknown or repeated parameters, invalid targets and future cursors are refused.",
           fixHint:
-            "Follow the next link unchanged, or omit both parameters to start a current page.",
+            "Follow the next link unchanged, or omit through and after to start a current page with the same target filter.",
           rule: "A5",
           extensions: {
             schema: RESEARCH_LISTS_SCHEMA_ID,
@@ -85,6 +85,7 @@ export function createReviewListRoutes(): Hono<{ Bindings: Env }> {
         const canonical = reviewsListPath(problem, format, {
           through: result.face.cursor,
           after: result.face.after,
+          ...(result.face.target === undefined ? {} : { target: result.face.target }),
         });
         const headers = new Headers({
           "content-type":
@@ -104,7 +105,7 @@ export function createReviewListRoutes(): Hono<{ Bindings: Env }> {
         if (result.face.next_after !== null)
           headers.append(
             "link",
-            `<${reviewsListPath(problem, format, { through: result.face.cursor, after: result.face.next_after })}>; rel="next"`,
+            `<${reviewsListPath(problem, format, { through: result.face.cursor, after: result.face.next_after, ...(result.face.target === undefined ? {} : { target: result.face.target }) })}>; rel="next"`,
           );
         if (result.unlisted) headers.set("x-robots-tag", "noindex, nofollow");
         if (format === "html")

@@ -26,7 +26,7 @@ export async function generateMetadata(props: EvidencePageProps): Promise<Metada
   const { slug, query } = await pageInput(props);
   const result = query === null ? undefined : await readEvidence(slug, evidenceListPath(slug, "json", query));
   return {
-    title: `${slug} — Evidence | ASImposium`,
+    title: `${slug} — Evidence${query?.target === undefined ? "" : ` for ${query.target}`} | ASImposium`,
     description: "Published evidence, exact scientific targets and original attribution at one ledger snapshot.",
     ...(result?.state !== "ok" || result.noindex ? { robots: { index: false, follow: false } } : {}),
   };
@@ -36,7 +36,7 @@ export default async function EvidencePage(props: EvidencePageProps) {
   const { slug, query } = await pageInput(props);
   if (query === null) return <main className="landing col problem-page" id="content">
     <h1>Invalid evidence view</h1>
-    <p>Use one non-negative through cursor and an optional after cursor. A continuation requires its original snapshot, and after cannot exceed through.</p>
+    <p>Use an optional exact claim target such as C-1@2, one non-negative through cursor and an optional after cursor. A continuation keeps its target and original snapshot; after cannot exceed through. Bare claims and repeated query values are invalid.</p>
     <p><Link href={evidenceListPath(slug, "human")}>Read current evidence</Link></p>
   </main>;
   const result = await readEvidence(slug, evidenceListPath(slug, "json", query));

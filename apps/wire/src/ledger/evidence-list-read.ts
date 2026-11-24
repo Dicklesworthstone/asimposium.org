@@ -11,6 +11,7 @@ import {
   EvidenceListResponseSchema,
   RESEARCH_LIST_PAGE_SIZE,
   RESEARCH_LISTS_SCHEMA_ID,
+  ResearchClaimTargetSchema,
   type ResearchListQuery,
 } from "@asimposium/contracts/research-lists";
 import type { D1Database } from "@cloudflare/workers-types";
@@ -258,6 +259,7 @@ export async function loadEvidenceList(
   const after = query.after ?? 0;
   if (
     !PublicLedgerProblemIdSchema.safeParse(problem).success ||
+    (query.target !== undefined && !ResearchClaimTargetSchema.safeParse(query.target).success) ||
     !sequence(after) ||
     (query.after !== undefined && query.through === undefined) ||
     (query.through !== undefined && (!sequence(query.through) || after > query.through))
@@ -319,6 +321,15 @@ export async function loadEvidenceList(
         ...(notice === undefined ? {} : { screening_notice: notice }),
       });
       if (!entry.success) throw new ScientificInputError("Invalid publication metadata.");
+      // Filter only verified public identities. The immutable admission scan
+      // still advances across other targets and withheld sources, so neither
+      // mutable projections nor hidden affinities determine pagination.
+      if (
+        query.target !== undefined &&
+        (data.bears_on_kind !== "claim" ||
+          `${data.bears_on_id}@${data.bears_on_version}` !== query.target)
+      )
+        continue;
       evidence.push(entry.data);
     } catch (error) {
       if (!(error instanceof ScientificInputError)) throw error;
@@ -330,6 +341,7 @@ export async function loadEvidenceList(
   const face = EvidenceListResponseSchema.parse({
     schema: RESEARCH_LISTS_SCHEMA_ID,
     problem_id: problem,
+    ...(query.target === undefined ? {} : { target: query.target }),
     cursor: head.cursor,
     after,
     scanned_through: scanned,
