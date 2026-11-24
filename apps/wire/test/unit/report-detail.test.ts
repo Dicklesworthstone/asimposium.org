@@ -3,6 +3,7 @@ import {
   AdminReportDetailSchema,
   ProblemDocumentSchema,
   ReportResponseSchema,
+  type ReportReason,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
@@ -67,14 +68,14 @@ async function fixture() {
       { statementsAfterEvent: () => [] },
     );
   };
-  const report = async (target = "C-1@1", sponsor: string = REPORTER.reporterSponsorId) => {
+  const report = async (target = "C-1@1", sponsor: string = REPORTER.reporterSponsorId, reason: ReportReason = "integrity") => {
     const response = await fileReportRequest(
       f.db,
       { ...REPORTER, reporterSponsorId: sponsor },
       {
         problem_id: PROBLEM,
         target,
-        reason: "integrity",
+        reason,
         note: NOTE,
       },
     );
@@ -147,15 +148,15 @@ test("unversioned reports retain the publication captured at filing without clai
 test("reviewing one publication leaves other revisions and legacy reports pending", async () => {
   const f = await fixture();
   await f.publish(1);
-  const initial = await f.report("C-1@1", "sponsor-one");
-  const samePublication = await f.report("C-1", "sponsor-two");
+  const initial = await f.report("C-1@1", "sponsor-one", "privacy");
+  const samePublication = await f.report("C-1", "sponsor-two", "privacy");
   await f.publish(2);
-  const revised = await f.report("C-1@2", "sponsor-three");
+  const revised = await f.report("C-1@2", "sponsor-three", "privacy");
   const unpinned = await fileReport(f.db, {
     problemId: PROBLEM,
     targetKind: "claim",
     targetRef: "C-1",
-    reason: "integrity",
+    reason: "privacy",
     note: null,
     ...REPORTER,
   });

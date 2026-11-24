@@ -200,6 +200,7 @@ function fixture() {
     "0091_moderation_plane.sql",
     "0135_report_source_pins.sql",
     "0145_sponsor_problem_hides.sql",
+    "0155_integrity_cases.sql",
   ]) {
     sql.exec(readFileSync(new URL(`../../../../db/migrations/${name}`, import.meta.url), "utf8"));
   }
@@ -299,7 +300,7 @@ function fixture() {
 
 async function communityHold(
   f: ReturnType<typeof fixture>,
-  reasons = ["integrity", "integrity", "integrity"],
+  reasons = ["spam", "spam", "spam"],
 ) {
   const reports = [];
   for (const reason of reasons) reports.push(await f.report(reason));
@@ -311,12 +312,12 @@ async function communityHold(
 describe("report resolution preserves independent allegations", () => {
   test("dismisses only the observed category, retaining safety/privacy holds until their own reviews", async () => {
     const f = fixture();
-    const [integrity, privacy, safety] = await communityHold(f, ["integrity", "privacy", "safety"]);
-    const duplicate = await f.report("integrity");
-    const otherTarget = await f.report("integrity", "C-1@2");
+    const [spam, privacy, safety] = await communityHold(f, ["spam", "privacy", "safety"]);
+    const duplicate = await f.report("spam");
+    const otherTarget = await f.report("spam", "C-1@2");
     const original = await f.control();
-    expect((await f.resolve(integrity!.reportId)).ok).toBe(true);
-    expect(f.status(integrity!.reportId)).toBe("dismissed");
+    expect((await f.resolve(spam!.reportId)).ok).toBe(true);
+    expect(f.status(spam!.reportId)).toBe("dismissed");
     expect(f.status(duplicate.reportId)).toBe("dismissed");
     expect(f.status(privacy!.reportId)).toBe("pending");
     expect(f.status(safety!.reportId)).toBe("pending");
@@ -329,7 +330,7 @@ describe("report resolution preserves independent allegations", () => {
     expect((await f.control())?.visibility).toBe("visible");
     expect(f.logs().filter((item) => item.action === "restored")).toHaveLength(1);
     expect(f.count("operator_audit")).toBe(3);
-    expect(await f.resolve(integrity!.reportId)).toEqual({ ok: false, reason: "not-pending" });
+    expect(await f.resolve(spam!.reportId)).toEqual({ ok: false, reason: "not-pending" });
     expect(f.count("operator_audit")).toBe(3);
     expect(JSON.stringify(f.logs())).not.toContain("PRIVATE-");
   });
@@ -348,13 +349,13 @@ describe("report resolution preserves independent allegations", () => {
 
   test("upholding a community-hidden target creates a durable operator hold", async () => {
     const f = fixture();
-    const [integrity, privacy, safety] = await communityHold(f, ["integrity", "privacy", "safety"]);
+    const [spam, privacy, safety] = await communityHold(f, ["spam", "privacy", "safety"]);
     expect((await f.resolve(privacy!.reportId, "uphold")).ok).toBe(true);
     const held = await f.control();
     expect(held?.source).toBe("operator");
     expect(held?.visibility).toBe("hidden");
     expect(held?.version).toBe(2);
-    await f.resolve(integrity!.reportId);
+    await f.resolve(spam!.reportId);
     await f.resolve(safety!.reportId);
     expect(await f.control()).toEqual(held);
     expect(f.status(privacy!.reportId)).toBe("upheld");
@@ -363,7 +364,7 @@ describe("report resolution preserves independent allegations", () => {
 
   test("a legacy upheld report blocks automatic restoration even under a community control", async () => {
     const f = fixture();
-    const [integrity, privacy, safety] = await communityHold(f, ["integrity", "privacy", "safety"]);
+    const [spam, privacy, safety] = await communityHold(f, ["spam", "privacy", "safety"]);
     // Older deployments could uphold an already-hidden target without upgrading
     // its community control. Preserve that prior human decision during migration.
     f.sql
@@ -376,14 +377,14 @@ describe("report resolution preserves independent allegations", () => {
         "A prior reviewed privacy finding.",
         privacy!.reportId,
       );
-    await f.resolve(integrity!.reportId);
+    await f.resolve(spam!.reportId);
     await f.resolve(safety!.reportId);
     expect((await f.control())?.visibility).toBe("hidden");
     expect(f.status(privacy!.reportId)).toBe("upheld");
     expect(f.logs().some((item) => item.action === "restored")).toBe(false);
   });
 
-  for (const incoming of ["integrity", "privacy"]) {
+  for (const incoming of ["spam", "privacy"]) {
     test(`a new ${incoming} report arriving after the reviewed snapshot remains pending`, async () => {
       const f = fixture();
       const reports = await communityHold(f);
@@ -432,7 +433,7 @@ describe("report resolution preserves independent allegations", () => {
     for (const report of reports) expect(f.status(report.reportId)).toBe("upheld");
     expect(f.count("operator_audit")).toBe(1);
     expect(f.logs().filter((item) => item.action.startsWith("report-"))).toEqual([
-      { action: "report-upheld", category: "integrity" },
+      { action: "report-upheld", category: "spam" },
     ]);
     expect(f.logs().some((item) => item.action === "restored")).toBe(false);
     expect((await f.control())?.source).toBe("operator");
@@ -463,7 +464,7 @@ describe("report resolution preserves independent allegations", () => {
     for (const report of reports) expect(f.status(report.reportId)).toBe("pending");
     expect(f.count("operator_audit")).toBe(0);
     expect(f.count("content_controls")).toBe(1);
-    expect(f.logs()).toEqual([{ action: "hidden", category: "integrity" }]);
+    expect(f.logs()).toEqual([{ action: "hidden", category: "spam" }]);
     f.sql.exec("DROP TRIGGER fail_control");
     expect((await f.resolve(reports[0]!.reportId)).ok).toBe(true);
     expect(f.count("operator_audit")).toBe(1);
@@ -472,11 +473,11 @@ describe("report resolution preserves independent allegations", () => {
 
   test("unsupported visibility targets retain report outcomes without false hide logs", async () => {
     const f = fixture();
-    const report = await f.report("integrity", "C-1@1-implies-C-2@1", "relation");
+    const report = await f.report("spam", "C-1@1-implies-C-2@1", "relation");
     expect((await f.resolve(report.reportId, "uphold")).ok).toBe(true);
     expect(f.status(report.reportId)).toBe("upheld");
     expect(f.count("content_controls")).toBe(0);
-    expect(f.logs()).toEqual([{ action: "report-upheld", category: "integrity" }]);
+    expect(f.logs()).toEqual([{ action: "report-upheld", category: "spam" }]);
     expect(await f.resolve("RP-absent")).toEqual({ ok: false, reason: "not-found" });
     expect(f.count("operator_audit")).toBe(1);
   });

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { FellowIdSchema, SponsorIdSchema } from "./enrollment.ts";
+import { PublicLedgerProblemIdSchema } from "./ledger.ts";
 import { ReportResponseSchema } from "./moderation.ts";
-import { ProblemIdSchema } from "./sessions.ts";
 
 /** Restricted human investigation; no case action is a scientific verdict. */
 export const INTEGRITY_CASES_SCHEMA_ID =
@@ -14,8 +14,8 @@ export const INTEGRITY_CASE_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 export const INTEGRITY_CASE_PUBLIC_NOTICE =
   "This record has a scientific-integrity review notice. A notice is not a finding of misconduct and does not change scientific standing.";
 export const INTEGRITY_CASE_ID_PATTERN = /^IC-[0-9A-HJKMNP-TV-Z]{26}$/;
-export const IntegrityCaseIdSchema = z.string().regex(INTEGRITY_CASE_ID_PATTERN);
-export const IntegrityCaseActionIdSchema = z.string().regex(/^IA-[0-9A-HJKMNP-TV-Z]{26}$/);
+export const IntegrityCaseIdSchema = z.string().length(29).regex(INTEGRITY_CASE_ID_PATTERN);
+export const IntegrityCaseActionIdSchema = z.string().length(29).regex(/^IA-[0-9A-HJKMNP-TV-Z]{26}$/);
 export const INTEGRITY_CONCERNS = [
   "fabricated-source",
   "fabricated-verification",
@@ -58,10 +58,10 @@ export const IntegrityTargetRefSchema = z
   .string()
   .min(1)
   .max(96)
-  .regex(/^(?:problem|C-[0-9]+@[1-9][0-9]{0,8}|(?:H|E|R|G|L|DE|Q|CF|SYNTH)-[0-9A-Za-z-]{1,78})$/);
+  .regex(/^(?:problem|C-[0-9]+@[1-9][0-9]{0,8}|(?:H|E|R|G|L|DE|Q|CF|SYNTH)-[0-9A-Za-z-]{1,78})$(?![\s\S])/);
 export const IntegrityCorrectionRefSchema = z
   .object({
-    problem_id: ProblemIdSchema,
+    problem_id: PublicLedgerProblemIdSchema,
     target_ref: IntegrityTargetRefSchema,
   })
   .strict();
@@ -69,10 +69,10 @@ export const IntegrityCorrectionRefSchema = z
 /** Server-derived immutable pin. No allegation or source body is copied here. */
 export const IntegrityPublicationPinSchema = z
   .object({
-    problem_id: ProblemIdSchema,
+    problem_id: PublicLedgerProblemIdSchema,
     target_ref: IntegrityTargetRefSchema,
     event_id: z.string().min(1).max(128),
-    payload_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    payload_sha256: z.string().length(64).regex(/^[0-9a-f]{64}$/),
     seq: RevisionSchema,
   })
   .strict();
@@ -307,10 +307,13 @@ export const PublicIntegrityNoticeSchema = z
     corrections: CorrectionPinsSchema,
   })
   .strict();
+export const PublicIntegrityNoticesQuerySchema = z
+  .object({ after: IntegrityCaseIdSchema.optional() })
+  .strict();
 export const PublicIntegrityNoticesResponseSchema = z
   .object({
     schema: z.literal(INTEGRITY_CASES_SCHEMA_ID),
-    problem_id: ProblemIdSchema,
+    problem_id: PublicLedgerProblemIdSchema,
     notices: z.array(PublicIntegrityNoticeSchema).max(INTEGRITY_CASE_PAGE_LIMIT),
     has_more: z.boolean(),
     next_after: IntegrityCaseIdSchema.nullable(),
@@ -407,12 +410,13 @@ export const IntegrityCasesContractsSchema = z
     list: IntegrityCaseListResponseSchema,
     detail: IntegrityCaseDetailResponseSchema,
     operator_detail: OperatorIntegrityCaseDetailResponseSchema,
+    public_query: PublicIntegrityNoticesQuerySchema,
     public_notices: PublicIntegrityNoticesResponseSchema,
   })
   .strict();
 export function generateIntegrityCasesSchema(): string {
   return `${JSON.stringify(
-    { $id: INTEGRITY_CASES_SCHEMA_ID, ...z.toJSONSchema(IntegrityCasesContractsSchema) },
+    { $id: INTEGRITY_CASES_SCHEMA_ID, ...z.toJSONSchema(IntegrityCasesContractsSchema, { io: "input" }) },
     null,
     2,
   )}\n`;
@@ -443,5 +447,6 @@ export type IntegrityCaseDetailResponse = z.infer<typeof IntegrityCaseDetailResp
 export type OperatorIntegrityCaseDetailResponse =
   z.infer<typeof OperatorIntegrityCaseDetailResponseSchema>;
 export type PublicIntegrityNotice = z.infer<typeof PublicIntegrityNoticeSchema>;
+export type PublicIntegrityNoticesQuery = z.infer<typeof PublicIntegrityNoticesQuerySchema>;
 export type PublicIntegrityNoticesResponse = z.infer<typeof PublicIntegrityNoticesResponseSchema>;
 export type IntegrityCasesContracts = z.infer<typeof IntegrityCasesContractsSchema>;

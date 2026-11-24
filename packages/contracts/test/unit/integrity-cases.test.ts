@@ -7,6 +7,7 @@ import {
   INTEGRITY_OUTCOMES,
   IntegrityCaseActionSchema,
   IntegrityCaseDetailResponseSchema,
+  IntegrityCaseIdSchema,
   IntegrityCaseListResponseSchema,
   IntegrityCaseOpenRequestSchema,
   IntegrityCaseQuerySchema,
@@ -18,6 +19,7 @@ import {
   IntegrityCaseSummarySchema,
   IntegrityPublicationPinSchema,
   OperatorIntegrityCaseDetailResponseSchema,
+  PublicIntegrityNoticesQuerySchema,
   PublicIntegrityNoticesResponseSchema,
   integrityCaseDetailMatchesRequest,
   integrityCaseListMatchesQuery,
@@ -99,6 +101,11 @@ test("canonical JSON Schema and Zod agree on commands and public privacy fixture
       "integrity-case-open-weak-science",
     ]],
     ["respond", IntegrityCaseRespondRequestSchema, "integrity-case-respond", []],
+    ["query", IntegrityCaseQuerySchema, "integrity-case-query", []],
+    ["read", IntegrityCaseReadRequestSchema, "integrity-case-read", []],
+    ["public_query", PublicIntegrityNoticesQuerySchema, "integrity-notices-query", [
+      "integrity-notices-query-authority",
+    ]],
     ["resolve", IntegrityCaseResolveRequestSchema, "integrity-case-resolve", [
       "integrity-case-resolve-override",
       "integrity-case-resolve-unpinned",
@@ -319,5 +326,59 @@ test("public notices carry only source pins and neutral state, including on conf
   }).success).toBe(false);
   expect(PublicIntegrityNoticesResponseSchema.safeParse({
     ...page, notices: [page.notices[0], page.notices[0]],
+  }).success).toBe(false);
+});
+
+test("case identifiers, publication digests and exact references reject trailing line breaks", () => {
+  for (const suffix of ["\n", "\r", "\r\n", "\u2028", "\u2029"]) {
+    expect(IntegrityCaseIdSchema.safeParse(CASE + suffix).success).toBe(false);
+    expect(IntegrityCaseActionSchema.safeParse({
+      ...openedAction(), action_id: openedAction().action_id + suffix,
+    }).success).toBe(false);
+    expect(IntegrityPublicationPinSchema.safeParse({
+      ...pin, target_ref: pin.target_ref + suffix,
+    }).success).toBe(false);
+    expect(IntegrityPublicationPinSchema.safeParse({
+      ...pin, payload_sha256: pin.payload_sha256 + suffix,
+    }).success).toBe(false);
+  }
+});
+
+test("request schemas accept omitted defaults without imposing response fields", () => {
+  expect(IntegrityCaseQuerySchema.parse({})).toEqual({ limit: 20 });
+  expect(IntegrityCaseReadRequestSchema.parse({ case_id: CASE })).toEqual({
+    case_id: CASE, after_revision: 0, limit: 20,
+  });
+  expect(PublicIntegrityNoticesQuerySchema.parse({})).toEqual({});
+  expect(PublicIntegrityNoticesQuerySchema.safeParse({ after: null }).success).toBe(false);
+  expect(PublicIntegrityNoticesQuerySchema.safeParse({
+    after: CASE, problem_id: "P-UNREQUESTED",
+  }).success).toBe(false);
+});
+
+test("public notices and publication pins preserve established legacy problem identifiers", async () => {
+  const value = await fixture("valid/integrity-notices-legacy");
+  const page = PublicIntegrityNoticesResponseSchema.parse(value);
+  expect(page.problem_id).toBe("legacy_2026:claim.study");
+  expect(page.notices[0]?.source.problem_id).toBe(page.problem_id);
+  expect(IntegrityCaseSchema.safeParse({
+    ...caseRecord(), source: page.notices[0]?.source,
+  }).success).toBe(true);
+  const command = await fixture("valid/integrity-case-resolve-legacy");
+  expect(IntegrityCaseResolveRequestSchema.safeParse(command).success).toBe(true);
+  const schema = JSON.parse(generateIntegrityCasesSchema());
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema(schema, "legacy-integrity");
+  expect(ajv.compile({
+    $ref: "legacy-integrity#/properties/public_notices",
+  })(value)).toBe(true);
+  expect(ajv.compile({
+    $ref: "legacy-integrity#/properties/resolve",
+  })(command)).toBe(true);
+  expect(PublicIntegrityNoticesResponseSchema.safeParse({
+    ...page, notices: [], problem_id: "p:" + "a".repeat(126),
+  }).success).toBe(true);
+  expect(PublicIntegrityNoticesResponseSchema.safeParse({
+    ...page, notices: [], problem_id: "p:" + "a".repeat(127),
   }).success).toBe(false);
 });

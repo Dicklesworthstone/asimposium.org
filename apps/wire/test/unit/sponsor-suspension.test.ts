@@ -447,10 +447,14 @@ describe("reviewed sponsor suspension", () => {
         ["POST", "workshop.search"],
         ["POST", "lease.list"],
         ["POST", "sponsor.screening-appeals.submit"],
+        ["POST", "sponsor.integrity.cases.query"],
+        ["POST", "sponsor.integrity.cases.read"],
+        ["POST", "sponsor.integrity.cases.respond"],
       ])
         expect(
           await sponsorMutationRefusal(f.db, SPONSOR, method as string, action as string),
         ).toBeUndefined();
+      expect((await sponsorMutationRefusal(f.db, SPONSOR, "POST", "sponsor.integrity.cases.resolve"))?.status).toBe(403);
       expect(await sponsorMutationRefusal(f.db, OTHER, "POST", "enrollment.mint")).toBeUndefined();
       await expect(f.service.mint(f.principal, { requested_scopes: ["review"] })).rejects.toThrow();
       for (const table of [

@@ -1,0 +1,14 @@
+{
+  "case_id": "IC-00000000000000000000000001",
+  "expected_revision": 2,
+  "outcome": "honest-error",
+  "rationale": "The source exists and the error is corrected in the linked publication.",
+  "correction_refs": [
+    {
+      "problem_id": "legacy_2026:claim.study",
+      "target_ref": "C-2@1"
+    }
+  ],
+  "conflict_declaration": "no-conflict",
+  "auth_issued_at": 1793361600
+}
