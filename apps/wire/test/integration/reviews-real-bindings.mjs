@@ -3,6 +3,7 @@ import {
   EnrollmentHelloResponseSchema,
   InboxResponseSchema,
   PackResponseSchema,
+  ReviewListResponseSchema,
   ReviewResponseSchema,
   TriageResponseSchema,
 } from "@asimposium/contracts";
@@ -420,6 +421,54 @@ await runLocalWorkerJourney(async (context) => {
     "T2 review must appear in claim pack",
   );
 
+  // Discover completed reviews from the problem itself without knowing an id
+  // or consuming the latest-event window. These are actual admitted reviews;
+  // assertion-only feedback remains discoverable without claiming standing.
+  const collectionPath = `/p/${problemId}/reviews.json`;
+  const initialCollectionResponse = await context.worker.fetch(
+    `${context.origin}${collectionPath}`,
+    { headers: { "User-Agent": context.userAgent } },
+  );
+  assert.equal(initialCollectionResponse.status, 200);
+  const initialCollection = ReviewListResponseSchema.parse(await initialCollectionResponse.json());
+  const pinnedCollectionPath = `${collectionPath}?through=${initialCollection.cursor}&after=0`;
+  const collectionEtag = initialCollectionResponse.headers.get("etag");
+  assert.ok(collectionEtag);
+  assert.equal(initialCollectionResponse.headers.get("content-location"), pinnedCollectionPath);
+  assert.equal(initialCollection.count, 4);
+  assert.equal(initialCollection.next_after, null);
+  for (const submitted of [revT0, revT1, revT2, revNoWeight]) {
+    const entry = initialCollection.reviews.find((review) => review.review_id === submitted.review_id);
+    assert.ok(entry, "every completed review is discoverable, including assertion-only feedback");
+    assert.deepEqual(entry.target, { claim_id: claimId, version: 1 });
+    assert.equal(entry.independence_tier, Number(submitted.tier.slice(1)));
+    assert.equal(entry.withdrawn, false);
+    assert.equal(entry.read_url, `/p/${problemId}/reviews/${submitted.review_id}.json`);
+    assert.equal(entry.read_url.includes("?"), false, "exact review readers do not take a list cursor");
+  }
+  assert.equal(JSON.stringify(initialCollection).includes(privateWorkshopNotes), false);
+  const cachedCollection = await context.worker.fetch(`${context.origin}${pinnedCollectionPath}`, {
+    headers: { "User-Agent": context.userAgent, "If-None-Match": collectionEtag },
+  });
+  assert.equal(cachedCollection.status, 304);
+  const collectionHead = await context.worker.fetch(`${context.origin}${pinnedCollectionPath}`, {
+    method: "HEAD",
+    headers: { "User-Agent": context.userAgent },
+  });
+  assert.equal(collectionHead.status, 200);
+  assert.equal(collectionHead.headers.get("etag"), collectionEtag);
+  assert.equal(await collectionHead.text(), "");
+  for (const format of ["md", "html"]) {
+    const response = await context.worker.fetch(
+      `${context.origin}/p/${problemId}/reviews.${format}?through=${initialCollection.cursor}&after=0`,
+      { headers: { "User-Agent": context.userAgent } },
+    );
+    assert.equal(response.status, 200);
+    const bytes = await response.text();
+    assert.ok(bytes.includes(revT2.review_id));
+    assert.equal(bytes.includes(privateWorkshopNotes), false);
+  }
+
   // Diptych census over this journey's item faces (lu59 / 92x).
   {
     const census = await faceCensus({
@@ -464,6 +513,22 @@ await runLocalWorkerJourney(async (context) => {
       feedback.unread_reviews.some((item) => item.review_id === revT1.review_id),
       action === "restore",
     );
+    const collectionResponse = await context.worker.fetch(
+      `${context.origin}${pinnedCollectionPath}`,
+      { headers: { "User-Agent": context.userAgent } },
+    );
+    assert.equal(collectionResponse.status, 200);
+    const collection = ReviewListResponseSchema.parse(await collectionResponse.json());
+    assert.equal(collection.cursor, initialCollection.cursor);
+    assert.equal(
+      collection.reviews.some((item) => item.review_id === revT1.review_id),
+      action === "restore",
+      "present controls apply even to a previously captured collection cut",
+    );
+    const conditional = await context.worker.fetch(`${context.origin}${pinnedCollectionPath}`, {
+      headers: { "User-Agent": context.userAgent, "If-None-Match": collectionEtag },
+    });
+    assert.equal(conditional.status, action === "hide" ? 200 : 304);
   }
   const withdrawnSource = await context.env.DB.prepare(
     "SELECT id, payload_sha256 FROM events WHERE problem_id = ? AND object_id = ? AND type = 'review.created'",
@@ -485,6 +550,23 @@ await runLocalWorkerJourney(async (context) => {
     !(await hello(author)).unread_reviews.some((item) => item.review_id === revNoWeight.review_id),
     "withdrawn feedback remains history and is no longer advertised as actionable",
   );
+  const afterWithdrawal = ReviewListResponseSchema.parse(
+    await call(collectionPath, undefined, undefined, 200),
+  );
+  assert.equal(
+    afterWithdrawal.reviews.find((item) => item.review_id === revNoWeight.review_id)?.withdrawn,
+    true,
+    "the completed collection retains a withdrawal as explicitly marked history",
+  );
+  const beforeWithdrawal = ReviewListResponseSchema.parse(
+    await call(pinnedCollectionPath, undefined, undefined, 200),
+  );
+  assert.equal(
+    beforeWithdrawal.reviews.find((item) => item.review_id === revNoWeight.review_id)?.withdrawn,
+    false,
+    "a withdrawal after the saved cut does not rewrite that cut",
+  );
+  console.log(JSON.stringify({ stage: "completed-review-collection", status: "pass" }));
   console.log(JSON.stringify({ stage: "returning-author-feedback", status: "pass" }));
 
   // W2.6: every projection row this journey built is reproducible from the log.
