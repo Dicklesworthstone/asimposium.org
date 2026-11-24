@@ -12,6 +12,7 @@ import {
   type ClaimTransitionContext,
   EMPTY_CLAIM_CONTEXT,
   evaluateClaimTransition,
+  hasStatementDefect,
   type VerifiedReview,
 } from "./dispositions.ts";
 
@@ -130,10 +131,7 @@ function reviewFinding(
   verdict: string,
   rubric?: readonly string[],
 ): VerifiedReview["finding"] | null {
-  if (
-    rubric &&
-    (rubric.includes("statement-defect") || rubric.includes("statement-fails-review"))
-  ) {
+  if (hasStatementDefect(rubric)) {
     return "statement-defect";
   }
   if (verdict === "confirm" || verdict === "reproduces") return "support";

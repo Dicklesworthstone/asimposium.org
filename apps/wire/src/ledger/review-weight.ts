@@ -36,6 +36,14 @@ const IMPRESSIONS = [
 ];
 const impressionBases: ReadonlySet<string> = new Set(IMPRESSIONS);
 
+/** Immutable rubric metadata supplies only the finding after withholding.
+ * Scientific weight is a separate check. The expression is source-authored. */
+export function statementDefectSql(rubricColumn: string): string {
+  return `(json_type(${rubricColumn}) = 'array' AND EXISTS (
+    SELECT 1 FROM json_each(${rubricColumn}) rubric WHERE rubric.type = 'text'
+    AND rubric.value IN ('statement-defect','statement-fails-review')))`;
+}
+
 function normalizedBasis(basis: string): string {
   let start = 0;
   let end = basis.length;

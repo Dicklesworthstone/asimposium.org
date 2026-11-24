@@ -15,7 +15,7 @@ import {
 } from "./dependency-ceiling.ts";
 import { reviewStateFromRecordedReviews } from "./dispositions.ts";
 import type { EvidenceClass } from "./evidence-class.ts";
-import { reviewCarriesWeightSql } from "./review-weight.ts";
+import { reviewCarriesWeightSql, statementDefectSql } from "./review-weight.ts";
 import {
   assessScientificVerification,
   checkedScientificPayload,
@@ -91,10 +91,9 @@ source_rows AS (
     CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce')
       AND ${reviewCarriesWeightSql({ basis: "r.basis", capableOfFailure: "r.capable_of_failure", bodyMd: "r.body_md" })}
       THEN 1 ELSE 0 END AS weighted_refutation,
-    CASE WHEN ${reviewCarriesWeightSql({ basis: "r.basis", capableOfFailure: "r.capable_of_failure", bodyMd: "r.body_md" })}
-      AND json_type(r.rubric_json) = 'array'
-      AND EXISTS (SELECT 1 FROM json_each(r.rubric_json) rubric
-        WHERE rubric.type = 'text' AND rubric.value IN ('statement-defect', 'statement-fails-review'))
+    CASE WHEN ${statementDefectSql("r.rubric_json")} THEN 1 ELSE 0 END AS statement_defect,
+    CASE WHEN ${statementDefectSql("r.rubric_json")}
+      AND ${reviewCarriesWeightSql({ basis: "r.basis", capableOfFailure: "r.capable_of_failure", bodyMd: "r.body_md" })}
       THEN 1 ELSE 0 END AS weighted_statement_defect,
     CASE WHEN e.object_kind = 'claim' THEN e.object_version
       WHEN e.object_kind = 'review' THEN r.target_version

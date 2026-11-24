@@ -4,6 +4,7 @@ import {
   type ScientificEvidenceReference,
   ScientificProvenanceSchema,
 } from "@asimposium/contracts";
+import { hasStatementDefect } from "./dispositions.ts";
 import { scientificEvidenceClassEligible } from "./evidence-grounding.ts";
 
 /** Withdrawal or unavailable grounding removes positive authority, not history
@@ -153,9 +154,6 @@ export function isNegativeReview(payload: Record<string, unknown> | undefined): 
   return (
     payload?.verdict === "refute" ||
     payload?.verdict === "fails-to-reproduce" ||
-    (Array.isArray(payload?.rubric) &&
-      payload.rubric.some(
-        (value) => value === "statement-defect" || value === "statement-fails-review",
-      ))
+    hasStatementDefect(payload?.rubric)
   );
 }

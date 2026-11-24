@@ -521,6 +521,25 @@ await runLocalWorkerJourney(async (context) => {
   const c2Id = c2.claim_id;
   await assertStanding(c2Id, "open", "unreviewed");
 
+  // A reviewer who cannot verify an ill-defined statement should be able
+  // to record the defect without inventing a refutation of the claim.
+  await call(
+    `${reviewerSessionPathC}/review`,
+    {
+      target_claim_id: c2Id,
+      target_version: 1,
+      verdict: "cannot-verify",
+      basis: "Checked the quantifier domain and the definition of the predicate.",
+      capable_of_failure: "An explicit definition of P would remove the objection.",
+      rubric: ["statement-fails-review"],
+      body_md:
+        "The predicate P has no definition on the stated domain, so the assertion cannot be evaluated.",
+    },
+    reviewerC,
+    201,
+  );
+  await assertStanding(c2Id, "malformed", "contested");
+
   // Reviewer B submits review indicating statement-defect rubric -> "malformed"
   await call(
     `${reviewerSessionPathB}/review`,

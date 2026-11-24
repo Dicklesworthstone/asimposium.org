@@ -159,7 +159,7 @@ for (const kind of ["evidence", "review"] as const) {
     }));
 }
 
-for (const verdict of ["refute", "fails-to-reproduce"]) {
+for (const verdict of ["refute", "fails-to-reproduce", "cannot-verify", "confirm"]) {
   for (const visibility of ["hidden", "redacted", "withdrawn-hidden"]) {
     test(`an impression-only ${verdict} stays contested without gaining weight when ${visibility}`, () =>
       using(async (f) => {
@@ -207,7 +207,9 @@ for (const rubric of ["statement-defect", "statement-fails-review"]) {
     test(`${visibility} ${rubric} review cannot clear malformed standing without revision`, () =>
       using(async (f) => {
         const review = f.source("review", "R-defect", { rubric: [rubric] });
-        assert.equal((await fold(f)).disposition, "malformed");
+        const before = await fold(f);
+        assert.equal(before.disposition, "malformed");
+        assert.equal(reviewStateFromRecordedReviews(before.reviewFacets), "contested");
         const cut = review.event.seq;
         if (visibility === "redacted")
           f.sql
@@ -236,6 +238,7 @@ for (const rubric of ["statement-defect", "statement-fails-review"]) {
         }
         const after = await fold(f);
         assert.equal(after.disposition, "malformed");
+        assert.equal(reviewStateFromRecordedReviews(after.reviewFacets), "contested");
         assert.equal(after.stale, true);
         assert.equal((await fold(f, cut)).disposition, "malformed");
         f.append(

@@ -18,12 +18,16 @@ import {
   computeCurrentClaimDisposition,
   type VersionedClaimTimelineEvent,
 } from "./disposition-read.ts";
-import type { IndependenceTier } from "./dispositions.ts";
+import { hasStatementDefect, type IndependenceTier } from "./dispositions.ts";
 import {
   type ScientificEvidenceUse,
   scientificEvidenceClassEligible,
 } from "./evidence-grounding.ts";
-import { reviewCarriesWeight, reviewCarriesWeightSql } from "./review-weight.ts";
+import {
+  reviewCarriesWeight,
+  reviewCarriesWeightSql,
+  statementDefectSql,
+} from "./review-weight.ts";
 import {
   assessScientificVerification,
   inspectFormalArtifact,
@@ -57,6 +61,7 @@ export interface ScientificRow {
   /** A completed objection remains contested even without verification weight. */
   negative_review?: number;
   weighted_refutation?: number;
+  statement_defect?: number;
   /** Immutable review rubric/weight survives withholding its public body. */
   weighted_statement_defect?: number;
   withdrawn_event_id?: string | null;
@@ -88,6 +93,7 @@ export interface ScientificReadBudget {
 export interface RecordedReviewFacet {
   readonly targetVersion: number;
   readonly verdict: string;
+  readonly statementDefect?: boolean;
   readonly carriesWeight: boolean;
   readonly tier: IndependenceTier;
 }
@@ -333,10 +339,9 @@ export function prepareScientificDispositions(
       CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce')
         AND ${reviewCarriesWeightSql({ basis: "r.basis", capableOfFailure: "r.capable_of_failure", bodyMd: "r.body_md" })}
         THEN 1 ELSE 0 END AS weighted_refutation,
-      CASE WHEN ${reviewCarriesWeightSql({ basis: "r.basis", capableOfFailure: "r.capable_of_failure", bodyMd: "r.body_md" })}
-        AND json_type(r.rubric_json) = 'array'
-        AND EXISTS (SELECT 1 FROM json_each(r.rubric_json) rubric
-          WHERE rubric.type = 'text' AND rubric.value IN ('statement-defect', 'statement-fails-review'))
+      CASE WHEN ${statementDefectSql("r.rubric_json")} THEN 1 ELSE 0 END AS statement_defect,
+      CASE WHEN ${statementDefectSql("r.rubric_json")}
+        AND ${reviewCarriesWeightSql({ basis: "r.basis", capableOfFailure: "r.capable_of_failure", bodyMd: "r.body_md" })}
         THEN 1 ELSE 0 END AS weighted_statement_defect
     FROM events e CROSS JOIN disclosure_cut
     LEFT JOIN reviews r ON r.source_event_id = e.id AND r.problem_id = e.problem_id
@@ -721,6 +726,7 @@ export async function foldScientificRows(
           adverseNovelty ||
           (!payload &&
             (row.negative_review === 1 ||
+              row.statement_defect === 1 ||
               row.weighted_refutation === 1 ||
               row.weighted_statement_defect === 1)));
       if (!adverseEvidence && !adverseReview) continue;
@@ -819,6 +825,7 @@ export async function foldScientificRows(
     if (
       row.type === "review.created" &&
       (row.negative_review === 1 ||
+        row.statement_defect === 1 ||
         row.weighted_refutation === 1 ||
         row.weighted_statement_defect === 1) &&
       (!payload || !claim)
@@ -828,7 +835,13 @@ export async function foldScientificRows(
       const carriesWeight = row.weighted_refutation === 1 || row.weighted_statement_defect === 1;
       const verdict =
         row.negative_review === 1 || row.weighted_refutation === 1 ? "refute" : "cannot-verify";
-      reviewFacets.push({ targetVersion: row.target_version, verdict, carriesWeight, tier: "T0" });
+      reviewFacets.push({
+        targetVersion: row.target_version,
+        verdict,
+        carriesWeight,
+        tier: "T0",
+        statementDefect: row.statement_defect === 1 || row.weighted_statement_defect === 1,
+      });
       timeline.push({
         kind: "review-created",
         sequence: row.seq,
@@ -985,6 +998,7 @@ export async function foldScientificRows(
     reviewFacets.push({
       targetVersion: row.target_version,
       verdict: typeof payload.verdict === "string" ? payload.verdict : "cannot-verify",
+      statementDefect: hasStatementDefect(rubric),
       // Disproving one counterexample is not independent confirmation of the
       // claim. The same boundary governs the disposition fold below.
       carriesWeight: carriesWeight && !(refutationCheck && !isNegativeReview(payload)),

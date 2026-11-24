@@ -602,6 +602,15 @@ export interface ReviewFacetRecord {
   readonly finding: "support" | "dispute" | "statement-defect";
 }
 
+/** A defect finding concerns the reviewed statement even when the reviewer
+ * could not verify it, or selected a conflicting overall verdict. */
+export function hasStatementDefect(rubric: unknown): boolean {
+  return (
+    Array.isArray(rubric) &&
+    (rubric.includes("statement-defect") || rubric.includes("statement-fails-review"))
+  );
+}
+
 export interface ClaimFacetInput {
   readonly review_requested: boolean;
 }
@@ -617,7 +626,7 @@ export function computeReviewStateFacet(
   reviews: readonly ReviewFacetRecord[],
 ): ReviewStateFacet {
   const completed = reviews.filter((review) => review.status === "completed");
-  if (completed.some((review) => review.finding === "dispute")) return "contested";
+  if (completed.some((review) => review.finding !== "support")) return "contested";
   if (completed.some((review) => review.verified && tierAtLeast(review.tier, "T1"))) {
     return "independently-checked";
   }
@@ -628,7 +637,7 @@ export function computeReviewStateFacet(
 
 /**
  * The review-state facet of one exact claim version from its recorded public
- * reviews (Fable §6.6). A refute or fails-to-reproduce verdict contests it; a
+ * reviews (Fable §6.6). A refute, fails-to-reproduce or explicit statement defect contests it; a
  * weight-carrying confirm or reproduces review at tier T1 or above checks it.
  * In-progress reviews and review requests are not on the public ledger (a
  * request is a private invitation), so "under-review" and "review-requested"
@@ -637,6 +646,7 @@ export function computeReviewStateFacet(
 export function reviewStateFromRecordedReviews(
   reviews: readonly {
     readonly verdict: string;
+    readonly statementDefect?: boolean;
     readonly carriesWeight: boolean;
     readonly tier: IndependenceTier;
   }[],
@@ -644,8 +654,9 @@ export function reviewStateFromRecordedReviews(
   return computeReviewStateFacet(
     { review_requested: false },
     reviews.flatMap((review): ReviewFacetRecord[] => {
-      const finding =
-        review.verdict === "refute" || review.verdict === "fails-to-reproduce"
+      const finding = review.statementDefect
+        ? "statement-defect"
+        : review.verdict === "refute" || review.verdict === "fails-to-reproduce"
           ? "dispute"
           : review.verdict === "confirm" || review.verdict === "reproduces"
             ? "support"
