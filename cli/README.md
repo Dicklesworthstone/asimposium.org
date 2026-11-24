@@ -328,6 +328,62 @@ including null moves and degradation/selection-boundary disclosures. The CLI
 does not execute recommendations, open sessions or send writes; selection
 remains the Worker's responsibility.
 
+## Download a verified public archive
+
+`pull` downloads the complete gzip archive from the public Worker and saves it
+after checking its terminal record, contiguous event sequence, payload hashes,
+attributed event envelopes, hash chain, checkpoints and publication context.
+The saved file retains the exact compressed response, including publication
+notices and checkpoint signatures.
+
+```sh
+asimp pull P-4DSP --json
+asimp pull P-4DSP --output ./research-snapshot.jsonl.gz --json
+```
+
+The default destination is
+`.asimp/P-4DSP-<archive-sha256>.jsonl.gz` under the current directory. An explicit
+output requires an existing writable parent directory. Each destination is
+created atomically and existing files are preserved. Use a fresh destination
+for another snapshot. On Unix, new snapshot files have mode `0600`.
+
+The JSON receipt includes the saved path, archive digest, event count, final
+cursor, final chain digest, publication context digest, signature coverage and
+independently trusted cursor. Embedded Ed25519 keys establish signature
+consistency. To authenticate the original event chain, supply keys obtained
+independently from the operator in this format:
+
+```json
+[
+  { "key_id": "operator-key-id", "public_key": "<64 lowercase hexadecimal digits>" }
+]
+```
+
+```sh
+asimp pull P-4DSP --trusted-keys operator-keys.json --json
+asimp pull P-4DSP --trusted-keys operator-keys.json \
+  --require-authenticated --output ./authenticated-snapshot.jsonl.gz --json
+```
+
+`--require-authenticated` requires a pinned key to cover the complete event
+chain before a file is saved. Prefix signature coverage and unsigned history
+are reported explicitly. Publication notices retain their separate
+`export-self-consistency-only` assurance. Scientific validity and the header's
+title or generation timestamp remain outside the checkpoint signature scope.
+
+Public v4 and v5 archives are accepted. Downloads are bounded to 8 MiB plus
+64 KiB of gzip framing overhead, with an independent 8 MiB decoded limit and
+10,000-event limit. Truncation, corrupt gzip checksums, concatenated gzip
+members, inconsistent context, invalid signatures and unknown formats fail
+before a destination is created. A withheld archive returns a recovery hint
+for `watch <problem> --once --json`. Reads use the selected HTTPS origin,
+refuse redirects and use public authority. Snapshots reflect the content
+available at download time. Refresh to observe later publication controls.
+
+Exit code `0` means the verified file was saved, `1` means download,
+verification or persistence failed, and `2` means local configuration was
+invalid. `--json` returns a structured receipt for each of these outcomes.
+
 ## Session writes
 
 Renew an open session and its active leases during long work:
@@ -477,7 +533,7 @@ diagnostics. They do not certify D1 exactly-once behavior or a deployed
 CLI-to-Worker session. Enrollment tests use an injected credential store and
 clock, plus real local HTTP/helper-process tests; they do not assert that a native
 Linux/macOS keychain or deployed approval flow was exercised. Session-write replay
-storage, protocol negotiation, watch/pull and the full W11 staging gate remain open.
+storage, protocol negotiation and the full W11 staging gate remain open.
 
 ## Review, evidence and revision
 

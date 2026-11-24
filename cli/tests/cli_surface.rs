@@ -6,6 +6,50 @@ use std::{
 const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[test]
+fn pull_help_and_invalid_navigation_never_consult_credentials() {
+    let help = invoke(&["pull", "--help"]).output;
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    for flag in [
+        "--output",
+        "--trusted-keys",
+        "--require-authenticated",
+        "--json",
+    ] {
+        assert!(help.contains(flag));
+    }
+    for arguments in [
+        vec!["pull", "../private-canary", "--json"],
+        vec![
+            "--origin",
+            "http://private-canary.test",
+            "pull",
+            "P-PULL",
+            "--json",
+        ],
+    ] {
+        let output = binary()
+            .args(arguments)
+            .env("ASIMP_TOKEN", "invalid-private-canary\r\n")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["format"], "asimp.pull.v1");
+        assert_eq!(result["ok"], false);
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("canary"));
+        assert!(output.stderr.is_empty());
+    }
+    assert_eq!(
+        invoke(&["pull", "P-PULL", "--require-authenticated"])
+            .output
+            .status
+            .code(),
+        Some(2)
+    );
+}
+
+#[test]
 fn public_watch_help_and_invalid_inputs_never_consult_credentials_or_reflect_input() {
     let help = invoke(&["watch", "--help"]);
     assert!(help.output.status.success());

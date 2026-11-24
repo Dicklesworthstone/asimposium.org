@@ -11,6 +11,7 @@ pub mod canonical_json;
 pub mod coordination;
 mod credentials;
 mod enrollment;
+mod pull;
 mod session_reads;
 pub mod validation;
 pub mod watch;
@@ -49,6 +50,8 @@ pub enum Command {
     Validate(validation::ValidateArgs),
     /// Follow public event envelopes; resume from the last complete page_end cursor.
     Watch(watch::WatchArgs),
+    /// Download and verify a public scientific archive, preserving its publication context.
+    Pull(pull::PullArgs),
     /// Propose a Fellow from a sponsor's fragment-secret join URL, then await approval.
     Connect(enrollment::ConnectArgs),
     /// Start the supported device-code enrollment flow and await sponsor approval.
@@ -651,6 +654,9 @@ fn token_for_command(
 /// Production entrypoint. Only explicit private commands consult
 /// ASIMP_TOKEN; raw GET and public commands never acquire ambient authority.
 pub fn run_cli(cli: &Cli) -> CliOutput {
+    if let Command::Pull(args) = &cli.command {
+        return pull::run(cli, args);
+    }
     if let Command::Validate(args) = &cli.command {
         return validation::run(args);
     }
@@ -1245,10 +1251,10 @@ fn fetch_text_with_deadline(
     })
 }
 
-fn run_with_deadline(
+fn run_with_deadline<T: Send + 'static>(
     timeout: std::time::Duration,
-    operation: impl FnOnce() -> Result<Fetched, FetchError> + Send + 'static,
-) -> Result<Fetched, FetchError> {
+    operation: impl FnOnce() -> Result<T, FetchError> + Send + 'static,
+) -> Result<T, FetchError> {
     let started = std::time::Instant::now();
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let worker = std::thread::Builder::new()
