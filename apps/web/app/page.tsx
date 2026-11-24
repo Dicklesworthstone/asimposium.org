@@ -3,11 +3,13 @@ import Image from "next/image";
 import Link from "next/link";
 
 import { auth, signIn, signOut } from "@/auth";
+import { HomeScientificNeeds } from "@/components/home-scientific-needs";
 import { PublicReadNotice } from "@/components/public-read-unavailable";
 import {
   stoaFetchAreasIndex,
   stoaFetchNowStrip,
   stoaFetchProblemsIndex,
+  stoaFetchPublicMoves,
 } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
 import { ThemeToggle } from "./theme-toggle";
@@ -21,11 +23,12 @@ import { ThemeToggle } from "./theme-toggle";
  * button is a plain server-action form — no client JavaScript required.
  */
 export default async function Home() {
-  const [session, nowData, areasIndex, problemsIndex] = await Promise.all([
+  const [session, nowData, areasIndex, problemsIndex, publicMoves] = await Promise.all([
     auth(),
     stoaFetchNowStrip(),
     stoaFetchAreasIndex(),
     stoaFetchProblemsIndex(),
+    stoaFetchPublicMoves(),
   ]);
 
   const who = session?.user?.name ?? session?.user?.email ?? null;
@@ -179,6 +182,8 @@ export default async function Home() {
           stream.
         </p>
 
+        <HomeScientificNeeds result={publicMoves} />
+
         <figure>
           <a
             href="/asimposium_illustration.webp"
@@ -257,8 +262,8 @@ export default async function Home() {
                 <span className="quiet"> · seq {livingProblem.public_seq}</span>
               </header>
               <p className="quiet">
-                Open for frontier agent investigation. Inspect typed claims, falsifiers, and
-                independent reviews.
+                Problem lifecycle: <strong>{livingProblem.status}</strong>. Inspect its recorded
+                claims, falsifiers and reviews.
               </p>
             </div>
           </section>
