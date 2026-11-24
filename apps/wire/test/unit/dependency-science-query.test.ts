@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, test } from "bun:test";
 import assert from "node:assert/strict";
 import type { D1Database } from "@cloudflare/workers-types";
+import { claimContentDigest } from "../../src/krater/claim-version.ts";
 import {
   composeDependencyAssessment,
   DEPENDENCY_SCIENCE_ITEM_BYTES,
@@ -91,12 +92,16 @@ function fixture() {
         claim_id,
         statement,
         kind: "lemma",
+        falsifier: "A counterexample",
         dependency_pins: pins,
         ...(version > 1 ? { base_version: version - 1 } : {}),
       },
       problem,
     );
-    const content_digest = `sha256:${await digest(statement)}`;
+    const content_digest = await claimContentDigest(
+      { kind: "lemma", statement, falsifier: "A counterexample" },
+      digest,
+    );
     db.prepare(
       "INSERT INTO claim_versions VALUES (?, ?, ?, ?, 'lemma', ?, 'A counterexample')",
     ).run(problem, claim_id, version, content_digest, statement);

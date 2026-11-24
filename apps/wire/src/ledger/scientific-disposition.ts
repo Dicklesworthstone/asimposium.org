@@ -30,6 +30,7 @@ import {
 } from "./review-weight.ts";
 import {
   assessScientificVerification,
+  checkedScientificClaimContent,
   inspectFormalArtifact,
   readScientificProvenance,
   recordedReviewIndependence,
@@ -488,7 +489,16 @@ export async function foldScientificRows(
     const payload = value as Record<string, unknown>;
     contents.set(row.event_id, payload);
     if (row.type === "claim.created" || row.type === "claim.revised") {
-      if (row.content_digest === null || row.statement === null) continue;
+      if (row.content_digest === null || row.statement === null) {
+        markStale(row);
+        continue;
+      }
+      await checkedScientificClaimContent(payload, {
+        claimId: row.claim_id,
+        version: row.object_version,
+        statement: row.statement,
+        contentDigest: row.content_digest,
+      });
       claims.set(row.object_version, {
         eventId: row.event_id,
         payloadDigest: row.payload_sha256,
@@ -500,6 +510,23 @@ export async function foldScientificRows(
         sponsorId: row.sponsor_id,
         provenance: readScientificProvenance(payload.scientific_provenance),
       });
+    }
+    if (
+      (row.type === "review.created" &&
+        (payload.target_claim_id !== row.claim_id ||
+          payload.target_version !== row.target_version)) ||
+      (row.type === "evidence.created" &&
+        (payload.bears_on_kind !== "claim" ||
+          payload.bears_on_id !== row.claim_id ||
+          payload.bears_on_version !== row.target_version ||
+          payload.direction !== row.direction))
+    ) {
+      // Treat a misbound input as unavailable source content. In particular,
+      // discarding its positive weight must not erase a recorded objection or
+      // allow a mismatched review to resolve counterevidence on this claim.
+      contents.delete(row.event_id);
+      markStale(row);
+      continue;
     }
     if (
       row.type === "evidence.created" &&

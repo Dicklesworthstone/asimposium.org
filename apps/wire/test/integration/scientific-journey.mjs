@@ -518,6 +518,7 @@ export async function scientificJourney({
   const searchEtags = new Map();
   async function checkCitationSearch(version, expectedStatement) {
     const canonical = `https://asimposium.org/p/${problem}/claims/${claim.claim_id}@${version}`;
+    const readUrl = `/p/${problem}/claims/${claim.claim_id}@${version}.md`;
     for (const q of [
       canonical,
       `${canonical}.md`,
@@ -542,6 +543,7 @@ export async function scientificJourney({
       assert.equal(result.items[0].statement, expectedStatement);
       assert.equal(result.items[0].version, version);
       assert.equal(result.items[0].url, canonical);
+      assert.equal(result.items[0].read_url, readUrl);
       assert.equal(result.items[0].match_type, "exact_reference");
       assert.ok(!JSON.stringify(result).includes(privateCanary));
       const etag = response.headers.get("etag");
@@ -558,7 +560,7 @@ export async function scientificJourney({
       assert.ok(md.headers.get("etag"));
       searchEtags.set(`${version}:${q}:md`, md.headers.get("etag"));
       const text = await md.text();
-      assert.ok(text.includes(canonical));
+      assert.ok(text.includes(`](${readUrl})`));
       assert.ok(text.includes(`@${version}`));
       assert.ok(!text.includes(privateCanary));
     }
@@ -1195,6 +1197,81 @@ export async function scientificJourney({
 
   const supportedSnapshot = await retainSnapshot();
   assert.equal(supportedSnapshot.live.claim_state.disposition, "strongly-supported");
+  // Corrupt only the rebuildable semantic-digest projection. A caller using
+  // that same forged digest must not authorize a review or falsification check
+  // against the still-intact immutable publication, or retain positive standing.
+  const forgedClaimDigest = `sha256:${"0".repeat(64)}`;
+  const beforeCorruptClaimScreening = await fixtures.screeningCalls();
+  const claimVersionGuard = await env.DB.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'claim_versions_immutable_update'",
+  ).first();
+  assert.equal(typeof claimVersionGuard?.sql, "string");
+  const changeClaimDigest = (digest) =>
+    env.DB.prepare(
+      "UPDATE claim_versions SET content_digest = ? WHERE problem_id = ? AND claim_id = ? AND version = 1",
+    ).bind(digest, problem, claim.claim_id);
+  await assert.rejects(changeClaimDigest(forgedClaimDigest).run(), /CLAIM_VERSION_IMMUTABLE/);
+  // Model a storage/projection fault, not an authorized update. Drop and restore
+  // the exact guard inside one atomic fixture batch; every HTTP assertion below
+  // runs with the production immutability trigger present.
+  async function injectClaimDigestFault(digest) {
+    const result = await env.DB.batch([
+      env.DB.prepare("DROP TRIGGER claim_versions_immutable_update"),
+      changeClaimDigest(digest),
+      env.DB.prepare(claimVersionGuard.sql),
+    ]);
+    assert.equal(result[1].meta.changes, 1);
+  }
+  await injectClaimDigestFault(forgedClaimDigest);
+  try {
+    const reviewRefusal = await call(
+      `${reviewer.path}/review`,
+      {
+        ...writeUpReview,
+        verification: { ...verification, target_digest: forgedClaimDigest },
+      },
+      reviewer.token,
+      422,
+      "science-corrupt-projection-review",
+    );
+    assert.equal(reviewRefusal.code, "REVIEW_BODY_INVALID");
+    const evidenceRefusal = await call(
+      `${reviewer.path}/evidence`,
+      {
+        ...groundedCheck,
+        falsification_check: {
+          ...groundedCheck.falsification_check,
+          target_digest: forgedClaimDigest,
+        },
+      },
+      reviewer.token,
+      422,
+      "science-corrupt-projection-evidence",
+    );
+    assert.equal(evidenceRefusal.code, "EVIDENCE_BODY_INVALID");
+    assert.equal(
+      await fixtures.screeningCalls(),
+      beforeCorruptClaimScreening,
+      "Semantic identity corruption is refused before paid screening",
+    );
+    const head = await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
+      .bind(problem)
+      .first();
+    assert.equal(head.public_seq, supportedSnapshot.cursor, "Refused checks append no events");
+    for (const target of [
+      `${claimPath}@1.json`,
+      `${claimPath}@1.json?through=${supportedSnapshot.cursor}`,
+    ]) {
+      const unavailable = await call(target, undefined, undefined, 500);
+      assert.equal(unavailable.code, "INTERNAL_ERROR");
+      assert.ok(!JSON.stringify(unavailable).includes(forgedClaimDigest));
+      assert.ok(!JSON.stringify(unavailable).includes("strongly-supported"));
+    }
+  } finally {
+    await injectClaimDigestFault(detail.content_digest);
+  }
+  await unchangedSnapshot(supportedSnapshot);
+  await standing("strongly-supported");
   // Change only the ancestor's present-day visibility while the current claim
   // is strongly supported. Restore with a later control row, never rewriting
   // the immutable publication. This fixture controls real D1 visibility; all
@@ -1409,9 +1486,11 @@ export async function scientificJourney({
     })}`,
   );
   assert.equal(headSearch.items[0].statement, revisedStatement);
+  assert.equal(headSearch.items[0].version, 2);
+  assert.equal(headSearch.items[0].read_url, `/p/${problem}/claims/${claim.claim_id}@2.md`);
   assert.equal(
     headSearch.items[0].url,
-    `https://asimposium.org/p/${problem}/claims/${claim.claim_id}`,
+    `https://asimposium.org/p/${problem}/claims/${claim.claim_id}@2`,
   );
   assert.equal(oldReview.target_version, 1);
   await standing("open");
@@ -2018,6 +2097,7 @@ export async function scientificJourney({
         "exact-version reset",
         "same-Fellow duplicate collapse",
         "reference admission before screening",
+        "corrupt projected claim digest cannot authorize scientific writes or current and retained standing",
         "unscanned certificate labels cannot ground a falsification check or upgrade standing",
         "redaction transaction rollback",
         "transitive evidence loss revokes derived standing at current and retained cursors",

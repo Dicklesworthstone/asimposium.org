@@ -1,25 +1,53 @@
 import { expect, test } from "bun:test";
+import { claimContentDigest } from "../../src/krater/claim-version.ts";
 import { sha256Hex } from "../../src/krater/krater.ts";
 import { reviewStateFromRecordedReviews } from "../../src/ledger/dispositions.ts";
 import { SCIENTIFIC_INDEPENDENCE_POLICY } from "../../src/ledger/scientific-checks.ts";
 import { foldScientificRows } from "../../src/ledger/scientific-disposition.ts";
 
 type Row = Parameters<typeof foldScientificRows>[0][number];
-const targetDigest = `sha256:${"a".repeat(64)}`;
 const statement = "Two equals two.";
+const targetDigest = await claimContentDigest(
+  { kind: "lemma", statement, falsifier: null },
+  sha256Hex,
+);
 async function row(
   sequence: number,
   type: string,
   payload: unknown,
   overrides: Partial<Row> = {},
 ): Promise<Row> {
-  const text = JSON.stringify(payload);
+  const isClaim = type === "claim.created" || type === "claim.revised";
+  const fields = payload as Record<string, unknown>;
+  // Model the actual publication shape and semantic digest. Corruption tests
+  // alter the returned row or its source explicitly after this valid baseline.
+  const content: Record<string, unknown> = isClaim
+    ? {
+        claim_id: overrides.claim_id ?? "C-1",
+        kind: "lemma",
+        statement: overrides.statement ?? statement,
+        falsifier: null,
+        ...(type === "claim.revised" ? { base_version: (overrides.object_version ?? 2) - 1 } : {}),
+        ...fields,
+      }
+    : type === "review.created"
+      ? { target_claim_id: "C-1", target_version: overrides.target_version ?? 1, ...fields }
+      : type === "evidence.created"
+        ? {
+            bears_on_kind: "claim",
+            bears_on_id: "C-1",
+            bears_on_version: overrides.target_version ?? 1,
+            direction: overrides.direction ?? "supports",
+            ...fields,
+          }
+        : fields;
+  const text = JSON.stringify(content);
   return {
     claim_id: "C-1",
     event_id: `EVENT-${sequence}`,
     seq: sequence,
     type,
-    object_id: `OBJECT-${sequence}`,
+    object_id: isClaim ? "C-1" : `OBJECT-${sequence}`,
     object_version: 1,
     target_version: 1,
     payload_json: text,
@@ -27,12 +55,47 @@ async function row(
     created_at: new Date(Date.UTC(2026, 8, 1, 0, sequence)).toISOString(),
     fellow_id: "F-author",
     sponsor_id: "S-author",
-    content_digest: null,
-    statement: null,
-    direction: null,
+    content_digest: isClaim
+      ? await claimContentDigest(
+          {
+            kind: String(content.kind),
+            statement: String(content.statement),
+            falsifier: typeof content.falsifier === "string" ? content.falsifier : null,
+          },
+          sha256Hex,
+        )
+      : null,
+    statement: isClaim ? String(content.statement) : null,
+    direction: type === "evidence.created" ? String(content.direction) : null,
     ...overrides,
   };
 }
+
+test("scientific standing rejects a projected semantic digest that disagrees with the immutable claim", async () => {
+  const publication = {
+    claim_id: "C-1",
+    kind: "lemma",
+    statement,
+    falsifier: null,
+  };
+  const contentDigest = await claimContentDigest(publication, sha256Hex);
+  const source = await row(1, "claim.created", publication, {
+    object_id: "C-1",
+    content_digest: contentDigest,
+    statement,
+  });
+  expect(await foldScientificRows([source])).toMatchObject({
+    currentVersion: 1,
+    disposition: "open",
+    stale: false,
+  });
+  await expect(
+    foldScientificRows([{ ...source, content_digest: `sha256:${"0".repeat(64)}` }]),
+  ).rejects.toThrow("claim");
+  await expect(
+    foldScientificRows([{ ...source, statement: "An unrelated stronger statement." }]),
+  ).rejects.toThrow("claim");
+});
 
 async function refutationCorpus(hours = 72): Promise<[Row, Row, Row]> {
   const creation = await row(
@@ -100,11 +163,26 @@ async function refutationCorpus(hours = 72): Promise<[Row, Row, Row]> {
 
 async function changedPayload(source: Row, change: Record<string, unknown>): Promise<Row> {
   if (source.payload_json === null) throw new Error("Expected a fixture payload");
-  const payload = JSON.stringify({ ...JSON.parse(source.payload_json), ...change });
-  return { ...source, payload_json: payload, payload_sha256: await sha256Hex(payload) };
+  const content = { ...JSON.parse(source.payload_json), ...change };
+  const payload = JSON.stringify(content);
+  return {
+    ...source,
+    payload_json: payload,
+    payload_sha256: await sha256Hex(payload),
+    ...(source.type === "claim.created" || source.type === "claim.revised"
+      ? {
+          content_digest: await claimContentDigest(content, sha256Hex),
+          statement: content.statement,
+        }
+      : {}),
+  };
 }
 
-async function refutationMismatch(source: Row, sequence: number): Promise<Row> {
+async function refutationMismatch(
+  source: Row,
+  sequence: number,
+  claimDigest = targetDigest,
+): Promise<Row> {
   return row(
     sequence,
     "review.created",
@@ -121,7 +199,7 @@ async function refutationMismatch(source: Row, sequence: number): Promise<Row> {
       independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
       verification: {
         kind: "refutation",
-        target_digest: targetDigest,
+        target_digest: claimDigest,
         evidence: { evidence_id: source.object_id, digest: `sha256:${source.payload_sha256}` },
         coverage: ["Witness domain", "Exact statement hypotheses"],
         result: "mismatch",
@@ -306,7 +384,6 @@ async function noveltyClaim(version = 1, sequence = 1): Promise<Row> {
       object_id: "C-1",
       object_version: version,
       target_version: version,
-      content_digest: targetDigest,
       statement,
     },
   );
@@ -374,9 +451,12 @@ test("retaining withdrawn adverse novelty cannot retain its counterevidence reso
   const claim = await changedPayload(original, { kind: "novelty-claim" });
   const adverseNovelty = await noveltyReview(3, "rediscovery");
   if (adverseNovelty.payload_json === null) throw new Error("Expected a novelty fixture payload");
-  const mismatch = await changedPayload(await refutationMismatch(evidence, 3), {
-    novelty: JSON.parse(adverseNovelty.payload_json).novelty,
-  });
+  const mismatch = await changedPayload(
+    await refutationMismatch(evidence, 3, claim.content_digest!),
+    {
+      novelty: JSON.parse(adverseNovelty.payload_json).novelty,
+    },
+  );
   expect(await foldScientificRows([claim, evidence, mismatch])).toMatchObject({
     disposition: "open",
     novelty: "not-new",
@@ -521,7 +601,7 @@ test("reduction standing comes from the exact publication's immutable dependency
         },
       ],
     },
-    { object_id: "C-1", statement, content_digest: targetDigest },
+    { object_id: "C-1", statement },
   );
   expect(await foldScientificRows([publication])).toMatchObject({
     disposition: "reduced-to",
@@ -546,7 +626,7 @@ test("malformed or unavailable reduction pins cannot fall back to unrelated proj
       1,
       "claim.created",
       { kind: "reduction", statement, dependency_pins: pins, relates_to: ["C-2"] },
-      { object_id: "C-1", statement, content_digest: targetDigest },
+      { object_id: "C-1", statement },
     );
     const misleadingProjection = { ...publication, reduced_to_claim_id: "C-3" };
     expect(await foldScientificRows([misleadingProjection])).toMatchObject({
@@ -558,7 +638,7 @@ test("malformed or unavailable reduction pins cannot fall back to unrelated proj
     1,
     "claim.created",
     { kind: "reduction", statement, relates_to: ["C-2"] },
-    { object_id: "C-1", statement, content_digest: targetDigest },
+    { object_id: "C-1", statement },
   );
   for (const payload_json of [null, `${publication.payload_json} `]) {
     const unavailable = {
@@ -579,7 +659,7 @@ test("legacy reductions use their own recorded claim relation only when pins are
     1,
     "claim.created",
     { kind: "reduction", statement, relates_to: ["C-2"] },
-    { object_id: "C-1", statement, content_digest: targetDigest },
+    { object_id: "C-1", statement },
   );
   expect((await foldScientificRows([publication])).disposition).toBe("reduced-to");
   const versioned = await changedPayload(publication, { relates_to: ["C-2@3"] });
@@ -765,7 +845,6 @@ test("settlement cannot revive withdrawn or malformed statements or cross a vers
       object_id: "C-1",
       object_version: 2,
       target_version: 2,
-      content_digest: `sha256:${"d".repeat(64)}`,
       statement: "A corrected second version.",
       created_at: "2026-09-01T02:00:00.000Z",
     },
@@ -1151,6 +1230,35 @@ test("grounded current-policy reviews earn support and redacted proof revokes it
   expect(fold.context.has_certified_artifact).toBe(false);
 });
 
+test("misbound reviews and evidence projections cannot confer positive standing", async () => {
+  const rows = await corpus();
+  expect((await foldScientificRows(rows)).disposition).toBe("strongly-supported");
+  for (const change of [{ target_claim_id: "C-OTHER" }, { target_version: 2 }]) {
+    const misbound = await Promise.all(
+      rows.map((source) =>
+        source.type === "review.created" ? changedPayload(source, change) : source,
+      ),
+    );
+    const fold = await foldScientificRows(misbound);
+    expect(fold.disposition).toBe("open");
+    expect(fold.stale).toBe(true);
+    expect(fold.context.verified_reviews).toHaveLength(0);
+    expect(fold.context.has_certified_artifact).toBe(false);
+  }
+
+  // Keep the proof, event hash and every referring digest intact. A derived
+  // direction that disagrees with the source still cannot lend it authority.
+  const fold = await foldScientificRows(
+    rows.map((source) =>
+      source.object_id === "E-1" ? { ...source, direction: "informs" } : source,
+    ),
+  );
+  expect(fold.disposition).toBe("open");
+  expect(fold.stale).toBe(true);
+  expect(fold.context.verified_reviews).toHaveLength(0);
+  expect(fold.context.has_certified_artifact).toBe(false);
+});
+
 test("unavailable evidence ancestors remove derived checks and positive verification weight", async () => {
   const original = await corpus();
   const ancestor = await row(
@@ -1360,7 +1468,6 @@ test("unavailable refutation stays disputed and old-version staleness does not i
       object_id: "C-1",
       object_version: 2,
       target_version: 2,
-      content_digest: `sha256:${"b".repeat(64)}`,
       statement: "The natural number two equals itself.",
     },
   );
