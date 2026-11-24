@@ -217,7 +217,11 @@ import {
   validateFalsificationCheck,
   validateScientificVerification,
 } from "../ledger/scientific-checks";
-import { readScientificDispositions } from "../ledger/scientific-disposition";
+import {
+  readScientificDispositions,
+  type ScientificDisposition,
+  ScientificReadBudgetExceededError,
+} from "../ledger/scientific-disposition";
 import {
   findSettlementReference,
   settlementReferenceGuards,
@@ -4238,6 +4242,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     let leasesTruncated = false;
     let hasLeaseContext = false;
     let claimContentUnavailable = false;
+    let claimHistoryBudgetExceeded = false;
     let workshopHeadsTruncated = false;
     let directiveContext: Awaited<ReturnType<typeof readActiveSponsorDirectives>>;
     try {
@@ -4514,12 +4519,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             .filter((claim) => claim.statement !== null)
             .map((claim) => claim.source_seq),
         );
-        const dispositions = await readScientificDispositions(
-          db,
-          session.problem_id,
-          cursor,
-          PACK_CLAIM_CANDIDATE_LIMIT,
-        );
+        let dispositions = new Map<string, ScientificDisposition>();
+        try {
+          dispositions = await readScientificDispositions(
+            db,
+            session.problem_id,
+            cursor,
+            PACK_CLAIM_CANDIDATE_LIMIT,
+          );
+        } catch (error) {
+          if (!(error instanceof ScientificReadBudgetExceededError)) throw error;
+          claimHistoryBudgetExceeded = true;
+        }
         // A bounded coordination prefix must not erase a selected claim's
         // lease tag. Return at most one current holder per selected claim,
         // using one JSON parameter rather than exceeding D1's bind ceiling.
@@ -4546,6 +4557,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         const leaseMap = new Map(claimLeases.results.map((lease) => [lease.object_id, lease]));
 
         for (const [index, claim] of selectedClaims.entries()) {
+          // The budget applies to the complete selected board history. A
+          // prefix cannot supply a claim's disposition or an empty-board signal.
+          if (claimHistoryBudgetExceeded) continue;
           if (claim.statement === null) {
             claimContentUnavailable = true;
             continue;
@@ -5216,6 +5230,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...targetSection.omitted,
         ...deadEndSection.omitted,
         ...(claimContentUnavailable ? [{ reason: "content_unavailable", detail: "claims" }] : []),
+        ...(claimHistoryBudgetExceeded
+          ? [
+              {
+                reason: "scientific_history_budget",
+                detail: `claims: standing unavailable within the read budget; inspect exact versions via /p/${session.problem_id}/claims.md?through=${cursor}`,
+              },
+            ]
+          : []),
         ...ledgerSection.omitted,
         ...claimGraphSection.omitted,
         ...formalRecords.omitted,

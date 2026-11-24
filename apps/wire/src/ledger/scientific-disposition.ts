@@ -89,6 +89,24 @@ export interface ScientificReadBudget {
   readonly maxTotalPayloadBytes: number;
 }
 
+/** Scientific standing needs the complete selected history. Bound the read
+ * before transferring bodies from D1, not after a pack has spent its token
+ * budget. A 512 KiB admitted write can grow with server provenance, so the
+ * body ceiling leaves that headroom; collections may supply tighter limits.
+ * These are read limits, never evidence or a partial-history approximation. */
+export const DEFAULT_SCIENTIFIC_READ_BUDGET: ScientificReadBudget = Object.freeze({
+  maxRows: 1024,
+  maxPayloadBytes: 1024 * 1024,
+  maxTotalPayloadBytes: 4 * 1024 * 1024,
+});
+
+export class ScientificReadBudgetExceededError extends ScientificInputError {
+  constructor() {
+    super("Scientific history exceeds the read budget.");
+    this.name = "ScientificReadBudgetExceededError";
+  }
+}
+
 /** One recorded review as the review-state facet sees it (Fable §6.6). */
 export interface RecordedReviewFacet {
   readonly targetVersion: number;
@@ -139,6 +157,7 @@ export async function readScientificDispositions(
   cursor: number,
   claimLimit: number,
   target?: { claimId: string; version: number },
+  budget: ScientificReadBudget = DEFAULT_SCIENTIFIC_READ_BUDGET,
 ): Promise<Map<string, ScientificDisposition>> {
   const result = await prepareScientificDispositions(
     db,
@@ -146,7 +165,9 @@ export async function readScientificDispositions(
     cursor,
     claimLimit,
     target,
+    budget,
   ).all<ScientificRow>();
+  if (!result.success) throw new ScientificInputError("Scientific history is unavailable.");
   const groups = new Map<string, ScientificRow[]>();
   for (const row of result.results) {
     if (target !== undefined && row.target_version > target.version) continue;
@@ -176,14 +197,13 @@ export function prepareScientificDispositions(
   cursor: number,
   claimLimit: number,
   target?: { claimId: string; version: number },
-  budget?: ScientificReadBudget,
+  budget: ScientificReadBudget = DEFAULT_SCIENTIFIC_READ_BUDGET,
 ): D1PreparedStatement {
   if (
-    budget !== undefined &&
-    ([budget.maxRows, budget.maxPayloadBytes, budget.maxTotalPayloadBytes].some(
+    [budget.maxRows, budget.maxPayloadBytes, budget.maxTotalPayloadBytes].some(
       (value) => !Number.isSafeInteger(value) || value < 1,
     ) ||
-      budget.maxRows === Number.MAX_SAFE_INTEGER)
+    budget.maxRows === Number.MAX_SAFE_INTEGER
   )
     throw new RangeError(
       "Scientific read budget requires positive safe integers and row lookahead.",
@@ -194,6 +214,30 @@ export function prepareScientificDispositions(
     target === undefined
       ? CLAIM_HEADS_AT_CURSOR_SQL
       : "SELECT object_id AS id FROM events WHERE problem_id = ? AND seq <= ? AND object_id = ? AND type = 'claim.created' AND object_kind = 'claim' LIMIT 1";
+  const targetVersion = `CASE WHEN e.object_kind = 'claim' THEN e.object_version
+    WHEN e.object_kind = 'review' THEN r.target_version
+    WHEN e.object_kind = 'retraction' AND w.source_event_id IS NOT NULL THEN w.claim_version
+    WHEN e.object_kind = 'retraction' THEN (
+      CASE WHEN instr(ret.target_object, '@') > 0
+        THEN CAST(substr(ret.target_object, instr(ret.target_object, '@') + 1) AS INTEGER)
+        ELSE COALESCE(
+          (
+            SELECT MAX(cv.version)
+            FROM claim_versions cv
+            JOIN events ce ON ce.problem_id = cv.problem_id
+              AND ce.object_id = cv.claim_id
+              AND ce.object_version = cv.version
+              AND ce.type IN ('claim.created', 'claim.revised')
+            WHERE cv.problem_id = e.problem_id
+              AND cv.claim_id = s.id
+              AND ce.seq <= e.seq
+          ),
+          1
+        )
+      END
+    )
+    ELSE x.bears_on_version
+  END`;
   // Check routing before selecting claim histories. A check over returned rows
   // alone cannot find an objection whose projection points at another claim or
   // version. One census at this problem/cursor detects both missing sources and
@@ -287,46 +331,17 @@ export function prepareScientificDispositions(
     )
     SELECT s.id AS claim_id, e.id AS event_id, e.seq, e.type, e.object_id, e.object_version,
       EXISTS (SELECT 1 FROM projection_mismatches) AS source_projection_mismatch,
-      CASE WHEN e.object_kind = 'claim' THEN e.object_version
-        WHEN e.object_kind = 'review' THEN r.target_version
-        WHEN e.object_kind = 'retraction' AND w.source_event_id IS NOT NULL THEN w.claim_version
-        WHEN e.object_kind = 'retraction' THEN (
-          CASE WHEN instr(ret.target_object, '@') > 0
-            THEN CAST(substr(ret.target_object, instr(ret.target_object, '@') + 1) AS INTEGER)
-            ELSE COALESCE(
-              (
-                SELECT MAX(cv.version)
-                FROM claim_versions cv
-                JOIN events ce ON ce.problem_id = cv.problem_id
-                  AND ce.object_id = cv.claim_id
-                  AND ce.object_version = cv.version
-                  AND ce.type IN ('claim.created', 'claim.revised')
-                WHERE cv.problem_id = e.problem_id
-                  AND cv.claim_id = s.id
-                  AND ce.seq <= e.seq
-              ),
-              1
-            )
-          END
-        )
-        ELSE x.bears_on_version
-      END AS target_version,
+      ${targetVersion} AS target_version,
       (SELECT cc.event_id FROM claim_concessions cc WHERE cc.event_id = e.id
         AND cc.event_sha256 = e.payload_sha256 AND cc.problem_id = e.problem_id
         AND cc.claim_id = s.id) AS concession_event_id,
       ret.target_object AS retraction_target,
-      e.payload_sha256, ${
-        budget === undefined
-          ? "c.payload_json"
-          : `e.problem_id AS scientific_problem_id,
-      length(CAST(c.payload_json AS BLOB)) AS scientific_payload_bytes`
-      }, e.created_at, e.actor_fellow_id AS fellow_id,
-      e.actor_sponsor_id AS sponsor_id, v.content_digest, ${
-        budget === undefined
-          ? "v.statement"
-          : `CASE WHEN c.event_id IS NOT NULL THEN length(CAST(v.statement AS BLOB)) END
-        AS scientific_statement_bytes`
-      }, x.direction,
+      e.payload_sha256, e.problem_id AS scientific_problem_id,
+      length(CAST(c.payload_json AS BLOB)) AS scientific_payload_bytes,
+      e.created_at, e.actor_fellow_id AS fellow_id,
+      e.actor_sponsor_id AS sponsor_id, v.content_digest,
+      CASE WHEN c.event_id IS NOT NULL THEN length(CAST(v.statement AS BLOB)) END
+        AS scientific_statement_bytes, x.direction,
       w.source_event_id AS withdrawn_event_id,
       CASE WHEN e.object_kind = 'claim' THEN ${directiveDisclosureStatusSql(
         "e.problem_id",
@@ -343,7 +358,7 @@ export function prepareScientificDispositions(
       CASE WHEN ${statementDefectSql("r.rubric_json")}
         AND ${reviewCarriesWeightSql({ basis: "r.basis", capableOfFailure: "r.capable_of_failure", bodyMd: "r.body_md" })}
         THEN 1 ELSE 0 END AS weighted_statement_defect
-    FROM events e CROSS JOIN disclosure_cut
+    FROM events e CROSS JOIN disclosure_cut CROSS JOIN scientific_scope
     LEFT JOIN reviews r ON r.source_event_id = e.id AND r.problem_id = e.problem_id
       AND r.review_id = e.object_id AND r.source_seq = e.seq AND e.type = 'review.created'
     LEFT JOIN evidence x ON x.source_event_id = e.id AND x.problem_id = e.problem_id
@@ -376,18 +391,17 @@ export function prepareScientificDispositions(
       AND NOT ${eventContentHiddenSql("e")}
     WHERE e.problem_id = ? AND e.seq <= ?
       AND e.type IN ('claim.created', 'claim.revised', 'review.created', 'evidence.created', 'object.retracted')
+      AND (scientific_scope.target_version IS NULL OR (${targetVersion}) <= scientific_scope.target_version)
     ORDER BY e.seq ASC
-    ${budget === undefined ? "" : `LIMIT ${budget.maxRows + 1}`}
+    LIMIT ${budget.maxRows + 1}
   `;
   // Select only bounded envelope/byte metadata first. No scientific body
   // crosses D1 unless the complete selected history fits every limit. The
   // lookahead row invalidates the whole history instead of hiding a late
-  // objection behind an apparently complete prefix. Ordinary callers keep
-  // the existing full-history query and fold unchanged.
-  const boundedQuery =
-    budget === undefined
-      ? query
-      : `WITH scientific_sources AS MATERIALIZED (${query}),
+  // objection behind an apparently complete prefix. Exact-version admission
+  // precedes this budget: future revisions cannot exhaust an older statement's
+  // read. The projection census still detects an objection rerouted away from it.
+  const boundedQuery = `WITH scientific_sources AS MATERIALIZED (${query}),
     scientific_budget AS MATERIALIZED (
       SELECT CASE WHEN COUNT(*) > ${budget.maxRows}
         OR COALESCE(MAX(scientific_payload_bytes), 0) > ${budget.maxPayloadBytes}
@@ -435,7 +449,7 @@ export async function foldScientificRows(
       (row) => row.scientific_budget_exceeded !== undefined && row.scientific_budget_exceeded !== 0,
     )
   )
-    throw new ScientificInputError("Scientific history exceeds the read budget.");
+    throw new ScientificReadBudgetExceededError();
   const contents = new Map<string, Record<string, unknown>>();
   const claims = new Map<number, ScientificClaim>();
   // Withdrawal needs immutable creation authorship even if the claim text is
