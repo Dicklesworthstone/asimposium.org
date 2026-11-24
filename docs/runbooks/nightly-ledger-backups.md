@@ -279,6 +279,11 @@ only after the export is durable.
 
 ## Keys and authenticity
 
+The production checkpoint verification pin provisioned on November 24, 2026 is
+`prod-checkpoint-2026-11=5120020dc958cd0a3607de564af835ebeeb6836c565237d9cd26b854f9dd7889`.
+Use the pin from this operator record when checking a backup signed under that
+key ID.
+
 `CHECKPOINT_SIGNING_KEY` and `CHECKPOINT_VERIFY_KEYS` must be configured, with
 the signing key's public key explicitly pinned in the verification keyring.
 The checkpoint signer runs before the backup task. Missing keys return an

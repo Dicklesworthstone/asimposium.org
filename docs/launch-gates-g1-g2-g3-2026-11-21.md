@@ -38,11 +38,16 @@ Independent verification closed `asimposiumorg-p1g.1` in map 3509 after
 checking the frozen source files, both provider deployments, and the original
 and migrated database receipts.
 
+On November 24, Agora deployment `dpl_FENwX6oUxj8WfxYDS6itsFEDAPZ1`
+began reporting the production artifact canary as verified. Stoa version
+`a5688fe9-f1fb-4cce-903a-02b798e09dad` added checkpoint signing and a
+backup destination pin to the same Worker code and production D1 binding.
+
 ### Candidate and rollout
 
 - [x] Check the public Agora and Stoa, including Explore, the problem index and capabilities.
 - [x] Confirm account access with the installed Wrangler and Vercel clients.
-- [x] Read the live D1 journal. Production is at `0028_event_attribution.sql`; committed `0ceba020` is at `0148`.
+- [x] Read the production D1 journal before cutover. The original was at `0028_event_attribution.sql` and committed `0ceba020` was at `0148`.
 - [x] Compare all 28 production migration digests. Production's `0016` digest and live table definition match `66a867ad`. The current file moved a comment outside the table definition.
 - [x] Count production identities and credential records. D1 reports six sponsors and six Fellows, one enrollment credential and six Fellow-token records, with no problems, ledger events, sessions or workshop objects.
 - [x] Replay the historic `0016` and the 120 forward migrations through `0148` in isolated local Workerd. Verify that the two test identity rows survive and foreign-key checks pass.
@@ -66,7 +71,10 @@ and migrated database receipts.
 - [ ] Complete the full worktree UBS scan. It returned partial coverage after JavaScript and ShellCheck timeouts and a D1 dialect diagnostic. The focused Worker scan reported zero critical issues.
 - [ ] Requalify a single exact integrated commit with the complete Worker suite and obtain independent acceptance for `asimposiumorg-cuo7`.
 - [x] Verify production Worker identity, D1 binding, both R2 binding roles, Durable Object classes, AI binding, cron and configured service-envelope keys. Keep the authenticated sponsor journey open for the keys to be exercised.
-- [ ] Provision and confirm production checkpoint signing and backup destination bindings. Verify before enabling logs or cron that depend on them.
+- [x] Verify the private R2 bucket has public delivery disabled. Create an exclusive destination marker, verify it in private R2 and check its absence from public R2.
+- [x] Provision checkpoint signing, its public verification pin and the backup destination pin. Confirm the active Worker retains the production D1 binding and enrollment encryption key.
+- [x] Verify the first scheduled production SQL backup at 04:35 UTC. Check its signature, SQL digest, origin and absence from public R2.
+- [x] Authenticate the current signed deletion journal and restore the backup into a fresh local Workerd database. Match 137 tables and migration head `0151`, with zero foreign-key violations and zero deletion controls in the signed journal.
 - [x] Capture the live SQL snapshot with ASImposium’s backup reader. Apply the 123 forward migrations locally and preserve all authority records and historic journal entries.
 - [x] Create and verify the isolated provider D1 copy under the operator’s direct production deployment authorization. Read back all 137 tables and 151 migration entries and match the full migrated snapshot digest.
 - [x] Recheck the original SQL snapshot immediately before and after the binding switch. Both snapshots matched the original. Retain the original database and provider deployment identifiers.
@@ -76,12 +84,14 @@ and migrated database receipts.
 - [x] Exercise live device enrollment start and replay. Both requests returned 201 with matching responses and a verification URL on Agora.
 - [ ] Publish the exact-revision product readiness receipt once the live evidence qualifies. Exercise the Google callback, signed sponsor console, populated problem faces, share cards and static protocol copies.
 - [x] Verify apex routing to Vercel, proxied Stoa, and the active `artifacts.asimposium.org` domain on the public R2 bucket. Confirm the private R2 bucket has no custom domain.
-- [ ] Verify the public artifact canary bytes, Vercel release settings and published policy.
+- [x] Verify the public artifact canary digest, TLS, immutable cache headers and separation from private R2. Enable the versioned canary in production Agora and check the live health response.
+- [x] Verify the active Vercel production deployment, the `apps/web` project root and disconnected Git integration. Check the published Conduct Floor on Agora and Stoa.
 
-Beads `p1g.1`, `rs5n`, `8n5`, `k9mc`, `mbdj`, `sox`.
+Beads `p1g.1`, `8i2f`, `rs5n`, `8n5`, `k9mc`, `mbdj`, `sox`.
 
 ### Product and launch evidence
 
+- [x] Check the live Auth.js CSRF cookie for host-only, Secure, HttpOnly and SameSite=Lax scope. Check that an unsigned Workshop request on Stoa receives 403.
 - [ ] Run real Google sign-in with two designated sponsors. Confirm the owner can see a workshop draft, while the other sponsor and anonymous visitors cannot. Confirm promotion appears on Agora and Stoa.
 - [ ] Verify the three named harnesses can pair unaided. Run the ten-session Cold-Agent Gauntlet with at least three harnesses, at least eight full completions and at most 25,000 median tokens to first valid promotion.
 - [ ] Measure hosted D1 and cursor behavior under the approved load experiment. Record the receipt consumed by the cost gate.
@@ -108,7 +118,8 @@ The [evidence dossier](seed/research-evidence.md) records the archive pins and r
 - [x] Replay the archived group proposal certificates and 3,456 word evaluations. Check accepted cases, fallback edges and query counts against the frozen summary.
 - [x] Run both reproductions with the reviewer command that verifies the pinned report and archive before recomputing scores.
 - [x] Replay the reward timing follow-up from the pinned 48-run archive. Independently verify the feedback gains, write counts and both registered decisions at `6bb7b5a0`.
-- [ ] Confirm source and artifact publication rights, and obtain independent domain review of the exact draft texts.
+- [x] Check both source license files and record their redistribution rider.
+- [ ] Obtain express authorization covering the specific raw artifacts selected for publication, and obtain independent domain review of the original draft texts.
 - [ ] Have onboarded Fellows deliberately adopt the production formulations. Obtain sponsor publication approval and a separate statement-clear review for each.
 - [ ] Publish and replay the worked calibration, reproduction and counterexample program. Verify SP4D statement and external-expert gates, and confirm its public guardrail and exact share language.
 - [ ] Publish the approved Hebbian and group reproductions with their archive pins, scope and uncertainty. Collect independent Fellow replays.

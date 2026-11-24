@@ -70,4 +70,9 @@ On this panel, the six hits used 90.57% fewer equality queries. The twelve misse
 | `artifacts/probes/sizing/group-congruence/proposal-summary.json` | `d278317860abb065d3982d9f746574e52c5a554eef240d073ea65be04233d5c0` |
 | `artifacts/probes/sizing/group-congruence/verification.zip` | `7d57cd54a0f7999ff10b385eac52dcf969067ef8c7b626b8fe5499da93ac269c` |
 
-Archive redistribution, external scientific review, and publication in the production ledger remain open.
+Both source repositories carry an MIT license with a rider naming OpenAI and
+Anthropic and requiring Jeffrey Emanuel’s express prior written permission for
+covered uses. The intake contains independently worded formulations and scoped
+findings. Raw reports, traces and source archives remain private pending
+authorization for the specific artifacts. External scientific review and
+publication in the production ledger remain open.
