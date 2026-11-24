@@ -844,9 +844,10 @@ export async function listPendingReports(
 }
 
 /**
- * Resolve the selected report and the same-category pending reports observed
- * with it. Different reasons, including safety versus scientific integrity,
- * are separate decisions. Reports arriving after that read remain pending.
+ * Resolve the selected report and same-category reports observed against
+ * that exact publication. The community tally spans the object's history,
+ * but reviewing an earlier revision cannot settle a later allegation.
+ * Legacy unpinned reports retain their separate, unpinned cohort.
  * A dismissal restores community-hidden content only after every report is
  * dismissed; an upheld report establishes an operator hold.
  */
@@ -868,7 +869,9 @@ export async function resolveReport(
       `SELECT r.report_id, r.problem_id, r.target_kind, r.target_ref, r.reason, r.status,
         (SELECT json_group_array(peer.report_id) FROM reports peer
           WHERE peer.problem_id = r.problem_id AND peer.target_ref = r.target_ref
-            AND peer.reason = r.reason AND peer.status = 'pending') AS cohort_json
+            AND peer.target_kind = r.target_kind AND peer.reason = r.reason
+            AND peer.source_event_id IS r.source_event_id AND peer.source_digest IS r.source_digest
+            AND peer.status = 'pending') AS cohort_json
        FROM reports r WHERE r.report_id = ?`,
     )
     .bind(input.reportId)

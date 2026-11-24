@@ -682,6 +682,11 @@ await runLocalWorkerJourney(
       note: SOURCE_NOTE,
     });
     await reviseSource(3);
+    const newerReport = await report(reporterD, 201, {
+      target: `${sourceClaim.claim_id}@3`,
+      reason: "integrity",
+      note: "Inspect the revised publication independently.",
+    });
     const controlPublished = (targetRef, kind, action) =>
       operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
         target_id: `${problem}/${targetRef}`,
@@ -746,6 +751,10 @@ await runLocalWorkerJourney(
     assert.ok(!JSON.stringify(privateQueue).includes(SOURCE_ORIGINAL));
     await resolve(sourceReport.report_id, "dismiss", "Reviewed the exact original publication.");
     assert.equal((await reportDetail(sourceReport.report_id)).report.status, "dismissed");
+    const pendingRevision = await reportDetail(newerReport.report_id);
+    assert.equal(pendingRevision.report.status, "pending");
+    assert.equal(pendingRevision.source.object_version, 3);
+    await resolve(newerReport.report_id, "dismiss", "Separately reviewed the revised publication.");
     await controlPublished(sourceClaim.claim_id, "claim", "restore");
 
     // 7e. The same moderation workflow protects a published hypothesis.

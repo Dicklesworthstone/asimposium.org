@@ -19,7 +19,7 @@ import {
   readOperatorReportDetail,
 } from "../../src/moderation/report-detail.ts";
 import { fileReportRequest } from "../../src/moderation/router.ts";
-import { fileReport } from "../../src/moderation/store.ts";
+import { currentContentControl, fileReport, resolveReport } from "../../src/moderation/store.ts";
 import { resolveModerationTarget } from "../../src/moderation/target.ts";
 import { PROBLEM, publicationContextFixture } from "../support/publication-context.ts";
 
@@ -67,7 +67,7 @@ async function fixture() {
       { statementsAfterEvent: () => [] },
     );
   };
-  const report = async (target = "C-1@1", sponsor = REPORTER.reporterSponsorId) => {
+  const report = async (target = "C-1@1", sponsor: string = REPORTER.reporterSponsorId) => {
     const response = await fileReportRequest(
       f.db,
       { ...REPORTER, reporterSponsorId: sponsor },
@@ -137,6 +137,42 @@ test("unversioned reports retain the publication captured at filing without clai
     requested_target: "C-1",
     event_id: captured.eventId,
     object_version: 2,
+  });
+});
+
+test("reviewing one publication leaves other revisions and legacy reports pending", async () => {
+  const f = await fixture();
+  await f.publish(1);
+  const initial = await f.report("C-1@1", "sponsor-one");
+  const samePublication = await f.report("C-1", "sponsor-two");
+  await f.publish(2);
+  const revised = await f.report("C-1@2", "sponsor-three");
+  const unpinned = await fileReport(f.db, {
+    problemId: PROBLEM,
+    targetKind: "claim",
+    targetRef: "C-1",
+    reason: "integrity",
+    note: null,
+    ...REPORTER,
+  });
+  const status = async (id: string) => (await readOperatorReportDetail(f.db, id))?.report.status;
+  const review = (id: string, resolution: "dismiss" | "uphold") =>
+    resolveReport(f.db, "reviewer", {
+      reportId: id,
+      resolution,
+      reason: "Reviewed the available source for this allegation.",
+    });
+  expect((await review(initial.report_id, "dismiss")).ok).toBe(true);
+  expect(await status(samePublication.report_id)).toBe("dismissed");
+  expect(await status(revised.report_id)).toBe("pending");
+  expect(await status(unpinned.reportId)).toBe("pending");
+  expect((await currentContentControl(f.db, PROBLEM, "C-1"))?.source).toBe("community-reports");
+  expect((await review(revised.report_id, "uphold")).ok).toBe(true);
+  expect(await status(unpinned.reportId)).toBe("pending");
+  expect((await review(unpinned.reportId, "dismiss")).ok).toBe(true);
+  expect(await currentContentControl(f.db, PROBLEM, "C-1")).toMatchObject({
+    visibility: "hidden",
+    source: "operator",
   });
 });
 
