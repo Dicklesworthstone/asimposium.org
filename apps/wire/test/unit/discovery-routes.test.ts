@@ -474,6 +474,22 @@ function seedFellowReview(raw: Database, problemId: string, basis: string) {
   return eventId;
 }
 
+/** Change actual storage after the card's list reads, immediately before its
+ * calibration work. This is a deterministic read-race test, not D1 proof. */
+function changeAfterFellowHistory(db: Env["DB"], change: () => void): Env["DB"] {
+  let changed = false;
+  return {
+    ...db,
+    async batch(...args: Parameters<typeof db.batch>) {
+      if (!changed) {
+        changed = true;
+        change();
+      }
+      return db.batch(...args);
+    },
+  } as Env["DB"];
+}
+
 describe("Now withdrawal on migrated SQLite (not deployed D1 proof)", () => {
   function visibility(raw: Database, target: string, visible: boolean, version = 1) {
     raw.run(
@@ -887,6 +903,152 @@ describe("Now scientific materiality on migrated SQLite (not D1 integration proo
 });
 
 describe("discovery projection regressions on migrated SQLite (not D1 integration proof)", () => {
+  test.each([
+    "claim hide",
+    "review hide",
+    "redaction",
+    "source removal",
+    "unlisting",
+    "sponsor transfer",
+    "publication warning",
+  ])("Fellow card refuses captured history after a concurrent %s", async (change) => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      seedFellowReview(raw, "P-4DSP", "A public review captured before the visibility change.");
+      const before = await loadFellowCard(db, "gauss-agent");
+      expect(before?.promoted_contributions).toHaveLength(1);
+      expect(before?.reviews).toHaveLength(1);
+      const racing = changeAfterFellowHistory(db, () => {
+        if (change === "claim hide" || change === "review hide") {
+          raw.run(
+            `INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,
+            version,visibility,source,reason_category,reason,actor,created_at)
+            VALUES('CC-CARD-RACE','P-4DSP','ledger-object',?,1,'hidden','operator','privacy',
+              'Hold the selected publication.','fixture-operator','2026-09-10T00:00:00Z')`,
+            [change === "claim hide" ? "C-1@1" : "R-1@1"],
+          );
+        } else if (change === "redaction") {
+          raw.run(`UPDATE event_content SET payload_json='{}',
+            redacted_at='2026-09-10T00:00:00Z',redaction_reason='Fixture lawful removal'
+            WHERE event_id='E-1'`);
+        } else if (change === "source removal") {
+          raw.run("DELETE FROM event_content WHERE event_id='E-1'");
+        } else if (change === "unlisting") {
+          raw.run("UPDATE problems SET unlisted=1 WHERE id='P-4DSP'");
+        } else if (change === "sponsor transfer") {
+          const transferredAt = Date.parse("2026-09-10T00:00:00Z");
+          raw.run(
+            "INSERT INTO sponsors(sponsor_id,created_at,last_seen_at) VALUES('SPON-NEXT',?,?)",
+            [transferredAt, transferredAt],
+          );
+          raw.run(
+            `INSERT INTO sponsor_fellow_transfers(transfer_id,fellow_id,source_sponsor_id,
+              target_sponsor_id,status,directive_attestation,transfer_manifest_json,
+              request_digest,created_at,expires_at,resolved_at)
+              VALUES('TRF-01JXYZ4K6Q0000000000000000','F-01M0HCVW4XTFWMZCQ40EJ0S0J7',
+                'SPON-01','SPON-NEXT','accepted','no_directives','{}','fixture-transfer',?,?,?)`,
+            [transferredAt - 1, transferredAt + 1, transferredAt],
+          );
+          raw.run("UPDATE enrollment_fellows SET sponsor_id='SPON-NEXT' WHERE name='gauss-agent'");
+        } else {
+          seedPublicationNotice(raw, "E-1");
+        }
+      });
+      await expect(loadFellowCard(racing, "gauss-agent")).rejects.toThrow(
+        "Fellow card sources changed before release.",
+      );
+      if (change === "sponsor transfer") {
+        const current = await loadFellowCard(db, "gauss-agent");
+        expect(current?.current_sponsor_id).toBe("SPON-NEXT");
+        expect(current?.promoted_contributions[0]?.sponsor_at_event).toBe("SPON-01");
+        expect(current?.transfer_effective_at).toBe("2026-09-10T00:00:00.000Z");
+      }
+    } finally {
+      raw.close();
+    }
+  });
+
+  test.each(["json", "md", "html"])(
+    "a late Fellow-source hide cannot reuse an old %s validator or return stale text",
+    async (suffix) => {
+      const { db, raw } = createMigratedDb();
+      try {
+        seedDiscoveryData(raw);
+        const app = createApp();
+        const url = `https://a.asimposium.org/a/gauss-agent.${suffix}`;
+        const first = await app.fetch(new Request(url), mockEnv(db));
+        expect(first.status).toBe(200);
+        const etag = first.headers.get("etag");
+        if (etag === null) throw new Error("Expected a Fellow face validator");
+        expect(await first.text()).toContain("Every trisection has a twist.");
+        const racing = changeAfterFellowHistory(db, () => {
+          raw.run(`INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,
+            version,visibility,source,reason_category,reason,actor,created_at)
+            VALUES('CC-CARD-FACE-RACE','P-4DSP','ledger-object','C-1@1',1,'hidden',
+              'operator','privacy','Hold the selected publication.','fixture-operator',
+              '2026-09-10T00:00:00Z')`);
+        });
+        const response = await app.fetch(
+          new Request(url, { headers: { "If-None-Match": etag } }),
+          mockEnv(racing),
+        );
+        expect(response.status).toBe(500);
+        expect(response.headers.get("etag")).not.toBe(etag);
+        const body = await response.text();
+        expect(body).not.toContain("Every trisection has a twist.");
+        expect(body).not.toContain("Fellow card sources changed");
+        expect(body).toContain("INTERNAL_ERROR");
+        const current = await loadFellowCard(db, "gauss-agent");
+        expect(current?.promoted_contributions).toEqual([]);
+      } finally {
+        raw.close();
+      }
+    },
+  );
+
+  test("a hidden publication outside the history window cannot remain in Fellow promotion totals", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      for (let seq = 2; seq <= 55; seq++)
+        seedAttributedClaim(raw, "P-4DSP", `C-${seq}`, seq, "SPON-01", "2026-08-03T00:00:00Z");
+      const first = await loadFellowCard(db, "gauss-agent");
+      expect(first?.promoted_contributions).toHaveLength(50);
+      expect(first?.promoted_contributions.some((claim) => claim.id === "C-1")).toBe(false);
+      expect(first?.calibration.conjectures_promoted).toBe(55);
+      const racing = changeAfterFellowHistory(db, () => {
+        raw.run(`INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,
+          version,visibility,source,reason_category,reason,actor,created_at)
+          VALUES('CC-CARD-TOTAL-RACE','P-4DSP','ledger-object','C-1@1',1,'hidden',
+            'operator','privacy','Hold an older publication.','fixture-operator',
+            '2026-09-10T00:00:00Z')`);
+      });
+      await expect(loadFellowCard(racing, "gauss-agent")).rejects.toThrow(
+        "Fellow card sources changed before release.",
+      );
+      const current = await loadFellowCard(db, "gauss-agent");
+      expect(current?.promoted_contributions).toEqual(first?.promoted_contributions);
+      expect(current?.calibration.conjectures_promoted).toBe(54);
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("unrelated problem changes do not invalidate a stable Fellow history", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      const first = await loadFellowCard(db, "gauss-agent");
+      const racing = changeAfterFellowHistory(db, () => {
+        raw.run("UPDATE problems SET unlisted=1 WHERE id='P-RIEMANN-01'");
+      });
+      expect(await loadFellowCard(racing, "gauss-agent")).toEqual(first);
+    } finally {
+      raw.close();
+    }
+  });
+
   test("Fellow contributions carry only the notice of their exact problem and published version", async () => {
     const { db, raw } = createMigratedDb();
     try {
@@ -1350,6 +1512,40 @@ describe("Fellow negative history on migrated SQLite (not D1 integration proof)"
     ]);
     return event;
   }
+
+  test.each(["hide", "redaction"])(
+    "a late negative-history %s withholds the whole captured card",
+    async (change) => {
+      const { db, raw } = createMigratedDb();
+      try {
+        seedDiscoveryData(raw);
+        const event = seedNegative(raw, "P-4DSP", "DE-RACE", 2);
+        expect((await loadFellowCard(db, "gauss-agent"))?.negative_history).toHaveLength(1);
+        const racing = changeAfterFellowHistory(db, () => {
+          if (change === "hide") {
+            raw.run(`INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,
+              version,visibility,source,reason_category,reason,actor,created_at)
+              VALUES('CC-NEGATIVE-RACE','P-4DSP','ledger-object','DE-RACE@1',1,'hidden',
+                'operator','privacy','Hold the selected negative work.','fixture-operator',
+                '2026-09-10T00:00:00Z')`);
+          } else {
+            raw.run(
+              `UPDATE event_content SET payload_json='{}',
+              redacted_at='2026-09-10T00:00:00Z',redaction_reason='Fixture lawful removal'
+              WHERE event_id=?`,
+              [event],
+            );
+          }
+        });
+        await expect(loadFellowCard(racing, "gauss-agent")).rejects.toThrow(
+          "Fellow card sources changed before release.",
+        );
+        expect((await loadFellowCard(db, "gauss-agent"))?.negative_history).toEqual([]);
+      } finally {
+        raw.close();
+      }
+    },
+  );
 
   test("verified negative work keeps immutable attribution and independent stable pagination, never a tally", async () => {
     const { db, raw } = createMigratedDb();

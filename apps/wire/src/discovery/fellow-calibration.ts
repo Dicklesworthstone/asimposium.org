@@ -56,9 +56,9 @@ interface Witness {
   body: string;
 }
 
-interface ReleaseCheck {
-  statement: D1PreparedStatement;
-  expected: number;
+export interface FellowCalibrationReleaseCheck {
+  readonly statement: D1PreparedStatement;
+  readonly expected: number;
 }
 
 export interface FellowCalibrationOutcomes {
@@ -142,7 +142,7 @@ function admissionCheck(
   fellow: string,
   kind: "review" | "retraction",
   expected: number,
-): ReleaseCheck {
+): FellowCalibrationReleaseCheck {
   // A new publication on a different problem must invalidate the aggregate,
   // too. The per-problem cursor witnesses alone cannot detect that insertion.
   return {
@@ -225,7 +225,7 @@ async function reviewSurvival(db: D1Database, rows: readonly Source[], fellow: s
   let surviving = 0;
   let survivalUnavailable = false;
   const outcomes = new Map<string, FellowReviewOutcome>();
-  const checks: ReleaseCheck[] = [];
+  const checks: FellowCalibrationReleaseCheck[] = [];
   for (const group of selected) {
     const { source, reviews } = group;
     const fencedWithdrawals = new Set<string>();
@@ -416,6 +416,7 @@ async function reviewSurvival(db: D1Database, rows: readonly Source[], fellow: s
 export async function loadFellowCalibration(
   db: D1Database,
   fellow: string,
+  cardReleaseChecks: readonly FellowCalibrationReleaseCheck[] = [],
 ): Promise<FellowCalibrationOutcomes> {
   const batch = await db.batch([sources(db, fellow, "retraction"), sources(db, fellow, "review")]);
   if (batch.length !== 2 || !batch[0]?.success || !batch[1]?.success)
@@ -456,12 +457,26 @@ export async function loadFellowCalibration(
         )
       : []),
   ];
-  if (checks.length > 0) {
+  if (checks.length > 0 || cardReleaseChecks.length > 0) {
     // Both outcomes share the final transaction. In particular, correction
     // credit cannot escape a hide while scientific review histories are read.
-    const released = await db.batch(checks.map((check) => check.statement));
-    if (released.length !== checks.length || released.some((result) => !result.success))
+    // A containing Fellow card releases its captured history and identity in
+    // this same snapshot; a later card-only check would reopen that race.
+    const released = await db.batch(
+      [...checks, ...cardReleaseChecks].map((check) => check.statement),
+    );
+    if (
+      released.length !== checks.length + cardReleaseChecks.length ||
+      released.some((result) => !result.success)
+    )
       throw new Error("Calibration release check failed.");
+    for (const [index, check] of cardReleaseChecks.entries()) {
+      if (
+        (released[checks.length + index]?.results[0] as { matched?: number } | undefined)
+          ?.matched !== check.expected
+      )
+        throw new Error("Fellow card sources changed before release.");
+    }
     for (const [index, check] of checks.entries()) {
       if (
         (released[index]?.results[0] as { matched?: number } | undefined)?.matched ===
