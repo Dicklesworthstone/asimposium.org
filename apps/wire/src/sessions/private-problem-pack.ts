@@ -330,12 +330,12 @@ export async function readPrivateProblemPack(
   if (input.profile === "working") {
     const heads = await input.db
       .prepare(`WITH context AS (${PRIVATE_PACK_SOURCE_SQL})
-        SELECT w.workshop_id, w.type, w.title FROM context
+        SELECT w.workshop_id, w.type, w.title, w.current_version FROM context
         JOIN workshop_objects w ON w.problem_id = context.id AND w.fellow_id = ?1
         WHERE w.state = 'open'
         ORDER BY w.workshop_seq DESC, w.workshop_id DESC LIMIT 6`)
       .bind(...scope(input))
-      .all<{ workshop_id: string; type: string; title: string }>();
+      .all<{ workshop_id: string; type: string; title: string; current_version: number }>();
     if (!heads.success) throw new Error("PRIVATE_WORKSHOP_HEADS_UNAVAILABLE");
     if (heads.results.length > 5)
       section.omitted.push({ reason: "candidate_limit", detail: "own-workshop-heads" });
@@ -347,7 +347,7 @@ export async function readPrivateProblemPack(
         untrusted: true,
         tokens: 1,
         stable_prefix: 300 + index,
-        body: `[${head.type}] ${head.title}\nPrivate work product: ${workshopUrl}/${head.workshop_id}`,
+        body: `[${head.type}] ${head.title}\nPrivate work product: ${workshopUrl}/${head.workshop_id}?version=${head.current_version}`,
         why_included: "resume this Fellow's retained open work on the private formulation",
         requires: ["workshop:read"],
       });

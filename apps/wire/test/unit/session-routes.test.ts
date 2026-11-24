@@ -16022,6 +16022,95 @@ describe("committed promotion outbox nudge", () => {
     expect(await failed.text()).not.toContain("SQL_DIAGNOSTIC_CANARY");
   });
 
+  test.each(["working", "graveyard"] as const)(
+    "%s pack links recover the captured workshop revision after a later session edits it",
+    async (profile) => {
+      const f = await fixture();
+      let key = 0;
+      const post = async (path: string, body: unknown) => {
+        const response = await f.call(path, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": `pack-revision-${++key}`,
+          },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(201);
+        return response.json();
+      };
+      const open = async () =>
+        SessionOpenResponseSchema.parse(
+          await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" }),
+        ).session_id;
+      const origin = await open();
+      const path = workshopDirectoryPath(origin);
+      const draft = WorkshopPushResponseSchema.parse(
+        await post(path, {
+          type: profile === "working" ? "scratch" : "dead-end-draft",
+          title: "Captured boundary calculation",
+          body_md: "CAPTURED_PRIVATE_BODY: the first finite witness loops.",
+        }),
+      );
+      const response = await f.call(
+        `/v1/sessions/${origin}/pack?profile=${profile}&max_tokens=8000`,
+      );
+      expect(response.status, await response.clone().text()).toBe(200);
+      const pack = PackResponseSchema.parse(await response.json());
+      const item = pack.items.find((entry) => entry.id === draft.workshop_id);
+      expect(item?.kind).toBe(profile === "working" ? "workshop-head" : "dead-end");
+      const label = "Private work product: ";
+      const readUrl = item?.body
+        .split("\n")
+        .find((line) => line.startsWith(label))
+        ?.slice(label.length);
+      expect(readUrl).toBe(`${path}/${draft.workshop_id}?version=1`);
+      if (readUrl === undefined) throw new Error("Expected a captured workshop recovery link.");
+
+      await post(`/v1/sessions/${origin}/close`, { handback: "Resume the retained calculation." });
+      const resumed = await open();
+      await post(workshopDirectoryPath(resumed), {
+        workshop_id: draft.workshop_id,
+        base_version: 1,
+        title: "A different boundary calculation",
+        body_md: "LATER_PRIVATE_BODY: a new witness changes the next check.",
+      });
+      // Follow the actual old pack link, through its now-closed session. The
+      // immutable body and the current edit version have distinct purposes.
+      const recovered = await f.call(readUrl);
+      expect(recovered.status, await recovered.clone().text()).toBe(200);
+      expect(recovered.headers.get("cache-control")).toBe("private, no-store");
+      expect(WorkshopObjectResponseSchema.parse(await recovered.json()).object).toMatchObject({
+        version: 1,
+        current_version: 2,
+        title: "Captured boundary calculation",
+        body_md: "CAPTURED_PRIVATE_BODY: the first finite witness loops.",
+      });
+      const current = await f.call(`${path}/${draft.workshop_id}`);
+      expect(WorkshopObjectResponseSchema.parse(await current.json()).object).toMatchObject({
+        version: 2,
+        current_version: 2,
+        body_md: "LATER_PRIVATE_BODY: a new witness changes the next check.",
+      });
+
+      const peer = await addApprovedFellow(f, { suffix: `pack-${profile}`, scopes: ["review"] });
+      expect((await peer.call(readUrl)).status).toBe(404);
+      await f.service.revokeCredential(
+        f.sponsor,
+        {
+          fellow_id: f.binding.fellowId,
+          credential_id: f.binding.credentialId,
+          confirm: "revoke-credential",
+          step_up_authenticated_at: Math.floor(Date.now() / 1000),
+        },
+        { idempotencyKey: "pack-revision-revoke" },
+      );
+      const revoked = await f.call(readUrl);
+      expect(revoked.status).toBe(401);
+      expect(await revoked.text()).not.toContain("CAPTURED_PRIVATE_BODY");
+    },
+  );
+
   test("PLANTED: working packs disclose workshop-head truncation at six rows (j9hw)", async () => {
     // The working-profile workshop query reads one row past the emitted five
     // purely to decide disclosure: five heads compose with no truncation
@@ -16122,7 +16211,7 @@ describe("committed promotion outbox nudge", () => {
     expect(headBodies).toEqual(
       [6, 5, 4, 3, 2].map(
         (number, index) =>
-          `[claim-draft] J9HW Title ${number}\nPrivate work product: /v1/sessions/${sixSession}/workshop/${headItems[index]?.id}`,
+          `[claim-draft] J9HW Title ${number}\nPrivate work product: /v1/sessions/${sixSession}/workshop/${headItems[index]?.id}?version=1`,
       ),
     );
     expect(packSixText).not.toContain("J9HW Title 1");

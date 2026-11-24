@@ -4715,7 +4715,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (profile === "graveyard") {
       const deadEnds = await db
         .prepare(
-          `SELECT workshop_id, title, body_md, cas_hash, workshop_seq, created_at FROM workshop_objects
+          `SELECT workshop_id, title, body_md, cas_hash, workshop_seq, created_at, current_version FROM workshop_objects
            WHERE problem_id = ? AND fellow_id = ? AND type IN ('dead-end-draft', 'dead-end')
            ORDER BY workshop_seq DESC LIMIT 11`,
         )
@@ -4727,6 +4727,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           cas_hash: string | null;
           workshop_seq: number;
           created_at: string;
+          current_version: number;
         }>();
       const deadEndRows = (deadEnds.results ?? []).slice(0, 10);
       if ((deadEnds.results ?? []).length > 10) {
@@ -4754,7 +4755,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             scope: "workshop",
             tokens: 1,
             untrusted: true,
-            body: `${deadEnd.title}: ${excerpt ? "[Excerpt: first 280 characters; full private body omitted.]\n" : ""}${deadEnd.body_md}\nPrivate work product: /v1/sessions/${session.session_id}/workshop/${deadEnd.workshop_id}`,
+            body: `${deadEnd.title}: ${excerpt ? "[Excerpt: first 280 characters; full private body omitted.]\n" : ""}${deadEnd.body_md}\nPrivate work product: /v1/sessions/${session.session_id}/workshop/${deadEnd.workshop_id}?version=${deadEnd.current_version}`,
             why_included: "preserve a recorded dead end (negative results are first-class, P6)",
             stable_prefix: 500 + index,
             requires: ["workshop:read"],
@@ -4766,7 +4767,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (profile === "working") {
       const heads = await db
         .prepare(
-          `SELECT workshop_id, type, title, workshop_seq, created_at FROM workshop_objects
+          `SELECT workshop_id, type, title, workshop_seq, created_at, current_version FROM workshop_objects
            WHERE problem_id = ? AND fellow_id = ? AND state = 'open'
            ORDER BY workshop_seq DESC, workshop_id DESC LIMIT 6`,
         )
@@ -4777,6 +4778,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           title: string;
           workshop_seq: number;
           created_at: string;
+          current_version: number;
         }>();
       const headRows = heads.results ?? [];
       // j9hw: one extra open row decides disclosure. Archived/discarded work
@@ -4797,13 +4799,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         });
       } else {
         for (const [index, head] of emittedHeads.entries()) {
+          // A concurrent edit must not replace the work referenced by this
+          // pack. The exact reader still checks current private authority and
+          // returns current_version separately for safe subsequent edits.
           candidates.push({
             kind: "workshop-head",
             id: head.workshop_id,
             scope: "workshop",
             tokens: 1,
             untrusted: true,
-            body: `[${head.type}] ${head.title}\nPrivate work product: /v1/sessions/${session.session_id}/workshop/${head.workshop_id}`,
+            body: `[${head.type}] ${head.title}\nPrivate work product: /v1/sessions/${session.session_id}/workshop/${head.workshop_id}?version=${head.current_version}`,
             why_included: "resume a recent open object in this Fellow's private workshop",
             stable_prefix: 300 + index,
             requires: ["workshop:read"],
