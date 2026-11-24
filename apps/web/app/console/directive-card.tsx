@@ -30,6 +30,7 @@ export function DirectiveManager({
   const eligible = useMemo(() => fellows.filter((fellow) => fellow.status === "active"), [fellows]);
   const [inputMode, setInputMode] = useState<"form" | "palette">("form");
   const [fellowId, setFellowId] = useState(eligible[0]?.fellow_id ?? "");
+  const [recipientNeedsChoice, setRecipientNeedsChoice] = useState(false);
   const [verb, setVerb] = useState<SponsorDirectiveVerb>("focus");
   const [text, setText] = useState("");
   const [paletteCommand, setPaletteCommand] = useState("");
@@ -40,6 +41,18 @@ export function DirectiveManager({
   const attemptKeys = useRef(new Map<string, string>());
   const [pending, startTransition] = useTransition();
   const router = useRouter();
+
+  // Console refreshes preserve this form while approval, lifecycle changes
+  // and inventory pagination can change its recipients. Select the first
+  // newly available Fellow only before a recipient has been lost. An existing
+  // draft must never move to another Fellow without an explicit choice.
+  const firstEligible = eligible[0];
+  if (fellowId !== "" && !eligible.some((fellow) => fellow.fellow_id === fellowId)) {
+    setFellowId("");
+    setRecipientNeedsChoice(true);
+  } else if (fellowId === "" && !recipientNeedsChoice && firstEligible !== undefined) {
+    setFellowId(firstEligible.fellow_id);
+  }
 
   const paletteParse = useMemo(() => {
     if (paletteCommand.trim().length === 0) return null;
@@ -97,10 +110,28 @@ export function DirectiveManager({
               review lifecycle controls or change a problem&apos;s writer capacity.
             </p>
           ) : null}
+          {recipientNeedsChoice ? (
+            <p className="quiet" role="status">
+              The previously selected Fellow is no longer available in this active Fellow list.
+              Your directive draft is kept. Choose its recipient before delivering it.
+            </p>
+          ) : null}
           <div className="auth-row" style={{ alignItems: "end", flexWrap: "wrap" }}>
             <label>
               Fellow
-              <select value={fellowId} onChange={(event) => setFellowId(event.target.value)}>
+              <select
+                value={fellowId}
+                disabled={pending || eligible.length === 0}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  if (!eligible.some((fellow) => fellow.fellow_id === next)) return;
+                  setFellowId(next);
+                  setRecipientNeedsChoice(false);
+                }}
+              >
+                <option value="" disabled>
+                  Choose an active Fellow
+                </option>
                 {eligible.map((fellow) => (
                   <option key={fellow.fellow_id} value={fellow.fellow_id}>
                     {fellow.name}
@@ -152,6 +183,7 @@ export function DirectiveManager({
               type="button"
               disabled={pending || fellowId === "" || (verb !== "unfocus" && text.trim() === "")}
               onClick={() => {
+                if (!eligible.some((fellow) => fellow.fellow_id === fellowId)) return;
                 setMessage(null);
                 setHandoff(null);
                 const request = {
