@@ -105,7 +105,7 @@ export async function stoaProblemResultClaim(
   const governance = await stoaProblemGovernance(principalId, problemId);
   if (!governance.ok) return governance;
   if ((!governance.data.authority.owner && !governance.data.authority.steward) ||
-      !["active", "dormant"].includes(governance.data.problem.status))
+      !["active", "dormant", "under-result-review"].includes(governance.data.problem.status))
     return { ok: false, reason: "refused", status: 422 };
   const target = `${claimId}@${version}`;
   const read = await stoaFetchClaimFace(problemId, target);

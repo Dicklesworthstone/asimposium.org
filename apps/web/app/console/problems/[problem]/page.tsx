@@ -94,7 +94,7 @@ export default async function ProblemPublicationPage({
       : undefined;
   let synthesisChoices: SynthesisSelectionPage | null = null;
   let claimChoices: ClaimsListResponse | null = null;
-  if (workspace !== undefined && ["active", "dormant"].includes(workspace.problem.status) && claimQuery !== null) {
+  if (workspace !== undefined && ["active", "dormant", "under-result-review"].includes(workspace.problem.status) && claimQuery !== null) {
     try {
       const choices = await stoaFetchClaimsList(problemId, undefined,
         Object.fromEntries(new URLSearchParams(claimsListQueryString(claimQuery.list))));

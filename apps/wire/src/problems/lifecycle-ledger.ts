@@ -32,6 +32,7 @@ import {
   readPublishedProblemFormulation,
 } from "../ledger/problem-formulation-read.ts";
 import {
+  checkedScientificPayload,
   findScientificClaim,
   type ScientificClaim,
   ScientificInputError,
@@ -120,6 +121,72 @@ const governanceEventTypes = {
 
 const MERGE_TARGET_STATUSES_SQL =
   "('sharpening', 'active', 'dormant', 'under-result-review', 'resolved')";
+
+/** Capture the selection envelope even when its content is unavailable. A
+ * replacement uses its own checked claim; hidden history is never consulted to
+ * reconstruct the prior result or allowed to erase the concurrency fence. */
+async function readResultReviewSelection(
+  db: D1Database,
+  problem: ProblemSnapshot,
+): Promise<{ readonly eventId: string | null; readonly resultClaim?: ClaimDependencyPin }> {
+  const row = await db
+    .prepare(`SELECT e.id AS event_id,e.seq,p.public_seq,e.object_kind,e.object_id,e.object_version,
+      e.actor_fellow_id,e.actor_sponsor_id,e.actor_session_id,e.created_at,e.payload_sha256,
+      CASE WHEN c.redacted_at IS NULL AND NOT ${eventContentHiddenSql("e")}
+        AND length(CAST(c.payload_json AS BLOB)) <= 65536 THEN c.payload_json END AS payload_json
+      FROM events e JOIN problems p ON p.id = e.problem_id
+      LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+      WHERE e.problem_id = ? AND e.type = 'problem.result-review-started'
+      ORDER BY e.seq DESC LIMIT 1`)
+    .bind(problem.id)
+    .first<{
+      event_id: string;
+      seq: number;
+      public_seq: number;
+      object_kind: string;
+      object_id: string;
+      object_version: number;
+      actor_fellow_id: string | null;
+      actor_sponsor_id: string | null;
+      actor_session_id: string | null;
+      created_at: string;
+      payload_sha256: string;
+      payload_json: string | null;
+    }>();
+  const selection = { eventId: row?.event_id ?? null };
+  if (
+    !row ||
+    row.seq > row.public_seq ||
+    row.object_kind !== "problem" ||
+    row.object_id !== problem.id ||
+    row.object_version !== problem.current_statement_version ||
+    row.actor_fellow_id !== null ||
+    row.actor_session_id !== null ||
+    row.payload_json === null
+  )
+    return selection;
+  try {
+    const parsed = ProblemGovernanceEventSchema.safeParse(
+      await checkedScientificPayload({
+        payload_json: row.payload_json,
+        payload_sha256: row.payload_sha256,
+      }),
+    );
+    if (
+      !parsed.success ||
+      parsed.data.action !== "enter-result-review" ||
+      parsed.data.problem.id !== problem.id ||
+      parsed.data.problem.current_statement_version !== problem.current_statement_version ||
+      parsed.data.problem.updated_at !== row.created_at ||
+      parsed.data.acting_principal.id !== row.actor_sponsor_id
+    )
+      return selection;
+    return { ...selection, resultClaim: parsed.data.problem.result_claim };
+  } catch (error) {
+    if (!(error instanceof ScientificInputError)) throw error;
+    return selection;
+  }
+}
 
 /** Bind a checked public formulation to the governance transaction. Visibility
  * controls can change without advancing a problem's scientific cursor, so a
@@ -417,10 +484,12 @@ export async function applyPublicProblemGovernance(
 
   const previous = await replay();
   if (previous) return previous;
-  // A concurrent identical transfer can remove this actor after the first
-  // receipt lookup. Its completed command wins over later mutable refusals.
+  // A concurrent identical command may change authority or the selected result
+  // after the first lookup. Its receipt wins over later mutable refusals.
   const currentStateRefusal = async (response: Response): Promise<Response> =>
-    action.action === "manage-steward" || action.action === "revise-statement"
+    action.action === "manage-steward" ||
+    action.action === "revise-statement" ||
+    action.action === "enter-result-review"
       ? ((await replay()) ?? response)
       : response;
   const publishing = action.action === "publish";
@@ -491,12 +560,14 @@ export async function applyPublicProblemGovernance(
       );
     }
   } else if (action.action === "enter-result-review") {
-    if (!["active", "dormant"].includes(problem.status)) {
-      return refusal(
-        "OBJECT_VERSION_CONFLICT",
-        409,
-        "The current problem state does not permit this transition.",
-        "Read the current problem before choosing a new lifecycle action.",
+    if (!["active", "dormant", "under-result-review"].includes(problem.status)) {
+      return currentStateRefusal(
+        refusal(
+          "OBJECT_VERSION_CONFLICT",
+          409,
+          "The current problem state does not permit this transition.",
+          "Read the current problem before choosing a new lifecycle action.",
+        ),
       );
     }
   } else if (action.action === "retire" || revising || action.action === "merge") {
@@ -646,6 +717,7 @@ export async function applyPublicProblemGovernance(
 
   let resultClaim: ClaimDependencyPin | undefined;
   let resultDisclosureLineage: string | undefined;
+  let resultReviewSelection: Awaited<ReturnType<typeof readResultReviewSelection>> | undefined;
   let resolution: ProblemResolutionSnapshot | undefined;
   if (action.action === "resolve") {
     const admission = await prepareProblemResolution(db, problem, action);
@@ -668,6 +740,7 @@ export async function applyPublicProblemGovernance(
     resultDisclosureLineage = resolution.disclosureLineage;
   }
   if (action.action === "enter-result-review") {
+    resultReviewSelection = await readResultReviewSelection(db, problem);
     const reference = action.result_claim;
     const current = await db
       .prepare(`SELECT claims.id FROM claims
@@ -687,11 +760,13 @@ export async function applyPublicProblemGovernance(
       claim = null;
     }
     if (!claim)
-      return refusal(
-        "OBJECT_VERSION_CONFLICT",
-        409,
-        "Result review requires an available current claim version anchored to the current problem statement.",
-        "Read the claim and problem, re-anchor any statement drift, and select the exact current claim version.",
+      return currentStateRefusal(
+        refusal(
+          "OBJECT_VERSION_CONFLICT",
+          409,
+          "Result review requires an available current claim version anchored to the current problem statement.",
+          "Read the claim and problem, re-anchor any statement drift, and select the exact current claim version.",
+        ),
       );
     resultClaim = {
       claim_id: claim.claimId,
@@ -712,14 +787,33 @@ export async function applyPublicProblemGovernance(
       typeof disclosure.lineage_digest !== "string" ||
       !/^[a-f0-9]{64}$/.test(disclosure.lineage_digest)
     ) {
-      return refusal(
-        "OBJECT_VERSION_CONFLICT",
-        409,
-        "Result review requires current sponsor disclosure for the exact claim and its result lineage. Missing or unresolved prior-sponsor coverage cannot be replaced by the current sponsor.",
-        "Each responsible sponsor must inspect and record their own coverage in the console disclosure workflow. Then retry result review for this exact current claim version.",
+      return currentStateRefusal(
+        refusal(
+          "OBJECT_VERSION_CONFLICT",
+          409,
+          "Result review requires current sponsor disclosure for the exact claim and its result lineage. Missing or unresolved prior-sponsor coverage cannot be replaced by the current sponsor.",
+          "Each responsible sponsor must inspect and record their own coverage in the console disclosure workflow. Then retry result review for this exact current claim version.",
+        ),
       );
     }
     resultDisclosureLineage = disclosure.lineage_digest;
+    const selected = resultReviewSelection.resultClaim;
+    if (
+      problem.status === "under-result-review" &&
+      selected?.claim_id === resultClaim.claim_id &&
+      selected.version === resultClaim.version &&
+      selected.event_id === resultClaim.event_id &&
+      selected.content_digest === resultClaim.content_digest &&
+      selected.payload_digest === resultClaim.payload_digest
+    )
+      return currentStateRefusal(
+        refusal(
+          "OBJECT_VERSION_CONFLICT",
+          409,
+          "This exact current result is already under review. No new selection was recorded.",
+          "Continue reviewing this result and its closing synthesis, or select a revised or replacement current claim with a new key.",
+        ),
+      );
   }
 
   if (revising && reviewedRevision?.preview.proposal.scope === undefined) {
@@ -1038,6 +1132,13 @@ export async function applyPublicProblemGovernance(
         AND status = ? AND current_statement_version = ? AND title = ?
         AND EXISTS (SELECT 1 FROM public_cursor WHERE singleton = 1 AND cursor < 9007199254740991)
         ${action.action === "fork" ? "AND (SELECT MAX(seq) FROM events WHERE problem_id = ?) = ?" : ""}
+        ${
+          resultReviewSelection
+            ? `AND (SELECT selected.id FROM events selected
+              WHERE selected.problem_id = ? AND selected.type = 'problem.result-review-started'
+              ORDER BY selected.seq DESC LIMIT 1) IS ?`
+            : ""
+        }
         ${lineageGuard?.sql ?? ""}
         ${currentFormulationGuard?.sql ?? ""}
         ${publishing ? "AND created_by_fellow_id = ? AND EXISTS (SELECT 1 FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active')" : ""}
@@ -1104,6 +1205,7 @@ export async function applyPublicProblemGovernance(
           problem.current_statement_version,
           problem.title,
           ...(action.action === "fork" ? [problem.id, parentCursor] : []),
+          ...(resultReviewSelection ? [problem.id, resultReviewSelection.eventId] : []),
           ...(lineageGuard?.bindings ?? []),
           ...(currentFormulationGuard?.bindings ?? []),
           ...(publishing && problem.created_by_fellow_id

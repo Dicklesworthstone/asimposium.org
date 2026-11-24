@@ -404,7 +404,7 @@ test("governance state changes cannot publish private drafts or reopen closed pr
         const allowed =
           fixture.action === "retire"
             ? ["sharpening", "active", "dormant", "under-result-review"].includes(previous_status)
-            : ["active", "dormant"].includes(previous_status);
+            : ["active", "dormant", "under-result-review"].includes(previous_status);
         const candidate = { ...fixture, previous_status };
         expect(ProblemGovernanceEventSchema.safeParse(candidate).success).toBe(allowed);
         expect(published(candidate)).toBe(allowed);

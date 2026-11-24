@@ -14,6 +14,7 @@ import {
 import { readPublishedProblemResolution } from "../../src/ledger/problem-resolution-read.ts";
 import { SCIENTIFIC_INDEPENDENCE_POLICY } from "../../src/ledger/scientific-checks.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
+import { prepareProblemResolution } from "../../src/problems/resolution-admission.ts";
 import {
   FELLOW,
   NOW,
@@ -57,6 +58,7 @@ async function fixture() {
     projection?: KraterLedgerProjectionPlan["statementsAfterEvent"],
     fellow: string | null = FELLOW,
     sponsor = SPONSOR,
+    version = 1,
   ): Promise<Source> => {
     const eventId = `EV-RESOLUTION-${++serial}`;
     const body = canonicalJson(payload);
@@ -70,7 +72,7 @@ async function fixture() {
         eventType: type,
         objectKind: kind,
         objectId: objectId ?? eventId,
-        objectVersion: 1,
+        objectVersion: version,
         payloadJson: body,
         createdAt: NOW(),
         attribution:
@@ -122,221 +124,244 @@ async function fixture() {
     undefined,
     null,
   );
-  const claimBody = {
-    falsifier: "An unequal result.",
-    kind: "lemma",
-    statement: "Two equals two.",
-  };
-  const contentDigest = `sha256:${await sha256Hex(canonicalJson(claimBody))}`;
-  const claim = await source(
-    "claim.created",
-    "claim",
-    CLAIM,
-    {
-      claim_id: CLAIM,
-      ...claimBody,
-      dependency_pins: [],
-      scientific_provenance: { model_family_self_declared: "gpt" },
-    },
-    ({ sequence, payloadSha256, createdAt }) => [
-      f.db
-        .prepare(`INSERT INTO claims
-      (id,problem_id,statement,payload_sha256,source_seq,created_at) VALUES(?,?,?,?,?,?)`)
-        .bind(CLAIM, PROBLEM, claimBody.statement, payloadSha256, sequence, createdAt),
-      f.db
-        .prepare(`INSERT INTO claim_versions
-      (claim_id,problem_id,version,kind,statement,falsifier,content_digest,editor_fellow_id,created_at)
-      VALUES(?,?,1,?,?,?,?,?,?)`)
-        .bind(
-          CLAIM,
-          PROBLEM,
-          claimBody.kind,
-          claimBody.statement,
-          claimBody.falsifier,
-          contentDigest,
-          FELLOW,
-          createdAt,
-        ),
-    ],
-  );
-  const resultClaim: ClaimDependencyPin = {
-    claim_id: CLAIM,
-    version: 1,
-    content_digest: contentDigest,
-    event_id: claim.eventId,
-    payload_digest: claim.hash,
-  };
-  const evidence = async (
-    id: string,
-    direction: "supports" | "informs",
-    fields: Record<string, unknown>,
-  ) =>
-    source(
-      "evidence.created",
-      "evidence",
-      id,
+  const publishResult = async (claimId = CLAIM, version = 1) => {
+    const suffix = claimId === CLAIM && version === 1 ? "" : `C${claimId.slice(2)}V${version}`;
+    const proofId = `E-PROOF${suffix}`;
+    const claimBody = {
+      falsifier: "An unequal result.",
+      kind: "lemma",
+      statement:
+        version === 1
+          ? "Two equals two."
+          : `Two equals two within the finite scope, revision ${version}.`,
+    };
+    const contentDigest = `sha256:${await sha256Hex(canonicalJson(claimBody))}`;
+    const claim = await source(
+      version === 1 ? "claim.created" : "claim.revised",
+      "claim",
+      claimId,
       {
-        bears_on_kind: "claim",
-        bears_on_id: CLAIM,
-        bears_on_version: 1,
-        kind: "argument",
-        source_kind: "locator",
-        mode: "confirmatory",
-        computed_class: "citation",
-        direction,
-        body_md: "The complete finite argument.",
-        ...fields,
+        claim_id: claimId,
+        ...(version > 1 ? { base_version: version - 1 } : {}),
+        ...claimBody,
+        dependency_pins: [],
+        scientific_provenance: { model_family_self_declared: "gpt" },
       },
-      ({ eventId, sequence, createdAt }) => [
+      ({ sequence, payloadSha256, createdAt }) => [
+        version === 1
+          ? f.db
+              .prepare(`INSERT INTO claims
+      (id,problem_id,statement,payload_sha256,source_seq,created_at) VALUES(?,?,?,?,?,?)`)
+              .bind(claimId, PROBLEM, claimBody.statement, payloadSha256, sequence, createdAt)
+          : f.db
+              .prepare(`UPDATE claims SET statement = ?, payload_sha256 = ?, source_seq = ?
+          WHERE problem_id = ? AND id = ?`)
+              .bind(claimBody.statement, payloadSha256, sequence, PROBLEM, claimId),
         f.db
-          .prepare(`INSERT INTO evidence
+          .prepare(`INSERT INTO claim_versions
+      (claim_id,problem_id,version,kind,statement,falsifier,content_digest,editor_fellow_id,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?)`)
+          .bind(
+            claimId,
+            PROBLEM,
+            version,
+            claimBody.kind,
+            claimBody.statement,
+            claimBody.falsifier,
+            contentDigest,
+            FELLOW,
+            createdAt,
+          ),
+      ],
+      FELLOW,
+      SPONSOR,
+      version,
+    );
+    const resultClaim: ClaimDependencyPin = {
+      claim_id: claimId,
+      version,
+      content_digest: contentDigest,
+      event_id: claim.eventId,
+      payload_digest: claim.hash,
+    };
+    const evidence = async (
+      id: string,
+      direction: "supports" | "informs",
+      fields: Record<string, unknown>,
+    ) =>
+      source(
+        "evidence.created",
+        "evidence",
+        id,
+        {
+          bears_on_kind: "claim",
+          bears_on_id: claimId,
+          bears_on_version: version,
+          kind: "argument",
+          source_kind: "locator",
+          mode: "confirmatory",
+          computed_class: "citation",
+          direction,
+          body_md: "The complete finite argument.",
+          ...fields,
+        },
+        ({ eventId, sequence, createdAt }) => [
+          f.db
+            .prepare(`INSERT INTO evidence
         (evidence_id,problem_id,bears_on_kind,bears_on_id,bears_on_version,direction,kind,source_kind,
          mode,computed_class,author_fellow_id,body_md,created_at,source_event_id,source_seq)
-        VALUES(?,?,'claim',?,1,?,'argument','locator','confirmatory','citation',?,?,?,?,?)`)
-          .bind(
-            id,
-            PROBLEM,
-            CLAIM,
-            direction,
-            FELLOW,
-            "The complete finite argument.",
-            createdAt,
-            eventId,
-            sequence,
-          ),
-      ],
-    );
-  const proof = await evidence("E-PROOF", "supports", {});
-  const reference = { evidence_id: "E-PROOF", digest: `sha256:${proof.hash}` };
-  await evidence("E-CHECK", "informs", {
-    falsification_check: {
-      target_digest: contentDigest,
-      attempted_falsifier: "Compare the two values.",
-      capable_of_failure: "The values could differ.",
-      result: "survived",
-      evidence: [reference],
-    },
-  });
-  for (const [id, family] of [
-    ["ONE", "claude"],
-    ["TWO", "gemini"],
-  ]) {
-    const reviewer = `F-${id}`;
-    await source(
-      "review.created",
-      "review",
-      `R-${id}`,
-      {
-        target_claim_id: CLAIM,
-        target_version: 1,
-        verdict: "confirm",
-        basis: "full-write-up",
-        capable_of_failure: "The equality could fail.",
-        body_md: "Independently verified the complete argument.",
-        tier: "T2",
-        independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
-        scientific_provenance: { model_family_self_declared: family },
-        verification: {
-          kind: "full-write-up",
-          target_digest: contentDigest,
-          evidence: reference,
-          coverage: ["The complete equality argument."],
-          result: "verified",
-        },
+        VALUES(?,?,'claim',?,?,?,'argument','locator','confirmatory','citation',?,?,?,?,?)`)
+            .bind(
+              id,
+              PROBLEM,
+              claimId,
+              version,
+              direction,
+              FELLOW,
+              "The complete finite argument.",
+              createdAt,
+              eventId,
+              sequence,
+            ),
+        ],
+      );
+    const proof = await evidence(proofId, "supports", {});
+    const reference = { evidence_id: proofId, digest: `sha256:${proof.hash}` };
+    await evidence(`E-CHECK${suffix}`, "informs", {
+      falsification_check: {
+        target_digest: contentDigest,
+        attempted_falsifier: "Compare the two values.",
+        capable_of_failure: "The values could differ.",
+        result: "survived",
+        evidence: [reference],
       },
-      ({ eventId, sequence, createdAt }) => [
-        f.db
-          .prepare(`INSERT INTO reviews
+    });
+    for (const [id, family] of [
+      ["ONE", "claude"],
+      ["TWO", "gemini"],
+    ]) {
+      const reviewer = `F-${id}`;
+      await source(
+        "review.created",
+        "review",
+        `R-${id}${suffix}`,
+        {
+          target_claim_id: claimId,
+          target_version: version,
+          verdict: "confirm",
+          basis: "full-write-up",
+          capable_of_failure: "The equality could fail.",
+          body_md: "Independently verified the complete argument.",
+          tier: "T2",
+          independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
+          scientific_provenance: { model_family_self_declared: family },
+          verification: {
+            kind: "full-write-up",
+            target_digest: contentDigest,
+            evidence: reference,
+            coverage: ["The complete equality argument."],
+            result: "verified",
+          },
+        },
+        ({ eventId, sequence, createdAt }) => [
+          f.db
+            .prepare(`INSERT INTO reviews
         (review_id,problem_id,target_claim_id,target_version,reviewer_fellow_id,tier,verdict,basis,
          capable_of_failure,body_md,created_at,source_event_id,source_seq)
-        VALUES(?,?,?,1,?,'T2','confirm','full-write-up',?,?,?,?,?)`)
-          .bind(
-            `R-${id}`,
-            PROBLEM,
-            CLAIM,
-            reviewer,
-            "The equality could fail.",
-            "Independently verified the complete argument.",
-            createdAt,
-            eventId,
-            sequence,
-          ),
-      ],
-      reviewer,
-      `usr_${id}`,
-    );
-  }
-  const lineage = await sha256Hex("resolution-lineage");
-  const scope = await sha256Hex("resolution-scope");
-  const coverage = await sha256Hex("resolution-coverage");
-  const disclosureBody = {
-    kind: "directive-disclosure",
-    target: {
-      problem_id: PROBLEM,
-      claim_id: CLAIM,
-      version: 1,
-      content_digest: contentDigest,
-      publication_event_id: claim.eventId,
-    },
-    sponsor_id: SPONSOR,
-    fellow_id: FELLOW,
-    scope_id: scope,
-    coverage_digest: coverage,
-    revision: 1,
-    decision: "no-undisclosed",
-  };
-  await source(
-    "directive.disclosure-recorded",
-    "directive-disclosure",
-    null,
-    disclosureBody,
-    ({ eventId, sequence, payloadSha256, createdAt }) => [
-      f.db
-        .prepare(`INSERT INTO directive_disclosure_records
+        VALUES(?,?,?,?,?,'T2','confirm','full-write-up',?,?,?,?,?)`)
+            .bind(
+              `R-${id}${suffix}`,
+              PROBLEM,
+              claimId,
+              version,
+              reviewer,
+              "The equality could fail.",
+              "Independently verified the complete argument.",
+              createdAt,
+              eventId,
+              sequence,
+            ),
+        ],
+        reviewer,
+        `usr_${id}`,
+      );
+    }
+    const lineage = await sha256Hex(`resolution-lineage${suffix}`);
+    const scope = await sha256Hex(`resolution-scope${suffix}`);
+    const coverage = await sha256Hex(`resolution-coverage${suffix}`);
+    const disclosureBody = {
+      kind: "directive-disclosure",
+      target: {
+        problem_id: PROBLEM,
+        claim_id: claimId,
+        version,
+        content_digest: contentDigest,
+        publication_event_id: claim.eventId,
+      },
+      sponsor_id: SPONSOR,
+      fellow_id: FELLOW,
+      scope_id: scope,
+      coverage_digest: coverage,
+      revision: 1,
+      decision: "no-undisclosed",
+    };
+    await source(
+      "directive.disclosure-recorded",
+      "directive-disclosure",
+      null,
+      disclosureBody,
+      ({ eventId, sequence, payloadSha256, createdAt }) => [
+        f.db
+          .prepare(`INSERT INTO directive_disclosure_records
         (event_id,problem_id,claim_id,claim_version,content_digest,source_event_id,sponsor_id,fellow_id,
          scope_id,coverage_digest,lineage_digest,revision,decision,seq,idempotency_key_digest,request_digest,
          public_payload_sha256,public_payload_json,recorded_at)
-        VALUES(?,?,?,1,?,?,?,?,?,?,?,1,'no-undisclosed',?,?,?,?,?,?)`)
-        .bind(
-          eventId,
-          PROBLEM,
-          CLAIM,
-          contentDigest,
-          claim.eventId,
-          SPONSOR,
-          FELLOW,
-          scope,
-          coverage,
-          lineage,
-          sequence,
-          "a".repeat(64),
-          "b".repeat(64),
-          payloadSha256,
-          canonicalJson(disclosureBody),
-          createdAt,
-        ),
-      f.db
-        .prepare(`INSERT INTO directive_disclosure_targets
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,1,'no-undisclosed',?,?,?,?,?,?)`)
+          .bind(
+            eventId,
+            PROBLEM,
+            claimId,
+            version,
+            contentDigest,
+            claim.eventId,
+            SPONSOR,
+            FELLOW,
+            scope,
+            coverage,
+            lineage,
+            sequence,
+            scope,
+            coverage,
+            payloadSha256,
+            canonicalJson(disclosureBody),
+            createdAt,
+          ),
+        f.db
+          .prepare(`INSERT INTO directive_disclosure_targets
         (problem_id,claim_id,claim_version,content_digest,source_event_id,lineage_digest,lineage_json,
          scope_requirements_json,invalidated,last_event_id,last_event_seq)
-        VALUES(?,?,1,?,?,?,?,?,0,?,?)`)
-        .bind(
-          PROBLEM,
-          CLAIM,
-          contentDigest,
-          claim.eventId,
-          lineage,
-          JSON.stringify({
-            pins: [{ ...resultClaim, payload_json: claim.body }],
-            fellows: [{ fellow_id: FELLOW, sponsor_id: SPONSOR }],
-          }),
-          JSON.stringify([{ scope_id: scope, coverage_digest: coverage }]),
-          eventId,
-          sequence,
-        ),
-    ],
-    null,
-  );
+        VALUES(?,?,?,?,?,?,?,?,0,?,?)`)
+          .bind(
+            PROBLEM,
+            claimId,
+            version,
+            contentDigest,
+            claim.eventId,
+            lineage,
+            JSON.stringify({
+              pins: [{ ...resultClaim, payload_json: claim.body }],
+              fellows: [{ fellow_id: FELLOW, sponsor_id: SPONSOR }],
+            }),
+            JSON.stringify([{ scope_id: scope, coverage_digest: coverage }]),
+            eventId,
+            sequence,
+          ),
+      ],
+      null,
+    );
+    return { claim, resultClaim, proof };
+  };
+  const { claim, resultClaim, proof } = await publishResult();
   const enter: Extract<ProblemLifecycleActionRequest, { action: "enter-result-review" }> = {
     action: "enter-result-review",
     result_claim: { claim_id: CLAIM, version: 1 },
@@ -346,23 +371,34 @@ async function fixture() {
     key: string,
     db = f.db,
   ) => applyPublicProblemGovernance(db, snapshot(f), SPONSOR, action, request(key));
-  const publishClosing = async () => {
+  const publishClosing = async (
+    selected = { claim, resultClaim },
+    synthesisId = "SYNTH-CLOSING",
+  ) => {
     const through = (
       f.sql.query("SELECT public_seq FROM problems WHERE id = ?").get(PROBLEM) as {
         public_seq: number;
       }
     ).public_seq;
-    const closing = await source("synthesis.created", "synthesis", "SYNTH-CLOSING", {
+    const closing = await source("synthesis.created", "synthesis", synthesisId, {
       covers_through: through,
       body_md: SUMMARY,
       anchors: [
-        { target_kind: "claim", target_id: CLAIM, target_version: 1, target_seq: claim.seq },
+        {
+          target_kind: "claim",
+          target_id: selected.resultClaim.claim_id,
+          target_version: selected.resultClaim.version,
+          target_seq: selected.claim.seq,
+        },
       ],
       omitted: [],
       selection_policy: "Include the complete earned result basis.",
       dropped_single_author_count: 0,
       closing_resolution: {
-        result_claim: { claim_id: CLAIM, version: 1 },
+        result_claim: {
+          claim_id: selected.resultClaim.claim_id,
+          version: selected.resultClaim.version,
+        },
         direction: "affirmed",
         no_claim_boundary: BOUNDARY,
       },
@@ -391,6 +427,7 @@ async function fixture() {
     enter,
     resolve,
     publishClosing,
+    publishResult,
     hide,
     proof,
     claim,
@@ -605,3 +642,222 @@ test("entering result review rechecks sponsor authority in the ledger transactio
     expect(ledgerState(f)).toEqual(before);
     expect(snapshot(f).status).toBe("active");
   }));
+
+test("a revised result can replace its stale review pin and earn resolution without losing prior receipts", () =>
+  using(async (f) => {
+    const first = await f.apply(f.enter, "original-review");
+    expect(first.status, await first.clone().text()).toBe(200);
+    const firstReceipt = await first.json();
+    const originalSelection = f.sql
+      .query(`SELECT e.id,c.payload_json FROM events e JOIN event_content c ON c.event_id=e.id
+        WHERE e.type='problem.result-review-started'`)
+      .get();
+    await f.publishClosing();
+    const revised = await f.publishResult(CLAIM, 2);
+    const beforeStaleResolution = ledgerState(f);
+    expect((await f.apply(f.resolve, "stale-result-resolution")).status).toBe(422);
+    expect(ledgerState(f)).toEqual(beforeStaleResolution);
+
+    const select = { ...f.enter, result_claim: { claim_id: CLAIM, version: 2 } };
+    const replacement = await f.apply(select, "revised-review");
+    expect(replacement.status, await replacement.clone().text()).toBe(200);
+    const replacementReceipt = await replacement.json();
+    expect(replacementReceipt).toMatchObject({
+      problem: { status: "under-result-review", result_claim: revised.resultClaim },
+    });
+    const selections = f.sql
+      .query(`SELECT e.id,c.payload_json FROM events e JOIN event_content c ON c.event_id=e.id
+        WHERE e.type='problem.result-review-started' ORDER BY e.seq`)
+      .all() as { id: string; payload_json: string }[];
+    expect(selections).toHaveLength(2);
+    expect(selections[0]).toEqual(originalSelection);
+    const selected = selections[1];
+    if (selected === undefined) throw new Error("Replacement selection was not recorded");
+    expect(ProblemGovernanceEventSchema.parse(JSON.parse(selected.payload_json))).toMatchObject({
+      previous_status: "under-result-review",
+      problem: { result_claim: revised.resultClaim },
+    });
+    const afterSelection = ledgerState(f);
+    expect((await f.apply(f.resolve, "old-closing-after-revision")).status).toBe(422);
+    expect(ledgerState(f)).toEqual(afterSelection);
+
+    const closing = await f.publishClosing(revised, "SYNTH-UPDATED");
+    const closingAction = {
+      ...f.resolve,
+      closing_synthesis: { ...f.resolve.closing_synthesis, synthesis_id: "SYNTH-UPDATED" },
+    };
+    const admission = await prepareProblemResolution(f.db, snapshot(f), closingAction);
+    expect(admission.ok, admission.ok ? "" : admission.reason).toBe(true);
+    const response = await f.apply(closingAction, "resolve-revised-result");
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(await readPublishedProblemResolution(f.db, PROBLEM, closing.seq + 1)).toMatchObject({
+      result_claim: revised.resultClaim,
+      closing_synthesis: { synthesis_id: "SYNTH-UPDATED" },
+    });
+    const afterResolution = ledgerState(f);
+    expect(await (await f.apply(f.enter, "original-review")).json()).toEqual(firstReceipt);
+    expect(await (await f.apply(select, "revised-review")).json()).toEqual(replacementReceipt);
+    expect((await f.apply(select, "cannot-reopen-resolution")).status).toBe(409);
+    expect(ledgerState(f)).toEqual(afterResolution);
+  }));
+
+test("a replacement claim is selected once and an unchanged selection does not append a fictitious transition", () =>
+  using(async (f) => {
+    expect((await f.apply(f.enter, "original-review")).status).toBe(200);
+    const replacement = await f.publishResult("C-2");
+    const select = { ...f.enter, result_claim: { claim_id: "C-2", version: 1 } };
+    const response = await f.apply(select, "replacement-review");
+    expect(response.status, await response.clone().text()).toBe(200);
+    const receipt = await response.json();
+    expect(receipt).toMatchObject({ problem: { result_claim: replacement.resultClaim } });
+    const before = ledgerState(f);
+    const duplicate = await f.apply(select, "unchanged-selection");
+    expect(duplicate.status).toBe(409);
+    expect(await duplicate.text()).toContain("already under review");
+    expect(ledgerState(f)).toEqual(before);
+    expect(await (await f.apply(select, "replacement-review")).json()).toEqual(receipt);
+    expect(ledgerState(f)).toEqual(before);
+  }));
+
+test("an unavailable selection record can be replaced using freshly checked claim and disclosure sources", () =>
+  using(async (f) => {
+    expect((await f.apply(f.enter, "original-review")).status).toBe(200);
+    const previous = f.sql
+      .query("SELECT seq FROM events WHERE type='problem.result-review-started'")
+      .get() as { seq: number };
+    f.hide(`#${previous.seq}`);
+    const before = ledgerState(f);
+    const replacement = await f.apply(f.enter, "restore-current-selection");
+    expect(replacement.status, await replacement.clone().text()).toBe(200);
+    expect(await replacement.json()).toMatchObject({ problem: { result_claim: f.resultClaim } });
+    expect(ledgerState(f).events).toHaveLength(before.events.length + 1);
+    const closing = await f.publishClosing();
+    const resolved = await f.apply(f.resolve, "resolve-restored-selection");
+    expect(resolved.status, await resolved.clone().text()).toBe(200);
+    expect(await readPublishedProblemResolution(f.db, PROBLEM, closing.seq + 1)).toMatchObject({
+      result_claim: f.resultClaim,
+    });
+  }));
+
+test("an identical selection committed after the first replay read returns its receipt instead of a no-op refusal", () =>
+  using(async (f) => {
+    expect((await f.apply(f.enter, "original-review")).status).toBe(200);
+    await f.publishResult("C-2");
+    const select = { ...f.enter, result_claim: { claim_id: "C-2", version: 1 } };
+    let happened = false;
+    let receipt: unknown;
+    let expected: ReturnType<typeof ledgerState> | undefined;
+    const db = {
+      prepare(text: string) {
+        const statement = f.db.prepare(text);
+        if (happened || !text.includes("FROM idempotency i LEFT JOIN events e")) return statement;
+        return {
+          bind(...values: (string | number | null)[]) {
+            const bound = statement.bind(...values);
+            return {
+              async first() {
+                const before = await bound.first();
+                happened = true;
+                const winner = await f.apply(select, "same-selection-key");
+                expect(winner.status, await winner.clone().text()).toBe(200);
+                receipt = await winner.json();
+                expected = ledgerState(f);
+                return before;
+              },
+            };
+          },
+        };
+      },
+      batch: f.db.batch.bind(f.db),
+    } as unknown as D1Database;
+    const response = await f.apply(select, "same-selection-key", db);
+    expect(happened).toBe(true);
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(await response.json()).toEqual(receipt);
+    expect(expected).toBeDefined();
+    expect(ledgerState(f)).toEqual(expected);
+  }));
+
+test("competing result selections cannot silently overwrite the captured review head", () =>
+  using(async (f) => {
+    expect((await f.apply(f.enter, "original-review")).status).toBe(200);
+    await f.publishResult("C-2");
+    const winner = await f.publishResult("C-3");
+    const first = { ...f.enter, result_claim: { claim_id: "C-2", version: 1 } };
+    const second = { ...f.enter, result_claim: { claim_id: "C-3", version: 1 } };
+    let expected: ReturnType<typeof ledgerState> | undefined;
+    const race = beforeLedgerBatch(f, async () => {
+      const response = await f.apply(second, "winning-selection");
+      expect(response.status, await response.clone().text()).toBe(200);
+      expect(await response.json()).toMatchObject({
+        problem: { result_claim: winner.resultClaim },
+      });
+      expected = ledgerState(f);
+    });
+    const refused = await f.apply(first, "racing-selection", race.db);
+    expect(race.happened()).toBe(true);
+    expect(refused.status, await refused.clone().text()).toBe(409);
+    expect(expected).toBeDefined();
+    expect(ledgerState(f)).toEqual(expected);
+    const retry = await f.apply(first, "racing-selection");
+    expect(retry.status, await retry.clone().text()).toBe(200);
+  }));
+
+for (const winner of ["selection", "resolution"] as const) {
+  test(`a competing ${winner} leaves the losing result-review command without partial ledger effects`, () =>
+    using(async (f) => {
+      expect((await f.apply(f.enter, "original-review")).status).toBe(200);
+      await f.publishResult("C-2");
+      await f.publishClosing();
+      const selection = { ...f.enter, result_claim: { claim_id: "C-2", version: 1 } };
+      let expected: ReturnType<typeof ledgerState> | undefined;
+      const race = beforeLedgerBatch(f, async () => {
+        const response = await f.apply(
+          winner === "selection" ? selection : f.resolve,
+          "winning-command",
+        );
+        expect(response.status, await response.clone().text()).toBe(200);
+        expected = ledgerState(f);
+      });
+      const response = await f.apply(
+        winner === "selection" ? f.resolve : selection,
+        "losing-command",
+        race.db,
+      );
+      expect(race.happened()).toBe(true);
+      expect(response.status, await response.clone().text()).toBe(409);
+      expect(expected).toBeDefined();
+      expect(ledgerState(f)).toEqual(expected);
+      expect(snapshot(f).status).toBe(winner === "selection" ? "under-result-review" : "resolved");
+    }));
+}
+
+for (const unavailable of ["claim", "disclosure", "sponsor"] as const) {
+  test(`replacement review rechecks current ${unavailable} availability at publication`, () =>
+    using(async (f) => {
+      expect((await f.apply(f.enter, "original-review")).status).toBe(200);
+      const replacement = await f.publishResult("C-2");
+      let expected: ReturnType<typeof ledgerState> | undefined;
+      const race = beforeLedgerBatch(f, () => {
+        if (unavailable === "claim") f.hide(`#${replacement.claim.seq}`);
+        else if (unavailable === "disclosure")
+          f.sql
+            .query("UPDATE directive_disclosure_targets SET invalidated = 1 WHERE claim_id = ?")
+            .run("C-2");
+        else
+          f.sql
+            .query("UPDATE sponsors SET tombstoned_at = ? WHERE sponsor_id = ?")
+            .run(Date.now(), SPONSOR);
+        expected = ledgerState(f);
+      });
+      const response = await f.apply(
+        { ...f.enter, result_claim: { claim_id: "C-2", version: 1 } },
+        "unavailable-replacement",
+        race.db,
+      );
+      expect(race.happened()).toBe(true);
+      expect(response.status, await response.clone().text()).toBe(409);
+      expect(expected).toBeDefined();
+      expect(ledgerState(f)).toEqual(expected);
+    }));
+}

@@ -222,11 +222,12 @@ test("a successful HTTP status is insufficient for mismatched or incomplete scie
 });
 
 test("result preview verifies current authority and reads one exact claim with no historical cursor or sponsor credential", async () => {
+  for (const status of ["active", "dormant", "under-result-review"] as const) {
   const calls: { url: string; init: RequestInit }[] = [];
   globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
     calls.push({ url: String(url), init: init ?? {} });
     return Response.json(String(url).endsWith("/governance")
-      ? { ...researchWorkspace, problem: { ...researchWorkspace.problem, status: "active" } }
+      ? { ...researchWorkspace, problem: { ...researchWorkspace.problem, status } }
       : researchClaimFace);
   }) as unknown as typeof fetch;
   expect(await stoaProblemResultClaim(researchSponsor, researchProblem, "C-3", 1))
@@ -241,11 +242,13 @@ test("result preview verifies current authority and reads one exact claim with n
   for (const name of ["cookie", "authorization", SERVICE_ENVELOPE_HEADER])
     expect(new Headers(claim.init.headers).has(name)).toBe(false);
   expect(calls.some((call) => call.url.includes("/lifecycle"))).toBe(false);
+  }
 });
 
 test("result preview cannot read another sponsor's problem or use a closed lifecycle state", async () => {
   for (const workspace of [
-    researchWorkspace,
+    { ...researchWorkspace, problem: { ...researchWorkspace.problem, status: "resolved" },
+      authority: { owner: true, steward: false, can_edit_access: false } },
     { ...researchWorkspace, authority: { owner: false, steward: false, can_edit_access: true } },
     { ...researchWorkspace, acting_sponsor_id: "usr_fedcba0987654321" },
     { ...researchWorkspace, problem: { ...researchWorkspace.problem, id: "P-OTHER", status: "active" } },

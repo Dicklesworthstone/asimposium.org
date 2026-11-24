@@ -47,7 +47,7 @@ export type ProblemResearchWorkspace = Pick<
 
 function describeCommand(input: ProblemResearchCommand): string {
   return input.action === "enter-result-review"
-    ? `Enter result review for ${input.result_claim.claim_id}@${input.result_claim.version}`
+    ? `Select ${input.result_claim.claim_id}@${input.result_claim.version} for result review`
     : `Resolve as ${input.direction} using ${input.closing_synthesis.synthesis_id}`;
 }
 
@@ -223,7 +223,7 @@ export function ProblemResearchControl({
   const [claimPreview, setClaimPreview] = useState<ResultClaimPreview | null>(null);
   const [claimPreviewMessage, setClaimPreviewMessage] = useState<string | null>(null);
   const [synthesisId, setSynthesisId] = useState(selectedSynthesis ?? "");
-  const [confirmed, setConfirmed] = useState(false);
+  const [confirmedAction, setConfirmedAction] = useState<ProblemResearchCommand["action"] | null>(null);
   const [preview, setPreview] = useState<ClosingSynthesisPreview | null>(null);
   const [previewMessage, setPreviewMessage] = useState<string | null>(null);
   const [result, setResult] = useState<ProblemResearchActionResult | null>(null);
@@ -316,7 +316,7 @@ export function ProblemResearchControl({
         const reply = await changeProblemResearch(sponsorId, problemId, next.input, next.key, true);
         setResult(reply);
         if (reply.ok || (!reply.retryable && !reply.retainAttempt)) clearAttempt(next);
-        if (reply.ok) setConfirmed(false);
+        if (reply.ok) setConfirmedAction(null);
       } catch {
         setResult({
           ok: false,
@@ -332,7 +332,7 @@ export function ProblemResearchControl({
   }
 
   function submit(input: ProblemResearchCommand) {
-    if (disabled || lock.current || !confirmed) return;
+    if (disabled || lock.current || confirmedAction !== input.action) return;
     send(
       createPendingProblemResearch(
         sponsorId,
@@ -348,7 +348,7 @@ export function ProblemResearchControl({
     lock.current = true;
     setSynthesisId(selectedId);
     setPreview(null);
-    setConfirmed(false);
+    setConfirmedAction(null);
     setPreviewMessage(null);
     startTransition(async () => {
       try {
@@ -372,7 +372,7 @@ export function ProblemResearchControl({
     setClaimVersion(String(version));
     setClaimPreview(null);
     setClaimPreviewMessage(null);
-    setConfirmed(false);
+    setConfirmedAction(null);
     startTransition(async () => {
       try {
         const reply = await previewProblemResultClaim(sponsorId, problemId, id, version);
@@ -496,9 +496,19 @@ export function ProblemResearchControl({
         {pending ? <p role="status">Waiting for the authoritative response…</p> : null}
       </section>
 
-      {status === "active" || status === "dormant" ? (
+      {status === "active" || status === "dormant" || status === "under-result-review" ? (
         <section className="card" aria-labelledby="enter-result-review-heading">
-          <h2 id="enter-result-review-heading">Enter result review</h2>
+          <h2 id="enter-result-review-heading">
+            {status === "under-result-review" ? "Update the result under review" : "Enter result review"}
+          </h2>
+          {status === "under-result-review" ? (
+            <p>
+              If the result has been revised or replaced, select its exact current claim version
+              here. The problem stays under review and earlier selections remain in its history.
+              Complete disclosure for the new result and obtain a closing synthesis for that exact
+              selection before resolving.
+            </p>
+          ) : null}
           <p>
             Choose the exact current result claim and version from the public ledger. A stale or
             unavailable result, or incomplete sponsor disclosure, can block admission. Result review
@@ -534,7 +544,7 @@ export function ProblemResearchControl({
                     setClaimId(event.target.value);
                     setClaimPreview(null);
                     setClaimPreviewMessage(null);
-                    setConfirmed(false);
+                    setConfirmedAction(null);
                   }}
                 />
               </label>
@@ -552,7 +562,7 @@ export function ProblemResearchControl({
                     setClaimVersion(event.target.value);
                     setClaimPreview(null);
                     setClaimPreviewMessage(null);
-                    setConfirmed(false);
+                    setConfirmedAction(null);
                   }}
                 />
               </label>
@@ -572,12 +582,13 @@ export function ProblemResearchControl({
               <label>
                 <input
                   type="checkbox"
+                  name="confirm_result_selection"
                   required
-                  checked={confirmed}
+                  checked={confirmedAction === "enter-result-review"}
                   disabled={claimPreview === null}
-                  onChange={(event) => setConfirmed(event.target.checked)}
+                  onChange={(event) => setConfirmedAction(event.target.checked ? "enter-result-review" : null)}
                 />{" "}
-                I confirm entering result review for{" "}
+                I confirm selecting this result for review:{" "}
                 <code>
                   {selectedClaim === undefined
                     ? "the exact claim and version entered above"
@@ -588,14 +599,17 @@ export function ProblemResearchControl({
               <button
                 type="submit"
                 className="btn-action"
-                disabled={!confirmed || claimPreview === null}
+                disabled={confirmedAction !== "enter-result-review" || claimPreview === null}
               >
-                Enter result review for this claim
+                {status === "under-result-review"
+                  ? "Update result review to this claim"
+                  : "Enter result review for this claim"}
               </button>
             </fieldset>
           </form>
         </section>
-      ) : status === "under-result-review" ? (
+      ) : null}
+      {status === "under-result-review" ? (
         <section className="card" aria-labelledby="resolve-problem-heading">
           <h2 id="resolve-problem-heading">Review the Fellow&apos;s closing synthesis</h2>
           <p>
@@ -626,7 +640,7 @@ export function ProblemResearchControl({
                   onChange={(event) => {
                     setSynthesisId(event.target.value);
                     setPreview(null);
-                    setConfirmed(false);
+                    setConfirmedAction(null);
                     setPreviewMessage(null);
                   }}
                 />
@@ -651,16 +665,17 @@ export function ProblemResearchControl({
                   <label>
                     <input
                       type="checkbox"
+                      name="confirm_result_resolution"
                       required
-                      checked={confirmed}
-                      onChange={(event) => setConfirmed(event.target.checked)}
+                      checked={confirmedAction === "resolve"}
+                      onChange={(event) => setConfirmedAction(event.target.checked ? "resolve" : null)}
                     />{" "}
                     I have read this exact synthesis and its limits, and confirm resolving{" "}
                     <code>{problemId}</code> as <strong>{preview.command.direction}</strong> using{" "}
                     <code>{preview.synthesis.synthesis_id}</code> without changing its scientific
                     content.
                   </label>
-                  <button type="submit" className="btn-action" disabled={!confirmed}>
+                  <button type="submit" className="btn-action" disabled={confirmedAction !== "resolve"}>
                     Resolve using this exact synthesis
                   </button>
                 </fieldset>
@@ -689,7 +704,8 @@ export function ProblemResearchControl({
             </Link>
           </p>
         </section>
-      ) : (
+      ) : null}
+      {status !== "active" && status !== "dormant" && status !== "under-result-review" ? (
         <section className="card">
           <h2>
             {status === "resolved"
@@ -706,7 +722,7 @@ export function ProblemResearchControl({
                 : "The formulation must complete its required independent statement review and the problem must become active before result review can begin."}
           </p>
         </section>
-      )}
+      ) : null}
       <noscript>
         <p>
           The current problem state and public links are available above. Enable JavaScript to

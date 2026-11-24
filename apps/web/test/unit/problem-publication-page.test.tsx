@@ -346,20 +346,36 @@ test("untrusted result-selection queries fail before private reads", async () =>
   expect(claimReads).toHaveLength(0);
 });
 
-test("result review loads a published synthesis without offering sponsor-authored scientific text", async () => {
+test("result review offers exact replacement selection alongside published closing synthesis", async () => {
   readResult = { ok: false, reason: "refused", status: 404 };
   governanceResult = { ok: true, data: publicGovernance("under-result-review") };
-  const html = await render();
+  claimResult = { state: "ok", origin: "https://a.asimposium.org", data: {
+    schema: CLAIMS_LIST_SCHEMA_ID, problem_id: publicationProblem, cursor: 40,
+    after: 0, scanned_through: 40, next_after: null, count: 1, omitted: [],
+    claims: [{ id: "C-3", version: 2, kind: "lemma", statement: "A corrected result for every integer $n$.",
+      source_seq: 39, created_at: "2026-11-24T12:00:00.000Z", stale: false }],
+  } };
+  const html = await render(publicationProblem, { claim: "C-3@2" });
   expect(html).toContain('name="closing_synthesis_id"');
   expect(html).toContain("Load the published closing synthesis");
   expect(html).toContain("immutable publication");
   expect(html).toContain("A preview is not a resolution receipt");
   expect(html).toContain("Famous-problem external-review requirements cannot be bypassed");
   expect(html).not.toContain("<textarea");
-  expect(html).not.toContain('name="result_claim_id"');
+  expect(html).toContain('name="result_claim_id"');
+  expect(html).toContain('name="result_claim_version"');
+  expect(html).toContain('name="confirm_result_selection"');
+  expect(html).toContain("Update the result under review");
+  expect(html).toContain("Update result review to this claim");
+  expect(html).toContain("earlier selections remain in its history");
+  expect(html).toContain("Load exact preview of C-3@2");
+  expect(html).toContain("Load the exact result claim");
+  expect(html).toContain('value="C-3"');
+  expect(html).toContain('value="2"');
   expect(html).not.toContain("Resolve using this exact synthesis");
   expect(html).toContain("Published synthesis choices are unavailable");
   expect(synthesisReads).toEqual([[publicationProblem, undefined, {}]]);
+  expect(claimReads).toEqual([[publicationProblem, undefined, {}]]);
 });
 
 test("authorized result review browses captured publication choices and preselects without resolving", async () => {

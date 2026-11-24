@@ -6514,7 +6514,8 @@
               "type": "string",
               "enum": [
                 "active",
-                "dormant"
+                "dormant",
+                "under-result-review"
               ]
             },
             "problem": {
