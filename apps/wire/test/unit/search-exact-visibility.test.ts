@@ -45,6 +45,24 @@ describe("exact search visibility and outage recovery", () => {
     }
   });
 
+  for (const [label, change] of [
+    ["uncommitted source bytes", "UPDATE event_content SET payload_json='{}'"],
+    [
+      "disagreeing projections",
+      "UPDATE claims SET statement='projected words'; UPDATE public_claim_fts SET statement='projected words'",
+    ],
+    ["incorrect source version", "UPDATE events SET type='claim.revised',object_version=3"],
+  ] as const) {
+    test(`neither exact nor lexical discovery cites ${label}`, async () => {
+      const f = fixture();
+      f.claim("C-1", "original words", "P-A17");
+      f.sqlite.exec(change);
+      for (const q of ["P-A17#C-1", "words"]) {
+        await assert.rejects(executeSearch(f.db, request(q)));
+      }
+    });
+  }
+
   test("a later restore makes the exact reference readable again", async () => {
     const f = fixture();
     f.problem("P-A17", "active", 0, "Restored research");

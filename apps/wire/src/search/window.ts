@@ -8,6 +8,7 @@ import {
 } from "../krater/public-content.ts";
 import { PUBLIC_EVENT_CONTENT_MAX_BYTES } from "../ledger/citation-read-integrity.ts";
 import { readPublishedProblemFormulations } from "../ledger/problem-formulation-read.ts";
+import { checkedScientificPayload } from "../ledger/scientific-checks.ts";
 import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 import { SearchContinuationError } from "./continuation.ts";
 
@@ -59,6 +60,50 @@ export const SEARCH_PROBLEM_FILTER_SQL = `(? IS NULL OR p.status = ?)
 
 export function searchProblemFilterBindings(query: SearchPageQuery): readonly (string | null)[] {
   return [query.status ?? null, query.status ?? null, query.area ?? null, query.area ?? null];
+}
+
+/** The projection selects the current publication. Its immutable envelope
+ * supplies the version and digest, and present-day controls still apply. */
+export const SEARCH_CLAIM_SOURCE_SQL = `JOIN events publication ON publication.problem_id = claims.problem_id
+  AND publication.seq = claims.source_seq AND publication.seq <= p.public_seq
+  AND publication.object_id = claims.id AND publication.object_kind = 'claim'
+  AND publication.type IN ('claim.created', 'claim.revised')
+  AND publication.payload_sha256 = claims.payload_sha256
+JOIN event_content content ON content.event_id = publication.id
+  AND content.payload_sha256 = publication.payload_sha256 AND content.redacted_at IS NULL
+  AND NOT ${eventContentHiddenSql("publication")}`;
+
+// Only selected results transfer source bodies. The cursor window stays small.
+export const SEARCH_CLAIM_SOURCE_COLUMNS = `publication.object_version AS version,
+  publication.type AS event_type, publication.payload_sha256,
+  CASE WHEN length(CAST(content.payload_json AS BLOB)) <= ${PUBLIC_EVENT_CONTENT_MAX_BYTES}
+    THEN content.payload_json END AS payload_json`;
+
+export interface SearchClaimPublication {
+  id: string;
+  statement: string;
+  version: number;
+  event_type: string;
+  payload_sha256: string;
+  payload_json: string | null;
+}
+
+export async function verifiedSearchClaimVersion(row: SearchClaimPublication): Promise<number> {
+  if (row.payload_json === null || !Number.isSafeInteger(row.version) || row.version < 1)
+    throw new Error("The search result has no verifiable publication.");
+  const payload = await checkedScientificPayload({
+    payload_sha256: row.payload_sha256,
+    payload_json: row.payload_json,
+  });
+  if (
+    payload.claim_id !== row.id ||
+    payload.statement !== row.statement ||
+    (row.version === 1
+      ? row.event_type !== "claim.created"
+      : row.event_type !== "claim.revised" || payload.base_version !== row.version - 1)
+  )
+    throw new Error("The search result differs from its claim publication.");
+  return row.version;
 }
 
 export const SEARCH_CLAIM_KEYS_SQL = `SELECT 'claim' AS kind, public_claim_fts.claim_id AS id,
@@ -134,6 +179,7 @@ export const SEARCH_CLAIM_PAGE_SQL = `WITH selected AS (
     json_extract(value,'$.payload_sha256') AS payload_sha256 FROM json_each(?)
 )
 SELECT public_claim_fts.claim_id AS id, public_claim_fts.problem_id, claims.statement,
+  ${SEARCH_CLAIM_SOURCE_COLUMNS},
   (SELECT s.provenance_json FROM events e JOIN screening_publications s ON s.event_id = e.id
     WHERE e.problem_id = claims.problem_id AND e.seq = claims.source_seq) AS screening_provenance,
   snippet(public_claim_fts, 2, '**', '**', '...', 24) AS snippet, bm25(public_claim_fts) AS rank
@@ -143,7 +189,8 @@ JOIN claims ON claims.id = public_claim_fts.claim_id AND claims.problem_id = pub
 JOIN selected ON selected.id = claims.id AND selected.problem_id = claims.problem_id
   AND selected.source_seq = claims.source_seq AND selected.payload_sha256 = claims.payload_sha256
 JOIN problems p ON p.id = claims.problem_id AND p.status <> 'private-draft' AND p.unlisted = 0
-WHERE public_claim_fts MATCH ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
+${SEARCH_CLAIM_SOURCE_SQL}
+WHERE public_claim_fts MATCH ?
 ORDER BY selected.ordinal`;
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: Control characters are not permitted in search identities.
@@ -312,14 +359,14 @@ export async function hydrateSearchPage(
   const hydrated = new Map<string, SearchResultItem>();
   if (claims.length > 0) {
     const rows = (
-      await db.prepare(SEARCH_CLAIM_PAGE_SQL).bind(JSON.stringify(claims), ftsQuery).all<{
-        id: string;
-        problem_id: string;
-        statement: string;
-        snippet: string | null;
-        rank: number;
-        screening_provenance?: string | null;
-      }>()
+      await db.prepare(SEARCH_CLAIM_PAGE_SQL).bind(JSON.stringify(claims), ftsQuery).all<
+        SearchClaimPublication & {
+          problem_id: string;
+          snippet: string | null;
+          rank: number;
+          screening_provenance?: string | null;
+        }
+      >()
     ).results;
     if (!Array.isArray(rows) || rows.length !== claims.length)
       throw new SearchContinuationError("changed");
@@ -335,13 +382,15 @@ export async function hydrateSearchPage(
         typeof row.statement !== "string"
       )
         throw new SearchContinuationError("changed");
+      const version = await verifiedSearchClaimVersion(row);
       const screeningNotice = publicationScreeningNotice(row.screening_provenance);
       hydrated.set(identity(pin), {
         kind: "claim",
         id: row.id,
         problem_id: row.problem_id,
-        url: `https://asimposium.org/p/${encodeURIComponent(row.problem_id)}/claims/${encodeURIComponent(row.id)}`,
-        title: `Claim ${row.id} in ${row.problem_id}`,
+        version,
+        url: `https://asimposium.org/p/${encodeURIComponent(row.problem_id)}/claims/${encodeURIComponent(row.id)}@${version}`,
+        title: `Claim ${row.id}@${version} in ${row.problem_id}`,
         statement: row.statement,
         snippet: (row.snippet ?? row.statement).slice(0, 2000),
         match_type: "lexical_fts",

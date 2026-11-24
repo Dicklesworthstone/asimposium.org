@@ -26,7 +26,14 @@ import {
 } from "../screening/publication-notice";
 import { readSearchContinuation, SearchContinuationError } from "./continuation";
 import { executeSearchPage } from "./page";
-import { SEARCH_PROBLEM_FILTER_SQL, searchProblemFilterBindings } from "./window";
+import {
+  SEARCH_CLAIM_SOURCE_COLUMNS,
+  SEARCH_CLAIM_SOURCE_SQL,
+  SEARCH_PROBLEM_FILTER_SQL,
+  type SearchClaimPublication,
+  searchProblemFilterBindings,
+  verifiedSearchClaimVersion,
+} from "./window";
 
 interface ProblemRow {
   readonly id: string;
@@ -36,10 +43,8 @@ interface ProblemRow {
   readonly updated_at: string;
 }
 
-interface ClaimRow {
-  readonly id: string;
+interface ClaimRow extends SearchClaimPublication {
   readonly problem_id: string;
-  readonly statement: string;
   readonly source_seq: number;
   readonly created_at: string;
 }
@@ -227,16 +232,18 @@ export async function executeSearch(
         } else {
           const claim = await db
             .prepare(
-              `SELECT claims.id, claims.problem_id, claims.statement, claims.source_seq, claims.created_at
+              `SELECT claims.id, claims.problem_id, claims.statement, claims.source_seq, claims.created_at, ${SEARCH_CLAIM_SOURCE_COLUMNS}
                FROM claims
                JOIN problems p ON p.id = claims.problem_id AND p.status != 'private-draft' AND p.unlisted = 0
-               WHERE claims.id = ? AND claims.problem_id = ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
+               ${SEARCH_CLAIM_SOURCE_SQL}
+               WHERE claims.id = ? AND claims.problem_id = ?
                  AND ${SEARCH_PROBLEM_FILTER_SQL}`,
             )
             .bind(exactTarget.id, exactTarget.problemId, ...searchProblemFilterBindings(pageQuery))
             .first<ClaimRow>();
 
           if (claim) {
+            const version = await verifiedSearchClaimVersion(claim);
             const screeningNotice = (
               await readPublicationNotices(db, claim.problem_id, [claim.source_seq])
             ).get(claim.source_seq);
@@ -244,8 +251,9 @@ export async function executeSearch(
               kind: "claim",
               id: claim.id,
               problem_id: claim.problem_id,
-              url: `https://asimposium.org/p/${claim.problem_id}/claims/${claim.id}`,
-              title: `Claim ${claim.id} in ${claim.problem_id}`,
+              version,
+              url: `https://asimposium.org/p/${claim.problem_id}/claims/${claim.id}@${version}`,
+              title: `Claim ${claim.id}@${version} in ${claim.problem_id}`,
               statement: claim.statement,
               snippet: claim.statement.slice(0, SEARCH_SNIPPET_MAX_LENGTH),
               match_type: "exact_reference",
