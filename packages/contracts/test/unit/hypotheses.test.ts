@@ -12,7 +12,11 @@ import {
   PublicHypothesisSchema,
 } from "../../src/hypotheses";
 import { generateHypothesesSchema } from "../../src/hypotheses-schema";
-import { HypothesisRequestSchema } from "../../src/sessions";
+import {
+  HypothesisKillRequestSchema,
+  HypothesisLifecycleRequestSchema,
+  HypothesisRequestSchema,
+} from "../../src/sessions";
 
 const fixture = async (path: string) =>
   JSON.parse(await readFile(new URL(`../fixtures/${path}`, import.meta.url), "utf8"));
@@ -105,6 +109,58 @@ test("hypothesis warning goldens are public-only context and cannot be supplied 
     assert.equal(HypothesesResponseSchema.safeParse(face).success, true);
     assert.equal(validate(face), true, JSON.stringify(validate.errors));
   }
+});
+
+test("latest-decision warnings preserve creation context and require their own visible event", async () => {
+  const item = await fixture("valid/hypothesis-decision-warning.json");
+  const schema = JSON.parse(generateHypothesesSchema());
+  const ajv = new Ajv2020({ strict: true, allErrors: true });
+  addFormats(ajv);
+  const validate = ajv.compile(schema.properties.response.properties.hypotheses.items);
+  assert.deepEqual(PublicHypothesisSchema.parse(item), item);
+  assert.equal(validate(item), true, JSON.stringify(validate.errors));
+  assert.notDeepEqual(item.screening_notice, item.last_event_screening_notice);
+  const invalid = await fixture("invalid/hypothesis-decision-warning-private.json");
+  assert.equal(PublicHypothesisSchema.safeParse(invalid).success, false);
+  assert.equal(validate(invalid), false);
+  assert.equal(
+    PublicHypothesisSchema.safeParse({ ...item, kill: null }).success,
+    false,
+    "a withheld decision cannot carry its publication notice",
+  );
+  assert.equal(
+    PublicHypothesisSchema.safeParse({ ...item, last_event: item.publication }).success,
+    false,
+    "the original publication cannot impersonate a later decision",
+  );
+  assert.equal(
+    HypothesisKillRequestSchema.safeParse({
+      ...item.kill,
+      last_event_screening_notice: item.last_event_screening_notice,
+    }).success,
+    false,
+  );
+  const lifecycle = {
+    action: "defer",
+    expected_last_event_id: item.publication.event_id,
+    reason: "Await an independent finite boundary check.",
+  };
+  assert.equal(
+    HypothesisLifecycleRequestSchema.safeParse({
+      ...lifecycle,
+      last_event_screening_notice: item.last_event_screening_notice,
+    }).success,
+    false,
+  );
+  assert.equal(
+    PublicHypothesisSchema.safeParse({
+      ...item,
+      status: "deferred",
+      kill: null,
+      lifecycle: { ...lifecycle, hypothesis_id: item.hypothesis_id },
+    }).success,
+    true,
+  );
 });
 
 test("hypothesis ids preserve minted Crockford and exact legacy atomic ids", () => {

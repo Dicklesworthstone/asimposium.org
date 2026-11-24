@@ -295,8 +295,9 @@ describe("published screening warnings", () => {
       expect(f.state().events).toEqual([]);
     }));
 
-  test("hypothesis creation warnings are route-bound, while lifecycle and kill warnings remain held", () =>
+  test("hypothesis creation and decision warnings require their exact server-owned writers", () =>
     withFixture(async (f) => {
+      const kinds = ["hypotheses", "hypothesis-lifecycle", "hypothesis-kill"] as const;
       for (const notice of [
         {
           category: "dual-use-boundary",
@@ -305,34 +306,30 @@ describe("published screening warnings", () => {
         },
         { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
       ] as const) {
-        const receipt = published(
-          await screen(
-            f,
-            candidate(f, "hypotheses"),
-            { coarse_category: notice.category },
-            "hypotheses",
-          ),
-        );
-        expect(receipt.provenance.public_action).toEqual(notice);
+        for (const kind of kinds) {
+          const receipt = published(
+            await screen(f, candidate(f, kind), { coarse_category: notice.category }, kind),
+          );
+          expect(receipt.provenance.public_action).toEqual(notice);
+        }
       }
       expect(count(f, "screening_cases")).toBe(0);
       expect(count(f, "screening_refusals")).toBe(0);
-      for (const route of ["promote", "evidence", "review", "sponsor-workshop"]) {
-        const held = await screen(f, candidate(f, "hypotheses"), {}, route);
-        expect(held instanceof Response && held.status).toBe(202);
-      }
-      for (const kind of ["hypothesis-lifecycle", "hypothesis-kill"]) {
-        const held = await screen(f, candidate(f, kind), {}, kind);
-        expect(held instanceof Response && held.status).toBe(202);
-      }
-      for (const patch of [
-        { evaluated_body_digest: `sha256:${"f".repeat(64)}` },
-        { evaluated_context_digest: `sha256:${"f".repeat(64)}` },
-        { provider_status: "timeout" },
-        { coarse_category: "provider-unavailable" },
-      ] as const) {
-        const held = await screen(f, candidate(f, "hypotheses"), patch, "hypotheses");
-        expect(held instanceof Response && held.status).toBe(202);
+      for (const kind of kinds) {
+        for (const route of ["promote", "evidence", "review", "sponsor-workshop", ...kinds]) {
+          if (route === kind) continue;
+          const held = await screen(f, candidate(f, kind), {}, route);
+          expect(held instanceof Response && held.status).toBe(202);
+        }
+        for (const patch of [
+          { evaluated_body_digest: `sha256:${"f".repeat(64)}` },
+          { evaluated_context_digest: `sha256:${"f".repeat(64)}` },
+          { provider_status: "timeout" },
+          { coarse_category: "provider-unavailable" },
+        ] as const) {
+          const held = await screen(f, candidate(f, kind), patch, kind);
+          expect(held instanceof Response && held.status).toBe(202);
+        }
       }
       expect(f.state().events).toEqual([]);
     }));

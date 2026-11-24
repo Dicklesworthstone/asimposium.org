@@ -106,6 +106,7 @@ SELECT p.object_id AS hypothesis_id, p.creations,
   c.actor_session_id AS session_id, c.model_string_self_declared AS model_self_declared,
   c.harness AS harness_self_declared,
   screen.provenance_json AS screening_provenance_json,
+  last_screen.provenance_json AS last_screening_provenance_json,
   CASE WHEN cc.redacted_at IS NULL
     AND ${visibleContentSql("c")}
     AND length(CAST(cc.payload_json AS BLOB)) <= ? THEN cc.payload_json END AS payload_json,
@@ -135,6 +136,7 @@ JOIN history state ON state.id = h.id
 LEFT JOIN event_content cc ON cc.event_id = c.id AND cc.payload_sha256 = c.payload_sha256
 LEFT JOIN event_content hc ON hc.event_id = h.id AND hc.payload_sha256 = h.payload_sha256
 LEFT JOIN screening_publications screen ON screen.event_id = c.id
+LEFT JOIN screening_publications last_screen ON last_screen.event_id = h.id
 ORDER BY c.seq`;
 }
 export const HYPOTHESIS_ROWS_SQL = hypothesisRowsSql(false);
@@ -359,6 +361,12 @@ export async function readHypotheses(
     // its verified optimistic-concurrency reference before restoring a route
     // to the live frontier; redacted or damaged bytes never reactivate work.
     if (lifecycleType === "hypothesis.resumed" && lifecycle === null) status = "unavailable";
+    const lastScreeningNotice =
+      kill === null && lifecycle === null
+        ? undefined
+        : publicationScreeningNotice(
+            row.last_screening_provenance_json as string | null | undefined,
+          );
     if (
       content === null ||
       (status === "killed" && kill === null) ||
@@ -373,6 +381,9 @@ export async function readHypotheses(
       content,
       ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
       last_event: last,
+      ...(lastScreeningNotice === undefined
+        ? {}
+        : { last_event_screening_notice: lastScreeningNotice }),
       kill,
       ...(lifecycleType === null ? {} : { lifecycle }),
     });

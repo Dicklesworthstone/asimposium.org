@@ -125,6 +125,30 @@ function read(overrides: Partial<ResearchFrontierPackDependencies> = {}) {
   });
 }
 
+test("resumed frontier preserves its distinct latest-decision notice without replacing original context", async () => {
+  const route = hypothesis();
+  route.screening_notice = {
+    category: "off-topic",
+    action: "published-with-warning",
+    notice: "off-scope",
+  };
+  route.last_event = { ...route.publication, event_id: "EV-RESUME", seq: 3 };
+  route.lifecycle = {
+    action: "resume",
+    hypothesis_id: route.hypothesis_id,
+    expected_last_event_id: "EV-DEFER",
+    reason: "The independent boundary observation is ready.",
+  };
+  route.last_event_screening_notice = warning;
+  const result = await read({ hypotheses: async () => hypotheses([route]) });
+  const candidate = required(result.candidates.find((item) => item.kind === "active-hypothesis"));
+  expect(candidate.screening_notice).toEqual(route.screening_notice);
+  expect(JSON.parse(candidate.body).last_event_screening_notice).toEqual(warning);
+  expect(candidate.why_included).toContain("Latest route decision (#3)");
+  expect(candidate.why_included).toContain(warning.category);
+  expect(candidate.body).not.toContain(route.lifecycle.reason);
+});
+
 test("arrival includes actual routes and obligations with exact source pins and distinct warnings", async () => {
   const result = await read({
     hypotheses: async (_db, id, through) => {

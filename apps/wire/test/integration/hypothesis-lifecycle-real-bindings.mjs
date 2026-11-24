@@ -21,7 +21,17 @@ import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, fixtures, env, worker, origin, userAgent }) => {
+  async ({
+    call,
+    enroll,
+    sponsorCall,
+    fixtures,
+    env,
+    worker,
+    origin,
+    userAgent,
+    clearScreeningPosture,
+  }) => {
     const sponsor = "usr_hypothesis_lifecycle_author";
     const author = await enroll("hypothesis-lifecycle-author", sponsor);
     const peer = await enroll("hypothesis-lifecycle-peer", "usr_hypothesis_lifecycle_peer");
@@ -331,10 +341,17 @@ await runLocalWorkerJourney(
     const discriminationSources = await preparedRoutes(discriminate, [first, second, successor]);
     await fixtures.setArtifactSourceVisibility(problem, first, "hidden");
     try {
+      const hiddenExact = await call(discriminationSources[0].jsonPath, undefined, undefined, 404);
+      assert.equal(hiddenExact.code, "PROBLEM_NOT_FOUND");
+      assert.ok(!JSON.stringify(hiddenExact).includes(original.content.route));
       const withheld = HypothesesResponseSchema.parse(
-        await call(discriminationSources[0].jsonPath),
+        await call(
+          `/p/${problem}/hypotheses.json?through=${discriminationSources[0].snapshot.cursor}`,
+        ),
       );
-      assert.equal(withheld.hypotheses[0].content, null);
+      const withheldRoute = withheld.hypotheses.find((item) => item.hypothesis_id === first);
+      assert.ok(withheldRoute, "collections retain the hidden admission without its content");
+      assert.equal(withheldRoute.content, null);
       assert.ok(withheld.omitted.includes("content_unavailable"));
       assert.ok(!JSON.stringify(withheld).includes(original.content.route));
     } finally {
@@ -661,6 +678,256 @@ await runLocalWorkerJourney(
       "only one competing lifecycle event commits",
     );
 
+    // A decision warning belongs to the exact immutable decision, independently
+    // of the original route. Exercise mounted writers and real receipt storage.
+    const decisionWarning = {
+      category: "dual-use-boundary",
+      action: "published-with-warning",
+      notice: "screening-warning",
+    };
+    // Separate real actors keep this additional journey within the ordinary
+    // per-Fellow write budget without changing the earlier lifecycle workload.
+    const warningAuthor = await enroll("hypothesis-decision-author", sponsor);
+    const warningRefuter = await enroll(
+      "hypothesis-decision-refuter",
+      "usr_hypothesis_lifecycle_peer",
+    );
+    const warningSession = (
+      await call("/v1/sessions", { problem_id: problem, intent: "explore" }, warningAuthor, 201)
+    ).session_id;
+    const warningRefuterSession = (
+      await call("/v1/sessions", { problem_id: problem, intent: "review" }, warningRefuter, 201)
+    ).session_id;
+    const warningPath = `/v1/sessions/${warningSession}`;
+    const warningRefuterPath = `/v1/sessions/${warningRefuterSession}`;
+    const warnedRoute = await create("warned route decisions", warningPath, warningAuthor);
+    const changeWarning = (body, key, expected = 200) =>
+      change(warnedRoute, body, key, expected, warningPath, warningAuthor);
+    const warnedOriginal = await read(warnedRoute);
+    const warnedEvidence = await evidence(warnedRoute, warningRefuterPath, warningRefuter);
+    const warnedDeferBody = {
+      action: "defer",
+      expected_last_event_id: warnedOriginal.last_event.event_id,
+      reason: "Wait for an independent audit of this route's boundary observation.",
+    };
+    for (const [mode, expected, code] of [
+      ["quarantine", 202, "SCREENING_HOLD"],
+      ["reject", 403, "POLICY_DENIED"],
+      ["unavailable", 202, "SCREENING_HOLD"],
+      ["wrong-context", 202, "SCREENING_HOLD"],
+    ]) {
+      await fixtures.setScreenMode(mode);
+      const before = await state(warnedRoute);
+      const refused = await changeWarning(
+        { ...warnedDeferBody, reason: `PRIVATE-DECISION-CANARY-${mode}` },
+        `warned-decision-refused-${mode}`,
+        expected,
+      );
+      assert.equal(refused.code, code);
+      assert.ok(!JSON.stringify(refused).includes("PRIVATE-DECISION-CANARY"));
+      assert.deepEqual(await state(warnedRoute), before, `${mode}: no scientific mutation`);
+    }
+    await clearScreeningPosture(sponsor);
+    await fixtures.setScreenMode("allow-with-warning");
+    const beforeWarnedDefer = await state(warnedRoute);
+    const warnedDefer = HypothesisLifecycleResponseSchema.parse(
+      await changeWarning(warnedDeferBody, "warned-decision-defer"),
+    );
+    const afterWarnedDefer = await state(warnedRoute);
+    assert.equal(afterWarnedDefer.events, beforeWarnedDefer.events + 1);
+    assert.equal(afterWarnedDefer.publications, beforeWarnedDefer.publications + 1);
+    assert.equal(afterWarnedDefer.receipts, beforeWarnedDefer.receipts + 1);
+    const deferredWarningFace = await face(warnedRoute);
+    const deferredWarning = deferredWarningFace.hypotheses[0];
+    assert.equal(deferredWarning.last_event.event_id, warnedDefer.event_id);
+    assert.deepEqual(deferredWarning.last_event_screening_notice, decisionWarning);
+    assert.equal(deferredWarning.screening_notice, undefined);
+    assert.deepEqual(deferredWarning.content, warnedOriginal.content);
+    assert.deepEqual(deferredWarning.publication, warnedOriginal.publication);
+
+    // Accepted replay predates a fresh policy decision, whereas stale heads and
+    // forged platform metadata are refused before publication or rescreening.
+    await fixtures.setScreenMode("reject");
+    const replayScreens = await fixtures.screeningCalls();
+    assert.deepEqual(await changeWarning(warnedDeferBody, "warned-decision-defer"), warnedDefer);
+    await changeWarning(
+      { ...warnedDeferBody, reason: "A conflicting body cannot reuse the accepted key." },
+      "warned-decision-defer",
+      409,
+    );
+    assert.equal(
+      (
+        await changeWarning(
+          { ...warnedDeferBody, reason: "This predecessor is obsolete." },
+          "warned-decision-stale",
+          409,
+        )
+      ).code,
+      "OBJECT_VERSION_CONFLICT",
+    );
+    await changeWarning(
+      {
+        action: "resume",
+        expected_last_event_id: warnedDefer.event_id,
+        reason: "A client cannot manufacture a platform warning.",
+        last_event_screening_notice: decisionWarning,
+      },
+      "warned-decision-forged-notice",
+      422,
+    );
+    assert.equal(await fixtures.screeningCalls(), replayScreens);
+    assert.deepEqual(await state(warnedRoute), afterWarnedDefer);
+
+    const decisionSeq = deferredWarning.last_event.seq;
+    const decisionPath = `/p/${problem}/hypotheses/${warnedRoute}`;
+    for (const format of ["md", "html"]) {
+      const response = await worker.fetch(`${origin}${decisionPath}.${format}`, {
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(response.status, 200);
+      const body = await response.text();
+      const label = `Latest route decision (#${decisionSeq}): Published with a screening context notice`;
+      assert.ok(body.includes(label));
+      assert.ok(body.indexOf(label) < body.indexOf(format === "md" ? "```" : "<pre>"));
+      assert.ok(!body.includes("model_version") && !body.includes("configuration_digest"));
+    }
+    const listedWarnings = HypothesesResponseSchema.parse(
+      await call(`/p/${problem}/hypotheses.json`),
+    );
+    assert.deepEqual(
+      listedWarnings.hypotheses.find((item) => item.hypothesis_id === warnedRoute)
+        .last_event_screening_notice,
+      decisionWarning,
+    );
+    const beforeHide = await worker.fetch(`${origin}${decisionPath}.json`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(beforeHide.status, 200);
+    const warningEtag = beforeHide.headers.get("ETag");
+    assert.ok(warningEtag);
+    await beforeHide.text();
+    // Exact-event controls are appended to this disposable D1 fixture; no
+    // original work or immutable decision bytes are changed.
+    const controlDecision = (visibility, version) =>
+      env.DB.prepare(`INSERT INTO content_controls
+        (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,actor,reason,version,created_at)
+        VALUES (?,?,'event',?,?,'operator','privacy','hypothesis-decision-lane',
+          'Verify current controls also withhold the exact decision notice.',?,?)`)
+        .bind(
+          `CC-hypothesis-decision-warning-${version}`,
+          problem,
+          `#${decisionSeq}`,
+          visibility,
+          version,
+          new Date().toISOString(),
+        )
+        .run();
+    await controlDecision("hidden", 1);
+    try {
+      for (const suffix of ["", `?through=${decisionSeq}`]) {
+        const hidden = await worker.fetch(`${origin}${decisionPath}.json${suffix}`, {
+          headers: { "User-Agent": userAgent, "If-None-Match": warningEtag },
+        });
+        assert.equal(hidden.status, 200, "a stale ETag cannot disclose a withheld decision");
+        const body = await hidden.text();
+        const route = HypothesesResponseSchema.parse(JSON.parse(body)).hypotheses[0];
+        assert.deepEqual(route.content, warnedOriginal.content);
+        assert.equal(route.lifecycle, null);
+        assert.equal(route.last_event_screening_notice, undefined);
+        assert.ok(!body.includes(warnedDeferBody.reason) && !body.includes("screening-warning"));
+      }
+    } finally {
+      await controlDecision("visible", 2);
+    }
+    assert.deepEqual(await face(warnedRoute, decisionSeq), deferredWarningFace);
+    assert.equal(
+      (await face(warnedRoute, warnedOriginal.publication.seq)).hypotheses[0]
+        .last_event_screening_notice,
+      undefined,
+    );
+
+    await fixtures.setScreenMode("allow-with-warning");
+    const warnedResume = HypothesisLifecycleResponseSchema.parse(
+      await changeWarning(
+        {
+          action: "resume",
+          expected_last_event_id: warnedDefer.event_id,
+          reason: "The independently recorded boundary observation is ready for review.",
+        },
+        "warned-decision-resume",
+      ),
+    );
+    const resumedWarning = await read(warnedRoute);
+    assert.equal(resumedWarning.status, "active");
+    assert.equal(resumedWarning.last_event.event_id, warnedResume.event_id);
+    assert.deepEqual(resumedWarning.last_event_screening_notice, decisionWarning);
+    assert.equal(resumedWarning.screening_notice, undefined);
+    assert.deepEqual(await face(warnedRoute, decisionSeq), deferredWarningFace);
+    const warnedKillBody = {
+      hypothesis_id: warnedRoute,
+      killed_by_evidence_id: warnedEvidence.evidence_id,
+      reason: "The recorded boundary observation fires this route's original falsifier.",
+    };
+    const warnedKillPath = `${warningRefuterPath}/hypotheses/${warnedRoute}/kill`;
+    const warnedKill = await call(
+      warnedKillPath,
+      warnedKillBody,
+      warningRefuter,
+      200,
+      "warned-decision-kill",
+    );
+    const killedWarning = await read(warnedRoute);
+    assert.equal(killedWarning.status, "killed");
+    assert.deepEqual(killedWarning.last_event_screening_notice, decisionWarning);
+    assert.equal(killedWarning.screening_notice, undefined);
+    assert.deepEqual(killedWarning.content, warnedOriginal.content);
+    assert.deepEqual(killedWarning.publication, warnedOriginal.publication);
+    assert.equal(killedWarning.kill.reason, warnedKillBody.reason);
+    await fixtures.setScreenMode("reject");
+    const beforeKillReplay = await state(warnedRoute);
+    const killReplayScreens = await fixtures.screeningCalls();
+    assert.deepEqual(
+      await call(warnedKillPath, warnedKillBody, warningRefuter, 200, "warned-decision-kill"),
+      warnedKill,
+    );
+    assert.equal(await fixtures.screeningCalls(), killReplayScreens);
+    assert.deepEqual(await state(warnedRoute), beforeKillReplay);
+    await fixtures.setScreenMode("pass");
+
+    const warnedGraveyard = PackResponseSchema.parse(
+      await call(`${authorPath}/pack?profile=graveyard&max_tokens=8000`, undefined, author),
+    );
+    const killedPackItem = warnedGraveyard.items.find(
+      (item) => item.id === `KH-${warnedOriginal.publication.seq}`,
+    );
+    assert.ok(killedPackItem, "warned elimination remains useful in the graveyard");
+    assert.equal(killedPackItem.screening_notice, undefined);
+    assert.deepEqual(JSON.parse(killedPackItem.body).last_event_screening_notice, decisionWarning);
+    assert.ok(
+      killedPackItem.why_included.includes(`Elimination (#${killedWarning.last_event.seq})`),
+    );
+    assert.ok(killedPackItem.why_included.includes("dual-use-boundary"));
+    for (const decision of [deferredWarning, resumedWarning, killedWarning]) {
+      const stored = await env.DB.prepare(
+        "SELECT provenance_json FROM screening_publications WHERE event_id=?",
+      )
+        .bind(decision.last_event.event_id)
+        .first();
+      assert.equal(JSON.parse(stored.provenance_json).outcome, "allow-with-warning");
+      assert.deepEqual(JSON.parse(stored.provenance_json).public_action, decisionWarning);
+      const pack = PackResponseSchema.parse(
+        await call(
+          `${authorPath}/pack?profile=full&max_tokens=8000&after=${decision.last_event.seq - 1}&through=${decision.last_event.seq}`,
+          undefined,
+          author,
+        ),
+      );
+      const item = pack.items.find((entry) => entry.id === `FULL-${decision.last_event.seq}`);
+      assert.ok(item);
+      assert.deepEqual(item.screening_notice, decisionWarning);
+      assert.equal(JSON.parse(item.body).publication.event_id, decision.last_event.event_id);
+    }
+
     // Generic question coordination must not erase the ask or replace the
     // separate authored question.leased lifecycle event.
     const question = await call(
@@ -810,6 +1077,9 @@ await runLocalWorkerJourney(
           "unavailable-source preflight",
           "atomic rollback",
           "competing transitions",
+          "event-bound lifecycle and elimination warnings",
+          "warning replay and current-control enforcement",
+          "warning graveyard and full-pack transport",
           "public event tail",
           "typed full packs",
           "projection rebuild",

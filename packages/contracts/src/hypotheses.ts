@@ -85,6 +85,9 @@ export const PublicHypothesisSchema = z
      * lifecycle decision or a scientific assessment of the route. */
     screening_notice: ScreeningPublicationNoticeSchema.optional(),
     last_event: Envelope,
+    /** Coarse context for the visible latest lifecycle or elimination decision,
+     * separate from the original hypothesis publication notice. */
+    last_event_screening_notice: ScreeningPublicationNoticeSchema.optional(),
     kill: HypothesisKillRequestSchema.nullable(),
     lifecycle: HypothesisLifecyclePublicationSchema.nullable().optional(),
   })
@@ -95,6 +98,18 @@ export const PublicHypothesisSchema = z
         code: "custom",
         path: ["screening_notice"],
         message: "Unavailable hypothesis content cannot carry a publication notice.",
+      });
+    if (
+      item.last_event_screening_notice !== undefined &&
+      (item.last_event.event_id === item.publication.event_id ||
+        item.last_event.seq <= item.publication.seq ||
+        (item.kill === null && item.lifecycle == null))
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["last_event_screening_notice"],
+        message:
+          "A latest-decision notice requires a visible decision after the original publication.",
       });
   });
 export type PublicHypothesis = z.infer<typeof PublicHypothesisSchema>;

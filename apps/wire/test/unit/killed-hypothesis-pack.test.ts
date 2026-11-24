@@ -54,7 +54,7 @@ test("graveyard carries complete committed work and both attributions, not mutab
 });
 
 for (const body of ["Bounded work product", "x".repeat(64 * 1024)])
-  test(`graveyard retains the original hypothesis warning beside whole or reference-only records (${body.length})`, async () => {
+  test(`graveyard retains distinct creation and elimination warnings beside whole or reference-only records (${body.length})`, async () => {
     const f = fixture();
     const receipt = JSON.parse(
       readFileSync(
@@ -70,9 +70,19 @@ for (const body of ["Bounded work product", "x".repeat(64 * 1024)])
       f.sql
         .query("INSERT INTO screening_publications VALUES('P-DEMO-1',?)")
         .run(JSON.stringify(receipt));
+      const killNotice = {
+        category: "off-topic",
+        action: "published-with-warning",
+        notice: "off-scope",
+      };
+      f.sql
+        .query("INSERT INTO screening_publications VALUES('P-DEMO-2',?)")
+        .run(JSON.stringify({ ...receipt, public_action: killNotice }));
       const section = await f.pack();
       const candidate = section.candidates.find((item) => item.kind === "killed-hypothesis");
       assert.deepEqual(candidate?.screening_notice, receipt.public_action);
+      assert.deepEqual(JSON.parse(candidate!.body).last_event_screening_notice, killNotice);
+      assert.ok(candidate?.why_included.includes("Elimination (#2): Off-scope science"));
       assert.equal(
         JSON.parse(candidate!.body).representation,
         body.length > 18_000 ? "reference-only" : "complete",

@@ -199,6 +199,7 @@ export function HypothesesView({
                         <p data-hypothesis-lifecycle={lifecycle.action}>
                           <strong>{LIFECYCLE_ACTION[lifecycle.action]}</strong>
                         </p>
+                        <ScreeningNotice notice={item.last_event_screening_notice} />
                         <WorkProduct>{lifecycle.reason}</WorkProduct>
                         {"successor_hypothesis_id" in lifecycle && (
                           <p>
@@ -222,6 +223,7 @@ export function HypothesesView({
                       <p>The refutation content is currently unavailable or withdrawn.</p>
                     ) : (
                       <>
+                        <ScreeningNotice notice={item.last_event_screening_notice} />
                         <WorkProduct>{item.kill.reason}</WorkProduct>
                         <p>
                           <Link href={`/r${problemPath}/evidence/${encodeURIComponent(item.kill.killed_by_evidence_id)}`} prefetch={false}>

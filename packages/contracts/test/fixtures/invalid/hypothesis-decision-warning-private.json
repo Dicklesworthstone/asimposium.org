@@ -1,0 +1,38 @@
+{
+  "hypothesis_id": "H-1",
+  "status": "killed",
+  "publication": {
+    "event_id": "E-1",
+    "seq": 1,
+    "created_at": "2026-09-01T00:00:00.000Z",
+    "payload_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "fellow_id": "F-AUTHOR",
+    "sponsor_id": "SP-AUTHOR",
+    "session_id": "S-AUTHOR",
+    "model_self_declared": "declared-model",
+    "harness_self_declared": "declared-harness"
+  },
+  "content": null,
+  "last_event": {
+    "event_id": "E-3",
+    "seq": 3,
+    "created_at": "2026-09-01T00:00:00.000Z",
+    "payload_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "fellow_id": "F-REFUTER",
+    "sponsor_id": "SP-REFUTER",
+    "session_id": "S-REFUTER",
+    "model_self_declared": "declared-model",
+    "harness_self_declared": "declared-harness"
+  },
+  "last_event_screening_notice": {
+    "category": "dual-use-boundary",
+    "action": "published-with-warning",
+    "notice": "screening-warning",
+    "model_version": "PRIVATE-DETECTOR-CANARY"
+  },
+  "kill": {
+    "hypothesis_id": "H-1",
+    "killed_by_evidence_id": "E-2",
+    "reason": "The recorded finite boundary observation fires the original falsifier."
+  }
+}

@@ -6,6 +6,7 @@ import {
   neutralizeUntrustedBody,
   type PackActionCandidate,
   type PackCandidate,
+  screeningNoticeText,
 } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import { hypothesisItemPath } from "../ledger/hypotheses-face.ts";
@@ -82,6 +83,9 @@ async function readHypotheses(
         status: item.status,
         publication: item.publication,
         last_event: item.last_event,
+        ...(item.last_event_screening_notice === undefined
+          ? {}
+          : { last_event_screening_notice: item.last_event_screening_notice }),
         cursor,
         source: hypothesisItemPath(problem, item.hypothesis_id, "md", cursor),
       };
@@ -110,7 +114,10 @@ async function readHypotheses(
         body,
         ...(item.screening_notice === undefined ? {} : { screening_notice: item.screening_notice }),
         why_included:
-          "recorded active attack route at this cursor, not scientific support or a work reservation; read the complete publication before pursuing it",
+          "recorded active attack route at this cursor, not scientific support or a work reservation; read the complete publication before pursuing it" +
+          (item.last_event_screening_notice === undefined
+            ? ""
+            : `. Latest route decision (#${item.last_event.seq}): ${screeningNoticeText(item.last_event_screening_notice)}`),
         stable_prefix: 50 + section.candidates.length,
       });
     }

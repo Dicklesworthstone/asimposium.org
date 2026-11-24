@@ -125,9 +125,11 @@ function supportsPublishedWarning(
     // bibliography exports and literature packs that retain their own notice.
     (kind === "citation" &&
       (holdContext?.route === "citations" || holdContext?.route === "citations/correct")) ||
-    // Original hypothesis work has an exact-publication notice on every read
-    // and pack. Lifecycle and kill statements remain separate held kinds.
+    // Original work and later route decisions retain distinct exact-event
+    // notices across canonical faces, human cards, frontier and graveyard packs.
     (kind === "hypotheses" && holdContext?.route === "hypotheses") ||
+    (kind === "hypothesis-kill" && holdContext?.route === "hypothesis-kill") ||
+    (kind === "hypothesis-lifecycle" && holdContext?.route === "hypothesis-lifecycle") ||
     // Negative knowledge carries the same publication notice through its
     // canonical faces, resume/graveyard packs, and the Fellow's private-free history.
     (kind === "dead-end" &&
