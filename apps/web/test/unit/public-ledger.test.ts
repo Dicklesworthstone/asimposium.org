@@ -313,6 +313,59 @@ describe("public-ledger client", () => {
     expect(unavailable).not.toContain("Download BibTeX");
   });
 
+  test("claim revision comparison reads only the adjacent exact version at the same cut", async () => {
+    const face = JSON.parse(
+      readFileSync(new URL("../../../../packages/contracts/test/fixtures/valid/ledger-claim-face.json", import.meta.url), "utf8"),
+    );
+    const requests: string[] = [];
+    let wrongPriorCut = false;
+    setMockFetch(async (input) => {
+      const url = new URL(String(input));
+      requests.push(url.pathname + url.search);
+      const prior = url.pathname.includes("C-1%401.");
+      const version = prior ? 1 : 2;
+      const publication = {
+        ...face.items[0],
+        id: `C-1@${version}`,
+        body: JSON.stringify({
+          statement: prior ? "Prior exact formulation." : "Revised exact formulation.",
+          falsifier: prior ? "Prior falsifier." : "Revised falsifier.",
+        }),
+      };
+      return Response.json({
+        ...face,
+        cursor: prior && wrongPriorCut ? 2 : 3,
+        claim_state: { ...face.claim_state, version, latest_version: 2 },
+        items: [publication],
+      });
+    });
+    const params = Promise.resolve({ slug: "P-CALIBRATION", claim: "C-1@2" });
+    const query = { through: "3", compare: "previous" };
+    const plain = renderToStaticMarkup(await ClaimPage({ params }));
+    expect(requests).toEqual(["/p/P-CALIBRATION/claims/C-1%402.json"]);
+    expect(plain).toContain("compare=previous#revision-comparison");
+    expect(plain).not.toContain("Prior exact formulation");
+    requests.length = 0;
+    const compared = renderToStaticMarkup(await ClaimPage({ params, searchParams: Promise.resolve(query) }));
+    expect(requests).toEqual([
+      "/p/P-CALIBRATION/claims/C-1%402.json?through=3",
+      "/p/P-CALIBRATION/claims/C-1%401.json?through=3",
+    ]);
+    expect(compared).toContain("Prior exact formulation.");
+    expect(compared).toContain("Prior falsifier.");
+    expect(compared).toContain("Revised falsifier.");
+    expect(compared).toContain("standing and reviews on this page belong to C-1@2");
+    wrongPriorCut = true;
+    const partial = renderToStaticMarkup(await ClaimPage({ params, searchParams: Promise.resolve(query) }));
+    expect(partial).toContain("The exact public statement could not be read");
+    expect(partial).not.toContain("Prior exact formulation");
+    expect(partial).toContain("Revised exact formulation.");
+    setMockFetch(async () => new Response(null, { status: 503 }));
+    const retry = renderToStaticMarkup(await ClaimPage({ params, searchParams: Promise.resolve(query) }));
+    expect(retry).toContain('name="compare" value="previous"');
+    expect(retry).toContain('name="through" value="3"');
+  });
+
   test("claim reads distinguish a typed absence from unavailable data and reject a wrong pin", async () => {
     const face = JSON.parse(
       readFileSync(

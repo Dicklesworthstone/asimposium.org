@@ -28,7 +28,10 @@ import { SITE } from "@/lib/site";
 
 interface ClaimPageProps {
   readonly params: Promise<{ readonly slug: string; readonly claim: string }>;
-  readonly searchParams?: Promise<{ readonly through?: string | string[] }>;
+  readonly searchParams?: Promise<{
+    readonly through?: string | string[];
+    readonly compare?: string | string[];
+  }>;
 }
 
 async function claimPageParams(params: ClaimPageProps["params"]) {
@@ -52,7 +55,7 @@ export async function generateMetadata({
   searchParams,
 }: ClaimPageProps): Promise<Metadata> {
   const { slug, claim } = await claimPageParams(params);
-  const { through } = (await searchParams) ?? {};
+  const { through, compare } = (await searchParams) ?? {};
   const result = await stoaFetchClaimFace(slug, claim, undefined, { through });
   if (result.state !== "ok") {
     return {
@@ -91,30 +94,46 @@ export async function generateMetadata({
       description: shareData.suggestedShareText,
       images: [ogImageUrl],
     },
-    ...(result.noindex ? { robots: { index: false, follow: false } } : {}),
+    ...(result.noindex || compare === "previous" ? { robots: { index: false, follow: false } } : {}),
   };
 }
 
 export default async function ClaimPage({ params, searchParams }: ClaimPageProps) {
   const { slug, claim } = await claimPageParams(params);
-  const { through } = (await searchParams) ?? {};
+  const { through, compare } = (await searchParams) ?? {};
   const query = ClaimFaceQuerySchema.safeParse({ through });
   const result = await stoaFetchClaimFace(slug, claim, undefined, { through });
   if (result.state === "not_found") notFound();
   const path = `/p/${encodeURIComponent(slug)}/claims/${encodeURIComponent(claim)}`;
-  if (result.state === "unavailable")
+  if (result.state === "unavailable") {
+    const retry = new URLSearchParams();
+    if (query.success && query.data.through !== undefined) retry.set("through", String(query.data.through));
+    if (compare === "previous") retry.set("compare", "previous");
     return (
       <PublicReadUnavailable
         title={`${slug} — ${claim}`}
-        retryPath={`${path}${query.success && query.data.through !== undefined ? `?through=${query.data.through}` : ""}`}
+        retryPath={retry.size > 0 ? `${path}?${retry}` : path}
       />
     );
+  }
   const face = result.data;
   const state = face.claim_state;
   const exact = `${state.claim_id}@${state.version}`;
   const agentPath = `${result.origin}/p/${encodeURIComponent(face.problem)}/claims/${exact}`;
   const cut = `?through=${face.cursor}`;
   const viewModel = buildClaimPageViewModel(face, result.origin);
+  const revisionPath = (version: number) =>
+    `/p/${encodeURIComponent(face.problem)}/claims/${state.claim_id}@${version}${cut}`;
+  const previousTarget = `${state.claim_id}@${state.version - 1}`;
+  const previous = compare === "previous" && state.version > 1
+    ? await stoaFetchClaimFace(face.problem, previousTarget, result.origin, {
+        through: String(face.cursor),
+      })
+    : undefined;
+  const previousItem = previous?.state === "ok"
+    ? previous.data.items.find((item) => item.kind === "claim-detail" && item.id === previousTarget)
+    : undefined;
+  const currentItem = face.items.find((item) => item.kind === "claim-detail" && item.id === exact);
 
   return (
     <>
@@ -129,7 +148,10 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
           <p className="lede">{face.preamble}</p>
         </header>
 
-        <PublicLedgerLive origin={result.origin} targets={publicViewWatchTargets(result.watch)} />
+        <PublicLedgerLive origin={result.origin} targets={previous === undefined
+          ? publicViewWatchTargets(result.watch)
+          : publicViewWatchTargets(result.watch, previous.state === "ok" ? previous.watch : undefined)}
+        />
 
         <section aria-labelledby="standing-heading">
           <h2 id="standing-heading">Computed standing</h2>
@@ -232,16 +254,36 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
               Review sponsor disclosure for this claim version →
             </Link>
           </p>
-          {viewModel.isSuperseded && (
-            <p className="version-notice">
-              This is an earlier statement version.{" "}
-              <Link
-                href={`/p/${encodeURIComponent(face.problem)}/claims/${state.claim_id}@${state.latest_version}${cut}`}
-              >
-                Read version {state.latest_version}
-              </Link>
-              .
-            </p>
+          {state.latest_version > 1 && (
+            <nav aria-label="Claim statement versions">
+              {state.version > 1 && (
+                <p>
+                  <Link href={revisionPath(state.version - 1)} prefetch={false}>
+                    Read version {state.version - 1}
+                  </Link>{" · "}
+                  {previous === undefined ? (
+                    <Link href={`${revisionPath(state.version)}&compare=previous#revision-comparison`} prefetch={false}>
+                      Compare this statement with version {state.version - 1}
+                    </Link>
+                  ) : (
+                    <Link href={revisionPath(state.version)} prefetch={false}>Close comparison</Link>
+                  )}
+                </p>
+              )}
+              {viewModel.isSuperseded && (
+                <p className="version-notice">
+                  This is an earlier statement version.{" "}
+                  <Link href={revisionPath(state.version + 1)} prefetch={false}>
+                    Read version {state.version + 1}
+                  </Link>
+                  {state.version + 1 < state.latest_version && (
+                    <>{" · "}<Link href={revisionPath(state.latest_version)} prefetch={false}>
+                      Read version {state.latest_version}
+                    </Link></>
+                  )}
+                </p>
+              )}
+            </nav>
           )}
           <p>
             Recorded refutation attempts: {state.recorded_refutation_attempts}. Independently
@@ -277,6 +319,27 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
             </pre>
           </details>
         </section>
+
+        {previous !== undefined && (
+          <section id="revision-comparison" aria-labelledby="revision-comparison-heading">
+            <h2 id="revision-comparison-heading">Compare published statements</h2>
+            <p className="quiet">
+              Both versions are read at problem ledger seq {face.cursor}, subject to current
+              visibility. The standing and reviews on this page belong to {exact}.
+            </p>
+            {([[previousTarget, previousItem], [exact, currentItem]] as const).map(([target, item]) => (
+              <article className="claim-card" key={target}>
+                <h3>{target}</h3>
+                {item ? (
+                  <>
+                    <ScreeningNotice notice={item.screening_notice} />
+                    <ScientificBody body={item.body} namespace={`revision-comparison-${target}`} />
+                  </>
+                ) : <p>The exact public statement could not be read at this snapshot.</p>}
+              </article>
+            ))}
+          </section>
+        )}
 
         <WhyThisStatusPanel whyThisStatus={viewModel.whyThisStatus} />
 
