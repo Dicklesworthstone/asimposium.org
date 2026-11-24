@@ -4,6 +4,7 @@ import {
   type NextMoveCandidate,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { offScopePublicationSql } from "../discovery/public-scope.ts";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 import { relationObjectId } from "../ledger/relations.ts";
 import { sha256Hex } from "../split/policy.ts";
@@ -18,7 +19,8 @@ const CONTENT_BYTES = 65_536;
  * Select heads before checking visibility, so an unavailable head never falls
  * back to an older statement. Dispute and normalization events obey the same
  * cut, while current content controls apply even to historical reads. */
-const CONFLICT_CANDIDATES_SQL = `
+function conflictCandidatesSql(excludeOffScope: boolean): string {
+  return `
 WITH input(problem, cut) AS (VALUES (?, ?)),
 scope AS MATERIALIZED (
   SELECT p.id, input.cut FROM problems p, input
@@ -29,7 +31,9 @@ candidates AS MATERIALIZED (
   SELECT a.id AS event_id, a.seq, a.object_id, a.payload_sha256,
     cr.source_claim_id, cr.source_version, cr.target_ref,
     target.object_id AS target_claim_id, target.object_version AS target_version,
-    ac.payload_json, source.payload_sha256 AS source_sha256, sc.payload_json AS source_json,
+    ac.payload_json, source.id AS source_event_id, source.seq AS source_seq,
+    source.payload_sha256 AS source_sha256, sc.payload_json AS source_json,
+    target.id AS target_event_id, target.seq AS target_seq,
     target.payload_sha256 AS target_sha256, tc.payload_json AS target_json
   FROM scope s JOIN claim_relations cr ON cr.problem_id = s.id AND cr.kind = 'contradicts'
   JOIN events a ON a.id = cr.asserted_by_event AND a.problem_id = s.id
@@ -50,6 +54,13 @@ candidates AS MATERIALIZED (
   WHERE NOT ${eventContentHiddenSql("a")}
     AND NOT ${eventContentHiddenSql("source")}
     AND NOT ${eventContentHiddenSql("target")}
+    ${
+      excludeOffScope
+        ? `AND NOT ${offScopePublicationSql("a.id")}
+           AND NOT ${offScopePublicationSql("source.id")}
+           AND NOT ${offScopePublicationSql("target.id")}`
+        : ""
+    }
     AND NOT EXISTS (
       SELECT 1 FROM events newer WHERE newer.problem_id = s.id
         AND newer.object_kind = 'claim' AND newer.type IN ('claim.created', 'claim.revised')
@@ -87,6 +98,7 @@ candidates AS MATERIALIZED (
 )
 SELECT s.id AS scope_id, s.cut AS through, c.* FROM scope s
 LEFT JOIN candidates c ON 1 = 1 ORDER BY c.seq, c.event_id`;
+}
 
 interface ConflictCandidate {
   readonly scope_id: string;
@@ -98,10 +110,14 @@ interface ConflictCandidate {
   readonly payload_json: string;
   readonly source_claim_id: string;
   readonly source_version: number;
+  readonly source_event_id: string;
+  readonly source_seq: number;
   readonly source_sha256: string;
   readonly source_json: string;
   readonly target_claim_id: string;
   readonly target_version: number;
+  readonly target_event_id: string;
+  readonly target_seq: number;
   readonly target_ref: string;
   readonly target_sha256: string;
   readonly target_json: string;
@@ -134,6 +150,7 @@ export async function selectNormalizeConflictMove(
   db: D1Database,
   problemId: string,
   cursor: number,
+  options: { excludeOffScope?: boolean } = {},
 ): Promise<ConflictMoveResult> {
   try {
     if (
@@ -143,7 +160,10 @@ export async function selectNormalizeConflictMove(
     )
       return { move: null, degraded: true };
     const rows = (
-      await db.prepare(CONFLICT_CANDIDATES_SQL).bind(problemId, cursor).all<ConflictCandidate>()
+      await db
+        .prepare(conflictCandidatesSql(options.excludeOffScope === true))
+        .bind(problemId, cursor)
+        .all<ConflictCandidate>()
     ).results;
     if (
       !Array.isArray(rows) ||
@@ -229,6 +249,26 @@ export async function selectNormalizeConflictMove(
             captured_cursor: cursor,
             claim_a: claimA,
             claim_b: claimB,
+            relation_pin: {
+              relation_id: row.object_id,
+              event_id: row.event_id,
+              seq: row.seq,
+              payload_sha256: row.payload_sha256,
+            },
+            claim_a_pin: {
+              claim_id: row.source_claim_id,
+              version: row.source_version,
+              event_id: row.source_event_id,
+              seq: row.source_seq,
+              payload_sha256: row.source_sha256,
+            },
+            claim_b_pin: {
+              claim_id: row.target_claim_id,
+              version: row.target_version,
+              event_id: row.target_event_id,
+              seq: row.target_seq,
+              payload_sha256: row.target_sha256,
+            },
             read_first: {
               method: "GET",
               path: `/p/${encodeURIComponent(problemId)}/relations/${row.seq}.md`,

@@ -19,6 +19,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { createApp } from "../../src/app.ts";
 import type { Env } from "../../src/env.ts";
 import { readPublishedProblemFormulation } from "../../src/ledger/problem-formulation-read.ts";
+import { selectNormalizeConflictMove } from "../../src/mega-commands/conflict-moves.ts";
 import {
   GLOBAL_MOVE_REFERENCES_SQL,
   loadPublicMoves,
@@ -50,6 +51,11 @@ function fixture() {
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
     CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
+    CREATE TABLE claim_relations(problem_id TEXT, kind TEXT, source_claim_id TEXT,
+      source_version INTEGER, target_ref TEXT, asserted_by_event TEXT);
+    CREATE TABLE conflicts(problem_id TEXT, conflict_id TEXT, seq INTEGER, claim_a_id TEXT,
+      claim_a_version INTEGER, claim_b_id TEXT, claim_b_version INTEGER);
+    CREATE TABLE retractions(problem_id TEXT, retraction_id TEXT, target_object TEXT);
   `);
   const db = {
     prepare(sql: string) {
@@ -160,6 +166,7 @@ function fixture() {
     async gaps() {
       return { move: null, degraded: false };
     },
+    conflicts: selectNormalizeConflictMove,
     async frictions() {
       return { move: null, degraded: false };
     },
@@ -237,6 +244,75 @@ function fixture() {
   };
   return { sqlite, db, problem, event, hide, items, calls, selectors, claim, offScope };
 }
+
+test("global conflict discovery skips off-scope assertions and claims before choosing a pair", async () => {
+  const f = fixture();
+  const id = "P-DEMO";
+  f.problem(id);
+  for (let seq = 2; seq <= 5; seq++) {
+    const claim = `C-${seq}`;
+    f.event(
+      id,
+      seq,
+      claim,
+      "claim",
+      "claim.created",
+      1,
+      JSON.stringify({
+        claim_id: claim,
+        statement: `Independent statement for ${claim}.`,
+      }),
+    );
+  }
+  const relation = (seq: number, source: string, target: string) => {
+    const relationId = `${source}@1-contradicts-${target}@1`;
+    const eventId = f.event(
+      id,
+      seq,
+      relationId,
+      "relation",
+      "relation.asserted",
+      1,
+      JSON.stringify({ source: `${source}@1`, kind: "contradicts", target: `${target}@1` }),
+    );
+    f.sqlite
+      .query("INSERT INTO claim_relations VALUES(?, 'contradicts', ?, 1, ?, ?)")
+      .run(id, source, `${target}@1`, eventId);
+    return eventId;
+  };
+  f.offScope(relation(6, "C-2", "C-3"));
+  f.offScope(`EV-${id}-4`);
+  relation(7, "C-4", "C-2");
+  relation(8, "C-3", "C-4");
+  const eligible = relation(9, "C-5", "C-3");
+  const named = () => loadPublicProblemMoves(f.db, id, { selectors: f.selectors });
+  const global = async () =>
+    (await loadPublicMoves(f.db, {}, { selectors: f.selectors })).discovery;
+  expect((await named())?.primary_move?.refs).toEqual([id, "C-2@1", "C-3@1"]);
+  const discovered = await global();
+  expect(discovered.degraded).toBe(false);
+  const move = discovered.problems[0]?.primary_move;
+  expect(move?.move).toBe("normalize-conflict");
+  expect(move?.refs).toEqual([id, "C-5@1", "C-3@1"]);
+  expect(move?.contract.preparation).toMatchObject({
+    relation_pin: { event_id: eligible, seq: 9 },
+    read_first: { method: "GET", path: `/p/${id}/relations/9.md` },
+    claim_a_pin: { claim_id: "C-5", event_id: `EV-${id}-5`, version: 1 },
+    claim_b_pin: { claim_id: "C-3", event_id: `EV-${id}-3`, version: 1 },
+  });
+  // A current redaction between selection and final revalidation cannot
+  // leave a public recommendation derived from the withdrawn assertion.
+  f.selectors.conflicts = async (...args) => {
+    const result = await selectNormalizeConflictMove(...args);
+    f.sqlite
+      .query("UPDATE event_content SET redacted_at=? WHERE event_id=?")
+      .run(instant, eligible);
+    return result;
+  };
+  const redacted = await global();
+  expect(redacted.problems[0]?.primary_move).toBeNull();
+  expect(redacted.problems[0]?.omitted.map((o) => o.reason)).toContain("content_unavailable");
+});
 
 /** Selection is a unit fixture; the actual canonical selector is exercised in
  * moves-real-bindings.mjs. Both publication pins go through real scope SQL. */

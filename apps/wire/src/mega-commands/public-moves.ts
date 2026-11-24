@@ -26,6 +26,7 @@ import {
   type PublishedProblemFormulation,
   readPublishedProblemFormulation,
 } from "../ledger/problem-formulation-read.ts";
+import { selectNormalizeConflictMove } from "./conflict-moves.ts";
 import { composeDiscriminateMove } from "./discriminate-moves.ts";
 import { selectFormalizeMove } from "./formalize-moves.ts";
 import { loadFormalizationFrictionMove } from "./friction-moves-service.ts";
@@ -37,7 +38,7 @@ import { compareMovePriority, selectTriageMove, uniqueMoves } from "./move-selec
 import { selectSharpenStatementMove } from "./sharpen-moves.ts";
 
 export const PUBLIC_MOVES_BOUNDARY =
-  "public-needs-v1: canonical statement-sharpening, review, refutation, hypothesis counterevidence (kill-or-stand), formalization-friction, proof-gap, load-bearing formalization, third-alternative, discrimination-draft and first-claim selectors. At most two review pages and the selectors' own bounded inputs per problem. Identity-specific work, private sessions and workshop contents are not examined. Read the pinned public inputs, then use authenticated /v1/p/:id/next to check your eligibility. Discovery grants no write permission, assignment, reservation or scientific standing.";
+  "public-needs-v1: canonical statement-sharpening, review, refutation, hypothesis counterevidence (kill-or-stand), formalization-friction, proof-gap, conflict normalization, load-bearing formalization, third-alternative, discrimination-draft and first-claim selectors. At most two review pages and the selectors' own bounded inputs per problem. Identity-specific work, private sessions and workshop contents are not examined. Read the pinned public inputs, then use authenticated /v1/p/:id/next to check your eligibility. Discovery grants no write permission, assignment, reservation or scientific standing.";
 export const GLOBAL_MOVES_BOUNDARY = `${PUBLIC_MOVES_BOUNDARY} Each live page examines at most ${PUBLIC_MOVES_PAGE_SIZE} listed working problems in ASCII ID order. Off-scope formulations and scientific inputs are excluded from global recommendations; known public problem reads remain available. Canonical move priority and review consequence rank the examined needs, not popularity. Each problem has its own captured cursor; next_after continues the admission order, not a global optimum or frozen global snapshot.`;
 
 const READ_ONLY_VIEWER = {
@@ -115,7 +116,7 @@ export const GLOBAL_MOVE_REFERENCES_SQL = publicationReferencesSql(true);
 
 interface PublicationReference {
   id: string;
-  kind: "claim" | "hypothesis" | "gap" | "evidence" | "problem";
+  kind: "claim" | "hypothesis" | "gap" | "evidence" | "problem" | "relation";
   version?: number;
   event_id?: string;
   seq?: number;
@@ -158,6 +159,7 @@ function emptyProblem(head: MoveHead, omissions: MoveDiscoveryOmission[] = []): 
 export interface PublicMoveSelectors {
   queue: typeof loadReviewQueue;
   gaps: typeof loadProofGapMove;
+  conflicts: typeof selectNormalizeConflictMove;
   frictions: typeof loadFormalizationFrictionMove;
   formalize: typeof selectFormalizeMove;
   hypotheses: typeof loadLiveHypotheses;
@@ -168,6 +170,7 @@ export interface PublicMoveSelectors {
 const production: PublicMoveSelectors = {
   queue: loadReviewQueue,
   gaps: loadProofGapMove,
+  conflicts: selectNormalizeConflictMove,
   frictions: loadFormalizationFrictionMove,
   formalize: selectFormalizeMove,
   hypotheses: loadLiveHypotheses,
@@ -308,6 +311,9 @@ async function selectProblem(
     await attempt("Proof gap", () =>
       selectors.gaps(db, head.id, head.cursor, now, { excludeOffScope: globalDiscovery }),
     );
+    await attempt("Conflict normalization", () =>
+      selectors.conflicts(db, head.id, head.cursor, { excludeOffScope: globalDiscovery }),
+    );
   }
   if (head.status !== "sharpening")
     try {
@@ -382,12 +388,21 @@ async function selectProblem(
     const pinned = new Map<string, PublicationReference>();
     for (const [key, kind, field] of [
       ["target_pin", "claim", "claim_id"],
+      ["claim_a_pin", "claim", "claim_id"],
+      ["claim_b_pin", "claim", "claim_id"],
+      ["relation_pin", "relation", "relation_id"],
       ["gap_pin", "gap", "gap_id"],
       ["friction_pin", "evidence", "evidence_id"],
       ["hypothesis_pin", "hypothesis", "hypothesis_id"],
       ["evidence_pin", "evidence", "evidence_id"],
     ] as const) {
       const pin = preparation[key] as Record<string, unknown> | undefined;
+      if (
+        move.move === "normalize-conflict" &&
+        ["claim_a_pin", "claim_b_pin", "relation_pin"].includes(key) &&
+        !pin
+      )
+        throw new Error("PUBLIC_MOVE_PIN_INVALID");
       if (!pin) continue;
       if (
         typeof pin[field] !== "string" ||
@@ -405,10 +420,14 @@ async function selectProblem(
         payload_sha256: pin.payload_sha256,
         ...(typeof pin.version === "number" ? { version: pin.version } : {}),
       };
-      pinned.set(
-        `${reference.id}${reference.version === undefined ? "" : `@${reference.version}`}`,
-        reference,
-      );
+      // The assertion is supporting provenance; the move's two actionable
+      // refs name just the claims. Revalidate all three before serving it.
+      if (kind === "relation") refs.push(reference);
+      else
+        pinned.set(
+          `${reference.id}${reference.version === undefined ? "" : `@${reference.version}`}`,
+          reference,
+        );
     }
     const dependencies = preparation.dependency_focus as Record<string, unknown> | undefined;
     const paths = [dependencies?.dependency_path, dependencies?.limiting_path].flatMap((path) =>
