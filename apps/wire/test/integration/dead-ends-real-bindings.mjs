@@ -1622,6 +1622,40 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(typeof (await choiceSchema.json()).$schema, "string");
   assert.deepEqual(choiceMove.contract.prefilled_hints, { type: "scratch" });
   assert.equal(choiceMove.contract.preparation.dead_end_pin.dead_end_id, choiceDeadEnd.dead_end_id);
+  const choiceRead = choiceMove.contract.preparation.read_first;
+  assert.deepEqual(choiceRead, {
+    method: "GET",
+    path: `/p/${choiceProblemId}/dead-ends.md?target=${choiceDeadEnd.dead_end_id}`,
+  });
+  const readChoiceSource = async (expected = 200) => {
+    const response = await worker.fetch(`${origin}${choiceRead.path}`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(response.status, expected, "the selected retry's source read is usable");
+    const text = await response.text();
+    assert.equal(text.includes("CANONICAL-RETRY-SOURCE"), expected === 200);
+    if (expected === 404)
+      assert.equal(ContractProblemSchema.parse(JSON.parse(text)).code, "DEAD_END_NOT_FOUND");
+    return text;
+  };
+  await readChoiceSource();
+  const choicePins = [
+    choiceMove.contract.preparation.dead_end_pin,
+    choiceMove.contract.preparation.firing_pin,
+  ];
+  for (const [index, pin] of choicePins.entries()) {
+    const read = choiceMove.contract.preparation.additional_reads[index];
+    assert.deepEqual(read, {
+      method: "GET",
+      path: `/p/${choiceProblemId}/events.json?since=${pin.seq - 1}&limit=1`,
+    });
+    const page = await call(read.path);
+    assert.equal(page.events.length, 1, "each provenance read returns only its selected event");
+    assert.equal(page.events[0].seq, pin.seq);
+    assert.equal(page.events[0].event.id, pin.event_id);
+    assert.equal(page.events[0].event.payload_sha256, pin.payload_sha256);
+    assert.equal(page.page_end.next_cursor, pin.seq);
+  }
   const controlChoiceSource = async (target, visibility, version) => {
     await env.DB.prepare(
       `INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,visibility,source,
@@ -1640,6 +1674,7 @@ await runLocalWorkerJourney(async (context) => {
       .run();
   };
   await controlChoiceSource(`${choiceDeadEnd.dead_end_id}@1`, "hidden", 1);
+  await readChoiceSource(404);
   const hiddenChoice = await call(`/v1/p/${choiceProblemId}/next`, undefined, triggerAuthor);
   assert.ok(
     ![hiddenChoice.primary_move, ...hiddenChoice.alternatives].some(
@@ -1648,6 +1683,7 @@ await runLocalWorkerJourney(async (context) => {
     "current controls remove even a fired retry from canonical recommendations",
   );
   await controlChoiceSource(`${choiceDeadEnd.dead_end_id}@1`, "visible", 2);
+  await readChoiceSource();
   const restoredChoice = await call(`/v1/p/${choiceProblemId}/next`, undefined, triggerAuthor);
   assert.ok(
     [restoredChoice.primary_move, ...restoredChoice.alternatives].some(
@@ -1667,7 +1703,7 @@ await runLocalWorkerJourney(async (context) => {
     201,
   );
   assert.equal(await call("/cursor"), choiceBeforeWork, "the served move writes only private work");
-  await call(
+  const choiceRetry = await call(
     `${choicePath}/dead-ends`,
     {
       approach: "Reassess the repeated-vertex transfer under the narrowed domain.",
@@ -1677,6 +1713,11 @@ await runLocalWorkerJourney(async (context) => {
     },
     triggerAuthor,
     201,
+  );
+  const supersededChoiceSource = await readChoiceSource();
+  assert.ok(
+    supersededChoiceSource.includes(choiceRetry.dead_end_id),
+    "a saved source link retains the original failure and discloses its current supersession",
   );
   const choiceAfter = await call(`/v1/p/${choiceProblemId}/next`, undefined, triggerAuthor);
   assert.ok(

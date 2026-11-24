@@ -38,6 +38,9 @@ test("retry action is private investigation with no fabricated result or copied 
   const prep = contract.preparation as {
     dead_end_pin: { event_id: string };
     firing_pin: { event_id: string };
+    read_first: { method: string; path: string };
+    additional_reads: Array<{ method: string; path: string }>;
+    note: string;
     author_may_supersede: boolean;
   };
   assert.equal(request.path, "/v1/sessions/{id}/workshop");
@@ -47,6 +50,16 @@ test("retry action is private investigation with no fabricated result or copied 
   assert.ok(!JSON.stringify(move).includes("invented failure"));
   assert.equal(prep.dead_end_pin.event_id, "SOURCE");
   assert.equal(prep.firing_pin.event_id, "FIRED");
+  assert.deepEqual(prep.read_first, {
+    method: "GET",
+    path: "/p/P-DEMO/dead-ends.md?target=DE-1",
+  });
+  assert.deepEqual(prep.additional_reads.slice(0, 2), [
+    { method: "GET", path: "/p/P-DEMO/events.json?since=0&limit=1" },
+    { method: "GET", path: "/p/P-DEMO/events.json?since=9&limit=1" },
+  ]);
+  assert.ok(prep.note.includes("current views, not frozen history"));
+  assert.ok(prep.note.includes("event/hash pins"));
   assert.equal(prep.author_may_supersede, true);
 });
 
@@ -71,7 +84,7 @@ test("typed condition reads distinguish exact gap, claim and current statement",
       preparation: { additional_reads: Array<{ path: string }> };
     };
     const paths = contract.preparation.additional_reads.map((x) => x.path);
-    assert.ok(paths.includes("/p/P-DEMO/events.json?since=9"));
+    assert.ok(paths.includes("/p/P-DEMO/events.json?since=9&limit=1"));
     assert.ok(
       paths.includes(
         trigger.kind === "gap-closed"
