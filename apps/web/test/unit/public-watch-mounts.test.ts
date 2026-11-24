@@ -31,7 +31,13 @@ const pages = [
             researchResult.state === "ok" ? researchResult.watch : undefined,
           )`,
   ],
-  ["app/p/[slug]/claims/[claim]/page.tsx", "result.origin", "publicViewWatchTargets(result.watch)"],
+  [
+    "app/p/[slug]/claims/[claim]/page.tsx",
+    "result.origin",
+    `previous === undefined
+          ? publicViewWatchTargets(result.watch)
+          : publicViewWatchTargets(result.watch, previous.state === "ok" ? previous.watch : undefined)`,
+  ],
   ["app/now/page.tsx", "nowData.origin", "publicViewWatchTargets(nowData.watch)"],
   ["app/reviews/page.tsx", "result.origin", "publicViewWatchTargets(result.watch)"],
   ["app/p/[slug]/dead-ends/page.tsx", "result.origin", "publicViewWatchTargets(result.watch)"],
