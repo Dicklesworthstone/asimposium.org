@@ -1,3 +1,4 @@
+import { statementVersionPath } from "@asimposium/contracts/statements";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { validatedProblem } from "../http/envelope";
 
@@ -69,17 +70,21 @@ export async function clientStatementContextConflict(
     .first<{ seq: number; object_version: number }>();
   if (!revised) return null;
   const cursor = context.cursor ?? context.sessionOpenedPublicCursor ?? 0;
+  const source = statementVersionPath(problemId, revised.object_version, "json", {
+    through: revised.seq,
+  });
   return validatedProblem({
     status: 409,
     code: "STATEMENT_REVISED_SINCE",
     title: "Problem statement revised since context cursor",
     detail: `The problem statement was revised at cursor ${revised.seq} (version ${revised.object_version}) after your context cursor ${cursor}.`,
-    fixHint: `Re-orient with GET /p/${problemId}.md or check your /v1/inbox, then retry with the current cursor.`,
+    fixHint: `Read GET ${source} and check the revised statement and boundaries against your work. Retry with the cursor you inspected.`,
     rule: "A5",
     extensions: {
       schema: "https://a.asimposium.org/schemas/problem.v1.json",
       example: { client_context_cursor: revised.seq },
       delta_pointer: `/p/${problemId}.md`,
+      refetch_url: source,
       problem_id: problemId,
       client_context_cursor: cursor,
       revised_at_cursor: revised.seq,
