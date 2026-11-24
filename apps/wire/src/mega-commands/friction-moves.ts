@@ -12,7 +12,7 @@ import {
 import { groundedFalsificationGuide } from "./ledger-moves.ts";
 
 export const FRICTION_MOVES_BOUNDARY =
-  "Friction selection examines at most sixteen evidence/review admissions and the already captured review-queue targets. Only structured counterexample-scent or statement-too-strong reports with a witness can seed investigation. Canonical scientific need and dependency context rank matching claims; oldest report breaks same-target ties. A declared obstruction is not a refutation, compilation result, assignment or reservation.";
+  "Friction selection examines at most sixteen friction candidate admissions and the already captured review-queue targets. Source fields nominate reports before exact digest and target verification; this bounded candidate index is not an exhaustive history or integrity audit. Ordinary evidence and verification reports with readable source fields are skipped before applying the friction candidate budget. Only structured counterexample-scent or statement-too-strong reports with a witness can seed investigation. Canonical scientific need and dependency context rank matching claims; oldest report breaks same-target ties. A declared obstruction is not a refutation, compilation result, assignment or reservation.";
 export interface FrictionMoveSelection {
   move: NextMoveCandidate | null;
   degraded: boolean;

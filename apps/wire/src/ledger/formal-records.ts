@@ -9,6 +9,7 @@ import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 
 export const FORMAL_RECORD_PAGE_SIZE = 8;
 export const FORMAL_RECORD_MAX_BYTES = 262144;
+export type FormalRecordCandidateKind = "formal" | "friction";
 export interface FormalRecordEvent {
   event_id: string;
   object_id: string;
@@ -72,7 +73,7 @@ export const FORMAL_RECORD_HEAD_SQL = `SELECT id, public_seq, status, unlisted F
 // before decoding; pages advance through ordinary and unavailable records.
 // Current controls win over a historical cut. Withhold bodies in this query,
 // not after decoding, while retaining hidden admissions for honest pagination.
-export const FORMAL_RECORD_PAGE_SQL = `SELECT e.id AS event_id, e.object_id, e.seq,
+const FORMAL_RECORD_ADMISSIONS_SQL = `SELECT e.id AS event_id, e.object_id, e.seq,
   e.type AS event_type, e.object_version, e.payload_sha256,
   e.actor_fellow_id AS fellow_id, e.actor_sponsor_id AS sponsor_id,
   e.actor_session_id AS session_id, e.model_string_self_declared, e.harness, e.created_at,
@@ -90,8 +91,44 @@ export const FORMAL_RECORD_PAGE_SQL = `SELECT e.id AS event_id, e.object_id, e.s
     AND e.seq > ? AND e.seq <= ?
     AND (? IS NULL OR e.object_id = ?)
     AND ((e.type = 'evidence.created' AND e.object_kind = 'evidence')
-      OR (e.type = 'review.created' AND e.object_kind = 'review'))
+      OR (e.type = 'review.created' AND e.object_kind = 'review'))`;
+export const FORMAL_RECORD_PAGE_SQL = `${FORMAL_RECORD_ADMISSIONS_SQL}
   ORDER BY e.seq LIMIT ${FORMAL_RECORD_PAGE_SIZE + 1}`;
+
+/** Internal discovery only. The public history still examines every admission.
+ * Select on privacy-masked source fields before applying the body-read budget:
+ * ordinary evidence/reviews cannot permanently displace later formal work.
+ * These unverified fields nominate candidates; the shared digest/decoder path
+ * below remains the authority. Hidden, missing and undecodable admissions are
+ * retained without inspecting their private kind, so they still disclose an
+ * omission and advance the cursor. This candidate index is not an exhaustive
+ * integrity audit: source-field damage can remove a nomination. */
+function formalRecordCandidatesSql(selection: FormalRecordCandidateKind): string {
+  return `WITH admissions AS (${FORMAL_RECORD_ADMISSIONS_SQL})
+  SELECT * FROM admissions
+  WHERE payload_json IS NULL OR CASE
+    WHEN json_valid(payload_json) = 0 THEN 1
+    WHEN json_type(payload_json) <> 'object' THEN 1
+    WHEN event_type = 'evidence.created' THEN CASE
+      WHEN json_type(payload_json, '$.kind') IS NOT 'text' THEN 1
+      WHEN json_extract(payload_json, '$.kind') = 'formalization-friction' THEN 1
+      ${
+        selection === "formal"
+          ? "WHEN json_type(payload_json, '$.formal_artifact') IS NOT NULL AND json_type(payload_json, '$.formal_artifact') <> 'null' THEN 1"
+          : ""
+      }
+      ELSE 0 END
+    WHEN event_type = 'review.created' THEN
+      ${
+        selection === "formal"
+          ? "json_type(payload_json, '$.verification') IS NOT NULL AND json_type(payload_json, '$.verification') <> 'null'"
+          : "0"
+      }
+    ELSE 1 END
+  ORDER BY seq LIMIT ${FORMAL_RECORD_PAGE_SIZE + 1}`;
+}
+export const FORMAL_RECORD_CANDIDATES_SQL = formalRecordCandidatesSql("formal");
+export const FRICTION_RECORD_CANDIDATES_SQL = formalRecordCandidatesSql("friction");
 
 export async function formalRecordPayload(
   text: string | null,
@@ -134,13 +171,39 @@ function headValid(head: Head | undefined, problem: string, cursor: number): boo
 /** The session owns the private context; this reader touches public ledger
  * events only. The caller supplies a captured cut. Privacy and content bytes
  * are rechecked together, and no projection or "certified" label is trusted. */
-export async function readFormalRecords(
+export function readFormalRecords(
   db: D1Database,
   problem: string,
   cursor: number,
   decoders: FormalRecordDecoders,
   after = 0,
   target?: string,
+): Promise<FormalRecordRead> {
+  return readFormalRecordPage(db, problem, cursor, decoders, after, target);
+}
+
+/** Pack/move discovery uses subtype nominations, never this selector for a
+ * public exhaustive history or exact record read. Consumers must disclose
+ * the bounded index and link to the unchanged canonical history. */
+export function readFormalRecordCandidates(
+  db: D1Database,
+  problem: string,
+  cursor: number,
+  decoders: FormalRecordDecoders,
+  after = 0,
+  selection: FormalRecordCandidateKind = "formal",
+): Promise<FormalRecordRead> {
+  return readFormalRecordPage(db, problem, cursor, decoders, after, undefined, selection);
+}
+
+async function readFormalRecordPage(
+  db: D1Database,
+  problem: string,
+  cursor: number,
+  decoders: FormalRecordDecoders,
+  after: number,
+  target?: string,
+  selection?: FormalRecordCandidateKind,
 ): Promise<FormalRecordRead> {
   if (
     !exact(/^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/, problem) ||
@@ -149,6 +212,7 @@ export async function readFormalRecords(
     !Number.isSafeInteger(after) ||
     after < 0 ||
     after > cursor ||
+    (selection !== undefined && selection !== "formal" && selection !== "friction") ||
     (target !== undefined &&
       (!exact(/^[ER]-[A-Za-z0-9][A-Za-z0-9._:-]{0,125}$/, target) || after !== 0))
   )
@@ -156,7 +220,13 @@ export async function readFormalRecords(
   const result = await db.batch([
     db.prepare(FORMAL_RECORD_HEAD_SQL).bind(problem),
     db
-      .prepare(FORMAL_RECORD_PAGE_SQL)
+      .prepare(
+        selection === "formal"
+          ? FORMAL_RECORD_CANDIDATES_SQL
+          : selection === "friction"
+            ? FRICTION_RECORD_CANDIDATES_SQL
+            : FORMAL_RECORD_PAGE_SQL,
+      )
       .bind(problem, cursor, after, cursor, target ?? null, target ?? null),
   ]);
   if (
@@ -250,6 +320,7 @@ export async function readFormalRecords(
       omitted.add("unsupported_record");
       continue;
     }
+    if (selection === "friction" && kind !== "formalization-friction") continue;
     const {
       event_type: _type,
       object_version: _version,

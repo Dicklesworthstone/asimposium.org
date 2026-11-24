@@ -4,17 +4,21 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { EvidenceRequest, ReviewRequest } from "@asimposium/contracts";
+import type { ReviewQueueItem } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
   FORMAL_RECORD_MAX_BYTES,
   type FormalRecordDecoders,
   formalRecordPayload,
+  readFormalRecordCandidates,
   readFormalRecordResource,
   readFormalRecords,
 } from "../../src/ledger/formal-records.ts";
+import { loadFormalizationFrictionMove } from "../../src/mega-commands/friction-moves-service.ts";
 
-// Actual SQLite and digest checks. These deliberately small decoder fixtures
-// are NOT proof of the production Zod adapter or scientific evaluator.
+// Actual SQLite and digest checks. Reader tests use deliberately small decoder
+// fixtures; the production friction-discovery test uses the real adapters.
+// Neither is native Workerd or proof of the complete scientific evaluator.
 const decoders: FormalRecordDecoders = {
   evidence: (value) =>
     typeof value.body_md === "string" && value.source !== undefined
@@ -660,6 +664,300 @@ test("target and after are exclusive even when after is zero", async () => {
       /query/,
     );
     assert.equal(f.statements.length, 0);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("formal discovery reaches later work without changing exhaustive admission pagination", async () => {
+  const f = fixture();
+  try {
+    for (let seq = 1; seq <= 40; seq++)
+      f.publish(
+        seq,
+        seq % 2 === 0
+          ? { kind: "argument", body_md: "Ordinary evidence." }
+          : { basis: "An ordinary review.", body_md: "No formal verification report." },
+        seq % 2 === 0 ? {} : { type: "review.created" },
+      );
+    f.publish(41, artifact());
+    f.publish(42, {
+      ...artifact(),
+      formal_artifact: undefined,
+      kind: "formalization-friction",
+      direction: "informs",
+    });
+    f.publish(
+      43,
+      {
+        target_claim_id: "C-1",
+        target_version: 1,
+        basis: "Checked the supplied source.",
+        body_md: "A verification report.",
+        verification: { reported: true },
+      },
+      { type: "review.created" },
+    );
+
+    const history = await f.read();
+    assert.deepEqual(history.records, []);
+    assert.equal(history.next_after, 8, "public history retains every ordinary admission");
+    const candidates = await readFormalRecordCandidates(f.db, "P-DEMO", 100, decoders);
+    assert.deepEqual(
+      candidates.records.map((record) => [record.publication.seq, record.kind]),
+      [
+        [41, "formal-artifact"],
+        [42, "formalization-friction"],
+        [43, "verification-report"],
+      ],
+    );
+    assert.equal(candidates.next_after, null);
+    assert.equal(
+      f.statements.length,
+      4,
+      "two SQL statements per reader, with no per-event queries",
+    );
+    assert.deepEqual(
+      (await readFormalRecordResource(f.db, "P-DEMO", { target: "E-41" }, decoders)).records[0],
+      candidates.records[0],
+      "nomination never substitutes another decoder or weaker source record",
+    );
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("friction discovery skips more than sixteen unrelated formal reports", async () => {
+  const f = fixture();
+  try {
+    for (let seq = 1; seq <= 20; seq++) f.publish(seq, artifact());
+    for (let seq = 21; seq <= 40; seq++)
+      f.publish(
+        seq,
+        {
+          target_claim_id: "C-1",
+          target_version: 1,
+          basis: "Checked an earlier source.",
+          body_md: "A separate verification report.",
+          verification: { reported: true },
+        },
+        { type: "review.created" },
+      );
+    f.publish(41, {
+      ...artifact(),
+      formal_artifact: undefined,
+      kind: "formalization-friction",
+      direction: "informs",
+      body_md: "A new counterexample-scent report.",
+    });
+    const formal = await readFormalRecordCandidates(f.db, "P-DEMO", 100, decoders);
+    assert.equal(formal.records.length, 8);
+    assert.equal(formal.next_after, 8);
+    const friction = await readFormalRecordCandidates(f.db, "P-DEMO", 100, decoders, 0, "friction");
+    assert.deepEqual(
+      friction.records.map((record) => record.publication.object_id),
+      ["E-41"],
+    );
+    assert.equal(friction.records[0]?.kind, "formalization-friction");
+    assert.equal(friction.next_after, null);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("candidate pages retain the captured cut, source order and eight-record bound", async () => {
+  const f = fixture();
+  try {
+    for (let seq = 1; seq <= 90; seq++)
+      f.publish(seq, seq % 10 === 0 ? artifact() : { kind: "argument", body_md: "Other work." });
+    const first = await readFormalRecordCandidates(f.db, "P-DEMO", 90, decoders);
+    assert.deepEqual(
+      first.records.map((record) => record.publication.seq),
+      [10, 20, 30, 40, 50, 60, 70, 80],
+    );
+    assert.equal(first.next_after, 80);
+    assert.deepEqual(first.omitted, ["page_limit"]);
+    f.publish(95, artifact());
+    assert.deepEqual(await readFormalRecordCandidates(f.db, "P-DEMO", 90, decoders), first);
+    const tail = await readFormalRecordCandidates(f.db, "P-DEMO", 90, decoders, 80);
+    assert.deepEqual(
+      tail.records.map((record) => record.publication.seq),
+      [90],
+    );
+    assert.equal(tail.next_after, null);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("hidden ordinary and formal admissions are indistinguishable to candidate selection", async () => {
+  const pages = [];
+  for (const payload of [
+    { kind: "argument", body_md: "PRIVATE-KIND-CANARY" },
+    { ...artifact(), body_md: "PRIVATE-KIND-CANARY" },
+  ]) {
+    const f = fixture();
+    try {
+      f.publish(2, payload);
+      control(f, "E-2");
+      let decoded = 0;
+      const refuse = () => {
+        decoded++;
+        throw new Error("Hidden content must not reach a decoder.");
+      };
+      const page = await readFormalRecordCandidates(
+        f.db,
+        "P-DEMO",
+        100,
+        { evidence: refuse, review: refuse },
+        0,
+        "friction",
+      );
+      assert.equal(decoded, 0);
+      assert.deepEqual(page.records, []);
+      assert.deepEqual(page.omitted, ["content_unavailable"]);
+      assert.ok(!JSON.stringify(page).includes("PRIVATE-KIND-CANARY"));
+      pages.push(page);
+    } finally {
+      f.sqlite.close();
+    }
+  }
+  assert.deepEqual(
+    pages[0],
+    pages[1],
+    "a hidden record's subtype must not select a different face",
+  );
+});
+
+test("source-field nominations cannot mint a formal record from damaged bytes", async () => {
+  const f = fixture();
+  try {
+    const id = f.publish(1, { kind: "argument", body_md: "Ordinary work." });
+    f.sqlite
+      .query("UPDATE event_content SET payload_json=? WHERE event_id=?")
+      .run(JSON.stringify(artifact()), id);
+    let decoded = 0;
+    const reject = () => {
+      decoded++;
+      throw new Error("Mismatched source must not reach a decoder.");
+    };
+    const page = await readFormalRecordCandidates(f.db, "P-DEMO", 100, {
+      evidence: reject,
+      review: reject,
+    });
+    assert.equal(decoded, 0);
+    assert.deepEqual(page.records, []);
+    assert.deepEqual(page.omitted, ["content_unavailable"]);
+    f.sqlite.query("UPDATE event_content SET payload_json='{' WHERE event_id=?").run(id);
+    const malformed = await readFormalRecordCandidates(f.db, "P-DEMO", 100, decoders);
+    assert.deepEqual(malformed.records, []);
+    assert.deepEqual(malformed.omitted, ["content_unavailable"]);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("an unnominated damaged record remains visible to the exhaustive integrity reader", async () => {
+  const f = fixture();
+  try {
+    const id = f.publish(1, artifact());
+    f.sqlite
+      .query("UPDATE event_content SET payload_json=? WHERE event_id=?")
+      .run(JSON.stringify({ kind: "argument", body_md: "Changed without a matching digest." }), id);
+    const selected = await readFormalRecordCandidates(f.db, "P-DEMO", 100, decoders);
+    assert.deepEqual(selected.records, []);
+    const history = await f.read();
+    assert.deepEqual(history.records, []);
+    assert.deepEqual(history.omitted, ["content_unavailable"]);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("candidate nomination still obeys scope and decoded record kind", async () => {
+  const f = fixture();
+  try {
+    f.publish(1, { ...artifact(), kind: "formalization-friction" });
+    f.publish(2, artifact(), { problem: "P-OTHER" });
+    const friction = await readFormalRecordCandidates(f.db, "P-DEMO", 100, decoders, 0, "friction");
+    assert.deepEqual(friction.records, [], "an artifact is not a friction witness");
+    f.sqlite.query("UPDATE problems SET status='private-draft' WHERE id='P-DEMO'").run();
+    await assert.rejects(readFormalRecordCandidates(f.db, "P-DEMO", 100, decoders), /SNAPSHOT/);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("the production friction move finds a witness after unrelated evidence and formal work", async () => {
+  const f = fixture();
+  try {
+    f.sqlite.exec(
+      "CREATE TABLE retractions(problem_id TEXT,retraction_id TEXT,seq INTEGER,target_object TEXT)",
+    );
+    const claim: ReviewQueueItem = {
+      problem_id: "P-DEMO",
+      claim_id: "C-1",
+      version: 1,
+      cursor: 100,
+      kind: "lemma",
+      statement: "Every denominator in the stated domain is nonzero.",
+      falsifier: "A denominator is zero at a point in the stated domain.",
+      disposition: "disputed",
+      need: "resolve-dispute",
+      best_recorded_tier: "none",
+      direct_dependents: 1,
+      dependents_capped: false,
+      author_fellow_id: "F-origin",
+      author_sponsor_id: "usr-origin",
+      created_at: "2026-09-01T00:00:00.000Z",
+      read_url: "/p/P-DEMO/claims/C-1@1.md?through=100",
+    };
+    f.publish(
+      1,
+      {
+        claim_id: claim.claim_id,
+        kind: claim.kind,
+        statement: claim.statement,
+        falsifier: claim.falsifier,
+      },
+      { type: "claim.created", kind: "claim", object: "C-1" },
+    );
+    for (let seq = 2; seq <= 20; seq++)
+      f.publish(seq, { kind: "argument", body_md: "Earlier unrelated evidence." });
+    for (let seq = 21; seq <= 40; seq++) f.publish(seq, artifact());
+    f.publish(41, {
+      bears_on_kind: "claim",
+      bears_on_id: "C-1",
+      bears_on_version: 1,
+      kind: "formalization-friction",
+      direction: "informs",
+      mode: "exploratory",
+      source: { kind: "model_memory" },
+      body_md: JSON.stringify({
+        format: "asimposium.formalization-friction.v1",
+        blocker: "counterexample-scent",
+        toolchain: "Lean local",
+        blocked_obligation: "Show that the denominator is nonzero.",
+        witness_seed: "Investigate the boundary at zero.",
+        analysis: "The attempt appears to require a missing regularity condition.",
+      }),
+    });
+    const result = await loadFormalizationFrictionMove(f.db, "P-DEMO", 100, [claim]);
+    assert.ok(result.move);
+    assert.equal(result.move.move, "add-refuter-from-friction");
+    assert.deepEqual(result.move.refs, ["P-DEMO", "C-1@1", "E-41"]);
+    assert.equal(
+      (result.move.contract.request as { path: string }).path,
+      "/v1/sessions/{id}/workshop",
+    );
+    assert.match(result.move?.selection_boundary ?? "", /not an exhaustive history/);
+    assert.ok(!JSON.stringify(result.move).includes("missing regularity condition"));
+    assert.equal(f.statements.length, 3, "candidate batch and one exact target-binding query");
+
+    control(f, "E-41");
+    const hidden = await loadFormalizationFrictionMove(f.db, "P-DEMO", 100, [claim]);
+    assert.equal(hidden.move, null);
+    assert.equal(hidden.degraded, true);
   } finally {
     f.sqlite.close();
   }
