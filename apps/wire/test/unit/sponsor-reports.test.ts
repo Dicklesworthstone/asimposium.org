@@ -16,7 +16,7 @@ const reportId = (id: number) => `RP-${String(id).padStart(26, "0")}`;
 function fixture() {
   const sql = new Database(":memory:");
   sql.exec(`CREATE TABLE sponsors(sponsor_id TEXT PRIMARY KEY, tombstoned_at TEXT);
-    CREATE TABLE reports(report_id TEXT PRIMARY KEY, problem_id TEXT, target_ref TEXT,
+    CREATE TABLE reports(report_id TEXT PRIMARY KEY, problem_id TEXT, target_ref TEXT, source_ref TEXT,
       reason TEXT, reporter_class TEXT, reporter_sponsor_id TEXT, status TEXT,
       created_at TEXT, resolved_at TEXT, note TEXT, resolved_by TEXT, resolution_reason TEXT);
     CREATE INDEX reports_sponsor_history_idx ON reports(reporter_sponsor_id,created_at DESC,report_id DESC);
@@ -74,9 +74,12 @@ function fixture() {
     },
     report(id: number, sponsor = "usr_owner", status = "pending", createdAt = NOW) {
       sql
-        .query("INSERT INTO reports VALUES(?, 'P-REPORTS', ?, 'privacy', ?, ?, ?, ?, ?, ?, ?, ?)")
+        .query(
+          "INSERT INTO reports VALUES(?, 'P-REPORTS', ?, ?, 'privacy', ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
         .run(
           reportId(id),
+          `C-${id}`,
           `C-${id}@2`,
           id % 2 === 0 ? "fellow" : "sponsor",
           sponsor,
@@ -109,6 +112,7 @@ test("private history pages both human and Fellow reports by immutable filing cu
     f.report(2, "usr_owner", "dismissed");
     f.report(3, "usr_owner", "upheld");
     f.report(9, "usr_other");
+    f.sql.query("UPDATE reports SET source_ref = NULL WHERE report_id = ?").run(reportId(1));
     const initial = f.sql.query("SELECT * FROM reports ORDER BY report_id").all();
     const response = await f.request('{"limit":2}');
     expect(response.status).toBe(200);
@@ -124,11 +128,13 @@ test("private history pages both human and Fellow reports by immutable filing cu
       [reportId(2), "dismissed", "fellow"],
     ]);
     expect(first.has_more).toBe(true);
+    expect(first.reports.map((report) => report.target)).toEqual(["C-3@2", "C-2@2"]);
     f.report(4, "usr_owner", "pending", "2026-11-22T13:00:00.000Z");
     const next = SponsorReportsResponseSchema.parse(
       await (await f.request(JSON.stringify({ limit: 2, before: first.next_cursor }))).json(),
     );
     expect(next.reports.map((r) => r.report_id)).toEqual([reportId(1)]);
+    expect(next.reports[0]?.target).toBe("C-1");
     expect(next.has_more).toBe(false);
     expect(next.next_cursor).toBe(null);
     expect(

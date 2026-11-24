@@ -731,6 +731,18 @@ await runLocalWorkerJourney(
       note: "A retry cannot replace the source.",
     });
     assert.equal(sameReport.report_id, sourceReport.report_id);
+    assert.equal(sameReport.target, `${sourceClaim.claim_id}@1`);
+    const familyHistory = await sponsorCall(
+      "usr_mod_c",
+      "POST",
+      "/v1/sponsors/reports/list",
+      "sponsor.reports.list",
+      {},
+    );
+    assert.equal(
+      familyHistory.reports.find((entry) => entry.report_id === sourceReport.report_id)?.target,
+      sameReport.target,
+    );
     assert.deepEqual(await reportDetail(sourceReport.report_id), retained);
     for (const token of [undefined, reporterC]) {
       const refused = await call(

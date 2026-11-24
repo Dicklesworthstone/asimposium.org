@@ -8,6 +8,7 @@ import {
   type ReportActionState,
   type ReportDraft,
   type ReportTarget,
+  reportReceiptMatchesTarget,
 } from "@/lib/report-submission";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import { stoaSponsorReport } from "@/lib/stoa";
@@ -105,11 +106,7 @@ export async function reportContentAction(
       );
     }
     const receipt = ReportResponseSchema.safeParse(result.data);
-    if (
-      !receipt.success ||
-      receipt.data.problem_id !== parsed.data.problem_id ||
-      receipt.data.target !== parsed.data.target
-    )
+    if (!receipt.success || !reportReceiptMatchesTarget(receipt.data, parsed.data))
       return refuse(
         "The report receipt did not match this target. Retry this unchanged report to recover a matching receipt.",
         true,

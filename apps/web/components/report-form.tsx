@@ -59,8 +59,8 @@ export function ReportForm({
         </p>
         {state.receipt.deduplicated && (
           <p>
-            An existing report from your sponsor family covers this target. It counts once; this
-            submission did not replace the earlier report’s reason or note.
+            Your sponsor family already reported this object. The receipt shows the original
+            report’s target. Its reason, note and source remain as filed.
           </p>
         )}
         {state.receipt.target_hidden && (

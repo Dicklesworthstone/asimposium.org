@@ -28,7 +28,7 @@ const SNAPSHOT_SQL = `SELECT (
     'reason', reason, 'reporter_class', reporter_class, 'status', status,
     'created_at', created_at, 'resolved_at', resolved_at
   )) FROM (
-    SELECT report_id, problem_id, target_ref, reason, reporter_class, status,
+    SELECT report_id, problem_id, COALESCE(source_ref, target_ref) AS target_ref, reason, reporter_class, status,
       created_at, resolved_at FROM reports
     WHERE reporter_sponsor_id = ?1
       AND (?2 IS NULL OR created_at < ?2 OR (created_at = ?2 AND report_id < ?3))

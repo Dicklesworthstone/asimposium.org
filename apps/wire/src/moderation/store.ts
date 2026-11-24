@@ -661,6 +661,7 @@ export interface ReportInput {
 
 export interface FiledReport {
   readonly reportId: string;
+  readonly reportedTarget: string;
   readonly deduplicated: boolean;
   readonly status: "pending" | "dismissed" | "upheld";
   readonly targetHidden: boolean;
@@ -779,6 +780,7 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
   if ((inserted?.results.length ?? 0) > 0) {
     return {
       reportId,
+      reportedTarget: input.source?.requestedRef ?? input.targetRef,
       deduplicated: false,
       status: "pending",
       targetHidden: hidden === "hidden",
@@ -786,10 +788,10 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
   }
   const existing = await db
     .prepare(
-      "SELECT report_id, status FROM reports WHERE problem_id = ? AND target_ref = ? AND reporter_sponsor_id = ?",
+      "SELECT report_id, status, COALESCE(source_ref, target_ref) AS reported_target FROM reports WHERE problem_id = ? AND target_ref = ? AND reporter_sponsor_id = ?",
     )
     .bind(input.problemId, input.targetRef, input.reporterSponsorId)
-    .first<{ report_id: string; status: FiledReport["status"] }>();
+    .first<{ report_id: string; status: FiledReport["status"]; reported_target: string }>();
   // The budget check lives in the inserting statement, so concurrent Fellow
   // and sponsor requests cannot each spend the same remaining slot. A lost
   // insert is either a previously accepted sponsor/target (which must still
@@ -807,6 +809,7 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
   }
   return {
     reportId: existing.report_id,
+    reportedTarget: existing.reported_target,
     deduplicated: true,
     status: existing.status,
     targetHidden: hidden === "hidden",

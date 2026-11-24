@@ -116,7 +116,11 @@ test("reported claim version remains exact through revisions, hiding and sponsor
     note: "A replay must not replace the original allegation or source.",
   });
   expect(replay.status).toBe(200);
-  expect(ReportResponseSchema.parse(await replay.json()).report_id).toBe(receipt.report_id);
+  expect(ReportResponseSchema.parse(await replay.json())).toMatchObject({
+    report_id: receipt.report_id,
+    target: "C-1@1",
+    deduplicated: true,
+  });
   expect(await readOperatorReportDetail(f.db, receipt.report_id)).toEqual(detail);
   const queue = JSON.stringify(await (await operatorReportsQueue(f.db)).json());
   expect(queue).not.toContain(NOTE);

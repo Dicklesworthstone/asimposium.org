@@ -231,6 +231,8 @@ if (process.env.ASIMPOSIUM_REPORT_ACTION_TEST_CHILD !== import.meta.path) {
         { ok: false, reason: "refused", status: 503 },
         { ok: true, data: { ...RECEIPT, problem_id: "P-OTHER" } },
         { ok: true, data: { ...RECEIPT, target: "C-1@3" } },
+        { ok: true, data: { ...RECEIPT, target: "C-2@3", deduplicated: true } },
+        { ok: true, data: { ...RECEIPT, target: "C-1@invalid", deduplicated: true } },
         { ok: true, data: { ...RECEIPT, report_id: "invalid" } },
       ];
       for (const failure of failures) {
@@ -285,7 +287,7 @@ if (process.env.ASIMPOSIUM_REPORT_ACTION_TEST_CHILD !== import.meta.path) {
 
     test("a duplicate may already be resolved and must retain the exact status from Stoa", async () => {
       for (const status of ["dismissed", "upheld"] as const) {
-        const receipt = { ...RECEIPT, status, deduplicated: true };
+        const receipt = { ...RECEIPT, target: "C-1@1", status, deduplicated: true };
         result = { ok: true, data: receipt };
         expect(await submit(SPONSOR, TARGET, { status: "idle" }, form())).toEqual({
           status: "committed",

@@ -37,6 +37,22 @@ export function reportPageHref(target: ReportTarget): string {
   return `/report?${new URLSearchParams(target)}`;
 }
 
+/** A new report must match the requested version. A sponsor-family replay
+ * may return the original report on another version of that same claim. */
+export function reportReceiptMatchesTarget(
+  receipt: ReportResponse,
+  requested: ReportTarget,
+): boolean {
+  if (receipt.problem_id !== requested.problem_id) return false;
+  if (receipt.target === requested.target) return true;
+  return (
+    receipt.deduplicated &&
+    requested.target.startsWith("C-") &&
+    ReportRequestSchema.shape.target.safeParse(receipt.target).success &&
+    receipt.target.split("@")[0] === requested.target.split("@")[0]
+  );
+}
+
 const TARGET_KINDS: Readonly<Record<string, PublicResourceKind>> = {
   H: "hypothesis",
   E: "evidence",
