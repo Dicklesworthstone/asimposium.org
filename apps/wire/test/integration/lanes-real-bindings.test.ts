@@ -31,6 +31,7 @@ const LANES = [
   "direct-append-sessions",
   "dispositions",
   "event-tails",
+  "evidence-list",
   "face-census",
   "fellow-rebind",
   "full-database-backup",
