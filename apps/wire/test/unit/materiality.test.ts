@@ -1,8 +1,10 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { getMoveTemplate, type NextMoveCandidate } from "@asimposium/contracts";
 import type { ReviewQueueItem } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
+import { selectBackToObjectMove } from "../../src/mega-commands/back-to-object-moves.ts";
 import { selectLedgerMoves } from "../../src/mega-commands/ledger-moves.ts";
 import {
   CEREMONY_BREAKER_EVENT_THRESHOLD,
@@ -107,6 +109,66 @@ function processWindow(items: ReviewQueueItem[] = [], reviewed = new Set<string>
       gapMove = move;
     },
   };
+}
+
+function statementWindow(
+  type: "problem.statement-reviewed" | "problem.statement-revised",
+  previousStatus: "sharpening" | "active",
+) {
+  const f = processWindow([need("C-1", 1)]);
+  f.sqlite.exec(`
+    ALTER TABLE events ADD COLUMN payload_sha256 TEXT;
+    ALTER TABLE event_content ADD COLUMN payload_sha256 TEXT;
+    ALTER TABLE event_content ADD COLUMN redacted_at TEXT;
+    CREATE TABLE problems (id TEXT PRIMARY KEY, status TEXT, public_seq INTEGER);
+    INSERT INTO problems VALUES ('P-TEST', 'active', 30);
+    CREATE TABLE content_controls (
+      problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER
+    );
+  `);
+  f.sqlite.run(
+    "UPDATE events SET type = ?, object_kind = 'problem', object_id = 'P-TEST', object_version = 2 WHERE id = 'EV-30'",
+    [type],
+  );
+  const payload: Record<string, unknown> =
+    type === "problem.statement-reviewed"
+      ? {
+          session_id: `S-${"0".repeat(26)}`,
+          problem_id: "P-TEST",
+          statement_version: 2,
+          verdict: "statement-clear",
+          basis: "The domain and falsifier are explicit.",
+          previous_status: previousStatus,
+          status: "active",
+        }
+      : {
+          action: "revise-statement",
+          acting_principal: { type: "sponsor", id: "usr_owner" },
+          source_fellow_id: "F-author",
+          previous_statement_version: 1,
+          previous_status: previousStatus,
+          problem: {
+            id: "P-TEST",
+            title: "A bounded problem",
+            status: previousStatus,
+            current_statement_version: 2,
+            statement: "Every integer in the finite range has the stated property.",
+            falsifier: "An integer in the range without the property.",
+            motivation: "Make the scientific target precise.",
+            updated_at: "2026-09-30T00:00:00.000Z",
+          },
+        };
+  const record = (value: Record<string, unknown>) => {
+    const body = JSON.stringify(value);
+    const digest = createHash("sha256").update(body).digest("hex");
+    f.sqlite.run("UPDATE events SET payload_sha256 = ? WHERE id = 'EV-30'", [digest]);
+    f.sqlite.run(
+      "INSERT OR REPLACE INTO event_content (event_id, payload_json, payload_sha256, redacted_at) VALUES ('EV-30', ?, ?, NULL)",
+      [body, digest],
+    );
+  };
+  record(payload);
+  return { ...f, payload, record };
 }
 
 describe("Materiality and Ceremony Guard (Fable §9.6)", () => {
@@ -270,6 +332,97 @@ describe("Materiality and Ceremony Guard (Fable §9.6)", () => {
       expect(result.objectEventCountInWindow).toBe(1);
       sqlite.close();
     });
+
+    for (const type of ["problem.statement-reviewed", "problem.statement-revised"] as const) {
+      test(`${type} preserves sharpening materiality after the problem becomes active`, async () => {
+        const f = statementWindow(type, "sharpening");
+        try {
+          const result = await f.read();
+          expect(result.active).toBe(false);
+          expect(result.objectEventCountInWindow).toBe(1);
+          expect(result.totalEventsInWindow).toBe(25);
+          expect(result.degraded).toBe(false);
+          expect(result.selectedMove).toBeNull();
+          expect(f.gapCalls()).toBe(0);
+        } finally {
+          f.sqlite.close();
+        }
+      });
+
+      test(`${type} after activation remains process work even with a sharpening caller`, async () => {
+        const f = statementWindow(type, "active");
+        try {
+          const result = await checkCeremonyBreaker(
+            f.db,
+            "P-TEST",
+            30,
+            "sharpening",
+            context,
+            f.readers,
+          );
+          expect(result.active).toBe(true);
+          expect(result.objectEventCountInWindow).toBe(0);
+          expect(result.degraded).toBe(false);
+          expect(result.oldestNeed?.ref).toBe("C-1@2");
+        } finally {
+          f.sqlite.close();
+        }
+      });
+    }
+
+    for (const invalid of ["missing previous status", "wrong problem", "wrong version"] as const) {
+      test(`does not infer a process-only window from ${invalid}`, async () => {
+        const f = statementWindow("problem.statement-reviewed", "sharpening");
+        try {
+          const payload = { ...f.payload };
+          if (invalid === "missing previous status") delete payload.previous_status;
+          else if (invalid === "wrong problem") payload.problem_id = "P-OTHER";
+          else payload.statement_version = 3;
+          f.record(payload);
+          const result = await f.read();
+          expect(result.active).toBe(false);
+          expect(result.degraded).toBe(true);
+          expect(result.objectEventCountInWindow).toBe(0);
+          expect(result.selectedMove).toBeNull();
+          expect(result.oldestNeed).toBeNull();
+          expect(await selectBackToObjectMove(f.db, "P-TEST", 30, "active", context)).toEqual({
+            move: null,
+            degraded: true,
+          });
+        } finally {
+          f.sqlite.close();
+        }
+      });
+    }
+
+    for (const unavailable of ["corrupt", "redacted", "hidden", "oversized"] as const) {
+      test(`does not turn ${unavailable} statement content into process-only evidence`, async () => {
+        const f = statementWindow("problem.statement-reviewed", "sharpening");
+        try {
+          if (unavailable === "corrupt")
+            f.sqlite.run("UPDATE event_content SET payload_json = '{}' WHERE event_id = 'EV-30'");
+          else if (unavailable === "redacted")
+            f.sqlite.run(
+              "UPDATE event_content SET redacted_at = '2026-10-01T00:00:00.000Z' WHERE event_id = 'EV-30'",
+            );
+          else if (unavailable === "hidden")
+            f.sqlite.run("INSERT INTO content_controls VALUES ('P-TEST', '#30', 'hidden', 1)");
+          else f.record({ ...f.payload, basis: "x".repeat(65_537) });
+          const result = await f.read();
+          expect(result.active).toBe(false);
+          expect(result.degraded).toBe(true);
+          expect(result.objectEventCountInWindow).toBe(0);
+          expect(result.selectedMove).toBeNull();
+          expect(result.oldestNeed).toBeNull();
+          expect(await selectBackToObjectMove(f.db, "P-TEST", 30, "active", context)).toEqual({
+            move: null,
+            degraded: true,
+          });
+        } finally {
+          f.sqlite.close();
+        }
+      });
+    }
 
     test("selects the oldest eligible current need without author or same-sponsor self-review", async () => {
       const f = processWindow([

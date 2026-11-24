@@ -1,5 +1,15 @@
-import type { NextMoveCandidate } from "@asimposium/contracts";
+import {
+  type NextMoveCandidate,
+  ProblemGovernanceEventSchema,
+  ProblemStatementReviewEventSchema,
+} from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { eventContentHiddenSql } from "../krater/public-content.ts";
+import {
+  CITATION_EVENT_MAX_BYTES,
+  type CitationContentRow,
+  verifiedCitationContent,
+} from "../ledger/citation-read-integrity.ts";
 import type { loadProofGapMove } from "./gap-moves-service.ts";
 import type { loadLedgerMoves, MovePermissions, MoveViewer } from "./ledger-moves.ts";
 
@@ -119,6 +129,90 @@ export interface IdleSessionResult {
   readonly quietMs: number;
 }
 
+interface CeremonyWindowEvent {
+  readonly id: string;
+  readonly seq: number;
+  readonly type: string;
+  readonly object_kind: string | null;
+  readonly object_id: string;
+  readonly object_version: number;
+}
+
+const CONDITIONAL_MATERIALITY_TYPES = new Set([
+  "dead_end.recorded",
+  "problem.statement-reviewed",
+  "problem.statement-revised",
+  "problem.statement-updated",
+]);
+
+/** Historical statement work is classified at publication time, never by the
+ * problem's current status. Unavailable conditional records cannot establish a
+ * process-only window. Read only the bounded source bytes needed to decide. */
+async function readConditionalMateriality(
+  db: D1Database,
+  problemId: string,
+  cursor: number,
+  events: readonly CeremonyWindowEvent[],
+): Promise<Map<string, boolean>> {
+  const conditional = events.filter((event) => CONDITIONAL_MATERIALITY_TYPES.has(event.type));
+  const material = new Map<string, boolean>();
+  if (conditional.length === 0) return material;
+  const result = await db
+    .prepare(
+      `SELECT e.id, e.problem_id, e.seq, p.public_seq, e.payload_sha256,
+         c.payload_sha256 AS content_sha256, c.redacted_at,
+         CASE WHEN length(CAST(c.payload_json AS BLOB)) <= ?
+           THEN c.payload_json ELSE NULL END AS payload_json
+       FROM events e
+       JOIN problems p ON p.id = e.problem_id
+       LEFT JOIN event_content c ON c.event_id = e.id
+       WHERE e.problem_id = ? AND e.seq <= ?
+         AND p.status != 'private-draft'
+         AND e.id IN (${conditional.map(() => "?").join(", ")})
+         AND NOT ${eventContentHiddenSql("e")}`,
+    )
+    .bind(CITATION_EVENT_MAX_BYTES, problemId, cursor, ...conditional.map((event) => event.id))
+    .all<CitationContentRow & { readonly id: string }>();
+  for (const event of conditional) {
+    const rows = (result.results ?? []).filter(
+      (row) => row.id === event.id && row.seq === event.seq,
+    );
+    const row = rows[0];
+    if (rows.length !== 1 || row === undefined) continue;
+    const payload = await verifiedCitationContent(problemId, row);
+    if (!payload) continue;
+    if (event.type === "dead_end.recorded") {
+      material.set(event.id, isObjectLevelEvent({ type: event.type, extract: row.payload_json }));
+    } else if (event.type === "problem.statement-revised") {
+      const parsed = ProblemGovernanceEventSchema.safeParse(payload);
+      if (
+        !parsed.success ||
+        parsed.data.action !== "revise-statement" ||
+        parsed.data.problem.id !== problemId ||
+        parsed.data.problem.current_statement_version !== event.object_version
+      )
+        continue;
+      material.set(
+        event.id,
+        isObjectLevelEvent({ type: event.type, problem_status: parsed.data.previous_status }),
+      );
+    } else if (event.type === "problem.statement-reviewed") {
+      const parsed = ProblemStatementReviewEventSchema.safeParse(payload);
+      if (
+        !parsed.success ||
+        parsed.data.problem_id !== problemId ||
+        parsed.data.statement_version !== event.object_version
+      )
+        continue;
+      material.set(
+        event.id,
+        isObjectLevelEvent({ type: event.type, problem_status: parsed.data.previous_status }),
+      );
+    }
+  }
+  return material;
+}
+
 /**
  * Checks if the recent event window is process-dominated (25+ events with zero
  * object-level increments). If so, the ceremony breaker triggers and names
@@ -134,64 +228,35 @@ export async function checkCeremonyBreaker(
 ): Promise<CeremonyBreakerResult> {
   const eventsResult = await db
     .prepare(
-      `SELECT e.seq, e.type, e.object_kind, e.object_id, e.object_version, ec.payload_json
+      `SELECT e.id, e.seq, e.type, e.object_kind, e.object_id, e.object_version
        FROM events e
-       LEFT JOIN event_content ec ON ec.event_id = e.id
        WHERE e.problem_id = ? AND e.seq <= ?
        ORDER BY e.seq DESC
        LIMIT ?`,
     )
     .bind(problemId, cursor, CEREMONY_BREAKER_EVENT_THRESHOLD)
-    .all<{
-      seq: number;
-      type: string;
-      object_kind: string | null;
-      object_id: string;
-      object_version: number;
-      payload_json: string | null;
-    }>();
+    .all<CeremonyWindowEvent>();
 
   const events = eventsResult.results ?? [];
-  if (events.length < CEREMONY_BREAKER_EVENT_THRESHOLD) {
-    return {
-      active: false,
-      objectEventCountInWindow: events.filter((e) =>
-        isObjectLevelEvent({
-          type: e.type,
-          object_kind: e.object_kind,
-          problem_status: problemStatus,
-          extract: e.payload_json,
-          payload_json: e.payload_json,
-        }),
-      ).length,
-      totalEventsInWindow: events.length,
-      degraded: false,
-      selectedMove: null,
-      oldestNeed: null,
-    };
-  }
-
+  const conditional = await readConditionalMateriality(db, problemId, cursor, events);
   let objectCount = 0;
-  for (const e of events) {
-    if (
-      isObjectLevelEvent({
-        type: e.type,
-        object_kind: e.object_kind,
-        problem_status: problemStatus,
-        extract: e.payload_json,
-        payload_json: e.payload_json,
-      })
-    ) {
+  let unclassified = false;
+  for (const event of events) {
+    if (CONDITIONAL_MATERIALITY_TYPES.has(event.type)) {
+      const material = conditional.get(event.id);
+      if (material === undefined) unclassified = true;
+      else if (material) objectCount++;
+    } else if (isObjectLevelEvent({ type: event.type, object_kind: event.object_kind })) {
       objectCount++;
     }
   }
 
-  if (objectCount > 0) {
+  if (events.length < CEREMONY_BREAKER_EVENT_THRESHOLD || objectCount > 0 || unclassified) {
     return {
       active: false,
       objectEventCountInWindow: objectCount,
       totalEventsInWindow: events.length,
-      degraded: false,
+      degraded: unclassified,
       selectedMove: null,
       oldestNeed: null,
     };
