@@ -821,6 +821,31 @@ export const SponsorWorkshopCursorResponseSchema = z
   .strict();
 export type SponsorWorkshopCursorResponse = z.infer<typeof SponsorWorkshopCursorResponseSchema>;
 
+/** Short-lived (60s TTL), single-use Ed25519 capability ticket bridging
+ * Agora's host-only sponsor cookie to a private workshop room on Stoa (S-6).
+ * The ticket is exchanged in the first WebSocket auth frame, never in a URL. */
+export const SponsorWorkshopRoomTicketRequestSchema = SponsorWorkshopScopeSchema;
+export type SponsorWorkshopRoomTicketRequest = z.infer<
+  typeof SponsorWorkshopRoomTicketRequestSchema
+>;
+export const SPONSOR_WORKSHOP_ROOM_TICKET_MAX_RESPONSE_BYTES = 2048;
+
+export const SponsorWorkshopRoomTicketResponseSchema = z
+  .object({
+    schema: z.literal("https://a.asimposium.org/schemas/sessions.v1.json"),
+    sponsor_id: SponsorIdSchema,
+    problem_id: ProblemIdSchema,
+    fellow_id: FellowIdSchema,
+    ticket: z.string().regex(/^[A-Za-z0-9_-]{32,640}\.[A-Za-z0-9_-]{80,128}$/),
+    expires_at: z.string().datetime(),
+    workshop_cursor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    room_url: z.string().url().max(512),
+  })
+  .strict();
+export type SponsorWorkshopRoomTicketResponse = z.infer<
+  typeof SponsorWorkshopRoomTicketResponseSchema
+>;
+
 /** The directory covers actual private work across every currently owned
  * Fellow, including Fellows without a problem-bound enrollment. It never
  * contains work-product text, CAS keys or public engagement counts. */
@@ -1757,9 +1782,26 @@ export const SynthesizeRequestSchema = z
     omitted: z.array(z.string().min(1).max(2048)).max(1000),
     selection_policy: z.string().min(1).max(4096),
     closing_resolution: ClosingSynthesisDeclarationSchema.optional(),
+    /** Fable §6.1: when true, persists as a private draft pending explicit
+     * steward or authoring-sponsor publication (never emitted to public ledger). */
+    draft: z.boolean().optional(),
   })
   .strict();
 export type SynthesizeRequest = z.infer<typeof SynthesizeRequestSchema>;
+
+/** Synthesis draft creation response when draft: true is requested (Fable §6.1). */
+export const SynthesisDraftResponseSchema = z
+  .object({
+    synthesis_id: z.string().min(1).max(128),
+    problem_id: ProblemIdSchema,
+    state: z.literal("draft"),
+    covers_through: z.number().int().min(0),
+    anchors_count: z.number().int().min(0),
+    dropped_single_author_count: z.number().int().min(0),
+    created_at: z.string().datetime(),
+  })
+  .strict();
+export type SynthesisDraftResponse = z.infer<typeof SynthesisDraftResponseSchema>;
 
 /** Synthesis creation response: 201 Created from POST /v1/sessions/:id/synthesize. */
 export const SynthesizeResponseSchema = z
@@ -1798,6 +1840,8 @@ export const SessionsContractsSchema = z
     sponsor_workshop_view: SponsorWorkshopViewSchema,
     sponsor_workshop_cursor_request: SponsorWorkshopCursorRequestSchema,
     sponsor_workshop_cursor_response: SponsorWorkshopCursorResponseSchema,
+    sponsor_workshop_room_ticket_request: SponsorWorkshopRoomTicketRequestSchema,
+    sponsor_workshop_room_ticket_response: SponsorWorkshopRoomTicketResponseSchema,
     sponsor_workshop_index_request: SponsorWorkshopIndexRequestSchema,
     sponsor_workshop_index_response: SponsorWorkshopIndexResponseSchema,
     sponsor_workshop_mutation_request: SponsorWorkshopMutationRequestSchema,

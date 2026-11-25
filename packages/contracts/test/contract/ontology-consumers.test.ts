@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import ts from "typescript";
 import {
   CLAIM_DISPOSITIONS,
   CLAIM_REVIEW_STATES,
@@ -8,6 +9,7 @@ import {
   CONTRACT_PROBLEM_CODES,
   EvidenceRequestSchema,
   EvidenceResponseSchema,
+  LEDGER_OBJECT_KINDS,
   OPAQUE_PROBLEM_CODES,
   PackProfileSchema,
   PublicClaimStateSchema,
@@ -82,30 +84,11 @@ const GRANDFATHERED_NON_ACTIVE: Readonly<Record<string, ReadonlySet<string>>> = 
   ]),
 };
 
-const CANONICAL_LEDGER_OBJECT_KINDS = [
-  "claim",
-  "hypothesis",
-  "evidence",
-  "review",
-  "proof-gap",
-  "conflict",
-  "dead-end",
-  "citation",
-  "question",
-  "synthesis",
-  "retraction",
-  "relation",
-  "commentary",
-  "statement-review",
-  "result-review",
-  "problem-resolution",
-] as const;
-
 function liveOntologyEnums(): LiveOntologyEnums {
   return {
     claim_kinds: ClaimKindSchema.options,
     workshop_object_kinds: WorkshopPushTypeSchema.options,
-    ledger_object_kinds: CANONICAL_LEDGER_OBJECT_KINDS,
+    ledger_object_kinds: LEDGER_OBJECT_KINDS,
     dispositions: CLAIM_DISPOSITIONS,
     review_states: CLAIM_REVIEW_STATES,
     stale_route_states: STALE_ROUTE_STATES,
@@ -140,6 +123,151 @@ function symbolExistsInSource(source: string, filePath: string, symbol: string):
 }
 
 /**
+ * Extract top-level TypeScript/JavaScript symbol declaration spans from a file
+ * and return the 2-hop same-file call/reference closure starting at `symbol`.
+ * This isolates the exact declared consumer (plus any private helpers or tables
+ * it directly invokes in the same module) so an unrelated symbol in the repo —
+ * or even a different function in the same file — cannot satisfy observation.
+ */
+function buildTsDeclarationMap(source: string, filePath: string): Map<string, string> {
+  const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true);
+  const map = new Map<string, string>();
+  for (const stmt of sf.statements) {
+    if (
+      (ts.isFunctionDeclaration(stmt) ||
+        ts.isClassDeclaration(stmt) ||
+        ts.isInterfaceDeclaration(stmt) ||
+        ts.isTypeAliasDeclaration(stmt) ||
+        ts.isEnumDeclaration(stmt)) &&
+      stmt.name
+    ) {
+      map.set(stmt.name.text, source.slice(stmt.getStart(sf), stmt.getEnd()));
+    } else if (ts.isVariableStatement(stmt)) {
+      for (const decl of stmt.declarationList.declarations) {
+        if (ts.isIdentifier(decl.name)) {
+          map.set(decl.name.text, source.slice(decl.getStart(sf), decl.getEnd()));
+        }
+      }
+    }
+  }
+  return map;
+}
+
+function extractRustSymbolSpan(source: string, symbol: string): string {
+  const escaped = escapeRegex(symbol);
+  const re = new RegExp(
+    `(?:^|\\n)\\s*(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?(?:fn|struct|enum|const|type|trait)\\s+${escaped}\\b`,
+  );
+  const match = re.exec(source);
+  if (!match) return "";
+  const start = match.index;
+  const braceStart = source.indexOf("{", start);
+  if (braceStart === -1) return source.slice(start, start + 512);
+  let depth = 0;
+  for (let i = braceStart; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  return source.slice(start);
+}
+
+const STRICT_LITERAL_CATEGORIES = new Set<keyof LiveOntologyEnums>([
+  "dispositions",
+  "review_states",
+  "stale_route_states",
+  "directive_disclosure_facets",
+  "evidence_classes",
+  "evidence_directions",
+  "evidence_modes",
+]);
+
+const LEDGER_OBJECT_DOMAIN_STEMS: Readonly<Record<string, readonly RegExp[]>> = {
+  claim: [/\bclaims?\b/i],
+  hypothesis: [/\bhypothes(?:is|es)\b/i],
+  evidence: [/\bevidence\b/i],
+  review: [/\breviews?\b/i],
+  "proof-gap": [/\bproof_gaps?\b/i, /\bProofGap/],
+  conflict: [/\bconflicts?\b/i],
+  "dead-end": [/\bdead_ends?\b/i, /\bDeadEnd/],
+  citation: [/\bcitations?\b/i],
+  question: [/\bquestions?\b/i],
+  synthesis: [/\bsynthes(?:is|es)\b/i],
+  retraction: [/\bretract(?:ion|ed)?\b/i],
+  relation: [/\brelations?\b/i],
+  commentary: [/\bcommentar(?:y|ies)\b/i],
+  "statement-review": [/\bstatement[-_]reviews?\b/i, /\bStatementReview/],
+  "result-review": [/\bresult[-_]reviews?\b/i, /\bResultReview/],
+  "problem-resolution": [/\bproblem[-_]resolution\b/i, /\bResolution/],
+};
+
+function hasLiteralOrPropertyKey(closure: string, value: string): boolean {
+  const escaped = escapeRegex(value);
+  const quoted = new RegExp(`["'\`]${escaped}["'\`]`);
+  if (quoted.test(closure)) return true;
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+    const propKey = new RegExp(`(?:^|[{,\\s])${escaped}\\s*:`);
+    if (propKey.test(closure)) return true;
+  }
+  return false;
+}
+
+function symbolObservesOntologyMember(
+  category: keyof LiveOntologyEnums,
+  value: string,
+  relPath: string,
+  symbol: string,
+  closure: string,
+): boolean {
+  if (closure.trim().length === 0) return false;
+  // Direct exact literal or unquoted property key match in the symbol's AST closure.
+  if (hasLiteralOrPropertyKey(closure, value)) return true;
+
+  // Categories where EVERY active consumer MUST branch on or name the exact value.
+  if (STRICT_LITERAL_CATEGORIES.has(category)) {
+    return false;
+  }
+
+  switch (category) {
+    case "claim_kinds":
+      // Generic claim-kind renderers/aggregators must read claim.kind / ClaimKind directly.
+      return /\bClaimKind\b|\bclaim_kind\b|\bclaim\.kind\b/.test(closure);
+    case "workshop_object_kinds":
+      return value === "note" && /\b(?:assessNoteIntent|NoteIntent)\b/.test(closure);
+    case "ledger_object_kinds": {
+      const stems = LEDGER_OBJECT_DOMAIN_STEMS[value];
+      return stems?.some((re) => re.test(closure)) ?? false;
+    }
+    case "novelty_facets":
+      return /\bnovelty\b/.test(closure) && hasLiteralOrPropertyKey(closure, value);
+    case "evidence_kinds":
+      return (
+        /\bEvidenceKind\b/.test(closure) ||
+        /\bevidence\.kind\b/.test(closure) ||
+        (/\bHypothesisEvidenceItemResponse\b/.test(closure) && /\bcontent\.kind\b/.test(closure))
+      );
+    case "pack_profiles":
+      if (value === "literature") {
+        return /\bLITERATURE_PACK_NOTICE\b/.test(closure) || /literature:/.test(closure);
+      }
+      if (relPath === "cli/src/session_reads.rs" && symbol === "read_path") {
+        return /append_pair\("profile",\s*profile\)/.test(closure);
+      }
+      return false;
+    case "problem_codes":
+      // Generic RFC 7807 envelope validators consume ProblemDocumentSchema / ProblemEnvelope.
+      return /\b(?:ProblemDocumentSchema|ProblemEnvelope|problemEnvelope|ProblemCode)\b/.test(
+        closure,
+      );
+    default:
+      return false;
+  }
+}
+
+/**
  * Pure audit validator used by both the live CI drift gate and planted
  * should-fail controls. Returns a list of machine-readable violations (empty
  * iff 100% of exported ontology entries are accounted for and bound to live
@@ -152,6 +280,7 @@ export function validateOntologyConsumerManifest(
 ): readonly string[] {
   const errors: string[] = [];
   const fileCache = new Map<string, string>();
+  const declMapCache = new Map<string, Map<string, string>>();
   const readCached = (relPath: string): string | null => {
     const existing = fileCache.get(relPath);
     if (existing !== undefined) return existing;
@@ -160,6 +289,30 @@ export function validateOntologyConsumerManifest(
     const text = readFileSync(abs, "utf8");
     fileCache.set(relPath, text);
     return text;
+  };
+  const extractSymbolClosure = (relPath: string, symbol: string, source: string): string => {
+    if (relPath.endsWith(".rs")) return extractRustSymbolSpan(source, symbol);
+    let decls = declMapCache.get(relPath);
+    if (decls === undefined) {
+      decls = buildTsDeclarationMap(source, relPath);
+      declMapCache.set(relPath, decls);
+    }
+    const visited = new Set<string>();
+    const parts: string[] = [];
+    const expand = (name: string, depth: number) => {
+      if (visited.has(name) || depth > 2) return;
+      const body = decls?.get(name);
+      if (body === undefined) return;
+      visited.add(name);
+      parts.push(body);
+      for (const candidate of decls?.keys() ?? []) {
+        if (!visited.has(candidate) && new RegExp(`\\b${escapeRegex(candidate)}\\b`).test(body)) {
+          expand(candidate, depth + 1);
+        }
+      }
+    };
+    expand(symbol, 0);
+    return parts.join("\n");
   };
 
   const validStatuses = new Set<EntryStatus>(["active", "tier-2-deferred", "retire-candidate"]);
@@ -248,7 +401,18 @@ export function validateOntologyConsumerManifest(
         if (entry.consumer === null) {
           errors.push(`ACTIVE_MISSING_CONSUMER:${category}:${entry.value} (Rule A10 / R-22)`);
         } else {
-          verifyBinding(entry.consumer, "consumer", category, entry.value);
+          const consumerSource = verifyBinding(entry.consumer, "consumer", category, entry.value);
+          if (consumerSource !== null) {
+            const colon = entry.consumer.indexOf(":");
+            const relPath = entry.consumer.slice(0, colon);
+            const symbol = entry.consumer.slice(colon + 1);
+            const closure = extractSymbolClosure(relPath, symbol, consumerSource);
+            if (!symbolObservesOntologyMember(category, entry.value, relPath, symbol, closure)) {
+              errors.push(
+                `CONSUMER_DOES_NOT_OBSERVE_MEMBER:${category}:${entry.value}:${entry.consumer} (Rule A10 / R-22)`,
+              );
+            }
+          }
         }
       } else {
         const allowed = GRANDFATHERED_NON_ACTIVE[category];
@@ -381,6 +545,63 @@ describe("W1 Ontology Consumer Audit (Fable Rev 3.1 §17.2 / Rule A10 / R-22)", 
     const errors = validateOntologyConsumerManifest(mutatedManifest, mutatedEnums, REPO_ROOT);
     expect(errors).toContain(
       "NEW_UNCONSUMED_SCHEMA_CEREMONY:pack_profiles:ceremonial-profile:retire-candidate (Rule A10 / R-22)",
+    );
+  });
+
+  test("SHOULD-FAIL CONTROL 6: exact 83c75754 unrelated-consumer plant (EnrollmentService for definition) fails closed", () => {
+    const mutated: OntologyConsumerManifest = {
+      ...manifest,
+      categories: {
+        ...manifest.categories,
+        claim_kinds: (manifest.categories.claim_kinds ?? []).map((entry) =>
+          entry.value === "definition"
+            ? { ...entry, consumer: "apps/wire/src/enrollment/service.ts:EnrollmentService" }
+            : entry,
+        ),
+      },
+    };
+    const errors = validateOntologyConsumerManifest(mutated, liveEnums, REPO_ROOT);
+    expect(errors).toContain(
+      "CONSUMER_DOES_NOT_OBSERVE_MEMBER:claim_kinds:definition:apps/wire/src/enrollment/service.ts:EnrollmentService (Rule A10 / R-22)",
+    );
+  });
+
+  test("SHOULD-FAIL CONTROL 7: wrong function in the right module (rankReviewQueue instead of reviewNeed for dispositions.open) fails closed", () => {
+    const mutated: OntologyConsumerManifest = {
+      ...manifest,
+      categories: {
+        ...manifest.categories,
+        dispositions: (manifest.categories.dispositions ?? []).map((entry) =>
+          entry.value === "open"
+            ? {
+                ...entry,
+                consumer: "apps/wire/src/discovery/review-queue-selection.ts:rankReviewQueue",
+              }
+            : entry,
+        ),
+      },
+    };
+    const errors = validateOntologyConsumerManifest(mutated, liveEnums, REPO_ROOT);
+    expect(errors).toContain(
+      "CONSUMER_DOES_NOT_OBSERVE_MEMBER:dispositions:open:apps/wire/src/discovery/review-queue-selection.ts:rankReviewQueue (Rule A10 / R-22)",
+    );
+  });
+
+  test("SHOULD-FAIL CONTROL 8: unrelated consumer bound to an active RFC 7807 problem code fails closed", () => {
+    const mutated: OntologyConsumerManifest = {
+      ...manifest,
+      categories: {
+        ...manifest.categories,
+        problem_codes: (manifest.categories.problem_codes ?? []).map((entry) =>
+          entry.value === "MISSING_FALSIFIER"
+            ? { ...entry, consumer: "apps/wire/src/enrollment/service.ts:EnrollmentService" }
+            : entry,
+        ),
+      },
+    };
+    const errors = validateOntologyConsumerManifest(mutated, liveEnums, REPO_ROOT);
+    expect(errors).toContain(
+      "CONSUMER_DOES_NOT_OBSERVE_MEMBER:problem_codes:MISSING_FALSIFIER:apps/wire/src/enrollment/service.ts:EnrollmentService (Rule A10 / R-22)",
     );
   });
 });

@@ -60,14 +60,21 @@ for (const path of ["environments/local.wrangler.toml",
   });
 }
 
-// The scaffold config and the hand-resolved production deploy overlay keep rooms
-// unbound until a staging deploy proves room delivery (asimposiumorg-rs5n, kzq).
+// Both the base scaffold config and the production deploy overlay now bind
+// HeraldRoom alongside KraterOutboxDrainer (and production binds Workers AI),
+// matching infra/environments.toml with zero silent omissions.
 for (const path of ["wrangler.toml", "environments/production.deploy.wrangler.toml"]) {
-  test(`${path} enables incoming request cancellation without binding rooms before staging proof`, () => {
+  test(`${path} enables incoming request cancellation and binds exported rooms`, () => {
     const config = Bun.TOML.parse(readFileSync(new URL(path, import.meta.url), "utf8"));
     assert.deepEqual(config.compatibility_flags, ["nodejs_compat", "enable_request_signal"]);
     assert.equal(config.workers_dev, false);
-    assert.equal(config.durable_objects.bindings.some((binding) => binding.class_name === "HeraldRoom"), false);
+    assert.equal(
+      config.durable_objects.bindings.some(
+        (binding) => binding.name === "HERALD_ROOMS" && binding.class_name === "HeraldRoom",
+      ),
+      true,
+    );
+    assert.equal(config.exports?.HeraldRoom?.type, "durable-object");
     if (path === "environments/production.deploy.wrangler.toml") {
       assert.equal(config.ai?.binding, "AI");
     }

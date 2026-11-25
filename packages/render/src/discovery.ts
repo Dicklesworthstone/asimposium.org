@@ -434,6 +434,27 @@ export function renderFellowCardMarkdown(
       `- **Confirmations retaining support:** ${data.calibration.reviews_verified_survival} independent confirmations with current scientific support (a count, not an accuracy rate)`,
     );
   }
+  if (data.calibration.force_note_count !== undefined) {
+    lines.push(
+      `- **Workshop \`force_note\` Overrides:** ${data.calibration.force_note_count} *(recorded count; private drafts omitted)*`,
+    );
+  }
+  if (data.calibration.claims_by_kind_and_disposition) {
+    const formatBucket = (counts: Record<string, number>) => {
+      const nonZero = Object.entries(counts)
+        .filter(([, count]) => count > 0)
+        .map(([disp, count]) => `${disp}: ${count}`);
+      return nonZero.length > 0 ? nonZero.join(", ") : "none";
+    };
+    const byKind = data.calibration.claims_by_kind_and_disposition;
+    lines.push(
+      `- **Conjectures by current disposition:** ${formatBucket(byKind.conjecture)}`,
+      `- **Theorem-attempts by current disposition:** ${formatBucket(byKind.theorem_attempt)}`,
+      `- **Other claims by current disposition:** ${formatBucket(byKind.other)}`,
+    );
+  } else if (data.calibration.claims_by_kind_and_disposition === null) {
+    lines.push("- **Claims by kind and disposition:** unavailable");
+  }
   lines.push("");
 
   lines.push("### Promoted Contributions (Immutable Historical Attribution)");
@@ -565,6 +586,27 @@ export function renderFellowCardHtmlFragment(
     lines.push(
       `      <li>Confirmations retaining support: ${data.calibration.reviews_verified_survival} independent confirmations with current scientific support (a count, not an accuracy rate)</li>`,
     );
+  }
+  if (data.calibration.force_note_count !== undefined) {
+    lines.push(
+      `      <li>Workshop <code>force_note</code> Overrides: ${data.calibration.force_note_count}</li>`,
+    );
+  }
+  if (data.calibration.claims_by_kind_and_disposition) {
+    const formatBucket = (counts: Record<string, number>) => {
+      const nonZero = Object.entries(counts)
+        .filter(([, count]) => count > 0)
+        .map(([disp, count]) => `${escapeHtml(disp)}: ${count}`);
+      return nonZero.length > 0 ? nonZero.join(", ") : "none";
+    };
+    const byKind = data.calibration.claims_by_kind_and_disposition;
+    lines.push(
+      `      <li>Conjectures by current disposition: ${formatBucket(byKind.conjecture)}</li>`,
+      `      <li>Theorem-attempts by current disposition: ${formatBucket(byKind.theorem_attempt)}</li>`,
+      `      <li>Other claims by current disposition: ${formatBucket(byKind.other)}</li>`,
+    );
+  } else if (data.calibration.claims_by_kind_and_disposition === null) {
+    lines.push("      <li>Claims by kind and disposition: unavailable</li>");
   }
   lines.push("    </ul>");
   lines.push("  </section>");

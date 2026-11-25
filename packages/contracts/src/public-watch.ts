@@ -60,7 +60,7 @@ function hasControlCharacters(value: string): boolean {
 /** Verify a public watch path and classify its target kind.
  * Queries remain byte-for-byte intact: historical pins and opaque pagination
  * must not be silently converted into a live head by the watcher. */
-export function publicWatchPath(path: string): "cursor" | "face" | undefined {
+export function publicWatchPath(path: string): "cursor" | "face" | "sse" | undefined {
   if (path.length > 2_048 || !path.startsWith("/") || path.startsWith("//")) return undefined;
   let url: URL;
   let decoded: string;
@@ -87,6 +87,12 @@ export function publicWatchPath(path: string): "cursor" | "face" | undefined {
     return undefined;
   }
   if (decoded === "/cursor") return entries.length === 0 ? "cursor" : undefined;
+  const roomSse = /^\/p\/([^/]+)\/room\/sse$/.exec(decoded);
+  if (roomSse && PROBLEM.test(roomSse[1] ?? "")) {
+    const since = query.get("since");
+    if (since !== null && parsePublicWatchCursor(since) === undefined) return undefined;
+    return entries.every(([key]) => key === "since") ? "sse" : undefined;
+  }
   let permitted: readonly string[];
   const problem = /^\/p\/([^/]+)\.json$/.exec(decoded);
   const claim = /^\/p\/([^/]+)\/claims\/C-([1-9][0-9]*)(?:@([1-9][0-9]*))?\.json$/.exec(decoded);

@@ -13,7 +13,11 @@ import {
   renderEnvironment,
   stoaOriginProjection,
 } from "./generate-wrangler.mjs";
-import { validateEnvironments } from "./validate-environments.mjs";
+import {
+  EnvironmentValidationError,
+  validateEnvironments,
+  validateProductionDeployOverlay,
+} from "./validate-environments.mjs";
 
 /**
  * Generated-configuration contract.
@@ -279,6 +283,27 @@ const cases = [
         (candidate) => candidate.name === report.environments.production.outbox.binding,
       );
       assert.equal(binding.class_name, report.environments.production.outbox.class_name);
+      const heraldBinding = deploy.durable_objects.bindings.find(
+        (candidate) => candidate.name === report.environments.production.durable_objects.binding,
+      );
+      assert.equal(
+        heraldBinding?.class_name,
+        report.environments.production.durable_objects.class_name,
+      );
+      assert.deepEqual(deploy.exports[report.environments.production.durable_objects.class_name], {
+        type: "durable-object",
+        storage: "sqlite",
+      });
+      assert.equal(deploy.ai?.binding, report.environments.production.ai?.binding);
+      const verifiedOverlay = validateProductionDeployOverlay(repositoryRoot, report);
+      assert.deepEqual(verifiedOverlay.verified_bindings, [
+        "AI",
+        "ARTIFACTS",
+        "DB",
+        "HERALD_ROOMS",
+        "KRATER_OUTBOX",
+        "PUBLIC_ARTIFACTS",
+      ]);
       assert.deepEqual(deploy.triggers.crons, [report.policy.outbox_cron]);
       assert.deepEqual(Object.keys(deploy.triggers), ["crons"]);
       assert.deepEqual(deploy.routes, [{ pattern: "a.asimposium.org", custom_domain: true }]);
@@ -586,6 +611,36 @@ const cases = [
       }
       const result = reconcile(root, files);
       assert.deepEqual(result.missing, [first]);
+    },
+  },
+  {
+    name: "PLANTED-production-deploy-overlay-missing-ai-or-herald-fails-closed",
+    execute() {
+      const overlayText = readFileSync(
+        join(repositoryRoot, "infra/environments/production.deploy.wrangler.toml"),
+        "utf8",
+      );
+      for (const [label, mutated] of [
+        ["missing-ai", overlayText.replace('\n[ai]\nbinding = "AI"\n', "\n")],
+        [
+          "missing-herald",
+          overlayText.replace(
+            '\n[[durable_objects.bindings]]\nname = "HERALD_ROOMS"\nclass_name = "HeraldRoom"\n',
+            "\n",
+          ),
+        ],
+      ]) {
+        const root = join(space, `overlay-${label}`);
+        mkdirSync(join(root, GENERATED_DIRECTORY), { recursive: true });
+        writeFileSync(join(root, `${GENERATED_DIRECTORY}/${DEPLOY_OVERLAY_NAME}`), mutated, "utf8");
+        assert.throws(
+          () => validateProductionDeployOverlay(root, report),
+          (error) =>
+            error instanceof EnvironmentValidationError &&
+            error.code === "DEPLOY_OVERLAY_MISSING_BINDING",
+          label,
+        );
+      }
     },
   },
   {

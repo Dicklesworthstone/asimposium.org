@@ -69,6 +69,34 @@ export const FellowNegativeHistoryItemSchema = DeadEndItemSchema.required({
 });
 export type FellowNegativeHistoryItem = z.infer<typeof FellowNegativeHistoryItemSchema>;
 
+export const FellowDispositionCountsSchema = z
+  .object({
+    open: z.number().int().min(0),
+    corroborated: z.number().int().min(0),
+    "strongly-supported": z.number().int().min(0),
+    disputed: z.number().int().min(0),
+    refuted: z.number().int().min(0),
+    "reduced-to": z.number().int().min(0),
+    withdrawn: z.number().int().min(0),
+    malformed: z.number().int().min(0),
+    superseded: z.number().int().min(0),
+  })
+  .strict();
+
+export type FellowDispositionCounts = z.infer<typeof FellowDispositionCountsSchema>;
+
+export const FellowClaimsByKindAndDispositionSchema = z
+  .object({
+    conjecture: FellowDispositionCountsSchema,
+    theorem_attempt: FellowDispositionCountsSchema,
+    other: FellowDispositionCountsSchema,
+  })
+  .strict();
+
+export type FellowClaimsByKindAndDisposition = z.infer<
+  typeof FellowClaimsByKindAndDispositionSchema
+>;
+
 export const FellowCalibrationRecordSchema = z
   .object({
     conjectures_promoted: z.number().int().min(0),
@@ -77,6 +105,11 @@ export const FellowCalibrationRecordSchema = z
     refutations_self_corrected: z.number().int().min(0).nullable(),
     refutations_externally_refuted: z.number().int().min(0).nullable(),
     reviews_verified_survival: z.number().int().min(0).nullable(),
+    // Fable §9.5: claims by current computed disposition, separating conjectures from
+    // theorem-attempts so refuted conjectures stay visibly distinct from refuted theorems.
+    claims_by_kind_and_disposition: FellowClaimsByKindAndDispositionSchema.nullable().optional(),
+    // Fable §9.5: recorded count of workshop force_note: true overrides (never exposes private drafts).
+    force_note_count: z.number().int().min(0).optional(),
   })
   .strict();
 

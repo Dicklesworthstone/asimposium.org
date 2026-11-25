@@ -1210,6 +1210,160 @@ export function validateEnvironments(
   };
 }
 
+/**
+ * Reconcile the checked-in production deploy overlay against the validated
+ * topology so `[ai]`, `HERALD_ROOMS`, `KRATER_OUTBOX`, D1, R2, origins, and
+ * compatibility flags can never silently drift or disappear from the file a
+ * production deploy actually reads (bead asimposiumorg-rc-wrangler-deploy-bindings-k9mc).
+ */
+export function validateProductionDeployOverlay(
+  root,
+  report,
+  overlayWorkspacePath = "infra/environments/production.deploy.wrangler.toml",
+) {
+  const overlayPath = resolve(root, overlayWorkspacePath);
+  if (!existsSync(overlayPath)) {
+    fail("MISSING_DEPLOY_OVERLAY", `${overlayWorkspacePath} is missing.`);
+  }
+  let parsed;
+  try {
+    parsed = Bun.TOML.parse(readFileSync(overlayPath, "utf8"));
+  } catch {
+    fail("MALFORMED_DEPLOY_OVERLAY", `${overlayWorkspacePath} is not valid TOML.`);
+  }
+  if (!isRecord(parsed)) {
+    fail("MALFORMED_DEPLOY_OVERLAY", `${overlayWorkspacePath} must parse to a TOML table.`);
+  }
+  const production = report.environments.production;
+  const policy = report.policy;
+  if (parsed.name !== production.durable_objects.script_namespace) {
+    fail(
+      "DEPLOY_OVERLAY_DRIFT",
+      `${overlayWorkspacePath} name must match production script_namespace (${production.durable_objects.script_namespace}).`,
+    );
+  }
+  if (parsed.workers_dev !== false) {
+    fail("DEPLOY_OVERLAY_DRIFT", `${overlayWorkspacePath} must set workers_dev = false.`);
+  }
+  const flags = parsed.compatibility_flags;
+  if (
+    !Array.isArray(flags) ||
+    flags.length !== 2 ||
+    flags[0] !== "nodejs_compat" ||
+    flags[1] !== "enable_request_signal"
+  ) {
+    fail(
+      "DEPLOY_OVERLAY_DRIFT",
+      `${overlayWorkspacePath} must set compatibility_flags = ["nodejs_compat", "enable_request_signal"].`,
+    );
+  }
+  const crons = parsed.triggers?.crons;
+  if (!Array.isArray(crons) || crons.length !== 1 || crons[0] !== policy.outbox_cron) {
+    fail(
+      "DEPLOY_OVERLAY_DRIFT",
+      `${overlayWorkspacePath} triggers.crons must match policy.outbox_cron (${policy.outbox_cron}).`,
+    );
+  }
+  const d1 = Array.isArray(parsed.d1_databases) ? parsed.d1_databases[0] : undefined;
+  if (
+    !isRecord(d1) ||
+    parsed.d1_databases.length !== 1 ||
+    d1.binding !== production.d1.binding ||
+    d1.database_name !== production.d1.database_name
+  ) {
+    fail(
+      "DEPLOY_OVERLAY_MISSING_BINDING",
+      `${overlayWorkspacePath} must bind D1 ${production.d1.binding} (${production.d1.database_name}).`,
+    );
+  }
+  if (
+    typeof d1.database_id !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(d1.database_id) ||
+    d1.database_id === "00000000-0000-0000-0000-000000000000"
+  ) {
+    fail(
+      "DEPLOY_OVERLAY_DRIFT",
+      `${overlayWorkspacePath} must carry a concrete production D1 database UUID.`,
+    );
+  }
+
+  const verifiedBindings = [d1.binding];
+  const r2Buckets = Array.isArray(parsed.r2_buckets) ? parsed.r2_buckets : [];
+  for (const expected of production.r2) {
+    const match = r2Buckets.find(
+      (candidate) =>
+        isRecord(candidate) &&
+        candidate.binding === expected.binding &&
+        candidate.bucket_name === expected.bucket_name,
+    );
+    if (!match) {
+      fail(
+        "DEPLOY_OVERLAY_MISSING_BINDING",
+        `${overlayWorkspacePath} must bind R2 ${expected.binding} (${expected.bucket_name}).`,
+      );
+    }
+    verifiedBindings.push(expected.binding);
+  }
+
+  const deferred = new Set(policy.deferred_bindings);
+  const doBindings = Array.isArray(parsed.durable_objects?.bindings)
+    ? parsed.durable_objects.bindings
+    : [];
+  const exportsTable = isRecord(parsed.exports) ? parsed.exports : {};
+  for (const expected of [production.durable_objects, production.outbox]) {
+    if (deferred.has(expected.binding)) continue;
+    const match = doBindings.find(
+      (candidate) =>
+        isRecord(candidate) &&
+        candidate.name === expected.binding &&
+        candidate.class_name === expected.class_name,
+    );
+    if (!match) {
+      fail(
+        "DEPLOY_OVERLAY_MISSING_BINDING",
+        `${overlayWorkspacePath} is missing required Durable Object binding ${expected.binding} (${expected.class_name}).`,
+      );
+    }
+    const exportEntry = exportsTable[expected.class_name];
+    if (
+      !isRecord(exportEntry) ||
+      exportEntry.type !== "durable-object" ||
+      exportEntry.storage !== expected.storage
+    ) {
+      fail(
+        "DEPLOY_OVERLAY_MISSING_BINDING",
+        `${overlayWorkspacePath} is missing matching [exports.${expected.class_name}] (storage = ${expected.storage}).`,
+      );
+    }
+    verifiedBindings.push(expected.binding);
+  }
+
+  if (production.ai) {
+    if (!isRecord(parsed.ai) || parsed.ai.binding !== production.ai.binding) {
+      fail(
+        "DEPLOY_OVERLAY_MISSING_BINDING",
+        `${overlayWorkspacePath} is missing required Workers AI binding [ai] binding = "${production.ai.binding}".`,
+      );
+    }
+    verifiedBindings.push(production.ai.binding);
+  }
+
+  if (
+    parsed.vars?.STOA_ORIGIN !== production.worker_origin ||
+    parsed.vars?.AGORA_ORIGIN !== production.agora_origin
+  ) {
+    fail(
+      "DEPLOY_OVERLAY_DRIFT",
+      `${overlayWorkspacePath} vars STOA_ORIGIN / AGORA_ORIGIN must match production topology.`,
+    );
+  }
+
+  return {
+    path: overlayWorkspacePath,
+    verified_bindings: verifiedBindings.sort(),
+  };
+}
+
 /** The environment a caller may act on, or a refusal. Selection is explicit. */
 export function selectEnvironment(report, requested) {
   if (requested === undefined || requested === "") {

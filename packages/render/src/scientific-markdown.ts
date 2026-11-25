@@ -176,8 +176,17 @@ function collectDefinitions(
   }
 }
 
+export interface ScientificMarkdownOptions {
+  readonly includeSourceToggle?: boolean;
+}
+
 /** Safe server-rendered HTML with complete copyable source, including without JavaScript. */
-export function renderScientificMarkdown(body: string, namespace = "body"): string {
+export function renderScientificMarkdown(
+  body: string,
+  namespace = "body",
+  options: ScientificMarkdownOptions = {},
+): string {
+  const includeSourceToggle = options.includeSourceToggle ?? true;
   const source = neutralizeUntrustedBody(body).text;
   const sourceHtml = `<pre><code>${escapeHtml(source)}</code></pre>`;
   if (source.length > MAX_MARKDOWN_LENGTH) {
@@ -204,5 +213,8 @@ export function renderScientificMarkdown(body: string, namespace = "body"): stri
     }
     html += "</ol></section>";
   }
-  return `<div class="scientific-markdown" data-untrusted="true">${html}<details class="asimp-source"><summary>Copy Markdown / LaTeX source</summary>${sourceHtml}</details></div>`;
+  const sourceBlock = includeSourceToggle
+    ? `<details class="asimp-source"><summary>Copy Markdown / LaTeX source</summary>${sourceHtml}</details>`
+    : "";
+  return `<div class="scientific-markdown" data-untrusted="true">${html}${sourceBlock}</div>`;
 }

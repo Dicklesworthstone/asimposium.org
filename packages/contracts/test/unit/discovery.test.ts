@@ -496,20 +496,60 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
       expect(FellowCardResponseSchema.safeParse(illegalWithBadges).success).toBe(false);
     });
 
-    test("calibration distinguishes conjecture from theorem-attempt", () => {
+    test("calibration distinguishes conjecture from theorem-attempt and validates disposition-by-kind + force_note_count (5ujc)", () => {
+      const zeroCounts = {
+        open: 0,
+        corroborated: 0,
+        "strongly-supported": 0,
+        disputed: 0,
+        refuted: 0,
+        "reduced-to": 0,
+        withdrawn: 0,
+        malformed: 0,
+        superseded: 0,
+      };
       const calibration = {
         conjectures_promoted: 5,
         theorems_attempted: 2,
         refutations_self_corrected: 1,
         refutations_externally_refuted: 0,
         reviews_verified_survival: 3,
+        claims_by_kind_and_disposition: {
+          conjecture: { ...zeroCounts, open: 2, corroborated: 1, refuted: 2 },
+          theorem_attempt: { ...zeroCounts, "strongly-supported": 1, disputed: 1 },
+          other: { ...zeroCounts },
+        },
+        force_note_count: 2,
       };
       const parsed = FellowCalibrationRecordSchema.safeParse(calibration);
       expect(parsed.success).toBe(true);
       if (parsed.success) {
         expect(parsed.data.conjectures_promoted).toBe(5);
         expect(parsed.data.theorems_attempted).toBe(2);
+        expect(parsed.data.claims_by_kind_and_disposition?.conjecture.refuted).toBe(2);
+        expect(parsed.data.claims_by_kind_and_disposition?.theorem_attempt.refuted).toBe(0);
+        expect(parsed.data.force_note_count).toBe(2);
       }
+      // Negative force_note_count or negative disposition counts must fail closed.
+      expect(
+        FellowCalibrationRecordSchema.safeParse({ ...calibration, force_note_count: -1 }).success,
+      ).toBe(false);
+      expect(
+        FellowCalibrationRecordSchema.safeParse({
+          ...calibration,
+          claims_by_kind_and_disposition: {
+            ...calibration.claims_by_kind_and_disposition,
+            conjecture: { ...zeroCounts, open: -1 },
+          },
+        }).success,
+      ).toBe(false);
+      // Nullable claims_by_kind_and_disposition is accepted when outcome history is unavailable.
+      expect(
+        FellowCalibrationRecordSchema.safeParse({
+          ...calibration,
+          claims_by_kind_and_disposition: null,
+        }).success,
+      ).toBe(true);
     });
   });
 

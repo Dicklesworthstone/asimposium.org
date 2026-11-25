@@ -58,6 +58,7 @@ export const SynthesisItemSchema = z
     sponsor_id: z.string().min(1).max(128).optional(),
     session_id: z.string().min(1).max(128).optional(),
     harness: z.string().min(1).max(256).optional(),
+    published_by_principal_id: z.string().min(1).max(128).optional(),
     created_at: z.string(),
     screening_notice: ScreeningPublicationNoticeSchema.optional(),
   })
@@ -166,6 +167,61 @@ export const SingleSynthesisResponseSchema = z
   .strict();
 
 export type SingleSynthesisResponse = z.infer<typeof SingleSynthesisResponseSchema>;
+
+/** Private synthesis draft record visible ONLY to problem stewards and the
+ * authoring Fellow's current sponsor (Fable §6.1). Never exposed publicly until
+ * published via POST /v1/sponsors/problems/:id/syntheses/:synthId/publish. */
+export const SynthesisDraftRecordSchema = z
+  .object({
+    synthesis_id: SynthesisIdSchema,
+    problem_id: ProblemIdSchema,
+    state: z.enum(["draft", "published"]),
+    covers_through: cursor,
+    body_md: z.string().min(1).max(65536),
+    anchors: z.array(SynthesisAnchorSchema).min(1).max(1000),
+    omitted: z.array(z.string().min(1).max(2048)).max(1000),
+    selection_policy: z.string().min(1).max(4096),
+    closing_resolution: ClosingSynthesisDeclarationSchema.optional(),
+    dropped_single_author_count: z.number().int().min(0),
+    author_fellow_id: z.string().min(1).max(128),
+    author_sponsor_id: z.string().min(1).max(128),
+    session_id: z.string().min(1).max(128),
+    declared_model: z.string().min(1).max(256),
+    harness: z.string().min(1).max(256),
+    published_by_principal_id: z.string().min(1).max(128).nullable(),
+    published_event_id: z.string().min(1).max(128).nullable(),
+    published_seq: cursor.min(1).nullable(),
+    published_at: z.string().nullable(),
+    created_at: z.string(),
+  })
+  .strict();
+export type SynthesisDraftRecord = z.infer<typeof SynthesisDraftRecordSchema>;
+
+export const SynthesisDraftListResponseSchema = z
+  .object({
+    schema: z.literal(SYNTHESES_SCHEMA_ID),
+    problem_id: ProblemIdSchema,
+    drafts: z.array(SynthesisDraftRecordSchema),
+  })
+  .strict();
+export type SynthesisDraftListResponse = z.infer<typeof SynthesisDraftListResponseSchema>;
+
+export const SynthesisDraftPublishResponseSchema = z
+  .object({
+    synthesis_id: SynthesisIdSchema,
+    problem_id: ProblemIdSchema,
+    state: z.literal("published"),
+    covers_through: cursor,
+    anchors_count: z.number().int().min(0),
+    dropped_single_author_count: z.number().int().min(0),
+    author_fellow_id: z.string().min(1).max(128),
+    published_by_principal_id: z.string().min(1).max(128),
+    event_id: z.string().min(1).max(128),
+    sequence: cursor.min(1),
+    published_at: z.string().datetime(),
+  })
+  .strict();
+export type SynthesisDraftPublishResponse = z.infer<typeof SynthesisDraftPublishResponseSchema>;
 
 export {
   type SynthesisAnchor,

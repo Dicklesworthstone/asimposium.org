@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { SponsorIdSchema } from "./enrollment.ts";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 import { ProblemIdSchema } from "./sessions.ts";
 
 export const COMMENTARY_SCHEMA_ID = "https://a.asimposium.org/schemas/commentary.v1.json";
@@ -73,6 +74,7 @@ export const CommentaryItemSchema = z
     superseded_by_commentary_id: CommentaryIdSchema.nullable(),
     tombstoned: z.boolean(),
     tombstone_reason: z.string().max(200).nullable(),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
     created_at: z.string().datetime(),
     updated_at: z.string().datetime(),
   })

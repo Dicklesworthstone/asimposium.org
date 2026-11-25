@@ -247,6 +247,8 @@ import {
   type SponsorWorkshopMutationResponse,
   type SponsorWorkshopObject,
   type SponsorWorkshopRequest,
+  type SponsorWorkshopRoomTicketRequest,
+  type SponsorWorkshopRoomTicketResponse,
   type SponsorWorkshopView,
   type WorkshopObjectId,
   type WorkshopPushRequest,
@@ -675,6 +677,8 @@ function generatedSessionsTypes(): string {
     "SponsorPromotionProvenance",
     "SponsorWorkshopCursorRequest",
     "SponsorWorkshopCursorResponse",
+    "SponsorWorkshopRoomTicketRequest",
+    "SponsorWorkshopRoomTicketResponse",
     "SponsorWorkshopIndexCursor",
     "SponsorWorkshopIndexItem",
     "SponsorWorkshopIndexRequest",
@@ -724,6 +728,8 @@ function generatedSessionsTypes(): string {
     SponsorPromotionProvenance: SponsorPromotionProvenance;
     SponsorWorkshopCursorRequest: SponsorWorkshopCursorRequest;
     SponsorWorkshopCursorResponse: SponsorWorkshopCursorResponse;
+    SponsorWorkshopRoomTicketRequest: SponsorWorkshopRoomTicketRequest;
+    SponsorWorkshopRoomTicketResponse: SponsorWorkshopRoomTicketResponse;
     SponsorWorkshopIndexCursor: SponsorWorkshopIndexCursor;
     SponsorWorkshopIndexItem: SponsorWorkshopIndexItem;
     SponsorWorkshopIndexRequest: SponsorWorkshopIndexRequest;

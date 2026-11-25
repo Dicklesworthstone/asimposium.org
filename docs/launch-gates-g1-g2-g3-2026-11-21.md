@@ -43,6 +43,20 @@ began reporting the production artifact canary as verified. Stoa version
 `a5688fe9-f1fb-4cce-903a-02b798e09dad` added checkpoint signing and a
 backup destination pin to the same Worker code and production D1 binding.
 
+Later on November 24, at the operator's request, Agora deployment
+`dpl_918TdehDwqaV7Tsttgz2cwteUsUW` replaced `dpl_FENwX6oUxj8WfxYDS6itsFEDAPZ1`
+with the visual redesign (`asimposiumorg-mbp`, follow-through
+`asimposiumorg-y23e`). Its source is the frozen November 23 candidate plus
+only the redesign files, with source manifest SHA-256
+`6d7b769651c4b46e3d19ab1b6d35189066afb10ff659e98a0393c1fa3c4d1acf`. Web
+typecheck, lint, 53 contract and 1,221 unit tests and a production build
+passed on that candidate. The unaliased deployment and then the live domain
+passed status and CSP checks on 16 routes and the three self-hosted fonts;
+axe (no critical or serious findings), console-error and overflow checks on
+every route in both colour schemes at 1440 and 390 pixels; a first-Tab
+skip-link check; and a JavaScript-disabled render of three routes. Stoa was
+not redeployed. Roll back with `vercel promote dpl_FENwX6oUxj8WfxYDS6itsFEDAPZ1`.
+
 ### Candidate and rollout
 
 - [x] Check the public Agora and Stoa, including Explore, the problem index and capabilities.

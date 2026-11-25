@@ -33,6 +33,27 @@ import {
  * whitespace, and control characters, so a row cannot escape its code span,
  * gain listing lines, or forge renderer structure (asimposiumorg-gfbc).
  */
+export const LEDGER_OBJECT_KINDS = [
+  "claim",
+  "hypothesis",
+  "evidence",
+  "review",
+  "proof-gap",
+  "conflict",
+  "dead-end",
+  "citation",
+  "question",
+  "synthesis",
+  "retraction",
+  "relation",
+  "commentary",
+  "statement-review",
+  "result-review",
+  "problem-resolution",
+] as const;
+export const LedgerObjectKindSchema = z.enum(LEDGER_OBJECT_KINDS);
+export type LedgerObjectKind = z.infer<typeof LedgerObjectKindSchema>;
+
 const PROBLEM_INDEX_ID_PATTERN = PUBLIC_LEDGER_PROBLEM_ID_PATTERN;
 
 /**

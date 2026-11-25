@@ -36,6 +36,7 @@
     "e2e:agora-local": "node e2e/playwright/agora-local-lane.mjs --build",
     "smoke:gallery": "bash scripts/smoke-gallery.sh",
     "verify:cost": "bun scripts/verify-cost-model.ts",
+    "ops:outbox-reconcile": "bun scripts/ops-outbox-reconcile.ts",
     "toolchain:typecheck": "tsc --noEmit -p tsconfig.json",
     "toolchain:lint": "biome check scripts package.json tsconfig.json tsconfig.base.json biome.json",
     "toolchain:integration": "bun scripts/suite/cli.ts --toolchain-integration",

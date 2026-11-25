@@ -55,6 +55,7 @@ import {
   resolvePinnedWranglerCommand,
   runBoundedCommand,
   runMigrationCli,
+  stripSqlComments,
 } from "./migrate.mjs";
 import {
   maskAbsolutePaths,
@@ -4924,6 +4925,47 @@ writeFileSync(1, ${JSON.stringify(`${JSON.stringify({ uuid: STAGING_DATABASE_ID,
       assert.equal(JSON.parse(contaminated.stderr.join("").trim()).code, "SCHEMA_LINEAGE_REFUSED");
       assert.equal(contaminatedTransport.calls.describe, 1);
       assert.ok(contaminatedTransport.calls.query >= 1);
+    },
+  },
+  {
+    name: "stripSqlComments strips comments safely while preserving quoted literals and raw journal digest",
+    execute() {
+      const rawSql = [
+        "-- leading file comment",
+        "CREATE TABLE comment_safety (",
+        "  -- inline comment inside DDL",
+        "  id TEXT PRIMARY KEY DEFAULT '--keep-literal',",
+        "  \"col/*kept*/\" TEXT DEFAULT '/*also-kept*/',",
+        "  [bracket--kept] TEXT /* block comment */ NOT NULL",
+        ");",
+      ].join("\n");
+      const stripped = stripSqlComments(rawSql);
+      assert.ok(!stripped.includes("leading file comment"));
+      assert.ok(!stripped.includes("inline comment inside DDL"));
+      assert.ok(!stripped.includes("block comment"));
+      assert.ok(stripped.includes("'--keep-literal'"));
+      assert.ok(stripped.includes('"col/*kept*/"'));
+      assert.ok(stripped.includes("'/*also-kept*/'"));
+      assert.ok(stripped.includes("[bracket--kept]"));
+
+      const rawDigest = digestOf(rawSql);
+      const command = migrationCommandSql(
+        { id: "0099_comment_safety.sql", sequence: 99, digest: rawDigest, sql: rawSql },
+        "2026-11-23T00:00:00.000Z",
+      );
+      assert.ok(
+        command.includes(rawDigest),
+        "journal INSERT must record the raw file digest, not the comment-stripped digest",
+      );
+      assert.ok(!command.includes("inline comment inside DDL"));
+      assert.ok(command.includes("'--keep-literal'"));
+
+      expectFailure("unterminated block comment", "UNTERMINATED_SQL_COMMENT", () =>
+        stripSqlComments("SELECT 1; /* unterminated"),
+      );
+      expectFailure("unterminated single quote", "UNTERMINATED_SQL_QUOTE", () =>
+        stripSqlComments("SELECT '--unterminated"),
+      );
     },
   },
 ];

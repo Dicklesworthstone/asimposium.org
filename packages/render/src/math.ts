@@ -16,6 +16,9 @@ export function renderMathHtml(formula: string, display = false): string {
       trust: false,
       strict: "error",
       throwOnError: true,
+      // Follow the theme danger token so untrusted TeX commands stay accessible
+      // in both light and dark schemes instead of KaTeX's light-only #cc0000.
+      errorColor: "var(--color-danger, #a3261c)",
       maxExpand: 1_000,
       maxSize: 20,
       macros: {},

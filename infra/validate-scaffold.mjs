@@ -41,8 +41,8 @@ const D1_DATABASE_CONFIG_KEYS = ["binding", "database_name", "database_id", "mig
 const R2_BUCKET_CONFIG_KEYS = ["binding", "bucket_name"];
 const DURABLE_OBJECTS_CONFIG_KEYS = ["bindings"];
 const DURABLE_OBJECT_BINDING_CONFIG_KEYS = ["name", "class_name"];
-const EXPORTS_CONFIG_KEYS = ["KraterOutboxDrainer"];
-const OUTBOX_EXPORT_CONFIG_KEYS = ["type", "storage"];
+const EXPORTS_CONFIG_KEYS = ["HeraldRoom", "KraterOutboxDrainer"];
+const DURABLE_OBJECT_EXPORT_CONFIG_KEYS = ["type", "storage"];
 const TRIGGERS_CONFIG_KEYS = ["crons"];
 const RULE_CONFIG_KEYS = ["type", "globs", "fallthrough"];
 
@@ -448,53 +448,75 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
 
   const durableObjects = readRequiredObject(parsedConfig, "durable_objects", configSource);
   assertExactKeys(durableObjects, DURABLE_OBJECTS_CONFIG_KEYS, `${configSource} [durable_objects]`);
-  const outboxBinding = readSingleObjectArray(
+  const durableObjectBindings = readExactObjectArray(
     durableObjects,
     "bindings",
+    2,
     `${configSource} [durable_objects]`,
   );
-  assertExactKeys(
-    outboxBinding,
-    DURABLE_OBJECT_BINDING_CONFIG_KEYS,
-    `${configSource} [[durable_objects.bindings]]`,
-  );
-  assertExact(
-    readRequiredString(outboxBinding, "name", configSource),
-    "KRATER_OUTBOX",
-    "durable_objects.bindings.name",
-    configSource,
-  );
-  assertExact(
-    readRequiredString(outboxBinding, "class_name", configSource),
-    "KraterOutboxDrainer",
-    "durable_objects.bindings.class_name",
-    configSource,
-  );
+  const requiredDurableObjects = [
+    { binding: "HERALD_ROOMS", className: "HeraldRoom" },
+    { binding: "KRATER_OUTBOX", className: "KraterOutboxDrainer" },
+  ];
+  const seenDurableBindings = new Map();
+  for (const bindingEntry of durableObjectBindings) {
+    assertExactKeys(
+      bindingEntry,
+      DURABLE_OBJECT_BINDING_CONFIG_KEYS,
+      `${configSource} [[durable_objects.bindings]]`,
+    );
+    const bindingName = readRequiredString(bindingEntry, "name", configSource);
+    const className = readRequiredString(bindingEntry, "class_name", configSource);
+    if (seenDurableBindings.has(bindingName)) {
+      fail(
+        "DUPLICATE_CONFIG_TABLE",
+        `${configSource} defines duplicate durable_objects.bindings entry for ${bindingName}.`,
+      );
+    }
+    seenDurableBindings.set(bindingName, className);
+  }
+  for (const expected of requiredDurableObjects) {
+    const actualClass = seenDurableBindings.get(expected.binding);
+    if (actualClass === undefined) {
+      fail(
+        "UNSAFE_CONFIG_VALUE",
+        `${configSource} must bind durable object ${expected.binding} (${expected.className}).`,
+      );
+    }
+    assertExact(
+      actualClass,
+      expected.className,
+      `durable_objects.bindings[${expected.binding}].class_name`,
+      configSource,
+    );
+  }
 
   const exportsConfig = readRequiredObject(parsedConfig, "exports", configSource);
   assertExactKeys(exportsConfig, EXPORTS_CONFIG_KEYS, `${configSource} [exports]`);
-  const outboxExport = readRequiredObject(
-    exportsConfig,
-    "KraterOutboxDrainer",
-    `${configSource} [exports]`,
-  );
-  assertExactKeys(
-    outboxExport,
-    OUTBOX_EXPORT_CONFIG_KEYS,
-    `${configSource} [exports.KraterOutboxDrainer]`,
-  );
-  assertExact(
-    readRequiredString(outboxExport, "type", configSource),
-    "durable-object",
-    "exports.KraterOutboxDrainer.type",
-    configSource,
-  );
-  assertExact(
-    readRequiredString(outboxExport, "storage", configSource),
-    "sqlite",
-    "exports.KraterOutboxDrainer.storage",
-    configSource,
-  );
+  for (const expected of requiredDurableObjects) {
+    const exportEntry = readRequiredObject(
+      exportsConfig,
+      expected.className,
+      `${configSource} [exports]`,
+    );
+    assertExactKeys(
+      exportEntry,
+      DURABLE_OBJECT_EXPORT_CONFIG_KEYS,
+      `${configSource} [exports.${expected.className}]`,
+    );
+    assertExact(
+      readRequiredString(exportEntry, "type", configSource),
+      "durable-object",
+      `exports.${expected.className}.type`,
+      configSource,
+    );
+    assertExact(
+      readRequiredString(exportEntry, "storage", configSource),
+      "sqlite",
+      `exports.${expected.className}.storage`,
+      configSource,
+    );
+  }
 
   const triggers = readRequiredObject(parsedConfig, "triggers", configSource);
   assertExactKeys(triggers, TRIGGERS_CONFIG_KEYS, `${configSource} [triggers]`);

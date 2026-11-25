@@ -344,6 +344,83 @@ export function scanSql(sql) {
   return { code, comments };
 }
 
+/**
+ * Strip SQL line (`-- ...`) and block (`/* ... *\/`) comments while preserving
+ * quoted string literals and identifiers byte-for-byte.
+ *
+ * Uses the exact same lexical state machine as `scanSql` so unterminated
+ * comments and quotes fail closed with the same typed errors. Making comment
+ * stripping explicit here keeps the `sqlite_schema` catalog deterministic
+ * across Wrangler releases (Wrangler <= 4.129 stripped comments before local
+ * D1 execution; Wrangler 4.158 preserves them). The migration journal still
+ * records the raw file digest, never the comment-stripped bytes.
+ */
+export function stripSqlComments(sql) {
+  let stripped = "";
+  let index = 0;
+
+  while (index < sql.length) {
+    const two = sql.slice(index, index + 2);
+
+    if (two === "--") {
+      const end = sql.indexOf("\n", index);
+      index = end === -1 ? sql.length : end;
+      continue;
+    }
+    if (two === "/*") {
+      const end = sql.indexOf("*/", index + 2);
+      if (end === -1) {
+        fail("UNTERMINATED_SQL_COMMENT", "A migration contains an unterminated block comment.");
+      }
+      stripped += " ";
+      index = end + 2;
+      continue;
+    }
+    const character = sql[index];
+    if (character === "[") {
+      const end = sql.indexOf("]", index + 1);
+      if (end === -1) {
+        fail(
+          "UNTERMINATED_SQL_QUOTE",
+          "A migration contains an unterminated quoted literal or identifier.",
+        );
+      }
+      stripped += sql.slice(index, end + 1);
+      index = end + 1;
+      continue;
+    }
+    if (character === "'" || character === '"' || character === "`") {
+      let cursor = index + 1;
+      let closed = false;
+      while (cursor < sql.length) {
+        if (sql[cursor] === character) {
+          if (sql[cursor + 1] === character) {
+            cursor += 2;
+            continue;
+          }
+          cursor += 1;
+          closed = true;
+          break;
+        }
+        cursor += 1;
+      }
+      if (!closed) {
+        fail(
+          "UNTERMINATED_SQL_QUOTE",
+          "A migration contains an unterminated quoted literal or identifier.",
+        );
+      }
+      stripped += sql.slice(index, cursor);
+      index = cursor;
+      continue;
+    }
+    stripped += character;
+    index += 1;
+  }
+
+  return stripped;
+}
+
 /** Split scanned code into statements. Literals are already neutralised. */
 export function splitStatements(code) {
   return code
@@ -3605,8 +3682,11 @@ export function migrationCommandSql(migration, appliedAt) {
   // Keep the lexical preflight at the execution seam too. Normal CLI inputs
   // were checked by readMigrationDirectory, but this protects every direct
   // caller and proves the journal append cannot be swallowed by malformed SQL.
-  scanSql(migration.sql);
-  return `${migration.sql}\nINSERT INTO ${LEDGER_TABLE} (id, sequence, digest, applied_at) VALUES (${sqlLiteral(migration.id)}, ${migration.sequence}, ${sqlLiteral(migration.digest)}, ${sqlLiteral(appliedAt)});`;
+  // Strip SQL comments explicitly so the applied sqlite_schema DDL matches the
+  // pinned catalog fingerprints across Wrangler releases regardless of whether
+  // Wrangler's splitter strips comments.
+  const executableSql = stripSqlComments(migration.sql);
+  return `${executableSql}\nINSERT INTO ${LEDGER_TABLE} (id, sequence, digest, applied_at) VALUES (${sqlLiteral(migration.id)}, ${migration.sequence}, ${sqlLiteral(migration.digest)}, ${sqlLiteral(appliedAt)});`;
 }
 
 async function applyLocalMigration(

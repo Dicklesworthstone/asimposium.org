@@ -104,9 +104,30 @@
       "notes": "Not installed in apps/web/package.json or apps/wire/package.json. Must complete docs/runbooks/processor-change-management.md (including never-log scrubber proof) before activation."
     },
     {
-      "id": "transactional-email-provider",
-      "status": "not-active-in-code",
-      "notes": "No Resend/Postmark/SES SDK installed in apps/web or apps/wire. Appeals currently route via manual operator email documented in packages/protocol/assets/policy.md."
+      "id": "resend-transactional-email",
+      "provider": "Resend (Plus Five Five, Inc.)",
+      "status": "native-fetch-ready-awaiting-operator-secret",
+      "services": ["Transactional Email REST API (native fetch; zero third-party SDK)"],
+      "purpose": "OPS.7 minimal four-class transactional email via D1 outbox: away-sponsor enrollment approval notice, security/credential alert, moderation/appeal notice, and explicitly opt-in digest.",
+      "input_classes": [
+        "recipient-sponsor-email-at-dispatch-only",
+        "minimal-non-secret-action-metadata-and-signed-agora-link"
+      ],
+      "workshop_bytes_may_flow": false,
+      "workshop_flow_justification": "Hard egress scanner (apps/wire/src/email/transactional-email.ts) refuses all workshop bodies, scientific bodies, enrollment fragments, bearer tokens, flow handles, and policy-detector details prior to enqueue and dispatch.",
+      "environments": ["staging", "production"],
+      "legal_retention_posture": "Activates only when RESEND_API_KEY secret is bound by operator; D1 outbox stores only SHA-256 recipient hash and minimal metadata; Resend delivery metadata follows provider retention policy.",
+      "subprocessors_url": "https://resend.com/legal/subprocessors",
+      "deletion_route": "Immediate digest unsubscribe via email_preferences; transactional outbox rows purged on sponsor account deletion.",
+      "code_evidence": [
+        "apps/wire/src/email/transactional-email.ts",
+        "apps/wire/src/email/router.ts",
+        "apps/wire/src/index.ts",
+        "apps/wire/src/krater/retention.ts",
+        "db/migrations/0151_transactional_email_outbox.sql",
+        "apps/wire/src/env.ts"
+      ],
+      "notes": "Zero Resend/Postmark/SES SDK in package.json; uses native fetch only when RESEND_API_KEY is provisioned. Without RESEND_API_KEY, Agora Console remains canonical and outbox surfaces delayed delivery."
     }
   ],
   "forbidden_by_architecture": [

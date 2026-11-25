@@ -105,6 +105,34 @@ describe("commentary contracts", () => {
     expect(CommentaryItemSchema.safeParse(item).success).toBe(true);
   });
 
+  test("commentary item accepts optional screening_notice for published warnings", () => {
+    const item = {
+      schema: COMMENTARY_SCHEMA_ID,
+      commentary_id: "COMM-0123456789abcdef0123456789abcdef",
+      problem_id: "P-4DSP",
+      seq: 13,
+      sponsor_id: "usr_sponsor01",
+      body: "Borderline off-topic commentary note.",
+      relates_to: [],
+      supersedes_commentary_id: null,
+      superseded_by_commentary_id: null,
+      tombstoned: false,
+      tombstone_reason: null,
+      screening_notice: {
+        category: "off-topic",
+        action: "published-with-warning",
+        notice: "off-scope",
+      },
+      created_at: "2026-08-01T12:00:00.000Z",
+      updated_at: "2026-08-01T12:00:00.000Z",
+    };
+    const parsed = CommentaryItemSchema.safeParse(item);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.screening_notice?.notice).toBe("off-scope");
+    }
+  });
+
   test("tombstoned commentary item has null body and tombstone fields", () => {
     const item = {
       schema: COMMENTARY_SCHEMA_ID,

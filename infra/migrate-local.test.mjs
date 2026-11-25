@@ -2108,13 +2108,23 @@ const cases = [
     name: "bootstrap baseline applies only to empty local D1 and leaves an empty journal",
     async execute() {
       const databaseName = uniqueDatabaseName("bootstrap");
-      // A real Wrangler D1 command creates its own exact `_cf_METADATA`
-      // table. It is platform control metadata, not caller contamination:
-      // classification and the atomic bootstrap guard must still admit the
-      // otherwise empty database, while any other table remains a refusal.
+      // Older Wrangler/Miniflare releases created `_cf_METADATA` on first local
+      // D1 query; Wrangler 4.158+ leaves a fresh database with an empty catalog
+      // (and D1 reserves `_cf_*` names against user DDL). Either way, only exact
+      // platform metadata (or none) may appear before bootstrap, and
+      // classification plus the atomic CAS guard must admit it while any user
+      // table remains a refusal.
       await localJson(databaseName, "SELECT 1 AS ok;", "bootstrap-platform-metadata");
       const beforeBootstrap = await readCatalog(databaseName, "bootstrap-preflight-catalog");
-      assert.equal(exactWranglerPlatformMetadata(beforeBootstrap).length, 1);
+      assert.equal(
+        beforeBootstrap.filter(
+          (entry) =>
+            !entry.name.startsWith("sqlite_") &&
+            exactWranglerPlatformMetadata([entry]).length === 0,
+        ).length,
+        0,
+        "a freshly opened local D1 may contain only exact Wrangler platform metadata or no user tables",
+      );
       assert.deepEqual(
         classifySchemaLineage({
           catalog: beforeBootstrap,
@@ -2124,7 +2134,7 @@ const cases = [
           manifest: bootstrapManifest,
         }),
         { kind: "provably-empty", head: 0 },
-        "the exact Wrangler platform table must not defeat empty-only bootstrap",
+        "a freshly opened local D1 must classify as provably empty before bootstrap",
       );
       await localJson(
         databaseName,

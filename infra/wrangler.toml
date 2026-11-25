@@ -23,8 +23,16 @@ binding = "PUBLIC_ARTIFACTS"
 bucket_name = "asimposium-public-local"
 
 [[durable_objects.bindings]]
+name = "HERALD_ROOMS"
+class_name = "HeraldRoom"
+
+[[durable_objects.bindings]]
 name = "KRATER_OUTBOX"
 class_name = "KraterOutboxDrainer"
+
+[exports.HeraldRoom]
+type = "durable-object"
+storage = "sqlite"
 
 [exports.KraterOutboxDrainer]
 type = "durable-object"

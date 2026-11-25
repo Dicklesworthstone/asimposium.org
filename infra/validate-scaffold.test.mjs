@@ -49,8 +49,16 @@ binding = "PUBLIC_ARTIFACTS"
 bucket_name = "asimposium-public-local"
 
 [[durable_objects.bindings]]
+name = "HERALD_ROOMS"
+class_name = "HeraldRoom"
+
+[[durable_objects.bindings]]
 name = "KRATER_OUTBOX"
 class_name = "KraterOutboxDrainer"
+
+[exports.HeraldRoom]
+type = "durable-object"
+storage = "sqlite"
 
 [exports.KraterOutboxDrainer]
 type = "durable-object"
@@ -244,7 +252,18 @@ value = "value"
     'name = "KRATER_OUTBOX"',
     'name = "OUTBOX_SHADOW"',
   );
-  const wrongOutboxStorageConfig = validConfig.replace('storage = "sqlite"', 'storage = "memory"');
+  const wrongOutboxStorageConfig = validConfig.replace(
+    '[exports.KraterOutboxDrainer]\ntype = "durable-object"\nstorage = "sqlite"',
+    '[exports.KraterOutboxDrainer]\ntype = "durable-object"\nstorage = "memory"',
+  );
+  const missingHeraldBindingConfig = validConfig.replace(
+    '\n[[durable_objects.bindings]]\nname = "HERALD_ROOMS"\nclass_name = "HeraldRoom"\n',
+    "\n",
+  );
+  const wrongHeraldStorageConfig = validConfig.replace(
+    '[exports.HeraldRoom]\ntype = "durable-object"\nstorage = "sqlite"',
+    '[exports.HeraldRoom]\ntype = "durable-object"\nstorage = "memory"',
+  );
   const missingOutboxCronConfig = validConfig.replace(
     '\n[triggers]\ncrons = ["*/5 * * * *"]\n',
     "\n",
@@ -592,6 +611,26 @@ value = "value"
       },
     },
     {
+      name: "missing-herald-binding",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("missing-herald-binding", missingHeraldBindingConfig),
+          "infra/wrangler.toml",
+          "MISSING_CONFIG_TABLE",
+        );
+      },
+    },
+    {
+      name: "wrong-herald-storage",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("wrong-herald-storage", wrongHeraldStorageConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_VALUE",
+        );
+      },
+    },
+    {
       name: "missing-outbox-cron",
       execute() {
         expectFailure(
@@ -617,7 +656,7 @@ value = "value"
     );
   }
   assert.deepEqual(failedCases, []);
-  assert.equal(cases.length, 36);
+  assert.equal(cases.length, 38);
 
   process.stdout.write(
     `${JSON.stringify({

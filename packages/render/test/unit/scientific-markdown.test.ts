@@ -97,6 +97,10 @@ See [the source][paper] and a note.[^proof]
     expect(html).not.toContain("<img");
     expect(html).not.toContain('id="content"');
     expect(html).not.toContain('style="background:');
+    expect(html).not.toContain("#cc0000");
+    if (html.includes('data-math-rendered="true"')) {
+      expect(html).toContain("var(--color-danger, #a3261c)");
+    }
   });
 
   test("malformed TeX, expansion loops and oversized input have readable source fallbacks", () => {

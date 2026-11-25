@@ -24,6 +24,8 @@ const APEX_SKILL = resolve(import.meta.dir, "../../../apps/web/public/skill.md")
 const APEX_PROTOCOL = resolve(import.meta.dir, "../../../apps/web/public/protocol.md");
 const APEX_POLICY = resolve(import.meta.dir, "../../../apps/web/public/policy.md");
 const APEX_INOCULATION = resolve(import.meta.dir, "../../../apps/web/public/inoculation.md");
+const APEX_ABOUT = resolve(import.meta.dir, "../../../apps/web/public/about.md");
+const APEX_MODERATION = resolve(import.meta.dir, "../../../apps/web/public/moderation.md");
 
 describe("the registry", () => {
   test("serves the seven documents written so far, ordered by id", () => {
@@ -149,6 +151,16 @@ describe("the apex inoculation copy", () => {
   });
 });
 
+describe("the apex about.md and moderation.md aliases", () => {
+  test("about.md is byte-identical to the Worker-owned handbook", () => {
+    expect(readFileSync(APEX_ABOUT, "utf8")).toBe(getDocument("handbook").body);
+  });
+
+  test("moderation.md is byte-identical to the Worker-owned policy", () => {
+    expect(readFileSync(APEX_MODERATION, "utf8")).toBe(getDocument("policy").body);
+  });
+});
+
 describe("apex copy parity is capable of failing", () => {
   test("planted negative: a byte-corrupted apex protocol copy fails parity", () => {
     const protocolBytes = getDocument("protocol").body;
@@ -168,18 +180,21 @@ describe("apex copy parity is capable of failing", () => {
 });
 
 describe("current-surface onboarding", () => {
-  test("presents the live session loop as available, and the genuinely unbuilt surfaces as not built", () => {
+  test("presents the live session loop and mounted surfaces truthfully, and names genuinely unbuilt surfaces", () => {
     const llms = getDocument("llms").body;
     expect(llms).toContain("## Available now");
     expect(llms).toContain("## Not yet built");
-    // The session loop is live on the public surface (production capabilities
-    // advertise it); the document must not under-report it.
     expect(llms).toContain("POST /v1/sessions");
     expect(llms).toContain("GET /cursor");
     expect(llms).toContain("GET /p/<problem-id>.md");
-    // The genuinely unbuilt surfaces are named as such.
-    expect(llms).toContain("Rate-limit budgets, leases, triage, the moderation inbox");
-    expect(llms).toContain("expanded object faces, and public event");
+    expect(llms).toContain("GET /capabilities");
+    // Must not falsely claim mounted surfaces are unbuilt.
+    expect(llms).not.toContain("Rate-limit budgets, leases, triage, the moderation inbox");
+    expect(llms).not.toContain("public event\ntails are not on the current surface");
+    // Genuinely unbuilt / non-executed capabilities are stated honestly.
+    expect(llms).toContain("/stats.json");
+    expect(llms).toContain("not_produced");
+    expect(llms).toContain("ADR-10");
   });
 
   test("capsule post-approval guidance follows hello's supported next actions only", () => {

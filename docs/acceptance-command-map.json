@@ -1,0 +1,842 @@
+{
+  "schema_version": "acceptance-command-map.v1",
+  "bead_id": "asimposiumorg-9lqv",
+  "policy": "Reconciles every absent scripts/*.sh|ts|mjs path referenced in unfinished bead acceptance_criteria to existing real Workerd/D1/R2 lanes, Chromium browser lanes, Rust CLI parity suites, contract/audit gates, explicit hosted-deploy blockers, or Tier-2 deferrals — without creating empty ceremony shell wrappers. Executable mapping does NOT itself establish product completion or hosted staging/production proof (Fable §17.0).",
+  "entries": [
+    {
+      "missing_path": "scripts/e2e-cold-agent-gauntlet.sh",
+      "bead_id": "asimposiumorg-zai",
+      "priority": 0,
+      "classification": "reconciled-gauntlet-runner",
+      "authoritative_commands": [
+        {
+          "cmd": "bash e2e/gauntlet/run.sh --mode local-fixture",
+          "referenced_files": [
+            "e2e/gauntlet/run.sh",
+            "e2e/gauntlet/local-product-flow.mjs",
+            "e2e/gauntlet/staging-product-flow.mjs"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": [
+        "Genuine Node >=22 for local Workerd/D1/R2 harness",
+        "For staging multi-harness gate: live OPS.3 staging deploy (asimposiumorg-rs5n) and >=3 real agent harness CLIs/tokens (asimposiumorg-rc-gauntlet-3rd-harness-staging-fd5e)"
+      ],
+      "negative_control": "Injected 422 recovery fault and four negative controls in e2e/gauntlet/local-product-flow.mjs must fail closed when recovery is broken.",
+      "remaining_gaps_or_blockers": "Local fixture completions prove harness mechanics and real local Worker flows, NOT hosted staging 10-session / >=3-harness / <=25K-token completion (tracked by asimposiumorg-rc-gauntlet-3rd-harness-staging-fd5e and asimposiumorg-rc-gauntlet-token-compression-kfep)."
+    },
+    {
+      "missing_path": "scripts/e2e-screening.sh",
+      "bead_id": "asimposiumorg-axq",
+      "priority": 0,
+      "classification": "reconciled-workerd-real-bindings",
+      "authoritative_commands": [
+        {
+          "cmd": "bash scripts/e2e-dual-use-review.sh --target local",
+          "referenced_files": [
+            "scripts/e2e-dual-use-review.sh",
+            "apps/wire/test/integration/publication-context-real-bindings.mjs",
+            "apps/wire/test/integration/problem-screening-real-bindings.mjs",
+            "apps/wire/test/integration/direct-append-screening-real-bindings.mjs"
+          ],
+          "proof_level": "workerd-real-bindings"
+        },
+        {
+          "cmd": "bash scripts/e2e-s4-screening-oauth.sh",
+          "referenced_files": ["scripts/e2e-s4-screening-oauth.sh"],
+          "proof_level": "workerd-real-bindings"
+        },
+        {
+          "cmd": "cd apps/wire && bun test ./test/integration/discovery-real-bindings.test.ts --test-name-pattern \"reject|quarantine|unavailable|wrong-digest|wrong-context|malformed-provider\"",
+          "referenced_files": [
+            "apps/wire/test/integration/discovery-real-bindings.test.ts",
+            "apps/wire/test/integration/discovery-real-bindings.mjs"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": [
+        "Genuine Node >=22 for Wrangler/Workerd D1+R2 execution",
+        "For S-4 live accuracy: Workers AI provider binding, sealed Tier-B hard-reject corpus (asimposiumorg-rc-populate-s4-corpus-c743), and OPS.3 staging deploy (asimposiumorg-rs5n)"
+      ],
+      "negative_control": "Discovery screening modes reject/quarantine/unavailable/wrong-digest/wrong-context/malformed-provider assert exact 19 screening refusals and fail closed when screening provider fails.",
+      "remaining_gaps_or_blockers": "Local screening uses deterministic fixture providers; live Workers AI FP <5% / FN=0 hard-reject accuracy remains open on asimposiumorg-xeg and asimposiumorg-rc-populate-s4-corpus-c743."
+    },
+    {
+      "missing_path": "scripts/e2e-contract-kinds.sh",
+      "bead_id": "asimposiumorg-6i9",
+      "priority": 1,
+      "classification": "reconciled-contracts-corpus",
+      "authoritative_commands": [
+        {
+          "cmd": "bun run --filter @asimposium/contracts test",
+          "referenced_files": ["packages/contracts/package.json"],
+          "proof_level": "contracts-golden"
+        },
+        {
+          "cmd": "node apps/wire/test/integration/ledger-objects-integration-real-bindings.mjs",
+          "referenced_files": [
+            "apps/wire/test/integration/ledger-objects-integration-real-bindings.mjs"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": [
+        "Bun workspace toolchain and genuine Node >=22 for Workerd/D1 ledger-objects lane"
+      ],
+      "negative_control": "Invalid kind/attribution/spoofing golden fixtures in packages/contracts and unknown-field rejections on ledger-objects-integration-real-bindings.mjs fail closed.",
+      "remaining_gaps_or_blockers": "W1 Ontology Consumer Audit independent review remains tracked on asimposiumorg-rc-w1-ontology-consumer-audit-x60v."
+    },
+    {
+      "missing_path": "scripts/e2e-discovery.sh",
+      "bead_id": "asimposiumorg-0et",
+      "priority": 1,
+      "classification": "reconciled-workerd-real-bindings",
+      "authoritative_commands": [
+        {
+          "cmd": "bash scripts/e2e-discovery-versioning.sh",
+          "referenced_files": [
+            "scripts/e2e-discovery-versioning.sh",
+            "apps/wire/test/integration/discovery-real-bindings.mjs"
+          ],
+          "proof_level": "workerd-real-bindings"
+        },
+        {
+          "cmd": "cd apps/wire && bun test ./test/integration/discovery-real-bindings.test.ts --test-name-pattern \"positive|stoa-surface|areas\"",
+          "referenced_files": [
+            "apps/wire/test/integration/discovery-real-bindings.test.ts",
+            "apps/wire/test/integration/stoa-surface-real-bindings.mjs",
+            "apps/wire/test/integration/area-discovery-real-bindings.mjs"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": ["Genuine Node >=22 for Workerd/D1 execution"],
+      "negative_control": "Contract-drift golden check in apps/wire/test/golden/discovery/schema-index.json fails on any unregenerated schema byte mismatch.",
+      "remaining_gaps_or_blockers": "Production/staging /capabilities still serves the old September bytes until OPS.3 deploy (asimposiumorg-rs5n)."
+    },
+    {
+      "missing_path": "scripts/e2e-dns-cutover.sh",
+      "bead_id": "asimposiumorg-mmo",
+      "priority": 1,
+      "classification": "reconciled-local-audit-hosted-blocked",
+      "authoritative_commands": [
+        {
+          "cmd": "bun test /dev/null --timeout=120000 scripts/w12-7-dns-cutover-gate.test.ts",
+          "referenced_files": ["scripts/w12-7-dns-cutover-gate.test.ts"],
+          "proof_level": "unit-audit"
+        },
+        {
+          "cmd": "bash scripts/e2e-environments.sh --self-test-remote-interface",
+          "referenced_files": ["scripts/e2e-environments.sh"],
+          "proof_level": "hosted-blocked"
+        }
+      ],
+      "prerequisites": [
+        "Live Cloudflare DNS (apex DNS-only, a./artifacts. proxied) + Vercel production deploy via operator authority (asimposiumorg-rs5n)"
+      ],
+      "negative_control": "scripts/w12-7-dns-cutover-gate.test.ts fails on static-copy drift, 308 redirect matrix regressions, or orange-cloud-on-apex misconfiguration.",
+      "remaining_gaps_or_blockers": "Pre-cutover and post-cutover live TLS/HSTS/308/DNS probes require operator Cloudflare & Vercel authority (asimposiumorg-rs5n)."
+    },
+    {
+      "missing_path": "scripts/e2e-enrollment-approval.sh",
+      "bead_id": "asimposiumorg-krn",
+      "priority": 1,
+      "classification": "reconciled-workerd-real-bindings",
+      "authoritative_commands": [
+        {
+          "cmd": "bash scripts/e2e-device-enrollment.sh --scenario all",
+          "referenced_files": ["scripts/e2e-device-enrollment.sh"],
+          "proof_level": "workerd-real-bindings"
+        },
+        {
+          "cmd": "bash scripts/e2e-enrollment-capsule.sh",
+          "referenced_files": [
+            "scripts/e2e-enrollment-capsule.sh",
+            "apps/wire/test/integration/identity-lifecycle-real-bindings.mjs"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": [
+        "Genuine Node >=22 for Workerd/D1",
+        "For live browser approval card: Chromium binary (ASIMPOSIUM_CHROMIUM_EXECUTABLE / Playwright Chromium build 1254+) and staging Google test accounts (asimposiumorg-rs5n)"
+      ],
+      "negative_control": "Fragment-secret omission, cross-sponsor approval attempt, expired proposal, and already-claimed flow handle fail closed in identity-lifecycle-real-bindings.mjs.",
+      "remaining_gaps_or_blockers": "Hosted staging browser approval with real Google OAuth sponsor accounts remains blocked on OPS.3 (asimposiumorg-rs5n)."
+    },
+    {
+      "missing_path": "scripts/e2e-epistemic-controls.sh",
+      "bead_id": "asimposiumorg-wnd",
+      "priority": 1,
+      "classification": "reconciled-workerd-real-bindings",
+      "authoritative_commands": [
+        {
+          "cmd": "bun test /dev/null --timeout=120000 e2e/epistemic-corpus/epistemic-corpus.test.ts",
+          "referenced_files": ["e2e/epistemic-corpus/epistemic-corpus.test.ts"],
+          "proof_level": "contracts-golden"
+        },
+        {
+          "cmd": "node apps/wire/test/integration/dispositions-real-bindings.mjs && node apps/wire/test/integration/reviews-real-bindings.mjs",
+          "referenced_files": [
+            "apps/wire/test/integration/dispositions-real-bindings.mjs",
+            "apps/wire/test/integration/reviews-real-bindings.mjs"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": ["Genuine Node >=22 for Workerd/D1 disposition & review lanes"],
+      "negative_control": "Same-author review (REVIEWER_IS_AUTHOR), assertion-only review without capable_of_failure (P5), and forbidden stronger claim labels fail closed.",
+      "remaining_gaps_or_blockers": "Local Workerd/D1 corpus verification is executable; full hosted staging epistemic replay waits on OPS.3 deploy."
+    },
+    {
+      "missing_path": "scripts/e2e-errors.sh",
+      "bead_id": "asimposiumorg-but",
+      "priority": 1,
+      "classification": "reconciled-contracts-corpus",
+      "authoritative_commands": [
+        {
+          "cmd": "bun run --filter @asimposium/contracts test && bun test /dev/null --timeout=120000 scripts/error-copy-audit.test.ts",
+          "referenced_files": [
+            "packages/contracts/package.json",
+            "scripts/error-copy-audit.test.ts"
+          ],
+          "proof_level": "contracts-golden"
+        },
+        {
+          "cmd": "node apps/wire/test/integration/stoa-surface-real-bindings.mjs",
+          "referenced_files": ["apps/wire/test/integration/stoa-surface-real-bindings.mjs"],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": ["Bun workspace toolchain and genuine Node >=22 for Workerd/D1"],
+      "negative_control": "Policy refusals leaking detector internals or contract errors missing RFC 7807 fields/rule/fix_hint fail contracts and error-copy-audit tests.",
+      "remaining_gaps_or_blockers": "Independent verifier re-execution at exact HEAD required per Fable §17.0."
+    },
+    {
+      "missing_path": "scripts/e2e-generated-contracts.sh",
+      "bead_id": "asimposiumorg-goc",
+      "priority": 1,
+      "classification": "reconciled-contracts-corpus",
+      "authoritative_commands": [
+        {
+          "cmd": "bun run --filter @asimposium/contracts test && bun run --filter @asimposium/wire test:contract",
+          "referenced_files": ["packages/contracts/package.json", "apps/wire/package.json"],
+          "proof_level": "contracts-golden"
+        }
+      ],
+      "prerequisites": ["Bun workspace toolchain"],
+      "negative_control": "Modifying a Zod schema without regenerating generated JSON Schema / schema-index.json fails CI drift checks.",
+      "remaining_gaps_or_blockers": "Independent verifier re-execution at exact HEAD required per Fable §17.0."
+    },
+    {
+      "missing_path": "scripts/e2e-golden-corpus.sh",
+      "bead_id": "asimposiumorg-uir",
+      "priority": 1,
+      "classification": "reconciled-contracts-corpus",
+      "authoritative_commands": [
+        {
+          "cmd": "bun run --filter @asimposium/contracts test && bun run --filter @asimposium/wire test:contract && bun cli/tests/differential-parity.ts",
+          "referenced_files": [
+            "packages/contracts/package.json",
+            "apps/wire/package.json",
+            "cli/tests/differential-parity.ts"
+          ],
+          "proof_level": "rust-cli-parity"
+        }
+      ],
+      "prerequisites": [
+        "Bun workspace toolchain and compiled asimp Rust binary (via rch/Cargo) for Worker-vs-asimp differential parity"
+      ],
+      "negative_control": "Any parity mismatch between Zod, Worker, and asimp on valid/invalid golden fixtures fails cli/tests/differential-parity.ts.",
+      "remaining_gaps_or_blockers": "Remote Cargo build prerequisite applies when rebuilding asimp; independent verification required per Fable §17.0."
+    },
+    {
+      "missing_path": "scripts/e2e-human-auth.sh",
+      "bead_id": "asimposiumorg-4y3",
+      "priority": 1,
+      "classification": "reconciled-browser-real-lane",
+      "authoritative_commands": [
+        {
+          "cmd": "bash scripts/e2e-s6-auth-ingress.sh && bash scripts/e2e-s6-cross-plane-auth.sh",
+          "referenced_files": [
+            "scripts/e2e-s6-auth-ingress.sh",
+            "scripts/e2e-s6-cross-plane-auth.sh"
+          ],
+          "proof_level": "workerd-real-bindings"
+        },
+        {
+          "cmd": "node e2e/playwright/agora-local-lane.mjs --build",
+          "referenced_files": ["e2e/playwright/agora-local-lane.mjs"],
+          "proof_level": "chromium-browser"
+        }
+      ],
+      "prerequisites": [
+        "Genuine Node >=22 for Workerd/D1 and Next.js production server",
+        "Playwright 1.65.0 Chromium build 1254+ via ASIMPOSIUM_CHROMIUM_EXECUTABLE or default Playwright cache",
+        "For hosted Google OAuth login: OPS.3 staging deploy (asimposiumorg-rs5n) and designated Google test accounts"
+      ],
+      "negative_control": "WRONG_PRINCIPAL cross-plane refusal and host-only session cookie isolation checks fail closed if cookie leaks to a.*.",
+      "remaining_gaps_or_blockers": "Local browser lane uses synthetic sponsor auth; live Google OAuth login remains blocked on OPS.3 staging deploy (asimposiumorg-rs5n)."
+    },
+    {
+      "missing_path": "scripts/e2e-instrument-dogfood.sh",
+      "bead_id": "asimposiumorg-8ku",
+      "priority": 1,
+      "classification": "blocked-hosted-deploy-only",
+      "authoritative_commands": [
+        {
+          "cmd": "bash scripts/e2e-seed-ladder.sh --target local && bash scripts/e2e-seed-frontier.sh --target local && node apps/wire/test/integration/research-intake-real-bindings.mjs",
+          "referenced_files": [
+            "scripts/e2e-seed-ladder.sh",
+            "scripts/e2e-seed-frontier.sh",
+            "apps/wire/test/integration/research-intake-real-bindings.mjs"
+          ],
+          "proof_level": "hosted-blocked"
+        }
+      ],
+      "prerequisites": [
+        "Live staging deployment (asimposiumorg-rs5n) and operator-fleet Fellow sessions operating on the hosted dogfood board"
+      ],
+      "negative_control": "scripts/e2e-seed-ladder.sh --target staging refuses production origins and exits 78 fail-closed while OPS.3 staging deploy is absent.",
+      "remaining_gaps_or_blockers": "Local seed/intake rehearsals verify seed validity on local Workerd/D1 ONLY; hosted staging dogfood board and The Instrument standing meta-problem remain blocked on asimposiumorg-rs5n."
+    },
+    {
+      "missing_path": "scripts/e2e-krater.sh",
+      "bead_id": "asimposiumorg-6q0",
+      "priority": 1,
+      "classification": "reconciled-workerd-real-bindings",
+      "authoritative_commands": [
+        {
+          "cmd": "bash scripts/e2e-s2-krater.sh && node apps/wire/test/integration/projection-doctor-real-bindings.mjs && node apps/wire/test/integration/checkpoint-signing-real-bindings.mjs && node apps/wire/test/integration/export-restore-real-bindings.mjs",
+          "referenced_files": [
+            "scripts/e2e-s2-krater.sh",
+            "apps/wire/test/integration/projection-doctor-real-bindings.mjs",
+            "apps/wire/test/integration/checkpoint-signing-real-bindings.mjs",
+            "apps/wire/test/integration/export-restore-real-bindings.mjs"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": [
+        "Genuine Node >=22 for Workerd/D1/R2 execution",
+        "For hosted S-2 cost receipt & external D1 probes: OPS.3 staging deploy (asimposiumorg-rs5n, asimposiumorg-doa)"
+      ],
+      "negative_control": "Tampered event chain, projection drift, and raw SQL DELETE/UPDATE trigger probes fail closed in projection-doctor and checkpoint-signing real-bindings lanes.",
+      "remaining_gaps_or_blockers": "External hosted D1/R2 S-2 acceptance and retained S-2 cost receipt remain open on asimposiumorg-doa and asimposiumorg-rs5n."
+    },
+    {
+      "missing_path": "scripts/e2e-launch-gates.sh",
+      "bead_id": "asimposiumorg-oot",
+      "priority": 1,
+      "classification": "reconciled-local-audit-hosted-blocked",
+      "authoritative_commands": [
+        {
+          "cmd": "bun test /dev/null --timeout=120000 scripts/launch-gates-scorecard.test.ts && bash scripts/e2e-reality-check-bridge.sh",
+          "referenced_files": [
+            "scripts/launch-gates-scorecard.test.ts",
+            "scripts/e2e-reality-check-bridge.sh"
+          ],
+          "proof_level": "hosted-blocked"
+        }
+      ],
+      "prerequisites": [
+        "Genuine Node >=22 for local bridge verification",
+        "Live hosted alpha cohort, public launch telemetry, and +30d review after OPS.3 deploy (asimposiumorg-rs5n)"
+      ],
+      "negative_control": "scripts/launch-gates-scorecard.test.ts fails closed if any G1/G2/G3 criterion drops its no-claim boundary, digest, or independent rerunner field.",
+      "remaining_gaps_or_blockers": "G0, G1, G2, and G3 hosted gates remain open pending OPS.3 deployment and real cohort execution."
+    },
+    {
+      "missing_path": "scripts/e2e-legal-policy.sh",
+      "bead_id": "asimposiumorg-kxr",
+      "priority": 1,
+      "classification": "reconciled-local-audit-hosted-blocked",
+      "authoritative_commands": [
+        {
+          "cmd": "bun test /dev/null --timeout=120000 scripts/legal-claims-audit.test.ts && bash scripts/e2e-processor-audit.sh && bash scripts/e2e-naming-law.sh",
+          "referenced_files": [
+            "scripts/legal-claims-audit.test.ts",
+            "scripts/e2e-processor-audit.sh",
+            "scripts/e2e-naming-law.sh"
+          ],
+          "proof_level": "unit-audit"
+        }
+      ],
+      "prerequisites": [
+        "Bun workspace toolchain for policy/code parity checks",
+        "Dated counsel/operator sign-off for non-code legal/processor agreements"
+      ],
+      "negative_control": "scripts/legal-claims-audit.test.ts fails if any served policy claim lacks a code/config owner or version binding.",
+      "remaining_gaps_or_blockers": "External counsel/operator sign-off and deployed legal pages remain outside local automated tests."
+    },
+    {
+      "missing_path": "scripts/e2e-outbox.sh",
+      "bead_id": "asimposiumorg-6js",
+      "priority": 1,
+      "classification": "reconciled-workerd-real-bindings",
+      "authoritative_commands": [
+        {
+          "cmd": "bash scripts/e2e-s2-krater.sh && node apps/wire/test/integration/observability-real-bindings.mjs",
+          "referenced_files": [
+            "scripts/e2e-s2-krater.sh",
+            "apps/wire/test/integration/observability-real-bindings.mjs",
+            "scripts/ops-outbox-reconcile.ts"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": [
+        "Genuine Node >=22 for Workerd/D1/DO execution",
+        "Remaining outbox drainer consumer jobs tracked by asimposiumorg-rc-outbox-drainer-jobs-embeddings-cn2n"
+      ],
+      "negative_control": "Outbox backlog alert threshold trip-and-recovery in observability-real-bindings.mjs and crash/poison-quarantine checks in outbox-do tests fail closed on missed draining.",
+      "remaining_gaps_or_blockers": "Full outbox consumer wiring (asimposiumorg-rc-outbox-drainer-jobs-embeddings-cn2n) and hosted DO alarm execution (asimposiumorg-rs5n) remain open."
+    },
+    {
+      "missing_path": "scripts/e2e-problem-page.sh",
+      "bead_id": "asimposiumorg-fjp",
+      "priority": 1,
+      "classification": "reconciled-browser-real-lane",
+      "authoritative_commands": [
+        {
+          "cmd": "node e2e/playwright/agora-local-lane.mjs --build",
+          "referenced_files": ["e2e/playwright/agora-local-lane.mjs"],
+          "proof_level": "chromium-browser"
+        },
+        {
+          "cmd": "node apps/wire/test/integration/problem-lifecycle-real-bindings.mjs && node apps/wire/test/integration/face-census-real-bindings.mjs",
+          "referenced_files": [
+            "apps/wire/test/integration/problem-lifecycle-real-bindings.mjs",
+            "apps/wire/test/integration/face-census-real-bindings.mjs"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": [
+        "Genuine Node >=22",
+        "Playwright 1.65.0 Chromium build 1254+ via ASIMPOSIUM_CHROMIUM_EXECUTABLE or Playwright cache (default shared cache may be absent)"
+      ],
+      "negative_control": "Anonymous /p/:id omits private workshop/draft bytes and untrusted markdown script payloads are neutralized in agora-local-lane.mjs and face-census-real-bindings.mjs.",
+      "remaining_gaps_or_blockers": "Local production-built Next.js + Workerd browser run does not replace hosted Vercel/Cloudflare staging proof (asimposiumorg-rs5n)."
+    },
+    {
+      "missing_path": "scripts/e2e-protocol-fixtures.sh",
+      "bead_id": "asimposiumorg-phs",
+      "priority": 1,
+      "classification": "reconciled-workerd-real-bindings",
+      "authoritative_commands": [
+        {
+          "cmd": "bun test /dev/null --timeout=120000 e2e/protocol-table/protocol-table.test.ts e2e/property-suite/invariants.property.test.ts",
+          "referenced_files": [
+            "e2e/protocol-table/protocol-table.test.ts",
+            "e2e/property-suite/invariants.property.test.ts"
+          ],
+          "proof_level": "contracts-golden"
+        },
+        {
+          "cmd": "node apps/wire/test/integration/protocol-conflicts-real-bindings.mjs",
+          "referenced_files": ["apps/wire/test/integration/protocol-conflicts-real-bindings.mjs"],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": ["Bun workspace toolchain and genuine Node >=22 for Workerd/D1"],
+      "negative_control": "Duplicate/illegal state-machine transitions and protocol conflict violations fail closed in protocol-table.test.ts and protocol-conflicts-real-bindings.mjs.",
+      "remaining_gaps_or_blockers": "Independent verifier re-execution at exact HEAD required per Fable §17.0."
+    },
+    {
+      "missing_path": "scripts/e2e-rate-limits.sh",
+      "bead_id": "asimposiumorg-irg",
+      "priority": 1,
+      "classification": "reconciled-workerd-real-bindings",
+      "authoritative_commands": [
+        {
+          "cmd": "node apps/wire/test/integration/read-quota-real-bindings.mjs && node apps/wire/test/integration/workshop-quota-real-bindings.mjs && node apps/wire/test/integration/slow-mode-real-bindings.mjs",
+          "referenced_files": [
+            "apps/wire/test/integration/read-quota-real-bindings.mjs",
+            "apps/wire/test/integration/workshop-quota-real-bindings.mjs",
+            "apps/wire/test/integration/slow-mode-real-bindings.mjs"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": [
+        "Genuine Node >=22 for Workerd/D1 execution",
+        "Accepted sponsor-window policy and deployed Cloudflare edge rate-limit configuration (asimposiumorg-rs5n)"
+      ],
+      "negative_control": "Exhausting Fellow/sponsor/read/workshop quotas returns 429 with Retry-After and visible remaining budget without corrupting state.",
+      "remaining_gaps_or_blockers": "Accepted sponsor-window policy and deployed staging/production rate-limit evidence remain open on asimposiumorg-irg and asimposiumorg-rs5n."
+    },
+    {
+      "missing_path": "scripts/e2e-safety-integrity-integration.sh",
+      "bead_id": "asimposiumorg-9qo",
+      "priority": 1,
+      "classification": "reconciled-workerd-real-bindings",
+      "authoritative_commands": [
+        {
+          "cmd": "bash scripts/e2e-reports-appeals.sh --target local && bash scripts/e2e-dual-use-review.sh --target local && bash scripts/e2e-integrity-cases.sh --target local",
+          "referenced_files": [
+            "scripts/e2e-reports-appeals.sh",
+            "scripts/e2e-dual-use-review.sh",
+            "scripts/e2e-integrity-cases.sh",
+            "apps/wire/test/integration/moderation-real-bindings.mjs",
+            "apps/wire/test/integration/screening-appeals-real-bindings.mjs",
+            "apps/wire/test/integration/integrity-cases-real-bindings.mjs"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": [
+        "Genuine Node >=22 for Workerd/D1 execution",
+        "For hosted moderation/dual-use proof: OPS.3 staging deploy (asimposiumorg-rs5n)"
+      ],
+      "negative_control": "Ordinary-science intake refusal, conflicted investigator/appellate refusal, concurrent operator race CAS refusal, and D1 immutability triggers all fail closed.",
+      "remaining_gaps_or_blockers": "W9.3c HTTP/Agora routes, D1 migration numbering reconciliation, and hosted Workers AI/staging proof remain open."
+    },
+    {
+      "missing_path": "scripts/e2e-service-envelope.sh",
+      "bead_id": "asimposiumorg-ggv",
+      "priority": 1,
+      "classification": "reconciled-workerd-real-bindings",
+      "authoritative_commands": [
+        {
+          "cmd": "bash scripts/e2e-s6-cross-plane-auth.sh && node apps/wire/test/integration/auth-race-matrix-real-bindings.mjs",
+          "referenced_files": [
+            "scripts/e2e-s6-cross-plane-auth.sh",
+            "apps/wire/test/integration/auth-race-matrix-real-bindings.mjs"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": ["Genuine Node >=22 for Workerd/D1 execution"],
+      "negative_control": "Tampered signatures, replayed nonces, wrong payload digests, expired envelopes, and WRONG_PRINCIPAL mismatches fail closed.",
+      "remaining_gaps_or_blockers": "Live Vercel-to-Cloudflare Worker staging envelope rotation check waits on OPS.3 deploy (asimposiumorg-rs5n)."
+    },
+    {
+      "missing_path": "scripts/e2e-write-transaction.sh",
+      "bead_id": "asimposiumorg-rvi",
+      "priority": 1,
+      "classification": "reconciled-workerd-real-bindings",
+      "authoritative_commands": [
+        {
+          "cmd": "node apps/wire/test/integration/atomic-batch-real-bindings.mjs && node apps/wire/test/integration/batch-replay-real-bindings.mjs && node apps/wire/test/integration/transition-race-real-bindings.mjs && node apps/wire/test/integration/direct-append-race-real-bindings.mjs",
+          "referenced_files": [
+            "apps/wire/test/integration/atomic-batch-real-bindings.mjs",
+            "apps/wire/test/integration/batch-replay-real-bindings.mjs",
+            "apps/wire/test/integration/transition-race-real-bindings.mjs",
+            "apps/wire/test/integration/direct-append-race-real-bindings.mjs"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": ["Genuine Node >=22 for Workerd/D1 execution"],
+      "negative_control": "Conflicting Idempotency-Key payloads, concurrent write races, and rollback failures produce zero partial projection/event commits.",
+      "remaining_gaps_or_blockers": "Hosted Cloudflare D1 production write-transaction proof waits on OPS.3 deploy (asimposiumorg-rs5n)."
+    },
+    {
+      "missing_path": "scripts/e2e-asimp-auth.sh",
+      "bead_id": "asimposiumorg-il7",
+      "priority": 2,
+      "classification": "reconciled-rust-cli-parity",
+      "authoritative_commands": [
+        {
+          "cmd": "rch exec -- cargo test --manifest-path cli/Cargo.toml --test pop_and_keystore_e2e -j 2 && bash scripts/e2e-device-enrollment.sh --scenario all",
+          "referenced_files": [
+            "cli/tests/pop_and_keystore_e2e.rs",
+            "scripts/e2e-device-enrollment.sh"
+          ],
+          "proof_level": "rust-cli-parity"
+        }
+      ],
+      "prerequisites": [
+        "Remote Rust toolchain via rch (or local Cargo) and genuine Node >=22 for device-enrollment Workerd lane"
+      ],
+      "negative_control": "Tampered PoP signatures, unsafe keystore permissions, and expired/denied device proposals fail closed.",
+      "remaining_gaps_or_blockers": "Live hosted staging PKCE/device login against Google OAuth waits on OPS.3 deploy (asimposiumorg-rs5n)."
+    },
+    {
+      "missing_path": "scripts/e2e-asimp-session.sh",
+      "bead_id": "asimposiumorg-l3b",
+      "priority": 2,
+      "classification": "reconciled-rust-cli-parity",
+      "authoritative_commands": [
+        {
+          "cmd": "rch exec -- cargo test --manifest-path cli/Cargo.toml --test cli_surface --test pull_protocol_parity -j 2 && node apps/wire/test/integration/session-lifecycle-real-bindings.mjs",
+          "referenced_files": [
+            "cli/tests/cli_surface.rs",
+            "cli/tests/pull_protocol_parity.rs",
+            "apps/wire/test/integration/session-lifecycle-real-bindings.mjs",
+            "apps/wire/test/integration/cli-search-real-bindings.mjs"
+          ],
+          "proof_level": "rust-cli-parity"
+        }
+      ],
+      "prerequisites": [
+        "Remote Rust toolchain via rch (or local Cargo); ASIMP_SEARCH_TEST_BINARY for manual cli-search-real-bindings.mjs; genuine Node >=22"
+      ],
+      "negative_control": "Expected workshop version conflicts, handback over-limit bounds, and stale idempotency edits fail closed.",
+      "remaining_gaps_or_blockers": "Deployed public search endpoint returns 404 until OPS.3 deploy (asimposiumorg-rs5n)."
+    },
+    {
+      "missing_path": "scripts/e2e-asimp-validate-scrub.sh",
+      "bead_id": "asimposiumorg-psl",
+      "priority": 2,
+      "classification": "reconciled-rust-cli-parity",
+      "authoritative_commands": [
+        {
+          "cmd": "rch exec -- cargo test --manifest-path cli/Cargo.toml --test validate_scrub_parity -j 2 && bun cli/tests/differential-parity.ts && bash scripts/e2e-secret-scan.sh",
+          "referenced_files": [
+            "cli/tests/validate_scrub_parity.rs",
+            "cli/tests/differential-parity.ts",
+            "scripts/e2e-secret-scan.sh"
+          ],
+          "proof_level": "rust-cli-parity"
+        }
+      ],
+      "prerequisites": [
+        "Remote Rust toolchain via rch (or local Cargo) and genuine Node >=22 for secret-scan Workerd lane"
+      ],
+      "negative_control": "Any byte-level validation or P7 secret-detection divergence between Worker and asimp fails differential-parity.ts.",
+      "remaining_gaps_or_blockers": "Independent verifier re-execution against exact HEAD required per Fable §17.0."
+    },
+    {
+      "missing_path": "scripts/e2e-content-redaction.sh",
+      "bead_id": "asimposiumorg-r8l",
+      "priority": 2,
+      "classification": "reconciled-workerd-real-bindings",
+      "authoritative_commands": [
+        {
+          "cmd": "node apps/wire/test/integration/moderation-real-bindings.mjs && node apps/wire/test/integration/content-hide-sweep-real-bindings.mjs && node apps/wire/test/integration/deletion-journal-real-bindings.mjs && node apps/wire/test/integration/security-retention-real-bindings.mjs",
+          "referenced_files": [
+            "apps/wire/test/integration/moderation-real-bindings.mjs",
+            "apps/wire/test/integration/content-hide-sweep-real-bindings.mjs",
+            "apps/wire/test/integration/deletion-journal-real-bindings.mjs",
+            "apps/wire/test/integration/security-retention-real-bindings.mjs"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": ["Genuine Node >=22 for Workerd/D1/R2 execution"],
+      "negative_control": "Hidden/tombstoned content disappearing from public faces/search/packs while immutable event envelopes remain verified fails closed on any leak.",
+      "remaining_gaps_or_blockers": "Hosted R2/edge purge timing after lawful redaction requires staging deploy (asimposiumorg-rs5n)."
+    },
+    {
+      "missing_path": "scripts/e2e-herald-integration.sh",
+      "bead_id": "asimposiumorg-lry",
+      "priority": 2,
+      "classification": "reconciled-workerd-real-bindings",
+      "authoritative_commands": [
+        {
+          "cmd": "bash scripts/e2e-herald-wrangler-dev.sh && bash scripts/e2e-agent-long-poll.sh && node apps/wire/test/integration/herald-room-real-bindings.mjs && node apps/wire/test/integration/event-tails-real-bindings.mjs",
+          "referenced_files": [
+            "scripts/e2e-herald-wrangler-dev.sh",
+            "scripts/e2e-agent-long-poll.sh",
+            "apps/wire/test/integration/herald-room-real-bindings.mjs",
+            "apps/wire/test/integration/event-tails-real-bindings.mjs"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": ["Genuine Node >=22 for Wrangler/Workerd DO+D1 execution"],
+      "negative_control": "Unauthorized workshop room subscription, revoked session eviction, and out-of-order/missed notify reconciliation fail closed.",
+      "remaining_gaps_or_blockers": "Agora human live WebSocket/SSE client rooms remain tracked by asimposiumorg-rc-herald-human-workshop-rooms-kfag and hosted DO binding on asimposiumorg-rs5n."
+    },
+    {
+      "missing_path": "scripts/e2e-herald.sh",
+      "bead_id": "asimposiumorg-kzq",
+      "priority": 2,
+      "classification": "reconciled-workerd-real-bindings",
+      "authoritative_commands": [
+        {
+          "cmd": "bash scripts/e2e-herald-wrangler-dev.sh && node apps/wire/test/integration/herald-room-real-bindings.mjs",
+          "referenced_files": [
+            "scripts/e2e-herald-wrangler-dev.sh",
+            "apps/wire/test/integration/herald-room-real-bindings.mjs"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": ["Genuine Node >=22 for Wrangler/Workerd DO execution"],
+      "negative_control": "WebSocket/SSE fallback and room-authorization checks fail closed on anonymous/cross-sponsor access to workshop rooms.",
+      "remaining_gaps_or_blockers": "Deployed Cloudflare Durable Object hibernation and browser room consumption remain open on asimposiumorg-rc-herald-human-workshop-rooms-kfag and asimposiumorg-rs5n."
+    },
+    {
+      "missing_path": "scripts/e2e-oauth-production.sh",
+      "bead_id": "asimposiumorg-qnh",
+      "priority": 2,
+      "classification": "blocked-hosted-deploy-only",
+      "authoritative_commands": [
+        {
+          "cmd": "bash scripts/smoke-gallery.sh && bash scripts/e2e-s6-auth-ingress.sh",
+          "referenced_files": ["scripts/smoke-gallery.sh", "scripts/e2e-s6-auth-ingress.sh"],
+          "proof_level": "hosted-blocked"
+        }
+      ],
+      "prerequisites": [
+        "Verified Google OAuth production consent screen, two designated Google test accounts, Playwright Chromium build 1254+ (ASIMPOSIUM_CHROMIUM_EXECUTABLE), and OPS.3 deploy (asimposiumorg-rs5n)"
+      ],
+      "negative_control": "scripts/smoke-gallery.sh exits 78 fail-closed whenever designated Google accounts, seeded staging problem, or Chromium are absent.",
+      "remaining_gaps_or_blockers": "Google OAuth production verification and step-up auth flows cannot be proven locally; blocked on operator OAuth review and asimposiumorg-rs5n."
+    },
+    {
+      "missing_path": "scripts/e2e-onboarding.sh",
+      "bead_id": "asimposiumorg-v2v",
+      "priority": 2,
+      "classification": "reconciled-workerd-real-bindings",
+      "authoritative_commands": [
+        {
+          "cmd": "bash scripts/e2e-s1-cold-enrollment.sh && bash scripts/e2e-enrollment-capsule.sh && bash scripts/e2e-identity-lifecycle.sh && bash scripts/e2e-token-lifecycle.sh",
+          "referenced_files": [
+            "scripts/e2e-s1-cold-enrollment.sh",
+            "scripts/e2e-enrollment-capsule.sh",
+            "scripts/e2e-identity-lifecycle.sh",
+            "scripts/e2e-token-lifecycle.sh"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": [
+        "Genuine Node >=22 for Workerd/D1 execution",
+        "For hosted S-1 3-harness real sponsor approval: OPS.3 staging deploy (asimposiumorg-rs5n)"
+      ],
+      "negative_control": "Stolen path-only join URL without fragment secret, cross-sponsor approval, and revoked bearer replay all fail closed.",
+      "remaining_gaps_or_blockers": "S-1 hosted 3-harness unaided enrollment with live Google sponsor approval remains open on asimposiumorg-mn7 and asimposiumorg-rs5n."
+    },
+    {
+      "missing_path": "scripts/e2e-symposiarch.sh",
+      "bead_id": "asimposiumorg-4jj",
+      "priority": 2,
+      "classification": "reconciled-workerd-real-bindings",
+      "authoritative_commands": [
+        {
+          "cmd": "bash scripts/e2e-reports-appeals.sh --target local && bash scripts/e2e-dual-use-review.sh --target local && bash scripts/e2e-integrity-cases.sh --target local && bash scripts/e2e-moves.sh && bash scripts/e2e-calibration-honors.sh",
+          "referenced_files": [
+            "scripts/e2e-reports-appeals.sh",
+            "scripts/e2e-dual-use-review.sh",
+            "scripts/e2e-integrity-cases.sh",
+            "scripts/e2e-moves.sh",
+            "scripts/e2e-calibration-honors.sh"
+          ],
+          "proof_level": "workerd-real-bindings"
+        }
+      ],
+      "prerequisites": [
+        "Genuine Node >=22 for Workerd/D1 execution",
+        "For live Workers AI accuracy and holdout metrics: asimposiumorg-rc-populate-s4-corpus-c743 and OPS.3 deploy (asimposiumorg-rs5n)"
+      ],
+      "negative_control": "Self-certification, low-materiality move spam, oracle-leaking policy refusals, and conflicted integrity adjudication all fail closed.",
+      "remaining_gaps_or_blockers": "Hosted Workers AI screening accuracy and sealed Tier-B corpus verification remain open."
+    },
+    {
+      "missing_path": "scripts/e2e-asimp-spool.sh",
+      "bead_id": "asimposiumorg-jsj",
+      "priority": 3,
+      "classification": "reconciled-rust-cli-parity",
+      "authoritative_commands": [
+        {
+          "cmd": "rch exec -- cargo test --manifest-path cli/Cargo.toml --test spool_sync_doctor_e2e -j 2",
+          "referenced_files": ["cli/tests/spool_sync_doctor_e2e.rs"],
+          "proof_level": "rust-cli-parity"
+        }
+      ],
+      "prerequisites": ["Remote Rust toolchain via rch (or local Cargo)"],
+      "negative_control": "Unsafe spool file permissions, clock-skewed 24h boundary violations, and unknown_commit quarantine cases fail closed in spool_sync_doctor_e2e.rs.",
+      "remaining_gaps_or_blockers": "Live hosted staging spool sync verification waits on OPS.3 deploy (asimposiumorg-rs5n)."
+    },
+    {
+      "missing_path": "scripts/e2e-cli-install.sh",
+      "bead_id": "asimposiumorg-85s",
+      "priority": 3,
+      "classification": "reconciled-rust-cli-parity",
+      "authoritative_commands": [
+        {
+          "cmd": "bun test /dev/null --timeout=120000 scripts/asimp-installer-e2e.test.ts && bash -n scripts/asimp-release-package.sh apps/web/public/install.sh",
+          "referenced_files": [
+            "scripts/asimp-installer-e2e.test.ts",
+            "scripts/asimp-release-package.sh",
+            "apps/web/public/install.sh"
+          ],
+          "proof_level": "rust-cli-parity"
+        }
+      ],
+      "prerequisites": [
+        "Bun workspace toolchain and shellcheck/bash; GitHub Releases signing keys for live cross-platform binary publication"
+      ],
+      "negative_control": "Checksum mismatch, tampered archive digest, and sudo-requiring install paths fail closed in asimp-installer-e2e.test.ts.",
+      "remaining_gaps_or_blockers": "Live cross-platform signed GitHub Release download check requires first published binary release."
+    },
+    {
+      "missing_path": "scripts/e2e-citation-enrichment.sh",
+      "bead_id": "asimposiumorg-pbq",
+      "priority": 4,
+      "classification": "tier-2-deferred",
+      "authoritative_commands": [],
+      "prerequisites": [
+        "Tier 2 post-launch workstream (Fable Rev 3.1); not a G0–G2 launch prerequisite"
+      ],
+      "negative_control": "Deferred until Tier 2 implementation; tracker gate explicitly classifies as tier-2-deferred rather than silent coverage.",
+      "remaining_gaps_or_blockers": "Intentionally deferred Tier 2 feature (DOI/arXiv enrichment + retraction watch)."
+    },
+    {
+      "missing_path": "scripts/e2e-fmd-export.sh",
+      "bead_id": "asimposiumorg-4gk",
+      "priority": 4,
+      "classification": "tier-2-deferred",
+      "authoritative_commands": [],
+      "prerequisites": [
+        "Tier 2 post-launch workstream (Fable Rev 3.1); not a G0–G2 launch prerequisite"
+      ],
+      "negative_control": "Deferred until Tier 2 implementation; tracker gate explicitly classifies as tier-2-deferred rather than silent coverage.",
+      "remaining_gaps_or_blockers": "Intentionally deferred Tier 2 feature (fmd export face)."
+    },
+    {
+      "missing_path": "scripts/e2e-mcp-adapter.sh",
+      "bead_id": "asimposiumorg-cus",
+      "priority": 4,
+      "classification": "tier-2-deferred",
+      "authoritative_commands": [],
+      "prerequisites": [
+        "Tier 2 post-launch workstream (Fable Rev 3.1 / OQ-11); not a G0–G2 launch prerequisite"
+      ],
+      "negative_control": "Deferred until Tier 2 implementation; tracker gate explicitly classifies as tier-2-deferred rather than silent coverage.",
+      "remaining_gaps_or_blockers": "Intentionally deferred Tier 2 feature (MCP adapter <=7 tools)."
+    },
+    {
+      "missing_path": "scripts/e2e-mirror.sh",
+      "bead_id": "asimposiumorg-el5",
+      "priority": 4,
+      "classification": "tier-2-deferred",
+      "authoritative_commands": [],
+      "prerequisites": [
+        "Tier 2 post-launch workstream (Fable Rev 3.1); not a G0–G2 launch prerequisite"
+      ],
+      "negative_control": "Deferred until Tier 2 implementation; tracker gate explicitly classifies as tier-2-deferred rather than silent coverage.",
+      "remaining_gaps_or_blockers": "Intentionally deferred Tier 2 feature (external archival mirrors)."
+    },
+    {
+      "missing_path": "scripts/e2e-webhooks.sh",
+      "bead_id": "asimposiumorg-b34",
+      "priority": 4,
+      "classification": "tier-2-deferred",
+      "authoritative_commands": [],
+      "prerequisites": [
+        "Tier 2 post-launch workstream (Fable Rev 3.1); not a G0–G2 launch prerequisite"
+      ],
+      "negative_control": "Deferred until Tier 2 implementation; tracker gate explicitly classifies as tier-2-deferred rather than silent coverage.",
+      "remaining_gaps_or_blockers": "Intentionally deferred Tier 2 feature (signed outbound webhooks)."
+    },
+    {
+      "missing_path": "scripts/eval-semantic-search.sh",
+      "bead_id": "asimposiumorg-1ba",
+      "priority": 4,
+      "classification": "tier-2-deferred",
+      "authoritative_commands": [],
+      "prerequisites": [
+        "Tier 2 evidence-gated evaluation (Fable Rev 3.1); only triggered if FTS5 paraphrase recall becomes a documented user complaint"
+      ],
+      "negative_control": "Deferred until Tier 2 evaluation; tracker gate explicitly classifies as tier-2-deferred rather than silent coverage.",
+      "remaining_gaps_or_blockers": "Intentionally deferred Tier 2 evidence-gated evaluation (frankensearch semantic search)."
+    }
+  ]
+}

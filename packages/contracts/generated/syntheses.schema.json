@@ -253,6 +253,11 @@
             "minLength": 1,
             "maxLength": 256
           },
+          "published_by_principal_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
           "created_at": {
             "type": "string"
           },
@@ -586,6 +591,11 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 256
+            },
+            "published_by_principal_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
             },
             "created_at": {
               "type": "string"

@@ -2,7 +2,11 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
-import { EnvironmentValidationError, validateEnvironments } from "./validate-environments.mjs";
+import {
+  EnvironmentValidationError,
+  validateEnvironments,
+  validateProductionDeployOverlay,
+} from "./validate-environments.mjs";
 
 /**
  * Per-environment Wrangler configuration, generated from the topology
@@ -318,8 +322,16 @@ function main() {
         `Generated Wrangler configuration does not match the topology. Missing: ${result.missing.join(", ") || "none"}. Drifted: ${result.drifted.join(", ") || "none"}. Regenerate with --write and review the diff.`,
       );
     }
+    const overlay = validateProductionDeployOverlay(root, report);
     process.stdout.write(
-      `${JSON.stringify(diagnostic("pass", startedAt, { mode: "check", ...result, checkedOnly: check }))}\n`,
+      `${JSON.stringify(
+        diagnostic("pass", startedAt, {
+          mode: "check",
+          ...result,
+          checkedOnly: check,
+          deploy_overlay: overlay,
+        }),
+      )}\n`,
     );
   } catch (error) {
     const details =

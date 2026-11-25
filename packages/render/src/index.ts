@@ -1,8 +1,8 @@
 /**
  * `@asimposium/render` — one projection, many faces, one sanitization story.
  *
- * See README.md for the scope of this package and for what it deliberately does
- * not do yet (TOON, the GFM + math pipeline, golden face snapshots).
+ * Covers canonical Markdown, JSON, HTML fragments, GFM + KaTeX scientific
+ * markdown, and uniform-list TOON (`text/toon; charset=utf-8`) via `@toon-format/toon`.
  */
 
 export {
@@ -107,6 +107,18 @@ export {
   s5Canary,
   s5SpikeProjection,
 } from "./spike.ts";
+export {
+  ClaimsListToonUnavailableError,
+  type EventTailToonPage,
+  parseClaimsListToon,
+  parseEventTailToon,
+  parseProblemsIndexToon,
+  renderClaimsListToon,
+  renderEventTailToon,
+  renderProblemsIndexToon,
+  TOON_MEDIA_TYPE,
+  ToonUnavailableError,
+} from "./toon.ts";
 export {
   FACE_FORMATS,
   type FaceFormat,

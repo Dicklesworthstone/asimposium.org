@@ -19,7 +19,7 @@
       "QUESTION_NOT_LEASED",
       "CONFLICT_NORMALIZATION_REQUIRED"
     ],
-    "summary": "Each exported ontology value lists its declared producer, consumer, and decision. CI checks coverage and verifies that the declared symbols exist. Mounted behavior tests supply separate evidence that a consumer uses the value. Nine grandfathered non-active items are explicitly tagged tier-2-deferred or retire-candidate."
+    "summary": "Each exported ontology value lists its declared producer, consumer, and decision. CI reads every category (including LEDGER_OBJECT_KINDS) directly from @asimposium/contracts, verifies symbol existence, and parses each consumer symbol's AST 2-hop same-file call closure to prove the consumer actually observes the ontology member or its contracted category type (rejecting unrelated symbols such as EnrollmentService). Nine grandfathered non-active items are explicitly tagged tier-2-deferred or retire-candidate."
   },
   "categories": {
     "claim_kinds": [
@@ -221,8 +221,8 @@
       {
         "value": "review",
         "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
-        "consumer": "apps/wire/src/ledger/review-independence.ts:scientificIndependence",
-        "decision_changed": "Computes independence tier and updates claim disposition and review_state facets without allowing self-certification.",
+        "consumer": "apps/wire/src/ledger/review-gate.ts:gateReviewSubmission",
+        "decision_changed": "Enforces P1 author-independence and ADR-21 novelty-review gating, computes independence tier, and updates claim disposition and review_state facets without allowing self-certification.",
         "status": "active"
       },
       {
@@ -321,8 +321,8 @@
       {
         "value": "open",
         "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
-        "consumer": "apps/wire/src/discovery/review-queue-selection.ts:rankReviewQueue",
-        "decision_changed": "Default live claim standing; combined with unchallenged flag when no refutation attempt is recorded (ADR-9).",
+        "consumer": "apps/wire/src/discovery/review-queue-selection.ts:reviewNeed",
+        "decision_changed": "Default live claim standing; combined with unchallenged flag when no refutation attempt is recorded (ADR-9) and admitted into review-queue need selection.",
         "status": "active"
       },
       {
@@ -335,8 +335,8 @@
       {
         "value": "disputed",
         "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
-        "consumer": "apps/wire/src/discovery/review-queue-selection.ts:rankReviewQueue",
-        "decision_changed": "Flags active scientific disagreement, caps downstream dependencies, and elevates review/conflict resolution priority.",
+        "consumer": "apps/wire/src/discovery/review-queue-selection.ts:reviewNeed",
+        "decision_changed": "Flags active scientific disagreement, caps downstream dependencies, and elevates review/conflict resolution priority to resolve-dispute.",
         "status": "active"
       },
       {
@@ -363,8 +363,8 @@
       {
         "value": "reduced-to",
         "producer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
-        "consumer": "apps/wire/src/discovery/review-queue-selection.ts:rankReviewQueue",
-        "decision_changed": "Redirects effort toward the target reduced claim instead of re-proving the original formulation.",
+        "consumer": "apps/wire/src/discovery/review-queue-selection.ts:reviewNeed",
+        "decision_changed": "Admits reduced claims for independent verification of the reduction and redirects effort toward the target reduced claim instead of re-proving the original formulation.",
         "status": "active"
       },
       {
@@ -592,16 +592,16 @@
       {
         "value": "negative-result",
         "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
-        "consumer": "packages/render/src/hypothesis-evidence.ts:renderHypothesisEvidenceMarkdown",
-        "decision_changed": "Labels failed-attempt empirical/analytical evidence explicitly on public faces to preserve negative knowledge (P6).",
+        "consumer": "packages/render/src/hypothesis-evidence.ts:renderHypothesisEvidenceHtml",
+        "decision_changed": "Labels failed-attempt empirical/analytical evidence explicitly via content.kind on public faces to preserve negative knowledge (P6).",
         "status": "active",
         "note": "Taxonomic display consumer; assessEvidenceClass classifies via standard locator/computation/assertion rules."
       },
       {
         "value": "null-result",
         "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
-        "consumer": "packages/render/src/hypothesis-evidence.ts:renderHypothesisEvidenceMarkdown",
-        "decision_changed": "Labels null-outcome searches explicitly on public faces alongside stated search domains (P5/P6).",
+        "consumer": "packages/render/src/hypothesis-evidence.ts:renderHypothesisEvidenceHtml",
+        "decision_changed": "Labels null-outcome searches explicitly via content.kind on public faces alongside stated search domains (P5/P6).",
         "status": "active",
         "note": "Taxonomic display consumer; assessEvidenceClass classifies via standard locator/computation/assertion rules."
       },
@@ -618,8 +618,8 @@
       {
         "value": "supports",
         "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
-        "consumer": "apps/wire/src/ledger/scientific-checks.ts:readScientificClaim",
-        "decision_changed": "Contributes confirmatory supporting evidence toward claim corroboration and hypothesis discrimination.",
+        "consumer": "apps/wire/src/ledger/scientific-checks.ts:assessScientificVerification",
+        "decision_changed": "Qualifies confirmatory supporting evidence for strong-support verification checks, claim corroboration, and hypothesis discrimination.",
         "status": "active"
       },
       {
@@ -646,8 +646,8 @@
       {
         "value": "reproduces",
         "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
-        "consumer": "apps/wire/src/ledger/dispositions.ts:evaluateClaimTransition",
-        "decision_changed": "Supplies independent replication weight for claim standing and Fellow calibration records.",
+        "consumer": "apps/wire/src/ledger/scientific-checks.ts:assessScientificVerification",
+        "decision_changed": "Qualifies confirmatory reproduction evidence for strong-support verification checks, claim standing, and Fellow calibration records.",
         "status": "active"
       },
       {
@@ -698,9 +698,9 @@
       },
       {
         "value": "claim",
-        "producer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
-        "consumer": "e2e/gauntlet/local-product-flow.mjs:fellowPost",
-        "decision_changed": "Focuses token budget on a single version-pinned claim C-n@v, its dependencies, evidence, and gaps.",
+        "producer": "apps/wire/src/sessions/ledger-pack.ts:readPackClaimHeads",
+        "consumer": "apps/wire/src/sessions/router-core.ts:createSessionRouter",
+        "decision_changed": "Focuses the 2,500-token pack budget on a single version-pinned claim C-n@v (validating PackTargetQuerySchema and disclosing omitted claim-detail when untargeted).",
         "status": "active"
       },
       {
@@ -920,8 +920,8 @@
         "value": "UNSUPPORTED_PROTOCOL_VERSION",
         "transparency_class": "contract-teaching",
         "producer": "apps/wire/src/app.ts:createApp",
-        "consumer": "cli/src/lib.rs:invalid_session_id",
-        "decision_changed": "Fails closed when client and server protocol versions are incompatible, listing supported_versions for upgrade.",
+        "consumer": "cli/src/protocol.rs:parse_unsupported_version_problem",
+        "decision_changed": "Fails closed in asimp when client and server protocol versions are incompatible, safely surfacing sanitized supported_versions for upgrade.",
         "status": "active"
       },
       {
@@ -2325,7 +2325,7 @@
         "value": "UNKNOWN_FORMAT",
         "transparency_class": "contract-teaching",
         "producer": "apps/wire/src/app.ts:servePublicRepresentation",
-        "consumer": "cli/src/validate.rs:run_with_io",
+        "consumer": "packages/render/src/render.ts:assertKnownFormat",
         "decision_changed": "Teaches valid Diptych representation formats or pack profiles so callers switch cleanly without guessing (Rule A1/§7.3).",
         "status": "active"
       },

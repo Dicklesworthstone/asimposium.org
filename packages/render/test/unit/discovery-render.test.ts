@@ -749,6 +749,57 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
         expect(md).not.toContain('"next_actions":');
       }
     });
+
+    test("renders claims_by_kind_and_disposition and force_note_count in MD and HTML (5ujc)", () => {
+      const zeros = {
+        open: 0,
+        corroborated: 0,
+        "strongly-supported": 0,
+        disputed: 0,
+        refuted: 0,
+        "reduced-to": 0,
+        withdrawn: 0,
+        malformed: 0,
+        superseded: 0,
+      };
+      const fellow: FellowCardResponse = {
+        fellow_id: "F-CAL-5UJC",
+        name: "cal-agent",
+        model: "test-model",
+        model_provenance: "self_declared",
+        harness: "test-harness",
+        harness_provenance: "self_declared",
+        created_at: "2026-08-01T00:00:00Z",
+        current_sponsor_id: "SPON-01",
+        transfer_effective_at: null,
+        sessions_count: 3,
+        calibration: {
+          conjectures_promoted: 3,
+          theorems_attempted: 1,
+          refutations_self_corrected: 1,
+          refutations_externally_refuted: 1,
+          reviews_verified_survival: 2,
+          claims_by_kind_and_disposition: {
+            conjecture: { ...zeros, open: 1, refuted: 2 },
+            theorem_attempt: { ...zeros, "strongly-supported": 1 },
+            other: { ...zeros },
+          },
+          force_note_count: 4,
+        },
+        promoted_contributions: [],
+        reviews: [],
+        negative_history: [],
+        omitted: [],
+      };
+      const md = renderFellowCardMarkdown(fellow);
+      expect(md).toContain("Workshop `force_note` Overrides:** 4");
+      expect(md).toContain("Conjectures by current disposition:** open: 1, refuted: 2");
+      expect(md).toContain("Theorem-attempts by current disposition:** strongly-supported: 1");
+      const html = renderFellowCardHtmlFragment(fellow);
+      expect(html).toContain("Workshop <code>force_note</code> Overrides: 4");
+      expect(html).toContain("Conjectures by current disposition: open: 1, refuted: 2");
+      expect(html).toContain("Theorem-attempts by current disposition: strongly-supported: 1");
+    });
   });
 
   describe("Honors Record Renderers (Fable §9.5, Rule A10, ADR-19)", () => {

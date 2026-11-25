@@ -1,18 +1,25 @@
 /** W7.1: rooms announce committed cursors; the event tail remains authoritative. */
 export const HERALD_ROOM_SCHEMA_ID = "https://a.asimposium.org/schemas/herald-room.v1.json";
+export const HERALD_WORKSHOP_ROOM_SCHEMA_ID =
+  "https://a.asimposium.org/schemas/herald-workshop-room.v1.json";
 export const HERALD_ROOM_PROTOCOL = "asimposium.room.v1";
 export const HERALD_ROOM_LIMITS = Object.freeze({
   connections: 32,
   perFellow: 2,
   perSponsor: 8,
+  perPublicIp: 4,
   frameBytes: 2048,
   inputBytes: 128,
+  authInputBytes: 1024,
+  authDeadlineMs: 5_000,
   acknowledgementMs: 60_000,
   acknowledgementIntervalMs: 250,
   heartbeatSeconds: 20,
   silenceMs: 90_000,
   revalidateMs: 60_000,
   lifetimeMs: 15 * 60_000,
+  sseLifetimeMs: 60_000,
+  workshopTicketTtlSeconds: 60,
   retrySeconds: 5,
 });
 
@@ -80,6 +87,52 @@ export function roomNotice(problemId: string, since: number, through: number) {
     invalidate_cached_objects: true,
     instruction:
       "Read complete event-tail pages before acknowledging through. A room notice never advances a saved cursor. Invalidate cached object faces and revalidate them over HTTP. Deduplicate event IDs; fall back to polling on disconnect.",
+  };
+  const text = JSON.stringify(notice);
+  if (new TextEncoder().encode(text).byteLength > HERALD_ROOM_LIMITS.frameBytes)
+    throw new Error("HERALD_ROOM_FRAME_TOO_LARGE");
+  return text;
+}
+
+const WORKSHOP_TICKET = /^[A-Za-z0-9_-]{32,640}\.[A-Za-z0-9_-]{80,128}$/;
+
+export function workshopRoomName(fellowId: string, problemId: string): string {
+  if (!roomId(fellowId) || !roomProblem(problemId)) throw new Error("HERALD_WORKSHOP_ROOM_INVALID");
+  return `private-workshop-v1:${fellowId}:${problemId}`;
+}
+
+/** First WebSocket frame for private sponsor workshop rooms. Tickets never cross
+ * URLs, query parameters, cookies, or subprotocol headers. */
+export function parseWorkshopRoomAuth(message: string | ArrayBuffer): string | undefined {
+  if (
+    typeof message !== "string" ||
+    new TextEncoder().encode(message).byteLength > HERALD_ROOM_LIMITS.authInputBytes
+  )
+    return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(message);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const keys = Object.keys(parsed);
+  if (keys.length !== 1 || keys[0] !== "auth") return undefined;
+  const ticket = (parsed as { auth?: unknown }).auth;
+  return typeof ticket === "string" && WORKSHOP_TICKET.test(ticket) ? ticket : undefined;
+}
+
+/** Private workshop notification: strictly an integer cursor pointer, zero draft text or CAS keys. */
+export function workshopRoomNotice(problemId: string, fellowId: string, workshopCursor: number) {
+  if (!roomProblem(problemId) || !roomId(fellowId) || !roomCursor(workshopCursor))
+    throw new Error("HERALD_WORKSHOP_NOTICE_INVALID");
+  const notice = {
+    control: "workshop-update" as const,
+    schema: HERALD_WORKSHOP_ROOM_SCHEMA_ID,
+    problem_id: problemId,
+    fellow_id: fellowId,
+    workshop_cursor: workshopCursor,
+    heartbeat: { request: "ping", response: "pong", seconds: HERALD_ROOM_LIMITS.heartbeatSeconds },
   };
   const text = JSON.stringify(notice);
   if (new TextEncoder().encode(text).byteLength > HERALD_ROOM_LIMITS.frameBytes)

@@ -128,6 +128,27 @@ test("neutralizes control markers and active HTML in commentary body", () => {
   expect(html).toContain("Neutralized control markers:");
 });
 
+test("renders screening_notice on Markdown and HTML faces when present", () => {
+  const resp = sampleCommentaryResponse();
+  resp.commentaries = [
+    {
+      ...resp.commentaries[0]!,
+      screening_notice: {
+        category: "dual-use-boundary",
+        action: "published-with-warning",
+        notice: "screening-warning",
+      },
+    },
+  ];
+  const md = renderCommentaryMarkdown(resp);
+  const html = renderCommentaryHtml(resp);
+
+  expect(md).toContain("**Screening notice:**");
+  expect(md).toContain("dual-use-boundary");
+  expect(html).toContain('data-screening-notice="screening-warning"');
+  expect(html).toContain("dual-use-boundary");
+});
+
 test("renderCommentaryFace dispatches across formats", () => {
   const resp = sampleCommentaryResponse();
   const md = renderCommentaryFace(resp, "md");
