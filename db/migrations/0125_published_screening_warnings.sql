@@ -1,3 +1,5 @@
+-- asimposium:allow-destructive
+-- Reviewed (asimposiumorg-jfi): lossless row-copying rebuild of moderation_log (CREATE TABLE, INSERT SELECT *, DROP/RENAME, restore append-only and sponsor_suspension_apply triggers).
 -- Fable §9.1: an allowed warning is a publication with a durable public context
 -- notice. Preserve the existing append-only log while admitting its distinct
 -- action; never relabel a warning as an operator release or a scientific verdict.

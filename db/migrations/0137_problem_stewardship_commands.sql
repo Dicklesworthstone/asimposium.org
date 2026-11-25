@@ -1,3 +1,5 @@
+-- asimposium:allow-destructive
+-- Reviewed (asimposiumorg-jfi): lossless row-copying rebuild of private_problem_access_replays, replacement of its four triggers, and ON CONFLICT DO UPDATE inside the recreated trigger body.
 -- Review pins follow the current accountable sponsor and steward roster, not
 -- timestamps (several governance writes may commit in the same millisecond).
 ALTER TABLE problems ADD COLUMN stewardship_version INTEGER NOT NULL DEFAULT 0

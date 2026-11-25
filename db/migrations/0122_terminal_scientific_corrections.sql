@@ -1,3 +1,5 @@
+-- asimposium:allow-destructive
+-- Reviewed (asimposiumorg-jfi): replaces one view (DROP VIEW scientific_withdrawal_authority immediately followed by CREATE VIEW); zero table data touched.
 PRAGMA foreign_keys = ON;
 
 -- Scientific closure cannot prevent an author from correcting the evidence

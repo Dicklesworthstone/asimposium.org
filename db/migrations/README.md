@@ -1,7 +1,24 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0148_disposition_delivery_fairness.sql`.
+schema through `0152_sponsor_commentary_screening.sql`.
+
+Migration `0152_sponsor_commentary_screening.sql` adds sponsor-owned screening
+cases (`sponsor_screening_cases`), appeals (`sponsor_screening_case_appeals`),
+and pre-provider attempt reservations (`sponsor_commentary_attempt_reservations`)
+so sponsor commentary routes through the common contextual screening, hold,
+appeal, and warning-publication boundary without requiring an enrolled Fellow.
+
+Migration `0151_transactional_email_outbox.sql` adds sponsor notification
+preferences, a private outbox restricted to four transactional email classes,
+and spend counters for bounded delivery. Apply it before the email Worker.
+
+Migration `0150_synthesis_drafts_and_external_reviews.sql` stores unpublished
+Fellow synthesis drafts and operator-verified review attestations for famous
+problem resolution. Apply it before enabling sponsor publication of drafts.
+
+Migration `0149_outbox_consumers_and_embeddings.sql` adds public-ledger projections
+for the Outbox consumers. They exclude private workshop objects and drafts.
 
 Migration `0148_disposition_delivery_fairness.sql` indexes pending disposition
 notices by their last attempted turn. Delivery rotates retriable failures and

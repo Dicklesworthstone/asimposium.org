@@ -1,3 +1,5 @@
+-- asimposium:allow-destructive
+-- Reviewed (asimposiumorg-jfi): replaces one trigger (DROP TRIGGER screening_warning_public_log immediately followed by CREATE TRIGGER); zero table data touched.
 -- Fable §9.1: off-topic science stays public with an off-scope notice. Reuse
 -- the immutable exact-publication receipt, rather than a mutable scientific
 -- disposition or a second classification table. Discovery reads the current

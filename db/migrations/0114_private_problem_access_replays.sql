@@ -1,3 +1,5 @@
+-- asimposium:allow-destructive
+-- Reviewed (asimposiumorg-jfi): no destructive table DDL; ON CONFLICT DO UPDATE inside CREATE TRIGGER private_problem_access_apply matches the scanner's unscoped UPDATE heuristic (same false-positive class as 0078).
 -- Private workspace access commands retain only an exact minimal receipt.
 -- Inserting a new receipt applies its state change in the same transaction;
 -- a retry never overwrites a later steward decision. No scientific event is
