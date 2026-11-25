@@ -15,6 +15,9 @@ use std::{
 
 /// Fable §657: 5 MB general artifact cap.
 pub const MAX_SCRUB_BYTES: u64 = 5 * 1024 * 1024;
+/// Shared deterministic P7 scanner policy version (kept in lockstep with
+/// `CREDENTIAL_SCAN_POLICY_VERSION` in `apps/wire/src/screening/credential-scan.ts`).
+pub const SCRUB_POLICY_VERSION: &str = "p7-credential-scan-v2";
 /// Matches `MAX_FINDINGS` in `apps/wire/src/screening/credential-scan.ts`.
 pub const MAX_FINDINGS: usize = 20;
 const MAX_PATH_LENGTH: usize = 200;
@@ -799,6 +802,81 @@ pub fn credential_runs(line_text: &str, max_per_pattern: usize) -> Vec<Credentia
             }
             let p3 = take_while(b, p2 + 1, is_b64url);
             if p3 - (p2 + 1) >= 10 { Some(p3) } else { None }
+        },
+    );
+
+    // 13b. access-token: /(?<![A-Za-z0-9_-])(?:__Secure-|__Host-)?(?:authjs|next-auth)\.session-token=[A-Za-z0-9._~-]{16,}/
+    push_pattern_matches(
+        line_text,
+        FindingKind::AccessToken,
+        max_per_pattern,
+        &mut out,
+        |b, i| {
+            if i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_' || b[i - 1] == b'-') {
+                return None;
+            }
+            let after_prefix = if b.get(i..i + 9) == Some(b"__Secure-") {
+                i + 9
+            } else if b.get(i..i + 7) == Some(b"__Host-") {
+                i + 7
+            } else {
+                i
+            };
+            let after_key = if b.get(after_prefix..after_prefix + 21) == Some(b"authjs.session-token=")
+            {
+                after_prefix + 21
+            } else if b.get(after_prefix..after_prefix + 24) == Some(b"next-auth.session-token=") {
+                after_prefix + 24
+            } else {
+                return None;
+            };
+            let end = take_while(b, after_key, |c| {
+                c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'~' | b'-')
+            });
+            if end - after_key >= 16 {
+                Some(end)
+            } else {
+                None
+            }
+        },
+    );
+
+    // 13c. access-token: /(?<![A-Za-z0-9_-])asimp-service-envelope:[ \t]*(?:\{[^\n\r]{16,}|[A-Za-z0-9+/=._-]{24,})/i
+    push_pattern_matches(
+        line_text,
+        FindingKind::AccessToken,
+        max_per_pattern,
+        &mut out,
+        |b, i| {
+            if i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_' || b[i - 1] == b'-') {
+                return None;
+            }
+            let header = b"asimp-service-envelope:";
+            if i + header.len() > b.len()
+                || !b[i..i + header.len()].eq_ignore_ascii_case(header)
+            {
+                return None;
+            }
+            let mut pos = i + header.len();
+            while pos < b.len() && (b[pos] == b' ' || b[pos] == b'\t') {
+                pos += 1;
+            }
+            if b.get(pos) == Some(&b'{') {
+                let mut end = pos + 1;
+                while end < b.len() && b[end] != b'\n' && b[end] != b'\r' {
+                    end += 1;
+                }
+                if end - (pos + 1) >= 16 {
+                    Some(end)
+                } else {
+                    None
+                }
+            } else {
+                let end = take_while(b, pos, |c| {
+                    c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=' | b'.' | b'_' | b'-')
+                });
+                if end - pos >= 24 { Some(end) } else { None }
+            }
         },
     );
 
@@ -2003,6 +2081,7 @@ fn format_ledger_result(args: &ScrubArgs, acks: &BTreeSet<AckSpec>, body: &str) 
     let stdout = if args.json {
         let payload = json!({
             "schema": "asimp.scrub.v1",
+            "policy_version": SCRUB_POLICY_VERSION,
             "mode": args.mode.as_str(),
             "status": status,
             "clean": clean,
@@ -2093,6 +2172,7 @@ fn format_artifact_result(args: &ScrubArgs, acks: &BTreeSet<AckSpec>, body: &str
     let stdout = if args.json {
         let payload = json!({
             "schema": "asimp.scrub.v1",
+            "policy_version": SCRUB_POLICY_VERSION,
             "mode": args.mode.as_str(),
             "status": status,
             "clean": clean,
