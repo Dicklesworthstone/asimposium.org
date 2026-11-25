@@ -1976,15 +1976,25 @@ export async function scientificJourney({
   );
   assert.equal(originalPublication?.content?.statement, statement);
   const publicDigest = await call(`/p/${problem}.json`);
+  const digestClaimRead = publicDigest.next_actions.find(
+    (action) =>
+      action.method === "GET" &&
+      action.url ===
+        `/p/${problem}/claims/${claim.claim_id}@${revision.version}.json?through=${publicDigest.cursor}`,
+  );
   assert.ok(
-    publicDigest.next_actions.some(
-      (action) =>
-        action.url === `/p/${problem}/claims/${claim.claim_id}.json?through=${publicDigest.cursor}`,
-    ),
+    digestClaimRead,
+    "The public digest must advertise its exact claim and captured cursor",
   );
-  const publicFinal = ClaimFaceResponseSchema.parse(
-    await call(`/p/${problem}/claims/${claim.claim_id}.json`),
+  const publicFinal = ClaimFaceResponseSchema.parse(await call(digestClaimRead.url));
+  assert.equal(publicFinal.cursor, publicDigest.cursor);
+  assert.equal(publicFinal.claim_state.version, revision.version);
+  const digestClaim = JSON.parse(
+    publicFinal.items.find((item) => item.kind === "claim-detail").body,
   );
+  assert.equal(digestClaim.statement, revisedStatement);
+  assert.equal(digestClaim.content_digest, revisedDetail.content_digest);
+  assert.equal(digestClaim.event, revisedDetail.event);
   assert.ok(!JSON.stringify(publicFinal).includes(privateCanary));
   assert.ok(!JSON.stringify(publicFinal).includes(privateHandback));
   assert.ok(

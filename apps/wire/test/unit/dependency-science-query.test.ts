@@ -107,7 +107,13 @@ function fixture() {
     ).run(problem, claim_id, version, content_digest, statement);
     return { claim_id, version, event_id: e.event, payload_digest: e.hash, content_digest };
   };
-  const evidence = async (claimId = "C-1", version = 1, body = "Evidence", problem = "P-READ") => {
+  const evidence = async (
+    claimId = "C-1",
+    version = 1,
+    body = "Evidence",
+    problem = "P-READ",
+    attributes: Record<string, unknown> = {},
+  ) => {
     const id = `E-${seq + 1}`;
     const e = await addEvent(
       "evidence",
@@ -123,6 +129,7 @@ function fixture() {
         mode: "confirmatory",
         computed_class: "computation",
         body_md: body,
+        ...attributes,
       },
       problem,
     );
@@ -234,6 +241,70 @@ test("science query reads both root and exact pinned premise evidence", async ()
   );
   assert.equal(rows.at(-1)?.directive_disclosure, null);
 });
+
+const scannedArtifact = {
+  language: "lean",
+  declaration: "even_double",
+  source: "theorem even_double (n : Nat) : 2 * n = n + n := by omega",
+  toolchain: "leanprover/lean4:v4.19.0",
+  axiom_report: "'even_double' depends on axioms: []",
+};
+
+for (const recorded of ["computation", "certified"] as const) {
+  for (const [label, artifact] of [
+    ["absent", undefined],
+    [
+      "admitted proof hole",
+      { ...scannedArtifact, source: "theorem even_double : True := by sorry" },
+    ],
+    ["unrelated declaration", { ...scannedArtifact, declaration: "other_theorem" }],
+  ] as const) {
+    test(`an ${label} formal source cannot lend legacy ${recorded} to a dependency chain`, async () => {
+      const f = fixture();
+      await f.chain();
+      await f.evidence("C-2");
+      await f.evidence("C-1", 1, "Legacy certificate label", "P-READ", {
+        kind: "certificate",
+        computed_class: recorded,
+        ...(artifact === undefined ? {} : { formal_artifact: artifact }),
+      });
+      const assessment = await assessChain(f);
+      assert.equal(assessment.get("C-1@1")?.standing.own_ceiling, "assertion");
+      assert.equal(assessment.get("C-2@1")?.standing.own_ceiling, "computation");
+      assert.equal(assessment.get("C-2@1")?.chain.ceiling, "assertion");
+      assert.deepEqual(assessment.get("C-2@1")?.chain.weakest_path, ["C-2@1", "C-1@1"]);
+    });
+  }
+
+  test(`a scanned formal source retains computation without trusting recorded ${recorded} as certification`, async () => {
+    const f = fixture();
+    await f.chain();
+    await f.evidence("C-2");
+    await f.evidence("C-1", 1, "A qualifying formal source", "P-READ", {
+      kind: "certificate",
+      computed_class: recorded,
+      formal_artifact: scannedArtifact,
+    });
+    const assessment = await assessChain(f);
+    assert.equal(assessment.get("C-1@1")?.standing.own_ceiling, "computation");
+    assert.equal(assessment.get("C-2@1")?.chain.ceiling, "computation");
+  });
+}
+
+for (const recorded of ["assertion", "heuristic", "citation"] as const) {
+  test(`ordinary ${recorded} support remains a dependency ceiling without a formal artifact`, async () => {
+    const f = fixture();
+    await f.chain();
+    await f.evidence("C-2");
+    await f.evidence("C-1", 1, "Ordinary supporting work", "P-READ", {
+      kind: recorded === "citation" ? "certificate" : "argument",
+      computed_class: recorded,
+    });
+    const assessment = await assessChain(f);
+    assert.equal(assessment.get("C-1@1")?.standing.own_ceiling, recorded);
+    assert.equal(assessment.get("C-2@1")?.chain.ceiling, recorded);
+  });
+}
 
 for (const rubric of ["statement-defect", "statement-fails-review"]) {
   test(`science query retains weighted ${rubric} metadata when its review is redacted`, async () => {

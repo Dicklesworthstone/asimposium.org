@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { canonicalJson } from "../../../../packages/contracts/src/canonical-json.ts";
 import { ClaimFaceResponseSchema } from "../../../../packages/contracts/src/ledger.ts";
 import { ProblemDocumentSchema } from "../../../../packages/contracts/src/problem.ts";
 import { SearchResponseSchema } from "../../../../packages/contracts/src/search.ts";
 import { PackResponseSchema } from "../../../../packages/contracts/src/sessions.ts";
+import { sha256Hex, writeLedgerEvent } from "../../src/krater/krater.ts";
 import { nextSearchCursor, readSearchContinuation } from "../../src/search/continuation.ts";
 
 // Production HTTP writes and actual local D1/R2. Existing fixture seams provide
@@ -90,6 +92,111 @@ export async function claimDependencies({
   const parentStatement = "For every integer n, the sum 2n + 2n is divisible by two.";
   const parent = await publish(parentStatement, [premise.claim_id], "dependency-parent");
   const target = `${parent.claim_id}@1`;
+  // Retain an old certificate-shaped publication using the actual Krater
+  // transaction. No immutable event is changed and no HTTP write can assert
+  // its own grade. These legacy labels must not strengthen a current read.
+  const author = await env.DB.prepare(
+    `SELECT actor_fellow_id AS fellowId, actor_sponsor_id AS sponsorId,
+      actor_session_id AS sessionId, model_string_self_declared AS modelSelfDeclared, harness
+      FROM events WHERE id = ?`,
+  )
+    .bind(detail1.event)
+    .first();
+  assert.ok(author);
+  for (const [grade, formalArtifact] of [
+    ["computation", undefined],
+    ["certified", undefined],
+    [
+      "computation",
+      {
+        language: "lean",
+        declaration: "legacy_even_double",
+        source: "theorem legacy_even_double : True := by sorry",
+        toolchain: "Lean fixture with an admitted proof hole",
+        axiom_report: "legacy_even_double: sorryAx",
+      },
+    ],
+  ]) {
+    const serial = crypto.randomUUID().replaceAll("-", "").toUpperCase();
+    const evidenceId = `E-${serial}`;
+    const payload = {
+      bears_on_kind: "claim",
+      bears_on_id: premise.claim_id,
+      bears_on_version: 1,
+      direction: "supports",
+      kind: "certificate",
+      mode: "confirmatory",
+      source: { kind: "locator", locator: "https://example.invalid/legacy-certificate" },
+      body_md: "Legacy certificate label without a stored formal source.",
+      computed_class: grade,
+      coercion_flags: [],
+      ...(formalArtifact === undefined ? {} : { formal_artifact: formalArtifact }),
+    };
+    const payloadJson = canonicalJson(payload);
+    const createdAt = new Date().toISOString();
+    const published = await writeLedgerEvent(
+      env.DB,
+      {
+        problemId: problem,
+        eventId: `E-LEGACY-${serial}`,
+        idempotencyKey: `legacy-certificate-${serial}`,
+        requestDigest: await sha256Hex(payloadJson),
+        eventType: "evidence.created",
+        objectKind: "evidence",
+        objectId: evidenceId,
+        objectVersion: 1,
+        payloadJson,
+        createdAt,
+        attribution: author,
+      },
+      {
+        statementsAfterEvent: ({ eventId, sequence }) => [
+          env.DB.prepare(`INSERT INTO evidence
+            (evidence_id, problem_id, bears_on_kind, bears_on_id, bears_on_version,
+             direction, kind, source_kind, locator, mode, computed_class,
+             coercion_flags_json, author_fellow_id, body_md, created_at, source_event_id, source_seq)
+            SELECT ?, ?, 'claim', ?, 1, 'supports', 'certificate', 'locator', ?,
+              'confirmatory', ?, '[]', ?, ?, ?, id, seq FROM events WHERE id = ? AND seq = ?`).bind(
+            evidenceId,
+            problem,
+            premise.claim_id,
+            payload.source.locator,
+            grade,
+            author.fellowId,
+            payload.body_md,
+            createdAt,
+            eventId,
+            sequence,
+          ),
+        ],
+      },
+    );
+    assert.equal(published.payloadSha256, await sha256Hex(payloadJson));
+  }
+  const scanned = await call(
+    `${path}/evidence`,
+    {
+      bears_on_kind: "claim",
+      bears_on_id: parent.claim_id,
+      bears_on_version: 1,
+      direction: "supports",
+      kind: "certificate",
+      mode: "confirmatory",
+      source: { kind: "locator", locator: "https://example.invalid/quadruple.lean" },
+      body_md: "A formal source is available for independent compilation and statement review.",
+      formal_artifact: {
+        language: "lean",
+        declaration: "even_quadruple",
+        source:
+          "import Mathlib\ntheorem even_quadruple (n : Int) : Even (2 * n + 2 * n) := ⟨2 * n, by ring⟩",
+        toolchain: "Lean 4.33.0; fixture source, not server-compiled",
+        axiom_report: "even_quadruple: propext, Classical.choice, Quot.sound",
+      },
+    },
+    token,
+    201,
+  );
+  assert.equal(scanned.computed_class, "computation");
   const original = await face(target);
   const dependency = original.value.items.find((item) => item.kind === "claim-dependency");
   assert.equal(dependency.id, `${premise.claim_id}@1`);
@@ -100,6 +207,13 @@ export async function claimDependencies({
   );
   assert.equal(parentDetail.dependency_pins[0].event_id, detail1.event);
   assert.equal(parentDetail.dependency_pins[0].content_digest, detail1.content_digest);
+  assert.equal(parentDetail.dependency_assessment.standing.own_ceiling, "computation");
+  assert.equal(parentDetail.dependency_assessment.chain.ceiling, "assertion");
+  assert.deepEqual(parentDetail.dependency_assessment.chain.weakest_path, [
+    target,
+    `${premise.claim_id}@1`,
+  ]);
+  assert.equal(JSON.parse(dependency.body).dependency_assessment.standing.own_ceiling, "assertion");
   assert.ok(
     original.value.next_actions.some(
       (action) =>
