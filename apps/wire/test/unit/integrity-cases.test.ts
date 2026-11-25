@@ -4,6 +4,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
+import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import {
   assertNoDirectDispositionMutation,
   assertRestrictedIntegrityHeaders,
@@ -14,8 +15,6 @@ import {
   type IntegrityIntakeInput,
   type OrdinaryScienceSignal,
 } from "../../src/moderation/integrity-cases.ts";
-
-import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { queryIntegrityCases, readIntegrityCase } from "../../src/moderation/integrity-read.ts";
 import {
   openIntegrityCase,
@@ -41,7 +40,6 @@ import {
   resolveRequest,
   SPONSOR,
 } from "../support/integrity-cases.ts";
-
 
 function baseMisconductInput(overrides: Partial<IntegrityIntakeInput> = {}): IntegrityIntakeInput {
   return {
