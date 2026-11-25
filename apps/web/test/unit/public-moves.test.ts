@@ -169,3 +169,21 @@ test("home discovery distinguishes no selected work, incomplete inputs and a fai
     expect(html).not.toContain("P-DD");
   }
 });
+
+test("home discovery says plainly when no working problem is listed", async () => {
+  const { HomeScientificNeeds } = await import("../../components/home-scientific-needs");
+  const data = face();
+  data.discovery.problems = [];
+  data.discovery.scanned = 0;
+  data.discovery.next_after = null;
+  const render = () => renderToStaticMarkup(HomeScientificNeeds({
+    result: { state: "ok", origin: PRODUCTION_STOA_ORIGIN, data },
+  }));
+  expect(render()).toContain("No working problems are listed on the public ledger yet");
+  expect(render()).not.toContain("examined 0");
+  expect(render()).not.toContain("No primary move was selected");
+  // An incomplete read of an empty page is not reported as an empty ledger.
+  data.discovery.degraded = true;
+  expect(render()).toContain("This selection is incomplete");
+  expect(render()).not.toContain("No working problems are listed");
+});

@@ -22,6 +22,10 @@ export function HomeScientificNeeds({
   const needs = discovery?.problems.flatMap(({ problem_id, primary_move, captured_cursor }) =>
     primary_move ? [{ problem_id, primary_move, captured_cursor }] : [],
   );
+  // An empty public ledger is not "no move selected": say plainly that there
+  // is nothing listed, rather than reporting zero problems examined.
+  const nothingListed =
+    discovery !== undefined && discovery.scanned === 0 && !incomplete && !discovery.next_after;
   return (
     <section aria-labelledby="scientific-needs-heading">
       <header className="section-head">
@@ -39,10 +43,12 @@ export function HomeScientificNeeds({
       </header>
       {face && discovery && needs ? (
         <>
-          <p className="quiet">
-            The ledger examined {discovery.scanned} listed working {discovery.scanned === 1 ? "problem" : "problems"} on this page.
-            {incomplete && " Some scientific inputs were unavailable. This selection is incomplete."}
-          </p>
+          {nothingListed ? null : (
+            <p className="quiet">
+              The ledger examined {discovery.scanned} listed working {discovery.scanned === 1 ? "problem" : "problems"} on this page.
+              {incomplete && " Some scientific inputs were unavailable. This selection is incomplete."}
+            </p>
+          )}
           {needs.length > 0 ? (
             <ol className="claims-list">
               {needs.map(({ problem_id, primary_move, captured_cursor }) => (
@@ -66,9 +72,11 @@ export function HomeScientificNeeds({
               ))}
             </ol>
           ) : (
-            <p>{incomplete
-              ? "The available inputs yielded no recommendation on this page."
-              : "No primary move was selected for this page of problems."}</p>
+            <p>{nothingListed
+              ? "No working problems are listed on the public ledger yet, so there is nothing to recommend."
+              : incomplete
+                ? "The available inputs yielded no recommendation on this page."
+                : "No primary move was selected for this page of problems."}</p>
           )}
           {discovery.next_after && (
             <p><Link href={`/moves?${new URLSearchParams({ after: discovery.next_after })}`} prefetch={false}>
